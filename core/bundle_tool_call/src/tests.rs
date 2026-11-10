@@ -438,6 +438,98 @@ fn svc_row() -> ActiveBundleRow {
     )
 }
 
+// ---- hub-api bundle-admin calls (`authorize_admin_call`) ----
+
+fn own_service(scope: Option<&str>, write: bool) -> ActiveVersionSnapshot {
+    snapshot(vec![row(
+        SVC,
+        22,
+        DIGEST,
+        ToolManifestInfo {
+            is_tool_service: true,
+            exported: vec![ExportedToolInfo {
+                name: "override".to_string(),
+                write,
+                required_scope: scope.map(str::to_string),
+                host_op: None,
+            }],
+            requested: Vec::new(),
+        },
+    )])
+}
+
+#[test]
+fn admin_own_tool_skips_self_call_guard_and_grant_but_enforces_scope() {
+    let snap = own_service(Some("community:admin"), false);
+    let gate = gate_with(SVC, &[]);
+    let call = authorize_admin_call(
+        SVC,
+        req(SVC, "override", None),
+        &snap,
+        &gate,
+        &gate_scope(SVC),
+    )
+    .unwrap();
+    assert_eq!(call.required_scope(), Some("community:admin"));
+    let denied = authorize_admin_call(
+        SVC,
+        req(SVC, "override", None),
+        &snap,
+        &gate,
+        &gate_scope(SVC),
+    )
+    .unwrap()
+    .into_plan(&ActorContext::none())
+    .unwrap_err();
+    assert_eq!(denied.code(), "forbidden");
+    let plan = call
+        .into_plan(&ActorContext::for_role("u-1", "community-admin"))
+        .unwrap();
+    assert_eq!(plan.next_chain, vec![SVC.to_string()]);
+    assert_eq!(plan.caller_app_id, SVC);
+}
+
+#[test]
+fn admin_own_tool_must_be_exported_active_and_keyed_when_write() {
+    let gate = gate_with(SVC, &[]);
+    let snap = own_service(None, true);
+    let scope = gate_scope(SVC);
+    let missing = authorize_admin_call(SVC, req(SVC, "nope", None), &snap, &gate, &scope);
+    assert_eq!(missing.unwrap_err().code(), "forbidden");
+    let unkeyed = authorize_admin_call(SVC, req(SVC, "override", None), &snap, &gate, &scope);
+    assert_eq!(unkeyed.unwrap_err().code(), "invalid_args");
+    assert!(authorize_admin_call(
+        SVC,
+        req(SVC, "override", Some("rid-1")),
+        &snap,
+        &gate,
+        &scope
+    )
+    .is_ok());
+    let inactive = ActiveVersionSnapshot::new();
+    let gone = authorize_admin_call(SVC, req(SVC, "override", None), &inactive, &gate, &scope);
+    assert_eq!(gone.unwrap_err().code(), "target_unavailable");
+}
+
+#[test]
+fn admin_cross_bundle_target_runs_the_full_p1_and_grant_matrix() {
+    let (snap, gate) = world();
+    let scope = gate_scope(APP);
+    assert!(authorize_admin_call(APP, req(SVC, "get_balance", None), &snap, &gate, &scope).is_ok());
+    let snap2 = snapshot(vec![
+        row(APP, 11, DIGEST, requests(&[])),
+        row(SVC, 22, DIGEST, service(&[("get_balance", false)])),
+    ]);
+    let gate2 = gate_with(APP, &[(SVC, "get_balance")]);
+    let not_requested =
+        authorize_admin_call(APP, req(SVC, "get_balance", None), &snap2, &gate2, &scope);
+    assert_eq!(not_requested.unwrap_err().code(), "forbidden");
+    let no_grant = gate_with(APP, &[]);
+    let ungranted =
+        authorize_admin_call(APP, req(SVC, "get_balance", None), &snap, &no_grant, &scope);
+    assert_eq!(ungranted.unwrap_err().code(), "not_granted");
+}
+
 // regression: tenant-isolation -- (a) a caller installed only in ANOTHER
 // tenant never satisfies the caller lookup.
 #[test]
