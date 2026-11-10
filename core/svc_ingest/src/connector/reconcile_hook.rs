@@ -207,7 +207,13 @@ struct FlightGuard {
 impl Drop for FlightGuard {
     fn drop(&mut self) {
         // Lock poisoning only means another pass panicked; the set itself is still valid.
-        let mut g = self.set.lock().unwrap_or_else(|p| p.into_inner());
+        let mut g = match self.set.lock() {
+            Ok(g) => g,
+            Err(p) => {
+                tracing::warn!("reconcile in-flight set lock poisoned; recovering");
+                p.into_inner()
+            }
+        };
         g.remove(&self.key);
     }
 }
@@ -234,7 +240,13 @@ impl<I: ReconcileInvoke> ReconcileScheduler<I> {
         let label = platform_label(platform);
         let key = (platform.to_string(), community_id);
         let inserted = {
-            let mut g = self.in_flight.lock().unwrap_or_else(|p| p.into_inner());
+            let mut g = match self.in_flight.lock() {
+                Ok(g) => g,
+                Err(p) => {
+                    tracing::warn!("reconcile in-flight set lock poisoned; recovering");
+                    p.into_inner()
+                }
+            };
             g.insert(key.clone())
         };
         if !inserted {

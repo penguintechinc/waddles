@@ -105,6 +105,8 @@ pub mod stage_v2_world {
             "waddle:bundle/ai@1.0.0": super::stage_next_world::waddle::bundle::ai,
             "waddle:bundle/media@1.0.0": super::stage_next_world::waddle::bundle::media,
             "waddle:bundle/metrics@1.0.0": super::stage_next_world::waddle::bundle::metrics,
+            "waddle:bundle/kv-v2@1.0.0": super::stage_next_world::waddle::bundle::kv_v2,
+            "waddle:bundle/db-v2@1.0.0": super::stage_next_world::waddle::bundle::db_v2,
             "waddle:bundle/streaming-lifecycle@1.0.0":
                 super::stage_next_world::exports::waddle::bundle::streaming_lifecycle,
         },
@@ -155,6 +157,8 @@ pub mod stage_tools_world {
             "waddle:bundle/ai@1.0.0": super::stage_next_world::waddle::bundle::ai,
             "waddle:bundle/media@1.0.0": super::stage_next_world::waddle::bundle::media,
             "waddle:bundle/metrics@1.0.0": super::stage_next_world::waddle::bundle::metrics,
+            "waddle:bundle/kv-v2@1.0.0": super::stage_next_world::waddle::bundle::kv_v2,
+            "waddle:bundle/db-v2@1.0.0": super::stage_next_world::waddle::bundle::db_v2,
         },
     });
 }
@@ -186,7 +190,8 @@ impl HasData for HasStageNextState {
 /// capability gate -- linking is reachability, never authority.
 fn link_stage_next_imports(linker: &mut Linker<ExecState>) -> Result<(), ExecutorError> {
     use stage_next_world::waddle::bundle::{
-        ai, economy, identity, media, metrics, object_storage, overlay, platform_table, reputation,
+        ai, db_v2, economy, identity, kv_v2, media, metrics, object_storage, overlay,
+        platform_table, reputation,
     };
     overlay::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     reputation::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
@@ -197,6 +202,8 @@ fn link_stage_next_imports(linker: &mut Linker<ExecState>) -> Result<(), Executo
     platform_table::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     metrics::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     object_storage::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
+    kv_v2::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
+    db_v2::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     Ok(())
 }
 

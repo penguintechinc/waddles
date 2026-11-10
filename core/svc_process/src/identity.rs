@@ -430,6 +430,12 @@ impl InvocationIdentity {
         self
     }
 
+    /// The host-verified retry identity exposed in bundle context. Never sourced
+    /// from guest arguments; an unanchored invocation has no retry identity.
+    pub(crate) fn event_id(&self) -> Option<&str> {
+        self.event_id.as_deref()
+    }
+
     /// Forks verified actor/mention facts with a fresh mutation sequence for one
     /// nested tool call. The host supplies a domain-separated retry namespace
     /// for writes; reads receive `None` and cannot mutate economy/reputation.

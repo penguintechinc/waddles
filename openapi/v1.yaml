@@ -283,6 +283,28 @@ components:
       - total_pages
       title: AnnouncementPagination
       type: object
+    ApiCredentialBody:
+      additionalProperties: false
+      description: 'Outbound API credential of a provider that needs one beside its
+        token (Wix).
+
+
+        Write-only: sealed on arrival; the admin DTO exposes only ``hasApiCredential``.
+        Unknown fields
+
+        are a 400 and the values never reach a repr.'
+      properties:
+        api_key:
+          title: Api Key
+          type: string
+        site_id:
+          title: Site Id
+          type: string
+      required:
+      - api_key
+      - site_id
+      title: ApiCredentialBody
+      type: object
     AuditEntryDTO:
       description: Audit log entry DTO.
       properties:
@@ -437,6 +459,29 @@ components:
       - displayName
       title: AuthProviderDTO
       type: object
+    AuthorDTO:
+      description: Author of a marketplace entry; `profileUrl`/`githubHandle` are
+        set for GitHub authors.
+      properties:
+        display:
+          title: Display
+          type: string
+        githubHandle:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Githubhandle
+        profileUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Profileurl
+      required:
+      - display
+      - githubHandle
+      - profileUrl
+      title: AuthorDTO
+      type: object
     AvailabilityDTO:
       description: 'Response DTO: one `app_tenant_availability` row, joined to its
         `app_catalog` metadata.'
@@ -549,14 +594,18 @@ components:
           type: string
         author:
           anyOf:
-          - type: string
+          - $ref: '#/components/schemas/AuthorDTO'
           - type: 'null'
-          title: Author
         category:
           anyOf:
           - type: string
           - type: 'null'
           title: Category
+        collection:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Collection
         compatibleWith:
           items:
             type: string
@@ -642,6 +691,7 @@ components:
       - homepageUrl
       - notice
       - category
+      - collection
       title: BundleDTO
       type: object
     BundleVersionSummaryDTO:
@@ -725,9 +775,8 @@ components:
       properties:
         author:
           anyOf:
-          - type: string
+          - $ref: '#/components/schemas/AuthorDTO'
           - type: 'null'
-          title: Author
         avgRating:
           title: Avgrating
           type: string
@@ -993,6 +1042,21 @@ components:
       - created_at
       title: ChatMessage
       type: object
+    CollectionEntryDTO:
+      description: One distinct bundle collection (publisher designation) + its bundle
+        count.
+      properties:
+        collection:
+          title: Collection
+          type: string
+        count:
+          title: Count
+          type: integer
+      required:
+      - collection
+      - count
+      title: CollectionEntryDTO
+      type: object
     CommandDTO:
       description: Commands reference DTO -- snake_case verbatim, matching Node's
         raw row passthrough.
@@ -1234,6 +1298,28 @@ components:
       - displayName
       - role
       title: CommunityMembershipDTO
+      type: object
+    ConfigHistoryEntryDTO:
+      description: One saved config version (metadata only).
+      properties:
+        createdAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Createdat
+        updatedBy:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Updatedby
+        version:
+          title: Version
+          type: integer
+      required:
+      - version
+      - updatedBy
+      - createdAt
+      title: ConfigHistoryEntryDTO
       type: object
     ConflictDTO:
       description: 'Response DTO: one detected coexistence conflict in a resolved
@@ -3128,9 +3214,8 @@ components:
       properties:
         author:
           anyOf:
-          - type: string
+          - $ref: '#/components/schemas/AuthorDTO'
           - type: 'null'
-          title: Author
         avgRating:
           title: Avgrating
           type: string
@@ -3219,9 +3304,8 @@ components:
       properties:
         author:
           anyOf:
-          - type: string
+          - $ref: '#/components/schemas/AuthorDTO'
           - type: 'null'
-          title: Author
         avgRating:
           title: Avgrating
           type: string
@@ -3867,6 +3951,9 @@ components:
           - type: string
           - type: 'null'
           title: Expiresat
+        hasApiCredential:
+          title: Hasapicredential
+          type: boolean
         hasRefreshToken:
           title: Hasrefreshtoken
           type: boolean
@@ -3921,6 +4008,7 @@ components:
       - usable
       - shared
       - hasRefreshToken
+      - hasApiCredential
       - expiresAt
       - capabilities
       - metadata
@@ -4282,6 +4370,39 @@ components:
       - createdAt
       title: RecentCommunityDTO
       type: object
+    ReportItem:
+      description: 'Outcome code: 1 created, 2 deleted, 3 failed, 4 revoked; echo
+        the work item''s ``nonce``.'
+      properties:
+        failureReason:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          default: null
+          title: Failurereason
+        nonce:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Nonce
+        outcome:
+          title: Outcome
+          type: integer
+        subscriptionId:
+          title: Subscriptionid
+          type: string
+        twitchSubscriptionId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Twitchsubscriptionid
+      required:
+      - subscriptionId
+      - outcome
+      title: ReportItem
+      type: object
     ReputationDTO:
       description: FICO-style reputation DTO.
       properties:
@@ -4518,43 +4639,6 @@ components:
           title: Necessary
           type: boolean
       title: SaveConsentPreferencesDTO
-      type: object
-    ScheduleTargetDTO:
-      description: One scheduled scope. `community_id` 0 = tenant-wide (then `community_name`
-        is null).
-      properties:
-        app_id:
-          title: App Id
-          type: string
-        community_id:
-          title: Community Id
-          type: integer
-        community_name:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Community Name
-        interval_s:
-          title: Interval S
-          type: integer
-        jitter:
-          title: Jitter
-          type: number
-        tenant_id:
-          title: Tenant Id
-          type: integer
-        tenant_slug:
-          title: Tenant Slug
-          type: string
-      required:
-      - tenant_id
-      - community_id
-      - tenant_slug
-      - community_name
-      - app_id
-      - interval_s
-      - jitter
-      title: ScheduleTargetDTO
       type: object
     SecretBody:
       additionalProperties: false
@@ -5041,6 +5125,35 @@ components:
       - workspaces
       - channels
       title: SlackStatsDTO
+      type: object
+    SlashCommandDTO:
+      description: One command to register; ``name``/``description`` is the payload,
+        the rest is context.
+      properties:
+        appPublicIds:
+          items:
+            type: string
+          title: Apppublicids
+          type: array
+        builtin:
+          title: Builtin
+          type: boolean
+        communityPublicIds:
+          items:
+            type: string
+          title: Communitypublicids
+          type: array
+        description:
+          title: Description
+          type: string
+        name:
+          title: Name
+          type: string
+      required:
+      - name
+      - description
+      - builtin
+      title: SlashCommandDTO
       type: object
     SpotlightedCommunityDTO:
       description: Spotlighted community DTO.
@@ -5592,6 +5705,42 @@ components:
       - destinations_enabled
       title: StreamStatusDTO
       type: object
+    SweepDTO:
+      description: Denominators of the sweep.
+      properties:
+        communities:
+          title: Communities
+          type: integer
+        created:
+          title: Created
+          type: integer
+        markedDelete:
+          title: Markeddelete
+          type: integer
+        markedStale:
+          title: Markedstale
+          type: integer
+        nextCommunityId:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          default: null
+          title: Nextcommunityid
+        removed:
+          title: Removed
+          type: integer
+        requeued:
+          title: Requeued
+          type: integer
+      required:
+      - communities
+      - created
+      - markedDelete
+      - removed
+      - markedStale
+      - requeued
+      title: SweepDTO
+      type: object
     TableAccessDTO:
       description: One requested platform-table access block (table/columns/ops/reason)
         -- explicit shape.
@@ -5951,6 +6100,33 @@ components:
       - created_at
       title: TokenTransactionDTO
       type: object
+    ToolDTO:
+      description: One admin tool the manifest declares, and whether this caller may
+        use it.
+      properties:
+        kind:
+          title: Kind
+          type: string
+        name:
+          title: Name
+          type: string
+        permitted:
+          title: Permitted
+          type: boolean
+        scope:
+          title: Scope
+          type: string
+        targetAppId:
+          title: Targetappid
+          type: string
+      required:
+      - name
+      - kind
+      - scope
+      - permitted
+      - targetAppId
+      title: ToolDTO
+      type: object
     TrackDTO:
       description: Wire shape of a resolved `Track` -- mirrors `services.music_providers.track.Track`.
       properties:
@@ -6192,6 +6368,63 @@ components:
       required:
       - id
       title: VendorRequestDTO
+      type: object
+    WorkItemDTO:
+      description: One create (``action`` 1) or delete (``action`` 2). Never carries
+        the webhook secret.
+      properties:
+        action:
+          title: Action
+          type: integer
+        callbackKey:
+          title: Callbackkey
+          type: string
+        callbackUrl:
+          title: Callbackurl
+          type: string
+        communityId:
+          title: Communityid
+          type: integer
+        connectionId:
+          title: Connectionid
+          type: integer
+        nonce:
+          title: Nonce
+          type: string
+        subType:
+          title: Subtype
+          type: integer
+        subscriptionId:
+          title: Subscriptionid
+          type: string
+        tenantId:
+          title: Tenantid
+          type: integer
+        twitchSubscriptionId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Twitchsubscriptionid
+        twitchType:
+          title: Twitchtype
+          type: string
+        version:
+          title: Version
+          type: integer
+      required:
+      - subscriptionId
+      - action
+      - tenantId
+      - communityId
+      - connectionId
+      - subType
+      - twitchType
+      - version
+      - callbackUrl
+      - callbackKey
+      - nonce
+      title: WorkItemDTO
       type: object
 info:
   title: hub-api
@@ -12999,6 +13232,354 @@ paths:
             its own list field here (e.g. `storageAccess`).'
       summary: The dangerous access grants activating `app_id` here would carry (red
         warning source).
+  /api/v1/apps/community/{community_id}/bundles/{app_id}/admin:
+    get:
+      description: ''
+      operationId: get_get_descriptor
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET .../admin`.
+                properties:
+                  appId:
+                    title: Appid
+                    type: string
+                  configSchema:
+                    anyOf:
+                    - additionalProperties: true
+                      type: object
+                    - type: 'null'
+                    title: Configschema
+                  success:
+                    title: Success
+                    type: boolean
+                  tools:
+                    items:
+                      $ref: '#/components/schemas/ToolDTO'
+                    title: Tools
+                    type: array
+                  version:
+                    title: Version
+                    type: string
+                required:
+                - success
+                - appId
+                - version
+                - configSchema
+                - tools
+                title: DescriptorResponse
+                type: object
+          description: Response DTO for `GET .../admin`.
+      summary: Config schema + admin tools for the bundle's admin UI (community moderator+).
+  /api/v1/apps/community/{community_id}/bundles/{app_id}/admin-actions/{tool_name}:
+    post:
+      description: ''
+      operationId: post_invoke_action
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: tool_name
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `POST .../admin-actions/<tool>`; `args`
+                is checked against its schema.
+              properties:
+                args:
+                  additionalProperties: true
+                  title: Args
+                  type: object
+              title: ActionRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for admin actions and data views; `result`
+                  matches the tool `output_schema`.
+                properties:
+                  limit:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    default: null
+                    title: Limit
+                  nextCursor:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    default: null
+                    title: Nextcursor
+                  result:
+                    additionalProperties: true
+                    title: Result
+                    type: object
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - result
+                title: ToolResponse
+                type: object
+          description: Response DTO for admin actions and data views; `result` matches
+            the tool `output_schema`.
+      summary: Invoke a manifest-declared admin action tool (scope per the manifest).
+  /api/v1/apps/community/{community_id}/bundles/{app_id}/config:
+    get:
+      description: ''
+      operationId: get_get_config__get_api_v1_apps_community_community_id_bundles_app_id_config
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET/PUT .../config` (`version` 0 =
+                  never saved).
+                properties:
+                  appId:
+                    title: Appid
+                    type: string
+                  config:
+                    additionalProperties: true
+                    title: Config
+                    type: object
+                  createdAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Createdat
+                  success:
+                    title: Success
+                    type: boolean
+                  updatedBy:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Updatedby
+                  version:
+                    title: Version
+                    type: integer
+                required:
+                - success
+                - appId
+                - version
+                - config
+                - updatedBy
+                - createdAt
+                title: ConfigResponse
+                type: object
+          description: Response DTO for `GET/PUT .../config` (`version` 0 = never
+            saved).
+      summary: Latest saved per-community config (community moderator+).
+    put:
+      description: ''
+      operationId: put_put_config
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `PUT .../config`; `expectedVersion` is
+                the optimistic-concurrency token.
+              properties:
+                config:
+                  additionalProperties: true
+                  title: Config
+                  type: object
+                expectedVersion:
+                  title: Expectedversion
+                  type: integer
+              required:
+              - config
+              - expectedVersion
+              title: SaveConfigRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET/PUT .../config` (`version` 0 =
+                  never saved).
+                properties:
+                  appId:
+                    title: Appid
+                    type: string
+                  config:
+                    additionalProperties: true
+                    title: Config
+                    type: object
+                  createdAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Createdat
+                  success:
+                    title: Success
+                    type: boolean
+                  updatedBy:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Updatedby
+                  version:
+                    title: Version
+                    type: integer
+                required:
+                - success
+                - appId
+                - version
+                - config
+                - updatedBy
+                - createdAt
+                title: ConfigResponse
+                type: object
+          description: Response DTO for `GET/PUT .../config` (`version` 0 = never
+            saved).
+      summary: Validate against the manifest `community_config_schema`; append a new
+        version (admin).
+  /api/v1/apps/community/{community_id}/bundles/{app_id}/config/history:
+    get:
+      description: ''
+      operationId: get_get_config_history
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET .../config/history`.
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                  versions:
+                    items:
+                      $ref: '#/components/schemas/ConfigHistoryEntryDTO'
+                    title: Versions
+                    type: array
+                required:
+                - success
+                - versions
+                title: ConfigHistoryResponse
+                type: object
+          description: Response DTO for `GET .../config/history`.
+      summary: Saved config versions, newest first (metadata only; `?limit=` 1..100).
+  /api/v1/apps/community/{community_id}/bundles/{app_id}/data/{view_name}:
+    get:
+      description: ''
+      operationId: get_read_view
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: view_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for admin actions and data views; `result`
+                  matches the tool `output_schema`.
+                properties:
+                  limit:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    default: null
+                    title: Limit
+                  nextCursor:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    default: null
+                    title: Nextcursor
+                  result:
+                    additionalProperties: true
+                    title: Result
+                    type: object
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - result
+                title: ToolResponse
+                type: object
+          description: Response DTO for admin actions and data views; `result` matches
+            the tool `output_schema`.
+      summary: 'Paginated bundle data view: `?limit=&cursor=&args=<url-encoded JSON
+        object>`.'
   /api/v1/apps/community/{community_id}/{app_id}/access-grants:
     get:
       description: ''
@@ -15741,6 +16322,11 @@ paths:
 
                 one of the two, never both.'
               properties:
+                api_credential:
+                  anyOf:
+                  - $ref: '#/components/schemas/ApiCredentialBody'
+                  - type: 'null'
+                  default: null
                 credentials:
                   anyOf:
                   - $ref: '#/components/schemas/CredentialsBody'
@@ -15948,6 +16534,11 @@ paths:
               description: Body of ``PATCH``. Omitted fields are unchanged; the provider
                 is immutable.
               properties:
+                api_credential:
+                  anyOf:
+                  - $ref: '#/components/schemas/ApiCredentialBody'
+                  - type: 'null'
+                  default: null
                 credentials:
                   anyOf:
                   - $ref: '#/components/schemas/CredentialsBody'
@@ -17464,62 +18055,6 @@ paths:
           description: Undocumented response
       summary: '`POST /api/v1/internal/activity/watch-session` -- service-to-service
         only.'
-  /api/v1/internal/bundle-schedules:
-    get:
-      description: '
-
-        Ladder after machine auth: caller allow-list (403) -> filter shape (400) ->
-        listing. A
-
-        candidate that fails the manifest/binding checks is excluded and logged/metered
-        by the service,
-
-        never returned.'
-      operationId: get_list_bundle_schedules
-      parameters:
-      - in: query
-        name: tenant_id
-        schema:
-          anyOf:
-          - type: integer
-          - type: 'null'
-          default: null
-          title: Tenant Id
-      - in: query
-        name: community_id
-        schema:
-          anyOf:
-          - type: integer
-          - type: 'null'
-          default: null
-          title: Community Id
-      - in: query
-        name: app_id
-        schema:
-          anyOf:
-          - type: string
-          - type: 'null'
-          default: null
-          title: App Id
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: '`{"targets": [...]}` -- the exact shape svc-ingest''s
-                  `TargetsDto` deserialises.'
-                properties:
-                  targets:
-                    items:
-                      $ref: '#/components/schemas/ScheduleTargetDTO'
-                    title: Targets
-                    type: array
-                title: ScheduleListResponse
-                type: object
-          description: '`{"targets": [...]}` -- the exact shape svc-ingest''s `TargetsDto`
-            deserialises.'
-      summary: '`GET /api/v1/internal/bundle-schedules` -> `{targets:[...]}` of active
-        scheduled bundles.'
   /api/v1/internal/calendar/events/sync-discord:
     post:
       description: '
@@ -17782,6 +18317,98 @@ paths:
             community, 503 unavailable).
       summary: '``POST .../resolve`` -- endpoint + credential for one usable binding
         of the BOUND community.'
+  /api/v1/internal/dataplane/app-commands/desired:
+    get:
+      description: ''
+      operationId: get_desired_route
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Desired state for one source. ``changed`` False (``if_version``
+                  matched) carries no list.
+                properties:
+                  changed:
+                    title: Changed
+                    type: boolean
+                  commands:
+                    items:
+                      $ref: '#/components/schemas/SlashCommandDTO'
+                    title: Commands
+                    type: array
+                  platform:
+                    title: Platform
+                    type: string
+                  sourceId:
+                    title: Sourceid
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantPublicId:
+                    title: Tenantpublicid
+                    type: string
+                  truncated:
+                    title: Truncated
+                    type: boolean
+                  version:
+                    title: Version
+                    type: string
+                required:
+                - success
+                - version
+                - changed
+                - tenantPublicId
+                - platform
+                - sourceId
+                - truncated
+                title: SlashDesiredDTO
+                type: object
+          description: Desired state for one source. ``changed`` False (``if_version``
+            matched) carries no list.
+      summary: '``GET`` -- the desired slash registration of one source, with its
+        idempotency version.'
+  /api/v1/internal/dataplane/app-commands/sources:
+    get:
+      description: ''
+      operationId: get_list_sources_route
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: One page of reconcile-eligible source ids.
+                properties:
+                  items:
+                    items:
+                      type: string
+                    title: Items
+                    type: array
+                  limit:
+                    title: Limit
+                    type: integer
+                  offset:
+                    title: Offset
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  total:
+                    title: Total
+                    type: integer
+                required:
+                - success
+                - items
+                - total
+                - limit
+                - offset
+                title: SlashSourcesDTO
+                type: object
+          description: One page of reconcile-eligible source ids.
+      summary: '``GET`` -- one page of sources of a platform that have a paired community.'
   /api/v1/internal/dataplane/resolve-scope:
     get:
       description: ''
@@ -17862,6 +18489,130 @@ paths:
           description: Batch response, in request order.
       summary: '``POST`` -- up to 100 lookups; each result carries its own status,
         order preserved.'
+  /api/v1/internal/eventsub/reconcile:
+    post:
+      description: ''
+      operationId: post_reconcile_route
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Body of the reconcile call (paging into the community sweep).
+              properties:
+                afterCommunityId:
+                  default: 0
+                  title: Aftercommunityid
+                  type: integer
+                limit:
+                  default: 200
+                  title: Limit
+                  type: integer
+              title: ReconcileRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Work plan plus the swept communities' live Twitch ids;
+                  GC only if ``enabledIdsComplete``.
+                properties:
+                  enabledIdsComplete:
+                    default: false
+                    title: Enabledidscomplete
+                    type: boolean
+                  enabledTwitchSubscriptionIds:
+                    items:
+                      type: string
+                    title: Enabledtwitchsubscriptionids
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                  sweep:
+                    $ref: '#/components/schemas/SweepDTO'
+                  work:
+                    items:
+                      $ref: '#/components/schemas/WorkItemDTO'
+                    title: Work
+                    type: array
+                required:
+                - success
+                - sweep
+                title: ReconcileResponse
+                type: object
+          description: Work plan plus the swept communities' live Twitch ids; GC only
+            if ``enabledIdsComplete``.
+      summary: Sweep desired state and return the pending create/delete work.
+  /api/v1/internal/eventsub/results:
+    post:
+      description: ''
+      operationId: post_results_route
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Body of the results call; applied atomically.
+              properties:
+                results:
+                  items:
+                    $ref: '#/components/schemas/ReportItem'
+                  title: Results
+                  type: array
+              title: ResultsRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Number of results applied.
+                properties:
+                  applied:
+                    title: Applied
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - applied
+                title: ResultsResponse
+                type: object
+          description: Number of results applied.
+      summary: Apply create/delete/failed/revoked outcomes atomically.
+  /api/v1/internal/eventsub/secret/{callback_key}:
+    get:
+      description: ''
+      operationId: get_secret_route
+      parameters:
+      - in: path
+        name: callback_key
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Webhook secret for one callback key.
+                properties:
+                  secret:
+                    default: ''
+                    title: Secret
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: SecretDTO
+                type: object
+          description: Webhook secret for one callback key.
+      summary: Webhook secret for the ingest verifier (404 for an unknown key).
   /api/v1/internal/live:
     get:
       description: ''
@@ -18521,6 +19272,12 @@ paths:
                   - type: 'null'
                   default: null
                   title: Category
+                collection:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Collection
                 compatibleWith:
                   items:
                     type: string
@@ -18609,6 +19366,34 @@ paths:
                 type: object
           description: Response DTO for message-only endpoints.
       summary: Install a bundle into the global catalog.
+  /api/v1/marketplace/bundles/collections:
+    get:
+      description: ''
+      operationId: get_list_bundle_collections
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /bundles/collections`.
+                properties:
+                  collections:
+                    items:
+                      $ref: '#/components/schemas/CollectionEntryDTO'
+                    title: Collections
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - collections
+                title: CollectionsResponse
+                type: object
+          description: Response DTO for `GET /bundles/collections`.
+      summary: List distinct bundle collections (e.g. `superpenguintv`) with counts
+        -- any tenant member.
   /api/v1/marketplace/bundles/{app_id}:
     delete:
       description: ''
@@ -24981,34 +25766,6 @@ paths:
         default:
           description: Undocumented response
       summary: Kubernetes liveness/readiness probe endpoint.
-  /internal/service-jwks.json:
-    get:
-      description: ''
-      operationId: get_service_jwks
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-      summary: Public-key set for verifiers -- no auth required (public keys only).
-  /internal/service-token:
-    post:
-      description: '
-
-        Request: `Authorization: Bearer <projected SA token>`, JSON body
-
-        `{"scope": "..."}`. Response: `{"token": "...", "expires_in": <secs>}`.
-
-        Returns 401 for any bootstrap failure -- wrong/expired/unauthenticated
-
-        SA token, wrong audience, or a ServiceAccount not allow-listed for the
-
-        requested scope -- without distinguishing which check failed.'
-      operationId: post_issue_service_token
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-      summary: Exchange a caller's projected ServiceAccount token for a machine JWT.
   /mcp/v1:
     post:
       description: '``tools/list``, and ``tools/call`` by JSON-RPC ``method``.

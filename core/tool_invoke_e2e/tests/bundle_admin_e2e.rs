@@ -293,11 +293,13 @@ impl AdminExecutor for E2eExecutor {
         actor: ActorContext,
     ) -> Result<Value, ToolRefusal> {
         let h = &self.0;
+        // Same names the event path keys kv on (recorded by the changelog consumer in prod).
+        let (tenant, community) = svc_process::bundle_admin::display_scope(scope)?;
         let kv_caps = Arc::new(CapabilitySnapshot::new());
         kv_caps.update(REP.to_string(), ["storage.kv".to_string()]);
         let caps = StageCapabilities::new(
-            scope.0.to_string(),
-            Some(scope.1.to_string()),
+            tenant,
+            community,
             req.caller_app_id.clone(),
             scope.0,
             scope.1,
@@ -398,6 +400,13 @@ async fn harness() -> Arc<Harness> {
     let mut entries = HashMap::new();
     entries.insert((TENANT, COMMUNITY, REP.to_string()), rep_row());
     snapshot.update_scoped_all(&entries);
+    svc_process::scope_names::record(
+        (TENANT, COMMUNITY),
+        &bundle_active_set::ResolvedScope {
+            tenant_slug: "acme".to_string(),
+            community_name: Some("main".to_string()),
+        },
+    );
     let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
     Arc::new(Harness {
         rig,

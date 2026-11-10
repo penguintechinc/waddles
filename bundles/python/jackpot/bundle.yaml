@@ -2,12 +2,12 @@ schema_version: 2
 app_id: waddles.core.example.jackpot
 name: Jackpot Bundle (Python)
 # 1.0.0: initial -- !jackpot <stake> / !jackpot. Economy-SDK stake, kv.increment pot, activation-gated.
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
 # Attribution: ideas/design only (see `notice`); original code, no MIT notice.
-author: "SuperPenguinTV (Psychoboy)"
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/jackpot
 notice: |
@@ -67,6 +67,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.1"
+  min_version: "1.0.1"
   max_version: null

@@ -351,6 +351,9 @@ async fn resolve_scope_cached<'a>(
     if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(scope) {
         match bundle_active_set::resolve_scope(db, scope.0, scope.1).await {
             Ok(Some(resolved)) => {
+                // The same DB-resolved names the event path keys on, shared with the
+                // bundle-admin path so both address one kv namespace.
+                crate::scope_names::record(scope, &resolved);
                 entry.insert(resolved);
             }
             Ok(None) => {
@@ -463,6 +466,21 @@ async fn apply_active_set(
     for row in active.values() {
         kv_capabilities.update(row.app_id.clone(), row.declared_capabilities.clone());
     }
+    // The approved manifest egress feeds the bundle http guard (no other
+    // production writer exists for its catalog): the WHOLE snapshot is rebuilt
+    // from this tick's active set, keyed by (tenant, community, app) -- never
+    // merged across scopes, and a deactivated bundle drops out.
+    bundle_host_http::grants::ActiveEgressSnapshot::global().replace_all(active.iter().map(
+        |((t, c, app), row)| {
+            (
+                i64::from(*t),
+                i64::from(*c),
+                app.clone(),
+                row.egress.clone(),
+                row.egress_rps,
+            )
+        },
+    ));
     // Feeds `crate::spine::ProcessDeps::app_version_snapshot` (bundle
     // capability-gate wiring, spec SS12 Phase 4) -- see
     // `core/svc_action::changelog_consumer::apply_active_set`'s identical
@@ -2833,6 +2851,8 @@ mod tests {
                     artifact_signature_key_id: None,
                     artifact_signed_approval_id: None,
                     declared_capabilities: Vec::new(),
+                    egress: Vec::new(),
+                    egress_rps: None,
                     tools: Default::default(),
                 }],
                 excluded: Vec::new(),
@@ -3048,6 +3068,8 @@ mod tests {
                     artifact_signature_key_id: None,
                     artifact_signed_approval_id: None,
                     declared_capabilities: Vec::new(),
+                    egress: Vec::new(),
+                    egress_rps: None,
                     tools: Default::default(),
                 }],
                 excluded: Vec::new(),

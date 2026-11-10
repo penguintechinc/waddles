@@ -64,6 +64,7 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-db-migrate-secret
               key: DATABASE_URL
+        {{- include "waddlebot.transitTls.pgClientEnv" . | nindent 8 }}
         - name: INITIAL_ADMIN_EMAIL
           valueFrom:
             secretKeyRef:
@@ -125,7 +126,9 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
 {{- end }}

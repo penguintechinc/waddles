@@ -126,12 +126,13 @@ impl<K: Eq + Hash + Clone> SessionLoaded<K> {
     }
 }
 
-/// The live session (if any) that has `key` loaded at exactly `digest` --
-/// **prefer newest** (highest session id) among qualifying sessions, same
-/// "newest wins" tie-break `host_api::ConnectionRegistry::active` already
-/// used, now scoped to "and actually has this digest" rather than blindly
-/// picking the newest live connection regardless of its loaded-state.
-/// Dispatch/invoke MUST use this (or an equivalent digest-exact check)
+/// The live session (if any) that has `key` loaded at exactly `digest`.
+/// Among the qualifying sessions (sorted by id) the one at index
+/// `rotation % count` is returned, so a caller that passes an incrementing
+/// counter spreads work round-robin across every executor replica holding the
+/// digest -- each call still resolves to exactly ONE session. Only sessions
+/// that actually have the digest loaded qualify, never one that merely
+/// happens to be newest. Dispatch/invoke MUST use this (or an equivalent digest-exact check)
 /// instead of `ConnectionRegistry::active()` alone -- picking a live
 /// session that simply happens to be newest, without checking it actually
 /// has the target digest loaded, is exactly the alpha 2026-10-03 failure
@@ -140,13 +141,18 @@ pub fn pick_session_with_digest<K: Eq + Hash + Clone>(
     loaded: &SessionLoaded<K>,
     key: &K,
     digest: &str,
+    rotation: u64,
 ) -> Option<SessionId> {
-    loaded
+    let mut holders: Vec<SessionId> = loaded
         .by_session
         .iter()
         .filter(|(_, scopes)| scopes.get(key).is_some_and(|d| d == digest))
         .map(|(&sid, _)| sid)
-        .max()
+        .collect();
+    holders.sort_unstable();
+    let count = u64::try_from(holders.len()).ok().filter(|c| *c > 0)?;
+    let index = usize::try_from(rotation % count).ok()?;
+    holders.get(index).copied()
 }
 
 /// What [`plan_sessions`] decided to do this tick: bundles to `Load` (a
@@ -393,13 +399,12 @@ mod tests {
         assert_eq!(loaded.loaded_count(&scope("ping")), 1);
     }
 
-    /// `pick_session_with_digest` prefers the NEWEST (highest id) session
-    /// among those actually holding the exact target digest -- never a
-    /// session that is merely "newest overall" but lacks the digest, which
-    /// is the alpha 2026-10-03 bug (invoke routed to a session with zero
-    /// bundles loaded because it was the only connection known at all).
+    /// `pick_session_with_digest` only ever returns a session actually
+    /// holding the exact target digest -- never one that is merely "newest
+    /// overall" but lacks it (the alpha 2026-10-03 bug) -- and rotates
+    /// round-robin across the holders so N executor replicas share the work.
     #[test]
-    fn pick_session_with_digest_prefers_newest_among_sessions_holding_the_digest() {
+    fn pick_session_with_digest_rotates_across_sessions_holding_the_digest() {
         let mut loaded = SessionLoaded::new();
         loaded.mark_loaded(1, scope("ping"), "sha256:p".to_string());
         loaded.mark_loaded(3, scope("ping"), "sha256:p".to_string());
@@ -407,10 +412,10 @@ mod tests {
         // never be picked for a dispatch targeting "sha256:p".
         loaded.mark_loaded(5, scope("ping"), "sha256:other".to_string());
 
-        assert_eq!(
-            pick_session_with_digest(&loaded, &scope("ping"), "sha256:p"),
-            Some(3)
-        );
+        let picks: Vec<_> = (0..4)
+            .map(|r| pick_session_with_digest(&loaded, &scope("ping"), "sha256:p", r))
+            .collect();
+        assert_eq!(picks, vec![Some(1), Some(3), Some(1), Some(3)]);
     }
 
     /// No live session holds the target digest at all -- `None`, never a
@@ -420,7 +425,7 @@ mod tests {
     fn pick_session_with_digest_returns_none_when_nothing_holds_it() {
         let loaded = SessionLoaded::<Scope>::new();
         assert_eq!(
-            pick_session_with_digest(&loaded, &scope("ping"), "sha256:p"),
+            pick_session_with_digest(&loaded, &scope("ping"), "sha256:p", 7),
             None
         );
     }
@@ -498,7 +503,7 @@ mod tests {
                 "{app} must be loaded on exactly the live session"
             );
             assert_eq!(
-                pick_session_with_digest(&loaded, &scope(app), &format!("sha256:{app}")),
+                pick_session_with_digest(&loaded, &scope(app), &format!("sha256:{app}"), 0),
                 Some(1)
             );
         }

@@ -549,6 +549,17 @@ impl AdminBackend for ValkeyBackend {
     }
 }
 
+/// The `(tenant slug, community name)` the event path keys on for numeric `scope`, as resolved by
+/// the changelog consumer from the database.
+///
+/// # Errors
+/// [`ToolRefusal::TargetUnavailable`] when this stage has not resolved that scope (fail closed).
+pub fn display_scope(scope: (i32, i32)) -> Result<(String, Option<String>), ToolRefusal> {
+    crate::scope_names::lookup(scope).ok_or_else(|| {
+        ToolRefusal::TargetUnavailable("the scope is not resolved on this stage".into())
+    })
+}
+
 /// Production executor: builds the CALLER bundle's capability set from the stage's own wirings
 /// (the same [`crate::spine::build_stage_capabilities`] the event path uses) and runs the
 /// shared admin planner + nested invoke.
@@ -587,15 +598,17 @@ impl AdminExecutor for StageAdminExecutor {
             .ok_or_else(|| {
                 ToolRefusal::TargetUnavailable("the bundle is not active in this scope".into())
             })?;
-        // Display strings only (never keys): the numeric ids stand in for the slug/name the
-        // event path reads off a stream key; `community` stays `None` iff tenant-wide.
-        let community = (scope.1 != 0).then(|| scope.1.to_string());
+        // The SAME tenant slug / community name the event path keys its kv namespace on (they
+        // come from the DB resolution of this exact numeric scope), so admin calls and event
+        // handling read and write one namespace and a numeric scope can only ever address its
+        // own tenant's names. Unknown scope: refused, never guessed.
+        let (tenant, community) = display_scope(scope)?;
         let invocation = Arc::new(crate::identity::InvocationIdentity::for_verified_admin(
             actor.clone(),
         ));
         let caps = crate::spine::build_stage_capabilities(
             &pd,
-            scope.0.to_string(),
+            tenant,
             community,
             version,
             Some(scope),

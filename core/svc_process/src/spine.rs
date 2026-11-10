@@ -299,7 +299,7 @@ pub async fn ensure_unloaded(
 /// the stale load.
 #[derive(Default)]
 pub struct LoadState {
-    loaded: std::sync::Mutex<Option<(Arc<Connection>, String)>>,
+    loaded: std::sync::Mutex<Vec<(Arc<Connection>, String)>>,
 }
 
 impl LoadState {
@@ -308,14 +308,27 @@ impl LoadState {
     }
 
     fn is_loaded_on(&self, connection: &Arc<Connection>, digest: &str) -> bool {
-        matches!(
-            &*self.loaded.lock().unwrap_or_else(|e| e.into_inner()),
-            Some((c, d)) if Arc::ptr_eq(c, connection) && d == digest
-        )
+        self.loaded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|(c, d)| Arc::ptr_eq(c, connection) && d == digest)
     }
 
+    /// Records `digest` as loaded on `connection`. Every (connection, digest)
+    /// pair is kept -- with several executor replicas the dispatcher
+    /// round-robins across connections, so a single slot would thrash and
+    /// re-`load` on every alternation. Pairs for closed connections are pruned
+    /// here so the set stays bounded by live sessions x active digests.
     fn mark_loaded(&self, connection: Arc<Connection>, digest: String) {
-        *self.loaded.lock().unwrap_or_else(|e| e.into_inner()) = Some((connection, digest));
+        let mut loaded = self.loaded.lock().unwrap_or_else(|e| e.into_inner());
+        loaded.retain(|(c, _)| !c.is_closed());
+        if !loaded
+            .iter()
+            .any(|(c, d)| Arc::ptr_eq(c, &connection) && *d == digest)
+        {
+            loaded.push((connection, digest));
+        }
     }
 }
 
@@ -1277,7 +1290,7 @@ async fn handle_delivered_inner<S: SpineOps>(
             0
         });
 
-    let Some(connection) = deps.connections.active() else {
+    let Some(connection) = deps.connections.pick_dispatch() else {
         // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
         // 2026-10-02 incident: svc-process/svc-action were rolled and each
         // bundle-executor stayed bound to its old, terminated pod; the new
@@ -1903,6 +1916,36 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    /// With several executor replicas the dispatcher alternates connections;
+    /// `LoadState` must remember every (connection, digest) pair so the digest
+    /// is `load`ed once per replica, not re-sent on every alternation.
+    #[test]
+    fn load_state_remembers_each_connection_and_digest_pair() {
+        let state = LoadState::new();
+        let a = crate::host_api::test_connection();
+        let b = crate::host_api::test_connection();
+        assert!(!state.is_loaded_on(&a, "sha256:x"));
+        state.mark_loaded(Arc::clone(&a), "sha256:x".to_string());
+        state.mark_loaded(Arc::clone(&b), "sha256:x".to_string());
+        state.mark_loaded(Arc::clone(&a), "sha256:y".to_string());
+        assert!(
+            state.is_loaded_on(&a, "sha256:x"),
+            "A keeps x after B loads"
+        );
+        assert!(state.is_loaded_on(&b, "sha256:x"));
+        assert!(
+            state.is_loaded_on(&a, "sha256:y"),
+            "a second digest coexists"
+        );
+        assert!(!state.is_loaded_on(&b, "sha256:y"));
+        a.mark_closed();
+        state.mark_loaded(Arc::clone(&b), "sha256:y".to_string());
+        assert!(
+            !state.is_loaded_on(&a, "sha256:x"),
+            "a closed connection's entries are pruned"
+        );
+    }
+
     fn env_with_scope(t: Option<i64>, c: Option<i32>) -> StageEnvelope {
         serde_json::from_value(serde_json::json!({
             "schema_version": if t.is_some() { 3 } else { 2 },
@@ -2425,6 +2468,8 @@ mod tests {
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
             declared_capabilities: Vec::new(),
+            egress: Vec::new(),
+            egress_rps: None,
             tools: Default::default(),
         }]);
         let deps = ProcessDeps {
@@ -3136,6 +3181,8 @@ mod tests {
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                egress: Vec::new(),
+                egress_rps: None,
                 tools: Default::default(),
             }]);
 
@@ -3193,6 +3240,8 @@ mod tests {
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                egress: Vec::new(),
+                egress_rps: None,
                 tools: Default::default(),
             }]);
 
@@ -3298,6 +3347,8 @@ mod tests {
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                egress: Vec::new(),
+                egress_rps: None,
                 tools: Default::default(),
             }]);
 
@@ -3358,6 +3409,8 @@ mod tests {
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                egress: Vec::new(),
+                egress_rps: None,
                 tools: Default::default(),
             }]);
 

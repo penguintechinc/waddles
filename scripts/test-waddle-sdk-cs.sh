@@ -22,6 +22,7 @@ trap 'rm -rf "$RESULTS_DIR"' EXIT
 
 echo "test-waddle-sdk-cs: running xUnit tests + coverage in ${DOTNET_SDK_IMAGE}"
 docker run --rm \
+  --user "$(id -u):$(id -g)" \
   -v "$(pwd)":/repo -v "$RESULTS_DIR":/covout -w /repo \
   -e HOME=/tmp -e DOTNET_CLI_HOME=/tmp -e NUGET_PACKAGES=/tmp/.nuget \
   -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \

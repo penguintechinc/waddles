@@ -17,6 +17,7 @@ with the GLOBAL tier's own writes).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -46,6 +47,9 @@ def _install_dal() -> AsyncDB:
 def _dal() -> tuple[Any, Any]:
     """`(async_dal, dal)` -- the pydal handles `authorize_community()` needs for membership."""
     return current_app.config["async_dal"], current_app.config["dal"]
+
+
+logger = logging.getLogger(__name__)
 
 
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
@@ -179,6 +183,7 @@ async def activation_access_grants(
             install_dal, app_id=app_id, version=version
         )
     except ApiError as exc:
+        logger.warning("%s refused: %s: %s", request.path, type(exc).__name__, exc.message)
         return _err(exc)
     return access_grants_response(blocks, requested, approved, dangerous)
 
@@ -213,6 +218,7 @@ async def activate(
             acknowledged_access_grants=frozenset(data.acknowledgedAccessGrants),
         )
     except ApiError as exc:
+        logger.warning("%s refused: %s: %s", request.path, type(exc).__name__, exc.message)
         return _err(exc)
     return (
         ActivateResponse(

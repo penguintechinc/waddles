@@ -2,10 +2,11 @@ schema_version: 2
 app_id: waddles.core.example.csping
 name: Ping Example Bundle (C#)
 # 1.0.0 retired -- fix/csping-version-bump, see this bundle's hub-manifest.yaml for why.
-version: 1.0.2
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
+author: github:penguintechinc
 language: csharp
 artifact: component
 execution_model: wasi-component

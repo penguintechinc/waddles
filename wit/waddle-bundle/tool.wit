@@ -58,6 +58,8 @@ world stage-tools {
   import media;
   import platform-table;
   import object-storage;
+  import kv-v2;
+  import db-v2;
   import tool;
 
   export tool-provider;

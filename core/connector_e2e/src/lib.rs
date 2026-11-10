@@ -201,7 +201,21 @@ impl WireRig {
     /// Test harness: a failed handshake is a loud panic.
     #[allow(clippy::expect_used)]
     pub async fn reconnect(&mut self) {
-        let previous = self.connection.take();
+        // An executor replica that reconnects does so because its old connection
+        // ended; the link no longer replaces a session on attach (several
+        // replicas stay attached side by side), so end the old connection first,
+        // exactly as the real dial loop's previous connection would have ended.
+        if let Some(old) = self.connection.take() {
+            let abort = old.abort_handle();
+            abort.abort();
+            let _ = tokio::time::timeout(OLD_CONNECTION_GRACE, old).await;
+            for _ in 0..500 {
+                if !self.link.is_attached() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
         let (stage_io, exec_io) = duplex(PIPE_BYTES);
         let executor = Arc::clone(&self.executor);
         let hello = executor.hello(false, "runc");
@@ -219,17 +233,58 @@ impl WireRig {
             .attach(stage_io)
             .await
             .expect("host-api handshake completes");
-        if let Some(old) = previous {
-            // Attaching replaced (and closed) the old session, so the old
-            // executor connection sees EOF and winds down on its own; give it
-            // a bounded moment to do so, and abort it if it somehow does not.
-            let abort = old.abort_handle();
-            if tokio::time::timeout(OLD_CONNECTION_GRACE, old)
+    }
+
+    /// Attaches a SECOND executor replica to the same link: a brand-new
+    /// [`Executor`] with `connectors` pinned (the same digests every replica
+    /// pins from the chart's `CONNECTOR_PIN_DIGEST_*`), dialing the link over its
+    /// own host-API connection -- what each pod of the scaled-out
+    /// `svc-bundles-executor` Deployment does.
+    ///
+    /// # Panics
+    /// Test harness: any setup failure is a loud panic naming the cause.
+    #[allow(clippy::expect_used)]
+    pub async fn add_replica(&self, connectors: &[RigConnector]) -> Replica {
+        let cfg = CliConfig::try_parse_from([
+            "bundle-executor",
+            "--stage-host-api-addr",
+            "svc-ingest:8301",
+        ])
+        .expect("static executor args parse");
+        let executor = Arc::new(Executor::new(&cfg, NoSource).expect("replica builds"));
+        for c in connectors {
+            let manifest =
+                VerifiedManifest::new(c.app_id.clone(), digest_of(c.wasm), c.world, HashSet::new());
+            executor
+                .pin_connector(
+                    &manifest,
+                    c.wasm.to_vec(),
+                    ConnectorLimits::from_config(&cfg),
+                    None,
+                )
                 .await
-                .is_err()
-            {
-                abort.abort();
-            }
+                .expect("replica pins the connector");
+        }
+        let (stage_io, exec_io) = duplex(PIPE_BYTES);
+        let hello = executor.hello(false, "runc");
+        let running = Arc::clone(&executor);
+        let connection = tokio::spawn(async move {
+            run_connection(
+                exec_io,
+                hello,
+                running,
+                "connector-e2e-replica",
+                Heartbeat::disabled(),
+            )
+            .await
+        });
+        self.link
+            .attach(stage_io)
+            .await
+            .expect("replica handshake completes");
+        Replica {
+            executor,
+            connection: Some(connection),
         }
     }
 
@@ -239,6 +294,28 @@ impl WireRig {
         if let Some(old) = self.connection.take() {
             old.abort();
         }
+    }
+}
+
+/// A second executor replica attached to a [`WireRig`]'s link.
+pub struct Replica {
+    /// The replica's own executor (own pinned registry).
+    pub executor: Arc<Executor<NoSource>>,
+    connection: Option<JoinHandle<Result<(), ExecutorError>>>,
+}
+
+impl Replica {
+    /// Ends this replica's host-API connection (the pod went away).
+    pub fn sever(&mut self) {
+        if let Some(c) = self.connection.take() {
+            c.abort();
+        }
+    }
+}
+
+impl Drop for Replica {
+    fn drop(&mut self) {
+        self.sever();
     }
 }
 
