@@ -49,6 +49,10 @@ pub enum SlotShape {
     Id,
     /// Visible ASCII (`0x21..=0x7e`), 1..=4096 bytes -- a bearer/bot token.
     Secret,
+    /// Decimal digits that parse as a `u64` (<= 20 chars). In a JSON body the value is
+    /// substituted as an INTEGER (some APIs, e.g. Kick moderation, require numeric ids); in a
+    /// path/query it is the digit text.
+    Int,
     /// Any non-NUL string of 1..=256 chars. Test-only: proves the encoders
     /// neutralize hostile values even if a shape check were ever loosened.
     #[cfg(test)]

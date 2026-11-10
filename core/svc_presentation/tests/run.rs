@@ -73,7 +73,7 @@ async fn run_with_shutdown_binds_connects_serves_and_stops_cleanly() {
         "--hub-api-grpc-endpoint",
         &format!("http://{hub_addr}"),
         "--service-jwt-token-endpoint",
-        &format!("http://{hub_addr}/internal/service-token"),
+        &format!("http://{hub_addr}"),
     ])
     .expect("valid CLI assembly");
     let config = Config::from_cli(cli).expect("required secrets are set");

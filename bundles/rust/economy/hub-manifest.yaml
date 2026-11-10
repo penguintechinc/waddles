@@ -1,10 +1,11 @@
 schema_version: 2
 app_id: waddles.core.service.economy
 name: Economy Service Bundle (Rust)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.service
 module: core
 provider: builtin
+author: github:penguintechinc
 language: rust
 artifact: prebuilt
 execution_model: native
@@ -39,6 +40,8 @@ permissions:
   justification: Admin-scoped tool sets balances with supply enforcement
 - id: economy.pot.pay
   justification: Atomically distribute community pot funds
+- id: economy.transfer_from
+  justification: ELEVATED primitive exposed to app bundles that hold their own admin-approved economy.transfer_from grant; the host enforces the caller's grant and caps
 - id: storage.kv
   justification: Read community currency alias and exchange policy
 routes_to: []
@@ -102,6 +105,28 @@ exported_tools:
     - from
     - to
     - amount
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: transfer_from
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      from: *id001
+      to: *id001
+      amount: *id002
+      reason:
+        type: string
+        pattern: ^[a-z0-9_.-]{1,64}$
+        minLength: 1
+        maxLength: 64
+    required:
+    - from
+    - to
+    - amount
+    - reason
     additionalProperties: false
   output_schema:
     type: object

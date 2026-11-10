@@ -1,4 +1,4 @@
-# feature/helm-auto-provision-keys -- Ed25519 platform keys (PR #431 bundle-signing, PR
+# feature/helm-auto-provision-keys -- platform keys (bundle-signing: Ed25519; service-jwt: ECDSA P-256 / ES256) (PR #431 bundle-signing, PR
 # #438 service-jwt). These CANNOT be generated with pure Helm/Sprig template functions
 # like auto-provisioned-secrets.yaml's symmetric keys: `genPrivateKey "ed25519"` (where
 # available) only yields a PEM private key, and Sprig has no function to derive the raw
@@ -40,6 +40,13 @@
 # ConfigMap this Job writes contains ONLY public key material -- safe for any consumer
 # to mount, unlike the Secret itself which stays hub-api-only (see values.yaml
 # comment). RBAC for this exact scope: auto-provisioned-keys-job-rbac.yaml.
+#
+# ES256 cut-over -- the service-jwt key is now an ECDSA P-256 key (`provision_ed25519`'s
+# 10th arg `algo` = "ec-p256"; bundle-signing keeps "ed25519"). The public half published
+# to the ConfigMap is the PEM SubjectPublicKeyInfo text (what `SERVICE_JWT_PUBLIC_KEY_<kid>`
+# expects), not raw bytes. An EXISTING Secret that still holds an Ed25519 key is NOT
+# silently reused for service-jwt: the derive step fails loud (see the P-256 check below)
+# -- rotate by creating a new kid with a P-256 key (docs/JWT_VERIFICATION.md).
 #
 # fix/hub-api-grpc-service-jwt-issuer -- `provision_ed25519` now takes a `format`
 # arg ("raw" | "pem"). bundle-signing keeps "raw" (32-byte seed, base64, unsuffixed
@@ -156,7 +163,7 @@ spec:
                 alpha|local) can_generate=true ;;
               esac
 
-              # provision_ed25519 <secret> <cm> <key-id> <external-flag> <priv-key-name> <kid-key-name> <pub-key-name> [<pub-keys-json-key-name>] [<format: raw|pem>]
+              # provision_ed25519 <secret> <cm> <key-id> <external-flag> <priv-key-name> <kid-key-name> <pub-key-name> [<pub-keys-json-key-name>] [<format: raw|pem>] [<algo: ed25519|ec-p256>]
               #
               # <priv-key-name> is the literal Secret data key for format=raw. For
               # format=pem it is the key-name PREFIX (e.g. SERVICE_JWT_PRIVATE_KEY_) and the
@@ -183,7 +190,11 @@ spec:
               # needed there.
               provision_ed25519() {
                 local secret="$1" cm="$2" key_id="$3" external="$4"
-                local priv_key="$5" kid_key="$6" pub_key="$7" pub_keys_json_key="${8:-}" format="${9:-raw}"
+                local priv_key="$5" kid_key="$6" pub_key="$7" pub_keys_json_key="${8:-}" format="${9:-raw}" algo="${10:-ed25519}"
+                if [ "${algo}" = "ec-p256" ] && [ "${format}" != "pem" ]; then
+                  echo "FATAL: algo=ec-p256 requires format=pem" >&2
+                  exit 1
+                fi
                 # Generation path: the key name is built from the CHART keyId (no existing
                 # Secret to honour). The derive path below re-resolves from the Secret.
                 local gen_priv_key="${priv_key}"
@@ -203,7 +214,11 @@ spec:
                   wd="$(mktemp -d)"
                   trap 'shred -u -f "'"${wd}"'"/* 2>/dev/null || true; rm -rf "'"${wd}"'"' RETURN
                   umask 077
-                  openssl genpkey -algorithm ed25519 -out "${wd}/priv.pem"
+                  if [ "${algo}" = "ec-p256" ]; then
+                    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -out "${wd}/priv.pem"
+                  else
+                    openssl genpkey -algorithm ed25519 -out "${wd}/priv.pem"
+                  fi
                   if [ "${format}" = "pem" ]; then
                     # PEM (PKCS8) straight into the Secret -- matches
                     # `scripts/generate-service-jwt-key.sh` and what
@@ -265,6 +280,16 @@ spec:
                 fi
                 if [ "${format}" = "pem" ]; then
                   printf '%s' "${priv_b64_in}" | base64 -d > "${wd2}/priv.pem"
+                  if [ "${algo}" = "ec-p256" ]; then
+                    # Fail loud on a leftover Ed25519 (or other-curve) key: hub-api's
+                    # load_issuer_from_env refuses anything but P-256, so publishing a public
+                    # key derived from it would advertise a key that can never sign.
+                    if ! openssl pkey -in "${wd2}/priv.pem" -noout -text | grep -q "prime256v1"; then
+                      echo "FATAL: secret/${secret} field '${derive_priv_key}' is not an ECDSA P-256 key (service JWTs are ES256). Rotate: create a new P-256 key under a new kid (docs/JWT_VERIFICATION.md)." >&2
+                      exit 1
+                    fi
+                    openssl pkey -in "${wd2}/priv.pem" -pubout -out "${wd2}/pub.pem"
+                  fi
                   openssl pkey -in "${wd2}/priv.pem" -pubout -outform DER -out "${wd2}/pub.der"
                 else
                   printf '%s' "${priv_b64_in}" | base64 -d | base64 -d > "${wd2}/priv.raw"
@@ -279,7 +304,12 @@ spec:
                   exit 1
                 fi
                 local pub_b64 actual_kid
-                pub_b64="$(tail -c 32 "${wd2}/pub.der" | base64 | tr -d '\n')"
+                if [ "${algo}" = "ec-p256" ]; then
+                  # Public PEM text (SPKI) -- never secret; what SERVICE_JWT_PUBLIC_KEY_<kid> expects.
+                  pub_b64="$(cat "${wd2}/pub.pem")"
+                else
+                  pub_b64="$(tail -c 32 "${wd2}/pub.der" | base64 | tr -d '\n')"
+                fi
                 actual_kid="${secret_kid}"
                 if [ -z "${actual_kid}" ]; then
                   echo "resolve: secret/${secret} has no ${kid_key}; publishing chart keyId '${key_id}' as the kid"
@@ -310,7 +340,7 @@ spec:
               # with no matching `SERVICE_JWT_PRIVATE_KEY_<kid>` var, `load_issuer_from_env`
               # raised, and the internal gRPC listener (port 50204) never started.
               provision_ed25519 "${SERVICE_JWT_SECRET}" "${SERVICE_JWT_CM}" "${SERVICE_JWT_KEY_ID}" "${SERVICE_JWT_EXTERNAL}" \
-                "SERVICE_JWT_PRIVATE_KEY_" SERVICE_JWT_ACTIVE_KID SERVICE_JWT_PUBLIC_KEY "" pem
+                "SERVICE_JWT_PRIVATE_KEY_" SERVICE_JWT_ACTIVE_KID SERVICE_JWT_PUBLIC_KEY "" pem ec-p256
 
               echo "auto-provision-keys: done"
           resources:

@@ -219,6 +219,15 @@ impl PlatformPolicy {
                     slots: USER_SLOTS.to_vec(),
                     ..KindPolicy::new("chat.delete", "DELETE", helix(&["moderation", "chat"]))
                 },
+                // https://dev.twitch.tv/docs/api/reference/#delete-chat-messages -- the same
+                // endpoint WITHOUT `message_id` clears the whole chat (moderator scope
+                // `moderator:manage:chat_messages`); its own kind keeps a distinct audit identity.
+                KindPolicy {
+                    query: vec!["broadcaster_id", "moderator_id"],
+                    slots: USER_SLOTS.to_vec(),
+                    requires_pin: true,
+                    ..KindPolicy::new("chat.clear", "DELETE", helix(&["moderation", "chat"]))
+                },
                 // https://dev.twitch.tv/docs/api/reference/#send-whisper
                 KindPolicy {
                     query: vec!["from_user_id", "to_user_id"],
@@ -306,5 +315,81 @@ impl PlatformPolicy {
             ],
             allow_http: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod chat_clear_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use crate::connector::sender_exec::verify::{verify, TemplateError};
+    use crate::connector::sender_exec::RequestTpl;
+
+    fn tpl(method: &str, url: &str, with_creds: bool, body: Option<&str>) -> RequestTpl {
+        let (headers, refs): (Vec<(&str, &str)>, Vec<(&str, &str)>) = if with_creds {
+            (
+                vec![
+                    ("Authorization", "Bearer {{TWITCH_TOKEN}}"),
+                    ("Client-Id", "{{TWITCH_CLIENT_ID}}"),
+                ],
+                vec![
+                    ("{{TWITCH_TOKEN}}", "token"),
+                    ("{{TWITCH_CLIENT_ID}}", "client_id"),
+                    ("{{TWITCH_BROADCASTER_ID}}", "broadcaster_id"),
+                    ("{{TWITCH_SENDER_ID}}", "sender_id"),
+                ],
+            )
+        } else {
+            (vec![], vec![])
+        };
+        let owned = |p: Vec<(&str, &str)>| {
+            p.into_iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect::<Vec<_>>()
+        };
+        RequestTpl {
+            method: method.into(),
+            url: url.into(),
+            headers: owned(headers),
+            body: body.map(|b| b.as_bytes().to_vec()),
+            secret_refs: owned(refs),
+        }
+    }
+
+    const MOD: &str = "broadcaster_id={{TWITCH_BROADCASTER_ID}}&moderator_id={{TWITCH_SENDER_ID}}";
+
+    fn check(t: &RequestTpl) -> Result<(), TemplateError> {
+        let p = PlatformPolicy::twitch();
+        verify(&p, p.kind("chat.clear").expect("kind exists"), t).map(|_| ())
+    }
+
+    #[test]
+    fn chat_clear_is_the_bodyless_delete_without_a_message_id_on_host_ids() {
+        let url = format!("https://api.twitch.tv/helix/moderation/chat?{MOD}");
+        assert_eq!(check(&tpl("DELETE", &url, true, None)), Ok(()));
+        assert!(PlatformPolicy::twitch().kind("chat.clear").unwrap().requires_pin);
+        // The delete-one-message query key is NOT part of the clear kind.
+        let with_msg = format!("{url}&message_id=abc");
+        assert_eq!(
+            check(&tpl("DELETE", &with_msg, true, None)),
+            Err(TemplateError::QueryMismatch)
+        );
+        // A literal broadcaster id (bundle-chosen) is refused: it must be the host slot.
+        let lit = "https://api.twitch.tv/helix/moderation/chat?broadcaster_id=999&moderator_id={{TWITCH_SENDER_ID}}";
+        assert_eq!(
+            check(&tpl("DELETE", lit, true, None)),
+            Err(TemplateError::SlotMisplaced)
+        );
+        // Wrong method / wrong path / a body are refused.
+        assert_eq!(check(&tpl("POST", &url, true, None)), Err(TemplateError::BadMethod));
+        let wrong = format!("https://api.twitch.tv/helix/moderation/bans?{MOD}");
+        assert_eq!(
+            check(&tpl("DELETE", &wrong, true, None)),
+            Err(TemplateError::PathMismatch)
+        );
+        assert_eq!(
+            check(&tpl("DELETE", &url, true, Some("{}"))),
+            Err(TemplateError::BodyPresence)
+        );
     }
 }

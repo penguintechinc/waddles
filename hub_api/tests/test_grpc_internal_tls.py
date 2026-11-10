@@ -22,8 +22,7 @@ import grpc
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey
 from waddles.hub.internal.v1 import identity_pb2, identity_pb2_grpc
@@ -41,7 +40,7 @@ def issuer() -> ServiceJwtIssuer:
     unauthenticated), but `build_internal_grpc_server` requires one to wire
     `AuthInterceptor`.
     """
-    private_key = Ed25519PrivateKey.generate()
+    private_key = ec.generate_private_key(ec.SECP256R1())
     identity = ServiceIdentity(
         service_id=SPIFFE_ID,
         k8s_namespace="waddlebot",

@@ -43,6 +43,7 @@ mod metrics;
 pub mod schema;
 pub mod scope;
 mod typed;
+pub mod v2;
 
 use std::time::Instant;
 

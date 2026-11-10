@@ -1,8 +1,8 @@
-.PHONY: seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: backfill-bundle-author seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
-        build-superpenguin-roll-bundle test-csharp-bundle-compile \
+        build-superpenguin-roll-bundle test-superpenguin-roll-e2e test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
         check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
@@ -30,6 +30,9 @@ docker-push:
 
 lint:
 	@bash scripts/lint.sh
+
+backfill-bundle-author:
+	@python3 scripts/backfill_bundle_author.py
 
 openapi-hubapi:
 	@python3 scripts/export-hubapi-openapi.py
@@ -306,6 +309,11 @@ test-superpenguin-roll:
 build-superpenguin-roll-bundle:
 	@bash scripts/verify-superpenguin-roll-fixture.sh
 
+# Real-path gate: builds the component, loads it in the REAL bundle-executor and drives
+# process-stage.transform (core/bundle_executor/tests/csharp_superpenguin_roll_e2e.rs).
+test-superpenguin-roll-e2e:
+	@bash scripts/test-superpenguin-roll-e2e.sh
+
 # End-to-end: builds the real bundles/csharp/csping spike bundle through
 # CSharpBuilder (core/bundle_compiler/src/build/csharp.rs), the
 # builder_for("csharp") arm now returns -- ignored by default cargo test
@@ -387,8 +395,8 @@ test-bundle-flag-on-command-e2e:
 codemod-app-bundles-activation-only:
 	@python3 scripts/codemod_app_bundles_activation_only.py
 
-# Generates the Ed25519 signing keypair for hub-api's per-service machine
-# JWTs (feature/eddsa-machine-jwt) and applies the resulting k8s Secret --
+# Generates the ECDSA P-256 (ES256) signing keypair for hub-api's per-service machine
+# JWTs and applies the resulting k8s Secret --
 # private key never printed/argv'd/persisted. Usage:
 #   KID=2026-09-28 NAMESPACE=waddlebot make generate-service-jwt-key
 generate-service-jwt-key:
@@ -462,3 +470,31 @@ pre-commit:
 .PHONY: gen-ops-cli-vectors
 gen-ops-cli-vectors:
 	python3 -I scripts/gen_ops_cli_vectors.py
+
+# SuperPenguinTV C# app ports; service-bundle tools own the shared capabilities.
+SUPERPENGUIN_GAMES := slots gamble defuse duel first roulette ffa heist steal fishing dropgame-core plinko balloon parachute curling golf racing ufoclaw giveaway bonustickets wheel audiocommand tts lastseen deathcounter dailycounter quotes raidtracker top alias timers weather viewers channelpoints
+.PHONY: $(addprefix test-superpenguin-,$(SUPERPENGUIN_GAMES)) $(addsuffix -bundle,$(addprefix build-superpenguin-,$(SUPERPENGUIN_GAMES)))
+$(addprefix test-superpenguin-,$(SUPERPENGUIN_GAMES)):
+	bash scripts/test-superpenguin-bundle.sh $(@:test-superpenguin-%=%)
+$(addsuffix -bundle,$(addprefix build-superpenguin-,$(SUPERPENGUIN_GAMES))):
+	bash scripts/build-superpenguin-bundle.sh $(@:build-superpenguin-%-bundle=%)
+
+.PHONY: test-superpenguin-ports-e2e
+test-superpenguin-ports-e2e:
+	bash scripts/test-superpenguin-ports-e2e.sh
+
+# Wave-3 utility ports: builds the ten real components and runs them through the production executor.
+.PHONY: test-superpenguin-wave3-e2e
+test-superpenguin-wave3-e2e:
+	bash scripts/test-superpenguin-wave3-e2e.sh
+
+# Wave-4 apps (giveaway, bonustickets, wheel, audiocommand, tts, channelpoints): manifests are generated from each bundle's
+# manifest.src.yaml; the contract test checks generated files are current, attribution, overlay asset hashes and provenance.
+SUPERPENGUIN_WAVE4 := giveaway bonustickets wheel audiocommand tts channelpoints
+.PHONY: gen-superpenguin-manifests test-superpenguin-wave4-contracts scaffold-superpenguin-bundle
+gen-superpenguin-manifests:
+	python3 -I scripts/gen-superpenguin-manifests.py $(SUPERPENGUIN_WAVE4)
+test-superpenguin-wave4-contracts:
+	python3 -m pytest scripts/ci/tests/test_superpenguin_wave4_contracts.py -q
+scaffold-superpenguin-bundle:
+	bash scripts/scaffold-superpenguin-bundle.sh $(NAME)
