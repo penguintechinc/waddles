@@ -1,16 +1,27 @@
-//! HTTP client for hub-api's internal resolve/list endpoints.
+//! gRPC client for hub-api's internal `ProviderConnectionService` (resolve + list).
+//!
+//! Replaces the retired machine-JWT REST routes (`GET /api/v1/internal/provider-connections`,
+//! `POST .../provider-connections/{id}/resolve`): intra-cluster calls are gRPC, REST is for
+//! external traffic only. One long-lived lazily-connecting [`tonic::transport::Channel`] per
+//! resolver (TLS pinned to the internal CA; plaintext only in alpha), a machine JWT in
+//! `authorization` metadata, a bounded per-RPC deadline, a circuit breaker, and a `tracing`
+//! span per call. Secrets never reach a log line, a label, or an error value.
 
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Deserialize;
+use hub_client::pb::provider_connection_service_client::ProviderConnectionServiceClient;
+use hub_client::pb::{ListBindingsRequest, ResolveConnectionRequest};
+use hub_client::{bearer_request, lazy_channel};
+use tonic::transport::Channel;
+use tonic::{Code, Status};
 use tracing::Instrument;
 
 use crate::breaker::{Breaker, Verdict};
 use crate::error::{NotUsableReason, ResolveError};
 use crate::types::{
-    parse_page, parse_resolved, BindingPage, ConnectionKind, ConnectionRef, ResolvedConnection,
+    page_from_pb, resolved_from_pb, BindingPage, ConnectionKind, ConnectionRef, ResolvedConnection,
 };
 
 /// Scope for OAuth-only resolves (community-bound).
@@ -20,11 +31,19 @@ pub const SCOPE_CONNECTIONS_RESOLVE_STATIC: &str = "connections:resolve:static";
 /// Scope for the unbound data-plane binding list.
 pub const SCOPE_CONNECTIONS_LIST: &str = "connections:list";
 
+/// Prefix of the `FAILED_PRECONDITION` detail hub-api sends for a not-usable connection; the
+/// fixed reason code follows it (`not_usable:disabled`).
+const NOT_USABLE_PREFIX: &str = "not_usable:";
+
 /// Static configuration of a [`ConnectionResolver`].
 #[derive(Clone, Debug)]
 pub struct ResolverConfig {
-    /// hub-api base URL (`HUB_API_URL`); plaintext `http://` is accepted only in alpha.
-    pub hub_api_url: String,
+    /// hub-api's internal gRPC endpoint (`HUB_API_GRPC_ENDPOINT`, e.g.
+    /// `https://waddlebot-hub-api-v3:50204`); plaintext `http://` is accepted only in alpha.
+    pub hub_grpc_endpoint: String,
+    /// PEM CA bundle that signed hub-api's gRPC server cert (`HUB_API_GRPC_CA_FILE`). `Some`
+    /// trusts ONLY that CA; `None` falls back to the webpki roots. Hostname checks stay on.
+    pub grpc_ca_path: Option<String>,
     /// Deployment environment name (`alpha`/`beta`/...), used for the transport policy.
     pub environment: String,
     /// hub-api's internal gRPC endpoint serving the machine-JWT mint
@@ -36,9 +55,9 @@ pub struct ResolverConfig {
     /// Scope requested for resolve tokens: [`SCOPE_CONNECTIONS_RESOLVE`] or
     /// [`SCOPE_CONNECTIONS_RESOLVE_STATIC`] (the latter only for callers allow-listed for it).
     pub resolve_scope: String,
-    /// Total per-request timeout (default 3s).
+    /// Per-RPC deadline (default 3s; the server rejects deadlines above 5s).
     pub request_timeout: Duration,
-    /// Connect timeout (default 2s).
+    /// Connect timeout for the token bootstrap HTTP client (default 2s).
     pub connect_timeout: Duration,
     /// Consecutive transient failures before the breaker opens (default 5).
     pub breaker_threshold: u32,
@@ -49,13 +68,14 @@ pub struct ResolverConfig {
 impl ResolverConfig {
     /// Config with the standard timeouts/breaker and the OAuth-only resolve scope.
     pub fn new(
-        hub_api_url: impl Into<String>,
+        hub_grpc_endpoint: impl Into<String>,
         environment: impl Into<String>,
         token_endpoint: impl Into<String>,
         sa_token_path: impl Into<String>,
     ) -> Self {
         Self {
-            hub_api_url: hub_api_url.into(),
+            hub_grpc_endpoint: hub_grpc_endpoint.into(),
+            grpc_ca_path: None,
             environment: environment.into(),
             token_endpoint: token_endpoint.into(),
             sa_token_path: sa_token_path.into(),
@@ -65,6 +85,13 @@ impl ResolverConfig {
             breaker_threshold: 5,
             breaker_cooldown: Duration::from_secs(10),
         }
+    }
+
+    /// Pin TLS trust to the internal CA at `path` (builder style).
+    #[must_use]
+    pub fn with_grpc_ca(mut self, path: Option<String>) -> Self {
+        self.grpc_ca_path = path.filter(|p| !p.trim().is_empty());
+        self
     }
 }
 
@@ -97,8 +124,8 @@ pub trait ConnectionResolve: Send + Sync {
 }
 
 struct Inner {
-    http: reqwest::Client,
-    base_url: String,
+    rpc: ProviderConnectionServiceClient<Channel>,
+    deadline: Duration,
     bound: service_auth::BoundMachineJwtClient,
     list_jwt: service_auth::MachineJwtClient,
     breaker: Breaker,
@@ -113,16 +140,14 @@ pub struct ConnectionResolver {
 
 impl std::fmt::Debug for ConnectionResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConnectionResolver")
-            .field("base_url", &self.inner.base_url)
-            .finish_non_exhaustive()
+        f.debug_struct("ConnectionResolver").finish_non_exhaustive()
     }
 }
 
 /// Plaintext `http://` is allowed only in alpha; anything but http(s) is refused.
 /// Same policy as svc_ingest's `check_transport`.
-fn check_transport(hub_api_url: &str, environment: &str) -> Result<(), ResolveError> {
-    let lower = hub_api_url.trim().to_ascii_lowercase();
+fn check_transport(endpoint: &str, environment: &str) -> Result<(), ResolveError> {
+    let lower = endpoint.trim().to_ascii_lowercase();
     if lower.starts_with("https://") {
         return Ok(());
     }
@@ -131,55 +156,29 @@ fn check_transport(hub_api_url: &str, environment: &str) -> Result<(), ResolveEr
             return Ok(());
         }
         return Err(ResolveError::Malformed(
-            "plaintext http hub url refused outside alpha",
+            "plaintext http hub endpoint refused outside alpha",
         ));
     }
-    Err(ResolveError::Malformed("hub url must be http(s)"))
+    Err(ResolveError::Malformed("hub endpoint must be http(s)"))
 }
 
-/// Owned response body that is zeroized on drop, so every exit path (success, parse error,
-/// early `?`) wipes the plaintext secrets it may hold. reqwest's internal `Bytes` is outside
-/// our control and remains an accepted residual.
-struct ZeroizingBody(Vec<u8>);
-
-impl std::ops::Deref for ZeroizingBody {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl Drop for ZeroizingBody {
-    fn drop(&mut self) {
-        wipe(&mut self.0);
-    }
-}
-
-/// Zero every byte of the buffer's allocation and clear it.
-fn wipe(buf: &mut Vec<u8>) {
-    zeroize::Zeroize::zeroize(buf);
-}
-
-#[derive(Deserialize)]
-struct NotUsableWire {
-    reason: Option<String>,
-}
-
-/// Map a non-success status (and, for 409, the flat `not_usable` body) to an error.
-fn map_status(status: reqwest::StatusCode, body: &[u8]) -> ResolveError {
-    match status.as_u16() {
-        404 => ResolveError::NotFound,
-        409 => match serde_json::from_slice::<NotUsableWire>(body) {
-            Ok(w) => ResolveError::NotUsable(
-                w.reason
-                    .as_deref()
-                    .map_or(NotUsableReason::Other, NotUsableReason::from_wire),
-            ),
-            Err(_) => ResolveError::Malformed("invalid not_usable body"),
+/// Map a non-OK gRPC status to a [`ResolveError`]. Only the status CODE (and, for the one
+/// documented `not_usable:<reason>` detail, a fixed reason code) is read -- never free-form
+/// server text, so a secret-looking message cannot reach an error value or a log line.
+fn map_status(status: &Status) -> ResolveError {
+    match status.code() {
+        Code::NotFound => ResolveError::NotFound,
+        Code::FailedPrecondition => match status.message().strip_prefix(NOT_USABLE_PREFIX) {
+            Some(reason) => ResolveError::NotUsable(NotUsableReason::from_wire(reason)),
+            None => ResolveError::Malformed("invalid not_usable status"),
         },
-        401 | 403 => ResolveError::Auth,
-        408 | 429 => ResolveError::Transient("hub rate limited or timed out"),
-        s if s >= 500 => ResolveError::Transient("hub server error"),
+        Code::Unauthenticated | Code::PermissionDenied => ResolveError::Auth,
+        Code::ResourceExhausted | Code::DeadlineExceeded | Code::Cancelled => {
+            ResolveError::Transient("hub rate limited or timed out")
+        }
+        Code::Unavailable | Code::Internal | Code::Unknown | Code::DataLoss | Code::Aborted => {
+            ResolveError::Transient("hub server error")
+        }
         _ => ResolveError::Malformed("unexpected status"),
     }
 }
@@ -196,21 +195,24 @@ fn map_auth_error(e: &service_auth::ServiceAuthError) -> ResolveError {
 }
 
 impl ConnectionResolver {
-    /// Build a resolver; refuses a plaintext hub URL outside alpha.
+    /// Build a resolver; refuses a plaintext hub endpoint outside alpha and must be called
+    /// inside a tokio runtime (the long-lived channel spawns its connection worker).
     pub fn new(
         cfg: ResolverConfig,
         metrics: Arc<dyn ResolverMetrics>,
     ) -> Result<Self, ResolveError> {
-        check_transport(&cfg.hub_api_url, &cfg.environment)?;
+        check_transport(&cfg.hub_grpc_endpoint, &cfg.environment)?;
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(ResolveError::Malformed(
+                "connection resolver must be built inside a tokio runtime",
+            ));
+        }
+        let channel = lazy_channel(cfg.hub_grpc_endpoint.trim(), cfg.grpc_ca_path.as_deref())
+            .map_err(|_| ResolveError::Malformed("cannot build hub grpc channel"))?;
         let timeouts = service_auth::HttpTimeouts {
             connect: cfg.connect_timeout,
             request: cfg.request_timeout,
         };
-        let http = reqwest::Client::builder()
-            .connect_timeout(cfg.connect_timeout)
-            .timeout(cfg.request_timeout)
-            .build()
-            .map_err(|_| ResolveError::Malformed("cannot build http client"))?;
         let bound = service_auth::BoundMachineJwtClient::with_timeouts(
             cfg.token_endpoint.clone(),
             cfg.sa_token_path.clone(),
@@ -227,8 +229,8 @@ impl ConnectionResolver {
         .map_err(|_| ResolveError::Malformed("cannot build token client"))?;
         Ok(Self {
             inner: Arc::new(Inner {
-                http,
-                base_url: cfg.hub_api_url.trim().trim_end_matches('/').to_string(),
+                rpc: ProviderConnectionServiceClient::new(channel),
+                deadline: cfg.request_timeout,
                 bound,
                 list_jwt,
                 breaker: Breaker::new(cfg.breaker_threshold, cfg.breaker_cooldown),
@@ -242,6 +244,8 @@ impl ConnectionResolver {
     pub async fn resolve(&self, r: ConnectionRef) -> Result<ResolvedConnection, ResolveError> {
         let span = tracing::info_span!(
             "connection_resolve",
+            rpc.system = "grpc",
+            rpc.method = "ProviderConnectionService/ResolveConnection",
             community_id = r.community_id,
             connection_id = r.connection_id,
             kind = tracing::field::Empty,
@@ -281,35 +285,21 @@ impl ConnectionResolver {
             .get_token_for(r.community_id, Some(r.connection_id))
             .await
             .map_err(|e| map_auth_error(&e))?;
-        let url = format!(
-            "{}/api/v1/internal/communities/{}/provider-connections/{}/resolve",
-            self.inner.base_url, r.community_id, r.connection_id
-        );
-        let (status, body) = self
-            .send(self.inner.http.post(url).bearer_auth(&*token))
-            .await?;
-        if status.is_success() {
-            parse_resolved(&body, r)
-        } else {
-            Err(map_status(status, &body))
-        }
-    }
-
-    /// Send a request and read the whole body; network/timeout failures are transient.
-    async fn send(
-        &self,
-        req: reqwest::RequestBuilder,
-    ) -> Result<(reqwest::StatusCode, ZeroizingBody), ResolveError> {
-        let resp = req
-            .send()
+        let request = bearer_request(
+            ResolveConnectionRequest {
+                community_id: r.community_id,
+                connection_id: r.connection_id,
+            },
+            &token,
+            self.inner.deadline,
+        )
+        .map_err(|_| ResolveError::Malformed("invalid token metadata"))?;
+        let mut rpc = self.inner.rpc.clone();
+        let response = rpc
+            .resolve_connection(request)
             .await
-            .map_err(|_| ResolveError::Transient("hub request failed"))?;
-        let status = resp.status();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|_| ResolveError::Transient("hub response read failed"))?;
-        Ok((status, ZeroizingBody(Vec::from(body))))
+            .map_err(|s| map_status(&s))?;
+        resolved_from_pb(response.into_inner(), r)
     }
 
     /// One page of bindings (no secrets), via the unbound `connections:list` token.
@@ -323,7 +313,14 @@ impl ConnectionResolver {
         let result = match self.inner.breaker.allow() {
             Err(e) => Err(e),
             Ok(()) => {
-                let r = self.list_call(provider, capability, after, limit).await;
+                let r = self
+                    .list_call(provider, capability, after, limit)
+                    .instrument(tracing::info_span!(
+                        "connection_list_bindings",
+                        rpc.system = "grpc",
+                        rpc.method = "ProviderConnectionService/ListBindings",
+                    ))
+                    .await;
                 self.inner.breaker.record(match &r {
                     Ok(_) => Verdict::Success,
                     Err(e) => Verdict::of_error(e),
@@ -350,25 +347,23 @@ impl ConnectionResolver {
             .get_token()
             .await
             .map_err(|e| map_auth_error(&e))?;
-        let mut query = vec![
-            ("provider", provider.to_string()),
-            ("after", after.to_string()),
-            ("limit", limit.to_string()),
-        ];
-        if let Some(c) = capability {
-            query.push(("capability", c.to_string()));
-        }
-        let url = format!(
-            "{}/api/v1/internal/provider-connections",
-            self.inner.base_url
-        );
-        let req = self.inner.http.get(url).bearer_auth(&*token).query(&query);
-        let (status, body) = self.send(req).await?;
-        if status.is_success() {
-            parse_page(&body)
-        } else {
-            Err(map_status(status, &body))
-        }
+        let request = bearer_request(
+            ListBindingsRequest {
+                provider: provider.to_string(),
+                capability: capability.unwrap_or_default().to_string(),
+                after,
+                limit,
+            },
+            &token,
+            self.inner.deadline,
+        )
+        .map_err(|_| ResolveError::Malformed("invalid token metadata"))?;
+        let mut rpc = self.inner.rpc.clone();
+        let response = rpc
+            .list_bindings(request)
+            .await
+            .map_err(|s| map_status(&s))?;
+        page_from_pb(response.into_inner())
     }
 }
 
@@ -392,600 +387,79 @@ impl ConnectionResolve for ConnectionResolver {
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    //! Fake-hub helpers shared by this crate's unit and contract tests.
-
-    use super::*;
-    use service_auth::test_support::{MintCall, MintReply, MockHub};
-    use std::sync::Mutex;
-    use std::sync::OnceLock;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    /// One scripted mint: answers a request whose scope/binding match (`None` = any).
-    struct MintEntry {
-        scope: Option<String>,
-        community: Option<i64>,
-        conn: Option<i64>,
-        token: String,
-    }
-
-    /// The mint a test's fake hub-api serves over gRPC (a real `MockHub`), scripted per
-    /// wiremock server the way the old `/internal/service-token` stubs were. Unmatched requests
-    /// are refused like an unknown caller.
-    pub(crate) struct MintBook {
-        entries: Mutex<Vec<MintEntry>>,
-        reject_all: Mutex<bool>,
-        hub: OnceLock<MockHub>,
-    }
-
-    /// A wiremock REST fake of hub-api plus the gRPC mint book that goes with it. Derefs to the
-    /// `MockServer` so REST stubs mount exactly as before; the mint is scripted on `book`.
-    pub(crate) struct Fx {
-        server: MockServer,
-        pub(crate) book: Arc<MintBook>,
-    }
-
-    impl Fx {
-        /// Start the REST fake with an empty mint book.
-        pub(crate) async fn start() -> Self {
-            Self {
-                server: MockServer::start().await,
-                book: Arc::new(MintBook {
-                    entries: Mutex::new(Vec::new()),
-                    reject_all: Mutex::new(false),
-                    hub: OnceLock::new(),
-                }),
-            }
-        }
-    }
-
-    impl std::ops::Deref for Fx {
-        type Target = MockServer;
-        fn deref(&self) -> &MockServer {
-            &self.server
-        }
-    }
-
-    impl MintBook {
-        /// The gRPC endpoint of this book's hub, starting it on first use (inside a tokio runtime).
-        pub(crate) fn endpoint(self: &Arc<Self>) -> String {
-            self.hub
-                .get_or_init(|| {
-                    let book = self.clone();
-                    let answer = move |call: &MintCall| {
-                        if *book.reject_all.lock().unwrap() {
-                            return Err(tonic::Status::unauthenticated("rejected"));
-                        }
-                        let entries = book.entries.lock().unwrap();
-                        let hit = entries.iter().find(|e| {
-                            e.scope.as_deref().is_none_or(|s| s == call.scope)
-                                && e.community.is_none_or(|c| Some(c) == call.community_id)
-                                && e.conn.is_none_or(|c| Some(c) == call.connection_id)
-                        });
-                        match hit {
-                            Some(e) => Ok((e.token.clone(), 3600)),
-                            None => Err(tonic::Status::not_found("no matching mint scripted")),
-                        }
-                    };
-                    MockHub::builder()
-                        .mint(vec![MintReply::With(Arc::new(answer))])
-                        .start_sync()
-                })
-                .endpoint
-                .clone()
-        }
-
-        /// Every mint request the hub received.
-        pub(crate) fn calls(&self) -> Vec<MintCall> {
-            self.hub.get().map(MockHub::mint_calls).unwrap_or_default()
-        }
-    }
-
-    /// Refuse every mint (a hub-api that rejects the bootstrap).
-    pub(crate) fn mount_token_rejected(server: &Fx) {
-        *server.book.reject_all.lock().unwrap() = true;
-    }
-
-    /// Mint `token` for any request with `scope` (any binding).
-    pub(crate) fn mount_scope_token(server: &Fx, scope: Option<&str>, token: &str) {
-        server.book.entries.lock().unwrap().push(MintEntry {
-            scope: scope.map(str::to_owned),
-            community: None,
-            conn: None,
-            token: token.to_owned(),
-        });
-    }
-
-    /// Metrics sink recording every call as `kind:outcome` strings.
-    #[derive(Default)]
-    pub(crate) struct Rec {
-        pub(crate) calls: Mutex<Vec<String>>,
-    }
-
-    impl ResolverMetrics for Rec {
-        fn resolve(&self, kind: ConnectionKind, outcome: &'static str, _l: Duration) {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("resolve:{}:{outcome}", kind.code()));
-        }
-        fn resolve_failed(&self, outcome: &'static str, _l: Duration) {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("resolve_failed:{outcome}"));
-        }
-        fn list(&self, outcome: &'static str) {
-            self.calls.lock().unwrap().push(format!("list:{outcome}"));
-        }
-    }
-
-    /// Resolver config pointed at `server`, with a throwaway SA token file.
-    pub(crate) fn cfg(server: &Fx) -> ResolverConfig {
-        let sa = std::env::temp_dir().join(format!(
-            "conn-resolver-sa-{}-{}",
-            std::process::id(),
-            server.address().port()
-        ));
-        std::fs::write(&sa, "projected-sa-token").unwrap();
-        let mut c = ResolverConfig::new(
-            server.uri(),
-            "alpha",
-            server.book.endpoint(),
-            sa.to_string_lossy().to_string(),
-        );
-        c.request_timeout = Duration::from_millis(500);
-        c.breaker_threshold = 1000;
-        c
-    }
-
-    /// Script a mint answering only for the exact bound request, with `token`.
-    pub(crate) async fn mount_bound_token(server: &Fx, community: i64, conn: i64, token: &str) {
-        server.book.entries.lock().unwrap().push(MintEntry {
-            scope: Some(SCOPE_CONNECTIONS_RESOLVE.to_owned()),
-            community: Some(community),
-            conn: Some(conn),
-            token: token.to_owned(),
-        });
-    }
-
-    /// Mount a resolve answering only when the bearer is `token`.
-    pub(crate) async fn mount_resolve(
-        server: &Fx,
-        community: i64,
-        conn: i64,
-        token: &str,
-        resp: ResponseTemplate,
-    ) {
-        Mock::given(method("POST"))
-            .and(path(format!(
-                "/api/v1/internal/communities/{community}/provider-connections/{conn}/resolve"
-            )))
-            .and(header("authorization", format!("Bearer {token}").as_str()))
-            .respond_with(resp)
-            .mount(server)
-            .await;
-    }
-
-    /// Count requests the fake hub received on `path_suffix`.
-    pub(crate) async fn hits(server: &MockServer, path_suffix: &str) -> usize {
-        server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .filter(|r| r.url.path().ends_with(path_suffix))
-            .count()
-    }
-
-    pub(crate) const OAUTH_BODY: &str = r#"{"success":true,"communityId":7,"connectionId":12,
-        "provider":"twitch","kind":1,"accessToken":"PLAIN-ACCESS","expiresAt":null,
-        "endpoint":{"url":null,"region":null,"function":null,"project":null},
-        "metadata":{},"secret":null}"#;
-
-    pub(crate) const R: ConnectionRef = ConnectionRef {
-        community_id: 7,
-        connection_id: 12,
-    };
-}
-
-#[cfg(test)]
 mod tests {
-    use super::test_support::*;
     use super::*;
-    use crate::types::ConnectionSecret;
-    use std::sync::Mutex;
-    use wiremock::matchers::{method, path, query_param};
-    use wiremock::{Mock, Request, Respond, ResponseTemplate};
 
-    fn ok_oauth() -> ResponseTemplate {
-        ResponseTemplate::new(200).set_body_raw(OAUTH_BODY, "application/json")
-    }
-
-    async fn resolver(server: &Fx) -> (ConnectionResolver, Arc<Rec>) {
-        let rec = Arc::new(Rec::default());
-        let r = ConnectionResolver::new(cfg(server), rec.clone()).unwrap();
-        (r, rec)
+    struct NoMetrics;
+    impl ResolverMetrics for NoMetrics {
+        fn resolve(&self, _: ConnectionKind, _: &'static str, _: Duration) {}
+        fn list(&self, _: &'static str) {}
     }
 
     #[test]
-    fn wipe_zeroes_the_whole_allocation() {
-        let mut v = b"PLAIN-secret-body".to_vec();
-        let len = v.len();
-        wipe(&mut v);
-        assert!(v.is_empty());
-        assert!(v.capacity() >= len);
-        // SAFETY: the first `len` bytes of the allocation were initialised (zeroed by wipe).
-        unsafe { v.set_len(len) };
-        assert!(v.iter().all(|b| *b == 0), "{v:?}");
-        let guard = ZeroizingBody(b"abc".to_vec());
-        assert_eq!(&guard[..], b"abc");
-    }
-
-    #[tokio::test]
-    async fn two_resolves_make_two_hub_calls() {
-        let server = Fx::start().await;
-        mount_bound_token(&server, 7, 12, "tok-7-12").await;
-        mount_resolve(&server, 7, 12, "tok-7-12", ok_oauth()).await;
-        let (r, _) = resolver(&server).await;
-        for _ in 0..2 {
-            let c = r.resolve(R).await.unwrap();
-            match &c.secret {
-                ConnectionSecret::OAuthAccessToken { access_token } => {
-                    assert_eq!(access_token.expose(), "PLAIN-ACCESS");
-                }
-                other => panic!("unexpected secret {other:?}"),
-            }
-        }
-        assert_eq!(hits(&server, "/resolve").await, 2, "no credential cache");
-        assert_eq!(server.book.calls().len(), 1, "only the bearer is cached");
-    }
-
-    #[tokio::test]
-    async fn resolve_sends_bound_bearer_for_that_community() {
-        let server = Fx::start().await;
-        mount_bound_token(&server, 7, 12, "tok-7-12").await;
-        mount_bound_token(&server, 8, 13, "tok-8-13").await;
-        // Each resolve only answers 200 to its own community's bearer (default is 404).
-        mount_resolve(&server, 7, 12, "tok-7-12", ok_oauth()).await;
-        mount_resolve(
-            &server,
-            8,
-            13,
-            "tok-8-13",
-            ResponseTemplate::new(200).set_body_raw(
-                OAUTH_BODY
-                    .replace("\"communityId\":7", "\"communityId\":8")
-                    .replace("12,", "13,"),
-                "application/json",
-            ),
-        )
-        .await;
-        let (r, _) = resolver(&server).await;
-        assert!(r.resolve(R).await.is_ok());
-        let other = ConnectionRef {
-            community_id: 8,
-            connection_id: 13,
-        };
-        assert!(r.resolve(other).await.is_ok());
-        // The 7-bearer must not open 8's resource: a body for another connection is refused.
-        let mismatched = ConnectionRef {
-            community_id: 7,
-            connection_id: 99,
-        };
-        mount_bound_token(&server, 7, 99, "tok-7-99").await;
-        mount_resolve(&server, 7, 99, "tok-7-99", ok_oauth()).await;
-        assert_eq!(
-            r.resolve(mismatched).await.unwrap_err(),
-            ResolveError::Malformed("resolve body is for another connection")
-        );
-    }
-
-    #[tokio::test]
-    async fn status_mapping_table() {
-        let table: Vec<(u16, &str, ResolveError)> = vec![
-            (404, "{}", ResolveError::NotFound),
+    fn status_mapping_table() {
+        let table: Vec<(Status, ResolveError)> = vec![
+            (Status::not_found("x"), ResolveError::NotFound),
             (
-                409,
-                r#"{"success":false,"error":"not_usable","reason":"pending_approval"}"#,
+                Status::failed_precondition("not_usable:pending_approval"),
                 ResolveError::NotUsable(NotUsableReason::PendingApproval),
             ),
             (
-                409,
-                r#"{"success":false,"error":"not_usable","reason":"token_expired"}"#,
+                Status::failed_precondition("not_usable:token_expired"),
                 ResolveError::NotUsable(NotUsableReason::TokenExpired),
             ),
             (
-                409,
-                r#"{"success":false,"error":"not_usable","reason":"brand_new_code"}"#,
+                Status::failed_precondition("not_usable:brand_new_code"),
                 ResolveError::NotUsable(NotUsableReason::Other),
             ),
             (
-                409,
-                r#"{"success":false,"error":"not_usable"}"#,
+                Status::failed_precondition("not_usable:"),
                 ResolveError::NotUsable(NotUsableReason::Other),
             ),
             (
-                409,
-                "<html>",
-                ResolveError::Malformed("invalid not_usable body"),
+                Status::failed_precondition("<html>"),
+                ResolveError::Malformed("invalid not_usable status"),
             ),
-            (401, "{}", ResolveError::Auth),
-            (403, "{}", ResolveError::Auth),
-            (500, "{}", ResolveError::Transient("hub server error")),
+            (Status::unauthenticated("x"), ResolveError::Auth),
+            (Status::permission_denied("x"), ResolveError::Auth),
             (
-                429,
-                "{}",
+                Status::internal("x"),
+                ResolveError::Transient("hub server error"),
+            ),
+            (
+                Status::unavailable("x"),
+                ResolveError::Transient("hub server error"),
+            ),
+            (
+                Status::resource_exhausted("x"),
                 ResolveError::Transient("hub rate limited or timed out"),
             ),
             (
-                408,
-                "{}",
+                Status::deadline_exceeded("x"),
                 ResolveError::Transient("hub rate limited or timed out"),
             ),
-            (503, "{}", ResolveError::Transient("hub server error")),
-            (400, "{}", ResolveError::Malformed("unexpected status")),
             (
-                200,
-                "not json",
-                ResolveError::Malformed("invalid resolve body"),
+                Status::invalid_argument("x"),
+                ResolveError::Malformed("unexpected status"),
+            ),
+            (
+                Status::unimplemented("x"),
+                ResolveError::Malformed("unexpected status"),
             ),
         ];
-        for (status, body, want) in table {
-            let server = Fx::start().await;
-            mount_bound_token(&server, 7, 12, "t").await;
-            mount_resolve(
-                &server,
-                7,
-                12,
-                "t",
-                ResponseTemplate::new(status).set_body_raw(body, "application/json"),
-            )
-            .await;
-            let (r, _) = resolver(&server).await;
-            assert_eq!(
-                r.resolve(R).await.unwrap_err(),
-                want,
-                "status {status} body {body}"
-            );
+        for (status, want) in table {
+            assert_eq!(map_status(&status), want, "{:?}", status.code());
         }
-    }
-
-    #[tokio::test]
-    async fn timeout_and_unreachable_hub_are_transient() {
-        let server = Fx::start().await;
-        mount_bound_token(&server, 7, 12, "t").await;
-        mount_resolve(
-            &server,
-            7,
-            12,
-            "t",
-            ok_oauth().set_delay(Duration::from_secs(2)),
-        )
-        .await;
-        let (r, _) = resolver(&server).await;
-        let e = r.resolve(R).await.unwrap_err();
-        assert_eq!(e, ResolveError::Transient("hub request failed"));
-        assert!(e.is_transient());
-
-        // Hub down entirely: mint succeeds from a live token server, resolve connects to a dead port.
-        let mut c = cfg(&server);
-        c.hub_api_url = "http://127.0.0.1:1".to_string();
-        let r2 = ConnectionResolver::new(c, Arc::new(Rec::default())).unwrap();
-        assert!(matches!(
-            r2.resolve(R).await,
-            Err(ResolveError::Transient(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn token_failures_map_to_auth_or_transient() {
-        // Token endpoint rejects the bootstrap -> Auth.
-        let server = Fx::start().await;
-        mount_token_rejected(&server);
-        let (r, _) = resolver(&server).await;
-        assert_eq!(r.resolve(R).await.unwrap_err(), ResolveError::Auth);
-        assert_eq!(
-            r.list_bindings("twitch", None, 0, 10).await.unwrap_err(),
-            ResolveError::Auth
-        );
-
-        // Token endpoint unreachable -> Transient.
-        let mut c = cfg(&server);
-        c.token_endpoint = "http://127.0.0.1:1".to_string();
-        let r2 = ConnectionResolver::new(c, Arc::new(Rec::default())).unwrap();
-        assert_eq!(
-            r2.resolve(R).await.unwrap_err(),
-            ResolveError::Transient("token endpoint unreachable")
-        );
-
-        // Unreadable SA token file -> Transient.
-        let mut c = cfg(&server);
-        c.sa_token_path = "/nonexistent/sa-token".to_string();
-        let r3 = ConnectionResolver::new(c, Arc::new(Rec::default())).unwrap();
-        assert_eq!(
-            r3.resolve(R).await.unwrap_err(),
-            ResolveError::Transient("service account token unreadable")
-        );
-    }
-
-    #[tokio::test]
-    async fn auth_and_notfound_are_not_transient() {
-        for status in [401u16, 404] {
-            let server = Fx::start().await;
-            mount_bound_token(&server, 7, 12, "t").await;
-            mount_resolve(&server, 7, 12, "t", ResponseTemplate::new(status)).await;
-            let mut c = cfg(&server);
-            c.breaker_threshold = 2;
-            let r = ConnectionResolver::new(c, Arc::new(Rec::default())).unwrap();
-            for _ in 0..6 {
-                let e = r.resolve(R).await.unwrap_err();
-                assert!(!e.is_transient(), "{e:?}");
-                assert_ne!(e, ResolveError::CircuitOpen, "breaker must stay neutral");
-            }
-            assert_eq!(hits(&server, "/resolve").await, 6);
-        }
-    }
-
-    #[tokio::test]
-    async fn breaker_sheds_after_threshold_without_hitting_hub() {
-        let server = Fx::start().await;
-        mount_bound_token(&server, 7, 12, "t").await;
-        mount_resolve(&server, 7, 12, "t", ResponseTemplate::new(500)).await;
-        let mut c = cfg(&server);
-        c.breaker_threshold = 2;
-        c.breaker_cooldown = Duration::from_secs(60);
-        let rec = Arc::new(Rec::default());
-        let r = ConnectionResolver::new(c, rec.clone()).unwrap();
-        for _ in 0..2 {
-            assert!(matches!(
-                r.resolve(R).await,
-                Err(ResolveError::Transient(_))
-            ));
-        }
-        for _ in 0..3 {
-            let e = r.resolve(R).await.unwrap_err();
-            assert_eq!(e, ResolveError::CircuitOpen);
-            assert!(e.is_transient());
-        }
-        assert_eq!(
-            r.list_bindings("twitch", None, 0, 1).await.unwrap_err(),
-            ResolveError::CircuitOpen
-        );
-        assert_eq!(
-            hits(&server, "/resolve").await,
-            2,
-            "open breaker must not call the hub"
-        );
-        let calls = rec.calls.lock().unwrap().clone();
-        assert!(calls.contains(&"resolve_failed:circuit_open".to_string()));
-        assert!(calls.contains(&"list:circuit_open".to_string()));
     }
 
     #[test]
-    fn plaintext_http_hub_url_refused_outside_alpha() {
-        let mk = |url: &str, env: &str| {
-            let mut c = ResolverConfig::new(url, env, "http://127.0.0.1:1", "/sa");
-            c.breaker_threshold = 5;
-            ConnectionResolver::new(c, Arc::new(Rec::default()))
-        };
-        assert!(mk("http://hub:8204", "beta").is_err());
-        assert!(mk("http://hub:8204", "").is_err());
-        assert!(mk("http://hub:8204", "prod").is_err());
-        assert!(mk("http://hub:8204", "alpha").is_ok());
-        assert!(mk("HTTP://hub:8204", "ALPHA").is_ok());
-        assert!(mk("https://hub:8204", "beta").is_ok());
-        assert!(mk("ftp://hub", "alpha").is_err());
-        assert!(mk("hub:8204", "alpha").is_err());
-    }
-
-    #[tokio::test]
-    async fn list_bindings_uses_unbound_list_scope_and_paginates() {
-        let server = Fx::start().await;
-        mount_scope_token(&server, Some(SCOPE_CONNECTIONS_LIST), "list-tok");
-        let page = |after: &'static str, items: &str, next: &str| {
-            let body = format!(r#"{{"success":true,"items":[{items}],"nextAfter":{next}}}"#);
-            Mock::given(method("GET"))
-                .and(path("/api/v1/internal/provider-connections"))
-                .and(wiremock::matchers::header(
-                    "authorization",
-                    "Bearer list-tok",
-                ))
-                .and(query_param("provider", "twitch"))
-                .and(query_param("capability", "chat.send"))
-                .and(query_param("limit", "1"))
-                .and(query_param("after", after))
-                .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
-        };
-        let item = |c: i64| {
-            format!(
-                r#"{{"communityId":{c},"connectionId":{c},"tenantId":3,"secretVersion":1,"provider":"twitch","metadata":{{"channel":"x"}}}}"#
-            )
-        };
-        page("0", &item(1), "1").mount(&server).await;
-        page("1", &item(2), "null").mount(&server).await;
-        let (r, rec) = resolver(&server).await;
-        let p1 = r
-            .list_bindings("twitch", Some("chat.send"), 0, 1)
-            .await
-            .unwrap();
-        assert_eq!(p1.next_after, Some(1));
-        assert_eq!(p1.items[0].community_id, 1);
-        assert_eq!(
-            p1.items[0].metadata.get("channel").map(String::as_str),
-            Some("x")
-        );
-        let p2 = r
-            .list_bindings("twitch", Some("chat.send"), 1, 1)
-            .await
-            .unwrap();
-        assert_eq!(p2.next_after, None);
-        // The list token request carried no binding fields (unbound scope).
-        let mints = server.book.calls();
-        assert_eq!(mints.len(), 1);
-        assert_eq!(mints[0].scope, SCOPE_CONNECTIONS_LIST);
-        assert!(
-            mints[0].community_id.is_none() && mints[0].connection_id.is_none(),
-            "{:?}",
-            mints[0]
-        );
-        assert_eq!(
-            rec.calls
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|c| *c == "list:ok")
-                .count(),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn list_bindings_maps_errors_without_capability() {
-        let server = Fx::start().await;
-        mount_scope_token(&server, None, "t");
-        Mock::given(method("GET"))
-            .and(path("/api/v1/internal/provider-connections"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw("{", "application/json"))
-            .mount(&server)
-            .await;
-        let (r, rec) = resolver(&server).await;
-        assert_eq!(
-            r.list_bindings("x", None, 0, 5).await.unwrap_err(),
-            ResolveError::Malformed("invalid list body")
-        );
-        let q: Vec<_> = server
-            .received_requests()
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|q| q.url.path().ends_with("/provider-connections"))
-            .collect();
-        assert!(!q[0].url.query().unwrap_or("").contains("capability"));
-        assert_eq!(rec.calls.lock().unwrap().as_slice(), ["list:malformed"]);
-    }
-
-    #[tokio::test]
-    async fn resolve_error_never_contains_response_body() {
-        let server = Fx::start().await;
-        mount_bound_token(&server, 7, 12, "t").await;
-        for status in [500u16, 400, 409] {
-            server.reset().await;
-            mount_bound_token(&server, 7, 12, "t").await;
-            mount_resolve(
-                &server,
-                7,
-                12,
-                "t",
-                ResponseTemplate::new(status).set_body_raw(
-                    "SECRET-LOOKING-sk-live-abc123 password=hunter2",
-                    "text/plain",
-                ),
-            )
-            .await;
-            let (r, _) = resolver(&server).await;
-            let e = r.resolve(R).await.unwrap_err();
+    fn status_mapping_never_echoes_server_text() {
+        for status in [
+            Status::internal("SECRET-LOOKING-sk-live-abc123 password=hunter2"),
+            Status::invalid_argument("SECRET-LOOKING-sk-live-abc123 password=hunter2"),
+            Status::failed_precondition("SECRET-LOOKING-sk-live-abc123 password=hunter2"),
+        ] {
+            let e = map_status(&status);
             let rendered = format!("{e} | {e:?}");
             assert!(
                 !rendered.contains("SECRET") && !rendered.contains("hunter2"),
@@ -995,71 +469,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metrics_emitted_once_per_resolve_without_secret_labels() {
-        let server = Fx::start().await;
-        mount_bound_token(&server, 7, 12, "t").await;
-        mount_resolve(&server, 7, 12, "t", ok_oauth()).await;
-        mount_bound_token(&server, 7, 13, "t2").await;
-        mount_resolve(&server, 7, 13, "t2", ResponseTemplate::new(404)).await;
-        let (r, rec) = resolver(&server).await;
-        r.resolve(R).await.unwrap();
-        r.resolve(ConnectionRef {
-            community_id: 7,
-            connection_id: 13,
-        })
-        .await
-        .unwrap_err();
-        let calls = rec.calls.lock().unwrap().clone();
-        assert_eq!(
-            calls,
-            vec![
-                "resolve:1:ok".to_string(),
-                "resolve_failed:not_found".to_string()
-            ]
-        );
-        for c in &calls {
-            assert!(!c.contains("PLAIN") && !c.contains("tok"), "{c}");
-        }
-    }
-
-    #[tokio::test]
-    async fn trait_seam_delegates_to_the_real_client() {
-        async fn through<T: ConnectionResolve>(t: &T) -> (bool, bool) {
-            (
-                t.resolve(R).await.is_ok(),
-                t.list_bindings("p", None, 0, 1).await.is_err(),
+    async fn plaintext_http_hub_endpoint_refused_outside_alpha() {
+        let mk = |url: &str, env: &str| {
+            ConnectionResolver::new(
+                ResolverConfig::new(url, env, "http://127.0.0.1:1", "/sa"),
+                Arc::new(NoMetrics),
             )
-        }
-        let server = Fx::start().await;
-        mount_bound_token(&server, 7, 12, "t").await;
-        mount_resolve(&server, 7, 12, "t", ok_oauth()).await;
-        let (r, _) = resolver(&server).await;
-        assert_eq!(through(&r).await, (true, true));
-        assert!(format!("{r:?}").contains("ConnectionResolver"));
-    }
-
-    struct Seq(Mutex<u32>);
-    impl Respond for Seq {
-        fn respond(&self, _: &Request) -> ResponseTemplate {
-            *self.0.lock().unwrap() += 1;
-            ResponseTemplate::new(200).set_body_raw(OAUTH_BODY, "application/json")
-        }
+        };
+        assert!(mk("http://hub:50204", "beta").is_err());
+        assert!(mk("http://hub:50204", "").is_err());
+        assert!(mk("http://hub:50204", "prod").is_err());
+        assert!(mk("http://hub:50204", "alpha").is_ok());
+        assert!(mk("HTTP://hub:50204", "ALPHA").is_ok());
+        assert!(mk("ftp://hub", "alpha").is_err());
+        assert!(mk("hub:50204", "alpha").is_err());
     }
 
     #[tokio::test]
-    async fn each_resolve_hits_hub_even_concurrently() {
-        let server = Fx::start().await;
-        mount_bound_token(&server, 7, 12, "t").await;
-        Mock::given(method("POST"))
-            .and(path(
-                "/api/v1/internal/communities/7/provider-connections/12/resolve",
-            ))
-            .respond_with(Seq(Mutex::new(0)))
-            .mount(&server)
-            .await;
-        let (r, _) = resolver(&server).await;
-        let (a, b, c) = tokio::join!(r.resolve(R), r.resolve(R), r.resolve(R));
-        assert!(a.is_ok() && b.is_ok() && c.is_ok());
-        assert_eq!(hits(&server, "/resolve").await, 3);
+    async fn https_endpoint_with_unreadable_ca_is_refused_loudly() {
+        let cfg = ResolverConfig::new(
+            "https://hub:50204",
+            "beta",
+            "http://127.0.0.1:1",
+            "/sa",
+        )
+        .with_grpc_ca(Some("/nonexistent/ca.pem".into()));
+        assert_eq!(
+            ConnectionResolver::new(cfg, Arc::new(NoMetrics)).unwrap_err(),
+            ResolveError::Malformed("cannot build hub grpc channel")
+        );
+    }
+
+    #[test]
+    fn building_outside_a_tokio_runtime_is_an_error_not_a_panic() {
+        let cfg = ResolverConfig::new("http://hub:50204", "alpha", "http://127.0.0.1:1", "/sa");
+        assert_eq!(
+            ConnectionResolver::new(cfg, Arc::new(NoMetrics)).unwrap_err(),
+            ResolveError::Malformed("connection resolver must be built inside a tokio runtime")
+        );
+    }
+
+    #[test]
+    fn blank_ca_path_means_unset() {
+        let cfg =
+            ResolverConfig::new("https://h", "beta", "t", "/sa").with_grpc_ca(Some("  ".into()));
+        assert!(cfg.grpc_ca_path.is_none());
     }
 }

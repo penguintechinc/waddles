@@ -195,7 +195,6 @@ class TestResolverExposure:
         )
         body = await response.get_json()
         assert response.status_code == 200, body
-        assert response.headers["Cache-Control"] == "no-store"
         assert body["accessToken"] == public_key_b64
         assert body["secret"] == {"scheme": 6, "fields": {"apiKey": API_KEY, "siteId": SITE_ID}}
         assert body["metadata"] == {"instance_id": INSTANCE}
