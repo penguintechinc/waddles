@@ -1,0 +1,100 @@
+# game-servers APP bundle. Pure orchestration over the gameserver SERVICE bundle's tools (app->service only);
+# holds no address, no secret, no socket. Server registration / allowlists / audit are service tools reached by the
+# generic bundle-admin gateway under the admin's verified scope (see README "Admin path").
+schema_version: 2
+app_id: waddles.core.example.game-servers
+name: Game Servers (Rust)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+language: rust
+artifact: prebuilt
+execution_model: native
+is_default: false
+stages:
+  process:
+    entry: waddle:bundle/process-stage#transform
+    consumes:
+    - platform: twitch
+      event_types:
+      - chat.message
+      filters:
+        command_prefix:
+        - '!server'
+        - '!rcon'
+    - platform: discord
+      event_types:
+      - chat.message
+      filters:
+        command_prefix:
+        - '!server'
+        - '!rcon'
+  action:
+    entry: waddle:bundle/action-stage#dispatch
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 8000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+- id: chat.send:twitch
+  justification: replies to the invoking twitch channel via the relay host import
+    (relay.push -> chat.send:twitch); also used for scheduled status posts
+- id: chat.send:discord
+  justification: replies to the invoking discord channel via the relay host import
+    (relay.push -> chat.send:discord); also used for scheduled status posts
+- id: tool.call:waddles.core.service.gameserver:gameserver.server.list
+  justification: resolves a typed server alias to the service's server UUID (enabled
+    servers only)
+  params:
+    write: false
+- id: tool.call:waddles.core.service.gameserver:gameserver.status.query
+  justification: serves !server status/players and scheduled status posts (read-only
+    A2S / server-list ping done by the service)
+  params:
+    write: false
+- id: tool.call:waddles.core.service.gameserver:gameserver.rcon.exec
+  justification: serves the moderator-only !rcon command; the service enforces the
+    per-server allowlist, rate limits, audit log and the verified actor's moderator
+    scope
+  params:
+    write: true
+- id: platform.scheduled
+  justification: 'periodic status posts: hub-api creates the community''s scheduled
+    trigger (>=60s floor); disabled unless the community enables status_post_enabled'
+routes_to: []
+requested_tools:
+- tool: gameserver.server.list
+  access: read
+  target_app_id: waddles.core.service.gameserver
+- tool: gameserver.status.query
+  access: read
+  target_app_id: waddles.core.service.gameserver
+- tool: gameserver.rcon.exec
+  access: write
+  target_app_id: waddles.core.service.gameserver
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    status_post_enabled:
+      type: boolean
+      default: false
+      description: Post periodic server status to a channel
+    status_post_platform:
+      enum:
+      - twitch
+      - discord
+    status_post_channel_id:
+      type: string
+      maxLength: 64
+    status_post_servers:
+      type: array
+      maxItems: 5
+      items:
+        type: string
+        maxLength: 64
+      description: Server aliases to include (empty = all enabled)

@@ -149,6 +149,14 @@ COPY bundles/rust/music-youtube /repo/bundles/rust/music-youtube
 WORKDIR /repo/bundles/rust/music-youtube
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# Game-server tooling: `gameserver` SERVICE (world stage-tools) + `game-servers` APP (world stage-next-tools).
+COPY bundles/rust/gameserver /repo/bundles/rust/gameserver
+WORKDIR /repo/bundles/rust/gameserver
+RUN cargo component build --release --target wasm32-wasip2 --locked
+COPY bundles/rust/game-servers /repo/bundles/rust/game-servers
+WORKDIR /repo/bundles/rust/game-servers
+RUN cargo component build --release --target wasm32-wasip2 --locked
+
 # AI Teammates app bundle (`stage-next-tools` world): same pinned builder.
 COPY bundles/rust/ai-teammates /repo/bundles/rust/ai-teammates
 WORKDIR /repo/bundles/rust/ai-teammates
@@ -365,6 +373,8 @@ COPY bundles/rust/live-now/hub-manifest.yaml /core-bundles/live-now.manifest.yam
 COPY bundles/rust/spectrum/hub-manifest.yaml /core-bundles/spectrum.manifest.yaml
 COPY bundles/rust/wix/hub-manifest.yaml /core-bundles/wix-connector.manifest.yaml
 COPY bundles/rust/music-youtube/hub-manifest.yaml /core-bundles/music-youtube.manifest.yaml
+COPY bundles/rust/gameserver/hub-manifest.yaml /core-bundles/gameserver.manifest.yaml
+COPY bundles/rust/game-servers/hub-manifest.yaml /core-bundles/game-servers.manifest.yaml
 COPY bundles/rust/ai-teammates/hub-manifest.yaml /core-bundles/ai-teammates.manifest.yaml
 COPY bundles/rust/calendar/hub-manifest.yaml /core-bundles/calendar.manifest.yaml
 COPY bundles/rust/music-spotify/hub-manifest.yaml /core-bundles/music-spotify.manifest.yaml
@@ -384,6 +394,8 @@ COPY --from=rust-bundle-builder /repo/bundles/rust/live-now/target/wasm32-wasip2
 COPY --from=rust-bundle-builder /repo/bundles/rust/spectrum/target/wasm32-wasip2/release/waddle_bundle_spectrum_service.wasm /core-bundles/spectrum.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/wix/target/wasm32-wasip2/release/waddle_bundle_wix_service.wasm /core-bundles/wix-connector.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/music-youtube/target/wasm32-wasip2/release/waddle_bundle_music_youtube_service.wasm /core-bundles/music-youtube.wasm
+COPY --from=rust-bundle-builder /repo/bundles/rust/gameserver/target/wasm32-wasip2/release/waddle_bundle_gameserver_service.wasm /core-bundles/gameserver.wasm
+COPY --from=rust-bundle-builder /repo/bundles/rust/game-servers/target/wasm32-wasip2/release/waddle_bundle_game_servers.wasm /core-bundles/game-servers.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/ai-teammates/target/wasm32-wasip2/release/waddle_bundle_ai_teammates.wasm /core-bundles/ai-teammates.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/calendar/target/wasm32-wasip2/release/waddle_bundle_calendar_rust.wasm /core-bundles/calendar.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/music-spotify/target/wasm32-wasip2/release/waddle_bundle_music_spotify_service.wasm /core-bundles/music-spotify.wasm
