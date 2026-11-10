@@ -185,6 +185,9 @@ discord-mentions = { path = "../discord_mentions", version = "=0.1.0" }
 # `crate::lib`'s startup wiring can construct the real
 # `egress_detokenizer::HubClientResolver`.
 hub_client = { path = "../hub_client", version = "=0.1.0" }
+# `crate::platform_user` classifies `hub_client`'s gRPC status codes (producer-side user
+# detokenization) -- same exact pin hub_client already resolves, no new version in the graph.
+tonic = { version = "=0.14.6", default-features = false }
 
 # `src/stage_metrics.rs`: OTel instruments built from the global meter
 # provider `penguin-logging` installs (never a provider of its own). Same

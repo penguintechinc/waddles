@@ -76,8 +76,8 @@ pub async fn readiness(State(state): State<AppState>) -> Json<ReadinessBody> {
         },
         DependencyStatus {
             name: "push_jwks",
-            configured: !cfg.push_jwks_url.is_empty(),
-            detail: cfg.push_jwks_url.clone(),
+            configured: !cfg.push_jwks_endpoint.is_empty(),
+            detail: cfg.push_jwks_endpoint.clone(),
         },
     ];
     Json(ReadinessBody {

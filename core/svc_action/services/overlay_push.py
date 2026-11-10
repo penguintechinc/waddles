@@ -14,7 +14,6 @@ from this pod's projected ServiceAccount token. Anything unresolvable raises `Ov
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
@@ -22,10 +21,11 @@ import time
 from typing import Any
 
 import httpx
+from waddle_transports.service_jwt_client import ServiceTokenError, mint_service_token
 
 logger = logging.getLogger(__name__)
 
-#: Request body field + scope base hub-api's `POST /internal/service-token` expects.
+#: Scope base hub-api's `ServiceAuthService/MintServiceToken` expects for an overlay push.
 _PUSH_SCOPE_BASE = "presentation.overlay:push"
 _DEFAULT_SA_TOKEN_PATH = "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"  # noqa: S105 -- path, not a secret
 #: Shape pinned by alembic 0057's CHECK constraint (16 lowercase hex = 64-bit CSPRNG value).
@@ -73,17 +73,13 @@ async def resolve_overlay_code(dal: Any, community_id: int) -> str:
     return code
 
 
-def _read_text(path: str) -> str:
-    """Read a small file (run via `asyncio.to_thread` so the loop never blocks on disk)."""
-    with open(path, encoding="utf-8") as handle:
-        return handle.read()
-
-
-async def mint_push_token(http_client: httpx.AsyncClient, community_id: int) -> str:
+async def mint_push_token(community_id: int) -> str:
     """Return a community-bound PUSH JWT from hub-api, cached until shortly before expiry.
 
-    Bootstraps with the pod's audience-scoped projected ServiceAccount token (no static
-    secret). Every failure raises `OverlayPushError` carrying ids/status only, never a token.
+    Mints over gRPC (`ServiceAuthService/MintServiceToken`, `SERVICE_JWT_TOKEN_ENDPOINT` = hub-api's
+    internal gRPC endpoint), bootstrapping with the pod's audience-scoped projected ServiceAccount
+    token (no static secret). Every failure raises `OverlayPushError` carrying the reason only,
+    never a token.
     """
     cached = _jwt_cache.get(community_id)
     if cached is not None and time.monotonic() < cached[0]:
@@ -92,37 +88,20 @@ async def mint_push_token(http_client: httpx.AsyncClient, community_id: int) -> 
     endpoint = _require_env("SERVICE_JWT_TOKEN_ENDPOINT")
     sa_path = os.environ.get("SERVICE_JWT_SA_TOKEN_PATH", "").strip() or _DEFAULT_SA_TOKEN_PATH
     try:
-        sa_token = (await asyncio.to_thread(_read_text, sa_path)).strip()
-    except OSError as exc:
-        raise OverlayPushError(
-            f"projected ServiceAccount token unreadable: {type(exc).__name__}"
-        ) from exc
-    if not sa_token:
-        raise OverlayPushError("projected ServiceAccount token is empty")
-
-    try:
-        response = await http_client.post(
-            endpoint,
-            headers={"Authorization": f"Bearer {sa_token}"},
-            json={"scope": _PUSH_SCOPE_BASE, "community_id": community_id},
-            timeout=_PUSH_TIMEOUT_S,
+        minted = await mint_service_token(
+            endpoint=endpoint,
+            scope=_PUSH_SCOPE_BASE,
+            community_id=community_id,
+            sa_token_path=sa_path,
+            timeout_s=_PUSH_TIMEOUT_S,
         )
-    except httpx.HTTPError as exc:
-        raise OverlayPushError(f"hub-api token endpoint unreachable: {type(exc).__name__}") from exc
-    if response.status_code != 200:
-        raise OverlayPushError(
-            f"hub-api refused the PUSH token request: HTTP {response.status_code}"
-        )
-    try:
-        body = response.json()
-        token = body["token"]
-        expires_in = float(body["expires_in"])
-    except (ValueError, KeyError, TypeError) as exc:
-        raise OverlayPushError("hub-api PUSH token response malformed") from exc
-    if not isinstance(token, str) or not token or expires_in <= 0:
-        raise OverlayPushError("hub-api PUSH token response malformed")
-    _jwt_cache[community_id] = (time.monotonic() + max(expires_in - _JWT_SKEW_S, 0.0), token)
-    return token
+    except ServiceTokenError as exc:
+        raise OverlayPushError(f"hub-api PUSH token mint failed: {exc}") from exc
+    _jwt_cache[community_id] = (
+        time.monotonic() + max(minted.expires_in - _JWT_SKEW_S, 0.0),
+        minted.token,
+    )
+    return minted.token
 
 
 async def push_overlay(
@@ -141,7 +120,7 @@ async def push_overlay(
     """
     base = _require_env("PRESENTATION_URL").rstrip("/")
     code = await resolve_overlay_code(dal, community_id)
-    token = await mint_push_token(http_client, community_id)
+    token = await mint_push_token(community_id)
     # The code is a path handle only; it is deliberately kept out of every log line below.
     url = f"{base}/{code}/{surface}/push"
     try:

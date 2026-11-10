@@ -58,6 +58,7 @@ fn service(exports: &[(&str, bool)], requests: &[(&str, &str, bool)]) -> ToolMan
                 name: (*n).to_string(),
                 write: *w,
                 required_scope: None,
+                host_op: None,
             })
             .collect(),
         requested: requests
@@ -933,6 +934,7 @@ fn admin_rows() -> Vec<ActiveBundleRow> {
         name: "admin_op".to_string(),
         write: true,
         required_scope: Some("community:admin".to_string()),
+        host_op: None,
     });
     vec![
         row(

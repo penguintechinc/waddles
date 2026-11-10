@@ -130,6 +130,12 @@ pub(crate) fn shape_ok(shape: SlotShape, v: &str) -> bool {
         SlotShape::Secret => {
             !v.is_empty() && v.len() <= 4096 && v.bytes().all(|b| (0x21..0x7f).contains(&b))
         }
+        SlotShape::Int => {
+            !v.is_empty()
+                && v.len() <= 20
+                && v.bytes().all(|b| b.is_ascii_digit())
+                && v.parse::<u64>().is_ok()
+        }
         #[cfg(test)]
         SlotShape::Opaque => !v.is_empty() && v.chars().count() <= 256 && !v.contains('\0'),
     }
@@ -239,7 +245,16 @@ pub fn render(
                 let slot = doc.pointer_mut(ptr).ok_or(SubstError::BodyPosition)?;
                 // `serde_json` escapes the string on serialization: quotes,
                 // backslashes, newlines and unicode cannot leave the string.
-                *slot = Value::String(val.expose().to_string());
+                *slot = match policy.slots[*idx].shape {
+                    // Typed substitution: an Int slot becomes a JSON integer, validated above
+                    // as digits-only and a valid u64 (no float / exponent / sign form).
+                    SlotShape::Int => Value::from(
+                        val.expose()
+                            .parse::<u64>()
+                            .map_err(|_| SubstError::ShapeInvalid)?,
+                    ),
+                    _ => Value::String(val.expose().to_string()),
+                };
             }
             let bytes = serde_json::to_vec(&doc).map_err(|_| SubstError::BodyPosition)?;
             if v.max_body.is_some_and(|m| bytes.len() > m) {

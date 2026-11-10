@@ -186,14 +186,17 @@ _MODERATION_RE = re.compile(r"^moderation\.(?P<platform>[a-z0-9_-]+)$")
 #: `EventsubManage`, `InteractionRespond`). Keep the two in sync.
 PLATFORM_OP_FAMILIES: dict[str, Risk] = {
     "message.edit": "dangerous",
+    "chat.clear": "dangerous",
+    "webhook.manage": "dangerous",
     "message.reaction": "normal",
     "commands.register": "dangerous",
     "eventsub.manage": "dangerous",
     "interaction.respond": "normal",
 }
 _PLATFORM_OP_RE = re.compile(
-    r"^(?P<family>message\.edit|message\.reaction|commands\.register|eventsub\.manage"
-    r"|interaction\.respond):(?P<platform>[a-z0-9_-]+)$"
+    r"^(?P<family>message\.edit|chat\.clear|webhook\.manage|message\.reaction"
+    r"|commands\.register|eventsub\.manage|interaction\.respond)"
+    r":(?P<platform>[a-z0-9_-]+)$"
 )
 # `tool.call:<target_app_id>:<tool>` -- mirrors Rust `permission.rs`
 # (`validate_tool_target` / `validate_tool_name`) and `bundle_manifest_v2`'s

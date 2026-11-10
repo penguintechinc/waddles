@@ -71,7 +71,7 @@ fn member_events_carry_only_ids() {
         assert_eq!(m.occurred_at, "2026-11-05T12:00:00Z");
         assert_eq!(
             payload(&m),
-            json!({"event_id": "e1", "instance_id": "inst-0001"})
+            json!({"event_id": "e1", "instance_id": "inst-0001", "time_source": "wix"})
         );
         assert!(!m.payload_json.contains("a@b.c") && !m.payload_json.contains("firstName"));
     }
@@ -94,7 +94,7 @@ fn subscription_started_changed_ended() {
         assert_eq!(m.event_type, "subscription.started", "{t}");
         assert_eq!(
             payload(m),
-            json!({"event_id":"e2","instance_id":"inst-0001","order_id":"ord-1","plan_id":"plan-7","status":"ACTIVE"})
+            json!({"event_id":"e2","instance_id":"inst-0001","time_source":"wix","order_id":"ord-1","plan_id":"plan-7","status":"ACTIVE"})
         );
         assert_eq!(m.member.as_deref(), Some("mem-9"));
     }
@@ -169,7 +169,7 @@ fn calendar_events_map_without_an_actor() {
         assert_eq!((m.event_type.as_str(), m.member.is_none()), (kind, true));
         assert_eq!(
             payload(&m),
-            json!({"event_id":"e6","instance_id":"inst-0001","wix_event_id":"wev-1","title":"Meetup",
+            json!({"event_id":"e6","instance_id":"inst-0001","time_source":"wix","wix_event_id":"wev-1","title":"Meetup",
                    "starts_at":"2026-12-01T18:00:00Z","ends_at":"2026-12-01T20:00:00Z",
                    "timezone":"Europe/Berlin","location":"Hall A","status":"UPCOMING"})
         );
@@ -198,10 +198,10 @@ fn missing_optional_event_fields_become_null_and_long_text_is_capped() {
     // eventTime absent -> the frame's received_at.
     let mut ev = domain("e10", "createdEvent", "entity", &e);
     ev.as_object_mut().expect("obj").remove("eventTime");
-    assert_eq!(
-        one(&token("inst-0001", "wix.events.v3.event_created", &ev)).occurred_at,
-        RECV
-    );
+    let fallback = one(&token("inst-0001", "wix.events.v3.event_created", &ev));
+    assert_eq!(fallback.occurred_at, RECV);
+    // The receive-time fallback is flagged non-orderable so consumers never compare clocks.
+    assert_eq!(payload(&fallback)["time_source"], "received");
 }
 
 #[test]

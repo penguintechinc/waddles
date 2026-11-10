@@ -428,6 +428,7 @@ fn rows() -> Vec<ActiveBundleRow> {
                         name: (*n).to_string(),
                         write: *w,
                         required_scope: s.map(str::to_string),
+                        host_op: None,
                     })
                     .collect(),
                 requested: Vec::new(),

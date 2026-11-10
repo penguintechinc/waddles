@@ -84,6 +84,12 @@ class TokenResponse:
     token_type: str
 
 
+#: PKCE audit (RFC 7636 S256). ``uses_pkce`` is True for every provider whose authorization-code
+#: flow documents PKCE support: Google/YouTube
+#: (https://developers.google.com/identity/protocols/oauth2/web-server), Spotify
+#: (https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow) and Kick. Twitch,
+#: Discord and Slack do not document PKCE for the confidential-client code grant, so they stay
+#: False (sending an unsupported parameter would only be ignored, never a protection).
 PROVIDERS: dict[str, ProviderSpec] = {
     "youtube": ProviderSpec(
         name="youtube",
@@ -97,7 +103,7 @@ PROVIDERS: dict[str, ProviderSpec] = {
         extra_authorize_params=MappingProxyType(
             {"access_type": "offline", "prompt": "consent", "include_granted_scopes": "true"}
         ),
-        uses_pkce=False,
+        uses_pkce=True,
         client_id_env="YOUTUBE_CLIENT_ID",
         client_secret_env="YOUTUBE_CLIENT_SECRET",  # noqa: S106 - env var name, not a credential
         token_auth="body",  # noqa: S106 - auth-mode literal, not a credential
@@ -114,7 +120,7 @@ PROVIDERS: dict[str, ProviderSpec] = {
             "playlist-read-private",
         ),
         extra_authorize_params=MappingProxyType({}),
-        uses_pkce=False,
+        uses_pkce=True,
         client_id_env="SPOTIFY_CLIENT_ID",
         client_secret_env="SPOTIFY_CLIENT_SECRET",  # noqa: S106 - env var name, not a credential
         token_auth="basic",  # noqa: S106 - auth-mode literal, not a credential

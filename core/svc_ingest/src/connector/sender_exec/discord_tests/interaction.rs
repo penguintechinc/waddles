@@ -167,6 +167,7 @@ fn rec(guild: Option<&str>) -> InteractionRecord {
         guild_id: guild.map(str::to_string),
         // Routed to community 1 (the rig's primary community).
         routed_community_id: Some(1),
+        invoker_user_id: None,
     }
 }
 
@@ -357,6 +358,18 @@ impl crate::active_context::ContextSource for FixedView {
     }
 }
 
+/// Host-side tokenizer double: the captured invoker maps to the event's actor.
+struct FixedTok;
+impl crate::active_context::InvokerTokenizer for FixedTok {
+    fn tokenize<'a>(
+        &'a self,
+        _s: &'a str,
+        _raw: &'a str,
+    ) -> BoxFut<'a, Result<String, crate::active_context::ContextError>> {
+        Box::pin(async { Ok("123e4567-e89b-12d3-a456-426614174000".to_string()) })
+    }
+}
+
 #[derive(Clone, Default)]
 struct Null;
 impl crate::connector::sink::EventSink for Null {
@@ -395,6 +408,7 @@ async fn route_via_sink(r: &IxRig, id: &str, community: i64, app: &str) {
         r.store.clone(),
         app.to_string(),
         register_routing_metrics(&prometheus::Registry::new()).unwrap(),
+        Arc::new(FixedTok),
     );
     let ctx = crate::connector::types::ConnectionCtx {
         platform: "discord".into(),
@@ -421,6 +435,7 @@ async fn context_sink_routing_makes_the_owner_answerable_and_only_the_owner() {
     let wrong_app = unique(4);
     let mut fresh = rec(Some(GUILD));
     fresh.routed_community_id = None;
+    fresh.invoker_user_id = Some("700000000000000001".into());
     for id in [&owned, &unrouted, &wrong_comm, &wrong_app] {
         assert!(r.store.put_new(id, &fresh).await.unwrap());
     }
