@@ -564,12 +564,23 @@ fn youtube_deletes_are_bodyless_with_an_exact_id_query() {
 }
 
 #[test]
-fn kick_is_declared_but_has_no_kinds_so_everything_is_refused() {
+fn kick_registers_chat_send_only_and_refuses_everything_else() {
     let p = PlatformPolicy::kick();
     assert_eq!(p.platform, "kick");
-    assert!(p.kinds.is_empty() && p.slots.is_empty());
-    assert!(p.kind("chat.send").is_none());
-    assert!(registered_op("kick", "chat.send").is_none());
+    assert_eq!(p.hosts, ["api.kick.com"]);
+    assert_eq!(registered_op("kick", "chat.send"), Some("chat.send"));
+    // chat.delete needs a Kick channel pin (pin_channel ignores requires_pin for kick) and
+    // moderation needs integer body slots: both refused, never sent.
+    for op in [
+        "chat.delete",
+        "mod.ban",
+        "mod.timeout",
+        "mod.unban",
+        "dm.send",
+        "",
+    ] {
+        assert!(registered_op("kick", op).is_none(), "{op}");
+    }
 }
 
 #[test]
@@ -662,7 +673,7 @@ fn the_policy_table_matches_the_relay_op_parity_fixture() {
     }
     assert_eq!(
         checked,
-        10 + 15 + 6,
+        10 + 15 + 6 + 1,
         "denominator: ops compared with the fixture"
     );
 }

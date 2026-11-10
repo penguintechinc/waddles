@@ -34,6 +34,7 @@
 pub mod app_credentials;
 pub mod discord_duties;
 pub mod discord_slots;
+pub mod kick_slots;
 pub mod policy;
 pub mod router;
 pub mod subst;

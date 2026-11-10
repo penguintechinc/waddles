@@ -1,0 +1,120 @@
+# hub-api install-pipeline manifest (schema_version 2) for the Kick platform SERVICE bundle.
+# Mirrors bundle.yaml (the seeder's agreement check fails on drift); the only differences are the
+# same two the Twitch bundle carries: `artifact: prebuilt` / `execution_model: native` and the
+# `platform.log` permission. See bundle.yaml for the credential/slot notes.
+schema_version: 2
+app_id: waddles.core.service.kick
+name: Kick Platform Connector (Rust)
+version: 1.0.0
+feature: waddles.core.service
+module: core
+provider: builtin
+language: rust
+artifact: prebuilt
+execution_model: native
+is_default: false
+kind: service
+stages:
+  action:
+    entry: waddle:bundle/tool-provider#call
+egress:
+- host: api.kick.com
+  methods:
+  - GET
+  - POST
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+- id: net.http.fqdn:api.kick.com
+  justification: Kick public API (chat send template, channels read tool); credentials
+    are host-injected secret refs
+  params:
+    methods:
+    - GET
+    - POST
+- id: chat.send:kick
+  justification: Template Kick chat messages (bot post); the host resolves the channel from the
+    community connection and substitutes the credential
+- id: connector.pii.read
+  justification: Gates identity.lookup, used to resolve the actor to its canonical UUID and the
+    live-channels broadcaster ref; first-party core only, dangerous, global-admin-approved
+- id: flags.read
+  justification: Reads the waddles.connector-kick cutover flag (default OFF) as the connector's
+    defence-in-depth gate; without it the gate always reads OFF
+- id: platform.log
+  justification: Bounded, PII-free lifecycle diagnostics (op and count only, debug level); the
+    host drops guest text and keeps only level and size
+- id: platform.clock
+  justification: Stamps as_of on kick.live.channels results (clock.now-rfc3339); read-only time
+routes_to: []
+exported_tools:
+- name: kick.live.channels
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      scope:
+        type: string
+        enum:
+        - community
+        - linked
+      cursor:
+        type: string
+        minLength: 1
+        maxLength: 512
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 100
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      channels:
+        type: array
+        items:
+          type: object
+          properties:
+            channel_ref:
+              type: string
+            display_name:
+              type: string
+            is_live:
+              type: boolean
+            title:
+              type: string
+            category:
+              type: string
+            viewers:
+              type: integer
+            started_at:
+              type: string
+            thumbnail_ref:
+              type: string
+          required:
+          - channel_ref
+          - display_name
+          - is_live
+      cursor:
+        type: string
+      as_of:
+        type: string
+    required:
+    - channels
+    - as_of
+author: PenguinTech/waddles
+license: AGPL-3.0-or-later
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/kick
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: 1.0.0
+  min_version: 1.0.0
+  max_version: null
