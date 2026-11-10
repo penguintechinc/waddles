@@ -2912,6 +2912,7 @@ dependencies = [
  "serde_json",
  "service_auth",
  "sha2",
+ "socket2",
  "subtle",
  "thiserror 2.0.20",
  "tokio",

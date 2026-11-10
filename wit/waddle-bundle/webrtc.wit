@@ -1,0 +1,50 @@
+package waddle:bundle@1.0.0;
+
+// `webrtc` host capability + `stage-tools-webrtc` world, for the `webrtc` SERVICE
+// bundle (`bundles/rust/webrtc`). Own file, additive: the FROZEN `stage`/
+// `stage-next`/`stage-v2`/`stage-tools` worlds are untouched; this world is
+// `stage-tools` plus ONE import, so only the bundle that needs the media plane
+// links it.
+
+/// Host-mediated WebRTC control plane served by `svc-streaming` (the media path
+/// -- ICE/DTLS/SRTP, SFU fan-out, TURN/ICE config, token signing secret -- stays
+/// host-side and never crosses this boundary).
+///
+/// Wire note: like `reputation`/`economy`/`object-storage`, a call is carried as
+/// `capability = db`, `op = "webrtc.<op>"` with `args` as canonical JSON; the
+/// stage dispatches on the op prefix, authorizes through the capability gate and
+/// forwards over mTLS to svc-streaming's host-API
+/// (`POST /host/v1/webrtc/{op}`). The stage -- never the guest -- supplies the
+/// community id; the guest cannot name another community's room.
+///
+/// Ops (JSON in/out): `room.create`, `room.get`, `room.close`, `token.issue`,
+/// `token.revoke`, `whip.endpoint`, `whep.endpoint`, `track.route`,
+/// `recording.start`, `recording.stop`.
+interface webrtc {
+  variant error {
+    /// The gate denied the call (not granted, rate limited, instance policy).
+    denied(string),
+    /// Room / source not found (also: a room of another community).
+    not-found,
+    /// Malformed argument.
+    invalid(string),
+    /// A per-community or per-room limit was reached.
+    quota-exceeded,
+    /// The op or mode is not implemented on this host (fail-loud).
+    not-implemented(string),
+    /// The media plane is not configured/reachable on this host.
+    unavailable(string),
+    backend(string),
+  }
+
+  /// Runs one control op. `args` is a JSON object (no community id); the result
+  /// is the host's JSON object.
+  call: func(op: string, args: string) -> result<string, error>;
+}
+
+/// `stage-tools` (kv, db, log, tool-provider export, ...) plus the `webrtc`
+/// import. Whoever extends `stage-tools` with a capability MUST mirror it here.
+world stage-tools-webrtc {
+  include stage-tools;
+  import webrtc;
+}

@@ -472,7 +472,7 @@ gen-ops-cli-vectors:
 	python3 -I scripts/gen_ops_cli_vectors.py
 
 # SuperPenguinTV C# app ports; service-bundle tools own the shared capabilities.
-SUPERPENGUIN_GAMES := slots gamble defuse duel first roulette giveaway bonustickets wheel audiocommand tts channelpoints
+SUPERPENGUIN_GAMES := slots gamble defuse duel first roulette ffa heist steal fishing dropgame-core plinko balloon parachute curling golf racing ufoclaw giveaway bonustickets wheel audiocommand tts lastseen deathcounter dailycounter quotes raidtracker top alias timers weather viewers channelpoints
 .PHONY: $(addprefix test-superpenguin-,$(SUPERPENGUIN_GAMES)) $(addsuffix -bundle,$(addprefix build-superpenguin-,$(SUPERPENGUIN_GAMES)))
 $(addprefix test-superpenguin-,$(SUPERPENGUIN_GAMES)):
 	bash scripts/test-superpenguin-bundle.sh $(@:test-superpenguin-%=%)
@@ -482,6 +482,11 @@ $(addsuffix -bundle,$(addprefix build-superpenguin-,$(SUPERPENGUIN_GAMES))):
 .PHONY: test-superpenguin-ports-e2e
 test-superpenguin-ports-e2e:
 	bash scripts/test-superpenguin-ports-e2e.sh
+
+# Wave-3 utility ports: builds the ten real components and runs them through the production executor.
+.PHONY: test-superpenguin-wave3-e2e
+test-superpenguin-wave3-e2e:
+	bash scripts/test-superpenguin-wave3-e2e.sh
 
 # Wave-4 apps (giveaway, bonustickets, wheel, audiocommand, tts, channelpoints): manifests are generated from each bundle's
 # manifest.src.yaml; the contract test checks generated files are current, attribution, overlay asset hashes and provenance.

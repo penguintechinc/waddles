@@ -620,7 +620,7 @@ roles, matching cert-manager's fixed Secret key names natively; the static Secre
 {{- end }}
 
 {{/*
-feature/e2e-helm-rust-dataplane -- host-API mTLS helpers (the bundle-executor<->stage wire
+feature/e2e-helm-rust-dataplane -- host-API mTLS helpers (the svc-bundles-executor<->stage wire
 protocol, core/bundle_executor/src/tls.rs + core/svc_action/src/host_api.rs), a separate
 identity from the gRPC helpers above -- different wire protocol, different port, mounted
 from the {{ fullname }}-host-api-tls Secret (templates/host-api-tls-secret.yaml /
@@ -658,7 +658,7 @@ true
   value: /etc/waddlebot/host-api-tls/ca.crt
 {{- end }}
 
-{{/* Client-role env vars: this pod dials a stage's host-API listener (bundle-executor). */}}
+{{/* Client-role env vars: this pod dials the stages' host-API listeners (svc-bundles-executor). */}}
 {{- define "waddlebot.hostApiTlsClientEnv" -}}
 - name: HOST_API_CA_FILE
   value: /etc/waddlebot/host-api-tls/ca.crt
@@ -669,11 +669,12 @@ true
 # fix/chart-host-api-stage-identity -- core/bundle_executor/src/config.rs::
 # validate_host_api_tls hard-requires this (Config error, immediate crashloop, if unset);
 # core/bundle_executor/src/tls.rs's PinnedIdentityVerifier matches it against the stage
-# cert's URI SAN / DNS SAN / Subject CN. Both bundle-executor.yaml and
-# bundle-executor-action.yaml pull this helper, so they always get the SAME identity -- the
-# shared host-api-tls Secret's one identity cert serves both stages (see that Secret's own
-# "one identity cert ... serves both roles" comment), so one expected identity is correct
-# for both executors regardless of which stage (svc-process-rust/svc-action-rust) they dial.
+# cert's URI SAN / DNS SAN / Subject CN. The single svc-bundles-executor pod dials BOTH
+# stages with this one identity -- the shared host-api-tls Secret's one identity cert
+# serves both stage listeners (see that Secret's own "one identity cert ... serves both
+# roles" comment), so one expected identity is correct for every stage
+# (svc-process-rust/svc-action-rust) it dials. The listeners verify the executor's client
+# cert by CA chain only (no per-client SAN pin), so the same cert satisfies both.
 - name: HOST_API_STAGE_IDENTITY
   value: {{ include "waddlebot.hostApiStageIdentity" . | quote }}
 {{- end }}
@@ -765,8 +766,8 @@ host-api-tls-certificate.yaml's own comments. Used as:
   - the CN argument to genSignedCert in templates/host-api-tls-secret.yaml (alpha/local
     auto-generate path)
   - the `commonName` field in templates/host-api-tls-certificate.yaml (cert-manager path)
-  - HOST_API_STAGE_IDENTITY in waddlebot.hostApiTlsClientEnv above (bundle-executor and
-    bundle-executor-action, the two consumers of that helper)
+  - HOST_API_STAGE_IDENTITY in waddlebot.hostApiTlsClientEnv above (svc-bundles-executor,
+    the consumer of that helper)
 so whichever provisioning path is live, the cert's CN and the executor's expected identity
 are byte-for-byte the same string and can never drift apart.
 
@@ -824,7 +825,7 @@ joined: a stable hash input for waddlebot.hostApiTlsSansSha256, and directly
 {{- $fullname := include "waddlebot.fullname" . -}}
 {{- $ns := .Values.namespace -}}
 {{- /* Explicit FQDNs, never a `*.<ns>.svc.cluster.local` wildcard: a wildcard cert from the shared internal CA would let any pod holding it impersonate Postgres/Valkey/S3 (security review HIGH). */ -}}
-{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-bundle-executor" $fullname) (printf "%s-svc-process-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-action-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-bundle-executor.%s.svc.cluster.local" $fullname $ns) | sortAlpha | join "," -}}
+{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-svc-bundles-executor" $fullname) (printf "%s-svc-process-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-action-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-bundles-executor.%s.svc.cluster.local" $fullname $ns) | sortAlpha | join "," -}}
 {{- end }}
 
 {{/* sha256 of waddlebot.hostApiTlsDesiredDnsNames -- the waddlebot.io/cert-sans-sha256
@@ -885,7 +886,7 @@ true
 
 {{/* checksum/host-api-tls pod-template annotation value -- derived from the desired
 identity+SANs ONLY, never key material, so an identity/SAN change rolls every consumer pod
-(svc-process-rust, svc-action-rust, bundle-executor, bundle-executor-action) even though
+(svc-process-rust, svc-action-rust, svc-bundles-executor) even though
 the Secret object itself is reused by name when kept. */}}
 {{- define "waddlebot.hostApiTlsPodChecksum" -}}
 {{- printf "%s|%s" (include "waddlebot.hostApiStageIdentity" .) (include "waddlebot.hostApiTlsSansSha256" .) | sha256sum -}}
@@ -1232,3 +1233,23 @@ true
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+svc-bundles-executor stage dial list -- the comma-separated `host:port` value of
+STAGE_HOST_API_ADDR: one entry per `pipeline.rustDataPlane.bundleExecutor.stages` item
+(`<fullname>-<target>:<port>`), in order. The executor runs one independent dial loop per
+entry (core/bundle_executor/src/config.rs). Fails the render on an empty list -- an executor
+that dials no stage would serve nothing.
+*/}}
+{{- define "waddlebot.bundleExecutorStageAddrs" -}}
+{{- $stages := .Values.pipeline.rustDataPlane.bundleExecutor.stages | default list -}}
+{{- if not $stages -}}
+{{- fail "pipeline.rustDataPlane.bundleExecutor.stages must list at least one stage ({target, port}) for svc-bundles-executor to dial" -}}
+{{- end -}}
+{{- $fullname := include "waddlebot.fullname" . -}}
+{{- $addrs := list -}}
+{{- range $stage := $stages -}}
+{{- $addrs = append $addrs (printf "%s-%s:%v" $fullname $stage.target $stage.port) -}}
+{{- end -}}
+{{- join "," $addrs -}}
+{{- end }}

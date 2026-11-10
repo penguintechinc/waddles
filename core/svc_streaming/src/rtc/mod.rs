@@ -42,34 +42,15 @@
 //! candidate on a bind failure. See that module's `PortAllocator` docs for
 //! the full rationale and the accepted TOCTOU trade-off.
 //!
-//! **In-process (same-runtime) RTP delivery between two `PeerConnection`s
-//! did not work in testing -- a real, reproducible gap, not a
-//! documentation nicety.** A minimal two-peer reproduction mirroring
-//! `webrtc-rs`'s own `examples/rtp-to-webrtc`/`examples/broadcast`
-//! patterns exactly (add a send-only Opus track, negotiate offer/answer,
-//! wait for `RTCPeerConnectionState::Connected` on *both* peers, then
-//! `write_rtp`) showed **zero packets ever reach the far side's
-//! `on_track`**, despite: a valid negotiated SDP (matching payload types,
-//! exchanged host candidates, matching fingerprints), and both peers
-//! independently reporting `Connected`. This reproduces with plain
-//! `PeerConnectionBuilder` calls, outside every abstraction in this
-//! module -- it is not a bug in [`pc_factory`], [`fanout`], or either
-//! `whip.rs`/`whep.rs` router. `tests/rtc_whip_whep_roundtrip.rs` documents
-//! the same finding at the integration-test level and, as a result, proves
-//! the WHIP/WHEP HTTP signaling contract and session lifecycle rather than
-//! actual RTP delivery through a live `PeerConnection` pair -- the RTP
-//! *forwarding* mechanics ([`fanout::TrackFanout`] and
-//! [`rtp_leg::RtpIngress`]) are proven independently by their own unit
-//! tests, which move packets through the same code without going through a
-//! real `PeerConnection`. **Follow-up before relying on this in
-//! production:** verify real browser <-> server WHIP/WHEP (not two
-//! in-process `webrtc-rs` peers) actually delivers media -- same-process
-//! dual-peer testing is an unusual `webrtc-rs` usage pattern (its own
-//! examples always run as two separate OS processes exchanging SDP via
-//! copy-paste), so this may be a same-process-specific limitation rather
-//! than one that affects a real deployment; that distinction is exactly
-//! what a live cross-network smoke test would settle and this chunk did
-//! not have the means to run.
+//! **In-process RTP delivery between two `PeerConnection`s works** (corrected
+//! 2026-11-07). An earlier note here recorded "zero packets ever reach the far
+//! side" as a webrtc-rs gap; the actual cause was the test helper's synthetic
+//! `rtc::rtp::Packet` leaving `Header::version` at 0 -- rtc's demuxer routes a
+//! packet whose first byte is not in 128..=191 to the ICE/STUN handler, so it
+//! was dropped as "non-STUN message". With `version: 2`,
+//! `tests/rtc_whip_whep_media_loopback.rs`, `tests/rooms_loopback.rs` and
+//! `tests/orchestrator_whep_wiring.rs` assert media RECEIVED by a second live
+//! `PeerConnection` over loopback.
 //!
 //! # Not done in this chunk (blocked on S3)
 //!

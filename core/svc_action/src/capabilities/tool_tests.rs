@@ -46,6 +46,8 @@ fn row(app: &str, version_id: i64, tools: ToolManifestInfo) -> ActiveBundleRow {
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
         declared_capabilities: Vec::new(),
+        egress: Vec::new(),
+        egress_rps: None,
         tools,
     }
 }

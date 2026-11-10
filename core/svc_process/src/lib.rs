@@ -1115,7 +1115,7 @@ async fn try_build_economy_wiring(
 /// caller rather than starting with a silently-empty denylist.
 fn build_process_egress_guard(
     cli: &config::CliConfig,
-    catalog: Arc<capabilities::HttpEgressCatalog>,
+    catalog: Arc<dyn bundle_host_http::egress::EgressRuleSource>,
     egress_denied_metric: prometheus::IntCounterVec,
     bundle_egress_flag: Arc<dyn bundle_host_http::egress::FeatureFlag>,
 ) -> Option<Arc<bundle_host_http::egress::EgressGuard>> {
@@ -1146,8 +1146,24 @@ fn build_process_egress_guard(
         .with_instance_policy(Arc::new(std::sync::RwLock::new(
             cli.instance_egress_policy(),
         )))
-        .with_cluster_denylist(cluster_denylist),
+        .with_cluster_denylist(cluster_denylist)
+        .with_credentials(bundle_credential_sources()),
     ))
+}
+
+/// The non-env credential sources + shared-credential quota for bundle
+/// `http.send` secret refs (per-community connections via hub-api, host-minted
+/// app tokens, Valkey-backed budgets). Quota counters use the durable spine
+/// Valkey; any source that cannot be built fails closed (see
+/// `bundle_host_credentials::wiring`).
+fn bundle_credential_sources() -> bundle_host_http::credentials::CredentialSources {
+    let client = penguin_spine::SpineConfig::from_env()
+        .ok()
+        .and_then(|cfg| build_redis_client(&cfg));
+    bundle_host_credentials::wiring::build_credential_sources(
+        &|key| std::env::var(key).ok(),
+        client,
+    )
 }
 
 /// Attempts to start the **legacy, single-consumer** process-stage drain
@@ -1288,7 +1304,7 @@ fn try_start_process_loop(
         };
     let Some(egress) = build_process_egress_guard(
         &config.cli,
-        capabilities::HttpEgressCatalog::new(),
+        bundle_host_http::grants::ActiveEgressSnapshot::global(),
         egress_denied_metric,
         bundle_egress_flag,
     ) else {
@@ -1382,6 +1398,8 @@ fn try_start_process_loop(
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                egress: Vec::new(),
+                egress_rps: None,
                 tools: Default::default(),
             }]);
         }
@@ -1902,7 +1920,7 @@ fn try_start_changelog_consumer(
     // `HttpEgressCatalog` seam.
     let Some(egress) = build_process_egress_guard(
         &config.cli,
-        capabilities::HttpEgressCatalog::new(),
+        bundle_host_http::grants::ActiveEgressSnapshot::global(),
         egress_denied_metric,
         bundle_egress_flag,
     ) else {
@@ -2307,6 +2325,39 @@ pub async fn run_healthcheck() -> anyhow::Result<()> {
             std::process::exit(1);
         }
     }
+}
+
+/// How often the `db` v2 schema registry is re-read from
+/// `bundle_data.table_registry` (hub-api provisioning metadata).
+const V2_REGISTRY_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Loads the v2 registry once (logging loudly on failure -- the table may not
+/// exist until alembic 0082 has run, in which case every v2 call reports
+/// `invalid_table` until a later refresh succeeds) and keeps it fresh on a
+/// fixed interval. A failed refresh keeps the previous registry: never a
+/// partial or emptied view.
+async fn spawn_v2_registry_refresh(
+    conn: sea_orm::DatabaseConnection,
+    registry: Arc<bundle_host_db::v2::SchemaRegistryV2>,
+) {
+    match bundle_host_db::v2::load_registry(&conn, &registry).await {
+        Ok(n) => tracing::info!(bundles = n, "db v2: schema registry loaded"),
+        Err(e) => tracing::error!(
+            error = %e,
+            "db v2: initial schema registry load failed (has alembic 0087_bundle_data_v2 run?); \
+             db v2 calls will report invalid_table until a refresh succeeds"
+        ),
+    }
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(V2_REGISTRY_REFRESH);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            if let Err(e) = bundle_host_db::v2::load_registry(&conn, &registry).await {
+                tracing::error!(error = %e, "db v2: schema registry refresh failed; keeping previous registry");
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -3377,37 +3428,4 @@ mod tests {
 
         assert!(result.is_ok(), "run_healthcheck must succeed: {result:?}");
     }
-}
-
-/// How often the `db` v2 schema registry is re-read from
-/// `bundle_data.table_registry` (hub-api provisioning metadata).
-const V2_REGISTRY_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Loads the v2 registry once (logging loudly on failure -- the table may not
-/// exist until alembic 0082 has run, in which case every v2 call reports
-/// `invalid_table` until a later refresh succeeds) and keeps it fresh on a
-/// fixed interval. A failed refresh keeps the previous registry: never a
-/// partial or emptied view.
-async fn spawn_v2_registry_refresh(
-    conn: sea_orm::DatabaseConnection,
-    registry: Arc<bundle_host_db::v2::SchemaRegistryV2>,
-) {
-    match bundle_host_db::v2::load_registry(&conn, &registry).await {
-        Ok(n) => tracing::info!(bundles = n, "db v2: schema registry loaded"),
-        Err(e) => tracing::error!(
-            error = %e,
-            "db v2: initial schema registry load failed (has alembic 0082_bundle_data_v2 run?); \
-             db v2 calls will report invalid_table until a refresh succeeds"
-        ),
-    }
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(V2_REGISTRY_REFRESH);
-        tick.tick().await;
-        loop {
-            tick.tick().await;
-            if let Err(e) = bundle_host_db::v2::load_registry(&conn, &registry).await {
-                tracing::error!(error = %e, "db v2: schema registry refresh failed; keeping previous registry");
-            }
-        }
-    });
 }

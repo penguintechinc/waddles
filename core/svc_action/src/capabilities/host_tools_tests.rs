@@ -1414,6 +1414,53 @@ async fn relay_push_can_never_reach_host_tool_only_ops_even_with_every_grant() {
 }
 
 #[tokio::test]
+async fn relay_push_refuses_eventsub_create_and_delete_but_list_still_queues() {
+    // The host reconcile path alone may create/delete EventSub subscriptions; `caps()` holds
+    // every grant, so the refusal must be `host_tool_only`, before any grant check or queueing.
+    let mut refused = 0;
+    for op in ["eventsub.create", "eventsub.delete"] {
+        let c = caps(FakeRelayQueue::with_live_drain());
+        let err = c
+            .handle(
+                &scope(),
+                HostCallBody {
+                    app_id: "waddles.bot.commands.default".to_string(),
+                    capability: CapabilityKind::Relay,
+                    op: "send".to_string(),
+                    args: json!({
+                        "provider": "twitch",
+                        "message_json": json!({"op": op}).to_string(),
+                    }),
+                    call_id: 1,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_tool_only", "{op}");
+        assert!(c.relay_queue.envelopes().is_empty(), "{op}");
+        refused += 1;
+    }
+    assert_eq!(refused, 2, "denominator: eventsub ops refused");
+    let c = caps(FakeRelayQueue::with_live_drain());
+    c.handle(
+        &scope(),
+        HostCallBody {
+            app_id: "waddles.bot.commands.default".to_string(),
+            capability: CapabilityKind::Relay,
+            op: "send".to_string(),
+            args: json!({
+                "provider": "twitch",
+                "message_json": json!({"op": "eventsub.list"}).to_string(),
+            }),
+            call_id: 1,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.relay_queue.envelopes().len(), 1);
+}
+
+#[tokio::test]
 async fn chat_clear_needs_its_own_permission_not_chat_delete() {
     let tools = vec![exported(
         "twitch.chat.clear",

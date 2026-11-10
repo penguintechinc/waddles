@@ -1,0 +1,65 @@
+{
+  "tool": "ai.rag.query",
+  "target": "waddles.core.service.ai",
+  "access": "read",
+  "source": "bundles/contracts/ai-tools.v1.json (PR #1120)",
+  "request": {
+    "type": "object",
+    "properties": {
+      "collection": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_.-]{0,39}$"
+      },
+      "question": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1000
+      },
+      "top_k": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 8
+      }
+    },
+    "required": [
+      "collection",
+      "question"
+    ],
+    "additionalProperties": false
+  },
+  "response": {
+    "type": "object",
+    "properties": {
+      "answer": {
+        "type": "string",
+        "maxLength": 2000
+      },
+      "citations": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "doc_id": {
+              "type": "string"
+            },
+            "chunk": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "score": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "doc_id",
+            "chunk"
+          ]
+        }
+      }
+    },
+    "required": [
+      "answer",
+      "citations"
+    ]
+  }
+}

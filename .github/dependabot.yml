@@ -8,6 +8,7 @@ updates:
   - /core/bundle_capability_gate
   - /core/bundle_compiler
   - /core/bundle_executor
+  - /core/bundle_host_credentials
   - /core/bundle_host_db
   - /core/bundle_host_economy
   - /core/bundle_host_http
@@ -84,7 +85,21 @@ updates:
   - /bundles/csharp/superpenguin-defuse
   - /bundles/csharp/superpenguin-duel
   - /bundles/csharp/superpenguin-first
+  - /bundles/csharp/superpenguin-fishing
   - /bundles/csharp/superpenguin-roulette
+  - /bundles/csharp/superpenguin-ffa
+  - /bundles/csharp/superpenguin-heist
+  - /bundles/csharp/superpenguin-steal
+  - /bundles/csharp/superpenguin-lastseen
+  - /bundles/csharp/superpenguin-deathcounter
+  - /bundles/csharp/superpenguin-dailycounter
+  - /bundles/csharp/superpenguin-quotes
+  - /bundles/csharp/superpenguin-raidtracker
+  - /bundles/csharp/superpenguin-top
+  - /bundles/csharp/superpenguin-alias
+  - /bundles/csharp/superpenguin-timers
+  - /bundles/csharp/superpenguin-weather
+  - /bundles/csharp/superpenguin-viewers
   - /core/ai_researcher_module
   - /core/analytics_core_module
   - /core/browser_source_core_module
