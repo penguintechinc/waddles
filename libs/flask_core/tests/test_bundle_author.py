@@ -34,6 +34,8 @@ _VALID: list[tuple[str, AuthorKind, str | None, str, str]] = [
         "github:Psychoboy",
     ),
     ("github/psychoboy", AuthorKind.GITHUB, "psychoboy", "psychoboy", "github:psychoboy"),
+    ("github/octo-cat", AuthorKind.GITHUB, "octo-cat", "octo-cat", "github:octo-cat"),
+    ("github/" + "a" * 39, AuthorKind.GITHUB, "a" * 39, "a" * 39, "github:" + "a" * 39),
     ("github/Psychoboy", AuthorKind.GITHUB, "Psychoboy", "Psychoboy", "github:Psychoboy"),
     ("github/penguintechinc", AuthorKind.GITHUB, "penguintechinc", "penguintechinc", "github:penguintechinc"),
     ("@octo-cat", AuthorKind.GITHUB, "octo-cat", "octo-cat", "github:octo-cat"),
@@ -80,6 +82,16 @@ _INVALID: list[tuple[Any, str]] = [
     ("https://github.com/foo#readme", "author_invalid_url"),
     ("github:", "author_invalid_github_handle"),
     ("github/", "author_invalid_github_handle"),
+    ("github//psychoboy", "author_invalid_github_handle"),
+    ("github/psychoboy/", "author_invalid_github_handle"),
+    ("github/psychoboy/repo", "author_invalid_github_handle"),
+    ("github/-lead", "author_invalid_github_handle"),
+    ("github/trail-", "author_invalid_github_handle"),
+    ("github/dou--ble", "author_invalid_github_handle"),
+    ("github/" + "a" * 40, "author_invalid_github_handle"),
+    ("github/a?tab=repos", "author_invalid_github_handle"),
+    ("github/a#readme", "author_invalid_github_handle"),
+    ("github/a\nb", "author_control_chars"),
     ("github/a/b", "author_invalid_github_handle"),
     ("github//x", "author_invalid_github_handle"),
     ("@", "author_invalid_github_handle"),
@@ -163,6 +175,28 @@ def test_author_view_github_name_none_and_legacy() -> None:
         "profile_url": None,
     }
 
+
+def test_slash_author_manifest_attribution() -> None:
+    """All current port manifests retain the requested literal while resolving a safe link."""
+    from pathlib import Path
+
+    import yaml
+
+    ports = Path(__file__).resolve().parents[3] / "bundles" / "csharp"
+    manifests = [
+        path for port in sorted(ports.glob("superpenguin-*"))
+        for name in ("bundle.yaml", "hub-manifest.yaml")
+        if (path := port / name).exists()
+    ]
+    assert len(manifests) >= 14
+    for path in manifests:
+        raw = yaml.safe_load(path.read_text())["author"]
+        assert raw == "github/psychoboy", str(path)
+        assert author_view(raw) == {
+            "display": "psychoboy",
+            "github_handle": "psychoboy",
+            "profile_url": "https://github.com/psychoboy",
+        }
 
 @pytest.mark.parametrize("slug", ["superpenguintv", "a", "a-b-c", "x1", "9"])
 def test_valid_collection_slugs(slug: str) -> None:

@@ -549,7 +549,19 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 .await;
             match outcome {
                 EventSyncOutcome::Done { id } => {
-                    Ok(serde_json::json!({"ok": true, "event_id": id}))
+                    // The tool result carries the platform id the calling app bundle must keep
+                    // (`id`, plus the legacy `event_id` spelling) and what happened: a create
+                    // returns the NEW snowflake, the others echo the event they acted on.
+                    let id = id.or(event_id);
+                    let status = match op {
+                        "event.create" => "created",
+                        "event.update" => "updated",
+                        "event.cancel" => "cancelled",
+                        _ => "deleted",
+                    };
+                    Ok(serde_json::json!({
+                        "ok": true, "id": id, "event_id": id, "status": status
+                    }))
                 }
                 EventSyncOutcome::Refused(code) => Err(refusal_for(&code)),
             }

@@ -191,6 +191,23 @@ _CHAT_SEND_RE = re.compile(r"^chat\.send:(?P<platform>[a-z0-9_-]+)$")
 _CHAT_DELETE_RE = re.compile(r"^chat\.delete:(?P<platform>[a-z0-9_-]+)$")
 _DM_SEND_RE = re.compile(r"^dm\.send:(?P<platform>[a-z0-9_-]+)$")
 _MODERATION_RE = re.compile(r"^moderation\.(?P<platform>[a-z0-9_-]+)$")
+#: Platform-op families (`<family>:<platform>`) added for the v3.0 op seams, with their risk --
+#: mirrors Rust `permission.rs` (`MessageEdit`, `MessageReaction`, `CommandsRegister`,
+#: `EventsubManage`, `InteractionRespond`). Keep the two in sync.
+PLATFORM_OP_FAMILIES: dict[str, Risk] = {
+    "message.edit": "dangerous",
+    "chat.clear": "dangerous",
+    "webhook.manage": "dangerous",
+    "message.reaction": "normal",
+    "commands.register": "dangerous",
+    "eventsub.manage": "dangerous",
+    "interaction.respond": "normal",
+}
+_PLATFORM_OP_RE = re.compile(
+    r"^(?P<family>message\.edit|chat\.clear|webhook\.manage|message\.reaction"
+    r"|commands\.register|eventsub\.manage|interaction\.respond)"
+    r":(?P<platform>[a-z0-9_-]+)$"
+)
 # `tool.call:<target_app_id>:<tool>` -- mirrors Rust `permission.rs`
 # (`validate_tool_target` / `validate_tool_name`) and `bundle_manifest_v2`'s
 # `_APP_ID_RE` / `_TOOL_NAME_RE`. Matched with `.fullmatch` (no `$`, which
@@ -268,6 +285,10 @@ def resolve_risk(permission_id: str) -> Risk | None:
     if match and match.group("platform") in RELAY_PROVIDERS:
         return "dangerous"
 
+    match = _PLATFORM_OP_RE.match(permission_id)
+    if match and match.group("platform") in RELAY_PROVIDERS:
+        return PLATFORM_OP_FAMILIES[match.group("family")]
+
     return None
 
 
@@ -296,6 +317,9 @@ def permission_family(permission_id: str) -> str:
         return "dm.send"
     if _MODERATION_RE.match(permission_id):
         return "moderation"
+    op_match = _PLATFORM_OP_RE.match(permission_id)
+    if op_match:
+        return op_match.group("family")
     return permission_id
 
 

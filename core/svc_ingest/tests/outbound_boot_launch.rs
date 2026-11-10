@@ -60,7 +60,7 @@ fn cli() -> CliConfig {
     c.connector_tools = true;
     c.environment = "alpha".to_string();
     c.hub_api_url = "http://hub-api:8204".to_string();
-    c.service_jwt_token_endpoint = "http://hub-api:8204/internal/service-token".to_string();
+    c.service_jwt_token_endpoint = "http://127.0.0.1:50204".to_string();
     c.bind_addr = "127.0.0.1".parse().unwrap();
     c
 }
@@ -88,11 +88,7 @@ fn env(cert: &str, key: &str, ca: &str, port: u16) -> HashMap<&'static str, Stri
 
 fn users() -> HubPlatformUserResolver {
     let channel = tonic::transport::Channel::from_static("http://127.0.0.1:9").connect_lazy();
-    HubPlatformUserResolver::from_channel(
-        channel,
-        "http://hub-api:8204/internal/service-token",
-        "/nonexistent/token",
-    )
+    HubPlatformUserResolver::from_channel(channel, "https://hub-api:50204", "/nonexistent/token")
 }
 
 fn spine() -> penguin_spine::SpineConfig {

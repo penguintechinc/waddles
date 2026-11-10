@@ -145,6 +145,53 @@ def test_overlay_media_duration_over_ceiling_rejected() -> None:
     assert exc.value.reason == "invalid_overlay_duration"
 
 
+def _overlay(params: dict) -> list[dict]:
+    return [{"id": "overlay.media", "justification": "Pushes game overlay.", "params": params}]
+
+
+def test_overlay_media_data_only_accepted() -> None:
+    manifest = _parse(_overlay({"mode": "data"}))
+    assert manifest.permission_declarations[0].params == {"mode": "data"}  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"allowed_hosts": ["youtube.com"]},
+        {"max_duration_seconds": 10},
+        {"allowed_hosts": [], "max_duration_seconds": 0},
+    ],
+)
+def test_overlay_media_data_only_with_media_fields_rejected(extra: dict) -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(_overlay({"mode": "data", **extra}))
+    assert exc.value.reason == "invalid_overlay_data_mode"
+
+
+def test_overlay_media_explicit_media_mode_still_strict() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(_overlay({"mode": "media"}))
+    assert exc.value.reason == "invalid_overlay_hosts"
+    ok = _parse(
+        _overlay({"mode": "media", "allowed_hosts": ["youtube.com"], "max_duration_seconds": 5})
+    )
+    assert ok.permission_declarations[0].params["mode"] == "media"  # type: ignore[attr-defined]
+
+
+def test_overlay_media_unknown_mode_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(
+            _overlay({"mode": "both", "allowed_hosts": ["youtube.com"], "max_duration_seconds": 5})
+        )
+    assert exc.value.reason == "invalid_overlay_mode"
+
+
+def test_overlay_media_no_mode_without_hosts_still_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(_overlay({}))
+    assert exc.value.reason == "invalid_overlay_hosts"
+
+
 def test_reputation_write_delta_bounds_enforced() -> None:
     with pytest.raises(ManifestV2Error) as exc:
         _parse(

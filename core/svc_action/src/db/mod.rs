@@ -94,6 +94,7 @@ mod tests {
             envelope_binding_keys: None,
             discord_bot_token: None,
             db_reader_password: None,
+            bundle_db_password: None,
         }
     }
 
@@ -137,6 +138,7 @@ mod tests {
             envelope_binding_keys: None,
             discord_bot_token: None,
             db_reader_password: None,
+            bundle_db_password: None,
         };
         let first = get_or_connect(&config).await.expect("connects");
         // Second call returns the cached connection rather than

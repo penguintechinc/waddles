@@ -168,6 +168,7 @@ class ProviderConnectionDTO:
     usable: bool
     shared: bool
     hasRefreshToken: bool
+    hasApiCredential: bool
     expiresAt: str | None
     capabilities: list[str]
     metadata: dict[str, Any]
@@ -210,6 +211,20 @@ class CredentialsBody:
 
 
 @dataclass(slots=True, frozen=True)
+class ApiCredentialBody:
+    """Outbound API credential of a provider that needs one beside its token (Wix).
+
+    Write-only: sealed on arrival; the admin DTO exposes only ``hasApiCredential``. Unknown fields
+    are a 400 and the values never reach a repr.
+    """
+
+    __pydantic_config__ = ConfigDict(extra="forbid")
+
+    api_key: str = field(repr=False)
+    site_id: str = field(repr=False)
+
+
+@dataclass(slots=True, frozen=True)
 class SecretBody:
     """Structured secret of a static-secret provider: a ``SecretScheme`` code + its document.
 
@@ -235,6 +250,7 @@ class CreateConnectionRequest:
     provider: str
     credentials: CredentialsBody | None = None
     secret: SecretBody | None = None
+    api_credential: ApiCredentialBody | None = None
     metadata: dict[str, str | dict[str, str]] = field(default_factory=dict)
     enabled: bool = True
 
@@ -248,6 +264,7 @@ class UpdateConnectionRequest:
     enabled: bool | None = None
     metadata: dict[str, str | dict[str, str]] | None = None
     credentials: CredentialsBody | None = None
+    api_credential: ApiCredentialBody | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -417,12 +434,18 @@ def _connection_dto(view: ConnectionView) -> ProviderConnectionDTO:
         usable=view.usable,
         shared=binding.shared_with > 0,
         hasRefreshToken=binding.connection.has_refresh_token,
+        hasApiCredential=binding.connection.has_api_credential,
         expiresAt=_iso(binding.connection.expires_at),
         capabilities=view.capabilities,
         metadata=view.public_metadata,
         createdAt=_iso(binding.connection.created_at),
         updatedAt=_iso(binding.connection.updated_at),
     )
+
+
+def _api_credential_doc(body: ApiCredentialBody | None) -> dict[str, str] | None:
+    """The write-only outbound credential as the service's document shape (never logged)."""
+    return None if body is None else {"api_key": body.api_key, "site_id": body.site_id}
 
 
 def _dataplane_dto(item: DataPlaneBinding) -> DataPlaneBindingDTO | None:
@@ -694,13 +717,14 @@ async def create_provider_connection(
             refresh_token=data.credentials.refresh_token,
             metadata=data.metadata,
             enabled=data.enabled,
+            api_credential=_api_credential_doc(data.api_credential),
         )
     else:
         ctx = get_tenant_context(request)
         assert ctx is not None  # nosec B101 - _admin_guard just resolved it
         if not await feature_enabled(FEATURE_STATIC_CONNECTIONS, tenant=ctx.tenant_slug):
             raise payment_required("Static-secret connections are not enabled for this plan")
-        if data.secret is None or data.credentials is not None:
+        if data.secret is None or data.credentials is not None or data.api_credential is not None:
             raise pc_errors.InvalidConnectionInput("this provider takes 'secret' only")
         view = await service.create_static(
             tenant_id=tenant_id,
@@ -752,6 +776,7 @@ async def update_provider_connection(
         metadata=data.metadata,
         access_token=data.credentials.access_token if data.credentials else None,
         refresh_token=data.credentials.refresh_token if data.credentials else None,
+        api_credential=_api_credential_doc(data.api_credential),
     )
     return ProviderConnectionResponse(success=True, connection=_connection_dto(view))
 
