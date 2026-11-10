@@ -143,17 +143,16 @@ class TestVersionedRoutersMounted:
             assert response.status_code == 401
 
 
-class TestServiceJwtBlueprintMounted:
-    """security review HIGH finding: `service_jwt_bp` was never registered.
+class TestServiceJwtRestRoutesRemoved:
+    """The machine-JWT bootstrap moved to gRPC (`ServiceAuthService`) -- no REST route remains.
 
-    `_test_config()` sets no `SERVICE_JWT_*` env vars, so issuance is
-    disabled (`app.py::startup`'s `except (ServiceJwtError, KeyError)`
-    path) -- these assert the blueprint is reachable (not 404) and fails
-    closed (503), not that a real token is minted end-to-end (covered by
-    `libs/flask_core/tests/test_service_jwt.py` instead).
+    gRPC for all intra-cluster calls: `POST /internal/service-token` and
+    `GET /internal/service-jwks.json` must 404, so a stale client fails loud instead of being
+    served over a second, un-migrated surface. The gRPC contract itself is covered by
+    `tests/test_service_auth_grpc.py`.
     """
 
-    async def test_service_token_route_reachable_but_unconfigured(self, app: Quart) -> None:
+    async def test_service_token_route_is_gone(self, app: Quart) -> None:
         async with app.test_app():
             client = app.test_client()
             response = await client.post(
@@ -161,14 +160,12 @@ class TestServiceJwtBlueprintMounted:
                 headers={"Authorization": "Bearer whatever"},
                 json={"scope": "identity:ephemeral:mint"},
             )
-            assert response.status_code == 503
+            assert response.status_code == 404
 
-    async def test_service_jwks_route_reachable(self, app: Quart) -> None:
+    async def test_service_jwks_route_is_gone(self, app: Quart) -> None:
         async with app.test_app():
-            client = app.test_client()
-            response = await client.get("/internal/service-jwks.json")
-            assert response.status_code == 200
-            assert (await response.get_json())["keys"] == []
+            response = await app.test_client().get("/internal/service-jwks.json")
+            assert response.status_code == 404
 
 
 class TestSessionCookieBridgeWiredIntoRealApp:

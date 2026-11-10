@@ -1,0 +1,4 @@
+self-hosted-runner:
+  labels:
+    - dal2-alpha
+    - dal2-alpha-ci

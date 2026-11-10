@@ -2,11 +2,11 @@ schema_version: 2
 app_id: waddles.core.example.choose
 name: Random Choice Example Bundle (Python)
 # 1.0.2: activation-gated only -- removed the in-bundle waddles.command-choose feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.3
+version: 1.0.4
 feature: waddles.core.example
 module: core
 provider: builtin
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/choose
 language: python

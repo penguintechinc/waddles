@@ -13,7 +13,7 @@
 # `egress-assertion` too, so the build context must include all three or
 # `cargo build` fails closed with "unable to update /service_auth" /
 # "/bundle_host_http" / "/egress_assertion" (no such file). Run from core/:
-#   docker build -f egress_proxy/Dockerfile.rust -t localhost:32000/waddlebot/egress-proxy:alpha-<epoch> .
+#   docker build -f egress_proxy/Dockerfile.rust --build-context proto=../proto -t localhost:32000/waddlebot/egress-proxy:alpha-<epoch> .
 
 FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
 
@@ -22,9 +22,13 @@ FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcb
 # assertion, `src/assertion.rs`) uses the `aws_lc_rs` crypto backend, same
 # rationale as core/service_auth's own Cargo.toml/Dockerfile comment
 # (RUSTSEC-2023-0071 -- no `rsa` crate in the graph).
+# protobuf-compiler (protoc) is required by `service_auth`'s build.rs (tonic-prost-build,
+# compiling the machine-JWT bootstrap contract `proto/waddles/hub/internal/v1/service_auth.proto`
+# -- the JWKS is fetched over gRPC).
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
         cmake=3.25.1-1 build-essential=12.9 ca-certificates=20250419~deb12u2 \
+        protobuf-compiler=3.21.12-3+deb12u1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -33,6 +37,13 @@ COPY egress_proxy/src ./egress_proxy/src
 COPY service_auth ./service_auth
 COPY bundle_host_http ./bundle_host_http
 COPY egress_assertion ./egress_assertion
+# `service_auth`'s build.rs resolves protos at `CARGO_MANIFEST_DIR/../../proto` -- for
+# `/build/service_auth` that is `/proto`. The repo-root `proto/` tree is a sibling of `core/`
+# (this Dockerfile's build context), so it is supplied as the named `proto` build context
+# (see build-egress-proxy.yml's `build-contexts`), exactly like core/svc_ingest/Dockerfile.rust.
+# `proto` is a named build context (--build-context), not a FROM alias -> DL3022 false positive.
+# hadolint ignore=DL3022
+COPY --from=proto . /proto
 WORKDIR /build/egress_proxy
 RUN cargo build --release --locked
 

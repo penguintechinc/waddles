@@ -210,8 +210,14 @@ class ProviderConnectionService:
         refresh_token: str | None,
         metadata: Mapping[str, Any],
         enabled: bool,
+        api_credential: Mapping[str, Any] | None = None,
     ) -> ConnectionView:
-        """Verify the credential with the provider, resolve the resource, then store it sealed."""
+        """Verify the credential with the provider, resolve the resource, then store it sealed.
+
+        ``api_credential`` is the optional outbound credential document of a provider that has one
+        (Wix ``{api_key, site_id}``); it is structurally validated up front and sealed beside the
+        token, never echoed back.
+        """
         adapter = self._registry.get(provider)
         spec = adapter.spec
         if spec.kind is not ConnectionKind.PLATFORM_OAUTH:
@@ -224,6 +230,7 @@ class ProviderConnectionService:
             validate_token_shape("access_token", credentials.access_token)
             if credentials.refresh_token and not spec.refreshable:
                 raise InvalidConnectionInput("this provider does not use a refresh token")
+            api_document = self._validated_api_credential(spec, api_credential)
             owner = await store.community_tenant_id(self._db, community_id)
             if owner != tenant_id:
                 # Same answer for "no such community" and "someone else's": no existence oracle,
@@ -257,6 +264,9 @@ class ProviderConnectionService:
                         else None
                     ),
                     seal_version=SEAL_AAD,
+                    sealed_api_credential=(
+                        self._vault.seal(api_document, aad=aad) if api_document else None
+                    ),
                 ),
                 expires_at=account.expires_at,
                 resource_metadata=facts,
@@ -400,13 +410,14 @@ class ProviderConnectionService:
         metadata: Mapping[str, Any] | None,
         access_token: str | None,
         refresh_token: str | None,
+        api_credential: Mapping[str, Any] | None = None,
     ) -> ConnectionView:
         """Toggle ``enabled``, re-target the resource, and/or rotate the credential.
 
         ``enabled`` is this community's own switch and always allowed. Changing the metadata or
         credential edits the *shared link*, so it is refused while another community uses it.
         """
-        if enabled is None and metadata is None and access_token is None:
+        if enabled is None and metadata is None and access_token is None and api_credential is None:
             raise InvalidConnectionInput("nothing to update")
         if refresh_token is not None and access_token is None:
             raise InvalidConnectionInput(
@@ -420,13 +431,15 @@ class ProviderConnectionService:
         adapter = self._registry.get(binding.connection.platform)
         spec = adapter.spec
         if spec.kind is not ConnectionKind.PLATFORM_OAUTH and (
-            metadata is not None or access_token is not None
+            metadata is not None or access_token is not None or api_credential is not None
         ):
             raise InvalidConnectionInput(
                 "a static-secret connection cannot be edited; delete it and create a new one"
             )
         with operation_span(spec.provider, "update"):
-            changes_link = metadata is not None or access_token is not None
+            changes_link = (
+                metadata is not None or access_token is not None or api_credential is not None
+            )
             if changes_link and binding.shared_with > 0:
                 raise ConnectionConflict(
                     "this connection is shared with other communities and cannot be changed here"
@@ -440,6 +453,7 @@ class ProviderConnectionService:
                     metadata=metadata,
                     access_token=access_token,
                     refresh_token=refresh_token,
+                    api_credential=api_credential,
                 )
             if enabled is not None and enabled != binding.grant.enabled:
                 updated = await store.set_enabled(
@@ -474,9 +488,26 @@ class ProviderConnectionService:
         metadata: Mapping[str, Any] | None,
         access_token: str | None,
         refresh_token: str | None,
+        api_credential: Mapping[str, Any] | None = None,
     ) -> Binding:
         """Re-verify against the provider, then rewrite the (unshared) link in one transaction."""
         spec = adapter.spec
+        api_document = self._validated_api_credential(spec, api_credential)
+        if api_document and access_token is None and metadata is None:
+            # Outbound-credential-only rotation: nothing provider-facing changes (the credential is
+            # never verified against the provider), so seal it and bump the rotation counter.
+            return await store.update_link(
+                self._db,
+                tenant_id=tenant_id,
+                community_id=community_id,
+                connection_id=binding.connection.id,
+                values={
+                    "sealed_api_credential": self._vault.seal(
+                        api_document, aad=self._row_aad(binding.connection)
+                    )
+                },
+                now=self._clock(),
+            )
         stored = binding.connection.resource_metadata
         if metadata is not None:
             clean_metadata = validate_metadata(spec, metadata)
@@ -521,6 +552,10 @@ class ProviderConnectionService:
         facts[FACT_TENANT_ID] = tenant_id
         values["resource_id"] = resource.resource_id
         values["resource_metadata"] = facts
+        if api_document:
+            values["sealed_api_credential"] = self._vault.seal(
+                api_document, aad=self._row_aad(binding.connection)
+            )
         return await store.update_link(
             self._db,
             tenant_id=tenant_id,
@@ -725,6 +760,9 @@ class ProviderConnectionService:
                 adapter, connection_id, community_id=community_id, state=state
             )
             allowed = adapter.spec.runtime_metadata_keys
+            api_scheme, api_fields = (
+                self._resolve_api_credential(adapter, state) if static_allowed else (None, None)
+            )
             return ResolvedCredentials(
                 connection_id=connection_id,
                 community_id=community_id,
@@ -733,6 +771,8 @@ class ProviderConnectionService:
                 access_token=plaintext,
                 expires_at=connection.expires_at,
                 metadata={k: v for k, v in connection.resource_metadata.items() if k in allowed},
+                secret_scheme=api_scheme,
+                secret_fields=api_fields,
             )
 
     # -- internals -------------------------------------------------------------------------
@@ -802,6 +842,45 @@ class ProviderConnectionService:
             secret_scheme=int(scheme),
             secret_fields=wire_secret_fields(scheme, doc),
         )
+
+    @staticmethod
+    def _validated_api_credential(spec: AdapterSpec, raw: Mapping[str, Any] | None) -> str | None:
+        """Canonical JSON of a validated outbound credential, or ``None`` when none was supplied.
+
+        A provider with no ``api_credential_scheme`` refuses one outright. Errors name only the
+        offending field, never its value.
+        """
+        if raw is None:
+            return None
+        if spec.api_credential_scheme is None:
+            raise InvalidConnectionInput("this provider does not take an API credential")
+        reject_control_characters(raw)
+        document = validate_secret_document(spec.api_credential_scheme, raw)
+        return json.dumps(document, sort_keys=True, separators=(",", ":"))
+
+    def _resolve_api_credential(
+        self, adapter: ProviderAdapter, state: ResolveState
+    ) -> tuple[int | None, dict[str, str | None] | None]:
+        """Open a kind-1 row's sealed outbound credential for a caller holding the static scope.
+
+        ``(None, None)`` when the provider has none or none is stored (the public token still
+        resolves). A stored document that fails its own scheme is :class:`VaultCorrupt` -- loud,
+        fixed-text, never partial.
+        """
+        scheme = adapter.spec.api_credential_scheme
+        sealed = state.secrets.sealed_api_credential
+        if scheme is None or sealed is None:
+            return None, None
+        plaintext = self._vault.open(
+            sealed, aad=self._row_aad(state.connection), seal_version=SEAL_AAD
+        )
+        try:
+            doc = json.loads(plaintext)
+        except ValueError:
+            raise VaultCorrupt("a stored connection secret is malformed") from None
+        if not isinstance(doc, dict) or infer_scheme(doc) is not scheme:
+            raise VaultCorrupt("a stored connection secret is malformed")
+        return int(scheme), wire_secret_fields(scheme, doc)
 
     def _needs_refresh(self, expires_at: datetime | None) -> bool:
         return expires_at is not None and expires_at <= self._clock() + self._refresh_skew

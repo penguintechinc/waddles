@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-level"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!level [@user]` / `!level leaderboard` -> passive per-message chat XP with a cooldown, a derived level curve and a top-5 board, kv-backed per community"
 requires-python = ">=3.13"
 dependencies = []

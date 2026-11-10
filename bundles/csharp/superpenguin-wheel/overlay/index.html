@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Wheel overlay</title>
+    <!--
+      Browser-source page for the superpenguin-wheel app bundle. Add it to OBS as a browser source:
+        <host that serves this directory>/index.html?origin=https://<presentation-host>&code=<overlay code>&key=<view key>
+      Adapted from PenguinTwitchBot wwwroot/wheel.html (MIT, github.com/Psychoboy/PenguinTwitchBot). No third-party network
+      resources are loaded: spin-wheel is vendored under vendor/ and the tick sound is synthesized with WebAudio.
+    -->
+    <link rel="stylesheet" href="wheel.css">
+</head>
+<body>
+    <div id="status" class="status" role="status">Connecting</div>
+    <div id="stage" class="stage">
+        <div id="wheel" class="wheel-container"></div>
+        <div id="winner" class="winner" hidden></div>
+    </div>
+    <script src="vendor/spin-wheel-iife.js"></script>
+    <script src="wheel-overlay.js"></script>
+</body>
+</html>

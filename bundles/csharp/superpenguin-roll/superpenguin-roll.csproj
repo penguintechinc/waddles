@@ -71,7 +71,7 @@
          never inlines a copy." This bundle project is the one that actually
          runs wit-bindgen (see waddle-sdk-cs.csproj's header comment for why
          the SDK library deliberately does not). -->
-    <Wit Include="../../../wit/waddle-bundle/stage.wit" World="stage" />
+    <Wit Include="../../../wit/waddle-bundle" World="stage-next-tools" />
   </ItemGroup>
 
 </Project>

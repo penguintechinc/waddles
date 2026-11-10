@@ -37,6 +37,7 @@ ADMIN_FIELDS = {
     "usable",
     "shared",
     "hasRefreshToken",
+    "hasApiCredential",
     "expiresAt",
     "capabilities",
     "metadata",
@@ -671,10 +672,10 @@ class TestInternalApi:
         assert response.status_code == 401
 
     async def test_only_the_operator_plane_tenant_may_call(self, client: Any, pc_db: Any) -> None:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.asymmetric import ec
         from flask_core.service_jwt import SigningKey
 
-        private = Ed25519PrivateKey.generate()
+        private = ec.generate_private_key(ec.SECP256R1())
         issuer = ServiceJwtIssuer(
             keys={"k1": SigningKey("k1", private, private.public_key())},
             active_kid="k1",

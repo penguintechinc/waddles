@@ -23,7 +23,7 @@ jobs:
   # in parallel. Fails open: see scripts/ci/changed-paths.sh.
   changes:
     name: Detect changed areas
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -54,7 +54,7 @@ jobs:
   # Integrity). Needs no real scanners -- fake ones are put on PATH.
   gate-integrity:
     name: Gate integrity (lint/security gates can fail)
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -84,6 +84,7 @@ jobs:
 
   no-stubs-gate:
     name: No stubs / no silent fallbacks (check-no-stubs)
+    # bare dal2-alpha-ci image has no `make` (and sudo is blocked): stays on hosted ubuntu-latest until a custom runner image bakes it in
     runs-on: ubuntu-latest
     # Scope correction (user decision, devops.md Branch Backups): this gate
     # enforces ONLY on merges landing on release/* or main -- feature/fix/
@@ -415,9 +416,16 @@ jobs:
               platform VARCHAR(50),
               platform_user_id VARCHAR(255),
               display_name VARCHAR(255),
-              is_active BOOLEAN DEFAULT true,
+              -- identity_resolution_service's "current member" predicate (not left, not removed):
+              -- 000_create_base_schema.sql (is_active, left_at) + 0012_schema_drift_columns (removed_at)
+              is_active BOOLEAN DEFAULT TRUE,
               left_at TIMESTAMP,
-              removed_at TIMESTAMP
+              removed_at TIMESTAMP,
+              -- 0079_bundle_platform_table column-scopes GRANTs over these baseline columns
+              -- (000_create_base_schema.sql): role is the only UPDATE-able one.
+              role VARCHAR(50),
+              joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
           );
           -- 0039_event_sync_enabled is the first Alembic migration to FK into
           -- calendar_events -- a legacy table owned by config/postgres/migrations/
@@ -668,6 +676,7 @@ jobs:
     name: Marketplace refund authorization tests
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node == 'true') }}
+    # bare dal2-alpha-ci image has no cc/cmake/libatomic and sudo is blocked (no-new-privileges): C-toolchain / node jobs stay on hosted ubuntu-latest until a custom runner image bakes them in
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -693,6 +702,7 @@ jobs:
     name: Build ${{ matrix.name }}
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node == 'true') }}
+    # bare dal2-alpha-ci image has no cc/cmake/libatomic and sudo is blocked (no-new-privileges): C-toolchain / node jobs stay on hosted ubuntu-latest until a custom runner image bakes them in
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -737,6 +747,7 @@ jobs:
     name: Helm chart lint + hook dependency ordering
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.helm == 'true') }}
+    # egress allowlist pending admin CNP update
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -964,7 +975,7 @@ jobs:
     name: Dockerfile.rust path-dependency coverage
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
     # Static analysis of the current tree only (no diff needed) -- narrower
     # than the workflow-level default, matching alembic-migration-chain's
     # own least-privilege override.
@@ -994,7 +1005,7 @@ jobs:
     name: Alembic single-head invariant (static, no DB)
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.python == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
     # Pure revision-graph walk over alembic/versions/*.py source text -- no
     # DB, no alembic package import -- so this runs on every PR regardless
     # of whether alembic/** changed, unlike the heavier real-Postgres
@@ -1023,6 +1034,7 @@ jobs:
     name: OpenAPI spec drift (openapi/v1.yaml matches generated)
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.python == 'true') }}
+    # bare dal2-alpha-ci image has no `make` (and sudo is blocked): stays on hosted ubuntu-latest until a custom runner image bakes it in
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1058,7 +1070,7 @@ jobs:
     name: Lockfile additions-only (no silent version changes)
     needs: changes
     if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.any_code == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
     permissions:
       contents: read
     steps:

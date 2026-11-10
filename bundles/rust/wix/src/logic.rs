@@ -145,6 +145,8 @@ struct Ctx<'a> {
     event_id: &'a str,
     instance_id: &'a str,
     occurred_at: String,
+    /// `true` when `occurred_at` is Wix's own `eventTime` (orderable), `false` for the receive-time fallback.
+    wix_time: bool,
 }
 
 impl Ctx<'_> {
@@ -152,6 +154,10 @@ impl Ctx<'_> {
         let mut m = Map::new();
         m.insert("event_id".into(), json!(self.event_id));
         m.insert("instance_id".into(), json!(self.instance_id));
+        m.insert(
+            "time_source".into(),
+            json!(if self.wix_time { "wix" } else { "received" }),
+        );
         m
     }
 
@@ -278,14 +284,15 @@ pub fn parse_frame(bytes: &[u8], received_at: &str) -> Result<Parsed> {
     let event_type = req_str(&envelope, "eventType")?;
     let event = json_str(&envelope, "data")?;
     let event_id = req_str(&event, "id")?;
-    let occurred_at = match event.get("eventTime").and_then(Value::as_str) {
-        Some(t) if !t.is_empty() => t.to_owned(),
-        _ => received_at.to_owned(),
+    let (occurred_at, wix_time) = match event.get("eventTime").and_then(Value::as_str) {
+        Some(t) if !t.is_empty() => (t.to_owned(), true),
+        _ => (received_at.to_owned(), false),
     };
     let ctx = Ctx {
         event_id,
         instance_id: &checked_ref(instance_id, "instanceId")?,
         occurred_at,
+        wix_time,
     };
     let mapped = map_event(&ctx, event_type, &event)?;
     Ok(match mapped {

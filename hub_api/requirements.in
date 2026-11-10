@@ -10,6 +10,8 @@ quart>=0.23.0,<0.24.0
 hypercorn>=0.18.0,<0.19.0
 quart-schema>=0.25.0,<0.26.0
 pydal>=20240906.1,<20260601
+# Generic bundle-admin gateway (config + admin-tool args validated against manifest JSON Schemas).
+jsonschema>=4.23.0,<5.0.0
 psycopg2-binary>=2.9.9,<3.0.0
 pyjwt>=2.13.0,<3.0.0
 
