@@ -26,6 +26,7 @@ use crate::connector::host_api_listener::{self, HostApiTls};
 use crate::connector::sender_exec::app_credentials::PlatformAppCredentials;
 use crate::connector::sender_exec::discord_duties::DiscordDuties;
 use crate::connector::sender_exec::discord_slots::DiscordSlots;
+use crate::connector::sender_exec::kick_slots::KickSlots;
 use crate::connector::sender_exec::twitch_slots::TwitchSlots;
 use crate::connector::sender_exec::youtube_slots::YoutubeSlots;
 use crate::connector::sender_exec::{
@@ -34,6 +35,7 @@ use crate::connector::sender_exec::{
 use crate::connector::{ConnectorRegistry, ExecutorLink, PinnedConnector};
 use crate::outbound_creds::ResolverTwitchCredentials;
 use crate::outbound_creds_discord::ResolverDiscordCredentials;
+use crate::outbound_creds_kick::ResolverKickCredentials;
 use crate::outbound_creds_youtube::ResolverYoutubeCredentials;
 use crate::outbound_pin::PinKeys;
 use crate::platform_users::HubPlatformUserResolver;
@@ -41,14 +43,20 @@ use crate::platform_users::HubPlatformUserResolver;
 /// Platforms the executor serves, in start order.
 pub const PLATFORMS: [&str; 3] = ["twitch", "discord", "youtube"];
 
+/// Kick is opt-in per deployment: it is served only when `SENDER_EXEC_DIGEST_KICK` is set (the
+/// Kick connector is built and pinned), so a deployment without it boots exactly as before.
+pub const KICK: &str = "kick";
+const KICK_DIGEST_ENV: &str = "SENDER_EXEC_DIGEST_KICK";
+
 /// The connector cutover flags the executor path answers `true` to over the
 /// host-API link: each platform connector refuses `sender.build-request` while
 /// its own flag reads OFF, and using the connector for outbound is exactly what
 /// `waddles.connector-tools` ON decides.
-pub const CONNECTOR_FLAGS: [&str; 3] = [
+pub const CONNECTOR_FLAGS: [&str; 4] = [
     "waddles.connector-twitch",
     "waddles.connector-discord",
     "waddles.connector-youtube",
+    "waddles.connector-kick",
 ];
 
 /// Default host-API listener port (the executor dials this).
@@ -61,6 +69,7 @@ fn app_id(platform: &str) -> Option<&'static str> {
         "twitch" => Some("waddles.core.service.twitch"),
         "discord" => Some("waddles.core.service.discord"),
         "youtube" => Some("waddles.core.service.youtube"),
+        "kick" => Some("waddles.core.service.kick"),
         _ => None,
     }
 }
@@ -115,6 +124,7 @@ fn platform_label(platform: &str) -> &'static str {
         "twitch" => "twitch",
         "discord" => "discord",
         "youtube" => "youtube",
+        "kick" => "kick",
         _ => "other",
     }
 }
@@ -236,6 +246,13 @@ impl ExecBootConfig {
                 .map_err(|_| BootError::Malformed(name))?;
             digests.insert(platform.to_string(), digest);
         }
+        // Optional Kick: unset = not served; set-but-blank or malformed is fatal, never ignored.
+        if lookup(KICK_DIGEST_ENV).is_some() {
+            let digest = required(lookup, KICK_DIGEST_ENV)?;
+            ExecutorConfig::production(HashMap::from([(KICK.to_string(), digest.clone())]))
+                .map_err(|_| BootError::Malformed(KICK_DIGEST_ENV))?;
+            digests.insert(KICK.to_string(), digest);
+        }
 
         let twitch_client_id = required(lookup, "TWITCH_CLIENT_ID")?;
         let hub_grpc_endpoint = required(lookup, "HUB_API_GRPC_ENDPOINT")?;
@@ -264,6 +281,16 @@ impl ExecBootConfig {
         self.digests.get(platform).map(String::as_str)
     }
 
+    /// The platforms this deployment serves: the core three plus Kick when its digest is pinned.
+    #[must_use]
+    pub fn served_platforms(&self) -> Vec<&'static str> {
+        let mut v = PLATFORMS.to_vec();
+        if self.digests.contains_key(KICK) {
+            v.push(KICK);
+        }
+        v
+    }
+
     /// The listener address the executor dials.
     #[must_use]
     pub fn host_api_addr(&self) -> SocketAddr {
@@ -289,6 +316,7 @@ pub type ProdSlots = PlatformSlotRouter<
     TwitchSlots<ResolverTwitchCredentials<Resolver>>,
     DiscordSlots<ResolverDiscordCredentials<Resolver>>,
     YoutubeSlots<ResolverYoutubeCredentials<Resolver>>,
+    KickSlots<ResolverKickCredentials<Resolver>>,
     PlatformAppCredentials,
 >;
 /// The production Discord host duties.
@@ -312,7 +340,7 @@ fn resolver(cli: &CliConfig) -> anyhow::Result<Resolver> {
 /// The registry of the three pinned connectors (digests from host config).
 fn registry(cfg: &ExecBootConfig) -> anyhow::Result<ConnectorRegistry> {
     let mut registry = ConnectorRegistry::new();
-    for platform in PLATFORMS {
+    for platform in cfg.served_platforms() {
         let (Some(app), Some(digest)) = (app_id(platform), cfg.digest(platform)) else {
             anyhow::bail!("no pinned connector for {platform}");
         };
@@ -400,6 +428,7 @@ pub fn build_with_link(
         ),
         DiscordSlots::new(ResolverDiscordCredentials::new(resolver(cli)?)),
         YoutubeSlots::new(ResolverYoutubeCredentials::new(resolver(cli)?)),
+        KickSlots::new(ResolverKickCredentials::new(resolver(cli)?)),
     )
     .with_app_credentials(
         PlatformAppCredentials::from_env()
@@ -491,8 +520,8 @@ pub async fn launch_with(
         tracing::info!(addr = %cfg.host_api_addr, "outbound executor host-api listener started");
     }
 
-    let pin = Arc::new(cfg.pin);
-    for platform in PLATFORMS {
+    let pin = Arc::new(cfg.pin.clone());
+    for platform in cfg.served_platforms() {
         let exec = Arc::clone(&parts.executor);
         let spine_cfg = spine_cfg.clone();
         let pin = Arc::clone(&pin);
@@ -502,7 +531,8 @@ pub async fn launch_with(
             let res = match platform {
                 "twitch" => crate::outbound::run_exec(&spine_cfg, &*exec, pin, rx).await,
                 "discord" => crate::outbound::run_discord_exec(&spine_cfg, &*exec, pin, rx).await,
-                _ => crate::outbound::run_youtube_exec(&spine_cfg, &*exec, pin, rx).await,
+                "youtube" => crate::outbound::run_youtube_exec(&spine_cfg, &*exec, pin, rx).await,
+                _ => crate::outbound::run_kick_exec(&spine_cfg, &*exec, pin, rx).await,
             };
             if let Err(err) = res {
                 tracing::error!(platform, error = %err, "outbound executor drain exited");
@@ -551,6 +581,36 @@ mod tests {
         env: &HashMap<&'static str, String>,
     ) -> Result<ExecBootConfig, BootError> {
         ExecBootConfig::from_lookup(cli, &|k| env.get(k).cloned())
+    }
+
+    #[test]
+    fn kick_is_served_only_when_its_digest_is_pinned_and_a_bad_pin_is_fatal() {
+        let core = ["twitch", "discord", "youtube"];
+        let cfg = load(&cli(true), &full()).unwrap();
+        assert_eq!(cfg.served_platforms(), core);
+        assert_eq!(cfg.digest("kick"), None);
+
+        let mut env = full();
+        env.insert("SENDER_EXEC_DIGEST_KICK", d('d'));
+        let cfg = load(&cli(true), &env).unwrap();
+        assert_eq!(cfg.served_platforms(), [core[0], core[1], core[2], "kick"]);
+        assert_eq!(cfg.digest("kick"), Some(d('d').as_str()));
+        let reg = registry(&cfg).unwrap();
+        assert_eq!(
+            reg.resolve("kick").unwrap().app_id,
+            "waddles.core.service.kick"
+        );
+
+        env.insert("SENDER_EXEC_DIGEST_KICK", "   ".to_string());
+        assert_eq!(
+            load(&cli(true), &env).unwrap_err(),
+            BootError::Missing("SENDER_EXEC_DIGEST_KICK")
+        );
+        env.insert("SENDER_EXEC_DIGEST_KICK", "not-a-digest".to_string());
+        assert_eq!(
+            load(&cli(true), &env).unwrap_err(),
+            BootError::Malformed("SENDER_EXEC_DIGEST_KICK")
+        );
     }
 
     #[test]
@@ -699,10 +759,17 @@ mod tests {
     }
 
     #[test]
-    fn the_registry_pins_all_three_core_connectors_from_host_config() {
-        let cfg = load(&cli(true), &full()).unwrap();
+    fn the_registry_pins_all_served_connectors_from_host_config() {
+        let mut env = full();
+        env.insert("SENDER_EXEC_DIGEST_KICK", d('d'));
+        let cfg = load(&cli(true), &env).unwrap();
         let reg = registry(&cfg).unwrap();
-        for (p, digest) in [("twitch", d('a')), ("discord", d('b')), ("youtube", d('c'))] {
+        for (p, digest) in [
+            ("twitch", d('a')),
+            ("discord", d('b')),
+            ("youtube", d('c')),
+            ("kick", d('d')),
+        ] {
             let c = reg.resolve(p).unwrap();
             assert_eq!(c.digest, digest);
             assert_eq!(c.app_id, format!("waddles.core.service.{p}"));

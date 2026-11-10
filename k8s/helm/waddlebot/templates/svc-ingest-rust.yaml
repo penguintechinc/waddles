@@ -179,6 +179,11 @@ spec:
           value: {{ include "waddlebot.connectorDigest" (dict "root" $ "platform" "discord") | quote }}
         - name: SENDER_EXEC_DIGEST_YOUTUBE
           value: {{ include "waddlebot.connectorDigest" (dict "root" $ "platform" "youtube") | quote }}
+        {{- if include "waddlebot.connectorPlatformOn" (dict "root" $ "platform" "kick") }}
+        # Kick is opt-in: served by the outbound executor only when its digest is pinned.
+        - name: SENDER_EXEC_DIGEST_KICK
+          value: {{ include "waddlebot.connectorDigest" (dict "root" $ "platform" "kick") | quote }}
+        {{- end }}
         {{- if include "waddlebot.connectorPlatformOn" (dict "root" $ "platform" "wix") }}
         - name: SENDER_EXEC_DIGEST_WIX
           value: {{ include "waddlebot.connectorDigest" (dict "root" $ "platform" "wix") | quote }}

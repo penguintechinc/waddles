@@ -266,6 +266,9 @@ const METADATA_SAFE_FIELDS: &[&str] = &[
     "bits",
     "type",
     "started_at",
+    // Kick `channel.subscribe` (bundles/rust/kick): months purchased + renewal flag.
+    "duration",
+    "is_renewal",
 ];
 
 /// The set of payload field names [`ID_NAME_FIELD_PAIRS`] tokenizes --

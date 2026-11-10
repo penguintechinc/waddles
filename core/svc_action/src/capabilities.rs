@@ -323,7 +323,7 @@ pub fn outbound_relay_queue_key(provider: &str) -> String {
 /// Adding a provider here without adding its table rows leaves every op
 /// refused `unsupported_op` -- a new provider is unsupported until someone
 /// deliberately opts it in, never auto-supported onto an undrained queue.
-pub(crate) const RELAY_PROVIDERS: &[&str] = &["twitch", "discord", "youtube"];
+pub(crate) const RELAY_PROVIDERS: &[&str] = &["twitch", "discord", "youtube", "kick"];
 
 /// Valkey key the Discord outbound drain (`svc_ingest::outbound::
 /// run_discord`) keeps alive (short TTL, heartbeat-refreshed) while it is
@@ -493,6 +493,8 @@ impl RelayOp {
 /// `chat.send` (inline bot REST, [`StageCapabilities::handle_discord_relay`])
 /// and Discord `chat.delete`/`dm.send` (bot-token REST sender behind the
 /// confirmation handshake, [`StageCapabilities::handle_discord_queued_op`]).
+/// Kick `chat.send` and its registered `mod.*` ops queue to the Kick drain
+/// (`waddles:transport:irc:kick:outbound`, svc-ingest's `run_kick_exec`); `dm.send` is refused.
 /// Twitch/YouTube `chat.delete` and every registered platform op run through the generic
 /// queued path ([`StageCapabilities::handle_platform_queued_op`]) and are confirmed by the
 /// drain's ack. Twitch `dm.send` stays authorized-then-refused (`unsupported_op`) until its
@@ -508,6 +510,7 @@ pub(crate) fn relay_op_supported(provider: &str, op: RelayOp) -> bool {
         (provider, op),
         ("twitch", RelayOp::ChatSend | RelayOp::ChatDelete)
             | ("youtube", RelayOp::ChatSend | RelayOp::ChatDelete)
+            | ("kick", RelayOp::ChatSend)
             | (
                 "discord",
                 RelayOp::ChatSend
@@ -1544,6 +1547,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         // (Twitch/YouTube `chat.delete`, YouTube `chat.send`) take the generic confirmed path.
         if matches!(op, RelayOp::Registered(_))
             || (provider == "youtube")
+            || (provider == "kick")
             || (provider == "twitch" && op == RelayOp::ChatDelete)
         {
             return self
@@ -5226,6 +5230,7 @@ mod tests {
             ("twitch", [true, true, false]),
             ("discord", [true, true, true]),
             ("youtube", [true, true, false]),
+            ("kick", [true, false, false]),
         ];
         assert_eq!(
             RELAY_PROVIDERS.len(),
@@ -5242,7 +5247,7 @@ mod tests {
             }
         }
         // A provider with no row is unsupported for every op -- the default.
-        for provider in ["slack", "kick", "some-new-provider"] {
+        for provider in ["slack", "some-new-provider"] {
             for op in [RelayOp::ChatSend, RelayOp::ChatDelete, RelayOp::DmSend] {
                 assert!(!relay_op_supported(provider, op), "{provider} {op:?}");
             }
@@ -7956,10 +7961,19 @@ mod tests {
         assert!(kick.permission("twitch").is_none());
         assert!(!relay_op_supported("twitch", kick));
         assert!(!relay_op_supported("youtube", kick));
-        // Kick has no ops: nothing registered is supported there.
+        // Kick registers exactly ban/timeout/unban; the Discord/Twitch-only ops stay refused.
+        for op in ["mod.ban", "mod.timeout", "mod.unban"] {
+            let parsed = RelayOp::parse(op).unwrap();
+            assert!(relay_op_supported("kick", parsed), "kick/{op}");
+            assert_eq!(
+                parsed.permission("kick").unwrap().canonical_id(),
+                "moderation.kick"
+            );
+        }
+        assert!(!relay_op_supported("kick", kick));
         assert!(!relay_op_supported(
             "kick",
-            RelayOp::parse("mod.ban").unwrap()
+            RelayOp::parse("eventsub.create").unwrap()
         ));
     }
 

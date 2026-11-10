@@ -3,6 +3,7 @@
 //! derivation. One registration line per platform keeps merges trivial.
 
 pub mod discord;
+pub mod kick;
 pub mod spectrum;
 pub mod twitch;
 pub mod wix;

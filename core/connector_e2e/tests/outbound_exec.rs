@@ -32,6 +32,7 @@ use svc_ingest::connector::sender_exec::discord_duties::{
     DiscordDuties, PlatformUserResolver, UserResolveError,
 };
 use svc_ingest::connector::sender_exec::discord_slots::DiscordSlots;
+use svc_ingest::connector::sender_exec::kick_slots::KickSlots;
 use svc_ingest::connector::sender_exec::twitch_slots::{
     DutyPair, EventSubSecretSource, TwitchAppSource, TwitchDuties, TwitchSlots,
 };
@@ -236,9 +237,28 @@ impl TemplateBuilder for Rewrite {
     }
 }
 
+/// Kick is not exercised by this three-platform suite (`kick_outbound.rs` owns it): it has no
+/// binding here, so a Kick send would be refused.
+struct KkCreds;
+
+impl svc_ingest::outbound_creds_kick::KickCredentialSource for KkCreds {
+    async fn binding(
+        &self,
+        _c: Option<i64>,
+    ) -> Result<svc_ingest::outbound_creds_kick::KickBinding, svc_ingest::outbound_creds::CredError>
+    {
+        Err(svc_ingest::outbound_creds::CredError::NoBinding)
+    }
+}
+
 type Exec = SenderExecutor<
     Rewrite,
-    PlatformSlotRouter<TwitchSlots<TwCreds, TwApp>, DiscordSlots<DcCreds>, YoutubeSlots<YtCreds>>,
+    PlatformSlotRouter<
+        TwitchSlots<TwCreds, TwApp>,
+        DiscordSlots<DcCreds>,
+        YoutubeSlots<YtCreds>,
+        KickSlots<KkCreds>,
+    >,
     CachedFlagGate,
     DutyPair<DiscordDuties<DcCreds, Users>, TwitchDuties<HookSecrets, TwApp>>,
 >;
@@ -361,6 +381,7 @@ async fn rig(flag: bool) -> Rig {
         .with_app_source(TwApp),
         DiscordSlots::with_endpoint(DcCreds, guard(), format!("{}/api/v10", dc.uri())),
         YoutubeSlots::new(YtCreds),
+        KickSlots::new(KkCreds),
     );
     let duties = DutyPair::new(
         DiscordDuties::with_endpoint(
