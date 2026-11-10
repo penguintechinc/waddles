@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 
 import grpc
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey
 from waddles.hub.internal.v1 import identity_pb2, identity_pb2_grpc
 
@@ -26,7 +26,7 @@ SPIFFE_ID = "spiffe://penguintech.io/alpha/svc-process"
 @pytest.fixture
 def issuer() -> ServiceJwtIssuer:
     """A throwaway single-key issuer allow-listing one test identity."""
-    private_key = Ed25519PrivateKey.generate()
+    private_key = ec.generate_private_key(ec.SECP256R1())
     identity = ServiceIdentity(
         service_id=SPIFFE_ID,
         k8s_namespace="waddlebot",
@@ -89,7 +89,7 @@ async def test_missing_token_rejected(server_address: str) -> None:
 @pytest.mark.asyncio
 async def test_forged_token_rejected(server_address: str) -> None:
     """A token signed by a key the server never trusted -> UNAUTHENTICATED."""
-    forged_key = Ed25519PrivateKey.generate()
+    forged_key = ec.generate_private_key(ec.SECP256R1())
     forged_signing_key = SigningKey(
         kid="other-kid", private_key=forged_key, public_key=forged_key.public_key()
     )

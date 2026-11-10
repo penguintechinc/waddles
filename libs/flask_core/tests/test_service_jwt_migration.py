@@ -1,7 +1,7 @@
-"""EdDSA service-auth migration: verify-only trust, HS256 rejection, gRPC interceptor, token client.
+"""ES256 service-auth migration: verify-only trust, HS256 rejection, gRPC interceptor, token client.
 
 Covers the HS256 shared-secret removal (security audit HIGH): the legacy fleet-wide
-HS256 token is REJECTED by every EdDSA verifier, a verify-only service can never hold a
+HS256 token is REJECTED by every ES256 verifier, a verify-only service can never hold a
 signing key, cross-module/forged tokens fail, kid rotation works, and the shared gRPC
 interceptor is exercised against a real in-process grpc.aio server.
 """
@@ -10,22 +10,18 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 
 import grpc
 import jwt as pyjwt
 import pytest
-import requests
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.grpc_service_auth import ServiceJwtAuthInterceptor
 from flask_core.service_jwt import (
-    BootstrapRejected,
     InvalidServiceToken,
     ServiceIdentity,
     ServiceJwtError,
     ServiceJwtIssuer,
-    ServiceTokenClient,
     SigningKey,
     StaticTrustBundle,
     UnknownKeyId,
@@ -41,7 +37,7 @@ LEGACY_FLEET_SECRET = (
 )  # stands in for the shared MODULE_SECRET_KEY / SECRET_KEY
 
 
-def _pem_pub(priv: Ed25519PrivateKey) -> str:
+def _pem_pub(priv: ec.EllipticCurvePrivateKey) -> str:
     return (
         priv.public_key()
         .public_bytes(
@@ -51,7 +47,7 @@ def _pem_pub(priv: Ed25519PrivateKey) -> str:
     )
 
 
-def _pem_priv(priv: Ed25519PrivateKey) -> str:
+def _pem_priv(priv: ec.EllipticCurvePrivateKey) -> str:
     return priv.private_bytes(
         serialization.Encoding.PEM,
         serialization.PrivateFormat.PKCS8,
@@ -60,9 +56,9 @@ def _pem_priv(priv: Ed25519PrivateKey) -> str:
 
 
 def _issuer(
-    kid: str = "k1", priv: Ed25519PrivateKey | None = None
-) -> tuple[ServiceJwtIssuer, Ed25519PrivateKey]:
-    priv = priv or Ed25519PrivateKey.generate()
+    kid: str = "k1", priv: ec.EllipticCurvePrivateKey | None = None
+) -> tuple[ServiceJwtIssuer, ec.EllipticCurvePrivateKey]:
+    priv = priv or ec.generate_private_key(ec.SECP256R1())
     ident = ServiceIdentity(
         service_id=CALLER,
         k8s_namespace="waddlebot",
@@ -152,8 +148,8 @@ def test_cross_module_forgery_fails(verifier_env) -> None:
     transfer."""
     issuer, _ = verifier_env
     verifier = load_verifier_from_env()
-    # (1) attacker signs with its own Ed25519 key but claims the trusted kid
-    attacker = Ed25519PrivateKey.generate()
+    # (1) attacker signs with its own ES256 key but claims the trusted kid
+    attacker = ec.generate_private_key(ec.SECP256R1())
     forged, _ = _issuer(kid="k1", priv=attacker)
     with pytest.raises(InvalidServiceToken):
         verifier.verify(forged.issue(CALLER, SCOPE_A), required_scope=SCOPE_A)
@@ -220,11 +216,11 @@ def test_verifier_rejects_bad_key_material(
         .decode()
     )
     monkeypatch.setenv("SERVICE_JWT_PUBLIC_KEY_bad", rsa_pem)
-    with pytest.raises(ServiceJwtError, match="not an Ed25519"):
+    with pytest.raises(ServiceJwtError, match="not an ECDSA P-256"):
         load_verifier_from_env()
     monkeypatch.delenv("SERVICE_JWT_PUBLIC_KEY_bad")
     monkeypatch.setenv(
-        "SERVICE_JWT_PUBLIC_KEY_../x", _pem_pub(Ed25519PrivateKey.generate())
+        "SERVICE_JWT_PUBLIC_KEY_../x", _pem_pub(ec.generate_private_key(ec.SECP256R1()))
     )
     with pytest.raises(ServiceJwtError, match="malformed kid"):
         load_verifier_from_env()
@@ -310,87 +306,3 @@ def test_interceptor_fails_closed_on_empty_config(verifier_env) -> None:
         ServiceJwtAuthInterceptor(
             v, required_scope="", allowed_callers=frozenset({CALLER})
         )
-
-
-# ---- caller-side token client --------------------------------------------------------
-
-
-class _Resp:
-    def __init__(self, body: object, status: int = 200) -> None:
-        self._body, self._status = body, status
-
-    def raise_for_status(self) -> None:
-        if self._status >= 400:
-            raise requests.HTTPError("boom")
-
-    def json(self) -> object:
-        return self._body
-
-
-def _client(tmp_path: Path, content: str = "sa-token") -> ServiceTokenClient:
-    p = tmp_path / "sa"
-    p.write_text(content)
-    return ServiceTokenClient("http://hub/internal/service-token", SCOPE_A, str(p))
-
-
-def test_token_client_caches_and_refreshes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[dict] = []
-
-    def post(url, json, headers, timeout):  # noqa: A002
-        calls.append({"url": url, "json": json, "auth": headers["Authorization"]})
-        return _Resp({"token": f"t{len(calls)}", "expires_in": 900})
-
-    monkeypatch.setattr(requests, "post", post)
-    c = _client(tmp_path)
-    assert c.get_token() == "t1" and c.get_token() == "t1" and len(calls) == 1
-    assert (
-        calls[0]["json"] == {"scope": SCOPE_A} and calls[0]["auth"] == "Bearer sa-token"
-    )
-    c._expires_at = time.time() + 10  # inside refresh margin
-    assert c.get_token() == "t2"
-
-
-@pytest.mark.parametrize(
-    "resp",
-    [
-        _Resp({}, 401),
-        _Resp({"token": "", "expires_in": 5}),
-        _Resp({"token": "t", "expires_in": 999999}),
-        _Resp([1]),
-    ],
-)
-def test_token_client_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resp: _Resp
-) -> None:
-    monkeypatch.setattr(requests, "post", lambda *a, **k: resp)
-    with pytest.raises(BootstrapRejected):
-        _client(tmp_path).get_token()
-
-
-def test_token_client_unreadable_or_empty_sa_token(tmp_path: Path) -> None:
-    with pytest.raises(BootstrapRejected):
-        ServiceTokenClient("http://x", SCOPE_A, str(tmp_path / "missing")).get_token()
-    with pytest.raises(BootstrapRejected):
-        _client(tmp_path, content="  ").get_token()
-
-
-def test_token_client_transport_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def post(*a, **k):
-        raise requests.ConnectionError("down")
-
-    monkeypatch.setattr(requests, "post", post)
-    with pytest.raises(BootstrapRejected):
-        _client(tmp_path).get_token()
-
-
-async def test_token_client_async(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        requests, "post", lambda *a, **k: _Resp({"token": "ta", "expires_in": 900})
-    )
-    assert await _client(tmp_path).get_token_async() == "ta"

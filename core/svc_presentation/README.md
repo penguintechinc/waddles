@@ -234,13 +234,13 @@ Python caption path and drop the deprecated `caption_events.username` column.
 | `DB_PASSWORD` | *(required, env-only)* | Never a CLI flag |
 | `CACHE_HOST`/`CACHE_PORT` | `localhost`/`6379` | Reserved for the live overlay fan-out (P3) |
 | `CACHE_PASSWORD` | *(optional, env-only)* | |
-| `PUSH_JWKS_URL` | `http://hub-api/.well-known/jwks.json` | hub-api's JWKS endpoint -- verifies PUSH credentials |
+| `PUSH_JWKS_ENDPOINT` | _(empty = refuse every PUSH)_ | hub-api's internal gRPC address (`ServiceAuthService.GetServiceJwks`, TLS 1.3, CA from `HUB_API_GRPC_CA_FILE`) -- verifies PUSH credentials |
 | `PUSH_AUDIENCE` | `waddlebot-internal` | Expected `aud` claim on a PUSH credential |
 | `PUSH_TRUSTED_ISSUER` | `hub-api` | Expected `iss` claim on a PUSH credential |
 | `HUB_API_GRPC_ENDPOINT` | *(required unless detok disabled)* | hub-api internal gRPC, e.g. `https://waddlebot-hub-api-v3:50204` -- overlay display-name resolution |
-| `SERVICE_JWT_TOKEN_ENDPOINT` | *(required unless detok disabled)* | hub-api machine-JWT bootstrap (`POST /internal/service-token`) |
+| `SERVICE_JWT_TOKEN_ENDPOINT` | *(required unless detok disabled)* | hub-api's gRPC address for the machine-JWT bootstrap (`ServiceAuthService.MintServiceToken`) -- same as `HUB_API_GRPC_ENDPOINT` |
 | `SERVICE_JWT_SA_TOKEN_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Projected SA token the bootstrap reads |
-| `HUB_API_GRPC_CA_FILE` | *(empty = system roots)* | PEM CA that signed hub-api's gRPC cert |
+| `HUB_API_GRPC_CA_FILE` | *(required for every https hub-api gRPC call)* | PEM CA that signed hub-api's gRPC cert (TLS 1.3, pinned) |
 | `PII_DETOKENIZATION_ENABLED` | *(unset = on)* | `false` = explicit operator escape hatch (see Detokenization at startup) |
 | `OVERLAY_CODE_CACHE_TTL_SECONDS` | `30` | Overlay code -> community cache TTL; also the worst-case delay before a rotated code stops resolving. `0` = no cache |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`/`_PROTOCOL`/`_HEADERS`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | unset | Standard OTLP env config; unset endpoint = tracing-only (no OTLP export attempted) |
@@ -248,7 +248,7 @@ Python caption path and drop the deprecated `caption_events.username` column.
 All secrets are env-only, never accepted as a CLI flag (`src/config.rs`).
 There is no static shared-secret bearer token (replacing the Python
 alpha's `PRESENTATION_PUSH_TOKEN`) -- PUSH credentials are hub-api-issued
-machine JWTs verified against `PUSH_JWKS_URL` (`overlay_auth`,
+machine JWTs verified against `PUSH_JWKS_ENDPOINT` (`overlay_auth`,
 `service_auth::JwksTrustBundle`).
 
 ## Contracts This Crate Depends On (never re-implemented)

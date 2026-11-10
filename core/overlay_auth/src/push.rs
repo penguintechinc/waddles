@@ -7,7 +7,7 @@
 //! secret is exactly the anti-pattern `security.md` Service-to-Service
 //! Auth calls out ("Long-lived static API keys/shared secrets"). This
 //! module adds **zero new crypto**: it reuses `service_auth`'s existing
-//! EdDSA machine-JWT verifier as-is and layers one thing on top --
+//! ES256 machine-JWT verifier as-is and layers one thing on top --
 //! **per-community scoping** -- so a credential minted for community 42
 //! can never push to community 91. Scoping is encoded directly in the
 //! OIDC `scope` claim (`push_scope()`, `presentation.overlay:push:<id>`)
@@ -172,19 +172,21 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    // Test-only Ed25519 keypair (PKCS8/SPKI-DER), generated once with
-    // `openssl genpkey -algorithm ed25519` / `openssl pkey -pubout`,
+    // Test-only ECDSA P-256 keypair (PKCS8 DER + JWK x/y), generated once with
+    // `cryptography` (`ec.generate_private_key(SECP256R1)`),
     // mirroring `core/service_auth/src/lib.rs`'s own test-key convention.
     // Never used outside this test module.
     const TEST_PRIV_DER: &[u8] = &[
-        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 68, 3, 89, 171, 105, 151, 46,
-        132, 159, 252, 253, 237, 160, 158, 76, 76, 117, 168, 49, 93, 237, 107, 129, 150, 211, 28,
-        65, 232, 226, 2, 111, 69,
+        48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206,
+        61, 3, 1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 209, 234, 92, 37, 28, 130, 216, 139, 48, 1,
+        225, 220, 88, 158, 30, 88, 20, 126, 43, 7, 182, 151, 62, 129, 248, 115, 187, 119, 18, 12,
+        142, 93, 161, 68, 3, 66, 0, 4, 17, 138, 186, 198, 3, 136, 154, 139, 190, 114, 14, 103, 123,
+        44, 247, 26, 31, 171, 203, 86, 236, 40, 175, 97, 236, 72, 32, 22, 179, 142, 109, 144, 173,
+        115, 191, 94, 95, 104, 151, 149, 88, 212, 250, 138, 99, 63, 147, 180, 150, 85, 29, 12, 130,
+        136, 7, 86, 162, 99, 191, 4, 123, 168, 238, 207,
     ];
-    const TEST_PUB_RAW: &[u8] = &[
-        89, 221, 212, 205, 236, 61, 210, 204, 150, 160, 132, 29, 103, 16, 191, 115, 187, 222, 12,
-        175, 169, 67, 5, 83, 51, 1, 220, 184, 65, 145, 95, 187,
-    ];
+    const TEST_X: &str = "EYq6xgOImou-cg5neyz3Gh-ry1bsKK9h7EggFrOObZA";
+    const TEST_Y: &str = "rXO_Xl9ol5VY1PqKYz-TtJZVHQyCiAdWomO_BHuo7s8";
 
     struct StaticTrustBundle(Mutex<HashMap<String, DecodingKey>>);
 
@@ -220,16 +222,16 @@ mod tests {
     }
 
     fn sign(claims: &service_auth::ServiceClaims) -> String {
-        let mut header = Header::new(Algorithm::EdDSA);
+        let mut header = Header::new(Algorithm::ES256);
         header.kid = Some("k1".to_string());
-        jsonwebtoken::encode(&header, claims, &EncodingKey::from_ed_der(TEST_PRIV_DER)).unwrap()
+        jsonwebtoken::encode(&header, claims, &EncodingKey::from_ec_der(TEST_PRIV_DER)).unwrap()
     }
 
     fn trust_source() -> FakeTrustSource {
         FakeTrustSource {
             bundle: StaticTrustBundle(Mutex::new(HashMap::from([(
                 "k1".to_string(),
-                DecodingKey::from_ed_der(TEST_PUB_RAW),
+                DecodingKey::from_ec_components(TEST_X, TEST_Y).expect("test P-256 key"),
             )]))),
             audience: "waddlebot-internal".into(),
         }
