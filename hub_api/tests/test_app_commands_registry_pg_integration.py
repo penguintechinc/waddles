@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey
 from quart import Quart
 from quart_schema import QuartSchema
@@ -236,7 +236,7 @@ async def test_community_delete_cascades_context(dal: Any) -> None:
 async def test_http_end_to_end(dal: Any) -> None:
     w = await _world(dal)
     await _command(dal, w, "ping", w.first)
-    private = Ed25519PrivateKey.generate()
+    private = ec.generate_private_key(ec.SECP256R1())
     key = SigningKey(kid="k1", private_key=private, public_key=private.public_key())
     issuer = ServiceJwtIssuer(
         keys={"k1": key},
