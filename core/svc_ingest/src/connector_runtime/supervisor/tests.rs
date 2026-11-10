@@ -1234,6 +1234,7 @@ fn key(community: i64, conn: i64) -> ConnKey {
         platform: PLATFORM,
         community_id: community,
         connection_id: conn,
+        lane: Default::default(),
     }
 }
 

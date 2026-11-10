@@ -34,6 +34,16 @@ Generic signed-webhook intake: `POST /intake/webhook/{route_key}`. Spec: `docs/s
 - Requires `CONNECTOR_WIX_ENABLED=true` (selector) AND `wix` in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`; helm `connectorRuntime.connector.wix.enabled` + `webhookPlatforms: [wix]` + `pipeline.connectors.digests.wix`.
 - Rejections stay uniform 403; the route answers 200 to Wix within its 1250 ms budget (verify + Valkey `SET NX PX`).
 
+## Kick webhooks
+
+Kick signs every delivery with ONE global RSA key (fetched from `api.kick.com/public/v1/public-key`, TTL-cached, rotation-aware), so a valid
+signature proves "from Kick", not which community. The Kick profile therefore plans a second, `Lane::Webhook` connection per binding when
+`kick` is listed in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`: route key = the host derivation for `(kick, connection_id)`, scheme =
+`Scheme::kick(<broadcaster_user_id>)` from the binding metadata, activated with `webhook_boot::activate_route`. After the signature
+verifies, `broadcaster.user_id` must equal the route's bound id. A binding without a valid numeric `broadcaster_user_id` is refused
+loudly, and a broadcaster claimed by two communities drops both. Activation also subscribes the broadcaster to the bundle's events
+(`kick_subscribe`), host-side with the community's own credential.
+
 ## Replay and abuse limits
 
 `replay_window` 300 s (<= dedup TTL 900 s); Valkey dedup fails CLOSED (503, nothing delivered); 20 failed verifications per source per minute then 429; pre-auth budget before any secret fetch; 1 MiB body cap.
