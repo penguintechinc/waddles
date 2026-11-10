@@ -108,6 +108,17 @@ def _ed25519_pem_and_seed(tmp: Path) -> tuple[bytes, bytes]:
     return pem.read_bytes(), der.read_bytes()[-32:]
 
 
+def _p256_pem(tmp: Path) -> bytes:
+    """Generate an ECDSA P-256 (prime256v1) PKCS8 PEM key -- the service-JWT (ES256) key type."""
+    pem = tmp / "ec.pem"
+    subprocess.run(  # noqa: S603,S607
+        ["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256",
+         "-pkeyopt", "ec_param_enc:named_curve", "-out", str(pem)],
+        check=True, capture_output=True,
+    )
+    return pem.read_bytes()
+
+
 def _write(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(value)
@@ -138,7 +149,7 @@ def _run(tmp_path: Path, jwt_fields: dict[str, str]) -> tuple[subprocess.Complet
 
 def test_existing_secret_with_different_kid_is_kept_and_derived(tmp_path: Path) -> None:
     """Existing Secret under an operator KID: key kept, public key derived, nothing regenerated."""
-    pem, _ = _ed25519_pem_and_seed(tmp_path)
+    pem = _p256_pem(tmp_path)
     proc, state = _run(tmp_path, {
         "SERVICE_JWT_ACTIVE_KID": _b64(b"operator-kid-9"),
         "SERVICE_JWT_PRIVATE_KEY_operator-kid-9": _b64(pem),
@@ -151,7 +162,7 @@ def test_existing_secret_with_different_kid_is_kept_and_derived(tmp_path: Path) 
 
 def test_missing_key_field_fails_loud_naming_expected_key(tmp_path: Path) -> None:
     """Active KID points at an absent field: exit 1, stderr names expected + present key names."""
-    pem, _ = _ed25519_pem_and_seed(tmp_path)
+    pem = _p256_pem(tmp_path)
     proc, _ = _run(tmp_path, {
         "SERVICE_JWT_ACTIVE_KID": _b64(b"operator-kid-9"),
         "SERVICE_JWT_PRIVATE_KEY_some-other-name": _b64(pem),
@@ -167,17 +178,17 @@ def _chart_kid() -> str:
     return _job_script_and_env()[1]["SERVICE_JWT_KEY_ID"]
 
 
-def _pub_b64_of(pem: bytes, tmp: Path) -> str:
-    """Independently derive the base64 raw Ed25519 public key (last 32 DER bytes) from a PEM."""
-    src, der = tmp / "chk.pem", tmp / "chk.der"
+def _pub_pem_of(pem: bytes, tmp: Path) -> str:
+    """Independently derive the public-key SPKI PEM text (what the Job publishes) from a P-256 PEM."""
+    src = tmp / "chk.pem"
     src.write_bytes(pem)
-    subprocess.run(["openssl", "pkey", "-in", str(src), "-pubout", "-outform", "DER", "-out", str(der)], check=True, capture_output=True)  # noqa: S603,S607
-    return _b64(der.read_bytes()[-32:])
+    out = subprocess.run(["openssl", "pkey", "-in", str(src), "-pubout"], check=True, capture_output=True, text=True)  # noqa: S603,S607
+    return out.stdout.rstrip("\n")
 
 
 def test_dotted_kid_resolves_via_quoted_jsonpath(tmp_path: Path) -> None:
     """KID containing dots must resolve (bracket-quoted jsonpath), not fail as an empty field."""
-    pem, _ = _ed25519_pem_and_seed(tmp_path)
+    pem = _p256_pem(tmp_path)
     kid = "kid.v1.2"
     proc, state = _run(tmp_path, {
         "SERVICE_JWT_ACTIVE_KID": _b64(kid.encode()),
@@ -191,7 +202,7 @@ def test_dotted_kid_resolves_via_quoted_jsonpath(tmp_path: Path) -> None:
 
 def test_no_active_kid_falls_back_to_chart_keyid(tmp_path: Path) -> None:
     """Secret without SERVICE_JWT_ACTIVE_KID: chart keyId selects the key and is published as kid."""
-    pem, _ = _ed25519_pem_and_seed(tmp_path)
+    pem = _p256_pem(tmp_path)
     chart_kid = _chart_kid()
     proc, state = _run(tmp_path, {f"SERVICE_JWT_PRIVATE_KEY_{chart_kid}": _b64(pem)})
     assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
@@ -201,7 +212,7 @@ def test_no_active_kid_falls_back_to_chart_keyid(tmp_path: Path) -> None:
     assert "create secret generic" not in (state / "calls.log").read_text()
     cm = (state / "cm.log").read_text()
     assert f"--from-literal=SERVICE_JWT_ACTIVE_KID={chart_kid}" in cm
-    assert f"--from-literal=SERVICE_JWT_PUBLIC_KEY={_pub_b64_of(pem, tmp_path)}" in cm
+    assert f"--from-literal=SERVICE_JWT_PUBLIC_KEY={_pub_pem_of(pem, tmp_path)}" in cm
 
 
 def test_missing_secret_generates_pem_key_and_publishes_public(tmp_path: Path) -> None:
@@ -219,4 +230,21 @@ def test_missing_secret_generates_pem_key_and_publishes_public(tmp_path: Path) -
     assert base64.b64decode((secret_dir / "SERVICE_JWT_ACTIVE_KID").read_text()).decode() == chart_kid
     cm = (state / "cm.log").read_text()
     assert f"--from-literal=SERVICE_JWT_ACTIVE_KID={chart_kid}" in cm
-    assert f"--from-literal=SERVICE_JWT_PUBLIC_KEY={_pub_b64_of(stored_pem, tmp_path)}" in cm
+    assert f"--from-literal=SERVICE_JWT_PUBLIC_KEY={_pub_pem_of(stored_pem, tmp_path)}" in cm
+
+
+def test_ed25519_key_in_secret_fails_loud(tmp_path: Path) -> None:
+    """A leftover Ed25519 service-JWT key (pre-ES256) must fail loud: nothing published, nothing regenerated."""
+    ed_pem, _ = _ed25519_pem_and_seed(tmp_path)
+    proc, state = _run(tmp_path, {
+        "SERVICE_JWT_ACTIVE_KID": _b64(b"operator-kid-9"),
+        "SERVICE_JWT_PRIVATE_KEY_operator-kid-9": _b64(ed_pem),
+    })
+    assert proc.returncode == 1, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert "FATAL" in proc.stderr
+    assert "not an ECDSA P-256 key" in proc.stderr
+    assert "operator-kid-9" in proc.stderr
+    assert "create secret generic" not in (state / "calls.log").read_text()
+    # The bundle-signing step runs first and may publish its own CM; the service-JWT one must not.
+    cm_log = state / "cm.log"
+    assert "SERVICE_JWT_PUBLIC_KEY" not in (cm_log.read_text() if cm_log.exists() else "")
