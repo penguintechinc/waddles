@@ -1,0 +1,119 @@
+{{- /*
+feature/transit-tls-core -- cert-manager path (global.transitTls.certManager.enabled=true) for the Postgres, SeaweedFS S3 and
+Valkey server certificates: a DEDICATED trust domain that exists only in the release namespace.
+  1. `<release>-transit-selfsigned` -- namespaced SelfSigned Issuer.
+  2. `<release>-transit-ca` -- ECDSA P-256 self-signed ROOT CA Certificate (isCA) with critical nameConstraints permitting ONLY the
+     data-store FQDNs below. It is NOT chained to the cluster-wide `waddlebot-internal-ca`.
+  3. `<release>-transit` -- namespaced CA Issuer over that root. Only Certificates in this namespace can reference it.
+  4. Postgres / SeaweedFS / Valkey server Certificates issued by it: ECDSA P-256 (ecdsa-with-SHA256), 90d auto-renew, explicit FQDN
+     SANs only -- never a wildcard (waddlebot.assertNoWildcardSan fails the render).
+Data-store clients trust ONLY this root (waddlebot.transitTls.caSecretName), so a leaf minted by the cluster-wide internal CA -- even
+with a Postgres/Valkey/S3 SAN -- is rejected. The hub-api HTTPS and gRPC/host-API mTLS certs keep `waddlebot-internal-ca`, a separate
+trust domain. With cert-manager missing the Secrets never appear and the pods stay ContainerCreating -- fail loud, no plaintext
+fallback. Regular resources (not hooks): the first-rollout order in docs/transit-encryption.md covers the pre-upgrade migration Job.
+*/ -}}
+{{- if include "waddlebot.transitTls.cm" . }}
+{{- $tt := .Values.global.transitTls.certManager }}
+{{- $fn := include "waddlebot.fullname" . }}
+{{- $targets := list }}
+{{- if .Values.infrastructure.postgresql.enabled }}
+{{- $targets = append $targets (dict "secret" (include "waddlebot.transitTls.pgSecretName" .) "component" "postgres-tls" "dns" (include "waddlebot.transitTls.pgDnsNames" . | fromJsonArray)) }}
+{{- end }}
+{{- if .Values.infrastructure.seaweedfs.enabled }}
+{{- $targets = append $targets (dict "secret" (include "waddlebot.transitTls.s3SecretName" .) "component" "seaweedfs-tls" "dns" (include "waddlebot.transitTls.s3DnsNames" . | fromJsonArray)) }}
+{{- end }}
+{{- if .Values.infrastructure.redis.tls.enabled }}
+{{- $targets = append $targets (dict "secret" (printf "%s-valkey-tls" $fn) "component" "valkey-tls" "dns" (include "waddlebot.transitTls.valkeyCmDnsNames" . | fromJsonArray)) }}
+{{- end }}
+{{- range $t := $targets }}
+{{- include "waddlebot.assertNoWildcardSan" (dict "what" (printf "global.transitTls (%s Certificate)" $t.component) "names" $t.dns) }}
+{{- end }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "waddlebot.transitTls.selfSignedIssuerName" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: transit-ca
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fn }}-transit-ca
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: transit-ca
+spec:
+  isCA: true
+  commonName: {{ $fn }}-transit-ca
+  secretName: {{ $fn }}-transit-ca
+  duration: {{ $tt.caDuration | default "8760h" | quote }}
+  renewBefore: {{ $tt.caRenewBefore | default "1440h" | quote }}
+  usages:
+    - cert sign
+    - crl sign
+  # Critical: this root can sign ONLY the data-store FQDNs (and their subdomains). Needs cert-manager's NameConstraints feature
+  # gate, which the internal root (k8s/dal2alpha/internal-ca.yaml) already requires.
+  nameConstraints:
+    critical: true
+    permitted:
+      dnsDomains:
+        {{- range (include "waddlebot.transitTls.caPermittedDomains" . | fromJsonArray) }}
+        - {{ . | quote }}
+        {{- end }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: {{ include "waddlebot.transitTls.selfSignedIssuerName" . }}
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "waddlebot.transitTls.nsIssuerName" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: transit-ca
+spec:
+  ca:
+    secretName: {{ $fn }}-transit-ca
+{{- range $t := $targets }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $t.secret }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $t.component }}
+spec:
+  secretName: {{ $t.secret }}
+  duration: {{ $tt.duration | default "2160h" | quote }}
+  renewBefore: {{ $tt.renewBefore | default "360h" | quote }}
+  # Server certs only; clients verify, they do not present certs.
+  usages:
+    - server auth
+  dnsNames:
+    {{- range $t.dns }}
+    - {{ . | quote }}
+    {{- end }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: {{ include "waddlebot.transitTls.nsIssuerName" $ }}
+    kind: Issuer
+    group: cert-manager.io
+{{- end }}
+{{- end }}

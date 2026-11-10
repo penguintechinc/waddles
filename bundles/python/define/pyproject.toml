@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-define"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!define <term>` -> a concise AI-generated definition, relayed to the caller's origin platform. AI-backed (ai.generate), activation-gated, no feature flag."
 requires-python = ">=3.13"
 dependencies = []

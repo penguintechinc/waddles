@@ -10,7 +10,7 @@
 //! - JWKS `kid` lookup: [`verify`] reads the assertion's `kid` header and
 //!   resolves it against the same [`TrustBundle`] `auth::authenticate`
 //!   already uses for the machine JWT -- the calling service signs both
-//!   tokens with its own per-service Ed25519 key (PR #438's per-service
+//!   tokens with its own per-service ECDSA P-256 key (PR #438's per-service
 //!   JWKS), so there is no second, separately-mounted static key here.
 //! - Replay protection: [`ReplayCache`]/[`InMemoryReplayCache`], scoped to
 //!   this proxy instance (see that trait's doc for the accepted
@@ -32,7 +32,7 @@
 //!   `destination_matches` uses -- so the two checks can never drift apart
 //!   on what counts as "inside the grant".
 //!
-//! Header: `X-Waddles-Egress-Assertion: <compact EdDSA JWT>` (re-exported
+//! Header: `X-Waddles-Egress-Assertion: <compact ES256 JWT>` (re-exported
 //! from `egress_assertion` as [`ASSERTION_HEADER`]).
 
 use std::collections::HashMap;
@@ -121,8 +121,12 @@ impl ReplayCache for InMemoryReplayCache {
     }
 }
 
-/// The assertion's one signing algorithm (RFC 8725 one-alg-per-verifier).
-const ASSERTION_ALGORITHM: &str = "EdDSA";
+/// The assertion's signing algorithm (RFC 8725 one-alg-per-verifier): ES256.
+const ASSERTION_ALGORITHM: &str = "ES256";
+
+/// Legacy algorithm, accepted only while the trust bundle's legacy window
+/// (`SERVICE_JWT_ACCEPT_LEGACY_EDDSA`) is open.
+const LEGACY_ASSERTION_ALGORITHM: &str = "EdDSA";
 
 /// Outcome of verifying one assertion token, with the closed-vocabulary
 /// `alg` / `outcome` labels the metric and log line need.
@@ -143,12 +147,18 @@ impl Checked {
 }
 
 /// Every check, in order, with no metrics or logging: JOSE header vetting
-/// (`alg` must be exactly EdDSA; `alg: none`, `jku`/`jwk`/`x5u`/`x5c`/`crit`
+/// (`alg` must be exactly ES256, or EdDSA while the legacy window is open; `alg: none`, `jku`/`jwk`/`x5u`/`x5c`/`crit`
 /// and a hostile `kid` are refused before any key lookup), `kid` resolution
 /// against `trust_bundle`, then signature / claims / TTL through
-/// `egress_assertion::verify_with_key`.
+/// `egress_assertion::verify_with_key_policy`.
 async fn check(token: &str, trust_bundle: &dyn TrustBundle, max_ttl_secs: u64) -> Checked {
-    let header = match inspect_header(token, &[ASSERTION_ALGORITHM], KidPolicy::Vet) {
+    let legacy = trust_bundle.accept_legacy_eddsa();
+    let allowed: &[&str] = if legacy {
+        &[ASSERTION_ALGORITHM, LEGACY_ASSERTION_ALGORITHM]
+    } else {
+        &[ASSERTION_ALGORITHM]
+    };
+    let header = match inspect_header(token, allowed, KidPolicy::Vet) {
         Ok(header) => header,
         Err(rejection) => {
             return Checked::rejected(
@@ -160,25 +170,30 @@ async fn check(token: &str, trust_bundle: &dyn TrustBundle, max_ttl_secs: u64) -
             );
         }
     };
+    let alg_label = if header.alg == LEGACY_ASSERTION_ALGORITHM {
+        "eddsa"
+    } else {
+        "es256"
+    };
     let Some(kid) = header.kid else {
         return Checked::rejected(
             AssertionError::UnknownKeyId(None),
-            "eddsa",
+            alg_label,
             REASON_UNKNOWN_KID,
         );
     };
     let Some(key) = trust_bundle.public_key(&kid).await else {
         return Checked::rejected(
             AssertionError::UnknownKeyId(Some(kid)),
-            "eddsa",
+            alg_label,
             REASON_UNKNOWN_KID,
         );
     };
 
-    match egress_assertion::verify_with_key(token, &key, max_ttl_secs) {
+    match egress_assertion::verify_with_key_policy(token, &key, max_ttl_secs, legacy) {
         Ok(claims) => Checked {
             result: Ok(claims),
-            alg: "eddsa",
+            alg: alg_label,
             outcome: OUTCOME_OK,
         },
         Err(error) => {
@@ -187,7 +202,7 @@ async fn check(token: &str, trust_bundle: &dyn TrustBundle, max_ttl_secs: u64) -
                 egress_assertion::AssertionError::TtlTooLong { .. } => REASON_INVALID_CLAIM,
                 _ => REASON_INVALID,
             };
-            Checked::rejected(AssertionError::Assertion(error), "eddsa", outcome)
+            Checked::rejected(AssertionError::Assertion(error), alg_label, outcome)
         }
     }
 }
@@ -292,20 +307,27 @@ mod tests {
     use service_auth::test_support::Capture;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // Fixed, test-only Ed25519 keypairs (same fixture as `core/service_auth`).
+    // Fixed, test-only ECDSA P-256 keypairs (same fixture as `core/service_auth`).
     const KEY_A_PRIV_DER: &[u8] = &[
-        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 1, 204, 5, 142, 35, 153, 231, 38,
-        150, 122, 1, 218, 34, 237, 70, 125, 233, 62, 126, 103, 151, 16, 11, 238, 95, 122, 209, 74,
-        183, 9, 171, 161,
+        48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206,
+        61, 3, 1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 209, 234, 92, 37, 28, 130, 216, 139, 48, 1,
+        225, 220, 88, 158, 30, 88, 20, 126, 43, 7, 182, 151, 62, 129, 248, 115, 187, 119, 18, 12,
+        142, 93, 161, 68, 3, 66, 0, 4, 17, 138, 186, 198, 3, 136, 154, 139, 190, 114, 14, 103, 123,
+        44, 247, 26, 31, 171, 203, 86, 236, 40, 175, 97, 236, 72, 32, 22, 179, 142, 109, 144, 173,
+        115, 191, 94, 95, 104, 151, 149, 88, 212, 250, 138, 99, 63, 147, 180, 150, 85, 29, 12, 130,
+        136, 7, 86, 162, 99, 191, 4, 123, 168, 238, 207,
     ];
-    const KEY_A_PUB_RAW: &[u8] = &[
-        169, 90, 255, 23, 51, 151, 156, 147, 56, 247, 214, 168, 76, 160, 67, 99, 211, 238, 208, 5,
-        69, 236, 245, 115, 4, 81, 1, 42, 23, 107, 4, 187,
-    ];
+    const KEY_A_X: &str = "EYq6xgOImou-cg5neyz3Gh-ry1bsKK9h7EggFrOObZA";
+    const KEY_A_Y: &str = "rXO_Xl9ol5VY1PqKYz-TtJZVHQyCiAdWomO_BHuo7s8";
+
     const KEY_B_PRIV_DER: &[u8] = &[
-        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 145, 56, 92, 35, 32, 192, 103,
-        161, 66, 249, 233, 0, 174, 22, 45, 100, 136, 104, 59, 129, 251, 81, 20, 214, 221, 250, 219,
-        227, 139, 109, 70, 185,
+        48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206,
+        61, 3, 1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 20, 206, 40, 170, 137, 187, 67, 100, 72, 148,
+        97, 198, 42, 118, 251, 253, 181, 175, 151, 157, 190, 138, 70, 223, 254, 35, 143, 55, 95,
+        203, 51, 94, 161, 68, 3, 66, 0, 4, 98, 209, 209, 125, 68, 215, 236, 61, 124, 80, 33, 30,
+        98, 233, 193, 159, 144, 225, 217, 28, 227, 168, 123, 73, 147, 40, 25, 77, 49, 223, 224,
+        212, 176, 207, 231, 228, 170, 8, 191, 45, 65, 72, 8, 104, 108, 95, 236, 201, 40, 162, 111,
+        235, 130, 235, 181, 132, 203, 245, 163, 102, 27, 85, 90, 176,
     ];
 
     const MAX_TTL: u64 = 60;
@@ -320,7 +342,8 @@ mod tests {
     impl TrustBundle for Bundle {
         async fn public_key(&self, kid: &str) -> Option<DecodingKey> {
             self.lookups.fetch_add(1, Ordering::SeqCst);
-            (kid == "k1").then(|| DecodingKey::from_ed_der(KEY_A_PUB_RAW))
+            (kid == "k1")
+                .then(|| DecodingKey::from_ec_components(KEY_A_X, KEY_A_Y).expect("test P-256 key"))
         }
     }
 
@@ -348,15 +371,15 @@ mod tests {
     }
 
     fn good_header() -> Value {
-        json!({"alg": "EdDSA", "typ": "JWT", "kid": "k1"})
+        json!({"alg": "ES256", "typ": "JWT", "kid": "k1"})
     }
 
     fn sign_with(key_der: &[u8], header: &Value, claims: &Value) -> String {
         let message = format!("{}.{}", b64(header), b64(claims));
         let signature = jsonwebtoken::crypto::sign(
             message.as_bytes(),
-            &EncodingKey::from_ed_der(key_der),
-            Algorithm::EdDSA,
+            &EncodingKey::from_ec_der(key_der),
+            Algorithm::ES256,
         )
         .expect("sign");
         format!("{message}.{signature}")
@@ -403,7 +426,7 @@ mod tests {
         let (result, capture) = run(&raw_token(&good_header(), &claims()), &bundle).await;
         let verified = result.expect("verifies");
         assert_eq!(verified.tenant, "tenant-a");
-        assert_eq!(capture.count("egress_assertion", "eddsa", "ok"), 1);
+        assert_eq!(capture.count("egress_assertion", "es256", "ok"), 1);
         assert_eq!(capture.total(), 1);
         assert_eq!(capture.points("waddles_jwt_verification_seconds").len(), 1);
     }
@@ -429,9 +452,12 @@ mod tests {
         ] {
             let mut header = Header::new(alg);
             header.kid = Some("k1".into());
-            let token =
-                jsonwebtoken::encode(&header, &claims(), &EncodingKey::from_secret(KEY_A_PUB_RAW))
-                    .expect("encode");
+            let token = jsonwebtoken::encode(
+                &header,
+                &claims(),
+                &EncodingKey::from_secret(KEY_A_X.as_bytes()),
+            )
+            .expect("encode");
             assert_refused(&token, REASON_ALG_MISMATCH, label, true).await;
         }
         let header = json!({"alg": "RS256", "kid": "k1"});
@@ -452,7 +478,7 @@ mod tests {
             assert_refused(
                 &raw_token(&header, &claims()),
                 REASON_FORBIDDEN_HEADER,
-                "eddsa",
+                "es256",
                 true,
             )
             .await;
@@ -472,7 +498,7 @@ mod tests {
             assert_refused(
                 &raw_token(&header, &claims()),
                 REASON_BAD_KID,
-                "eddsa",
+                "es256",
                 true,
             )
             .await;
@@ -482,15 +508,15 @@ mod tests {
     #[tokio::test]
     async fn absent_and_unknown_kid_are_unknown_kid() {
         let bundle = bundle();
-        let (result, capture) = run(&raw_token(&json!({"alg": "EdDSA"}), &claims()), &bundle).await;
+        let (result, capture) = run(&raw_token(&json!({"alg": "ES256"}), &claims()), &bundle).await;
         assert!(matches!(result, Err(AssertionError::UnknownKeyId(None))));
-        assert_eq!(capture.count("egress_assertion", "eddsa", "unknown_kid"), 1);
+        assert_eq!(capture.count("egress_assertion", "es256", "unknown_kid"), 1);
         assert_eq!(bundle.lookups.load(Ordering::SeqCst), 0);
 
-        let header = json!({"alg": "EdDSA", "kid": "retired"});
+        let header = json!({"alg": "ES256", "kid": "retired"});
         let (result, capture) = run(&raw_token(&header, &claims()), &bundle).await;
         assert!(matches!(&result, Err(AssertionError::UnknownKeyId(Some(k))) if k == "retired"));
-        assert_eq!(capture.count("egress_assertion", "eddsa", "unknown_kid"), 1);
+        assert_eq!(capture.count("egress_assertion", "es256", "unknown_kid"), 1);
         assert_eq!(bundle.lookups.load(Ordering::SeqCst), 1);
     }
 
@@ -523,14 +549,14 @@ mod tests {
             (future, REASON_IMMATURE),
             (long_ttl, "invalid_claim"),
         ] {
-            assert_refused(&raw_token(&good_header(), &claims), outcome, "eddsa", false).await;
+            assert_refused(&raw_token(&good_header(), &claims), outcome, "es256", false).await;
         }
     }
 
     #[tokio::test]
     async fn a_forged_signature_is_bad_signature() {
         let token = sign_with(KEY_B_PRIV_DER, &good_header(), &claims());
-        assert_refused(&token, REASON_BAD_SIGNATURE, "eddsa", false).await;
+        assert_refused(&token, REASON_BAD_SIGNATURE, "es256", false).await;
     }
 
     #[tokio::test]
@@ -562,7 +588,7 @@ mod tests {
             cache.check_and_record(&first.jti, first.exp),
             Err(AssertionError::Replayed(_))
         ));
-        assert_eq!(capture.count("egress_assertion", "eddsa", "ok"), 1);
+        assert_eq!(capture.count("egress_assertion", "es256", "ok"), 1);
 
         // Missing header: not a verification at all.
         let empty = http::HeaderMap::new();

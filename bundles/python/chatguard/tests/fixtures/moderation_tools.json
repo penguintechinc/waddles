@@ -1,0 +1,230 @@
+{
+  "discord.moderation.ban": {
+    "app_id": "waddles.core.service.discord",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "delete_message_seconds": {
+          "maximum": 604800,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "user": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user"
+      ],
+      "type": "object"
+    },
+    "required_scope": "community:moderate",
+    "source": "platform bundle exported_tools (PR #1118 / #1124)"
+  },
+  "discord.moderation.kick": {
+    "app_id": "waddles.core.service.discord",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "user": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user"
+      ],
+      "type": "object"
+    },
+    "required_scope": "community:moderate",
+    "source": "platform bundle exported_tools (PR #1118 / #1124)"
+  },
+  "discord.moderation.timeout": {
+    "app_id": "waddles.core.service.discord",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_seconds": {
+          "maximum": 2419200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "user": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user",
+        "duration_seconds"
+      ],
+      "type": "object"
+    },
+    "required_scope": "community:moderate",
+    "source": "platform bundle exported_tools (PR #1118 / #1124)"
+  },
+  "discord.moderation.unban": {
+    "app_id": "waddles.core.service.discord",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "user": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user"
+      ],
+      "type": "object"
+    },
+    "required_scope": "community:moderate",
+    "source": "platform bundle exported_tools (PR #1118 / #1124)"
+  },
+  "discord.moderation.untimeout": {
+    "app_id": "waddles.core.service.discord",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "user": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user"
+      ],
+      "type": "object"
+    },
+    "required_scope": "community:moderate",
+    "source": "platform bundle exported_tools (PR #1118 / #1124)"
+  },
+  "twitch.moderation.ban": {
+    "app_id": "waddles.core.service.twitch",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "maxLength": 500,
+          "type": "string"
+        },
+        "user": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user"
+      ],
+      "type": "object"
+    },
+    "required_scope": "community:moderate",
+    "source": "platform bundle exported_tools (PR #1118 / #1124)"
+  },
+  "twitch.moderation.delete_message": {
+    "app_id": "waddles.core.service.twitch",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "message_id": {
+          "maxLength": 64,
+          "type": "string"
+        }
+      },
+      "required": [
+        "message_id"
+      ],
+      "type": "object"
+    },
+    "required_scope": "community:moderate",
+    "source": "platform bundle exported_tools (PR #1118 / #1124)"
+  },
+  "twitch.moderation.timeout": {
+    "app_id": "waddles.core.service.twitch",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "duration": {
+          "maximum": 1209600,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "reason": {
+          "maxLength": 500,
+          "type": "string"
+        },
+        "user": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user",
+        "duration"
+      ],
+      "type": "object"
+    },
+    "required_scope": "community:moderate",
+    "source": "platform bundle exported_tools (PR #1118 / #1124)"
+  },
+  "twitch.moderation.unban": {
+    "app_id": "waddles.core.service.twitch",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "user": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user"
+      ],
+      "type": "object"
+    },
+    "required_scope": "community:moderate",
+    "source": "platform bundle exported_tools (PR #1118 / #1124)"
+  },
+  "youtube.chat.ban": {
+    "app_id": "waddles.core.service.youtube",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_seconds": {
+          "maximum": 1209600,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "user": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user"
+      ],
+      "type": "object"
+    },
+    "required_scope": "community:moderate",
+    "source": "ASSUMED (S3a in flight, no published schema) -- re-verify when youtube tools merge"
+  },
+  "youtube.chat.unban": {
+    "app_id": "waddles.core.service.youtube",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "user": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user"
+      ],
+      "type": "object"
+    },
+    "required_scope": "community:moderate",
+    "source": "ASSUMED (S3a in flight) -- re-verify"
+  }
+}

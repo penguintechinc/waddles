@@ -1447,6 +1447,53 @@ async fn relay_push_can_never_reach_host_tool_only_ops_even_with_every_grant() {
 }
 
 #[tokio::test]
+async fn relay_push_refuses_eventsub_create_and_delete_but_list_still_queues() {
+    // The host reconcile path alone may create/delete EventSub subscriptions; `caps()` holds
+    // every grant, so the refusal must be `host_tool_only`, before any grant check or queueing.
+    let mut refused = 0;
+    for op in ["eventsub.create", "eventsub.delete"] {
+        let c = caps(FakeRelayQueue::with_live_drain());
+        let err = c
+            .handle(
+                &scope(),
+                HostCallBody {
+                    app_id: "waddles.bot.commands.default".to_string(),
+                    capability: CapabilityKind::Relay,
+                    op: "send".to_string(),
+                    args: json!({
+                        "provider": "twitch",
+                        "message_json": json!({"op": op}).to_string(),
+                    }),
+                    call_id: 1,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_tool_only", "{op}");
+        assert!(c.relay_queue.envelopes().is_empty(), "{op}");
+        refused += 1;
+    }
+    assert_eq!(refused, 2, "denominator: eventsub ops refused");
+    let c = caps(FakeRelayQueue::with_live_drain());
+    c.handle(
+        &scope(),
+        HostCallBody {
+            app_id: "waddles.bot.commands.default".to_string(),
+            capability: CapabilityKind::Relay,
+            op: "send".to_string(),
+            args: json!({
+                "provider": "twitch",
+                "message_json": json!({"op": "eventsub.list"}).to_string(),
+            }),
+            call_id: 1,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.relay_queue.envelopes().len(), 1);
+}
+
+#[tokio::test]
 async fn chat_clear_needs_its_own_permission_not_chat_delete() {
     let tools = vec![exported(
         "twitch.chat.clear",
@@ -1616,4 +1663,93 @@ async fn a_placeholder_user_wire_is_refused_for_non_role_non_moderation_ops() {
     assert_eq!(err.code, "forbidden");
     assert!(err.message.contains("placeholder"), "{}", err.message);
     assert!(c.relay_queue.envelopes().is_empty());
+}
+
+#[tokio::test]
+async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() {
+    // The guest relay path has no verified actor, scope check or protected-target check: every
+    // moderation op is host-tool-only. `caps()` holds a permissive gate (moderation.<p> granted),
+    // so the refusal must come from `host_tool_only`, before any grant check.
+    let mut checked = 0;
+    for (provider, ops) in [
+        ("twitch", vec!["mod.ban", "mod.timeout", "mod.unban"]),
+        (
+            "discord",
+            vec!["mod.kick", "mod.ban", "mod.unban", "mod.timeout"],
+        ),
+        (
+            "youtube",
+            vec!["mod.ban", "mod.unban", "mod.add", "mod.remove"],
+        ),
+    ] {
+        for op in ops {
+            let c = caps(FakeRelayQueue::with_live_drain());
+            let err = c
+                .handle(
+                    &twitch_event(Some("500")),
+                    HostCallBody {
+                        app_id: "waddles.bot.commands.default".to_string(),
+                        capability: CapabilityKind::Relay,
+                        op: "send".to_string(),
+                        args: json!({
+                            "provider": provider,
+                            "message_json": json!({"op": op, "user_id": "141981764"}).to_string(),
+                        }),
+                        call_id: 1,
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "host_tool_only", "{provider} {op}");
+            assert!(c.relay_queue.envelopes().is_empty(), "{provider} {op}");
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 3 + 4 + 4, "denominator: moderation ops attempted");
+    // Kick registers no ops and is not a relay provider: refused outright, never queued.
+    let c = caps(FakeRelayQueue::with_live_drain());
+    let err = c
+        .handle(
+            &twitch_event(Some("500")),
+            HostCallBody {
+                app_id: "waddles.bot.commands.default".to_string(),
+                capability: CapabilityKind::Relay,
+                op: "send".to_string(),
+                args: json!({
+                    "provider": "kick",
+                    "message_json": json!({"op": "mod.ban", "user_id": "1"}).to_string(),
+                }),
+                call_id: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "unknown_provider");
+    assert!(c.relay_queue.envelopes().is_empty());
+}
+
+#[tokio::test]
+async fn the_generic_queued_producer_itself_refuses_host_tool_only_ops() {
+    // Defense in depth: even called directly (a future caller forgetting the upstream check),
+    // `handle_platform_queued_op` never queues a host-tool-only op.
+    for (provider, op) in [
+        ("twitch", "mod.ban"),
+        ("discord", "mod.kick"),
+        ("youtube", "mod.add"),
+    ] {
+        let c = caps(FakeRelayQueue::with_live_drain());
+        let reg = bundle_capability_gate::platform_ops::registered(provider, op)
+            .unwrap_or_else(|| panic!("{provider}/{op} must be registered"));
+        let err = c
+            .handle_platform_queued_op(
+                &twitch_event(Some("500")),
+                provider,
+                RelayOp::Registered(reg),
+                &json!({"user_id": "141981764"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_tool_only", "{provider} {op}");
+        assert!(c.relay_queue.envelopes().is_empty());
+    }
 }

@@ -40,7 +40,7 @@ jobs:
   # doesn't occupy a runner/check-run at all.
   detect-changes:
     name: Detect Changed Files
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
     if: github.event_name != 'release'
     outputs:
       changed: ${{ steps.changes.outputs.changed }}
