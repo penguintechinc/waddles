@@ -8,6 +8,11 @@
 //!   resolves the actor's active community (tokenized user UUID only; hub-api never sees a
 //!   Discord id) and stamps `active_community` (a community `public_id` UUID) into the
 //!   payload; routing keys on that, never on a name.
+//! * Routing is recorded host-side: once the community is resolved, [`ContextSink`] verifies the
+//!   stored interaction against the connection's own guild and application id and calls
+//!   [`InteractionStore::set_routed`] with the hub-resolved numeric community. Only then can the
+//!   sender-side ownership check answer that interaction; none of the three values comes from
+//!   the guest or the payload. A failed check answers the user generically and publishes nothing.
 //! * `/context` is handled HERE, never published to a bundle: bare `/context` echoes the
 //!   current community and lists the switchable ones; `/context <name>` matches the display
 //!   name (or a listed UUID) client-side and PUTs the `public_id`. Names never resolve at
@@ -28,7 +33,9 @@ use serde_json::Value;
 use crate::commands_reconcile::BoxFut;
 use crate::connector::sink::{EventSink, SinkError};
 use crate::connector::types::{ConnectionCtx, ConnectorEvent};
-use crate::interaction_store::InteractionStore;
+use crate::interaction_store::{InteractionStore, RouteOnce};
+use prometheus::{HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry};
+use tracing::Instrument;
 
 /// Machine-JWT scope svc-ingest holds for the active-context endpoints.
 pub const ACTIVE_CONTEXT_JWT_SCOPE: &str = "dataplane:active-context";
@@ -57,6 +64,10 @@ pub struct ContextView {
     /// Active community `public_id`.
     #[serde(rename = "communityPublicId")]
     pub community_public_id: String,
+    /// Active community NUMERIC id (the key the interaction ownership check compares).
+    /// Required: a hub answer without it is `Malformed`, so routing fails closed.
+    #[serde(rename = "communityId")]
+    pub community_id: i64,
     /// Active community display name.
     #[serde(rename = "communityName")]
     pub community_name: String,
@@ -315,6 +326,57 @@ impl InteractionReplier {
     }
 }
 
+/// Turns the invoker's raw Discord user id (host-captured from the verified frame) into the
+/// tokenized actor UUID, inside the PII boundary. Production wires the hub-backed tokenizer.
+pub trait InvokerTokenizer: Send + Sync {
+    /// Tokenized actor for `raw_user_id` on the connection `source_id`.
+    fn tokenize<'a>(
+        &'a self,
+        source_id: &'a str,
+        raw_user_id: &'a str,
+    ) -> BoxFut<'a, Result<String, ContextError>>;
+}
+
+/// Prometheus instruments for the routing step. Labels are bounded `&'static str` outcomes
+/// only; never an id, guild or user (PII-free by construction).
+#[derive(Clone)]
+pub struct RoutingMetrics {
+    /// `svc_ingest_interaction_routing_total{outcome}`: `routed` or the refusal reason.
+    pub routing_total: IntCounterVec,
+    /// `svc_ingest_interaction_routing_duration_seconds{outcome}`: verify + record latency.
+    pub routing_duration_seconds: HistogramVec,
+}
+
+/// Registers the routing metrics on `registry` (once per registry).
+///
+/// # Errors
+/// [`prometheus::Error`] when registration fails (e.g. a duplicate).
+pub fn register_routing_metrics(registry: &Registry) -> Result<RoutingMetrics, prometheus::Error> {
+    let routing_total = IntCounterVec::new(
+        Opts::new(
+            "svc_ingest_interaction_routing_total",
+            "Discord interactions routed to a community (or refused), by outcome",
+        ),
+        &["outcome"],
+    )?;
+    let routing_duration_seconds = HistogramVec::new(
+        HistogramOpts::new(
+            "svc_ingest_interaction_routing_duration_seconds",
+            "Interaction routing latency (ownership verify + record) in seconds",
+        )
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+        ]),
+        &["outcome"],
+    )?;
+    registry.register(Box::new(routing_total.clone()))?;
+    registry.register(Box::new(routing_duration_seconds.clone()))?;
+    Ok(RoutingMetrics {
+        routing_total,
+        routing_duration_seconds,
+    })
+}
+
 const GENERIC_UNAVAILABLE: &str =
     "Sorry, that command is temporarily unavailable. Please try again shortly.";
 
@@ -323,16 +385,109 @@ pub struct ContextSink<S: EventSink> {
     inner: S,
     source: Arc<dyn ContextSource>,
     replier: Arc<InteractionReplier>,
+    store: InteractionStore,
+    application_id: String,
+    metrics: RoutingMetrics,
+    tokenizer: Arc<dyn InvokerTokenizer>,
 }
 
 impl<S: EventSink> ContextSink<S> {
-    /// Wraps `inner`.
+    /// Wraps `inner`. `application_id` is the Discord application (client) id of THIS
+    /// connection's bot, from the host's own credential binding; `store` is the host-held
+    /// interaction store the sender-side ownership check reads.
     #[must_use]
-    pub fn new(inner: S, source: Arc<dyn ContextSource>, replier: Arc<InteractionReplier>) -> Self {
+    pub fn new(
+        inner: S,
+        source: Arc<dyn ContextSource>,
+        replier: Arc<InteractionReplier>,
+        store: InteractionStore,
+        application_id: String,
+        metrics: RoutingMetrics,
+        tokenizer: Arc<dyn InvokerTokenizer>,
+    ) -> Self {
         Self {
             inner,
             source,
             replier,
+            store,
+            application_id,
+            metrics,
+            tokenizer,
+        }
+    }
+
+    /// Derives the invoking actor from the HOST-captured record instead of trusting the guest
+    /// event: the invoker's raw id (from the verified frame) is tokenized host-side and must
+    /// equal the event's actor. A guest naming another user's interaction id is refused.
+    async fn verified_actor(
+        &self,
+        ctx: &ConnectionCtx,
+        id: &str,
+        claimed: Option<&str>,
+    ) -> Result<String, &'static str> {
+        let claimed = claimed.ok_or("no_actor")?;
+        let rec = self
+            .store
+            .get(id)
+            .await
+            .map_err(|_| "store_unavailable")?
+            .ok_or("interaction_expired")?;
+        let raw = rec.invoker_user_id.as_deref().ok_or("invoker_unrecorded")?;
+        let derived = self
+            .tokenizer
+            .tokenize(&ctx.source_id, raw)
+            .await
+            .map_err(|_| "tokenize_unavailable")?;
+        if derived.eq_ignore_ascii_case(claimed) {
+            Ok(derived)
+        } else {
+            Err("actor_mismatch")
+        }
+    }
+
+    fn note_outcome(&self, outcome: &'static str, started: std::time::Instant) {
+        self.metrics
+            .routing_total
+            .with_label_values(&[outcome])
+            .inc();
+        self.metrics
+            .routing_duration_seconds
+            .with_label_values(&[outcome])
+            .observe(started.elapsed().as_secs_f64());
+    }
+
+    /// Verifies the stored interaction belongs to this connection's guild and application,
+    /// then records `community_id` as its routed community. Returns the refusal reason.
+    async fn route(
+        &self,
+        ctx: &ConnectionCtx,
+        id: &str,
+        community_id: i64,
+    ) -> Result<(), &'static str> {
+        if community_id <= 0 {
+            return Err("community_id_invalid");
+        }
+        let rec = self
+            .store
+            .get(id)
+            .await
+            .map_err(|_| "store_unavailable")?
+            .ok_or("interaction_expired")?;
+        if rec.guild_id.as_deref() != Some(ctx.source_id.as_str()) {
+            return Err("guild_mismatch");
+        }
+        if rec.application_id != self.application_id {
+            return Err("application_mismatch");
+        }
+        match self
+            .store
+            .route_once(id, community_id)
+            .await
+            .map_err(|_| "store_unavailable")?
+        {
+            RouteOnce::Recorded | RouteOnce::Same => Ok(()),
+            RouteOnce::Unknown => Err("interaction_expired"),
+            RouteOnce::Conflict => Err("already_routed_elsewhere"),
         }
     }
 
@@ -376,8 +531,13 @@ impl<S: EventSink> EventSink for ContextSink<S> {
         else {
             return self.inner.publish(ctx, event).await;
         };
-        let Some(user) = event.actor.clone() else {
-            return self.refuse(&id, "no_actor").await;
+        let verify_started = std::time::Instant::now();
+        let user = match self.verified_actor(ctx, &id, event.actor.as_deref()).await {
+            Ok(u) => u,
+            Err(reason) => {
+                self.note_outcome(reason, verify_started);
+                return self.refuse(&id, reason).await;
+            }
         };
         let view = match self.source.get(&ctx.source_id, &user).await {
             Ok(v) => v,
@@ -404,6 +564,27 @@ impl<S: EventSink> EventSink for ContextSink<S> {
             }
             return Ok(());
         }
+        let started = std::time::Instant::now();
+        let span = tracing::info_span!(
+            "interaction.route",
+            platform = "discord",
+            community_id = view.community_id
+        );
+        let routed = self
+            .route(ctx, &id, view.community_id)
+            .instrument(span.clone())
+            .await;
+        let outcome = routed.err().unwrap_or("routed");
+        self.note_outcome(outcome, started);
+        if let Err(reason) = routed {
+            return self.refuse(&id, reason).await;
+        }
+        tracing::info!(
+            parent: &span,
+            platform = "discord",
+            community_id = view.community_id,
+            "interaction routed to community"
+        );
         if let Some(obj) = payload.as_object_mut() {
             obj.insert(
                 "active_community".to_string(),
@@ -429,10 +610,26 @@ mod tests {
     const U1: &str = "11111111-1111-4111-8111-111111111111";
     const U2: &str = "22222222-2222-4222-8222-222222222222";
     const USER: &str = "123e4567-e89b-12d3-a456-426614174000";
+    const OTHER_USER: &str = "99999999-9999-4999-8999-999999999999";
+    const RAW_USER: &str = "700000000000000001";
+
+    /// Tokenizer double: the invoker's raw id -> a fixed actor, or a fixed failure.
+    struct Tok(Result<String, ContextError>);
+    impl InvokerTokenizer for Tok {
+        fn tokenize<'a>(
+            &'a self,
+            _s: &'a str,
+            raw: &'a str,
+        ) -> BoxFut<'a, Result<String, ContextError>> {
+            assert_eq!(raw, RAW_USER, "the host passes the captured invoker id");
+            Box::pin(async move { self.0.clone() })
+        }
+    }
 
     fn view() -> ContextView {
         ContextView {
             community_public_id: U1.into(),
+            community_id: 1,
             community_name: "Alpha".into(),
             explicit: false,
             communities: vec![
@@ -554,6 +751,37 @@ mod tests {
     async fn rig(
         view: Result<ContextView, ContextError>,
     ) -> (MockServer, ContextSink<Rec>, Rec, Arc<Source>, String) {
+        let (a, b, c, d, e, _) = rig_with(view, "42").await;
+        (a, b, c, d, e)
+    }
+
+    async fn rig_with(
+        view: Result<ContextView, ContextError>,
+        sink_app: &str,
+    ) -> (
+        MockServer,
+        ContextSink<Rec>,
+        Rec,
+        Arc<Source>,
+        String,
+        InteractionStore,
+    ) {
+        rig_full(view, sink_app, Some(RAW_USER), Ok(USER.to_string())).await
+    }
+
+    async fn rig_full(
+        view: Result<ContextView, ContextError>,
+        sink_app: &str,
+        invoker: Option<&str>,
+        tokenized: Result<String, ContextError>,
+    ) -> (
+        MockServer,
+        ContextSink<Rec>,
+        Rec,
+        Arc<Source>,
+        String,
+        InteractionStore,
+    ) {
         let server = MockServer::start().await;
         let url = std::env::var("VALKEY_URL").expect("VALKEY_URL (a local valkey) is required");
         let store = InteractionStore::new(
@@ -576,6 +804,7 @@ mod tests {
                     token: "ctxTOKEN-secret".into(),
                     guild_id: Some("111".into()),
                     routed_community_id: None,
+                    invoker_user_id: invoker.map(str::to_string),
                 },
             )
             .await
@@ -589,7 +818,7 @@ mod tests {
             vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
         );
         let replier = Arc::new(InteractionReplier::new(
-            store,
+            store.clone(),
             client,
             format!("{}/api/v10", server.uri()),
         ));
@@ -599,8 +828,17 @@ mod tests {
             gets: Mutex::default(),
         });
         let rec = Rec::default();
-        let sink = ContextSink::new(rec.clone(), source.clone(), replier);
-        (server, sink, rec, source, id)
+        let metrics = register_routing_metrics(&Registry::new()).unwrap();
+        let sink = ContextSink::new(
+            rec.clone(),
+            source.clone(),
+            replier,
+            store.clone(),
+            sink_app.to_string(),
+            metrics,
+            Arc::new(Tok(tokenized)),
+        );
+        (server, sink, rec, source, id, store)
     }
 
     async fn mock_followup(s: &MockServer, partial: Value) {
@@ -702,5 +940,192 @@ mod tests {
                 "nothing is routed on failure"
             );
         }
+    }
+    #[tokio::test]
+    async fn a_routed_interaction_records_the_hub_community_and_is_published() {
+        let (_server, sink, rec, _s, id, store) = rig_with(Ok(view()), "42").await;
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().routed_community_id,
+            None
+        );
+        sink.publish(
+            &ctx(),
+            event("interaction.command", "ping", "", &id, Some(USER)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rec.0.lock().unwrap().len(), 1);
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().routed_community_id,
+            Some(1)
+        );
+        assert_eq!(
+            sink.metrics
+                .routing_total
+                .with_label_values(&["routed"])
+                .get(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_application_or_guild_or_bad_community_is_refused_and_left_unrouted() {
+        // Wrong application on the sink.
+        let (server, sink, rec, _s, id, store) = rig_with(Ok(view()), "999").await;
+        mock_followup(&server, json!({"flags":64,"content":GENERIC_UNAVAILABLE})).await;
+        sink.publish(
+            &ctx(),
+            event("interaction.command", "ping", "", &id, Some(USER)),
+        )
+        .await
+        .unwrap();
+        assert!(rec.0.lock().unwrap().is_empty());
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().routed_community_id,
+            None
+        );
+        assert_eq!(
+            sink.metrics
+                .routing_total
+                .with_label_values(&["application_mismatch"])
+                .get(),
+            1
+        );
+        // Wrong guild: the connection is guild 222, the record is guild 111.
+        let (server, sink, rec, _s, id, store) = rig_with(Ok(view()), "42").await;
+        mock_followup(&server, json!({"flags":64,"content":GENERIC_UNAVAILABLE})).await;
+        let mut other = ctx();
+        other.source_id = "222".into();
+        sink.publish(
+            &other,
+            event("interaction.command", "ping", "", &id, Some(USER)),
+        )
+        .await
+        .unwrap();
+        assert!(rec.0.lock().unwrap().is_empty());
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().routed_community_id,
+            None
+        );
+        assert_eq!(
+            sink.metrics
+                .routing_total
+                .with_label_values(&["guild_mismatch"])
+                .get(),
+            1
+        );
+        // A non-positive numeric community is refused, never recorded.
+        let mut bad = view();
+        bad.community_id = 0;
+        let (server, sink, rec, _s, id, store) = rig_with(Ok(bad), "42").await;
+        mock_followup(&server, json!({"flags":64,"content":GENERIC_UNAVAILABLE})).await;
+        sink.publish(
+            &ctx(),
+            event("interaction.command", "ping", "", &id, Some(USER)),
+        )
+        .await
+        .unwrap();
+        assert!(rec.0.lock().unwrap().is_empty());
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().routed_community_id,
+            None
+        );
+    }
+
+    #[test]
+    fn a_hub_answer_without_a_numeric_community_is_malformed() {
+        let r: Result<ContextView, _> = serde_json::from_value(json!({
+            "communityPublicId": U1, "communityName": "Alpha", "explicit": false
+        }));
+        assert!(r.is_err());
+    }
+    #[tokio::test]
+    async fn a_guest_naming_another_users_interaction_is_refused_unrouted() {
+        // regression: confused deputy -- the event actor must equal the host-captured invoker.
+        let (server, sink, rec, source, id, store) = rig_with(Ok(view()), "42").await;
+        mock_followup(&server, json!({"flags":64,"content":GENERIC_UNAVAILABLE})).await;
+        sink.publish(
+            &ctx(),
+            event("interaction.command", "ping", "", &id, Some(OTHER_USER)),
+        )
+        .await
+        .unwrap();
+        assert!(rec.0.lock().unwrap().is_empty());
+        assert!(
+            source.gets.lock().unwrap().is_empty(),
+            "no lookup for a forged actor"
+        );
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().routed_community_id,
+            None
+        );
+        assert_eq!(
+            sink.metrics
+                .routing_total
+                .with_label_values(&["actor_mismatch"])
+                .get(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unrecorded_invoker_or_failed_tokenization_fails_closed() {
+        for (invoker, tokenized, outcome) in [
+            (None, Ok(USER.to_string()), "invoker_unrecorded"),
+            (
+                Some(RAW_USER),
+                Err(ContextError::Unavailable),
+                "tokenize_unavailable",
+            ),
+        ] {
+            let (server, sink, rec, source, id, store) =
+                rig_full(Ok(view()), "42", invoker, tokenized).await;
+            mock_followup(&server, json!({"flags":64,"content":GENERIC_UNAVAILABLE})).await;
+            sink.publish(
+                &ctx(),
+                event("interaction.command", "ping", "", &id, Some(USER)),
+            )
+            .await
+            .unwrap();
+            assert!(rec.0.lock().unwrap().is_empty(), "{outcome}");
+            assert!(source.gets.lock().unwrap().is_empty(), "{outcome}");
+            assert_eq!(
+                store.get(&id).await.unwrap().unwrap().routed_community_id,
+                None
+            );
+            assert_eq!(
+                sink.metrics
+                    .routing_total
+                    .with_label_values(&[outcome])
+                    .get(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn re_routing_to_a_different_community_is_refused_and_the_same_is_idempotent() {
+        let (server, sink, rec, _s, id, store) = rig_with(Ok(view()), "42").await;
+        assert!(store.set_routed(&id, 2).await.unwrap());
+        mock_followup(&server, json!({"flags":64,"content":GENERIC_UNAVAILABLE})).await;
+        // The hub says community 1, but the interaction is already routed to 2.
+        sink.publish(
+            &ctx(),
+            event("interaction.command", "ping", "", &id, Some(USER)),
+        )
+        .await
+        .unwrap();
+        assert!(rec.0.lock().unwrap().is_empty());
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().routed_community_id,
+            Some(2)
+        );
+        assert_eq!(
+            sink.metrics
+                .routing_total
+                .with_label_values(&["already_routed_elsewhere"])
+                .get(),
+            1
+        );
     }
 }

@@ -167,6 +167,7 @@ fn rec(guild: Option<&str>) -> InteractionRecord {
         guild_id: guild.map(str::to_string),
         // Routed to community 1 (the rig's primary community).
         routed_community_id: Some(1),
+        invoker_user_id: None,
     }
 }
 
@@ -336,6 +337,134 @@ async fn same_guild_other_community_other_application_or_unrouted_is_refused() {
         .unwrap();
 }
 
+struct FixedView(crate::active_context::ContextView);
+impl crate::active_context::ContextSource for FixedView {
+    fn get<'a>(
+        &'a self,
+        _s: &'a str,
+        _u: &'a str,
+    ) -> BoxFut<'a, Result<crate::active_context::ContextView, crate::active_context::ContextError>>
+    {
+        Box::pin(async move { Ok(self.0.clone()) })
+    }
+    fn put<'a>(
+        &'a self,
+        _s: &'a str,
+        _u: &'a str,
+        _c: &'a str,
+    ) -> BoxFut<'a, Result<crate::active_context::ContextView, crate::active_context::ContextError>>
+    {
+        Box::pin(async move { Ok(self.0.clone()) })
+    }
+}
+
+/// Host-side tokenizer double: the captured invoker maps to the event's actor.
+struct FixedTok;
+impl crate::active_context::InvokerTokenizer for FixedTok {
+    fn tokenize<'a>(
+        &'a self,
+        _s: &'a str,
+        _raw: &'a str,
+    ) -> BoxFut<'a, Result<String, crate::active_context::ContextError>> {
+        Box::pin(async { Ok("123e4567-e89b-12d3-a456-426614174000".to_string()) })
+    }
+}
+
+#[derive(Clone, Default)]
+struct Null;
+impl crate::connector::sink::EventSink for Null {
+    async fn publish(
+        &self,
+        _c: &crate::connector::types::ConnectionCtx,
+        _e: crate::connector::types::ConnectorEvent,
+    ) -> Result<(), crate::connector::sink::SinkError> {
+        Ok(())
+    }
+}
+
+/// Routes `id` through the production `ContextSink` (hub view = `community`, sink bound to
+/// `app`), against the rig's real store.
+async fn route_via_sink(r: &IxRig, id: &str, community: i64, app: &str) {
+    use crate::active_context::{
+        register_routing_metrics, ContextSink, ContextView, InteractionReplier,
+    };
+    use crate::connector::sink::EventSink;
+    let view = ContextView {
+        community_public_id: "11111111-1111-4111-8111-111111111111".into(),
+        community_id: community,
+        community_name: "Alpha".into(),
+        explicit: false,
+        communities: vec![],
+    };
+    let replier = Arc::new(InteractionReplier::new(
+        r.store.clone(),
+        guard(),
+        format!("{}/api/v10", r.server.uri()),
+    ));
+    let sink = ContextSink::new(
+        Null,
+        Arc::new(FixedView(view)),
+        replier,
+        r.store.clone(),
+        app.to_string(),
+        register_routing_metrics(&prometheus::Registry::new()).unwrap(),
+        Arc::new(FixedTok),
+    );
+    let ctx = crate::connector::types::ConnectionCtx {
+        platform: "discord".into(),
+        source_id: GUILD.into(),
+        connection_id: "c".into(),
+        session_token: None,
+    };
+    let ev = crate::connector::types::ConnectorEvent {
+        platform: "discord".into(),
+        event_type: "interaction.command".into(),
+        actor: Some("123e4567-e89b-12d3-a456-426614174000".into()),
+        payload_json: json!({"interaction_id": id, "command": "ping", "args": ""}).to_string(),
+        occurred_at: "t".into(),
+    };
+    sink.publish(&ctx, ev).await.unwrap();
+}
+
+#[tokio::test]
+async fn context_sink_routing_makes_the_owner_answerable_and_only_the_owner() {
+    let r = ix_rig(followup_tpl, true, None).await;
+    let owned = unique(1);
+    let unrouted = unique(2);
+    let wrong_comm = unique(3);
+    let wrong_app = unique(4);
+    let mut fresh = rec(Some(GUILD));
+    fresh.routed_community_id = None;
+    fresh.invoker_user_id = Some("700000000000000001".into());
+    for id in [&owned, &unrouted, &wrong_comm, &wrong_app] {
+        assert!(r.store.put_new(id, &fresh).await.unwrap());
+    }
+    // A refused routing also posts the generic notice through the followup webhook.
+    mock_post(&r.server, format!("/api/v10/webhooks/{APP_ID}/{IX_TOKEN}")).await;
+    route_via_sink(&r, &owned, 1, APP_ID).await;
+    route_via_sink(&r, &wrong_comm, 2, APP_ID).await;
+    route_via_sink(&r, &wrong_app, 1, "999").await;
+    for id in [&unrouted, &wrong_comm, &wrong_app] {
+        let e = r
+            .exec
+            .execute(&rq(&op("interaction.followup", Some("{}"), Some(id)), 1))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e,
+            ExecError::Slot(SlotError::Refused("interaction_not_owned")),
+            "{id}"
+        );
+    }
+    r.exec
+        .execute(&rq(
+            &op("interaction.followup", Some("{}"), Some(&owned)),
+            1,
+        ))
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn without_a_configured_store_interaction_ops_fail_loud() {
     let r = ix_rig(followup_tpl, false, None).await;
@@ -465,4 +594,220 @@ async fn an_unchanged_desired_answer_authorizes_no_write_and_no_lookup_means_ref
         ExecError::Slot(SlotError::Refused("registry_unconfigured"))
     );
     assert!(seen(&r.server).await.is_empty());
+}
+
+/// Inner factory for the boot-wiring test: every connection gets the inert [`Null`] sink.
+struct NullFactory;
+impl crate::connector_runtime::supervisor::SinkFactory<Null> for NullFactory {
+    fn build<'a>(
+        &'a self,
+        _d: &'a crate::connector_runtime::DesiredConnection,
+        _t: i64,
+    ) -> BoxFut<'a, Result<Null, crate::connector_runtime::supervisor::SinkBuildError>> {
+        Box::pin(async { Ok(Null) })
+    }
+}
+
+/// Resolver answering one connection with an `application_id` in its binding metadata.
+struct AppResolver(Option<&'static str>);
+impl connection_resolver::ConnectionResolve for AppResolver {
+    async fn resolve(
+        &self,
+        r: connection_resolver::ConnectionRef,
+    ) -> Result<connection_resolver::ResolvedConnection, connection_resolver::ResolveError> {
+        Ok(connection_resolver::ResolvedConnection {
+            connection_id: r.connection_id,
+            community_id: r.community_id,
+            provider: "discord".into(),
+            kind: connection_resolver::ConnectionKind::PlatformOauth,
+            endpoint: connection_resolver::Endpoint::default(),
+            secret: connection_resolver::ConnectionSecret::OAuthAccessToken {
+                access_token: connection_resolver::SecretString::new("bot-token".to_owned()),
+            },
+            expires_at: None,
+            metadata: self
+                .0
+                .map(|a| [("application_id".to_string(), a.to_string())].into())
+                .unwrap_or_default(),
+        })
+    }
+    async fn list_bindings(
+        &self,
+        _p: &str,
+        _c: Option<&str>,
+        _a: i64,
+        _l: u32,
+    ) -> Result<connection_resolver::BindingPage, connection_resolver::ResolveError> {
+        Ok(connection_resolver::BindingPage {
+            items: vec![],
+            next_after: None,
+        })
+    }
+}
+
+fn routing_for(
+    r: &IxRig,
+    community: i64,
+) -> crate::connector_runtime::interaction_routing::InteractionRouting {
+    use crate::active_context::{register_routing_metrics, ContextView, InteractionReplier};
+    let view = ContextView {
+        community_public_id: "11111111-1111-4111-8111-111111111111".into(),
+        community_id: community,
+        community_name: "Alpha".into(),
+        explicit: false,
+        communities: vec![],
+    };
+    crate::connector_runtime::interaction_routing::InteractionRouting {
+        source: Arc::new(FixedView(view)),
+        store: r.store.clone(),
+        replier: Arc::new(InteractionReplier::new(
+            r.store.clone(),
+            guard(),
+            format!("{}/api/v10", r.server.uri()),
+        )),
+        metrics: register_routing_metrics(&prometheus::Registry::new()).unwrap(),
+        tokenizer: Arc::new(FixedIdentityTok),
+    }
+}
+
+/// Host identity-tokenizer double behind the routing factory: every raw id maps to one actor.
+struct FixedIdentityTok;
+impl crate::connector::host_calls::IdentityTokenizer for FixedIdentityTok {
+    fn tokenize<'a>(
+        &'a self,
+        _scope: &'a crate::connector::host_calls::CallScope,
+        _platform_user_id: &'a str,
+    ) -> BoxFut<'a, Result<String, crate::connector::host_calls::TokenizeError>> {
+        Box::pin(async { Ok("123e4567-e89b-12d3-a456-426614174000".to_string()) })
+    }
+}
+
+fn discord_conn() -> crate::connector_runtime::DesiredConnection {
+    crate::connector_runtime::testkit::desired_ws("discord", 1, 7, 1, "src", 1)
+}
+
+const NO_APP: &str = "discord binding has no valid application_id; interactions cannot be routed";
+
+/// Boot wiring: the factory the runtime is assembled with builds a `ContextSink` for a Discord
+/// connection (bound to the binding's own application id) and a plain sink for any other
+/// platform; a missing dependency or application id fails loud.
+#[tokio::test]
+async fn the_routing_factory_wires_a_context_sink_for_discord_and_fails_loud() {
+    use crate::connector_runtime::interaction_routing::{RoutedSink, RoutingSinkFactory};
+    use crate::connector_runtime::supervisor::SinkFactory;
+    let r = ix_rig(followup_tpl, true, None).await;
+    let f = RoutingSinkFactory::new(
+        Arc::new(NullFactory),
+        Arc::new(AppResolver(Some(APP_ID))),
+        Some(routing_for(&r, 1)),
+    );
+    let built = f.build(&discord_conn(), 1).await.expect("discord sink");
+    assert!(matches!(built, RoutedSink::Context(_)));
+    let twitch = crate::connector_runtime::testkit::desired_ws("twitch", 1, 8, 1, "src", 1);
+    let built = f.build(&twitch, 1).await.expect("twitch sink");
+    assert!(matches!(built, RoutedSink::Plain(_)));
+    for (resolver, with_routing, want) in [
+        (AppResolver(None), true, NO_APP),
+        (AppResolver(Some("not-a-snowflake")), true, NO_APP),
+        (
+            AppResolver(Some(APP_ID)),
+            false,
+            "discord interaction routing is not configured",
+        ),
+    ] {
+        let routing = with_routing.then(|| routing_for(&r, 1));
+        let f = RoutingSinkFactory::new(Arc::new(NullFactory), Arc::new(resolver), routing);
+        let e = f
+            .build(&discord_conn(), 1)
+            .await
+            .err()
+            .expect("must fail loud");
+        assert_eq!(e.0, want);
+    }
+}
+
+/// Real path: a gateway INTERACTION_CREATE is captured and acked by the real tap into the real
+/// Valkey store, routed by the factory-built production sink (hub view = community 1), and its
+/// followup is then answered; the same frame under a mismatching application id is refused.
+#[tokio::test]
+async fn ingest_to_routing_to_followup_is_answered_end_to_end() {
+    use crate::connector::sink::EventSink;
+    use crate::connector_runtime::interaction_routing::RoutingSinkFactory;
+    use crate::connector_runtime::supervisor::SinkFactory;
+    use crate::interaction_tap::{FrameTap, GatewayTap, InteractionAcker, TapVerdict};
+    let r = ix_rig(followup_tpl, true, None).await;
+    let api = format!("{}/api/v10", r.server.uri());
+    // Discord's ack callback + the followup webhook (also the refusal notice path).
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&r.server)
+        .await;
+    let tap = GatewayTap::new(
+        r.store.clone(),
+        Arc::new(InteractionAcker::with_endpoint(guard(), api)),
+    );
+    let frame = |id: &str| {
+        serde_json::to_vec(&json!({"op":0,"t":"INTERACTION_CREATE","d":{
+            "id": id, "application_id": APP_ID, "type": 2, "token": IX_TOKEN,
+            "guild_id": GUILD, "member": {"user": {"id": "80351110224678912"}},
+            "data": {"name": "ping", "type": 1}}}))
+        .unwrap()
+    };
+    let event = |id: &str| crate::connector::types::ConnectorEvent {
+        platform: "discord".into(),
+        event_type: "interaction.command".into(),
+        actor: Some("123e4567-e89b-12d3-a456-426614174000".into()),
+        payload_json: json!({"interaction_id": id, "command": "ping", "args": ""}).to_string(),
+        occurred_at: "t".into(),
+    };
+    let ctx = crate::connector::types::ConnectionCtx {
+        platform: "discord".into(),
+        source_id: GUILD.into(),
+        connection_id: "7".into(),
+        session_token: None,
+    };
+    let followup = |id: &str| op("interaction.followup", Some("{}"), Some(id));
+
+    let owned = unique(5);
+    assert_eq!(
+        tap.on_frame("discord", &frame(&owned)).await,
+        TapVerdict::Pass
+    );
+    // Ingested but not yet routed: the followup is refused.
+    let e = r.exec.execute(&rq(&followup(&owned), 1)).await.unwrap_err();
+    assert_eq!(
+        e,
+        ExecError::Slot(SlotError::Refused("interaction_not_owned"))
+    );
+
+    let factory = RoutingSinkFactory::new(
+        Arc::new(NullFactory),
+        Arc::new(AppResolver(Some(APP_ID))),
+        Some(routing_for(&r, 1)),
+    );
+    let sink = factory.build(&discord_conn(), 1).await.expect("sink");
+    sink.publish(&ctx, event(&owned)).await.unwrap();
+    r.exec
+        .execute(&rq(&followup(&owned), 1))
+        .await
+        .expect("a routed interaction's followup is answered");
+
+    // A connection bound to a DIFFERENT application never routes this interaction.
+    let other = unique(6);
+    assert_eq!(
+        tap.on_frame("discord", &frame(&other)).await,
+        TapVerdict::Pass
+    );
+    let wrong = RoutingSinkFactory::new(
+        Arc::new(NullFactory),
+        Arc::new(AppResolver(Some("999"))),
+        Some(routing_for(&r, 1)),
+    );
+    let sink = wrong.build(&discord_conn(), 1).await.expect("sink");
+    sink.publish(&ctx, event(&other)).await.unwrap();
+    let e = r.exec.execute(&rq(&followup(&other), 1)).await.unwrap_err();
+    assert_eq!(
+        e,
+        ExecError::Slot(SlotError::Refused("interaction_not_owned"))
+    );
 }

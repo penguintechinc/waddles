@@ -9,6 +9,12 @@ Implemented in **hub-api**: `hub_api/services/provider_connections/`,
 Design background and the storage model it builds on:
 [`CONNECTION_MODEL.local.md`](CONNECTION_MODEL.local.md).
 
+> **Transport (2026-11):** the data-plane reads (list + resolve) are internal **gRPC** on hub-api's
+> internal listener (TLS pinned to the internal CA, machine JWT in `authorization` metadata, same
+> scopes, `system` tenant, community-bound `Resolve`). The former `/api/v1/internal/...` REST routes
+> are removed; a refusal to hand out a credential is `FAILED_PRECONDITION` with detail
+> `not_usable:<reason>`, a missing/foreign binding is `NOT_FOUND`/`PERMISSION_DENIED`.
+
 ## What problem this solves
 
 Platform connections used to be **static environment variables**. `svc-ingest`'s Twitch IRC receiver
@@ -203,11 +209,11 @@ refresh to work; otherwise the connection works until the access token expires.
 svc-ingest                              hub-api
    | gRPC ServiceAuthService.MintServiceToken  (projected SA token, TLS 1.3)  -> short-lived ES256 JWT
    |                                                        scope connections:resolve, tenant=system
-   | GET  /api/v1/internal/provider-connections?provider=twitch&capability=chat_ingest&after=0&limit=500
+   | gRPC ProviderConnectionService.ListBindings{provider=twitch, capability=chat_ingest, after=0, limit=500}
    |  <- {items:[{grantId, connectionId, communityId, tenantId, resourceId, capabilities,
    |              expiresAt, metadata:{channel_login, bot_login, ...}}], nextAfter}   (NO tokens)
    | for each new item: start an IRC session; for each removed item: stop it
-   | POST /api/v1/internal/communities/{communityId}/provider-connections/{connectionId}/resolve
+   | gRPC ProviderConnectionService.ResolveConnection{community_id, connection_id}
    |  <- {accessToken, expiresAt, metadata}     (refreshed under lock if stale)
 ```
 
@@ -271,7 +277,7 @@ The data-plane list returns only **usable** bindings (grant `approved` and `enab
    `store.insert_connection`) inserts the link with `status=active` and this community's grant with
    `status=approved` (approver = the installing community admin, whose authority was already checked
    by `authorize_community`) and `enabled` = the request's `enabled` (default `true`).
-2. The next `GET /api/v1/internal/provider-connections?provider=twitch&capability=chat_ingest` lists
+2. The next `ProviderConnectionService.ListBindings(provider=twitch, capability=chat_ingest)` lists
    it (`service.list_for_dataplane` -> `store.list_dataplane`).
 3. The only optional step is an admin's own toggle: `create` with `"enabled": false` (or a later
    `PATCH {"enabled": false}`) hides it until `PATCH {"enabled": true}`.
@@ -355,7 +361,7 @@ POST /api/v1/communities/{id}/provider-connections
 
 ### Resolve v2 wire shape (all four kinds)
 
-`POST /api/v1/internal/communities/{communityId}/provider-connections/{connectionId}/resolve` returns
+`ProviderConnectionService.ResolveConnection` (gRPC, `proto/waddles/hub/internal/v1/provider_connection.proto`) returns
 `{connectionId, communityId, provider, kind, accessToken, expiresAt, endpoint:{url,region,function,project},
 secret:{scheme, fields}, metadata}`. `kind` is the int code (1 `platform_oauth`, 2 `external_http`,
 3 `aws_lambda`, 4 `gcp_function`); `secret.scheme` is 1 bearer, 2 basic, 3 api-key-header, 4 aws-access-key,
@@ -495,7 +501,7 @@ browser ◀── redirect ── Google ── code ──▶ GET /api/v1/provi
 admin ──POST …/<conn>/discover (or PATCH metadata.live_chat_id)──▶ binding complete ──▶ data plane
 ```
 
-**What the data plane receives** (`POST /api/v1/internal/communities/<id>/provider-connections/<conn>/resolve`):
+**What the data plane receives** (`ProviderConnectionService.ResolveConnection`, gRPC; the JSON below is the camelCase view of the proto message, kept as the golden fixtures):
 `kind: 1` + `accessToken` (the executor's `ConnectionSecret::OAuthAccessToken`), `expiresAt`
 (RFC 3339; the executor refuses a token expiring within 30 s, hub-api refreshes inside a 120 s skew),
 `metadata: {"live_chat_id": "..."}`, `secret: null`. Never the refresh token, client id/secret or tenant.

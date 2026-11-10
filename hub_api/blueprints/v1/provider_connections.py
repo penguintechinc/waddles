@@ -20,41 +20,34 @@ the validated token, never from the path or body. Responses are explicit DTOs
 (security.md Output Validation): a token, its ciphertext and the OAuth app secret have no field to
 travel in, and adapter metadata is filtered through the adapter's own public-key allow-list.
 
-**Internal (``/api/v1/internal/...``) -- the data plane (svc-ingest) only.** Authenticated with a
-short-lived machine JWT (scope ``connections:resolve``, operator-plane ``system`` tenant), never a
-shared key:
-
-* ``GET  /provider-connections?provider=&capability=&after=&limit=`` -- what to run (no secrets);
-  scope ``connections:list``, unbound
-* ``POST /communities/<id>/provider-connections/<conn_id>/resolve``  -- endpoint + credential;
-  scope ``connections:resolve``, community-bound (a token for community A cannot resolve B's)
-
-The resolve response is the only place a decrypted secret leaves hub-api. An OAuth row yields the
-access token only (never the refresh token or OAuth app secret); a static-secret row yields its
-non-secret ``endpoint`` and a structured ``secret``. It is ``Cache-Control: no-store``.
+**Internal data-plane reads are gRPC, not REST.** The binding list and per-connection resolve
+used by ``core/connection_resolver`` (svc-ingest / svc-action) are served by
+``grpc_internal.dataplane_servicers.ProviderConnectionServicer`` on hub-api's internal gRPC server
+(``proto/waddles/hub/internal/v1/provider_connection.proto``), authenticated with the same
+short-lived machine JWT (``connections:list`` / ``connections:resolve[:static]``, operator-plane
+``system`` tenant). The resolve response is the only place a decrypted secret leaves hub-api.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, MutableMapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
-from typing import Any, Final, ParamSpec, TypeVar, cast
+from typing import Any, ParamSpec, TypeVar, cast
 
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from pydantic import ConfigDict
-from quart import Blueprint, Response, current_app, g, request
-from quart_schema import document_response, validate_request, validate_response
+from quart import Blueprint, current_app, request
+from quart_schema import validate_request, validate_response
 
 from services.community_authz import authorize_community
 from services.current_user import get_current_user_id
-from services.errors import ApiError, bad_request, forbidden, payment_required
-from services.machine_auth import machine_authenticated
+from services.errors import ApiError, forbidden, payment_required
 from services.provider_connections import (
     AdapterSpec,
     PlatformKeyVault,
@@ -65,10 +58,7 @@ from services.provider_connections.kinds import ConnectionKind
 from services.provider_connections.registry import build_default_registry
 from services.provider_connections.service import (
     FEATURE_STATIC_CONNECTIONS,
-    MAX_PAGE_SIZE,
     ConnectionView,
-    DataPlaneBinding,
-    ResolvedCredentials,
 )
 from services.provider_connections.telemetry import log_failure
 from services.youtube_install import make_app_credentials
@@ -76,9 +66,6 @@ from services.youtube_install import make_app_credentials
 logger = logging.getLogger(__name__)
 
 provider_connections_bp = Blueprint("v1_provider_connections", __name__, url_prefix="/api/v1")
-provider_connections_internal_bp = Blueprint(
-    "v1_provider_connections_internal", __name__, url_prefix="/api/v1/internal"
-)
 
 #: OIDC scope for community connection administration. Carried by the tenant-owner bundle
 #: (``flask_core.auth.SCOPE_BUNDLES["tenant"]["admin"]``) and by global admins via ``*:admin``;
@@ -98,8 +85,6 @@ FEATURE_PROVIDER_CONNECTIONS = "waddles.integrations.provider_connections"
 #: ``app.config`` key a test (or a future composition root) may pre-populate; otherwise the
 #: service is built once, lazily, from ``install_dal`` + the default registry + the platform vault.
 SERVICE_CONFIG_KEY = "provider_connection_service"
-
-_DEFAULT_DATAPLANE_PAGE = 500
 
 
 # --------------------------------------------------------------------------
@@ -268,109 +253,6 @@ class UpdateConnectionRequest:
 
 
 @dataclass(slots=True, frozen=True)
-class DataPlaneBindingDTO:
-    """One (community, connection) pair the data plane should run. Carries no token.
-
-    ``tenantId`` is derived server-side from the community's own tenant (never metadata);
-    ``secretVersion`` is a rotation counter -- a change means the credential was replaced.
-    """
-
-    grantId: int
-    connectionId: int
-    communityId: int
-    tenantId: int
-    provider: str
-    resourceType: str
-    resourceId: str
-    capabilities: list[str]
-    expiresAt: str | None
-    updatedAt: str | None
-    metadata: dict[str, str]
-    kind: int = 1
-    secretVersion: int = 1
-
-
-@dataclass(slots=True, frozen=True)
-class DataPlaneListResponse:
-    """Response for the internal list; ``nextAfter`` is the cursor for the next page, if any."""
-
-    success: bool
-    items: list[DataPlaneBindingDTO] = field(default_factory=list)
-    nextAfter: int | None = None
-
-
-@dataclass(slots=True, frozen=True)
-class EndpointDTO:
-    """Non-secret target facts of a static connection; every field null for an OAuth row."""
-
-    url: str | None
-    region: str | None
-    function: str | None
-    project: str | None
-
-
-@dataclass(slots=True, frozen=True)
-class SecretDTO:
-    """A static connection's structured credential: ``SecretScheme`` code + camelCase fields."""
-
-    scheme: int
-    fields: dict[str, str | None] = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class ResolvedCredentialsDTO:
-    """What the data plane needs to call one connection (the only secret-bearing response here).
-
-    Exactly one of ``accessToken`` (OAuth, kind 1) / ``secret`` (static, kinds 2-4) is non-null.
-    """
-
-    success: bool
-    connectionId: int
-    communityId: int
-    provider: str
-    kind: int
-    accessToken: str | None = field(repr=False)
-    expiresAt: str | None
-    endpoint: EndpointDTO
-    secret: SecretDTO | None = field(repr=False)
-    metadata: dict[str, str]
-
-
-#: The only ``reason`` codes a resolve 409 may carry; anything else a writer stores (or a future
-#: writer adds) is emitted as ``other`` -- a reason never leaks through by merely looking safe.
-NOT_USABLE_REASONS: Final = frozenset(
-    {
-        "pending_approval",
-        "revoked_grant",
-        "disabled",
-        "connection_expired",
-        "connection_revoked",
-        "metadata_incomplete",
-        "token_expired",
-        "refresh_rejected",
-        "refresh_not_configured",
-        "app_replaced",
-    }
-)
-
-
-@dataclass(slots=True, frozen=True)
-class NotUsableDTO:
-    """409 body of resolve: a flat refusal; ``reason`` is one of ``NOT_USABLE_REASONS``."""
-
-    success: bool
-    error: str
-    reason: str
-
-
-@dataclass(slots=True, frozen=True)
-class ForbiddenDTO:
-    """403 body (guard refusals and a missing ``connections:resolve:static``): one fixed word."""
-
-    error: str
-
-
-@dataclass(slots=True, frozen=True)
 class ErrorBodyDTO:
     """The inner ``error`` object of the standard error envelope."""
 
@@ -448,81 +330,31 @@ def _api_credential_doc(body: ApiCredentialBody | None) -> dict[str, str] | None
     return None if body is None else {"api_key": body.api_key, "site_id": body.site_id}
 
 
-def _dataplane_dto(item: DataPlaneBinding) -> DataPlaneBindingDTO | None:
-    """One list item, or ``None`` when its metadata contract is unmet (skipped and logged)."""
-    metadata = _service().binding_metadata(
-        item.provider, item.metadata, connection_id=item.connection_id
-    )
-    if metadata is None:
-        return None
-    return DataPlaneBindingDTO(
-        grantId=item.grant_id,
-        connectionId=item.connection_id,
-        communityId=item.community_id,
-        tenantId=item.tenant_id,
-        provider=item.provider,
-        resourceType=item.resource_type,
-        resourceId=item.resource_id,
-        capabilities=item.capabilities,
-        expiresAt=_iso(item.expires_at),
-        updatedAt=_iso(item.updated_at),
-        metadata=metadata,
-        kind=item.kind,
-        secretVersion=item.secret_version,
-    )
-
-
-def _resolved_dto(item: ResolvedCredentials) -> ResolvedCredentialsDTO:
-    """Shape a resolved credential for the wire; a twitch row with an incomplete binding is 409."""
-    metadata = _service().binding_metadata(
-        item.provider, item.metadata, connection_id=item.connection_id
-    )
-    if metadata is None:
-        raise pc_errors.ConnectionNotUsable(
-            "the connection's binding is incomplete", reason="metadata_incomplete"
-        )
-    endpoint = item.endpoint
-    return ResolvedCredentialsDTO(
-        success=True,
-        connectionId=item.connection_id,
-        communityId=item.community_id,
-        provider=item.provider,
-        kind=item.kind,
-        accessToken=item.access_token,
-        expiresAt=_iso(item.expires_at),
-        endpoint=EndpointDTO(
-            url=endpoint.get("url"),
-            region=endpoint.get("region"),
-            function=endpoint.get("function"),
-            project=endpoint.get("project"),
-        ),
-        secret=(
-            SecretDTO(scheme=item.secret_scheme, fields=item.secret_fields)
-            if item.secret_scheme is not None and item.secret_fields is not None
-            else None
-        ),
-        metadata=metadata,
-    )
-
-
 # --------------------------------------------------------------------------
 # Wiring + error mapping
 # --------------------------------------------------------------------------
 
 
-def _service() -> ProviderConnectionService:
-    """The process-wide service, built once from ``install_dal`` unless a test pre-seeded one."""
-    existing = current_app.config.get(SERVICE_CONFIG_KEY)
+def service_from_config(config: MutableMapping[str, Any]) -> ProviderConnectionService:
+    """The process-wide service, built once from ``install_dal`` unless a test pre-seeded one.
+
+    Shared by the admin routes (``current_app.config``) and the internal gRPC servicers (the same
+    mapping), so both sides drive one ``ProviderConnectionService`` and one refresh lock.
+    """
+    existing = config.get(SERVICE_CONFIG_KEY)
     if existing is None:
         existing = ProviderConnectionService(
-            current_app.config["install_dal"],
-            build_default_registry(
-                youtube_app_credentials=make_app_credentials(current_app.config["dal"])
-            ),
+            config["install_dal"],
+            build_default_registry(youtube_app_credentials=make_app_credentials(config["dal"])),
             PlatformKeyVault(),
         )
-        current_app.config[SERVICE_CONFIG_KEY] = existing
+        config[SERVICE_CONFIG_KEY] = existing
     return cast(ProviderConnectionService, existing)
+
+
+def _service() -> ProviderConnectionService:
+    """The process-wide service for the current Quart app."""
+    return service_from_config(current_app.config)
 
 
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
@@ -567,13 +399,6 @@ def _connection_err(
             logger, "provider_connections.request_failed", exc, level=logging.WARNING, route=event
         )
         return {"error": "forbidden"}, 403
-    if event == "internal_resolve" and isinstance(exc, pc_errors.ConnectionNotUsable):
-        # The data-plane contract: a flat, fixed-code body (no free text, no envelope).
-        log_failure(
-            logger, "provider_connections.request_failed", exc, level=logging.INFO, route=event
-        )
-        reason = exc.reason if exc.reason in NOT_USABLE_REASONS else "other"
-        return {"success": False, "error": "not_usable", "reason": reason}, 409
     status, code = _STATUS_BY_ERROR.get(type(exc), (500, "INTERNAL_ERROR"))
     level = logging.ERROR if status >= 500 else logging.INFO
     # The event name is a static literal (LiteralString); the route name is a bounded label.
@@ -795,91 +620,4 @@ async def delete_provider_connection(community_id: int, connection_id: int) -> D
     return DeleteResponse(success=True, purged=purged)
 
 
-# --------------------------------------------------------------------------
-# Internal (data plane) routes -- machine JWT, operator-plane tenant
-# --------------------------------------------------------------------------
-
-
-#: Requires a valid machine JWT with ``connections:resolve`` from the operator-plane tenant; the
-#: fail-closed ladder lives in :func:`services.machine_auth.machine_authenticated`.
-_resolve_authenticated = machine_authenticated(
-    (SCOPE_CONNECTIONS_RESOLVE, SCOPE_CONNECTIONS_RESOLVE_STATIC),
-    bind_community=True,
-    unconfigured_event="provider_connections.service_auth_unconfigured",
-    rejected_event="provider_connections.service_auth_rejected",
-    wrong_tenant_event="provider_connections.service_auth_wrong_tenant",
-)
-#: The list is deliberately unbound (it enumerates every community) and carries no secret.
-_list_authenticated = machine_authenticated(
-    SCOPE_CONNECTIONS_LIST,
-    unconfigured_event="provider_connections.service_auth_unconfigured",
-    rejected_event="provider_connections.service_auth_rejected",
-    wrong_tenant_event="provider_connections.service_auth_wrong_tenant",
-)
-
-
-@provider_connections_internal_bp.after_request
-async def _no_store(response: Response) -> Response:
-    """Nothing under ``/internal`` may be cached by any intermediary (some bodies hold a token)."""
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Pragma"] = "no-cache"
-    return response
-
-
-def _int_arg(name: str, *, default: int, minimum: int, maximum: int) -> int:
-    raw = request.args.get(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise bad_request(f"{name} must be an integer") from exc
-    if not minimum <= value <= maximum:
-        raise bad_request(f"{name} must be between {minimum} and {maximum}")
-    return value
-
-
-@provider_connections_internal_bp.route("/provider-connections", methods=["GET"])
-@_list_authenticated
-@validate_response(DataPlaneListResponse)
-@_guarded("internal_list")
-async def internal_list() -> DataPlaneListResponse:
-    """``GET`` -- usable bindings for one provider across all tenants (no tokens)."""
-    provider = request.args.get("provider", "")
-    if not provider:
-        raise bad_request("provider is required")
-    capability = request.args.get("capability") or None
-    after = _int_arg("after", default=0, minimum=0, maximum=2**62)
-    limit = _int_arg("limit", default=_DEFAULT_DATAPLANE_PAGE, minimum=1, maximum=MAX_PAGE_SIZE)
-    page = await _service().list_for_dataplane(
-        provider=provider, capability=capability, after=after, limit=limit
-    )
-    items = [dto for dto in (_dataplane_dto(item) for item in page.items) if dto is not None]
-    return DataPlaneListResponse(success=True, items=items, nextAfter=page.next_after)
-
-
-@provider_connections_internal_bp.route(_ONE + "/resolve", methods=["POST"])
-@_resolve_authenticated
-@validate_response(ResolvedCredentialsDTO)
-@document_response(NotUsableDTO, 409)
-@document_response(ForbiddenDTO, 403)
-@document_response(ErrorEnvelopeDTO, 404)
-@document_response(ErrorEnvelopeDTO, 503)
-@_guarded("internal_resolve")
-async def internal_resolve(community_id: int, connection_id: int) -> ResolvedCredentialsDTO:
-    """``POST .../resolve`` -- endpoint + credential for one usable binding of the BOUND community.
-
-    An OAuth row refreshes under lock and returns ``accessToken``; a static row returns its
-    ``endpoint`` + structured ``secret``. Not found or not granted to this community is a 404 (never
-    a 403: no existence oracle).
-    """
-    resolved = await _service().resolve(
-        community_id=community_id,
-        connection_id=connection_id,
-        static_allowed=SCOPE_CONNECTIONS_RESOLVE_STATIC
-        in getattr(g, "machine_scopes", frozenset()),
-    )
-    return _resolved_dto(resolved)
-
-
-BLUEPRINTS = [provider_connections_bp, provider_connections_internal_bp]
+BLUEPRINTS = [provider_connections_bp]

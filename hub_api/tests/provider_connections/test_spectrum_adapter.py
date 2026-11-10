@@ -31,6 +31,7 @@ from services.provider_connections.registry import build_default_registry
 from services.provider_connections.spectrum import SPECTRUM_SPEC, SpectrumAdapter
 from tests.conftest import make_user_token
 from tests.provider_connections.conftest import SYSTEM_SERVICE_ID, FakeClock, admin_headers
+from tests.provider_connections.grpc_internal_client import GrpcRoutingClient
 from tests.provider_connections.support import open_row, raw_rows
 
 TOKEN = "Zk3jQ9x-rsi_session.token+value/abc123=="  # noqa: S105 - fake
@@ -110,7 +111,7 @@ def sclient(pc_app: Any, pc_db: Any, fake_rsi: FakeRsi, clock: FakeClock) -> Any
         PlatformKeyVault(),
         clock=clock,
     )
-    return pc_app.test_client()
+    return GrpcRoutingClient(pc_app.test_client())
 
 
 def _base(db: Any, community_id: int | None = None) -> str:
