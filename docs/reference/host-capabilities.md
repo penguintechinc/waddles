@@ -110,7 +110,23 @@ Note: the `bundle_host_db/src/lib.rs` header describes an older insert/get/updat
 | Header | `Authorization` (plain name) | MERGED | Resolved value sent as that request header |
 | Query param | `?key` | IN-FLIGHT #749 | Appends `key=VALUE`; first hop only, to granted FQDN; dropped on redirect; scrubbed from errors and responses; unresolvable → denied, never sent unauthenticated |
 
-Resolution (MERGED, `egress.rs` ~L441–460): guest names a symbolic ref → must exist in the activation's `granted_secret_refs` map → only the mapped env-var name is read via `CredentialBroker`. Unknown ref → `secret_not_granted`. Secret value never enters the component.
+Resolution: guest names a symbolic ref → must exist in the bundle's `granted_secret_refs` map → the grant value says where it resolves from. Unknown ref → `secret_not_granted`. Secret value never enters the component, is injected only after hop-0 egress allowlist passes, and is scrubbed from every response/error.
+
+| Grant value | Source | Notes |
+|---|---|---|
+| `NAME` / `env:NAME` | process env | platform-default / shared app credential (e.g. `YOUTUBE_API_KEY`) |
+| `connection:<provider>` | the INVOKING community's platform connection (hub-api `connections:resolve`; hub refreshes OAuth under lock) | community = MAC-verified envelope scope (never guest input); no connection → `secret_unresolved`; never falls back to env |
+| `connection:<provider>#raw` | the connection's secret with no scheme prefix (Google API key for a `?key` slot, Wix API key for `Authorization: <key>`) | |
+| `connection:<provider>#field.<name>` | a named field of a multi-field credential (Wix scheme-6 `siteId`/`apiKey`) | needs `connections:resolve:static`; the http-egress host's resolver requests it, svc-ingest generally never |
+| `connection:<provider>#meta.<key>` | non-secret connection metadata | missing key → `secret_unresolved` |
+| `cc:<provider>` | the community's own OAuth client id (metadata `client_id`) + secret; the HOST does the client-credentials exchange and caches the token per community (SoundCloud → `OAuth <token>`) | cache invalidated on secret rotation |
+| `app:<name>` | host-minted + cached platform-level client-credentials token (`spotify.app`) | client id/secret from host env; 60s early re-mint, single-flight |
+
+Grants for first-party bundles come from the PLATFORM table `bundle_host_http::grants::FIRST_PARTY_GRANTS` (keyed by the reserved `waddles.core.*` app id), never from bundle-declared data. Egress rows come from the approved install summary (`egress`/`egressRps`) via `ActiveEgressSnapshot` (before this, no production writer populated any egress catalog, so every bundle `http.send` was `host_not_declared`). Rows are keyed by activation scope `(tenant_id, community_id)` then `app_id`, resolved with the host-verified `CallScope` (own community's activation, else the tenant's tenant-wide `community_id=0` one, else nothing — never merged, never another tenant's), and rebuilt wholesale each active-set tick so a deactivated bundle drops out. Unscoped `resolve()` fails closed.
+
+**Quota** (`bundle_host_http::credentials::QuotaGuard`, Valkey counters via `bundle_host_credentials::ValkeyQuotaStore`): per secret ref, global per-minute + per-day budgets plus a per-community share of the day budget; atomic multi-counter charge (refused charges consume nothing); exhausted → `quota_exhausted`; store down for a metered ref → `quota_unavailable` (fail closed). Defaults in `grants::default_quota_policies`, override with `BUNDLE_SECRET_QUOTAS_JSON`.
+
+**Unfollowed redirects**: a first-party row may list FQDNs (`unfollowed_redirect_hosts`, e.g. `api.soundcloud.com`) whose first-hop 3xx is returned to the bundle verbatim (status + `Location`) instead of being followed.
 
 ## Chat Relay (`chat.send:<platform>`)
 

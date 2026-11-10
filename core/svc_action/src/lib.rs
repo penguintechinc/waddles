@@ -789,8 +789,24 @@ fn build_action_egress_guard(
         .with_instance_policy(Arc::new(std::sync::RwLock::new(
             cli.instance_egress_policy(),
         )))
-        .with_cluster_denylist(cluster_denylist),
+        .with_cluster_denylist(cluster_denylist)
+        .with_credentials(bundle_credential_sources()),
     ))
+}
+
+/// The non-env credential sources + shared-credential quota for bundle
+/// `http.send` secret refs (per-community connections via hub-api, host-minted
+/// app tokens, Valkey-backed budgets). Quota counters use the durable spine
+/// Valkey; any source that cannot be built fails closed (see
+/// `bundle_host_credentials::wiring`).
+fn bundle_credential_sources() -> bundle_host_http::credentials::CredentialSources {
+    let client = penguin_spine::SpineConfig::from_env()
+        .ok()
+        .and_then(|cfg| build_redis_client(&cfg));
+    bundle_host_credentials::wiring::build_credential_sources(
+        &|key| std::env::var(key).ok(),
+        client,
+    )
 }
 
 /// Builds the real [`capabilities::StageCapabilities`] (a live Valkey
@@ -1777,6 +1793,8 @@ fn try_start_dispatch(
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                egress: Vec::new(),
+                egress_rps: None,
                 tools: Default::default(),
             }]);
         }

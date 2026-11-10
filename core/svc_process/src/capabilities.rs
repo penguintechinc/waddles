@@ -2757,7 +2757,18 @@ impl<K: KvBackend> StageCapabilities<K> {
         &self,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
-        self.egress.send(&self.app_id, args).await
+        // The community whose connection a `connection:` secret grant
+        // resolves: the MAC-verified envelope's numeric scope when present
+        // (a tenant-wide activation serves many communities), else the
+        // stage's bound scope. Never a guest-supplied value.
+        let (tenant_id, community_id) = self
+            .verified_scope
+            .unwrap_or((self.tenant_id, self.community_id));
+        let scope = bundle_host_http::credentials::CallScope {
+            tenant_id: i64::from(tenant_id),
+            community_id: i64::from(community_id),
+        };
+        self.egress.send_scoped(&self.app_id, &scope, args).await
     }
 
     fn handle_clock(&self, op: &str) -> Result<serde_json::Value, HostResultError> {
