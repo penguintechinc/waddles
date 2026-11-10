@@ -30,12 +30,14 @@ import grpc
 from flask_core.service_jwt import ServiceJwtIssuer
 from waddles.hub.internal.v1 import (
     active_context_pb2_grpc,
+    bundle_schedule_pb2_grpc,
     identity_pb2_grpc,
     key_pb2_grpc,
     service_auth_pb2_grpc,
 )
 
 from grpc_internal.active_context_servicer import ACTIVE_CONTEXT_SCOPES, ActiveContextServicer
+from grpc_internal.bundle_schedule_servicer import BUNDLE_SCHEDULE_SCOPES, BundleScheduleServicer
 from grpc_internal.interceptors import (
     AuthInterceptor,
     DeadlineInterceptor,
@@ -49,7 +51,11 @@ logger = logging.getLogger(__name__)
 
 #: Every served method -> required scope. One entry per service-area module, merged here, so a new
 #: area adds a module + one line below instead of editing a shared table.
-ALL_REQUIRED_SCOPES: dict[str, str] = {**REQUIRED_SCOPES, **ACTIVE_CONTEXT_SCOPES}
+ALL_REQUIRED_SCOPES: dict[str, str] = {
+    **REQUIRED_SCOPES,
+    **ACTIVE_CONTEXT_SCOPES,
+    **BUNDLE_SCHEDULE_SCOPES,
+}
 
 #: Rejects any message over 4 MiB either direction -- generous for a
 #: <=100-item batch, small enough that one internal caller can't exhaust
@@ -154,6 +160,9 @@ async def build_internal_grpc_server(
     key_pb2_grpc.add_KeyServiceServicer_to_server(KeyServicer(), server)
     active_context_pb2_grpc.add_ActiveContextServiceServicer_to_server(
         ActiveContextServicer(install_dal), server
+    )
+    bundle_schedule_pb2_grpc.add_BundleScheduleServiceServicer_to_server(
+        BundleScheduleServicer(install_dal), server
     )
     service_auth_pb2_grpc.add_ServiceAuthServiceServicer_to_server(
         ServiceAuthServicer(issuer, audit_logger=audit_logger), server

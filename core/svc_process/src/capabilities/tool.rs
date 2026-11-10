@@ -317,7 +317,15 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             "tool.invoke authorized"
         );
 
-        // 6. Nested invoke on the active executor connection.
+        self.run_nested(ctx, &plan).await
+    }
+
+    /// Step 6: the nested invoke of the planned target on the active executor connection.
+    async fn run_nested(
+        &self,
+        ctx: &ToolContext,
+        plan: &bundle_tool_call::ToolPlan,
+    ) -> Result<serde_json::Value, ToolRefusal> {
         let deadline = bundle_tool_call::nested_deadline(ctx.deadline)?;
         let conn = ctx.connections.active().ok_or_else(|| {
             ToolRefusal::TargetUnavailable("no executor connection is active".to_string())
@@ -328,9 +336,9 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             ..ctx.clone()
         };
         let target_caps: Arc<dyn CapabilityHandler> =
-            Arc::new(self.for_tool_target(&plan, nested_ctx));
+            Arc::new(self.for_tool_target(plan, nested_ctx));
         let result =
-            crate::spine::invoke_tool_call(&conn, &plan, deadline, ctx.trace.clone(), target_caps)
+            crate::spine::invoke_tool_call(&conn, plan, deadline, ctx.trace.clone(), target_caps)
                 .await;
         if let Err(ToolRefusal::TargetUnavailable(_)) = &result {
             tracing::warn!(
@@ -340,6 +348,37 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             );
         }
         result
+    }
+
+    /// Runs a hub-api bundle-admin call (`crate::bundle_admin`): `self` is the CALLER bundle's
+    /// capability set (`app_id` = the signed `caller_app_id`, scope = the signed tenant/community),
+    /// `actor` the actor whose scopes the gateway's MAC covers. Same P1 matrix / `tool.call` gate
+    /// as a guest `tool.invoke` (own-bundle tools excepted, see
+    /// [`bundle_tool_call::authorize_admin_call`]); the verified actor's scopes then gate
+    /// `required_scope` tools.
+    ///
+    /// # Errors
+    /// The typed [`ToolRefusal`] naming the first refused step.
+    pub async fn invoke_admin_tool(
+        &self,
+        args: &serde_json::Value,
+        actor: bundle_tool_call::ActorContext,
+    ) -> Result<serde_json::Value, ToolRefusal> {
+        let Some(ctx) = &self.tool else {
+            return Err(ToolRefusal::TargetUnavailable(
+                "tool calls are unavailable (no tool wiring configured)".to_string(),
+            ));
+        };
+        let req = bundle_tool_call::parse_request(args)?;
+        let authorized = bundle_tool_call::authorize_admin_call(
+            &self.app_id,
+            req,
+            &ctx.snapshot,
+            &self.gate,
+            &self.gate_scope(),
+        )?;
+        let plan = authorized.into_plan(&actor)?;
+        self.run_nested(ctx, &plan).await
     }
 }
 

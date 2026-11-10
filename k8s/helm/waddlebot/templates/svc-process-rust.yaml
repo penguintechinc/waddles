@@ -189,6 +189,14 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: SERVICE_API_KEY
+        # Bundle-admin request key (hub-api signs, this stage verifies and consumes
+        # waddles:bundle-admin:requests) -- templates/bundle-admin-request-secret.yaml.
+        - name: BUNDLE_ADMIN_REQUEST_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.bundleAdminRequestSecretName" . }}
+              key: BUNDLE_ADMIN_REQUEST_KEYS
+              optional: true  # absent when the Rust data plane is off; the consumer then logs and stays off
         # CliConfig reads CACHE_HOST/CACHE_PORT/CACHE_PASSWORD -- the shared ConfigMap only
         # publishes REDIS_HOST/REDIS_PORT (a different name), so these are wired explicitly.
         - name: CACHE_HOST

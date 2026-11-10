@@ -446,6 +446,64 @@ pub fn authorize_tool_call(
     })
 }
 
+/// Authorizes a hub-api bundle-admin call (`admin_tools`) -- the gateway's signed request, not a
+/// guest `tool.invoke`. `caller_app_id` is the bundle whose admin UI made the call.
+///
+/// * Target is ANOTHER bundle: exactly [`authorize_tool_call`] (P1 matrix, the caller's own
+///   `requested_tools`, the P2 `tool.call` gate), with the call chain `[caller]`.
+/// * Target is the caller ITSELF (a service bundle's own admin tool): the self-call guard,
+///   `requested_tools` and the `tool.call` grant do not apply (a bundle needs no grant to run its
+///   own export); the target must still be active in this scope and export the tool, a write tool
+///   still needs an idempotency key, and `required_scope` is still enforced against the verified
+///   actor by [`AuthorizedCall::into_plan`].
+///
+/// # Errors
+/// The same typed [`ToolRefusal`]s as [`authorize_tool_call`].
+pub fn authorize_admin_call(
+    caller_app_id: &str,
+    req: ToolRequest,
+    snapshot: &ActiveVersionSnapshot,
+    gate: &CapabilityGate,
+    gate_scope: &InvokeScope,
+) -> Result<AuthorizedCall, ToolRefusal> {
+    let chain = vec![caller_app_id.to_string()];
+    if req.target != caller_app_id {
+        return authorize_tool_call(caller_app_id, &chain, req, snapshot, gate, gate_scope);
+    }
+    let (tenant_id, community_id) = (gate_scope.tenant_id(), gate_scope.community_id());
+    let entry = snapshot
+        .tool_entry_in_scope(tenant_id, community_id, &req.target)
+        .ok_or_else(|| {
+            ToolRefusal::TargetUnavailable("the target is not active in this scope".to_string())
+        })?;
+    let exported = entry.tools.exported_tool(&req.tool).ok_or_else(|| {
+        ToolRefusal::Forbidden("the bundle does not export this tool".to_string())
+    })?;
+    if exported.write && req.idempotency_key.is_none() {
+        return Err(ToolRefusal::InvalidArgs(
+            "a write tool requires an idempotency key".to_string(),
+        ));
+    }
+    let required_scope = exported.required_scope.clone();
+    Ok(AuthorizedCall {
+        required_scope,
+        plan: ToolPlan {
+            target_app_id: req.target,
+            tool: req.tool,
+            args: req.args,
+            idempotency_key: req.idempotency_key,
+            target_digest: entry.digest,
+            target_version: entry.version_id,
+            write: exported.write,
+            next_chain: chain,
+            caller_app_id: caller_app_id.to_string(),
+            actor: ActorContext::none(),
+            tenant_id,
+            community_id,
+        },
+    })
+}
+
 /// A tool call that passed every actor-INDEPENDENT authorization step
 /// (self/cycle/depth, the caller's `requested_tools`, the P2 gate, target
 /// resolution + the app->app ban, and the write-key requirement). The

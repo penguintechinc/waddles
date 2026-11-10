@@ -196,6 +196,92 @@ class RequestedTool:
     access: str
 
 
+#: Host bounds for `schedule` -- mirror `core/svc_ingest/src/connector/reconcile_hook.rs`
+#: (`MIN_RECONCILE_INTERVAL`, `MAX_RECONCILE_INTERVAL`, `MAX_JITTER_FRACTION`).
+SCHEDULE_MIN_INTERVAL_S = 30
+SCHEDULE_MAX_INTERVAL_S = 24 * 60 * 60
+SCHEDULE_MAX_JITTER = 0.5
+SCHEDULE_DEFAULT_JITTER = 0.2
+
+
+@dataclass(slots=True, frozen=True)
+class ScheduleDeclaration:
+    """A validated manifest `schedule:` block: the host delivers `bundle.reconcile` this often."""
+
+    interval_s: int
+    jitter: float = SCHEDULE_DEFAULT_JITTER
+
+
+def parse_schedule(raw: Any) -> ScheduleDeclaration | None:
+    """Validate the optional `schedule: {interval_s, jitter}` block; absent (`None`) is `None`.
+
+    `interval_s` is an integer within 30s..=24h (a bool is not an integer); `jitter` is an
+    optional finite fraction within 0.0..=0.5 (default 0.2). Unknown keys are refused so a typo
+    cannot silently disable the schedule. Raises `ManifestV2Error` (`invalid_schedule`).
+    """
+    if raw is None:
+        return None
+    _require(isinstance(raw, dict), "invalid_schedule", "schedule must be a mapping")
+    unknown = sorted(set(raw) - {"interval_s", "jitter"})
+    names = ", ".join(map(str, unknown))
+    _require(not unknown, "invalid_schedule", f"unknown schedule keys: {names}")
+    interval = raw.get("interval_s")
+    _require(
+        isinstance(interval, int) and not isinstance(interval, bool),
+        "invalid_schedule",
+        "schedule.interval_s must be an integer",
+    )
+    _require(
+        SCHEDULE_MIN_INTERVAL_S <= interval <= SCHEDULE_MAX_INTERVAL_S,
+        "invalid_schedule",
+        f"schedule.interval_s must be within {SCHEDULE_MIN_INTERVAL_S}..{SCHEDULE_MAX_INTERVAL_S}",
+    )
+    jitter = raw.get("jitter", SCHEDULE_DEFAULT_JITTER)
+    _require(
+        isinstance(jitter, int | float)
+        and not isinstance(jitter, bool)
+        and 0.0 <= float(jitter) <= SCHEDULE_MAX_JITTER,
+        "invalid_schedule",
+        f"schedule.jitter must be a fraction within 0..{SCHEDULE_MAX_JITTER}",
+    )
+    return ScheduleDeclaration(interval_s=interval, jitter=float(jitter))
+
+
+#: The `hub` source platform + event the host delivers on a bundle's schedule; mirrors
+#: `core/svc_ingest/src/connector/bundle_schedule.rs` (`SCHEDULE_PLATFORM`, `RECONCILE_EVENT_TYPE`).
+SCHEDULE_PLATFORM = "hub"
+SCHEDULE_EVENT_TYPE = "bundle.reconcile"
+
+
+def app_id_slug(raw: str) -> str:
+    """Python mirror of `core/svc_ingest/src/publish.rs::app_id_slug` (the `hub` source id).
+
+    Lowercases, maps every char outside `[a-z0-9_-]` to `-`, strips leading non-alphanumerics and
+    falls back to `x` -- byte-identical to the Rust publisher so hub-api's binding names the very
+    stream svc-ingest publishes the scheduled `bundle.reconcile` onto.
+    """
+    out = "".join(
+        c if ("a" <= c <= "z") or ("0" <= c <= "9") or c in "_-" else "-" for c in raw.lower()
+    )
+    out = out.lstrip("_-")
+    return out or "x"
+
+
+def scheduled_consume_rule_ok(app_id: str, consumes: tuple[ConsumeRule, ...]) -> bool:
+    """True when `consumes` has a `hub`/`bundle.reconcile` rule on this app's own source id.
+
+    The rule's `source_id` must be absent or exactly `app_id_slug(app_id)`: the stream only this
+    bundle consumes. Any other source id would never receive the scheduled event.
+    """
+    slug = app_id_slug(app_id)
+    return any(
+        rule.platform == SCHEDULE_PLATFORM
+        and SCHEDULE_EVENT_TYPE in rule.event_types
+        and rule.source_id in (None, slug)
+        for rule in consumes
+    )
+
+
 @dataclass(slots=True, frozen=True)
 class AdminTool:
     """One tool the community admin UI may invoke through the generic bundle-admin gateway.
@@ -286,6 +372,9 @@ class BundleManifestV2:
     # (op, owner) is ALSO folded into `permission_declarations` as a dangerous
     # `storage.<op>:<owner>` id. Defaulted last for hand-built fixtures.
     storage_access: tuple[StorageAccessRequest, ...] = ()
+    # Periodic host-delivered `hub`/`bundle.reconcile` event (APP and SERVICE bundles); `None`
+    # = the host never schedules one. Defaulted last for hand-built fixtures.
+    schedule: ScheduleDeclaration | None = None
     # Generic bundle-admin gateway (docs/BUNDLE_ADMIN_GATEWAY.md): the per-community config JSON
     # Schema and the tools the admin UI may invoke. Both optional; defaulted last.
     community_config_schema: dict[str, Any] | None = None
@@ -1454,6 +1543,14 @@ def parse_bundle_manifest_v2(
         if pid not in declared_ids
     )
 
+    schedule = parse_schedule(raw.get("schedule"))
+    _require(
+        schedule is None or scheduled_consume_rule_ok(raw["app_id"], consumes),
+        "schedule_requires_hub_consume",
+        f"a scheduled bundle must consume {SCHEDULE_PLATFORM}/{SCHEDULE_EVENT_TYPE} "
+        f"with source_id absent or {app_id_slug(raw['app_id'])!r}",
+    )
+
     return BundleManifestV2(
         schema_version=raw["schema_version"],
         app_id=raw["app_id"],
@@ -1491,6 +1588,7 @@ def parse_bundle_manifest_v2(
         trusted_source=trusted_source,
         table_access=table_access,
         storage_access=storage_access,
+        schedule=schedule,
         community_config_schema=community_config_schema,
         admin_tools=admin_tools,
     )

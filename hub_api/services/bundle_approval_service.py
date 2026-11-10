@@ -133,6 +133,7 @@ from services.bundle_manifest_v2 import (
     parse_exported_tools,
     parse_permission_declarations,
     parse_requested_tools,
+    parse_schedule,
     requested_tool_declarations,
 )
 from services.bundle_storage_access import parse_storage_access, storage_access_permission_ids
@@ -257,6 +258,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         trusted_source=True,
         table_access=table_access,
         storage_access=storage_access,
+        schedule=parse_schedule(raw.get("schedule")),
         community_config_schema=parse_config_schema(raw.get("community_config_schema")),
         admin_tools=parse_admin_tools(raw.get("admin_tools"), own_app_id=raw["app_id"]),
     )

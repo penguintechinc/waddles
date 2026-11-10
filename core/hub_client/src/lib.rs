@@ -38,6 +38,7 @@
 //! `Arc`-backed handle) rather than opening a new connection per call.
 
 pub mod active_context;
+pub mod bundle_schedule;
 pub(crate) mod rpc;
 
 pub mod pb {
