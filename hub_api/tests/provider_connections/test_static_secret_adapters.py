@@ -251,6 +251,7 @@ class TestEnums:
             ("API_KEY_HEADER", 3),
             ("AWS_ACCESS_KEY", 4),
             ("GCP_SERVICE_ACCOUNT", 5),
+            ("WIX_API_KEY", 6),
         ]
 
     @pytest.mark.parametrize("code", [0, 5, -1, 99, True, "2", None, 2.0])
@@ -258,7 +259,7 @@ class TestEnums:
         with pytest.raises(UnknownConnectionKind):
             ConnectionKind.from_code(code)
 
-    @pytest.mark.parametrize("code", [0, 6, -1, True, "1", None])
+    @pytest.mark.parametrize("code", [0, 7, -1, True, "1", None])
     def test_secret_scheme_from_unknown_code_raises(self, code: Any) -> None:
         with pytest.raises(UnknownSecretScheme):
             SecretScheme.from_code(code)

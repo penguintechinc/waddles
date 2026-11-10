@@ -10,7 +10,7 @@ metadata:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 data:
   # Database Configuration - individual vars for modules to build connection strings
-  DB_HOST: {{ .Values.infrastructure.postgresql.service.name | quote }}
+  DB_HOST: {{ include "waddlebot.postgres.host" . | quote }}
   DB_PORT: {{ .Values.infrastructure.postgresql.service.port | quote }}
   DB_NAME: {{ .Values.infrastructure.postgresql.database | quote }}
   # H-1/H-3 -- NO DB_USER / DATABASE_USER here. The database owner (superuser) name used
@@ -21,20 +21,21 @@ data:
   POSTGRES_USER: {{ .Values.infrastructure.postgresql.username | quote }}
   POSTGRES_DB: {{ .Values.infrastructure.postgresql.database | quote }}
   # Alternative naming convention used by some modules (router, etc.)
-  DATABASE_HOST: {{ .Values.infrastructure.postgresql.service.name | quote }}
+  DATABASE_HOST: {{ include "waddlebot.postgres.host" . | quote }}
   DATABASE_PORT: {{ .Values.infrastructure.postgresql.service.port | quote }}
   DATABASE_NAME: {{ .Values.infrastructure.postgresql.database | quote }}
 
   # Redis Configuration
   REDIS_HOST: {{ .Values.infrastructure.redis.service.name | quote }}
-  REDIS_PORT: {{ .Values.infrastructure.redis.service.port | quote }}
+  # TLS port only -- the cache Valkey has no plaintext listener (feature/transit-tls-core F2).
+  REDIS_PORT: {{ .Values.infrastructure.redis.tls.port | quote }}
 
   # S3-compatible object storage (SeaweedFS, was MinIO) -- key names kept as
   # MINIO_* for backward compatibility with consumers still reading them
   # (e.g. core/video_proxy_module); S3_* names are the primary/preferred keys.
-  MINIO_ENDPOINT: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
+  MINIO_ENDPOINT: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
   MINIO_CONSOLE_ENDPOINT: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.masterPort }}"
-  S3_ENDPOINT_URL: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
+  S3_ENDPOINT_URL: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
   S3_BUCKET_NAME: {{ .Values.infrastructure.seaweedfs.bucketName | quote }}
   S3_STORAGE_ENABLED: "true"
   # regression: bundle publish/fetch bucket split after SeaweedFS migration (#508/#509) --

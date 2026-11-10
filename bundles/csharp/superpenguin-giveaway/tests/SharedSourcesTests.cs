@@ -1,0 +1,187 @@
+using System.Text;
+using System.Text.Json;
+using SuperPenguinShared;
+using WaddleSdk.Chat;
+using WaddleSdk.Economy;
+using WaddleSdk.Overlay;
+using WaddleSdk.Relay;
+using WaddleSdk.Tests;
+using WaddleSdk.Tool;
+using WaddleSdk.Types;
+using Xunit;
+
+namespace WaddleBundleSuperpenguinGiveaway.Tests;
+
+/// <summary>Covers the sources every SuperPenguin port links from `bundles/csharp/superpenguin-shared` (stamped by the scaffold script).</summary>
+public class SharedSourcesTests
+{
+    private const string Flag = "waddles.command-superpenguin-shared-test";
+
+    private static StageEnvelopeInfo EnvelopeWithReply(string platform, string text, string? channelId)
+    {
+        var replyJson = channelId is null
+            ? $"{{\"text\":\"{text}\"}}"
+            : $"{{\"text\":\"{text}\",\"channel_id\":\"{channelId}\"}}";
+        return new StageEnvelopeInfo(
+            "tenant-1", null, "waddles.integrations.superpenguin.test", "action",
+            new PlatformEventInfo(platform, "chat.message", "user-1", replyJson, "2026-09-28T00:00:00.000Z"),
+            "2026-09-28T00:00:00.000Z", null, null);
+    }
+
+    [Theory]
+    [InlineData("twitch")]
+    [InlineData("discord")]
+    public void dispatch_relays_to_the_events_own_origin_platform(string platform)
+    {
+        var host = new FakeWaddleHost();
+
+        var result = new ReplyDispatch().Run(EnvelopeWithReply(platform, "hi", "42"), "{}", host);
+
+        Assert.True(result.Ok);
+        Assert.Equal(platform, result.Detail);
+        Assert.Equal(platform, Assert.Single(host.RelayFake.Pushes).Provider);
+    }
+
+    [Fact]
+    public void dispatch_throws_a_fatal_error_when_channel_id_is_missing()
+    {
+        var ex = Assert.Throws<WaddleTransportException>(
+            () => new ReplyDispatch().Run(EnvelopeWithReply("twitch", "text", null), "{}", new FakeWaddleHost()));
+
+        Assert.Equal("MISSING_CHANNEL", ex.Error.Code);
+        Assert.False(ex.Error.Retryable);
+    }
+
+    [Fact]
+    public void dispatch_rejects_a_payload_that_is_not_a_reply()
+    {
+        var envelope = new StageEnvelopeInfo("t", null, "a", "action",
+            new PlatformEventInfo("twitch", "chat.message", "u", "null", "2026-09-28T00:00:00.000Z"), "2026-09-28T00:00:00.000Z", null, null);
+
+        var ex = Assert.Throws<WaddleTransportException>(() => new ReplyDispatch().Run(envelope, "{}", new FakeWaddleHost()));
+
+        Assert.Equal("BAD_PAYLOAD", ex.Error.Code);
+    }
+
+    [Theory]
+    [InlineData(RelayErrorKind.Backend)]
+    [InlineData(RelayErrorKind.Denied)]
+    public void dispatch_turns_a_relay_failure_into_a_retryable_transport_error(RelayErrorKind kind)
+    {
+        var host = new FakeWaddleHost();
+        host.RelayFake.ThrowOnPush = new WaddleRelayException(kind, "relay backend unavailable");
+
+        var ex = Assert.Throws<WaddleTransportException>(
+            () => new ReplyDispatch().Run(EnvelopeWithReply("discord", "hi", "42"), "{}", host));
+
+        Assert.Equal("RELAY_PUSH_FAILED", ex.Error.Code);
+        Assert.True(ex.Error.Retryable);
+    }
+
+    [Theory]
+    [InlineData("{\"text\":\"!x\",\"is_mod\":true}", true)]
+    [InlineData("{\"text\":\"!x\",\"is_broadcaster\":true}", true)]
+    [InlineData("{\"text\":\"!x\",\"is_mod\":\"true\"}", false)]
+    [InlineData("{\"text\":\"!x\",\"is_mod\":1}", false)]
+    [InlineData("{\"text\":\"!x\",\"is_mod\":false}", false)]
+    [InlineData("{\"text\":\"!x\"}", false)]
+    [InlineData("[true]", false)]
+    [InlineData("not json", false)]
+    public void moderator_badges_are_strict_booleans_and_fail_closed(string payload, bool expected) =>
+        Assert.Equal(expected, ChatPrivileges.IsModerator(payload));
+
+    [Theory]
+    [InlineData("{\"is_bot\":true}", true)]
+    [InlineData("{\"is_bot\":\"yes\"}", false)]
+    [InlineData("{}", false)]
+    public void bot_badge_is_a_strict_boolean(string payload, bool expected) =>
+        Assert.Equal(expected, ChatPrivileges.IsBot(payload));
+
+    [Fact]
+    public void overlay_alert_pushes_a_namespaced_alert_box_payload()
+    {
+        var overlay = new FakeOverlayClient();
+
+        OverlayAlert.Push(overlay, "w1", "thing.go", "{\"n\":1}", "hello");
+
+        var push = Assert.Single(overlay.Pushes);
+        Assert.Equal(("w1", OverlaySurface.AlertBox), (push.WidgetId, push.Surface));
+        using var doc = JsonDocument.Parse(push.Payload);
+        var alert = doc.RootElement.GetProperty("alert");
+        Assert.Equal("superpenguin.thing.go", alert.GetProperty("alert_type").GetString());
+        Assert.Equal(1, alert.GetProperty("amount").GetProperty("n").GetInt32());
+        Assert.Equal("hello", alert.GetProperty("message").GetString());
+    }
+
+    [Fact]
+    public void overlay_alert_omits_the_message_when_none_is_given()
+    {
+        var overlay = new FakeOverlayClient();
+
+        OverlayAlert.Push(overlay, "w1", "x", "{}", null);
+
+        using var doc = JsonDocument.Parse(overlay.Pushes[0].Payload);
+        Assert.False(doc.RootElement.GetProperty("alert").TryGetProperty("message", out _));
+    }
+
+    [Fact]
+    public void overlay_alert_refuses_a_blank_suffix_and_an_oversized_amount()
+    {
+        var overlay = new FakeOverlayClient();
+
+        Assert.Throws<ArgumentException>(() => OverlayAlert.Push(overlay, "w1", " ", "{}", null));
+        Assert.Throws<InvalidOperationException>(() =>
+            OverlayAlert.Push(overlay, "w1", "x", "\"" + new string('a', OverlayAlert.MaxAmountBytes) + "\"", null));
+        Assert.Empty(overlay.Pushes);
+    }
+
+    [Fact]
+    public void overlay_alert_registers_an_alert_box_widget()
+    {
+        var overlay = new FakeOverlayClient();
+
+        OverlayAlert.Register(overlay, "w1", "Widget One");
+
+        var widget = Assert.Single(overlay.Registered);
+        Assert.Equal(("w1", "Widget One", OverlaySurface.AlertBox), (widget.WidgetId, widget.DisplayName, widget.Surface));
+    }
+
+    [Fact]
+    public void replay_keys_bind_message_platform_actor_and_command_and_refuse_a_blank_message_id()
+    {
+        var world = new World(Flag);
+        var ev = World.Msg("!x");
+        var a = ReplayGuard.KeyFor("k", ev, world.HostFor(World.Alice, "m1"), World.Alice, "x");
+        var b = ReplayGuard.KeyFor("k", ev, world.HostFor(World.Alice, "m2"), World.Alice, "x");
+        var c = ReplayGuard.KeyFor("k", ev, world.HostFor(World.Bob, "m1"), World.Bob, "x");
+
+        Assert.NotEqual(a, b);
+        Assert.NotEqual(a, c);
+        Assert.Throws<InvalidOperationException>(() => ReplayGuard.KeyFor("k", ev, world.HostFor(World.Alice, " "), World.Alice, "x"));
+    }
+
+    [Fact]
+    public void alias_comes_from_the_economy_service_and_falls_back_loudly()
+    {
+        var world = new World(Flag, "stars");
+        var host = world.HostFor(World.Alice, "m1");
+        Assert.Equal("stars", Replies.Alias(host, World.Alice, "t"));
+
+        world.Tools.Handlers[(EconomyServiceTools.Target, "points_view")] = _ => throw new WaddleToolException(ToolErrorKind.TargetUnavailable, "down");
+        Assert.Equal(EconomyServiceTools.DefaultAlias, Replies.Alias(host, World.Alice, "t"));
+        Assert.Contains(world.Log.Writes, w => w.Message == "t.alias_unavailable");
+
+        world.Tools.Handlers[(EconomyServiceTools.Target, "points_view")] = _ => Encoding.UTF8.GetBytes($"{{\"user\":\"{World.Alice}\",\"balance\":1,\"alias\":\" \"}}");
+        Assert.Equal(EconomyServiceTools.DefaultAlias, Replies.Alias(host, World.Alice, "t"));
+    }
+
+    [Fact]
+    public void replies_carry_the_commands_channel()
+    {
+        var cmd = ChatCommand.TryParse("{\"text\":\"!x\",\"channel_id\":\"chan-1\"}", "!")!;
+        var reply = Replies.Reply(World.Msg("!x"), cmd, "pong");
+
+        Assert.Equal("pong", World.TextOf(reply));
+        Assert.Equal("chan-1", reply.Payload(WaddleSdk.Json.WaddleSdkJsonContext.Default.ChatReplyPayload)!.ChannelId);
+    }
+}

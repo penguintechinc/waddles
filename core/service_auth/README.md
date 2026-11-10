@@ -1,6 +1,6 @@
 # service_auth
 
-Verifier + caching client for hub-api-issued per-service EdDSA machine JWTs.
+Verifier + caching client for hub-api-issued per-service ES256 machine JWTs.
 See the crate docs in `src/lib.rs` for the SPIFFE/Skauswatch migration notes.
 
 ## Outbound HTTP resilience
@@ -34,10 +34,30 @@ and `MachineJwtClient::with_timeouts(.., HttpTimeouts)` take explicit values.
   rotation can take up to the negative TTL to be honoured by a verifier that
   saw the new `kid` first; lower the TTL if that window matters).
 
+## gRPC bootstrap (mint + JWKS)
+
+The machine-JWT mint and the JWKS are hub-api **gRPC** RPCs (`proto/waddles/hub/internal/v1/service_auth.proto`,
+`ServiceAuthService.{MintServiceToken, GetServiceJwks}`); the REST routes `POST /internal/service-token` and
+`GET /internal/service-jwks.json` no longer exist. `src/grpc.rs` owns the transport:
+
+- **TLS 1.3 only**, trusting exactly the CA in `HUB_API_GRPC_CA_FILE` (hostname verification on). An `https://`
+  endpoint without a CA is an error -- never system roots, never plaintext. `http://` is accepted for loopback
+  only (dev / in-process tests); any other plaintext host is refused.
+- **Mint authentication**: the pod's projected, audience-bound ServiceAccount token as `authorization: Bearer`
+  metadata (the credential the REST route used; hub-api validates it with TokenReview and maps it to an
+  allow-listed identity), over the TLS channel. When hub-api sets `GRPC_TLS_CLIENT_CA_PATH` the channel is
+  additionally mTLS. `GetServiceJwks` is public keys only and needs no credential.
+- **One long-lived channel** per `HubChannel` (lazy connect, HTTP/2 keepalive while idle, transparent reconnect);
+  share it between `MachineJwtClient`, `BoundMachineJwtClient` and `JwksTrustBundle` via `*::with_channel`.
+- **Deadlines** are `min(request timeout, 4s)` -- under hub-api's 5s server ceiling.
+- JWKS cache semantics are unchanged (single-flight refetch, negative-`kid` TTL, fail closed).
+
+Tests use `test_support::MockHub`, a real in-process tonic `ServiceAuthService` (enable the `test-support` feature).
+
 ## BoundMachineJwtClient (community-bound bearers)
 
 `BoundMachineJwtClient::get_token_for(community_id, connection_id)` mints a machine JWT bound by hub-api
-(`POST /internal/service-token`, body `{scope, community_id, connection_id?}`) to exactly one
+(gRPC `ServiceAuthService.MintServiceToken`, request `{scope, community_id?, connection_id?}`) to exactly one
 `(community, connection)` and caches it in a 256-entry LRU (bearer JWT only, never connection secrets).
 Refreshes within `CLOCK_SKEW_SECONDS` of `exp`; concurrent callers per binding share one mint.
 The unbound `MachineJwtClient` is unchanged (`connections:list`).

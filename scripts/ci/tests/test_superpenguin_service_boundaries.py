@@ -1,11 +1,11 @@
 """The C# ports keep game rules in apps and consume existing service contracts."""
 
 import json
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
 import yaml
+from defusedxml import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[3]
 GAMES = ("roll", "slots", "gamble", "defuse", "duel", "first", "roulette", "ffa", "heist")

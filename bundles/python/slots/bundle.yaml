@@ -5,13 +5,13 @@ name: Slot Machine Bundle (Python)
 # src/app.py's own module docstring for full scope + the cross-community-leaderboard deferral.
 # 1.0.3: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
 # 1.0.4: activation-gated only -- removed the in-bundle waddles.command-slots feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.5
+version: 1.0.6
 feature: waddles.core.example
 module: core
 provider: builtin
 # Net-new Waddles content -- no inspiration source, no attribution/notice required (contrast
 # bundles/python/fish, which credits superpenguintv (Psychoboy) for its catch-and-track concept).
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/slots
 language: python
@@ -60,6 +60,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.5"
-  min_version: "1.0.5"
+  tested_with: "1.0.6"
+  min_version: "1.0.6"
   max_version: null

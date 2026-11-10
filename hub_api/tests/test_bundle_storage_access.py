@@ -31,6 +31,7 @@ _RAW = {
     "feature": "waddles.core.role_sync",
     "module": "core",
     "provider": "builtin",
+    "author": "github:penguintechinc",
     "language": "python",
     "artifact": "source",
     "stages": {
