@@ -1,4 +1,5 @@
-//! `sender.build-request`: Kick public-API request templates for `chat.send` and `chat.delete`.
+//! `sender.build-request`: Kick public-API request templates for `chat.send`, `chat.delete`,
+//! `mod.ban`, `mod.timeout` and `mod.unban`.
 //!
 //! API reference: <https://docs.kick.com/apis/chat>. The connector never holds a token and
 //! never chooses a destination: the credential is the opaque slot `{{KICK_TOKEN}}` the host
@@ -7,11 +8,14 @@
 //! is needed -- or accepted -- in the template. Any caller-supplied channel field in the
 //! payload is IGNORED (never read), so the template is byte-identical with or without it.
 //!
-//! `mod.ban` / `mod.timeout` / `mod.unban` (<https://docs.kick.com/apis/moderation>) need the
-//! broadcaster's id as a JSON INTEGER in the request body (`broadcaster_user_id`, `user_id`);
-//! the host's template substituter can only write JSON strings, which Kick's integer fields
-//! reject. They therefore fail loud (`Unsupported`) until the host gains an integer body slot;
-//! see README "Needs from host seams".
+//! Moderation (<https://docs.kick.com/apis/moderation>, `/public/v1/moderation/bans`): Kick
+//! takes `broadcaster_user_id` and `user_id` as JSON INTEGERS. The broadcaster is the opaque host
+//! slot `{{KICK_BROADCASTER_ID}}` (the host writes it as a JSON integer from the community's own
+//! connection, so a template can never aim the token at another channel); the target `user_id` is
+//! the producer's platform id, parsed here as a non-zero `u64` and emitted as a literal integer.
+//! The host refuses a request whose target equals the broadcaster (protected target).
+//! `mod.timeout` requires `text` = `{"duration":<1..=10080 minutes>[,"reason":".."]}`; `mod.ban`
+//! takes an optional plain-text reason in `text`; `mod.unban` takes no `text`.
 
 use serde_json::{Value, json};
 
@@ -20,6 +24,12 @@ use crate::common::FrameErr;
 const API: &str = "https://api.kick.com/public/v1";
 /// Slot: bearer token (header value after `Bearer `).
 pub const SLOT_TOKEN: &str = "{{KICK_TOKEN}}";
+/// Slot: the community connection's broadcaster user id (host-written JSON integer).
+pub const SLOT_BROADCASTER: &str = "{{KICK_BROADCASTER_ID}}";
+/// Kick's documented ceiling for a timeout, in minutes (7 days).
+pub const MAX_TIMEOUT_MINUTES: u64 = 10_080;
+/// Kick's documented ban/timeout reason limit, in characters.
+pub const MAX_REASON_CHARS: usize = 100;
 /// Kick's documented chat content limit (user-perceived characters).
 pub const MAX_TEXT_CHARS: usize = 500;
 /// Kick's documented byte ceiling for one chat message (UTF-8).
@@ -122,6 +132,102 @@ fn message_id(payload: &Value, key: &str) -> Result<String, FrameErr> {
     Ok(v.to_string())
 }
 
+/// The producer's target user id: a non-zero decimal `u64` (Kick user ids are integers).
+fn target_user_id(payload: &Value) -> Result<u64, FrameErr> {
+    let raw = payload
+        .get("user_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| FrameErr::Malformed("payload needs string `user_id`".to_string()))?;
+    if !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(FrameErr::Malformed("`user_id` must be digits".to_string()));
+    }
+    match raw.parse::<u64>() {
+        Ok(n) if n != 0 => Ok(n),
+        _ => Err(FrameErr::Malformed(
+            "`user_id` must be a non-zero integer".to_string(),
+        )),
+    }
+}
+
+/// A ban/timeout reason: bounded, no unsafe characters or slot braces.
+fn clean_reason(raw: &str) -> Result<String, FrameErr> {
+    reject_unsafe("reason", raw)?;
+    if raw.trim().is_empty() || raw.chars().count() > MAX_REASON_CHARS {
+        return Err(FrameErr::Malformed(format!(
+            "reason must be 1..={MAX_REASON_CHARS} characters"
+        )));
+    }
+    Ok(raw.to_string())
+}
+
+/// The moderation template for `kind`. `text` is the producer's optional free text (see the
+/// module doc for each op's grammar); an unexpected `text` fails loud rather than being ignored.
+fn moderation_tpl(kind: &str, payload: &Value) -> Result<Tpl, FrameErr> {
+    let user_id = target_user_id(payload)?;
+    let text = payload.get("text").and_then(Value::as_str);
+    let mut body = json!({ "broadcaster_user_id": SLOT_BROADCASTER, "user_id": user_id });
+    match kind {
+        "mod.ban" => {
+            if let Some(t) = text {
+                body["reason"] = Value::String(clean_reason(t)?);
+            }
+        }
+        "mod.timeout" => {
+            let raw = text.ok_or_else(|| {
+                FrameErr::Malformed("mod.timeout needs `text` with a duration".to_string())
+            })?;
+            let spec: Value = serde_json::from_str(raw).map_err(|_| {
+                FrameErr::Malformed("mod.timeout `text` is not a JSON object".to_string())
+            })?;
+            let obj = spec.as_object().ok_or_else(|| {
+                FrameErr::Malformed("mod.timeout `text` is not a JSON object".to_string())
+            })?;
+            if obj.keys().any(|k| k != "duration" && k != "reason") {
+                return Err(FrameErr::Malformed(
+                    "mod.timeout `text` has an unknown key".to_string(),
+                ));
+            }
+            let minutes = obj
+                .get("duration")
+                .and_then(Value::as_u64)
+                .filter(|m| (1..=MAX_TIMEOUT_MINUTES).contains(m))
+                .ok_or_else(|| {
+                    FrameErr::Malformed(format!(
+                        "duration must be an integer 1..={MAX_TIMEOUT_MINUTES} minutes"
+                    ))
+                })?;
+            body["duration"] = Value::from(minutes);
+            if let Some(r) = obj.get("reason") {
+                let r = r
+                    .as_str()
+                    .ok_or_else(|| FrameErr::Malformed("reason must be a string".to_string()))?;
+                body["reason"] = Value::String(clean_reason(r)?);
+            }
+        }
+        _ => {
+            if text.is_some() {
+                return Err(FrameErr::Malformed("mod.unban takes no `text`".to_string()));
+            }
+        }
+    }
+    let mut headers = auth_headers();
+    headers.push(("Content-Type".to_string(), "application/json".to_string()));
+    let mut secret_refs = base_refs();
+    secret_refs.push((SLOT_BROADCASTER.to_string(), "broadcaster_id".to_string()));
+    Ok(Tpl {
+        method: if kind == "mod.unban" {
+            "DELETE"
+        } else {
+            "POST"
+        }
+        .to_string(),
+        url: format!("{API}/moderation/bans"),
+        headers,
+        body: Some(body.to_string().into_bytes()),
+        secret_refs,
+    })
+}
+
 /// Defence in depth on the finished template: the only `{{` / `}}` pairs present must be the
 /// slots this module declares in `secret_refs`.
 fn verify_slots(t: &Tpl) -> Result<(), FrameErr> {
@@ -186,10 +292,7 @@ fn build_unchecked(
                 secret_refs: base_refs(),
             })
         }
-        "mod.ban" | "mod.timeout" | "mod.unban" => Err(FrameErr::Unsupported(format!(
-            "{kind} needs an integer-typed host body slot (Kick requires integer \
-             broadcaster_user_id); not available yet"
-        ))),
+        "mod.ban" | "mod.timeout" | "mod.unban" => moderation_tpl(kind, &payload),
         other => Err(FrameErr::Unsupported(format!(
             "unsupported action kind {other}"
         ))),
@@ -322,16 +425,121 @@ mod tests {
         ));
     }
 
-    /// Pins the open integer-slot gap: when the host grows an integer body slot this test must
-    /// fail on purpose, prompting the real implementation + policy kinds.
+    fn body_of(t: &Tpl) -> Value {
+        serde_json::from_slice(t.body.as_ref().unwrap()).unwrap()
+    }
+
     #[test]
-    fn moderation_fails_loud_until_the_host_has_integer_body_slots() {
-        for k in ["mod.ban", "mod.timeout", "mod.unban"] {
-            let e = build_request(k, "s", &json!({"user_id": "5"}).to_string()).unwrap_err();
-            let FrameErr::Unsupported(m) = e else {
-                panic!("{k} must be Unsupported");
-            };
-            assert!(m.contains("integer"), "{m}");
+    fn mod_ban_is_a_post_with_a_host_broadcaster_slot_and_an_integer_target() {
+        let p = json!({"user_id": "4242", "text": "spam"}).to_string();
+        let t = build_request("mod.ban", "s", &p).unwrap();
+        assert_eq!(t.method, "POST");
+        assert_eq!(t.url, "https://api.kick.com/public/v1/moderation/bans");
+        let b = body_of(&t);
+        assert_eq!(b["broadcaster_user_id"], SLOT_BROADCASTER);
+        assert_eq!(b["user_id"], 4242);
+        assert!(b["user_id"].is_u64());
+        assert_eq!(b["reason"], "spam");
+        assert!(b.get("duration").is_none());
+        assert_eq!(
+            t.secret_refs,
+            vec![
+                (SLOT_TOKEN.into(), "token".into()),
+                (SLOT_BROADCASTER.into(), "broadcaster_id".into())
+            ]
+        );
+        // No reason: key absent.
+        let t = build_request("mod.ban", "s", &json!({"user_id": "7"}).to_string()).unwrap();
+        assert!(body_of(&t).get("reason").is_none());
+    }
+
+    #[test]
+    fn mod_timeout_requires_a_bounded_duration() {
+        let ok = |d: Value| {
+            let text = json!({"duration": d, "reason": "calm down"}).to_string();
+            build_request(
+                "mod.timeout",
+                "s",
+                &json!({"user_id": "9", "text": text}).to_string(),
+            )
+        };
+        let b = body_of(&ok(json!(10)).unwrap());
+        assert_eq!(b["duration"], 10);
+        assert_eq!(b["reason"], "calm down");
+        assert!(ok(json!(MAX_TIMEOUT_MINUTES)).is_ok());
+        for bad in [
+            json!(0),
+            json!(MAX_TIMEOUT_MINUTES + 1),
+            json!(-1),
+            json!("5"),
+            json!(1.5),
+        ] {
+            assert!(ok(bad.clone()).is_err(), "{bad}");
         }
+        // Missing / malformed / extra-key text all fail loud.
+        for text in [
+            None,
+            Some("nope"),
+            Some("[1]"),
+            Some(r#"{"duration":5,"x":1}"#),
+            Some("{}"),
+        ] {
+            let mut p = json!({"user_id": "9"});
+            if let Some(t) = text {
+                p["text"] = Value::String(t.to_string());
+            }
+            assert!(
+                build_request("mod.timeout", "s", &p.to_string()).is_err(),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mod_unban_is_a_delete_with_no_text() {
+        let t = build_request("mod.unban", "s", &json!({"user_id": "31"}).to_string()).unwrap();
+        assert_eq!(t.method, "DELETE");
+        assert_eq!(body_of(&t)["user_id"], 31);
+        let with_text = json!({"user_id": "31", "text": "x"}).to_string();
+        assert!(build_request("mod.unban", "s", &with_text).is_err());
+    }
+
+    #[test]
+    fn moderation_target_must_be_a_non_zero_digit_string_and_reasons_are_sanitized() {
+        for bad in [
+            json!("0"),
+            json!(""),
+            json!("-1"),
+            json!("1e3"),
+            json!("12 "),
+            json!(5),
+            json!("18446744073709551616"),
+        ] {
+            let p = json!({"user_id": bad}).to_string();
+            for k in ["mod.ban", "mod.unban"] {
+                assert!(build_request(k, "s", &p).is_err(), "{k} {bad}");
+            }
+        }
+        assert!(build_request("mod.ban", "s", "{}").is_err());
+        for reason in ["x {{KICK_TOKEN}}", "a\u{200B}b", "", &"r".repeat(101)] {
+            let p = json!({"user_id": "1", "text": reason}).to_string();
+            assert!(build_request("mod.ban", "s", &p).is_err(), "{reason:?}");
+        }
+        assert!(
+            build_request(
+                "mod.ban",
+                "s",
+                &json!({"user_id":"1","text":"r".repeat(100)}).to_string()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_connector_supplied_broadcaster_is_never_read_for_moderation() {
+        let plain = build_request("mod.ban", "s", &json!({"user_id": "5"}).to_string()).unwrap();
+        let p = json!({"user_id": "5", "broadcaster_user_id": "999", "broadcaster_id": 999})
+            .to_string();
+        assert_eq!(build_request("mod.ban", "s", &p).unwrap(), plain);
     }
 }

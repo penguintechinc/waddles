@@ -9,7 +9,7 @@ Pusher WS (host WsTransport, profiles/kick.rs) ─┐
 signed webhook (host verifies, wraps envelope) ─┼─> receiver.on-frame ─> normalized-event
                                                 │   ({"event":..} = Pusher, else {"type","body"} envelope)
 on-connect ─> one pusher:subscribe (slot only)       on-heartbeat-due ─> pusher:ping
-sender.build-request(chat.send | chat.delete) ─> http-request-tpl (slot only)
+sender.build-request(chat.send | mod.ban | mod.timeout | mod.unban; chat.delete builds but the host refuses it) ─> http-request-tpl (slots only)
 tool-provider: kick.live.channels
 ```
 
@@ -70,8 +70,15 @@ host-side only). API: <https://docs.kick.com/apis/chat>.
 | Op | Request |
 |---|---|
 | `chat.send` | `POST /public/v1/chat` `{"content","type":"bot"[,"reply_to_message_id"]}` — Kick delivers a bot post to the channel attached to the token |
-| `chat.delete` | builds `DELETE /public/v1/chat/{message_id}`, but the host REFUSES it today (see seam 1) |
-| `mod.ban` `mod.timeout` `mod.unban` | **fail loud (`Unsupported`)** — see below |
+| `chat.delete` | builds `DELETE /public/v1/chat/{message_id}`, but the host REFUSES it (unregistered, fail closed): the message id is global and not bound to the community channel |
+| `mod.ban` | `POST /public/v1/moderation/bans` `{"broadcaster_user_id":"{{KICK_BROADCASTER_ID}}"→int,"user_id":<int>[,"reason"]}`; `text` = optional plain reason (≤100 chars) |
+| `mod.timeout` | same endpoint plus `"duration"` (1..=10080 minutes): `text` = `{"duration":N[,"reason":".."]}` (required) |
+| `mod.unban` | `DELETE /public/v1/moderation/bans` `{"broadcaster_user_id":..,"user_id":..}`; no `text` |
+
+The broadcaster is the host slot `{{KICK_BROADCASTER_ID}}` (the host writes a JSON integer from the community connection's own
+`broadcaster_user_id` binding metadata; a bundle can never name another channel). `user_id` must be a non-zero digit string and is
+emitted as a JSON integer. The host refuses a request whose target equals the broadcaster (`protected_target`). `reason`/`text` pass the
+same unsafe-character and brace gate as chat text.
 
 `kick.live.channels` (catalog S8 `*.live.channels` contract): `GET /public/v1/channels` with no
 query returns the authenticated user's channel, i.e. exactly the community's own connection. Only an
@@ -91,27 +98,17 @@ when it lands).
   ping; the 25 s client `pusher:ping` (below Pusher's activity timeout) keeps the server from ever
   needing to ping.
 
-## Needs from host seams (S0) — not done here, by ownership
+## Host seams
 
-0. **Kick channel pin** — `chat.delete` is not registered on the host (policy table, relay ops,
-   manifest permissions) because the message id is global: the community token could delete
-   messages in any channel its owner moderates. `sender_exec::pin_channel` enforces a pin only for
-   twitch|discord|youtube and returns `Ok(None)` for other platforms even when a kind sets
-   `requires_pin` (fail-open for any future platform). Needed: `outbound_pin::pin_target` learns
-   `kick`, and `pin_channel` fails closed for an unknown platform when `requires_pin`. Then register
-   `chat.delete` (`policy/kick.rs`, `platform_ops.rs`, fixture) and re-add the `chat.delete:kick` +
-   `moderation.kick` permissions.
-1. **Integer body slot** — Kick moderation takes `broadcaster_user_id` / `user_id` as JSON
-   *integers*; the template substituter writes only JSON strings. Needed: a `Position::BodyInt`-style
-   slot (digits-only `SlotShape`, written as a JSON number). Then add `mod.ban|timeout|unban` kinds to
-   `sender_exec/policy/kick.rs` + `bundle_capability_gate/src/platform_ops.rs`, and implement them in
-   `sender.rs`. Pinned by three tests that fail on purpose when the gap closes.
-2. **`KickSlots` slot source** — a `SlotSource` for `kick` (handle `token`, from the community's
-   Kick connection) and one `PlatformSlotRouter` arm; until then every Kick op is refused
-   (`slot_platform_unknown`). Also svc_action `senders.rs` `Platform::Kick` is `PendingSeam`.
-3. **Webhook scheme + envelope** — a `Scheme` variant in `webhook_verify.rs` that calls
-   `kick_webhook::{prepare, verify}` with the key fetched from `PUBLIC_KEY_URL` (cached, rotation
-   aware), and passes `Prepared::envelope(body)` to the guest instead of the raw body.
+Landed in svc_ingest / svc_action: the Kick channel pin, the integer body slot (`SlotShape::Int`), `KickSlots`, the webhook scheme +
+envelope, the executor queue (`SenderStatus::ExecutorQueue`, `kick` in the relay providers), the registered `mod.*` ops
+(`policy/kick.rs`, `platform_ops.rs`, fixture, `moderation.kick` permission), the webhook route plan
+(`Scheme::kick(<broadcaster_user_id>)` on a second supervised lane) and the events subscription (`connector/kick_subscribe.rs`).
+
+Still open:
+
+3. **`chat.delete`** needs the host to prove a message id belongs to the community (an id seen in its verified ingest stream, or a host lookup of the message's broadcaster against the binding) before it is registered again.
+
 4. **Read-tool slots** — `kick.live.channels` needs only the bearer (header ref `kick_bearer`); the
    host `http` import must resolve it for kick tool calls.
 

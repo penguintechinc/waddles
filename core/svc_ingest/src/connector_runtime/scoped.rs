@@ -72,13 +72,16 @@ pub const COMMUNITY_PLATFORM: &str = "community";
 /// What to ask the scope authority for `desired`: the upstream resource for
 /// twitch/discord, else (youtube/spectrum, whose sources have no `community_servers`
 /// link) the connection's own numeric community from the server-derived feed.
-/// Never read from binding metadata. `None` for a webhook plan or an unknown platform.
+/// Never read from binding metadata. The community-scoped platforms resolve for ANY plan kind
+/// (including a webhook lane, which has no source key); `None` for a twitch/discord webhook
+/// plan or an unknown platform.
 #[must_use]
 pub fn lookup_target(desired: &DesiredConnection) -> Option<(&'static str, String)> {
     let platform = desired.key.platform;
-    let key = source_key_of(desired)?;
     match platform {
-        "twitch" | "discord" => scope_source(platform, key).map(|s| (platform, s)),
+        "twitch" | "discord" => {
+            scope_source(platform, source_key_of(desired)?).map(|s| (platform, s))
+        }
         "youtube" | "spectrum" | "wix" | "kick" => {
             Some((COMMUNITY_PLATFORM, desired.key.community_id.to_string()))
         }

@@ -24,13 +24,14 @@ use connection_resolver::{ConnectionKind, ConnectionResolver, ResolverConfig, Re
 use connector_e2e::{digest_of, RigConnector, WireRig};
 use svc_ingest::connector::sender_exec::kick_slots::KickSlots;
 use svc_ingest::connector::sender_exec::policy::registered_op;
+use svc_ingest::connector::sender_exec::subst::SubstError;
 use svc_ingest::connector::sender_exec::{
     BuildError, BuiltTemplate, ExecError, ExecRequest, ExecutorConfig, PlatformPolicy,
     SenderAction, SenderExecutor, TemplateBuilder, WireTemplateBuilder,
 };
 use svc_ingest::outbound_boot::CachedFlagGate;
 use svc_ingest::outbound_creds_kick::ResolverKickCredentials;
-use svc_ingest::outbound_ops::OutboundAction;
+use svc_ingest::outbound_ops::{OutboundAction, PolicyOp};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -38,6 +39,7 @@ const WASM: &[u8] = include_bytes!("fixtures/kick_connector.wasm");
 const COMMUNITY: i64 = 7;
 const TOKEN: &str = "KICK-OAUTH-SECRET";
 const CHAN: &str = "kick-chan";
+const BROADCASTER: &str = "777";
 const MSG_ID: &str = "828f83bb-e391-4c78-9e91-af35a172840e";
 
 struct NoMetrics;
@@ -62,7 +64,11 @@ type Slots = KickSlots<ResolverKickCredentials<ConnectionResolver>>;
 
 /// A fake hub-api serving ONE Kick connection (community 7, connection 12, kind-1 token).
 /// Returns the server (request counts are read back from it) and the production slot source.
-async fn hub() -> (MockServer, Slots, TestSa) {
+async fn hub(broadcaster: Option<&str>) -> (MockServer, Slots, TestSa) {
+    let metadata = broadcaster.map_or_else(
+        || serde_json::json!({}),
+        |b| serde_json::json!({ "broadcaster_user_id": b }),
+    );
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/internal/service-token"))
@@ -77,7 +83,7 @@ async fn hub() -> (MockServer, Slots, TestSa) {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "success": true,
             "items": [{"communityId": COMMUNITY, "connectionId": 12, "tenantId": 3,
-                       "secretVersion": 1, "provider": "kick", "kind": 1, "metadata": {}}],
+                       "secretVersion": 1, "provider": "kick", "kind": 1, "metadata": metadata}],
             "nextAfter": null
         })))
         .mount(&server)
@@ -88,11 +94,14 @@ async fn hub() -> (MockServer, Slots, TestSa) {
         )))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "communityId": COMMUNITY, "connectionId": 12, "provider": "kick", "kind": 1,
-            "accessToken": TOKEN, "expiresAt": null, "metadata": {}
+            "accessToken": TOKEN, "expiresAt": null, "metadata": metadata
         })))
         .mount(&server)
         .await;
-    let sa = std::env::temp_dir().join(format!("kick-sa-{}", std::process::id()));
+    // One file per rig: tests run in parallel inside this process and each removes its own on drop.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let sa = std::env::temp_dir().join(format!("kick-sa-{}-{n}", std::process::id()));
     std::fs::write(&sa, "synthetic-sa").unwrap();
     let resolver = ConnectionResolver::new(
         ResolverConfig::new(
@@ -155,6 +164,10 @@ struct Rig {
 }
 
 async fn rig() -> Rig {
+    rig_with(Some(BROADCASTER)).await
+}
+
+async fn rig_with(broadcaster: Option<&str>) -> Rig {
     let wire = WireRig::start_with_permissions(
         vec![RigConnector {
             platform: "kick".into(),
@@ -185,7 +198,7 @@ async fn rig() -> Rig {
         },
         vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
     );
-    let (hub, slots, sa) = hub().await;
+    let (hub, slots, sa) = hub(broadcaster).await;
     let exec = SenderExecutor::new(
         Rewrite {
             inner: WireTemplateBuilder::new(Arc::clone(&wire.link), Arc::clone(&wire.registry)),
@@ -261,45 +274,33 @@ async fn chat_send_reaches_the_kick_api_with_the_host_resolved_token_and_no_dest
     );
 }
 
-/// `chat.delete` is deliberately unregistered on Kick: the message id is global and the executor's
-/// `pin_channel` cannot pin a Kick channel (it ignores `requires_pin` for platforms other than
-/// twitch|discord|youtube), so the community token could delete messages in any channel its owner
-/// moderates. The executor refuses it (`UnsupportedKind`) and nothing is sent; the bundle still
-/// builds the template, so enabling it later is a policy + pin change only.
+/// Regression (security review, HIGH): `chat.delete` takes a global message id that is not bound
+/// to the community's channel, so it is UNREGISTERED. The executor refuses it for every shape
+/// (pinned, mismatched channel, no origin) and nothing reaches Kick; the bundle may still build the
+/// template, which proves the host (not the guest) is the gate.
 #[tokio::test(flavor = "multi_thread")]
-async fn chat_delete_is_refused_until_the_executor_can_pin_a_kick_channel() {
+async fn chat_delete_is_refused_fail_closed_and_never_sent() {
     let rig = rig().await;
     Mock::given(wiremock::matchers::any())
         .respond_with(ResponseTemplate::new(204))
         .mount(&rig.server)
         .await;
     assert!(registered_op("kick", "chat.delete").is_none());
-    let action = OutboundAction::ChatDelete {
-        channel: CHAN.into(),
-        message_id: MSG_ID.into(),
-        origin_channel: Some(CHAN.into()),
-    };
-    let err = rig.exec.execute(&req(&action)).await.unwrap_err();
-    assert!(matches!(err, ExecError::UnsupportedKind), "got {err:?}");
+    for (channel, origin) in [
+        (CHAN, Some(CHAN)),
+        ("someone-else", Some(CHAN)),
+        (CHAN, None),
+    ] {
+        let action = OutboundAction::ChatDelete {
+            channel: channel.into(),
+            message_id: MSG_ID.into(),
+            origin_channel: origin.map(str::to_string),
+        };
+        let err = rig.exec.execute(&req(&action)).await.unwrap_err();
+        assert!(matches!(err, ExecError::UnsupportedKind), "got {err:?}");
+    }
     assert!(rig.server.received_requests().await.unwrap().is_empty());
-
-    let builder = WireTemplateBuilder::new(rig._wire.link.clone(), Arc::clone(&rig._wire.registry));
-    let built = builder
-        .build_request(
-            "kick",
-            &SenderAction {
-                kind: "chat.delete".into(),
-                target_source_id: "src".into(),
-                payload_json: format!(r#"{{"message_id":"{MSG_ID}"}}"#),
-            },
-        )
-        .await
-        .expect("the bundle builds chat.delete");
-    assert_eq!(built.tpl.method, "DELETE");
-    assert_eq!(
-        built.tpl.url,
-        format!("https://api.kick.com/public/v1/chat/{MSG_ID}")
-    );
+    assert_eq!(resolves(&rig.hub).await, 0, "no credential resolved either");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -334,27 +335,145 @@ async fn hostile_input_and_unowned_channels_send_nothing() {
     );
 }
 
-/// Moderation fails loud at every layer until the host has integer body slots: the policy table
-/// never registers the op (parse-time `UnknownOp`) and the bundle itself answers `unsupported`.
-#[tokio::test(flavor = "multi_thread")]
-async fn moderation_is_refused_loudly_never_sent() {
-    for op in ["mod.ban", "mod.timeout", "mod.unban"] {
-        assert!(registered_op("kick", op).is_none(), "{op}");
+fn mod_op(op: &str, user: &str, text: Option<&str>) -> OutboundAction {
+    OutboundAction::PolicyOp(PolicyOp {
+        op: registered_op("kick", op).expect("registered"),
+        channel: Some(CHAN.into()),
+        text: text.map(str::to_string),
+        message_id: None,
+        user_id: Some(user.into()),
+        origin_channel: Some(CHAN.into()),
+        tenant_id: Some(3),
+    })
+}
+
+async fn mount_bans(rig: &Rig) {
+    for m in ["POST", "DELETE"] {
+        Mock::given(method(m))
+            .and(path("/public/v1/moderation/bans"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": {}, "message": "ok"})),
+            )
+            .mount(&rig.server)
+            .await;
     }
+}
+
+/// Ban / timeout / unban reach Kick with the broadcaster as a host-written JSON INTEGER from the
+/// community's own binding and the target as an integer; the real compiled bundle builds them.
+#[tokio::test(flavor = "multi_thread")]
+async fn moderation_sends_integer_ids_with_the_host_resolved_broadcaster() {
     let rig = rig().await;
-    let wire = rig._wire.link.clone();
-    let builder = WireTemplateBuilder::new(wire, Arc::clone(&rig._wire.registry));
-    let err = builder
-        .build_request(
-            "kick",
-            &SenderAction {
-                kind: "mod.ban".into(),
-                target_source_id: "src".into(),
-                payload_json: r#"{"user_id":"5"}"#.into(),
-            },
-        )
+    mount_bans(&rig).await;
+    for op in ["mod.ban", "mod.timeout", "mod.unban"] {
+        assert_eq!(registered_op("kick", op), Some(op), "{op}");
+    }
+    rig.exec
+        .execute(&req(&mod_op("mod.ban", "4242", Some("spam"))))
+        .await
+        .expect("mod.ban");
+    rig.exec
+        .execute(&req(&mod_op(
+            "mod.timeout",
+            "4243",
+            Some(r#"{"duration":10,"reason":"calm down"}"#),
+        )))
+        .await
+        .expect("mod.timeout");
+    rig.exec
+        .execute(&req(&mod_op("mod.unban", "4244", None)))
+        .await
+        .expect("mod.unban");
+
+    let reqs = rig.server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 3);
+    let bodies: Vec<serde_json::Value> = reqs
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(
+        bodies[0],
+        serde_json::json!({"broadcaster_user_id": 777, "user_id": 4242, "reason": "spam"})
+    );
+    assert_eq!(
+        bodies[1],
+        serde_json::json!({"broadcaster_user_id": 777, "user_id": 4243, "duration": 10, "reason": "calm down"})
+    );
+    assert_eq!(
+        bodies[2],
+        serde_json::json!({"broadcaster_user_id": 777, "user_id": 4244})
+    );
+    for b in &bodies {
+        assert!(b["broadcaster_user_id"].is_u64() && b["user_id"].is_u64());
+    }
+    assert_eq!(
+        reqs.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(),
+        ["POST", "POST", "DELETE"]
+    );
+    assert!(reqs
+        .iter()
+        .all(|r| header(r, "authorization") == format!("Bearer {TOKEN}")));
+}
+
+/// The broadcaster can never be the target (and neither can a non-integer / missing one): the
+/// request is refused after substitution, before anything reaches Kick.
+#[tokio::test(flavor = "multi_thread")]
+async fn moderating_the_broadcaster_or_a_non_integer_target_sends_nothing() {
+    let rig = rig().await;
+    mount_bans(&rig).await;
+    let err = rig
+        .exec
+        .execute(&req(&mod_op("mod.ban", BROADCASTER, None)))
         .await
         .unwrap_err();
-    assert_eq!(err, BuildError::Guest("unsupported"));
+    assert!(
+        matches!(err, ExecError::Subst(SubstError::ProtectedTarget)),
+        "got {err:?}"
+    );
+    for bad in ["abc", "0", "-3", "1.5"] {
+        assert!(
+            rig.exec
+                .execute(&req(&mod_op("mod.unban", bad, None)))
+                .await
+                .is_err(),
+            "{bad}"
+        );
+    }
+    // A timeout without a duration, or out of range, is a bundle-side refusal.
+    for text in [
+        None,
+        Some(r#"{"duration":0}"#),
+        Some(r#"{"duration":10081}"#),
+    ] {
+        assert!(rig
+            .exec
+            .execute(&req(&mod_op("mod.timeout", "9", text)))
+            .await
+            .is_err());
+    }
     assert!(rig.server.received_requests().await.unwrap().is_empty());
+}
+
+/// A binding with no valid `broadcaster_user_id` refuses moderation loudly (never guessed) while
+/// chat.send keeps working.
+#[tokio::test(flavor = "multi_thread")]
+async fn moderation_without_a_bound_broadcaster_is_refused_but_chat_still_sends() {
+    let rig = rig_with(None).await;
+    mount_bans(&rig).await;
+    Mock::given(method("POST"))
+        .and(path("/public/v1/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {}})))
+        .mount(&rig.server)
+        .await;
+    let err = rig
+        .exec
+        .execute(&req(&mod_op("mod.ban", "4242", None)))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "broadcaster_id_unbound");
+    rig.exec.execute(&req(&send("still works"))).await.unwrap();
+    let reqs = rig.server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].url.path(), "/public/v1/chat");
 }

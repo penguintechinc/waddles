@@ -22,6 +22,7 @@ egress:
   methods:
   - GET
   - POST
+  - DELETE
 data:
   tables: []
 limits:
@@ -39,6 +40,9 @@ permissions:
 - id: chat.send:kick
   justification: Template Kick chat messages (bot post); the host resolves the channel from the
     community connection and substitutes the credential
+- id: moderation.kick
+  justification: Ban, timeout and unban viewers (/public/v1/moderation/bans); the broadcaster id is a
+    host integer slot from the community connection and the host refuses the broadcaster as target
 - id: connector.pii.read
   justification: Gates identity.lookup, used to resolve the actor to its canonical UUID and the
     live-channels broadcaster ref; first-party core only, dangerous, global-admin-approved

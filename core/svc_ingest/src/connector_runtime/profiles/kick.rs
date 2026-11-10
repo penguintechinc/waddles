@@ -12,9 +12,16 @@
 //! sent on this socket; the single handshake slot is the non-secret channel name
 //! `chatrooms.<id>.v2`, answered from the validated chatroom id by [`KickFieldSecrets`].
 //!
-//! Webhook events (follow / subscription / livestream status) are NOT planned here: their
-//! signature scheme lives in `connector::kick_webhook` and is registered on a webhook route by
-//! the webhook seam (see the PR body). This profile never yields a webhook plan.
+//! Webhook events (follow / subscription / livestream status) are a SECOND, independently
+//! supervised and leased transport of the same binding ([`Lane::Webhook`]): when `kick` is listed
+//! as a webhook platform the profile also yields a [`TransportPlan::Webhook`] whose route is the
+//! host-derived key for `(kick, connection_id)`, the scheme is [`Scheme::kick`] bound to the
+//! binding's `broadcaster_user_id`, and the supervisor activates it with
+//! `webhook_boot::activate_route`. Kick signs every delivery with one global key, so the broadcaster
+//! binding is what keeps one community from receiving another's events; the feed additionally
+//! refuses a broadcaster claimed by two communities. With webhooks enabled a binding that lacks a
+//! valid `broadcaster_user_id` is refused loudly (never planned chat-only). Registering the
+//! subscription with Kick is `connector::kick_subscribe`.
 //!
 //! The chatroom id is a numeric platform id (not PII); it is nevertheless only hashed into
 //! `source_id` and never logged.
@@ -26,9 +33,13 @@ use std::time::Duration;
 use connection_resolver::{BindingSummary, ConnectionKind, ConnectionRef, SecretString};
 use sha2::{Digest, Sha256};
 
+use super::super::feed::{Lane, WebhookPlan};
+use super::super::webhook_boot::{RouteKeyDeriver, REPLAY_WINDOW};
 use super::twitch::TenantSource;
 use crate::connector::secrets::{Destination, ResolvedAuth};
 use crate::connector::webhook::{BoxFut, SecretError};
+use crate::connector::webhook::{RateLimit, WebhookRoute, HARD_MAX_BODY_BYTES};
+use crate::connector::webhook_verify::Scheme;
 use crate::connector::{HandshakeAfter, SessionRules, TransportSecretSource, WsConfig};
 use crate::connector_runtime::feed::{ConnKey, DesiredConnection, TransportPlan};
 use crate::connector_runtime::plan::{ConnectorProfile, PlanError, RuntimeEnv};
@@ -50,6 +61,9 @@ pub const HANDLE_CHANNEL: &str = "channel";
 pub const SLOT_PREFIX: &str = r#"{"event":"pusher:subscribe","data":{"auth":"","channel":""#;
 /// Binding metadata key: the numeric Kick chatroom id.
 pub const META_CHATROOM_ID: &str = "chatroom_id";
+/// Binding metadata key: the numeric Kick broadcaster (channel owner) user id the webhook route
+/// is bound to. Required only when kick webhooks are enabled.
+pub const META_BROADCASTER_ID: &str = "broadcaster_user_id";
 /// Binding metadata key: an OPTIONAL tenant claim, cross-checked only.
 pub const META_TENANT_ID: &str = "tenant_id";
 /// Synthetic `connection_id` of the non-secret `channel` handle. Never a real row (real ids are
@@ -74,6 +88,7 @@ const MAX_CHATROOM_DIGITS: usize = 20;
 #[derive(Clone, Default)]
 pub struct KickProfile {
     tenants: Option<Arc<dyn TenantSource>>,
+    webhook: Option<RouteKeyDeriver>,
 }
 
 impl KickProfile {
@@ -83,6 +98,7 @@ impl KickProfile {
     pub fn new(tenants: Arc<dyn TenantSource>) -> Self {
         Self {
             tenants: Some(tenants),
+            webhook: None,
         }
     }
 
@@ -90,7 +106,18 @@ impl KickProfile {
     /// `TenantResolve` still cross-checks it before a connection starts).
     #[must_use]
     pub fn from_feed() -> Self {
-        Self { tenants: None }
+        Self {
+            tenants: None,
+            webhook: None,
+        }
+    }
+
+    /// Enables the webhook lane with the route-key deriver (`None` = chat only). Pass `Some` only
+    /// when `kick` is listed as a webhook platform.
+    #[must_use]
+    pub fn with_webhook(mut self, deriver: Option<RouteKeyDeriver>) -> Self {
+        self.webhook = deriver;
+        self
     }
 }
 
@@ -104,6 +131,19 @@ fn chatroom_id(raw: &str) -> Result<&str, PlanError> {
         Ok(raw)
     } else {
         Err(PlanError::InvalidValue(META_CHATROOM_ID))
+    }
+}
+
+/// A numeric Kick user id: 1..=20 ASCII digits that parse as a non-zero `u64`.
+fn broadcaster_id(raw: &str) -> Result<&str, PlanError> {
+    let ok = !raw.is_empty()
+        && raw.len() <= MAX_CHATROOM_DIGITS
+        && raw.bytes().all(|b| b.is_ascii_digit())
+        && raw.parse::<u64>().is_ok_and(|n| n != 0);
+    if ok {
+        Ok(raw)
+    } else {
+        Err(PlanError::InvalidValue(META_BROADCASTER_ID))
     }
 }
 
@@ -219,6 +259,66 @@ impl TransportSecretSource for KickFieldSecrets {
     }
 }
 
+impl KickProfile {
+    /// The binding's webhook lane: a route bound to its OWN broadcaster id. The route key is the
+    /// host derivation (never binding data) and the secret ref is the connection itself.
+    fn webhook_connection(
+        &self,
+        deriver: &RouteKeyDeriver,
+        b: &BindingSummary,
+        tenant: i64,
+        version: i64,
+    ) -> Result<DesiredConnection, PlanError> {
+        let broadcaster = broadcaster_id(required(&b.metadata, META_BROADCASTER_ID)?)?;
+        let route_key = deriver
+            .derive(PLATFORM, b.connection_id)
+            .map_err(|_| PlanError::Config("kick route key derivation failed"))?;
+        let route = WebhookRoute {
+            route_key,
+            owner_bundle: PLATFORM.to_owned(),
+            scheme: Scheme::kick(broadcaster),
+            secret_ref: ConnectionRef {
+                community_id: b.community_id,
+                connection_id: b.connection_id,
+            },
+            replay_window: REPLAY_WINDOW,
+            rate_limit: RateLimit {
+                max: 300,
+                per: Duration::from_secs(60),
+            },
+            body_limit: HARD_MAX_BODY_BYTES,
+        };
+        let mut h = Sha256::new();
+        h.update(b"kick-webhook-profile-v1\0");
+        h.update(route.route_key.as_bytes());
+        h.update(broadcaster.as_bytes());
+        h.update(tenant.to_be_bytes());
+        h.update(version.to_be_bytes());
+        let d = h.finalize();
+        let mut fp = [0u8; 8];
+        fp.copy_from_slice(&d[..8]);
+        tracing::debug!(
+            community_id = b.community_id,
+            connection_id = b.connection_id,
+            "planned kick webhook route"
+        );
+        Ok(DesiredConnection {
+            key: ConnKey {
+                platform: PLATFORM,
+                community_id: b.community_id,
+                connection_id: b.connection_id,
+                lane: Lane::Webhook,
+            },
+            tenant_id: tenant,
+            plan: TransportPlan::Webhook(Box::new(WebhookPlan {
+                route,
+                authorized_community: b.community_id,
+            })),
+            fingerprint: u64::from_be_bytes(fp),
+        })
+    }
+}
+
 impl ConnectorProfile for KickProfile {
     fn platform(&self) -> &'static str {
         PLATFORM
@@ -300,16 +400,21 @@ impl ConnectorProfile for KickProfile {
             connection_id = b.connection_id,
             "planned kick pusher connection"
         );
-        Ok(vec![DesiredConnection {
+        let mut out = vec![DesiredConnection {
             key: ConnKey {
                 platform: PLATFORM,
                 community_id: b.community_id,
                 connection_id: b.connection_id,
+                lane: Lane::Primary,
             },
             tenant_id: tenant,
             plan: TransportPlan::Ws(Box::new(cfg)),
             fingerprint: fp,
-        }])
+        }];
+        if let Some(deriver) = &self.webhook {
+            out.push(self.webhook_connection(deriver, b, tenant, version)?);
+        }
+        Ok(out)
     }
 }
 
@@ -377,6 +482,101 @@ mod tests {
                 timeout: FIRST_FRAME_TIMEOUT
             }
         );
+    }
+
+    fn deriver() -> RouteKeyDeriver {
+        RouteKeyDeriver::new(SecretString::new("k".repeat(40))).unwrap()
+    }
+
+    fn hooked() -> KickProfile {
+        profile().with_webhook(Some(deriver()))
+    }
+
+    fn with_broadcaster(mut b: BindingSummary, id: &str) -> BindingSummary {
+        b.metadata
+            .insert(META_BROADCASTER_ID.to_owned(), id.to_owned());
+        b
+    }
+
+    #[test]
+    fn without_a_deriver_there_is_never_a_webhook_lane() {
+        let v = profile()
+            .plan(&with_broadcaster(binding(7, 9, "1"), "555"), &env())
+            .unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].key.lane, Lane::Primary);
+    }
+
+    #[test]
+    fn webhook_enabled_plans_a_second_lane_bound_to_the_broadcaster() {
+        let v = hooked()
+            .plan(&with_broadcaster(binding(7, 9, "1"), "555"), &env())
+            .unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!(
+            (v[0].key.lane, v[1].key.lane),
+            (Lane::Primary, Lane::Webhook)
+        );
+        assert_ne!(v[0].key, v[1].key, "lanes must not share a supervisor slot");
+        let TransportPlan::Webhook(w) = &v[1].plan else {
+            panic!("second lane is a webhook plan");
+        };
+        let Scheme::Kick(spec) = &w.route.scheme else {
+            panic!("kick scheme");
+        };
+        assert_eq!(spec.broadcaster_id, "555");
+        assert_eq!(w.route.owner_bundle, "kick");
+        assert_eq!(w.authorized_community, 7);
+        assert_eq!(
+            w.route.secret_ref,
+            ConnectionRef {
+                community_id: 7,
+                connection_id: 9
+            }
+        );
+        assert_eq!(
+            w.route.route_key,
+            deriver().derive("kick", 9).unwrap(),
+            "the key is the host derivation"
+        );
+        assert_eq!(v[1].tenant_id, 42);
+    }
+
+    #[test]
+    fn webhook_enabled_refuses_a_missing_or_invalid_broadcaster_loudly() {
+        let mut b = binding(7, 9, "1");
+        assert_eq!(
+            hooked().plan(&b, &env()).unwrap_err(),
+            PlanError::MissingKey(META_BROADCASTER_ID)
+        );
+        for bad in [
+            "",
+            "0",
+            "-4",
+            "1 2",
+            "12a",
+            "１２",
+            &"9".repeat(21),
+            "18446744073709551616",
+        ] {
+            b = with_broadcaster(binding(7, 9, "1"), bad);
+            assert_eq!(
+                hooked().plan(&b, &env()).unwrap_err(),
+                PlanError::InvalidValue(META_BROADCASTER_ID),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_webhook_fingerprint_tracks_broadcaster_and_secret_version() {
+        let fp = |b: &BindingSummary| hooked().plan(b, &env()).unwrap()[1].fingerprint;
+        let base = with_broadcaster(binding(7, 9, "1"), "555");
+        assert_eq!(fp(&base), fp(&base));
+        assert_ne!(fp(&base), fp(&with_broadcaster(binding(7, 9, "1"), "556")));
+        let mut v2 = base.clone();
+        v2.secret_version = 2;
+        assert_ne!(fp(&base), fp(&v2));
     }
 
     #[test]

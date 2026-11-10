@@ -45,15 +45,21 @@ use crate::config::CliConfig;
 use crate::connector::host_calls::{
     ActiveConnections, CallScope, ConnectorHostCalls, HostCallConfig, IdentityTokenizer,
 };
+use crate::connector::kick_subscribe::{
+    BackgroundSubscriber, HttpKickEvents, KickOwnerVerifier, KickSubscriber, SharedResolver,
+    SubscribeOnAttach,
+};
 use crate::connector::secrets::TransportSecretSource;
 use crate::connector::spectrum::{RedisSpectrumStore, SpectrumStore};
 use crate::connector::webhook::{WebhookIngress, WebhookTransport};
+use crate::connector::webhook_verify::Scheme;
 use crate::connector::{
     register_connector_metrics, ConnectorRegistry, DiscordIdentifyGate, ExecutorLink,
     FrameRuleMetrics, GatewayBotSource, HandshakeGate, IdentifyBudgetMetrics, PinnedConnector,
     RedisIdentifyBudget, TransportError, WireConnectorInvoker,
 };
 use crate::identity_crypto::DekProvider;
+use crate::outbound_creds_kick::ResolverKickCredentials;
 use crate::publish::EventAppender;
 
 /// Frame-size ceiling for the pinned inbound connectors (matches outbound).
@@ -249,13 +255,26 @@ impl ConnectionActivator for TableActivator {
 pub struct IngressAttach {
     ingress: Arc<WebhookIngress>,
     env: Arc<WebhookEnv>,
+    kick_subscribe: Option<Arc<dyn SubscribeOnAttach>>,
 }
 
 impl IngressAttach {
     /// Wraps the ingress `lib.rs` also hands to `http::router` via `AppState`.
     #[must_use]
     pub fn new(ingress: Arc<WebhookIngress>, env: Arc<WebhookEnv>) -> Self {
-        Self { ingress, env }
+        Self {
+            ingress,
+            env,
+            kick_subscribe: None,
+        }
+    }
+
+    /// Subscribes a Kick route's broadcaster to Kick's webhook events (host-side, with the
+    /// community's own credential) whenever the route is activated.
+    #[must_use]
+    pub fn with_kick_subscribe(mut self, hook: Arc<dyn SubscribeOnAttach>) -> Self {
+        self.kick_subscribe = Some(hook);
+        self
     }
 }
 
@@ -269,14 +288,22 @@ impl WebhookAttach for IngressAttach {
             route: plan.route.clone(),
             authorized_community: plan.authorized_community,
         };
-        webhook_boot::activate_plan(&self.ingress, &self.env, owned).map_err(|e| {
-            // The error names an item, never a route key or secret.
-            tracing::warn!(error = %e, "webhook route activation refused");
-            TransportError::Connect("webhook route activation refused".into())
-        })
+        let transport =
+            webhook_boot::activate_plan(&self.ingress, &self.env, owned).map_err(|e| {
+                // The error names an item, never a route key or secret.
+                tracing::warn!(error = %e, "webhook route activation refused");
+                TransportError::Connect("webhook route activation refused".into())
+            })?;
+        if let (Some(hook), Scheme::Kick(_)) = (&self.kick_subscribe, &plan.route.scheme) {
+            hook.start(plan.authorized_community, &plan.route.route_key);
+        }
+        Ok(transport)
     }
 
     fn detach(&self, plan: &WebhookPlan) {
+        if let Some(hook) = &self.kick_subscribe {
+            hook.stop(&plan.route.route_key);
+        }
         if let Err(e) = webhook_boot::deactivate_route(
             &self.ingress,
             &plan.route.route_key,
@@ -309,14 +336,21 @@ pub fn twitch_secrets_wrapper() -> SecretsWrapper {
 }
 
 /// The Kick secrets wrapper: the Pusher socket carries no credential, so the community-bound
-/// source is dropped and only the validated `chatrooms.<id>.v2` channel name is answered.
+/// source is dropped and only the validated `chatrooms.<id>.v2` channel name is answered. The
+/// webhook lane holds no transport secret at all (the verification key is Kick's own published
+/// key, fetched host-side by `KickKeySecrets`), so it keeps the unused community-bound source.
+/// Any other plan kind is refused.
 #[must_use]
 pub fn kick_secrets_wrapper() -> SecretsWrapper {
-    Arc::new(|_inner, desired| {
-        let TransportPlan::Ws(cfg) = &desired.plan else {
-            return Err(TransportError::Connect(
-                "kick plan is not a websocket".into(),
-            ));
+    Arc::new(|inner, desired| {
+        let cfg = match &desired.plan {
+            TransportPlan::Ws(cfg) => cfg,
+            TransportPlan::Webhook(_) => return Ok(inner),
+            _ => {
+                return Err(TransportError::Connect(
+                    "kick plan is neither a websocket nor a webhook".into(),
+                ));
+            }
         };
         let source = kick::KickFieldSecrets::from_config(cfg)
             .map_err(|_| TransportError::Connect("kick secrets could not be derived".into()))?;
@@ -478,6 +512,7 @@ fn feed_for<R: ConnectionResolve + 'static>(
     env: &RuntimeEnv,
     metrics: &RuntimeMetrics,
     route_keys: Option<&webhook_boot::RouteKeyDeriver>,
+    kick_route_keys: Option<&webhook_boot::RouteKeyDeriver>,
     self_echo: &SelfEchoRegistry,
 ) -> Option<Arc<dyn DynFeed>> {
     fn make<R: ConnectionResolve + 'static, P: ConnectorProfile + 'static>(
@@ -520,13 +555,25 @@ fn feed_for<R: ConnectionResolve + 'static>(
             metrics,
             self_echo,
         )),
-        "kick" => Some(make(
-            resolver,
-            kick::KickProfile::from_feed(),
-            env,
-            metrics,
-            self_echo,
-        )),
+        "kick" => {
+            let profile = kick::KickProfile::from_feed().with_webhook(kick_route_keys.cloned());
+            let mut feed = HubBindingFeed::new(
+                Arc::clone(resolver),
+                profile,
+                env.clone(),
+                FEED_CALL_TIMEOUT,
+            )
+            .with_metrics(metrics.clone())
+            .with_self_echo(self_echo.clone());
+            if kick_route_keys.is_some() {
+                // The webhook lane's broadcaster comes from editable metadata: it is only
+                // planned once proven to be the owner of the community's own token.
+                let http = HttpKickEvents::new().ok()?;
+                let creds = ResolverKickCredentials::new(SharedResolver(Arc::clone(resolver)));
+                feed = feed.with_lane_verifier(Arc::new(KickOwnerVerifier::new(creds, http)));
+            }
+            Some(Arc::new(feed))
+        }
         "spectrum" => Some(make(
             resolver,
             spectrum::SpectrumProfile::new(),
@@ -567,6 +614,8 @@ where
         .map_err(|_| BootError::Malformed("frame rule metrics"))?;
     super::self_echo::register_metrics(&deps.registry)
         .map_err(|_| BootError::Malformed("self-echo metrics"))?;
+    crate::connector::kick_subscribe::register_metrics(&deps.registry)
+        .map_err(|_| BootError::Malformed("kick subscribe metrics"))?;
 
     let gates: Option<Arc<dyn HandshakeGateFactory>> = if settings.platforms.contains(&"discord") {
         let backend = deps
@@ -590,6 +639,12 @@ where
         .webhook
         .as_ref()
         .and_then(|(_, e)| e.deriver().cloned());
+    // Kick plans a webhook lane only when `kick` is explicitly listed as a webhook platform.
+    let kick_route_keys = deps
+        .webhook
+        .as_ref()
+        .filter(|(_, e)| e.enabled("kick"))
+        .and_then(|(_, e)| e.deriver().cloned());
     for p in &settings.platforms {
         let feed = feed_for(
             p,
@@ -597,6 +652,7 @@ where
             &env,
             &metrics,
             route_keys.as_ref(),
+            kick_route_keys.as_ref(),
             &self_echo,
         )
         .ok_or(BootError::Malformed("platform"))?;
@@ -627,9 +683,25 @@ where
         Arc::clone(&deps.scope),
     )
     .with_self_echo(self_echo.clone());
-    let webhook = deps
-        .webhook
-        .map(|(ingress, env)| Arc::new(IngressAttach::new(ingress, env)) as Arc<dyn WebhookAttach>);
+    // Kick routes also subscribe their broadcaster to Kick's events (host-side credential).
+    let kick_subscribe: Option<Arc<dyn SubscribeOnAttach>> = match &deps.webhook {
+        Some((_, env)) if env.enabled("kick") => {
+            let http = HttpKickEvents::new()
+                .map_err(|_| BootError::Malformed("kick events http client"))?;
+            let creds = ResolverKickCredentials::new(SharedResolver(Arc::clone(&deps.resolver)));
+            Some(Arc::new(BackgroundSubscriber::new(KickSubscriber::new(
+                creds, http,
+            ))))
+        }
+        _ => None,
+    };
+    let webhook = deps.webhook.map(|(ingress, env)| {
+        let mut attach = IngressAttach::new(ingress, env);
+        if let Some(hook) = kick_subscribe {
+            attach = attach.with_kick_subscribe(hook);
+        }
+        Arc::new(attach) as Arc<dyn WebhookAttach>
+    });
     let spectrum_store: Option<Arc<dyn SpectrumStore>> =
         settings.platforms.contains(&"spectrum").then(|| {
             Arc::new(RedisSpectrumStore::new(deps.lease_conn.clone())) as Arc<dyn SpectrumStore>
@@ -1153,6 +1225,7 @@ mod tests {
             platform: "twitch",
             community_id: 7,
             connection_id: 9,
+            lane: Default::default(),
         };
         act.activate(&key, 5).unwrap();
         let scope = b.active.scope_of(9).unwrap();
@@ -1186,6 +1259,7 @@ mod tests {
             platform: "twitch",
             community_id: 7,
             connection_id: 9,
+            lane: Default::default(),
         };
         let other = ConnKey {
             community_id: 8,
@@ -1266,6 +1340,7 @@ mod tests {
             platform: "discord",
             community_id: 7,
             connection_id: 9,
+            lane: Default::default(),
         };
         // Forged key: refused.
         let mut forged = desired_webhook(7, 9, "forged-route-key-0000000000000000000000000", 1);

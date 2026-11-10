@@ -22,12 +22,26 @@ use super::plan::{ConnectorProfile, RuntimeEnv};
 use super::self_echo::{parse_ids, SelfEchoRegistry};
 use crate::connector::spectrum::SpectrumSpec;
 use crate::connector::webhook::WebhookRoute;
+use crate::connector::webhook_verify::Scheme;
 use crate::connector::{PollConfig, WsConfig};
 
 /// Bindings requested per page.
 pub const PAGE_LIMIT: u32 = 200;
 /// Hard cap on pages per discovery; exceeding it is a failure, not a truncation.
 pub const MAX_PAGES: u32 = 100;
+
+/// Which of a binding's transports a [`ConnKey`] names. Most bindings run exactly one
+/// (`Primary`); a binding that is BOTH a socket/poll feed and a verified webhook receiver (Kick)
+/// runs the webhook as a second, independently supervised and leased `Webhook` lane, so the two
+/// can never collapse into one supervisor slot or contend for one lease.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
+pub enum Lane {
+    /// The binding's main transport (the only one for every platform but Kick).
+    #[default]
+    Primary,
+    /// The binding's additional webhook receiver.
+    Webhook,
+}
 
 /// Identity of one supervised connection (numeric ids only, never handles).
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -38,6 +52,8 @@ pub struct ConnKey {
     pub community_id: i64,
     /// Hub-api connection row (numeric).
     pub connection_id: i64,
+    /// Which of the binding's transports this is.
+    pub lane: Lane,
 }
 
 /// How a desired connection receives frames.
@@ -137,6 +153,19 @@ pub trait BindingFeed: Send + Sync {
     ) -> impl Future<Output = Result<Vec<DesiredConnection>, FeedError>> + Send;
 }
 
+/// Async gate every [`Lane::Webhook`] plan must pass before it is desired. A Kick webhook lane is
+/// bound to the `broadcaster_user_id` in EDITABLE binding metadata, and Kick signs every delivery
+/// with one global key, so the binding is only trusted once the broadcaster is proven to be the
+/// owner of the community's own token. `false` (mismatch OR a failed check) refuses just that
+/// binding's lane, fail closed; the next reconcile retries.
+pub trait WebhookLaneVerifier: Send + Sync {
+    /// `true` only when `d`'s webhook binding is proven to belong to its own community.
+    fn verify<'a>(
+        &'a self,
+        d: &'a DesiredConnection,
+    ) -> crate::connector::webhook::BoxFut<'a, bool>;
+}
+
 /// What a connection claims upstream, for cross-community conflict checks.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum Claim {
@@ -150,7 +179,13 @@ fn claim_of(d: &DesiredConnection) -> Claim {
     match &d.plan {
         TransportPlan::Ws(c) => Claim::Resource(c.source_key.clone()),
         TransportPlan::Poll(c) => Claim::Resource(c.source_key.clone()),
-        TransportPlan::Webhook(w) => Claim::Route(w.route.route_key.clone()),
+        // Kick signs every webhook with ONE global key, so a route is only as exclusive as the
+        // broadcaster it is bound to: the claim is the broadcaster, and two communities binding
+        // the same one are both dropped (fail closed) like a shared Pusher chatroom.
+        TransportPlan::Webhook(w) => match &w.route.scheme {
+            Scheme::Kick(spec) => Claim::Resource(format!("kick-webhook:{}", spec.broadcaster_id)),
+            _ => Claim::Route(w.route.route_key.clone()),
+        },
         TransportPlan::Spectrum(s) => Claim::Resource(s.poll.source_key.clone()),
     }
 }
@@ -212,6 +247,7 @@ pub struct HubBindingFeed<R: ConnectionResolve, P: ConnectorProfile> {
     call_timeout: Duration,
     metrics: Option<RuntimeMetrics>,
     self_echo: Option<SelfEchoRegistry>,
+    lane_verifier: Option<Arc<dyn WebhookLaneVerifier>>,
 }
 
 impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
@@ -224,7 +260,16 @@ impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
             call_timeout,
             metrics: None,
             self_echo: None,
+            lane_verifier: None,
         }
+    }
+
+    /// Gates every Kick webhook lane on `verifier` (see [`WebhookLaneVerifier`]). Without one a
+    /// Kick webhook lane is REFUSED, never planned unverified.
+    #[must_use]
+    pub fn with_lane_verifier(mut self, verifier: Arc<dyn WebhookLaneVerifier>) -> Self {
+        self.lane_verifier = Some(verifier);
+        self
     }
 
     /// Keeps `registry` current with each COMPLETE discovery: the bot identity (`self_user_id`)
@@ -240,6 +285,30 @@ impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
     pub fn with_metrics(mut self, metrics: RuntimeMetrics) -> Self {
         self.metrics = Some(metrics);
         self
+    }
+
+    /// `true` unless `d` is a Kick webhook lane that is unverified (no verifier configured) or
+    /// fails the verifier. Other plans always pass.
+    async fn lane_allowed(&self, d: &DesiredConnection) -> bool {
+        let TransportPlan::Webhook(w) = &d.plan else {
+            return true;
+        };
+        if !matches!(w.route.scheme, Scheme::Kick(_)) {
+            return true;
+        }
+        let allowed = match &self.lane_verifier {
+            Some(v) => v.verify(d).await,
+            None => false,
+        };
+        if !allowed {
+            tracing::warn!(
+                platform = d.key.platform,
+                community_id = d.key.community_id,
+                connection_id = d.key.connection_id,
+                "kick webhook lane refused: broadcaster not proven to be the token owner"
+            );
+        }
+        allowed
     }
 
     /// Pages the binding list to completion and plans each binding.
@@ -283,6 +352,10 @@ impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
                                     connection_id = item.connection_id,
                                     "profile produced a connection that does not match its binding"
                                 );
+                                malformed += 1;
+                                continue;
+                            }
+                            if !self.lane_allowed(&d).await {
                                 malformed += 1;
                                 continue;
                             }

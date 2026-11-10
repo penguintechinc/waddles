@@ -44,6 +44,7 @@ pub mod host_calls;
 pub mod identify_budget;
 pub mod invoker;
 pub mod kick_keys;
+pub mod kick_subscribe;
 pub mod kick_webhook;
 pub mod lifecycle;
 #[cfg(test)]
