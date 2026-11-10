@@ -41,6 +41,7 @@ from tests.provider_connections.conftest import (
     FakeClock,
     admin_headers,
 )
+from tests.provider_connections.grpc_internal_client import GrpcRoutingClient
 
 GUILD = "812345678901234567"
 OTHER_GUILD = "812345678901234999"
@@ -119,7 +120,7 @@ def discord_service(
 def dclient(pc_app: Any, discord_service: ProviderConnectionService) -> Any:
     """Test client whose service serves Discord."""
     pc_app.config[SERVICE_CONFIG_KEY] = discord_service
-    return pc_app.test_client()
+    return GrpcRoutingClient(pc_app.test_client())
 
 
 def _base(db: Any) -> str:

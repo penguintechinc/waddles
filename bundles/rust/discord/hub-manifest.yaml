@@ -50,7 +50,7 @@ permissions:
   - id: message.reaction:discord
     justification: "Add reactions in the host-pinned channel"
   - id: commands.register:discord
-    justification: "Bulk-overwrite the application's slash commands; the application id is a host app-scoped slot"
+    justification: "The platform reconciler (never an app bundle) bulk-overwrites a guild's slash commands with exactly the hub-api desired set; the application id is a host app-scoped slot and the host re-verifies the payload"
   - id: interaction.respond:discord
     justification: "Answer interactions through host-held interaction slots; no credential in the template"
   - id: connector.pii.read
