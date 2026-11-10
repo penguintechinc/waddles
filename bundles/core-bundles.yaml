@@ -1594,6 +1594,19 @@ bundles:
     source_dir: rust/twitch-clips
     manifest_path: twitch-clips.manifest.yaml
     artifact_path: twitch-clips.wasm
+  # AI Teammates APP bundle (Rust, `stage-next-tools` world): Researcher, Receptionist, Producer --
+  # each default OFF per community, configured via config_schema. Consumes the AI service tools.
+  - app_id: waddles.core.example.ai_teammates
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-next-tools
+    source_dir: rust/ai-teammates
+    manifest_path: ai-teammates.manifest.yaml
+    artifact_path: ai-teammates.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
   # Calendar APP bundle (Rust, `stage-next-tools`): community events, RSVP, approvals, `!calendar`
   # commands, and event sync to Discord scheduled events by CALLING `discord.scheduled_event.*`
   # (sync OFF until a community admin enables it). Built by rust-bundle-builder; the world comes
