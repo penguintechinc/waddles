@@ -37,6 +37,7 @@ ADMIN_FIELDS = {
     "usable",
     "shared",
     "hasRefreshToken",
+    "hasApiCredential",
     "expiresAt",
     "capabilities",
     "metadata",

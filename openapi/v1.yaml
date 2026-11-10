@@ -283,6 +283,28 @@ components:
       - total_pages
       title: AnnouncementPagination
       type: object
+    ApiCredentialBody:
+      additionalProperties: false
+      description: 'Outbound API credential of a provider that needs one beside its
+        token (Wix).
+
+
+        Write-only: sealed on arrival; the admin DTO exposes only ``hasApiCredential``.
+        Unknown fields
+
+        are a 400 and the values never reach a repr.'
+      properties:
+        api_key:
+          title: Api Key
+          type: string
+        site_id:
+          title: Site Id
+          type: string
+      required:
+      - api_key
+      - site_id
+      title: ApiCredentialBody
+      type: object
     AuditEntryDTO:
       description: Audit log entry DTO.
       properties:
@@ -3929,6 +3951,9 @@ components:
           - type: string
           - type: 'null'
           title: Expiresat
+        hasApiCredential:
+          title: Hasapicredential
+          type: boolean
         hasRefreshToken:
           title: Hasrefreshtoken
           type: boolean
@@ -3983,6 +4008,7 @@ components:
       - usable
       - shared
       - hasRefreshToken
+      - hasApiCredential
       - expiresAt
       - capabilities
       - metadata
@@ -16170,6 +16196,11 @@ paths:
 
                 one of the two, never both.'
               properties:
+                api_credential:
+                  anyOf:
+                  - $ref: '#/components/schemas/ApiCredentialBody'
+                  - type: 'null'
+                  default: null
                 credentials:
                   anyOf:
                   - $ref: '#/components/schemas/CredentialsBody'
@@ -16377,6 +16408,11 @@ paths:
               description: Body of ``PATCH``. Omitted fields are unchanged; the provider
                 is immutable.
               properties:
+                api_credential:
+                  anyOf:
+                  - $ref: '#/components/schemas/ApiCredentialBody'
+                  - type: 'null'
+                  default: null
                 credentials:
                   anyOf:
                   - $ref: '#/components/schemas/CredentialsBody'
