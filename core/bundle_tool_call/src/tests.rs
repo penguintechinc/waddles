@@ -451,6 +451,7 @@ fn own_service(scope: Option<&str>, write: bool) -> ActiveVersionSnapshot {
                 name: "override".to_string(),
                 write,
                 required_scope: scope.map(str::to_string),
+                host_op: None,
             }],
             requested: Vec::new(),
         },

@@ -366,7 +366,7 @@ where
         // Schema-v3 producer: resolver is installed BEFORE any receiver can
         // publish. A flag that is ON but misconfigured fails the process
         // loudly -- never a silent downgrade to the v2/static path.
-        try_install_scope_resolver(&config, ingest_metrics.clone())?;
+        try_install_scope_resolver(&config, ingest_metrics.clone()).await?;
         // Twitch IRC (primary e2e path), Discord Gateway (secondary), the
         // Twitch outbound relay drain, and the Twitch EventSub webhook
         // receiver each independently no-op with a logged reason when
@@ -554,7 +554,7 @@ async fn start_outbound(
 /// missing machine-JWT bootstrap config, or a plaintext
 /// `http://` hub-api outside alpha is an `Err` -- fail loud, never silently
 /// fall back.
-fn try_install_scope_resolver(
+async fn try_install_scope_resolver(
     config: &config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
 ) -> anyhow::Result<()> {
@@ -572,14 +572,27 @@ fn try_install_scope_resolver(
             scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG
         );
     }
-    scope_resolver::check_transport(&cli.hub_api_url, &cli.environment)
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let jwt = Arc::new(service_auth::MachineJwtClient::new(
-        cli.service_jwt_token_endpoint.clone(),
-        cli.service_jwt_sa_token_path.clone(),
-        scope_resolver::RESOLVE_SCOPE_JWT_SCOPE,
-    ));
-    let source = scope_resolver::HubScopeSource::new(&cli.hub_api_url, jwt)?;
+    let hub_grpc_endpoint = std::env::var("HUB_API_GRPC_ENDPOINT")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} is ON but HUB_API_GRPC_ENDPOINT is unset: no hub-api gRPC endpoint for the resolver",
+                scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG
+            )
+        })?;
+    let hub_grpc_ca = std::env::var("HUB_API_GRPC_CA_FILE")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
+    let source = scope_resolver::HubScopeSource::connect(
+        &hub_grpc_endpoint,
+        &cli.service_jwt_token_endpoint,
+        &cli.service_jwt_sa_token_path,
+        hub_grpc_ca.as_deref(),
+    )
+    .await?;
     let resolver = Arc::new(scope_resolver::ScopeResolver::new(
         source,
         scope_resolver::ResolverConfig::default(),
