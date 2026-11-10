@@ -144,10 +144,14 @@ fn verify_slots(t: &Tpl) -> Result<(), FrameErr> {
             Err(_) => all.push_str(&String::from_utf8_lossy(b)),
         }
     }
+    // Host-duty slots (callback, secret, segment id) carry no `secret-refs` handle: the host
+    // fills them from its own state, so they are expected placeholders too.
     let expected: usize = t
         .secret_refs
         .iter()
-        .map(|(slot, _)| all.matches(slot.as_str()).count())
+        .map(|(slot, _)| slot.as_str())
+        .chain(crate::eventsub_sub::DUTY_SLOTS.iter().copied())
+        .map(|slot| all.matches(slot).count())
         .sum();
     if all.matches("{{").count() != expected || all.matches("}}").count() != expected {
         return Err(FrameErr::Malformed(
@@ -207,6 +211,9 @@ fn build_unchecked(
     }
     match kind {
         k if crate::moderation::KINDS.contains(&k) => crate::moderation::build(k, &payload),
+        k if crate::eventsub_sub::KINDS.contains(&k) => crate::eventsub_sub::build(k, &payload),
+        k if crate::schedule::KINDS.contains(&k) => crate::schedule::build(k, &payload),
+        crate::clips::CREATE_KIND => crate::clips::build_create(&payload),
         "chat.send" => {
             let text = clean_text(&payload)?;
             let body = json!({
