@@ -4,15 +4,9 @@
 # plus this stage's own .enabled sub-flag, so flipping the parent flag alone doesn't force
 # every stage on.
 #
-# fix/helm-alpha-self-provisioning -- Resource name carries a `-rust` suffix, and the image
-# repository below (waddlebot.legacyModuleImage, module rustDataPlane.svcIngest.imageRepository,
-# default "svc-ingest-rust") was made DISTINCT from the (now removed) Python svc-ingest
-# Deployment's -- previously both resolved to the identical
-# repository:tag, which broke the documented alpha COEXISTENCE state (both Deployments
-# enabled simultaneously, see pipeline.rustDataPlane's values-alpha.yaml comment): whichever
-# image was pushed to that shared tag last silently became what BOTH Deployments ran.
-# core/svc_ingest/Dockerfile.rust's own build-tag comment predates this split and should be
-# updated to build+push "svc-ingest-rust" going forward.
+# Resource name keeps its `-rust` suffix; the image repository is `svc-ingest`
+# (waddlebot.legacyModuleImage, rustDataPlane.svcIngest.imageRepository) now that the
+# Python svc-ingest image/Deployment is gone.
 #
 # CURRENT STATE: core/svc_ingest is implemented -- native Twitch IRC, Discord Gateway,
 # Twitch EventSub (HMAC-verified), and Twitch/Discord outbound drains. Valkey is read from
@@ -86,7 +80,7 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-ingest-rust
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcIngest.imageRepository | default "svc-ingest-rust") "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcIngest.imageRepository | default "svc-ingest") "imageTag" .Values.global.imageTag) }}"
         # Values-driven -- see templates/svc-process-rust.yaml's comment on this same line
         # for why the old hardcoded Always was removed (identical here).
         imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
