@@ -46,6 +46,7 @@ from tests.provider_connections.fake_kick import (
     BOT_USER_ID,
     FakeKick,
 )
+from tests.provider_connections.grpc_internal_client import GrpcRoutingClient
 from tests.provider_connections.support import open_row, raw_rows
 
 INTERNAL = "/api/v1/internal"
@@ -111,7 +112,7 @@ def kclient(pc_app: Any, pc_db: Any, fake_kick: FakeKick, clock: FakeClock) -> A
         PlatformKeyVault(),
         clock=clock,
     )
-    return pc_app.test_client()
+    return GrpcRoutingClient(pc_app.test_client())
 
 
 def _app_log(caplog: pytest.LogCaptureFixture) -> str:
@@ -575,7 +576,8 @@ class TestDataPlane:
         clock.advance(seconds=7200 - 60)
         fake_kick.refresh_status = 503
         failed = await _resolve(kclient, pc_db, service_issuer, cid)
-        assert failed.status_code == 502
+        # over gRPC a transient upstream failure is UNAVAILABLE (503), not the retired REST 502
+        assert failed.status_code == 503
         (row,) = await raw_rows(pc_db, "platform_connections")
         assert row["status"] == "active" and open_row(row) == tokens[0]
         # Kick recovers: the very next resolve refreshes and succeeds (the chain was not burnt).
