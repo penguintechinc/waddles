@@ -141,7 +141,7 @@ The following table lists the main configurable parameters of the WaddleBot char
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `global.imageRegistry` | Global Docker image registry | `docker.io/waddlebot` |
-| `global.imagePullPolicy` | Image pull policy for **every** workload container, including `hub-api`, `svc-{action,ingest,process}-rust`, `svc-presentation` and both `bundle-executor` Deployments (no template hardcodes a policy) | `IfNotPresent` |
+| `global.imagePullPolicy` | Image pull policy for **every** workload container, including `hub-api`, `svc-{action,ingest,process}-rust`, `svc-presentation` and both `svc-bundles-executor` Deployments (no template hardcodes a policy) | `IfNotPresent` |
 | `global.imagePullSecrets` | Global image pull secrets | `[]` |
 | `global.storageClass` | Global storage class for PVCs | `standard` |
 
@@ -419,10 +419,10 @@ Tests: `tests/test_scale_and_shutdown_hardening_render.py`.
 | `shutdown.preStopSleepSeconds` | `preStop` sleep so the pod leaves Service endpoints before SIGTERM (`0` = off). Native `sleep` action on k8s >= 1.30, `exec sleep` below | `5` |
 | `startupProbe.periodSeconds` / `.failureThreshold` | Startup budget (30 x 5s = 150s) for hub-api, the Rust data-plane stages, the Python pipeline stages, svc-streaming, svc-presentation | `5` / `30` |
 | `autoscaling.defaults.*` | HPA defaults: `enabled` (off), `minReplicas`, `maxReplicas`, `targetCPUUtilizationPercentage`, optional `targetMemoryUtilizationPercentage` / `behavior` | off, `2`, `10`, `70` |
-| `autoscaling.services.<key>.*` | Per-service override (field-by-field over `defaults`); production enables it for hub-api, hub-webui, svc-{action,process}-rust, both bundle-executors, reputation | `{}` |
+| `autoscaling.services.<key>.*` | Per-service override (field-by-field over `defaults`); production enables it for hub-api, hub-webui, svc-{action,process}-rust, the single svc-bundles-executor, reputation | `{}` |
 | `podDisruptionBudget.enabled` / `.minAvailable` / `.maxUnavailable` | PDB for every registered service that effectively runs >1 replica (`services.<key>` overrides) | `true` / `1` / `""` |
 
-- HPA keys: `hubApi hubWebui svcCore svcProcess svcAction svcProcessRust svcActionRust bundleExecutor bundleExecutorAction reputation router`. PDB-only (never an HPA): `svcIngest svcIngestRust egressProxy`. Needs metrics-server + container resource requests.
+- HPA keys: `hubApi hubWebui svcCore svcProcess svcAction svcProcessRust svcActionRust bundleExecutor reputation router`. PDB-only (never an HPA): `svcIngest svcIngestRust egressProxy`. Needs metrics-server + container resource requests.
 - When a service's HPA is enabled its Deployment omits `spec.replicas`, so `helm upgrade` never resets the autoscaler.
 - A PDB is skipped for a single effective replica (it would block node drains), so alpha/beta/gamma render none.
 - **Singletons are never autoscaled or budgeted:** `svc-streaming` (stateful RTMP/SRT + stream dir, `strategy: Recreate`, replicas 1, 60s grace) and `svc-presentation` (overlay fan-out is in-process).
@@ -916,7 +916,7 @@ ingress:
 ### Bundle Artifact Signing Rollout Order
 
 `feature/bundle-artifact-signing`: hub-api signs each approved bundle with a
-platform Ed25519 key; the bundle-executor(s) verify that signature before
+platform Ed25519 key; the svc-bundles-executor(s) verify that signature before
 instantiating any component and fail closed with no configured key.
 
 **fix/chart-autogen-bundle-signing-key: steps 1 and 4 below are now automatic in
@@ -925,7 +925,7 @@ pre-upgrade hook keeps the `<release>-bundle-signing` Secret and
 `<release>-bundle-signing-public` ConfigMap in sync on every `helm install`/
 `helm upgrade` (generating the Secret itself on a miss in alpha/local; requiring
 a pre-created Secret or `externalSecret: true` elsewhere), and
-`bundle-executor`/`bundle-executor-action` now source `BUNDLE_SIGNING_PUBLIC_KEYS`
+`svc-bundles-executor` now source `BUNDLE_SIGNING_PUBLIC_KEYS`
 from that ConfigMap by default -- see "Self-provisioned platform keys" above.
 `make generate-bundle-signing-key` and
 `pipeline.rustDataPlane.bundleSigningPublicKeys` remain available as an explicit

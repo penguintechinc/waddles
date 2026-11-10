@@ -111,6 +111,13 @@ async fn database() -> DatabaseFixture {
          CREATE TABLE hub_users(id INTEGER PRIMARY KEY, uuid UUID);
          CREATE TABLE community_members(id SERIAL PRIMARY KEY, community_id INTEGER REFERENCES communities(id), user_id TEXT,
            platform TEXT, platform_user_id TEXT, is_active BOOLEAN DEFAULT TRUE, left_at TIMESTAMP, removed_at TIMESTAMP, user_uuid_unavailable_reason TEXT);
+         CREATE TABLE community_permission_grants(
+           community_id INTEGER NOT NULL REFERENCES communities(id), tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+           app_id VARCHAR(255) NOT NULL, permission_id VARCHAR(255) NOT NULL, params_json JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+           granted_by INTEGER REFERENCES hub_users(id), granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+           revoked_by INTEGER REFERENCES hub_users(id), revoked_at TIMESTAMPTZ,
+           PRIMARY KEY (community_id, app_id, permission_id));
+         INSERT INTO hub_users VALUES(41, NULL);
          INSERT INTO tenants VALUES({TENANT}); INSERT INTO communities VALUES({COMMUNITY},{TENANT});
          CREATE ROLE waddles_economy_runtime LOGIN PASSWORD '{PASSWORD}';"
     )).await.unwrap();
@@ -118,6 +125,7 @@ async fn database() -> DatabaseFixture {
         include_str!("../../../../scripts/db/bundle_economy_store.sql"),
         include_str!("../../../../scripts/db/bundle_economy_idempotency.sql"),
         include_str!("../../../../scripts/db/bundle_economy_ledger_kinds.sql"),
+        include_str!("../../../../scripts/db/bundle_economy_elevated.sql"),
         include_str!("../../../../scripts/db/bundle_identity_role.sql"),
     ] {
         admin.execute_unprepared(sql).await.unwrap();
@@ -184,9 +192,17 @@ impl EconomyWorld {
         Self::new_with(&[]).await
     }
 
-    /// Like [`Self::new`], but the caller REQUESTS every tool while the platform never
-    /// grants `tool.call` for those in `ungranted` (an unapproved caller).
+    /// The default world: the caller is approved for the MINT-class elevated grant
+    /// only (the existing assertions mint, set and pay), never `transfer_from`.
     async fn new_with(ungranted: &[&str]) -> Self {
+        Self::new_full(ungranted, &["economy.app_mint"]).await
+    }
+
+    /// Like [`Self::new`], but the caller REQUESTS every tool while the platform never
+    /// grants `tool.call` for those in `ungranted` (an unapproved caller), and holds
+    /// exactly the elevated grants in `elevated` (in the grant snapshot AND the
+    /// `community_permission_grants` table the store re-reads in-transaction).
+    async fn new_full(ungranted: &[&str], elevated: &[&str]) -> Self {
         let wasm = component();
         let db = database().await;
         let names = [
@@ -195,12 +211,24 @@ impl EconomyWorld {
             ("pay_pot", true),
             ("exchange", true),
             ("points_set", true),
+            ("transfer_from", true),
             ("get_balance", false),
         ];
         let requests = names
             .iter()
             .map(|(n, w)| (SERVICE, *n, *w))
             .collect::<Vec<_>>();
+        for id in elevated {
+            db.admin
+                .execute_unprepared(&format!(
+                    "INSERT INTO community_permission_grants \
+                       (community_id, tenant_id, app_id, permission_id, params_json, granted_by) \
+                     VALUES ({COMMUNITY}, {TENANT}, '{CALLER}', '{id}', \
+                       '{{\"max_per_op\":100,\"max_per_day\":1000,\"max_per_target_per_day\":500}}'::jsonb, 41)"
+                ))
+                .await
+                .unwrap();
+        }
         let mut service = tools(true, &names, &[]);
         // Mirrors the shipped manifests: these tools carry `required_scope: community:admin`.
         for admin_tool in ["points_set", "exchange"] {
@@ -227,7 +255,7 @@ impl EconomyWorld {
             .collect(),
         );
         let grants = InMemoryGrantSnapshot::new();
-        let caller = names
+        let mut caller: std::collections::HashMap<String, GrantedPermission> = names
             .iter()
             .filter(|(n, _)| !ungranted.contains(n))
             .map(|(n, _)| {
@@ -241,6 +269,15 @@ impl EconomyWorld {
                 )
             })
             .collect();
+        for id in elevated {
+            caller.insert(
+                (*id).to_string(),
+                GrantedPermission {
+                    permission_id: (*id).to_string(),
+                    params: json!({"max_per_op":100,"max_per_day":1000,"max_per_target_per_day":500}),
+                },
+            );
+        }
         grants.set(
             GrantScopeKey {
                 tenant_id: TENANT,
@@ -260,6 +297,7 @@ impl EconomyWorld {
             "economy.transfer",
             "economy.pot.pay",
             "economy.admin_adjust",
+            "economy.transfer_from",
             "storage.kv",
         ]
         .into_iter()
@@ -513,4 +551,111 @@ async fn an_unapproved_caller_cannot_reach_the_money_tools() {
         assert!(reply["tool_error"] == "NotGranted", "{name}: {reply:?}");
     }
     assert_eq!(w.balance(ACTOR_UUID).await, 0, "nothing was minted");
+}
+
+/// Sets a balance as the privileged hub-side writer (the runtime role cannot mint).
+async fn fund(w: &EconomyWorld, user: &str, balance: i64) {
+    w.db.admin
+        .execute_unprepared(&format!(
+            "INSERT INTO economy_balances(tenant_id,community_id,user_uuid,balance) \
+             VALUES({TENANT},{COMMUNITY},'{user}',{balance}) \
+             ON CONFLICT (tenant_id,community_id,user_uuid) DO UPDATE SET balance={balance}"
+        ))
+        .await
+        .unwrap();
+}
+
+async fn audit_rows(w: &EconomyWorld) -> i64 {
+    w.db.admin
+        .query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            "SELECT COUNT(*) FROM economy_elevated_audit".to_string(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index(0)
+        .unwrap()
+}
+
+/// Regression (security review): `tool.call:...:adjust_balance` alone must not let an app
+/// mint, debit a non-actor or `transfer_from` -- the CALLING app needs its own approved
+/// elevated grant. Real caller WASM -> real economy WASM -> real gates -> real Postgres.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_without_elevated_grants_cannot_mint_debit_others_or_transfer_from() {
+    let w = EconomyWorld::new_full(&[], &[]).await;
+    fund(&w, BOB, 60).await;
+    for (name, args, key) in [
+        ("adjust_balance", json!({"user":ACTOR_UUID,"delta":10}), "e-mint"),
+        ("adjust_balance", json!({"user":BOB,"delta":-5}), "e-burn"),
+        (
+            "transfer_from",
+            json!({"from":BOB,"to":ACTOR_UUID,"amount":5,"reason":"steal"}),
+            "e-steal",
+        ),
+    ] {
+        let reply = w.call(name, args, key, "1001").await;
+        assert!(reply.get("ok").is_none(), "{name}: {reply:?}");
+        assert_eq!(reply["tool_error"], "NotGranted", "{name}: {reply:?}");
+    }
+    assert_eq!((w.balance(ACTOR_UUID).await, w.balance(BOB).await), (0, 60));
+    assert_eq!(audit_rows(&w).await, 0);
+}
+
+/// The `transfer_from` primitive end to end: moves a NON-actor's funds once (idempotent),
+/// returns both balances, honours the admin-set per-call cap and leaves an audit row naming
+/// the calling app and the approving admin.
+#[tokio::test(flavor = "multi_thread")]
+async fn transfer_from_moves_a_non_actors_funds_once_under_the_callers_grant_and_caps() {
+    let w = EconomyWorld::new_full(&[], &["economy.transfer_from"]).await;
+    fund(&w, BOB, 60).await;
+    let steal = json!({"from":BOB,"to":ACTOR_UUID,"amount":25,"reason":"steal"});
+    let first = w.call("transfer_from", steal.clone(), "steal-once", "1001").await;
+    assert_eq!(first["ok"]["from_balance"], 35, "{first:?}");
+    assert_eq!(first["ok"]["to_balance"], 25, "{first:?}");
+    // The retry of the same call (same key) replays: nothing moves a second time.
+    let replay = w.call("transfer_from", steal, "steal-once", "1001").await;
+    assert_eq!(replay["ok"]["from_balance"], 35, "{replay:?}");
+    assert_eq!((w.balance(BOB).await, w.balance(ACTOR_UUID).await), (35, 25));
+    // Above the admin-set per-call cap (100): refused, nothing moves.
+    fund(&w, BOB, 1_000).await;
+    let big = w
+        .call(
+            "transfer_from",
+            json!({"from":BOB,"to":ACTOR_UUID,"amount":101,"reason":"steal"}),
+            "steal-big",
+            "1001",
+        )
+        .await;
+    assert!(big.get("ok").is_none(), "{big:?}");
+    assert_eq!(w.balance(BOB).await, 1_000);
+    // The mint class was NOT granted: minting through the service is still refused.
+    let mint = w
+        .call(
+            "adjust_balance",
+            json!({"user":ACTOR_UUID,"delta":10}),
+            "no-mint",
+            "1001",
+        )
+        .await;
+    assert_eq!(mint["tool_error"], "NotGranted", "{mint:?}");
+    // One audit row (the applied steal): calling app + approving admin recorded.
+    assert_eq!(audit_rows(&w).await, 1);
+    let approved: i64 = w
+        .db
+        .admin
+        .query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            format!(
+                "SELECT COUNT(*) FROM economy_elevated_audit WHERE caller_app_id = '{CALLER}' \
+                 AND service_app_id = '{SERVICE}' AND approved_by = 41 AND amount = 25 \
+                 AND reason = 'steal' AND status = 2"
+            ),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index(0)
+        .unwrap();
+    assert_eq!(approved, 1);
 }

@@ -26,9 +26,7 @@
 # update /bundle_active_set" (or the equivalent path for any of the other
 # five) (no such file) -- same failure class as gh-425/gh-498. Run from
 # core/:
-#   docker build -f svc_action/Dockerfile.rust -t localhost:32000/waddlebot/svc-action-rust:alpha-<epoch> .
-# ("svc-action-rust", not "svc-action" -- fix/helm-alpha-self-provisioning, see
-# core/svc_ingest/Dockerfile.rust's identical comment.)
+#   docker build -f svc_action/Dockerfile.rust -t localhost:32000/waddlebot/svc-action:alpha-<epoch> .
 
 FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
 
@@ -55,6 +53,8 @@ COPY bundle_active_set ./bundle_active_set
 COPY bundle_host_kv ./bundle_host_kv
 COPY bundle_host_db ./bundle_host_db
 COPY bundle_host_http ./bundle_host_http
+COPY bundle_host_credentials ./bundle_host_credentials
+COPY connection_resolver ./connection_resolver
 COPY bundle_capability_gate ./bundle_capability_gate
 COPY bundle_tool_call ./bundle_tool_call
 COPY circuit_breaker ./circuit_breaker

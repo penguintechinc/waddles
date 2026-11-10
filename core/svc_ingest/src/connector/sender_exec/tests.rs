@@ -990,6 +990,63 @@ async fn oversize_response_is_bounded_by_the_guard() {
     );
 }
 
+/// Regression (security review HIGH): the APP token acts for the whole application, so
+/// no `eventsub.*` kind may run on app credentials without a host-side broadcaster
+/// binding -- otherwise any community could list/delete another broadcaster's
+/// subscriptions. Refused with a stable code BEFORE any slot source is consulted.
+#[tokio::test]
+async fn app_credential_eventsub_kinds_are_refused_before_any_slot_resolution() {
+    let pairs = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+        v.iter()
+            .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
+            .collect()
+    };
+    let tpl = RequestTpl {
+        method: "GET".into(),
+        url: "https://api.twitch.tv/helix/eventsub/subscriptions".into(),
+        headers: pairs(&[
+            ("Authorization", "Bearer {{TWITCH_APP_TOKEN}}"),
+            ("Client-Id", "{{TWITCH_APP_CLIENT_ID}}"),
+        ]),
+        body: None,
+        secret_refs: pairs(&[
+            ("{{TWITCH_APP_TOKEN}}", "app.token"),
+            ("{{TWITCH_APP_CLIENT_ID}}", "app.client_id"),
+        ]),
+    };
+    let slots = MapSlots::with(&[("app.token", "apptok"), ("app.client_id", "cid")]);
+    let r = rig(PlatformPolicy::twitch(), tpl, slots, true).await;
+    let a = OutboundAction::PolicyOp(crate::outbound_ops::PolicyOp {
+        op: "eventsub.list",
+        channel: None,
+        text: None,
+        message_id: None,
+        user_id: None,
+        origin_channel: None,
+        tenant_id: None,
+    });
+    assert_eq!(
+        r.exec
+            .execute(&req("twitch", &a, Some(7)))
+            .await
+            .unwrap_err(),
+        ExecError::Slot(SlotError::Refused(APP_KIND_UNBOUND_CODE))
+    );
+    assert!(sent(&r).await.is_empty(), "nothing reached the platform");
+}
+
+#[test]
+fn only_twitch_eventsub_kinds_lack_a_broadcaster_binding() {
+    for k in ["eventsub.list", "eventsub.delete", "eventsub.create"] {
+        assert!(app_kind_lacks_broadcaster_binding("twitch", k), "{k}");
+        assert!(!app_kind_lacks_broadcaster_binding("discord", k), "{k}");
+    }
+    for k in ["chat.send", "commands.register", "mod.ban"] {
+        assert!(!app_kind_lacks_broadcaster_binding("twitch", k), "{k}");
+        assert!(!app_kind_lacks_broadcaster_binding("discord", k), "{k}");
+    }
+}
+
 #[tokio::test]
 async fn unsupported_platform_kind_and_missing_host_duty_fail_loud() {
     let r = rig(
