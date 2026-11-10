@@ -11,7 +11,7 @@ if [ ! -d "$cargo_cache" ] || [ ! -d "$rustup_cache" ]; then
   echo "C# port e2e: Rust dependency/toolchain caches are required for the offline Docker test" >&2
   exit 1
 fi
-for game in roll slots gamble defuse duel first roulette ffa heist steal bonustickets channelpoints giveaway wheel audiocommand tts; do
+for game in roll slots gamble defuse duel first roulette ffa heist steal fishing bonustickets channelpoints giveaway wheel audiocommand tts; do
   bash scripts/build-superpenguin-bundle.sh "$game" "$out_dir"
 done
 log="$out_dir/executor.log"
@@ -34,4 +34,4 @@ done
 for app in bonustickets channelpoints giveaway wheel audiocommand tts; do
   grep -q "C# wave-4 matrix: $app PASS" "$log"
 done
-echo 'C# port e2e: PASS (16 real components, nonzero flag-on/replay coverage)'
+echo 'C# port e2e: PASS (17 real components, nonzero flag-on/replay coverage)'
