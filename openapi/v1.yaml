@@ -5045,6 +5045,35 @@ components:
       - channels
       title: SlackStatsDTO
       type: object
+    SlashCommandDTO:
+      description: One command to register; ``name``/``description`` is the payload,
+        the rest is context.
+      properties:
+        appPublicIds:
+          items:
+            type: string
+          title: Apppublicids
+          type: array
+        builtin:
+          title: Builtin
+          type: boolean
+        communityPublicIds:
+          items:
+            type: string
+          title: Communitypublicids
+          type: array
+        description:
+          title: Description
+          type: string
+        name:
+          title: Name
+          type: string
+      required:
+      - name
+      - description
+      - builtin
+      title: SlashCommandDTO
+      type: object
     SpotlightedCommunityDTO:
       description: Spotlighted community DTO.
       properties:
@@ -17729,6 +17758,98 @@ paths:
             community, 503 unavailable).
       summary: '``POST .../resolve`` -- endpoint + credential for one usable binding
         of the BOUND community.'
+  /api/v1/internal/dataplane/app-commands/desired:
+    get:
+      description: ''
+      operationId: get_desired_route
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Desired state for one source. ``changed`` False (``if_version``
+                  matched) carries no list.
+                properties:
+                  changed:
+                    title: Changed
+                    type: boolean
+                  commands:
+                    items:
+                      $ref: '#/components/schemas/SlashCommandDTO'
+                    title: Commands
+                    type: array
+                  platform:
+                    title: Platform
+                    type: string
+                  sourceId:
+                    title: Sourceid
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantPublicId:
+                    title: Tenantpublicid
+                    type: string
+                  truncated:
+                    title: Truncated
+                    type: boolean
+                  version:
+                    title: Version
+                    type: string
+                required:
+                - success
+                - version
+                - changed
+                - tenantPublicId
+                - platform
+                - sourceId
+                - truncated
+                title: SlashDesiredDTO
+                type: object
+          description: Desired state for one source. ``changed`` False (``if_version``
+            matched) carries no list.
+      summary: '``GET`` -- the desired slash registration of one source, with its
+        idempotency version.'
+  /api/v1/internal/dataplane/app-commands/sources:
+    get:
+      description: ''
+      operationId: get_list_sources_route
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: One page of reconcile-eligible source ids.
+                properties:
+                  items:
+                    items:
+                      type: string
+                    title: Items
+                    type: array
+                  limit:
+                    title: Limit
+                    type: integer
+                  offset:
+                    title: Offset
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  total:
+                    title: Total
+                    type: integer
+                required:
+                - success
+                - items
+                - total
+                - limit
+                - offset
+                title: SlashSourcesDTO
+                type: object
+          description: One page of reconcile-eligible source ids.
+      summary: '``GET`` -- one page of sources of a platform that have a paired community.'
   /api/v1/internal/dataplane/resolve-scope:
     get:
       description: ''

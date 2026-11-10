@@ -969,7 +969,8 @@ def parse_bundle_manifest_v2(
     _require(problem is None, "collection_attribution_required", problem or "")
 
     stages = raw["stages"]
-    _require(bool(stages), "no_stages_declared", "stages must be non-empty")
+    # An empty `stages` is legal ONLY for a trusted `kind: service` (an inbound-only platform
+    # connector runs no pluggable process/action stage) -- enforced after `kind` is resolved.
     _require(
         "ingest" not in stages, "ingest_not_pluggable", "ingest is fixed code, not bundle-pluggable"
     )
@@ -1062,6 +1063,11 @@ def parse_bundle_manifest_v2(
             "untrusted_service_kind",
             "kind: service may only be declared via a trusted install path",
         )
+    _require(
+        bool(stages) or raw_kind == "service",
+        "no_stages_declared",
+        "stages must be non-empty (only a trusted kind: service may declare none)",
+    )
     kind = raw_kind or _infer_kind(raw["app_id"], raw["module"])
 
     exported_tools = parse_exported_tools(raw.get("exported_tools"))

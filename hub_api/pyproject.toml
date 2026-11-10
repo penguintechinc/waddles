@@ -63,6 +63,7 @@ convention = "google"
 "blueprints/v1/auth.py" = ["S101", "N815"]
 "blueprints/v1/identity.py" = ["N815"]
 "blueprints/v1/dataplane_scope.py" = ["N815"]  # wire DTOs are camelCase by API contract
+"blueprints/v1/app_commands_internal.py" = ["N815"]  # wire DTOs are camelCase by API contract
 "blueprints/v1/passkey.py" = ["N815"]
 "blueprints/v1/profile.py" = ["N815"]
 "blueprints/v1/marketplace_vendor.py" = ["N815"]  # wire DTOs are camelCase by API contract
