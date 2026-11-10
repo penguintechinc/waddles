@@ -209,6 +209,7 @@ def _manifest_dict_from_row(row: Any) -> dict[str, Any]:
         "homepage_url": row.homepage_url,
         "notice": row.notice,
         "category": row.category,
+        "collection": row.collection,
     }
 
 
@@ -298,6 +299,7 @@ async def install_bundle(
         homepage_url=manifest.homepage_url,
         notice=manifest.notice,
         category=manifest.category,
+        collection=manifest.collection,
         kind=manifest.kind,
     )
     dal.commit()
@@ -324,6 +326,7 @@ async def list_installed(
     provider: str | None,
     status: str | None,
     category: str | None = None,
+    collection: str | None = None,
     page: int,
     limit: int,
 ) -> tuple[list[Any], int, int]:
@@ -350,6 +353,8 @@ async def list_installed(
         query &= dal.app_catalog.status == status
     if category:
         query &= dal.app_catalog.category == category
+    if collection:
+        query &= dal.app_catalog.collection == collection
 
     total = dal(query).count()
     page = max(1, page)
@@ -358,6 +363,21 @@ async def list_installed(
     rows = dal(query).select(orderby=dal.app_catalog.app_id, limitby=(offset, offset + limit))
     total_pages = (total + limit - 1) // limit if total else 0
     return list(rows), total, total_pages
+
+
+def list_collections(dal: Any) -> list[tuple[str, int]]:
+    """Distinct non-null `app_catalog.collection` values with bundle counts, sorted by name.
+
+    Modeled on `marketplace_catalog_service.get_categories`; collection slugs are not tenant
+    sensitive, so this is a global aggregate.
+    """
+    rows = dal(dal.app_catalog.collection != None).select(  # noqa: E711
+        dal.app_catalog.collection
+    )
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row.collection] = counts.get(row.collection, 0) + 1
+    return sorted(counts.items())
 
 
 # ---------------------------------------------------------------------------

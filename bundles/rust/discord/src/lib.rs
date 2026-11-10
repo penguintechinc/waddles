@@ -7,8 +7,12 @@
 //! host-testable core lives in the plain modules below; the `component` module
 //! (wasm32 only) adapts it to the generated bindings.
 
+pub mod commands;
 pub mod error;
 pub mod gateway;
+pub mod interaction;
+pub mod message_ops;
+pub mod moderation;
 pub mod normalize;
 pub mod perms;
 pub mod receiver;

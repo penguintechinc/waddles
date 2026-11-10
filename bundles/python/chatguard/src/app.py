@@ -17,6 +17,10 @@ Commands (moderators/broadcasters only; the grammar is `waddle_sdk.command`'s):
   `permit` is not a `parse_command` shape (its first argument is a mention), so it has its own
   small parser; everything else goes through `parse_command`.
 
+Cross-platform moderator commands (`moderation.py`: `!ban`, `!unban`, `!timeout`, `!untimeout`,
+`!kick`, `!purge`, `!modlog`; platform word optional, default all) fan out to the platform
+services' moderation tools through `tool.invoke`; see that module's docstring.
+
 **Moderation capability (verified against the host, not assumed).** The only moderation op the
 host implements is `chat.delete` on **Discord**: `relay.push("discord", {"op": "chat.delete", ...})`
 under the `chat.delete:discord` permission (`core/svc_action/src/capabilities.rs`
@@ -67,6 +71,8 @@ from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, pa
 from waddle_sdk.flask_core import get_bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.safe_text import sanitize_user_text
+
+import moderation
 
 #: Rule names in evaluation order (first match wins).
 RULES = ("blacklist", "links", "caps", "symbols")
@@ -726,6 +732,15 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     community = get_bundle_context().community
     head = stripped.partition(" ")[0].lower()
+    if head in moderation.MOD_COMMANDS:
+        channel_id = event.payload.get("channel_id")
+        if not channel_id:
+            raise ValueError("moderation reply requires a channel_id from the inbound chat.message")
+        flagged = await _screen(event, stripped, community)
+        if flagged is not None:
+            return flagged
+        reply = await moderation.handle(stripped, event.payload, event.platform, community)
+        return _event_like(event, {"command": "reply", "text": reply, "channel_id": channel_id})
     if head in ("!chatguard", "!permit"):
         channel_id = event.payload.get("channel_id")
         if not channel_id:

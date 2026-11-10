@@ -55,6 +55,29 @@ Validation: `make test-superpenguin-<name>` (xUnit, 90% line floor each), `make 
 `make test-superpenguin-wave3-e2e` (all ten real components through the production executor against a simulated stage host),
 `scripts/ci/tests/test_superpenguin_wave3_manifests.py` (manifest sync, grants vs real service catalogs, secret-free weather).
 
+## Wave 4 (giveaway, event awards, wheel, audio, TTS, channel points)
+
+Authored from `manifest.src.yaml` (`make gen-superpenguin-manifests`); contracts in
+`scripts/ci/tests/test_superpenguin_wave4_contracts.py` (`make test-superpenguin-wave4-contracts`). Shared C# sources live in
+`bundles/csharp/superpenguin-shared` (moderator-badge probe, replay keys, overlay emission, reply dispatch); new bundles are
+stamped by `make scaffold-superpenguin-bundle NAME=<name>`.
+
+| Upstream modules | C# app | Service/host calls | Overlay component |
+|---|---|---|---|
+| Features/GiveawayFeature, TicketGames/RaffleRuntimeService, GiveawayFairnessReport | superpenguin-giveaway | economy points_view, adjust_balance; overlay alert-box | `overlay/` (original; upstream has no giveaway overlay) |
+| TicketGames/BonusTickets, AddActive | superpenguin-bonustickets | economy points_view, adjust_balance | none (no upstream visual) |
+| WheelSpin/* | superpenguin-wheel | overlay alert-box | `overlay/` (upstream wheel svg + adapted logic, spin-wheel 5.0.2 vendored) |
+| AudioCommand/* | superpenguin-audiocommand | overlay alert-box | `overlay/` (audio player; sound files are community uploads) |
+| TTS/* | superpenguin-tts | media service tool `tts_synthesize` (NOT YET PROVIDED: fails loud), overlay alert-box | `overlay/` (audio player) |
+| ChannelPoints subactions | superpenguin-channelpoints | economy adjust_balance; Twitch redemption event; overlay alert-box | `overlay/` (adapted alert view) |
+
+Host needs surfaced by this wave (none worked around): the `overlay` host import answers `not-implemented` in the executor today
+(`core/bundle_executor/src/host/stage_next_imports.rs`), so every overlay push fails loudly until a stage handler lands; ingest
+does not forward `channel.channel_points_custom_reward_redemption.add`; no host TTS capability or `tts_synthesize` service tool
+exists; no stream-online event (daily resets instead); no timer for app bundles (deadlines settle on the next event); the host does
+not forward app config JSON (constants documented per bundle). Upstream binary media of unclear provenance (`wwwroot/sfx/wheel.ogg`,
+`wwwroot/audio/*.mp3`, `wwwroot/gifs/*`) is not shipped; each bundle's `overlay/_ASSETS.md` lists what shipped and what did not.
+
 ## Remaining app ports (not complete)
 
 | Upstream modules | Decision | Service dependencies / remaining work |
@@ -64,12 +87,7 @@ Validation: `make test-superpenguin-<name>` (xUnit, 90% line floor each), `make 
 | Fishing/* | Port C# game, shop and tournament policy | Shared economy/inventory tools where available; durable state and scheduling |
 | Games/Starship | Port C# story/voting app | Persisted state, scheduling, economy, overlay |
 | Games/Balloon, Parachute, Plinko, Curling, Golf, Racing, UfoClaw | Port C# game logic and matching visual assets | Shared overlay and economy tools; scheduling for join windows |
-| WheelSpin/* | Port C# picker/visual app | Shared overlay tools; Python wheel overlap is allowed |
-| TicketGames/BonusTickets, AddActive | Port C# event-award policy | economy tools; stream/engagement event contracts |
-| Features/GiveawayFeature, TicketGames/RaffleRuntimeService, GiveawayFairnessReport | Port C# giveaway policy, fairness and exclusions | Durable state; existing Python giveaway/raffle do not justify skipping |
 | Alias/* | Ported in wave 3 (`superpenguin-alias`) | Relays the resolved command; real re-dispatch needs a host capability |
-| AudioCommand/* | Port C# command/sound policy | Shared media/overlay tools; audio files remain in shared storage |
-| TTS/* | Port C# command policy only | Reuse media TTS tools; skip duplicate synthesis/player infrastructure |
 | Misc/AutoTimers, timer groups | Ported in wave 3 (`superpenguin-timers`) | Tick-on-event emulation; a real scheduler (`scheduled-stage`) is still needed |
 | Misc/Weather | Ported in wave 3 (`superpenguin-weather`) | No weather service exists: host http egress + secret reference |
 | Features/ViewerFeature, Misc/LastSeen, DeathCounters, DailyCounter, QuoteSystem, RaidTracker, Top | Ported in wave 3 (`-viewers`, `-lastseen`, `-deathcounter`, `-dailycounter`, `-quotes`, `-raidtracker`, `-top`) | Top reads economy/reputation service leaderboards |
@@ -77,7 +95,6 @@ Validation: `make test-superpenguin-<name>` (xUnit, 90% line floor each), `make 
 | Ai/ScAi | Port C# domain prompts and command policy | Shared AI service; no separate model client |
 | Music/YtPlayer, banned songs/cooldowns, Metrics/SongRequests | Port C# request/queue policy | Shared music/media tools; no independent player transport |
 | Actions recipes/triggers/variables | Port reusable C# app policy after mapping automation contracts | Do not copy host queue, process lifecycle or unrestricted script engine |
-| ChannelPoints subactions | Port distinct redemption-to-action policy | Shared Twitch operations; skip duplicate redemption transport |
 | Points/PointsSystem, PointType, UserPoints ledger | Skip duplicate ledger | Economy service owns balances, mint/debit, transfers and caps; distinct earn policy belongs to C# apps |
 | Platform API/EventSub/OAuth clients | Skip duplicate platform transport | Platform service bundles/host own credentials and networking |
 | Moderation command policy / ModSpam | Port only distinct policy | Reuse platform moderation tools; skip duplicate ban/filter authority |

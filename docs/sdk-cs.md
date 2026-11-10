@@ -106,6 +106,19 @@ split a big game into several bundles (core/shop/tournament) rather than one com
 | Vendor-onboarding lifecycle export | non-core C# bundles on stage-next worlds | Fixed: optional `streaming-lifecycle` is accepted; both process/action exports remain mandatory and other extra exports fail |
 | Decision on catalog placement of third-party ports | roll (and every port) is `waddles.integrations.*`; `seed_core_bundles._guard_core_namespace` hard-refuses non-`waddles.core.*` rows, so NO catalog row was added | vendor path only (blocked by the validator row above) |
 
+## Wave-4 toolkit (new ports)
+
+| Need | Use |
+|---|---|
+| New bundle boilerplate | `make scaffold-superpenguin-bundle NAME=<lowercase>` (stamps roll's adapter/shims/csproj/Dockerfile, the shared sources and a test world) |
+| Manifests | write `manifest.src.yaml`, then `make gen-superpenguin-manifests` (bundle.yaml + hub-manifest.yaml generated; overlay files hashed into `overlay_assets`) |
+| Moderator-only commands | `SuperPenguinShared.ChatPrivileges` (`is_mod`/`is_broadcaster`/`is_bot` strict-boolean badges; absent = deny) |
+| Overlay visuals | `SuperPenguinShared.OverlayAlert.Push` on the alert-box surface (`superpenguin.<app>.*` alert types) and a browser-source page in the bundle's `overlay/` |
+| Contracts | `make test-superpenguin-wave4-contracts` (attribution, generated manifests current, overlay hashes/provenance, no binary media) |
+
+The `overlay` host import is not handled by the stage yet (executor answers `not-implemented`), so overlay emission fails loud; the
+`overlay.media` quota is 1 call / 10 s, which a show+spin sequence exceeds, so the quota needs raising for these apps.
+
 ## SuperPenguinTV app/service boundary
 
 Wagering and maximum-bet handling remain in the C# app and use the granted

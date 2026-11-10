@@ -215,6 +215,51 @@ class TestCreateUpdateDelete:
         )
         assert second.status_code == 409
 
+    async def test_create_normalizes_github_author_and_detail_links_it(
+        self, client: Any, auth_headers: Any
+    ) -> None:
+        headers = auth_headers(scope=_ADMIN_SCOPE, user_id="1")
+        created = await _post_json(
+            client,
+            "/api/v1/modules",
+            headers,
+            {"name": "gh-widget", "version": "1.0.0", "author": "https://github.com/octo-cat/"},
+        )
+        assert created.status_code == 201
+        new_id = (await created.get_json())["module"]["id"]
+        await _put_json(client, f"/api/v1/modules/{new_id}", headers, {"isPublished": True})
+        detail = (await (await client.get(f"/api/v1/modules/{new_id}")).get_json())["module"]
+        assert detail["author"] == {
+            "display": "octo-cat",
+            "githubHandle": "octo-cat",
+            "profileUrl": "https://github.com/octo-cat",
+        }
+
+    @pytest.mark.parametrize("author", ["<script>x</script>", "https://evil.example/a", 5])
+    async def test_create_rejects_invalid_author(
+        self, client: Any, auth_headers: Any, author: Any
+    ) -> None:
+        headers = auth_headers(scope=_ADMIN_SCOPE, user_id="1")
+        response = await _post_json(
+            client,
+            "/api/v1/modules",
+            headers,
+            {"name": "bad-author-widget", "version": "1.0.0", "author": author},
+        )
+        assert response.status_code == 400
+
+    async def test_update_rejects_invalid_author(
+        self, client: Any, auth_headers: Any, ids: dict[str, int]
+    ) -> None:
+        headers = auth_headers(scope=_ADMIN_SCOPE, user_id="1")
+        response = await _put_json(
+            client,
+            f"/api/v1/modules/{ids['published_module_id']}",
+            headers,
+            {"author": "@-bad"},
+        )
+        assert response.status_code == 400
+
     async def test_delete_core_module_is_404(
         self, client: Any, auth_headers: Any, ids: dict[str, int]
     ) -> None:
@@ -257,7 +302,11 @@ class TestCreateUpdateDelete:
         assert detail["displayName"] == "Updated Display Name"
         assert detail["description"] == "Updated description"
         assert detail["version"] == "2.0.0"
-        assert detail["author"] == "New Author"
+        assert detail["author"] == {
+            "display": "New Author",
+            "githubHandle": None,
+            "profileUrl": None,
+        }
         assert detail["category"] == "new-category"
         assert detail["iconUrl"] == "https://example.com/new-icon.png"
         assert detail["isFeatured"] is False

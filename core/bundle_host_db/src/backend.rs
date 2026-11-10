@@ -149,7 +149,7 @@ impl DbError {
 /// configuration error (a schema that should never have been marked
 /// cross-community-read for a bundle-writable table), not a race or a
 /// legitimate denial -- logged loudly (ERROR) alongside the returned error.
-fn reject_write_on_cross_community_table(schema: &TableSchema) -> Result<(), DbError> {
+pub(crate) fn reject_write_on_cross_community_table(schema: &TableSchema) -> Result<(), DbError> {
     if schema.cross_community_read {
         tracing::error!(
             table = %schema.table,
@@ -183,7 +183,11 @@ pub(crate) fn db_value_to_sea_value(v: &DbValue) -> Value {
 /// UUID string (design doc SS3.2/SS4: "`user_ref` carries the platform
 /// user's UUID only"); a `text`/`jsonb` value must respect its size cap
 /// (design doc SS3.1).
-fn validate_column_value(schema: &TableSchema, name: &str, value: &DbValue) -> Result<(), DbError> {
+pub(crate) fn validate_column_value(
+    schema: &TableSchema,
+    name: &str,
+    value: &DbValue,
+) -> Result<(), DbError> {
     if PLATFORM_COLUMNS.contains(&name) {
         return Err(DbError::InvalidColumn(format!(
             "{name:?} is a platform-owned column and cannot be set by a bundle"
@@ -270,7 +274,7 @@ fn validate_column_value(schema: &TableSchema, name: &str, value: &DbValue) -> R
 /// Validates every entry in a guest-supplied `column-values` map, in one
 /// pass, so a caller gets a single well-formed rejection rather than
 /// partially validating and partially writing.
-fn validate_column_values(
+pub(crate) fn validate_column_values(
     schema: &TableSchema,
     column_values: &[(String, DbValue)],
 ) -> Result<(), DbError> {
@@ -283,16 +287,16 @@ fn validate_column_values(
 /// One guest-supplied column of an `insert`/`update`, resolved against the
 /// schema into exactly what the statement needs: the quoted identifier, the
 /// explicit type cast for its placeholder, and the typed bind value.
-struct WriteColumn {
-    quoted: String,
-    cast: &'static str,
-    value: Value,
+pub(crate) struct WriteColumn {
+    pub(crate) quoted: String,
+    pub(crate) cast: &'static str,
+    pub(crate) value: Value,
 }
 
 impl WriteColumn {
     /// The placeholder for bind position `n` (1-based): `$n` plus the
     /// declared column's explicit cast, if it is a typed column.
-    fn placeholder(&self, n: usize) -> String {
+    pub(crate) fn placeholder(&self, n: usize) -> String {
         format!("${n}{}", self.cast)
     }
 }
@@ -301,7 +305,7 @@ impl WriteColumn {
 /// against `schema` -- the declared type decides the bind type and cast
 /// (see [`crate::typed`]), never the guest value. Run **before** a
 /// transaction is opened so a failure here costs no round trip.
-fn plan_writes(
+pub(crate) fn plan_writes(
     schema: &TableSchema,
     column_values: &[(String, DbValue)],
 ) -> Result<Vec<WriteColumn>, DbError> {
@@ -326,7 +330,7 @@ fn plan_writes(
 /// refuses to decode an `INT4` column as `i64`. A negative value cannot come
 /// from the `DEFAULT 1` / `version + 1` the host maintains, so it is reported
 /// as a backend fault rather than wrapped.
-fn read_version(row: &sea_orm::QueryResult) -> Result<u64, DbError> {
+pub(crate) fn read_version(row: &sea_orm::QueryResult) -> Result<u64, DbError> {
     let version: i32 = row
         .try_get("", "version")
         .map_err(|e| DbError::Backend(e.to_string()))?;
@@ -337,7 +341,7 @@ fn read_version(row: &sea_orm::QueryResult) -> Result<u64, DbError> {
 /// The `SELECT` list `get`/`query` share: the platform `row_id`/`version`
 /// followed by each declared column in its read form
 /// ([`typed::select_expr`]).
-fn select_list(schema: &TableSchema) -> String {
+pub(crate) fn select_list(schema: &TableSchema) -> String {
     let mut exprs = vec![quote_ident("row_id"), quote_ident("version")];
     exprs.extend(schema.columns.iter().map(typed::select_expr));
     exprs.join(", ")
@@ -355,7 +359,10 @@ fn select_list(schema: &TableSchema) -> String {
 /// policy reads them back with `NULLIF(current_setting(..., true),
 /// '')::integer`, so a non-numeric value would raise
 /// `invalid_text_representation` on every statement.
-async fn set_local_scope(txn: &impl ConnectionTrait, scope: &DbScope) -> Result<(), DbError> {
+pub(crate) async fn set_local_scope(
+    txn: &impl ConnectionTrait,
+    scope: &DbScope,
+) -> Result<(), DbError> {
     txn.execute_raw(Statement::from_sql_and_values(
         SeaDbBackend::Postgres,
         format!("SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}"),
@@ -395,7 +402,10 @@ async fn set_local_scope(txn: &impl ConnectionTrait, scope: &DbScope) -> Result<
 /// lock keys and never contend with each other. The lock is
 /// transaction-scoped (`_xact_`) -- released automatically at COMMIT/
 /// ROLLBACK, never leaked across a pooled connection's next checkout.
-async fn lock_quota_scope(txn: &impl ConnectionTrait, scope: &DbScope) -> Result<(), DbError> {
+pub(crate) async fn lock_quota_scope(
+    txn: &impl ConnectionTrait,
+    scope: &DbScope,
+) -> Result<(), DbError> {
     let key = format!(
         "{}:{}:{}",
         scope.tenant_id, scope.community_id, scope.app_id
@@ -437,7 +447,7 @@ fn scope_predicate(
 /// order. A tenant-wide scope is the plain equality `community_id = 0`
 /// ([`crate::scope::TENANT_WIDE_COMMUNITY_ID`]): the column is `NOT NULL`,
 /// so there is no `IS NULL` form.
-fn tenant_predicate(scope: &DbScope, next_param: usize) -> (String, Vec<Value>) {
+pub(crate) fn tenant_predicate(scope: &DbScope, next_param: usize) -> (String, Vec<Value>) {
     (
         format!(
             "tenant_id = ${} AND community_id = ${}",
@@ -994,7 +1004,7 @@ impl PostgresBackend {
 /// form [`typed::select_expr`] projected: `timestamptz` (RFC 3339 UTC) and
 /// `jsonb` (JSON text) arrive as plain text, `uuid` decodes natively -- so
 /// the decode type here must stay in lockstep with that projection.
-fn extract_value(
+pub(crate) fn extract_value(
     row: &sea_orm::QueryResult,
     col: &crate::schema::ColumnDef,
 ) -> Result<DbValue, DbError> {

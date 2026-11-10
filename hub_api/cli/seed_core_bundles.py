@@ -840,7 +840,13 @@ async def seed_platform_connection(
     return ConnectionResult(platform=connection.platform, source_id=ingest_id, outcome=outcome)
 
 
-_AGREEMENT_KEYS = ("kind", "exported_tools", "requested_tools")
+_AGREEMENT_KEYS = (
+    "kind",
+    "exported_tools",
+    "requested_tools",
+    "community_config_schema",
+    "admin_tools",
+)
 
 
 def _assert_manifest_files_agree(

@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    xUnit tests for the `superpenguin-channelpoints` bundle (ChannelpointsLogic and the shared sources), run on the normal host CLR. Not a
+    ProjectReference to the wasi-wasm bundle project: the logic sources are linked in (real source, not a copy) while the
+    wit-bindgen-dependent adapter/export shims are excluded. Component behaviour is covered by the real-executor e2e matrix.
+    Pascal-case name and the coverlet settings follow scripts/test-superpenguin-bundle.sh.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>WaddleBundleSuperpenguinChannelpoints.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="coverlet.collector" Version="10.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../../sdk/waddle-sdk-cs/waddle-sdk-cs.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Every bundle source file except the wit-bindgen adapter/export shims and the tests directory. -->
+    <Compile Include="../*.cs" Exclude="../WaddleHostAdapter.cs;../ProcessStageExportsImpl.cs;../ActionStageExportsImpl.cs;../StreamingLifecycleExportsImpl.cs" Link="Bundle/%(Filename)%(Extension)" />
+    <Compile Include="../../superpenguin-shared/*.cs" Link="shared/%(Filename)%(Extension)" />
+    <Compile Include="../../../../sdk/waddle-sdk-cs/tests/Fakes.cs" Link="SdkFakes.cs" />
+    <Compile Include="../../../../sdk/waddle-sdk-cs/tests/FakesNext.cs" Link="SdkFakesNext.cs" />
+  </ItemGroup>
+
+</Project>
