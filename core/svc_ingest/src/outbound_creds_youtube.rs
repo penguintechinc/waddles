@@ -586,7 +586,7 @@ mod tests {
         async fn hub(
             resolve_body: serde_json::Value,
         ) -> (
-            MockServer,
+            (MockServer, connection_resolver::test_support::Running),
             ResolverYoutubeCredentials<ConnectionResolver>,
             TestSa,
         ) {
@@ -599,28 +599,21 @@ mod tests {
                 )])
                 .start_detached()
                 .await;
-            Mock::given(method("GET"))
-                .and(path("/api/v1/internal/provider-connections"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "success": true,
-                    "items": [{"communityId": 7, "connectionId": 12, "tenantId": 3, "secretVersion": 1, "provider": "youtube",
-                               "kind": 1, "metadata": {"live_chat_id": CHAT}}],
-                    "nextAfter": null
-                })))
-                .mount(&server)
-                .await;
-            Mock::given(method("POST"))
-                .and(path(
-                    "/api/v1/internal/communities/7/provider-connections/12/resolve",
-                ))
-                .respond_with(ResponseTemplate::new(200).set_body_json(resolve_body))
-                .mount(&server)
-                .await;
+            let list = serde_json::json!({
+                "success": true,
+                "items": [{"communityId": 7, "connectionId": 12, "tenantId": 3, "secretVersion": 1, "provider": "youtube",
+                           "kind": 1, "metadata": {"live_chat_id": CHAT}}],
+                "nextAfter": null
+            });
+            let running = connection_resolver::test_support::start(
+                &connection_resolver::test_support::json_hub(&list, &resolve_body),
+            )
+            .await;
             let sa = std::env::temp_dir().join(format!("yt-sa-{}", uuid::Uuid::new_v4()));
             std::fs::write(&sa, "synthetic-sa").unwrap();
             let resolver = ConnectionResolver::new(
                 ResolverConfig::new(
-                    server.uri(),
+                    running.endpoint.clone(),
                     "alpha",
                     mint_endpoint,
                     sa.to_string_lossy().to_string(),
@@ -629,7 +622,7 @@ mod tests {
             )
             .unwrap();
             (
-                server,
+                (server, running),
                 ResolverYoutubeCredentials::with_clock(resolver, || NOW),
                 TestSa(sa),
             )

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use connection_resolver::{
-    ConnectionKind, ConnectionResolver, ResolverConfig, ResolverMetrics as ConnResolverMetrics,
+    ConnectionKind, ConnectionResolver, ResolverMetrics as ConnResolverMetrics,
 };
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -137,16 +137,8 @@ pub fn try_start_twitch_sessions(
         )
     })?;
     let resolver = Arc::new(
-        ConnectionResolver::new(
-            ResolverConfig::new(
-                cli.hub_api_url.clone(),
-                cli.environment.clone(),
-                cli.service_jwt_token_endpoint.clone(),
-                cli.service_jwt_sa_token_path.clone(),
-            ),
-            Arc::new(ResolverTelemetry),
-        )
-        .map_err(|e| anyhow::anyhow!("connection resolver unavailable: {e}"))?,
+        ConnectionResolver::new(cli.resolver_config()?, Arc::new(ResolverTelemetry))
+            .map_err(|e| anyhow::anyhow!("connection resolver unavailable: {e}"))?,
     );
 
     let active_kid = cli.binding_active_kid.clone();
