@@ -10,6 +10,7 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/service_auth/**'
+      - 'proto/waddles/hub/internal/v1/service_auth.proto'
       - '.github/workflows/rust-service-auth.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
@@ -62,5 +63,5 @@ jobs:
       working_directory: core/service_auth
       # aws-lc-sys (the jsonwebtoken aws_lc_rs backend) needs cmake + a
       # C/C++ compiler to build -- same rationale as rust-egress-proxy.yml.
-      extra_apt_packages: cmake build-essential
-      extra_apt_reason: 'for aws-lc-sys (cmake, C/C++ toolchain)'
+      extra_apt_packages: cmake build-essential protobuf-compiler
+      extra_apt_reason: 'for aws-lc-sys (cmake, C/C++ toolchain) and the gRPC stubs (protoc)'

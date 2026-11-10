@@ -164,7 +164,7 @@ generic.
 | Never logged | Logs go through `flask_core.safe_logging` (exception type, code, category and frames -- never the message). Tokens, ciphertext, bot/channel names and provider response bodies are asserted absent from logs, spans and metric labels by tests. httpx's INFO line (which prints full URLs) is filtered for Twitch hosts. |
 | Output validation | Every response is an explicit DTO; request bodies reject unknown fields (`extra=forbid`). A regression test pins the exact field set. |
 | Outbound | Provider URLs are fixed constants but still pass the SSRF guard; redirects are never followed; responses are size-bounded; timeouts 5 s connect / 15 s total. |
-| Data plane auth | Short-lived Ed25519 **machine JWT**, scope `connections:resolve`, operator-plane `system` tenant (the routes span tenants by design). No shared key, no fallback. |
+| Data plane auth | Short-lived ES256 (ECDSA P-256) **machine JWT**, scope `connections:resolve`, operator-plane `system` tenant (the routes span tenants by design). No shared key, no fallback. |
 | Audit | Admin mutations pass `require_scope`, so the app-wide audit hook records them as `admin.action` for entitled tenants; `/api/v1/internal/` is intentionally unaudited plumbing. |
 
 > **Operational caution.** Never enable SQLAlchemy SQL echo (`sqlalchemy.engine` at INFO/DEBUG) in a
@@ -201,7 +201,7 @@ refresh to work; otherwise the connection works until the access token expires.
 
 ```
 svc-ingest                              hub-api
-   | POST /internal/service-token  (projected SA token)  -> short-lived Ed25519 JWT
+   | gRPC ServiceAuthService.MintServiceToken  (projected SA token, TLS 1.3)  -> short-lived ES256 JWT
    |                                                        scope connections:resolve, tenant=system
    | GET  /api/v1/internal/provider-connections?provider=twitch&capability=chat_ingest&after=0&limit=500
    |  <- {items:[{grantId, connectionId, communityId, tenantId, resourceId, capabilities,
@@ -247,7 +247,7 @@ inbound feed runs on the same bot token as its `action_relay`; it was previously
 
 ### svc-ingest's service identity (the scope grant)
 
-hub-api's token endpoint (`hub_api/blueprints/service_jwt_bp.py`) only mints a scope the caller's
+hub-api's gRPC mint (`hub_api/grpc_internal/service_auth_servicer.py`) only mints a scope the caller's
 allow-listed identity carries. The allow-list is chart config, rendered into hub-api's
 `SERVICE_JWT_IDENTITIES` env var and parsed at startup by
 `flask_core.service_jwt.load_identities_from_env`:
@@ -414,7 +414,7 @@ AAD) still open through a fallback until you close it -- see the runbook below.
 
 The shared `X-Service-Key` header no longer authenticates either data-plane route nor the connection token
 endpoint (HIGH-2): there is **no dual-accept window**. Callers use a machine JWT minted via
-`/internal/service-token` from their projected ServiceAccount token. A request carrying only the old header
+gRPC `ServiceAuthService.MintServiceToken` from their projected ServiceAccount token. A request carrying only the old header
 gets `401` (asserted live by `live_legacy_service_key_is_rejected`).
 
 ## SPIFFE readiness and its footguns

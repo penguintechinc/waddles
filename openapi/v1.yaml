@@ -25516,34 +25516,6 @@ paths:
         default:
           description: Undocumented response
       summary: Kubernetes liveness/readiness probe endpoint.
-  /internal/service-jwks.json:
-    get:
-      description: ''
-      operationId: get_service_jwks
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-      summary: Public-key set for verifiers -- no auth required (public keys only).
-  /internal/service-token:
-    post:
-      description: '
-
-        Request: `Authorization: Bearer <projected SA token>`, JSON body
-
-        `{"scope": "..."}`. Response: `{"token": "...", "expires_in": <secs>}`.
-
-        Returns 401 for any bootstrap failure -- wrong/expired/unauthenticated
-
-        SA token, wrong audience, or a ServiceAccount not allow-listed for the
-
-        requested scope -- without distinguishing which check failed.'
-      operationId: post_issue_service_token
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-      summary: Exchange a caller's projected ServiceAccount token for a machine JWT.
   /mcp/v1:
     post:
       description: '``tools/list``, and ``tools/call`` by JSON-RPC ``method``.

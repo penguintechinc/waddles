@@ -2467,7 +2467,7 @@ mod tests {
                 "--hub-api-grpc-endpoint",
                 &format!("http://{hub_addr}"),
                 "--service-jwt-token-endpoint",
-                &format!("http://{hub_addr}/internal/service-token"),
+                &format!("http://{hub_addr}"),
             ]);
             let config = Config::from_cli(cli).expect("secrets are set");
             unsafe {
@@ -3224,7 +3224,7 @@ mod tests {
             "--hub-api-grpc-endpoint",
             &format!("http://{addr}"),
             "--service-jwt-token-endpoint",
-            &format!("http://{addr}/internal/service-token"),
+            &format!("http://{addr}"),
         ]);
         let err = match build_hub_client(&cli, true).await {
             Ok(_) => panic!("an unreachable hub-api gRPC endpoint must fail loud at startup"),
@@ -3257,7 +3257,7 @@ mod tests {
             "--hub-api-grpc-endpoint",
             &format!("http://{addr}"),
             "--service-jwt-token-endpoint",
-            &format!("http://{addr}/internal/service-token"),
+            &format!("http://{addr}"),
         ]);
         assert!(build_hub_handle_client(&cli).await.is_none());
     }
@@ -3283,7 +3283,7 @@ mod tests {
             "--hub-api-grpc-endpoint",
             &format!("http://{addr}"),
             "--service-jwt-token-endpoint",
-            &format!("http://{addr}/internal/service-token"),
+            &format!("http://{addr}"),
         ]);
         assert!(build_hub_handle_client(&cli).await.is_some());
         assert_eq!(

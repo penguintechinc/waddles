@@ -63,8 +63,8 @@ jobs:
       # aws-lc-sys (the jsonwebtoken aws_lc_rs backend, src/assertion.rs)
       # needs cmake + a C/C++ compiler to build -- same rationale as
       # rust-svc-action.yml.
-      extra_apt_packages: cmake build-essential
-      extra_apt_reason: 'for aws-lc-sys (cmake, C/C++ toolchain)'
+      extra_apt_packages: cmake build-essential protobuf-compiler
+      extra_apt_reason: 'for aws-lc-sys (cmake, C/C++ toolchain) and service_auth (protoc)'
       # main.rs is a thin binary entrypoint (all logic lives in src/lib.rs,
       # see its own module doc) -- same coverage_ignore_regex convention as
       # rust-svc-process.yml.
