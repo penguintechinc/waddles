@@ -458,6 +458,13 @@ bundleExecutor:
   image:
     repository: "ghcr.io/penguintechinc/waddles/svc-bundles-executor"
     tag: ""
+  # Kata isolation stays OFF until the admin Kata PR (RuntimeClass + node labels) is applied
+  # on dal2alpha. To enable afterwards:
+  # runtimeClass:
+  #   enabled: true
+  #   name: "kata"
+  # nodeSelector:
+  #   katacontainers.io/kata-runtime: "true"
 
 # svc-bundles-executor scales horizontally: every replica dials every stage + the connector
 # link and each listener round-robins work across the replicas (see values.yaml

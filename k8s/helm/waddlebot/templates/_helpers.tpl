@@ -1235,6 +1235,46 @@ true
 {{- end -}}
 
 {{/*
+Kata Containers isolation for the bundle executors (bundleExecutor.runtimeClass).
+Renders pod-spec lines (runtimeClassName, nodeSelector, affinity) for the svc-bundles-executor
+Deployment ONLY -- never included by any other data-plane workload. Empty output when
+disabled. Fails the render if enabled with an empty name (no silent fallback to runc).
+Call: include "waddlebot.executorKataPodSpec" .
+*/}}
+{{- define "waddlebot.executorKataPodSpec" -}}
+{{- $rc := .Values.bundleExecutor.runtimeClass | default dict -}}
+{{- if $rc.enabled -}}
+{{- if not $rc.name -}}
+{{- fail "bundleExecutor.runtimeClass.enabled=true requires a non-empty bundleExecutor.runtimeClass.name (the RuntimeClass, e.g. \"kata\", must exist in the cluster)" -}}
+{{- end -}}
+runtimeClassName: {{ $rc.name | quote }}
+{{- with .Values.bundleExecutor.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.bundleExecutor.affinity }}
+affinity:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Executor container resources. When Kata is enabled and bundleExecutor.runtimeClass.resources
+is set, those requests/limits replace the per-environment values (they size the guest VM
+workload; the RuntimeClass `overhead` is added by Kubernetes on top automatically).
+Call: include "waddlebot.executorResources" (dict "root" $ "default" <resources map>)
+*/}}
+{{- define "waddlebot.executorResources" -}}
+{{- $rc := .root.Values.bundleExecutor.runtimeClass | default dict -}}
+{{- if and $rc.enabled $rc.resources -}}
+{{- toYaml $rc.resources -}}
+{{- else -}}
+{{- toYaml .default -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 svc-bundles-executor stage dial list -- the comma-separated `host:port` value of
 STAGE_HOST_API_ADDR: one entry per `pipeline.rustDataPlane.bundleExecutor.stages` item
 (`<fullname>-<target>:<port>`), in order. The executor runs one independent dial loop per
