@@ -1639,7 +1639,7 @@ bundles:
 
   # AI Teammates APP bundle (Rust, `stage-next-tools` world): Researcher, Receptionist, Producer --
   # each default OFF per community, configured via config_schema. Consumes the AI service tools.
-  - app_id: waddles.core.example.ai_teammates
+  - app_id: waddles.core.example.ai-teammates
     version: "1.0.0"
     language: rust
     wit_world: stage-next-tools

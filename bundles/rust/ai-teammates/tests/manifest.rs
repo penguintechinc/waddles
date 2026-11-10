@@ -63,7 +63,7 @@ fn stages_world_and_commands_match_the_design() {
     let (hub, bun) = (read("hub-manifest.yaml"), read("bundle.yaml"));
     assert!(bun.contains("wit_world: stage-next-tools") && bun.contains("language: rust"));
     for doc in [&hub, &bun] {
-        assert!(doc.contains("app_id: waddles.core.example.ai_teammates"));
+        assert!(doc.contains("app_id: waddles.core.example.ai-teammates"));
         assert!(doc.contains("member.join") && doc.contains("chat.message"));
         assert!(
             doc.contains("waddle:bundle/process-stage#transform")

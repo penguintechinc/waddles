@@ -415,6 +415,32 @@ def load_platform_connections(catalog_path: Path) -> tuple[PlatformConnection, .
     return tuple(connections)
 
 
+def order_services_first(
+    entries: tuple[CatalogEntry, ...], bundles_dir: Path
+) -> tuple[CatalogEntry, ...]:
+    """Return `entries` with every `kind: service` bundle first, original order otherwise kept.
+
+    An app bundle that requests a service's tools is refused at activation
+    (`tool_target_cross_tenant`) unless that service is already available to the tenant, so a
+    service must be seeded before any consumer -- catalog row order alone can't guarantee it.
+    Kind is read from each entry's own hub manifest, the same file `seed_one()` parses.
+    """
+
+    def _is_service(entry: CatalogEntry) -> bool:
+        try:
+            raw = yaml.safe_load((bundles_dir / entry.manifest_path).read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            # Unreadable manifest: keep it in place; `seed_one()` re-reads it and fails loud
+            # for this entry alone (per-entry isolation), so ordering never aborts the run.
+            return False
+        return isinstance(raw, Mapping) and raw.get("kind") == "service"
+
+    flags = {entry.app_id: _is_service(entry) for entry in entries}
+    return tuple(
+        [e for e in entries if flags[e.app_id]] + [e for e in entries if not flags[e.app_id]]
+    )
+
+
 def _resolve_activation_targets(entry: CatalogEntry) -> tuple[ActivationTarget, ...]:
     """`CORE_BUNDLES_TENANT_SLUGS`, if set, overrides `entry`'s own catalog-declared targets."""
     override = os.getenv(_TENANT_SLUGS_OVERRIDE_ENV)
@@ -686,9 +712,13 @@ async def _resolve_or_publish_version(
         tenant_slug=publish_tenant_slug,
         valkey_client=valkey_client,
     )
-    if published.app_version_id is None:  # pragma: no cover - defensive, see bundle_version_service
+    if published.app_version_id is None:
+        # A component the WIT conformance gate rejected lands here (status REJECTED, no
+        # app_versions row); surface the gate's own reason so the Job log names the cause.
         raise ApiError(
-            f"{entry.app_id}@{entry.version} published with no app_version_id",
+            f"{entry.app_id}@{entry.version} published with no app_version_id "
+            f"(upload status={getattr(published, 'status', None)!r}, "
+            f"reject_reason={getattr(published, 'reject_reason', None)!r})",
             500,
             "publish_failed",
         )
@@ -1590,7 +1620,7 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
             },
         )
 
-        for entry in entries:
+        for entry in order_services_first(entries, bundles_dir):
             try:
                 results = await seed_one(
                     install_dal, entry, bundles_dir, connection_scopes=connection_scopes
@@ -1673,7 +1703,8 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                 # bucket/key, and the server's error code. `exc_info=True` attaches the full
                 # traceback to the rendered line too, not only to `extra`.
                 logger.error(
-                    f"core-bundle-seeder: bundle failed ({type(exc).__name__}: {exc})",
+                    f"core-bundle-seeder: bundle failed ({entry.app_id}@{entry.version}, "
+                    f"{type(exc).__name__}: {exc})",
                     extra={
                         "app_id": entry.app_id,
                         "version": entry.version,

@@ -8,6 +8,7 @@ version: 1.0.0
 feature: waddles.core.example
 module: core
 provider: builtin
+author: github:penguintechinc
 language: rust
 artifact: prebuilt
 execution_model: native
