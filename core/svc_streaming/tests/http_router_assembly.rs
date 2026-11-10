@@ -225,8 +225,9 @@ async fn every_mount_is_reachable_through_the_assembled_router() {
     );
 
     // 6. WHEP mount: POST /whep/{community_id}/{pipeline_id}
-    // (crate::egress::whep) -- deterministic 404 (no source registered),
-    // via the ApiError envelope (not axum's routeless 404).
+    // (crate::egress::whep) -- with no viewer-auth keys configured it fails
+    // CLOSED (501 not_implemented) via the ApiError envelope, never serving
+    // media unauthenticated.
     let pipeline_id = uuid::Uuid::new_v4();
     let response = app
         .clone()
@@ -240,8 +241,8 @@ async fn every_mount_is_reachable_through_the_assembled_router() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(parsed["error"], "not_found");
+    assert_eq!(parsed["error"], "not_implemented");
 }

@@ -144,6 +144,16 @@ COPY bundles/rust/wix /repo/bundles/rust/wix
 WORKDIR /repo/bundles/rust/wix
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# WebRTC service + rooms app: both build against wit/waddle-bundle (webrtc.wit adds the
+# `webrtc` capability + `stage-tools-webrtc` world); rooms needs `sdk/waddle-sdk-rs` only
+# transitively (webrtc), already copied above.
+COPY bundles/rust/webrtc /repo/bundles/rust/webrtc
+WORKDIR /repo/bundles/rust/webrtc
+RUN cargo component build --release --target wasm32-wasip2 --locked
+COPY bundles/rust/rooms /repo/bundles/rust/rooms
+WORKDIR /repo/bundles/rust/rooms
+RUN cargo component build --release --target wasm32-wasip2 --locked
+
 # Music YouTube service (`kind: service`, world stage-tools): same pinned builder.
 COPY bundles/rust/music-youtube /repo/bundles/rust/music-youtube
 WORKDIR /repo/bundles/rust/music-youtube
@@ -372,6 +382,8 @@ COPY bundles/rust/youtube/hub-manifest.yaml /core-bundles/youtube.manifest.yaml
 COPY bundles/rust/live-now/hub-manifest.yaml /core-bundles/live-now.manifest.yaml
 COPY bundles/rust/spectrum/hub-manifest.yaml /core-bundles/spectrum.manifest.yaml
 COPY bundles/rust/wix/hub-manifest.yaml /core-bundles/wix-connector.manifest.yaml
+COPY bundles/rust/webrtc/hub-manifest.yaml /core-bundles/webrtc.manifest.yaml
+COPY bundles/rust/rooms/hub-manifest.yaml /core-bundles/rooms.manifest.yaml
 COPY bundles/rust/music-youtube/hub-manifest.yaml /core-bundles/music-youtube.manifest.yaml
 COPY bundles/rust/gameserver/hub-manifest.yaml /core-bundles/gameserver.manifest.yaml
 COPY bundles/rust/game-servers/hub-manifest.yaml /core-bundles/game-servers.manifest.yaml
@@ -393,6 +405,8 @@ COPY --from=rust-bundle-builder /repo/bundles/rust/youtube/target/wasm32-wasip2/
 COPY --from=rust-bundle-builder /repo/bundles/rust/live-now/target/wasm32-wasip2/release/waddle_bundle_live_now.wasm /core-bundles/live-now.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/spectrum/target/wasm32-wasip2/release/waddle_bundle_spectrum_service.wasm /core-bundles/spectrum.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/wix/target/wasm32-wasip2/release/waddle_bundle_wix_service.wasm /core-bundles/wix-connector.wasm
+COPY --from=rust-bundle-builder /repo/bundles/rust/webrtc/target/wasm32-wasip2/release/waddle_bundle_webrtc_service.wasm /core-bundles/webrtc.wasm
+COPY --from=rust-bundle-builder /repo/bundles/rust/rooms/target/wasm32-wasip2/release/waddle_bundle_rooms.wasm /core-bundles/rooms.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/music-youtube/target/wasm32-wasip2/release/waddle_bundle_music_youtube_service.wasm /core-bundles/music-youtube.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/gameserver/target/wasm32-wasip2/release/waddle_bundle_gameserver_service.wasm /core-bundles/gameserver.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/game-servers/target/wasm32-wasip2/release/waddle_bundle_game_servers.wasm /core-bundles/game-servers.wasm

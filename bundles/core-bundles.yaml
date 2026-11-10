@@ -1677,6 +1677,30 @@ bundles:
       - tenant_slug: global
         community_id: null
 
+  # WebRTC control-plane SERVICE bundle (Rust `kind: service`, `stage-tools-webrtc` world): tools over
+  # svc-streaming's rooms/SFU. Host seams for the `webrtc` capability are pending (see PR body).
+  - app_id: waddles.core.service.webrtc
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-tools-webrtc
+    kind: service
+    source_dir: rust/webrtc
+    manifest_path: webrtc.manifest.yaml
+    artifact_path: webrtc.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
+  # Rooms APP bundle (Rust, `stage-next-tools` world): per-community / per-event / virtual rooms over
+  # the webrtc service's tools. Replaces hub_api calls.py + calls_proxy.py and Go module_rtc.
+  - app_id: waddles.core.app.rooms
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-next-tools
+    source_dir: rust/rooms
+    manifest_path: rooms.manifest.yaml
+    artifact_path: rooms.wasm
+
   # Music YouTube SERVICE bundle (Rust `kind: service`, world stage-tools): common music tool
   # contract music.youtube.{search,track,playlist.get,resolve} over the YouTube Data API v3.
   # Built by rust-bundle-builder; credentials are host-side secret refs.
