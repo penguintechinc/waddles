@@ -4196,6 +4196,39 @@ components:
       - createdAt
       title: RecentCommunityDTO
       type: object
+    ReportItem:
+      description: 'Outcome code: 1 created, 2 deleted, 3 failed, 4 revoked; echo
+        the work item''s ``nonce``.'
+      properties:
+        failureReason:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          default: null
+          title: Failurereason
+        nonce:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Nonce
+        outcome:
+          title: Outcome
+          type: integer
+        subscriptionId:
+          title: Subscriptionid
+          type: string
+        twitchSubscriptionId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Twitchsubscriptionid
+      required:
+      - subscriptionId
+      - outcome
+      title: ReportItem
+      type: object
     ReputationDTO:
       description: FICO-style reputation DTO.
       properties:
@@ -5479,6 +5512,42 @@ components:
       - destinations_enabled
       title: StreamStatusDTO
       type: object
+    SweepDTO:
+      description: Denominators of the sweep.
+      properties:
+        communities:
+          title: Communities
+          type: integer
+        created:
+          title: Created
+          type: integer
+        markedDelete:
+          title: Markeddelete
+          type: integer
+        markedStale:
+          title: Markedstale
+          type: integer
+        nextCommunityId:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          default: null
+          title: Nextcommunityid
+        removed:
+          title: Removed
+          type: integer
+        requeued:
+          title: Requeued
+          type: integer
+      required:
+      - communities
+      - created
+      - markedDelete
+      - removed
+      - markedStale
+      - requeued
+      title: SweepDTO
+      type: object
     TableAccessDTO:
       description: One requested platform-table access block (table/columns/ops/reason)
         -- explicit shape.
@@ -6106,6 +6175,63 @@ components:
       required:
       - id
       title: VendorRequestDTO
+      type: object
+    WorkItemDTO:
+      description: One create (``action`` 1) or delete (``action`` 2). Never carries
+        the webhook secret.
+      properties:
+        action:
+          title: Action
+          type: integer
+        callbackKey:
+          title: Callbackkey
+          type: string
+        callbackUrl:
+          title: Callbackurl
+          type: string
+        communityId:
+          title: Communityid
+          type: integer
+        connectionId:
+          title: Connectionid
+          type: integer
+        nonce:
+          title: Nonce
+          type: string
+        subType:
+          title: Subtype
+          type: integer
+        subscriptionId:
+          title: Subscriptionid
+          type: string
+        tenantId:
+          title: Tenantid
+          type: integer
+        twitchSubscriptionId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Twitchsubscriptionid
+        twitchType:
+          title: Twitchtype
+          type: string
+        version:
+          title: Version
+          type: integer
+      required:
+      - subscriptionId
+      - action
+      - tenantId
+      - communityId
+      - connectionId
+      - subType
+      - twitchType
+      - version
+      - callbackUrl
+      - callbackKey
+      - nonce
+      title: WorkItemDTO
       type: object
 info:
   title: hub-api
@@ -17920,6 +18046,130 @@ paths:
                 type: object
           description: One page of reconcile-eligible source ids.
       summary: '``GET`` -- one page of sources of a platform that have a paired community.'
+  /api/v1/internal/eventsub/reconcile:
+    post:
+      description: ''
+      operationId: post_reconcile_route
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Body of the reconcile call (paging into the community sweep).
+              properties:
+                afterCommunityId:
+                  default: 0
+                  title: Aftercommunityid
+                  type: integer
+                limit:
+                  default: 200
+                  title: Limit
+                  type: integer
+              title: ReconcileRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Work plan plus the swept communities' live Twitch ids;
+                  GC only if ``enabledIdsComplete``.
+                properties:
+                  enabledIdsComplete:
+                    default: false
+                    title: Enabledidscomplete
+                    type: boolean
+                  enabledTwitchSubscriptionIds:
+                    items:
+                      type: string
+                    title: Enabledtwitchsubscriptionids
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                  sweep:
+                    $ref: '#/components/schemas/SweepDTO'
+                  work:
+                    items:
+                      $ref: '#/components/schemas/WorkItemDTO'
+                    title: Work
+                    type: array
+                required:
+                - success
+                - sweep
+                title: ReconcileResponse
+                type: object
+          description: Work plan plus the swept communities' live Twitch ids; GC only
+            if ``enabledIdsComplete``.
+      summary: Sweep desired state and return the pending create/delete work.
+  /api/v1/internal/eventsub/results:
+    post:
+      description: ''
+      operationId: post_results_route
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Body of the results call; applied atomically.
+              properties:
+                results:
+                  items:
+                    $ref: '#/components/schemas/ReportItem'
+                  title: Results
+                  type: array
+              title: ResultsRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Number of results applied.
+                properties:
+                  applied:
+                    title: Applied
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - applied
+                title: ResultsResponse
+                type: object
+          description: Number of results applied.
+      summary: Apply create/delete/failed/revoked outcomes atomically.
+  /api/v1/internal/eventsub/secret/{callback_key}:
+    get:
+      description: ''
+      operationId: get_secret_route
+      parameters:
+      - in: path
+        name: callback_key
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Webhook secret for one callback key.
+                properties:
+                  secret:
+                    default: ''
+                    title: Secret
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: SecretDTO
+                type: object
+          description: Webhook secret for one callback key.
+      summary: Webhook secret for the ingest verifier (404 for an unknown key).
   /api/v1/internal/live:
     get:
       description: ''

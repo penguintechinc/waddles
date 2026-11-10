@@ -47,7 +47,12 @@ from flask_core.stream_pipeline import source_stream_key
 from sqlalchemy import delete, select
 
 from services import valkey_admin_client
-from services.bundle_manifest_v2 import BundleManifestV2
+from services.bundle_manifest_v2 import (
+    SCHEDULE_PLATFORM,
+    BundleManifestV2,
+    app_id_slug,
+    scheduled_consume_rule_ok,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +107,22 @@ async def sync_bindings(
         the caller passes this to `provision_source_stream_groups()`
         AFTER the transaction commits.
     """
-    consumed = sorted({rule.platform for rule in manifest.consumes})
+    # A scheduled bundle's `hub` stream is the HOST's, not an ingest source: bound below on the
+    # bundle's own `app_id_slug` source id, never matched against `ingest_sources` or gated by
+    # `supported_platforms` (`hub` is not a chat platform).
+    scheduled = manifest.schedule is not None
+    if scheduled and not scheduled_consume_rule_ok(app_id, manifest.consumes):
+        raise ValueError(
+            f"scheduled bundle {app_id!r} lacks a hub/bundle.reconcile consume rule on its own "
+            "app_id_slug source id"
+        )
+    consumed = sorted(
+        {
+            r.platform
+            for r in manifest.consumes
+            if not (scheduled and r.platform == SCHEDULE_PLATFORM)
+        }
+    )
     platforms = [p for p in consumed if manifest.supports_platform(p)]
     # Issue #685 fail-loud gate: never grant a bundle a source stream on a
     # platform it does not support -- no grant, no events. PII-free log.
@@ -128,6 +148,21 @@ async def sync_bindings(
     )
 
     bound: dict[str, list[str]] = {}
+    if scheduled:
+        schedule_source = app_id_slug(app_id)
+        await conn.execute(
+            bindings_table.insert(),
+            [
+                {
+                    "tenant_id": tenant_id,
+                    "community_id": active_community_id,
+                    "app_id": app_id,
+                    "platform": SCHEDULE_PLATFORM,
+                    "source_id": schedule_source,
+                }
+            ],
+        )
+        bound[SCHEDULE_PLATFORM] = [schedule_source]
     if not platforms:
         return bound
 
