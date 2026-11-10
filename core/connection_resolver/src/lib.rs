@@ -20,6 +20,7 @@ pub mod test_support;
 
 pub use client::{
     ConnectionResolve, ConnectionResolver, ResolverConfig, ResolverMetrics, SCOPE_CONNECTIONS_LIST,
+    SCOPE_CONNECTIONS_LIST_GAMESERVER, SCOPE_CONNECTIONS_RESOLVE_GAMESERVER,
     SCOPE_CONNECTIONS_RESOLVE, SCOPE_CONNECTIONS_RESOLVE_STATIC,
 };
 pub use error::{NotUsableReason, ResolveError};

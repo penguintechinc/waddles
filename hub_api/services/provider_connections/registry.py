@@ -11,6 +11,7 @@ import httpx
 
 from services.provider_connections.adapter import AdapterRegistry
 from services.provider_connections.discord import DiscordAdapter
+from services.provider_connections.gameserver import GameServerAdapter
 from services.provider_connections.kick import KickAdapter
 from services.provider_connections.music_keys import SoundcloudAdapter, YoutubeApiKeyAdapter
 from services.provider_connections.spectrum import SpectrumAdapter
@@ -42,6 +43,7 @@ def build_default_registry(
     registry.register(KickAdapter(transport=transport))
     registry.register(SpectrumAdapter(transport=transport))
     registry.register(WixAdapter())
+    registry.register(GameServerAdapter())
     registry.register(SoundcloudAdapter())
     registry.register(YoutubeApiKeyAdapter())
     registry.register(ExternalHttpAdapter())

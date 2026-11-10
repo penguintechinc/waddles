@@ -61,6 +61,7 @@ world stage-tools {
   import kv-v2;
   import db-v2;
   import tool;
+  import gameserver-net;
 
   export tool-provider;
 }
@@ -70,4 +71,41 @@ world stage-tools {
 world stage-next-tools {
   include stage-next;
   import tool;
+}
+
+/// Host-mediated game-server network access (RCON / TCP / UDP). APPEND-ONLY interface.
+/// The guest names an admin-registered connection by UUID; the HOST resolves it (scoped to the
+/// invoking tenant+community), runs the SSRF guard on the resolved IP, performs the RCON login
+/// with the stored password (it never enters the guest) and enforces rate limits, deadlines and
+/// byte budgets. Gated by the `gameserver.net` permission (dangerous, first-party core only).
+interface gameserver-net {
+  variant error {
+    /// Policy refusal: not registered, forbidden address, rate limited, too many sessions,
+    /// rejected command. The string is a fixed machine code (never an address or secret).
+    denied(string),
+    unreachable,
+    timeout,
+    /// The server rejected the host-side RCON login.
+    auth-failed,
+    /// A byte budget (in or out) would be exceeded.
+    too-large,
+    /// Host failure; detail is host-logged only.
+    backend(string),
+  }
+
+  enum scheme { source-rcon, minecraft-rcon }
+
+  /// An open, host-budgeted TCP session; dropping it closes the socket.
+  resource tcp {
+    write-all: func(bytes: list<u8>) -> result<_, error>;
+    /// One read of at most `max` bytes; an empty list means the peer closed.
+    read: func(max: u32) -> result<list<u8>, error>;
+  }
+
+  /// Opens an AUTHENTICATED RCON session (the host performs the login).
+  rcon-open: func(server: string, scheme: scheme) -> result<tcp, error>;
+  /// Opens an unauthenticated TCP session (Minecraft status ping).
+  tcp-open: func(server: string) -> result<tcp, error>;
+  /// One UDP request/response (A2S); the response is at most `max-response` (<= 1400) bytes.
+  udp-exchange: func(server: string, payload: list<u8>, max-response: u32) -> result<list<u8>, error>;
 }

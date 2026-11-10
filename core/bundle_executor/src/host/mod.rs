@@ -19,6 +19,7 @@ pub mod stage_next_object_storage;
 pub mod stage_next_platform_table;
 pub mod stage_next_storage_v2;
 pub mod stage_tools;
+pub mod stage_tools_gameserver_net;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

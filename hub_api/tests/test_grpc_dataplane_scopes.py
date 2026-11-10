@@ -15,10 +15,14 @@ from waddles.hub.internal.v1 import distribution_pb2, media_pb2, provider_connec
 from grpc_internal.servicers import REQUIRED_SCOPES
 
 _EXPECTED: dict[str, str | tuple[str, ...]] = {
-    "/waddles.hub.internal.v1.ProviderConnectionService/ListBindings": "connections:list",
+    "/waddles.hub.internal.v1.ProviderConnectionService/ListBindings": (
+        "connections:list",
+        "connections:list:gameserver",
+    ),
     "/waddles.hub.internal.v1.ProviderConnectionService/ResolveConnection": (
         "connections:resolve",
         "connections:resolve:static",
+        "connections:resolve:gameserver",
     ),
     "/waddles.hub.internal.v1.DistributionService/ListBundles": "distribution:read",
     "/waddles.hub.internal.v1.MediaService/ResolveByok": "media:byok:resolve",

@@ -361,6 +361,27 @@ impl FeatureGate for BundlePlatformTableCapabilityGate {
     }
 }
 
+/// Production [`FeatureGate`] for [`crate::capabilities::BUNDLE_GAMESERVER_NET_CAPABILITY_FLAG`]
+/// -- plain opt-in flag; unseen/OFF/license-server-unreachable denies every
+/// `gameserver_net.*` call `feature_disabled` (fail-closed default).
+pub struct BundleGameServerNetCapabilityGate(Arc<LicenseClient>);
+
+impl BundleGameServerNetCapabilityGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for BundleGameServerNetCapabilityGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            self.0
+                .flag_enabled(crate::capabilities::BUNDLE_GAMESERVER_NET_CAPABILITY_FLAG)
+                .await
+        })
+    }
+}
+
 /// Gates the bundle `object-storage` host capability (`crate::capabilities::
 /// StageCapabilities::handle_object_storage`) -- plain opt-in flag; unseen/OFF/
 /// license-server-unreachable means every `object_storage.*` call is denied
