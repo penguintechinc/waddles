@@ -1472,6 +1472,21 @@ bundles:
       - tenant_slug: global
         community_id: null
 
+  # Catalog bundle `ai` (P0b): AI SERVICE (Rust, always-on `kind: service`, world stage-tools).
+  # Tools ai.complete/ai.classify over host ai.generate; ai.rag.* fail loud until the host
+  # exposes a RAG capability. Built by rust-bundle-builder like reputation above.
+  - app_id: waddles.core.service.ai
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-tools
+    kind: service
+    source_dir: rust/ai
+    manifest_path: ai.manifest.yaml
+    artifact_path: ai.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
   # Atomic community currency service, installed by the trusted core seeder.
   - app_id: waddles.core.service.economy
     version: "1.0.1"

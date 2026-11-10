@@ -89,6 +89,11 @@ COPY bundles/rust/reputation /repo/bundles/rust/reputation
 WORKDIR /repo/bundles/rust/reputation
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# AI service (catalog `ai`, `kind: service`, world stage-tools): same pinned builder.
+COPY bundles/rust/ai /repo/bundles/rust/ai
+WORKDIR /repo/bundles/rust/ai
+RUN cargo component build --release --target wasm32-wasip2 --locked
+
 # Community economy service uses the tool-provider world and the same pinned builder.
 COPY bundles/rust/economy /repo/bundles/rust/economy
 WORKDIR /repo/bundles/rust/economy
@@ -313,6 +318,7 @@ RUN mkdir -p /core-bundles
 COPY bundles/core-bundles.yaml /core-bundles/core-bundles.yaml
 COPY bundles/rust/ping/hub-manifest.yaml /core-bundles/ping.manifest.yaml
 COPY bundles/rust/reputation/hub-manifest.yaml /core-bundles/reputation.manifest.yaml
+COPY bundles/rust/ai/hub-manifest.yaml /core-bundles/ai.manifest.yaml
 COPY bundles/rust/economy/hub-manifest.yaml /core-bundles/economy.manifest.yaml
 COPY bundles/rust/twitch/hub-manifest.yaml /core-bundles/twitch.manifest.yaml
 COPY bundles/rust/music-soundcloud/hub-manifest.yaml /core-bundles/music-soundcloud.manifest.yaml
@@ -323,6 +329,7 @@ COPY bundles/rust/wix/hub-manifest.yaml /core-bundles/wix-connector.manifest.yam
 COPY bundles/csharp/csping/hub-manifest.yaml /core-bundles/csping.manifest.yaml
 COPY --from=rust-bundle-builder /repo/bundles/rust/ping/target/wasm32-wasip2/release/waddle_bundle_ping_rust.wasm /core-bundles/ping.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/reputation/target/wasm32-wasip2/release/waddle_bundle_reputation_service.wasm /core-bundles/reputation.wasm
+COPY --from=rust-bundle-builder /repo/bundles/rust/ai/target/wasm32-wasip2/release/waddle_bundle_ai_service.wasm /core-bundles/ai.wasm
 COPY --from=csharp-bundle-builder /repo/bundles/csharp/csping/bin/Release/net10.0/wasi-wasm/publish/csping.wasm /core-bundles/csping.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/economy/target/wasm32-wasip2/release/waddle_bundle_economy_service.wasm /core-bundles/economy.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/twitch/target/wasm32-wasip2/release/waddle_bundle_twitch_overlay.wasm /core-bundles/twitch.wasm
