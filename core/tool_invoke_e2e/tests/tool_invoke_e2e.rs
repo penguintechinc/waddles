@@ -77,6 +77,7 @@ fn tools(
                 name: (*n).to_string(),
                 write: *w,
                 required_scope: None,
+                host_op: None,
             })
             .collect(),
         requested: requests
@@ -816,6 +817,7 @@ async fn admin_world(account: Option<&str>, role: Option<&'static str>) -> World
                 name: "whoami".to_string(),
                 write: false,
                 required_scope: Some("community:admin".to_string()),
+                host_op: None,
             });
         }
         if r.app_id == CALLER {

@@ -63,6 +63,7 @@
 //! that leaves as a documented seam.
 
 pub mod active_digests;
+pub mod actor;
 pub mod bundle_loader;
 pub mod capabilities;
 pub mod changelog_consumer;
@@ -82,6 +83,7 @@ pub mod host_api;
 pub mod http;
 pub mod metrics_facade;
 pub mod pin_sig;
+pub mod platform_user;
 pub mod retry;
 pub mod senders;
 pub mod stage_metrics;
@@ -174,6 +176,43 @@ async fn build_hub_client(
              waddles.core.disable-pii-detokenization kill-switch",
             cli.hub_api_grpc_endpoint
         )),
+    }
+}
+
+/// Connects the hub client used to detokenize a host tool's target user
+/// (`IdentityService.ResolvePlatformUser`, scope [`platform_user::PLATFORM_USER_SCOPE`]).
+/// `None` (logged) when hub-api's endpoints are unset or the connect fails: host tools that
+/// name a user are then refused at call time, never run with an unresolved id.
+async fn build_platform_user_resolver(
+    cli: &config::CliConfig,
+) -> Option<Arc<dyn platform_user::PlatformUserResolver>> {
+    if cli.hub_api_grpc_endpoint.is_empty() || cli.service_jwt_token_endpoint.is_empty() {
+        tracing::warn!(
+            "HUB_API_GRPC_ENDPOINT/SERVICE_JWT_TOKEN_ENDPOINT unset; host platform tools that \
+             name a user are refused (no detokenization)"
+        );
+        return None;
+    }
+    match hub_client::HubClient::connect(
+        cli.hub_api_grpc_endpoint.clone(),
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        platform_user::PLATFORM_USER_SCOPE,
+        (!cli.hub_api_grpc_ca_file.is_empty()).then_some(cli.hub_api_grpc_ca_file.as_str()),
+    )
+    .await
+    {
+        Ok(client) => Some(Arc::new(platform_user::HubPlatformUserResolver::new(
+            client,
+        ))),
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "platform-user detokenization hub client failed to connect; host platform tools \
+                 that name a user are refused"
+            );
+            None
+        }
     }
 }
 
@@ -840,6 +879,7 @@ async fn build_stage_capabilities(
     // refresh loop against this same Valkey connection's client.
     let redis_client = build_redis_client(&spine_cfg);
     let poll_interval = cli.bundle_config_poll_interval();
+    let mut actor_db: Option<sea_orm::DatabaseConnection> = None;
     let gate = match db_reader_password {
         Some(password) => {
             let reader_cfg = bundle_active_set::ReaderConfig {
@@ -849,11 +889,15 @@ async fn build_stage_capabilities(
                 user: cli.db_reader_user.clone(),
             };
             match bundle_active_set::reader::connect(&reader_cfg, password.expose()).await {
-                Ok(db) => grant_gate::build_production_gate(
-                    grant_gate::PgGrantLoader::new(db),
-                    redis_client,
-                    poll_interval,
-                ),
+                Ok(db) => {
+                    // The same read-only reader connection backs the actor directory.
+                    actor_db = Some(db.clone());
+                    grant_gate::build_production_gate(
+                        grant_gate::PgGrantLoader::new(db),
+                        redis_client,
+                        poll_interval,
+                    )
+                }
                 Err(err) => {
                     tracing::warn!(error = %err, "grant-gate db-reader connection failed; every non-platform permission denies until the next connection attempt");
                     grant_gate::build_production_gate(
@@ -944,6 +988,24 @@ async fn build_stage_capabilities(
         connections,
         snapshot: app_version_snapshot,
     });
+    // Host-verified actor resolution for scope-restricted tools (`crate::actor`): without the
+    // reader connection every `required_scope` tool is refused (fail closed).
+    let caps = match actor_db {
+        Some(db) => caps.with_actor_directory(Arc::new(actor::PgActorDirectory::new(db))),
+        None => {
+            tracing::warn!(
+                "no db-reader connection; scope-restricted tools are refused on the action stage"
+            );
+            caps
+        }
+    };
+    // Producer-side user detokenization for host-executed platform tools: its OWN hub client
+    // (a client is single-scope) carrying `identity:platform-user:resolve`. Unavailable =>
+    // every host tool naming a user is refused loudly (never an unresolved id).
+    let caps = match build_platform_user_resolver(cli).await {
+        Some(resolver) => caps.with_platform_users(resolver),
+        None => caps,
+    };
     // Event-sync requests from hub-api (`EVENT_SYNC_REQUEST_KEYS`, a DEDICATED
     // verify-only ring). Without it the consumer is not started: hub-api's
     // enqueue then times out loudly instead of anything running unauthenticated.
