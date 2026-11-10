@@ -17,6 +17,7 @@ _VALID_MANIFEST = {
     "feature": "waddles.socials.music",
     "module": "socials",
     "provider": "builtin",
+    "author": "github:penguintechinc",
     "language": "python",
     "artifact": "source",
     "stages": {

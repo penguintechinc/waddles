@@ -1,0 +1,49 @@
+{
+  "contract": "live-channels-contract",
+  "version": 1,
+  "doc": "Common tool every platform SERVICE bundle implements as <platform>.live.channels (twitch, youtube, discord, kick). The host resolves the community's connected channels itself; the caller never supplies channel ids. Output carries channel/stream metadata only -- no user PII. Optional fields are absent or null when the platform does not know them. Failures are LOUD: the tool errors with an invalid-args message whose text starts with one of error_codes (optionally followed by ': detail'); there is no empty-success fallback. Discord maps 'live' to a member Go-Live/streaming presence or an active stage channel in a linked guild (channel_ref identifies the voice/stage channel or guild-scoped streamer ref, display_name the channel/stage name, title the stage topic or streamed activity name, viewers the voice/stage audience count).",
+  "tool_name_template": "{platform}.live.channels",
+  "platforms": ["twitch", "youtube", "discord", "kick"],
+  "error_codes": ["platform_unavailable", "rate_limited", "not_connected"],
+  "definitions": {
+    "channel": {
+      "type": "object",
+      "properties": {
+        "channel_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "display_name": {"type": "string", "minLength": 1, "maxLength": 100},
+        "is_live": {"type": "boolean"},
+        "title": {"type": ["string", "null"], "maxLength": 300},
+        "category": {"type": ["string", "null"], "maxLength": 100},
+        "viewers": {"type": ["integer", "null"], "minimum": 0},
+        "started_at": {"type": ["string", "null"], "maxLength": 40},
+        "thumbnail_ref": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "required": ["channel_ref", "display_name", "is_live"]
+    }
+  },
+  "tools": {
+    "channels": {
+      "access": "read",
+      "risk": "normal",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "scope": {"type": "string", "enum": ["community", "linked"]},
+          "cursor": {"type": "string", "minLength": 1, "maxLength": 512},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 100}
+        },
+        "required": ["scope"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "channels": {"type": "array", "items": {"$ref": "#/definitions/channel"}},
+          "cursor": {"type": ["string", "null"], "maxLength": 512},
+          "as_of": {"type": "string", "maxLength": 40}
+        },
+        "required": ["channels", "as_of"]
+      }
+    }
+  }
+}
