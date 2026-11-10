@@ -85,7 +85,9 @@ spec:
           export AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID}"
           export AWS_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY}"
           export AWS_DEFAULT_REGION="us-east-1"
-          ENDPOINT="http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
+          # feature/transit-tls-core (F5): https against the FQDN, internal CA pinned (aws cli reads AWS_CA_BUNDLE).
+          export AWS_CA_BUNDLE="{{ include "waddlebot.transitTls.caPath" . }}"
+          ENDPOINT="{{ include "waddlebot.transitTls.s3Endpoint" . }}"
           # "recordings" (svc-streaming egress) and bundleExecutor.bucketName
           # ("waddles-bundles", core/bundle_executor's BUNDLE_BUCKET_NAME) --
           # both consumers expect their bucket to already exist; previously
@@ -129,6 +131,10 @@ spec:
           limits:
             memory: "128Mi"
             cpu: "200m"
+        volumeMounts:
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
+      volumes:
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -150,6 +156,8 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      annotations:
+        checksum/transit-tls: {{ include "waddlebot.transitTls.podChecksum" . | quote }}
       labels:
         app.kubernetes.io/name: seaweedfs
         app.kubernetes.io/instance: {{ .Release.Name }}
@@ -256,6 +264,8 @@ spec:
             -dir=/data \
             -s3 \
             -s3.port={{ .Values.infrastructure.seaweedfs.s3Port }} \
+            -s3.cert.file=/etc/seaweedfs-tls/tls.crt \
+            -s3.key.file=/etc/seaweedfs-tls/tls.key \
             -s3.config=/etc/seaweedfs/s3-identities.json \
             -master.port={{ .Values.infrastructure.seaweedfs.masterPort }} \
             -volume.port=8080 \
@@ -338,6 +348,10 @@ spec:
           mountPath: /etc/seaweedfs
         - name: tmp
           mountPath: /tmp
+        - name: transit-tls
+          mountPath: /etc/seaweedfs-tls
+          readOnly: true
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
         {{- with (include "waddlebot.kms.seaweedfsVolumeMounts" .) }}{{ . | nindent 8 }}{{- end }}
         resources:
           requests:
@@ -366,7 +380,7 @@ spec:
             - /bin/sh
             - -c
             - |
-              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:{{ .Values.infrastructure.seaweedfs.s3Port }}/")
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --cacert /etc/waddles/transit-ca/ca.crt --resolve "{{ include "waddlebot.transitTls.s3Host" . }}:{{ .Values.infrastructure.seaweedfs.s3Port }}:127.0.0.1" "https://{{ include "waddlebot.transitTls.s3Host" . }}:{{ .Values.infrastructure.seaweedfs.s3Port }}/")
               [ "$code" = "200" ] || [ "$code" = "403" ]
           initialDelaySeconds: 30
           periodSeconds: 30
@@ -378,7 +392,7 @@ spec:
             - /bin/sh
             - -c
             - |
-              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:{{ .Values.infrastructure.seaweedfs.s3Port }}/")
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --cacert /etc/waddles/transit-ca/ca.crt --resolve "{{ include "waddlebot.transitTls.s3Host" . }}:{{ .Values.infrastructure.seaweedfs.s3Port }}:127.0.0.1" "https://{{ include "waddlebot.transitTls.s3Host" . }}:{{ .Values.infrastructure.seaweedfs.s3Port }}/")
               [ "$code" = "200" ] || [ "$code" = "403" ]
           initialDelaySeconds: 10
           periodSeconds: 15
@@ -392,6 +406,14 @@ spec:
         emptyDir: {}
       - name: tmp
         emptyDir: {}
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
+      # Server leaf + key from the transit-tls Secret; probes verify against the shared CA volume above (no -k).
+      - name: transit-tls
+        secret:
+          secretName: {{ include "waddlebot.transitTls.s3SecretName" . }}
+          defaultMode: 0440
+          items:
+          {{- include "waddlebot.transitTls.s3Items" . | nindent 10 }}
       {{- with (include "waddlebot.kms.seaweedfsVolumes" .) }}{{ . | nindent 6 }}{{- end }}
 ---
 apiVersion: v1

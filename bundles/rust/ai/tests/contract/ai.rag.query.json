@@ -1,0 +1,44 @@
+{
+  "name": "ai.rag.query",
+  "access": "read",
+  "risk": "normal",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "collection": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,39}$"},
+      "question": {"type": "string", "minLength": 1, "maxLength": 1000},
+      "top_k": {"type": "integer", "minimum": 1, "maximum": 8}
+    },
+    "required": ["collection", "question"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "answer": {"type": "string", "maxLength": 2000},
+      "citations": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "doc_id": {"type": "string"},
+            "chunk": {"type": "integer", "minimum": 0},
+            "score": {"type": "number"}
+          },
+          "required": ["doc_id", "chunk"]
+        }
+      }
+    },
+    "required": ["answer", "citations"]
+  },
+  "examples_valid": [
+    {"collection": "faq", "question": "When do we stream?"},
+    {"collection": "game.notes", "question": "q", "top_k": 3}
+  ],
+  "examples_invalid": [
+    {"question": "q"},
+    {"collection": "Bad Name", "question": "q"},
+    {"collection": "faq", "question": ""},
+    {"collection": "faq", "question": "q", "top_k": 9}
+  ]
+}

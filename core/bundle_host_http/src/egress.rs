@@ -3803,19 +3803,21 @@ mod tests {
         assert!(header.1.starts_with("waddles.a.b.c|discord.com|"));
     }
 
-    // PKCS8-DER-encoded Ed25519 test keypair (fixed, test-only) -- same
+    // PKCS8-DER-encoded ECDSA P-256 test keypair (fixed, test-only) -- same
     // fixture shape `core/egress_assertion`'s own test module uses;
-    // generated once with `openssl genpkey -algorithm ed25519` / `openssl
-    // pkey -pubout`, never used outside this test module.
+    // generated once with `cryptography` (`ec.generate_private_key(SECP256R1)`),
+    // never used outside this test module.
     const TEST_KEY_PRIV_DER: &[u8] = &[
-        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 1, 204, 5, 142, 35, 153, 231, 38,
-        150, 122, 1, 218, 34, 237, 70, 125, 233, 62, 126, 103, 151, 16, 11, 238, 95, 122, 209, 74,
-        183, 9, 171, 161,
+        48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206,
+        61, 3, 1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 209, 234, 92, 37, 28, 130, 216, 139, 48, 1,
+        225, 220, 88, 158, 30, 88, 20, 126, 43, 7, 182, 151, 62, 129, 248, 115, 187, 119, 18, 12,
+        142, 93, 161, 68, 3, 66, 0, 4, 17, 138, 186, 198, 3, 136, 154, 139, 190, 114, 14, 103, 123,
+        44, 247, 26, 31, 171, 203, 86, 236, 40, 175, 97, 236, 72, 32, 22, 179, 142, 109, 144, 173,
+        115, 191, 94, 95, 104, 151, 149, 88, 212, 250, 138, 99, 63, 147, 180, 150, 85, 29, 12, 130,
+        136, 7, 86, 162, 99, 191, 4, 123, 168, 238, 207,
     ];
-    const TEST_KEY_PUB_RAW: &[u8] = &[
-        169, 90, 255, 23, 51, 151, 156, 147, 56, 247, 214, 168, 76, 160, 67, 99, 211, 238, 208, 5,
-        69, 236, 245, 115, 4, 81, 1, 42, 23, 107, 4, 187,
-    ];
+    const TEST_KEY_X: &str = "EYq6xgOImou-cg5neyz3Gh-ry1bsKK9h7EggFrOObZA";
+    const TEST_KEY_Y: &str = "rXO_Xl9ol5VY1PqKYz-TtJZVHQyCiAdWomO_BHuo7s8";
 
     /// The cross-crate contract this landing exists to guarantee:
     /// [`EgressAssertionSigner`] (wired into [`EgressGuard::send`] here,
@@ -3828,13 +3830,13 @@ mod tests {
     #[tokio::test]
     async fn egress_assertion_signer_round_trips_through_the_shared_verifier() {
         let signing_key = Arc::new(
-            AssertionSigningKey::from_ed25519_pem(
-                // `from_ed25519_pem` takes PEM bytes; build one from the
+            AssertionSigningKey::from_ec_pem(
+                // `from_ec_pem` takes PEM bytes; build one from the
                 // fixed DER test key via `jsonwebtoken`'s own encoder
                 // isn't available here, so construct the signer directly
                 // from DER through the crate's private-field test seam
                 // instead -- see the inline helper below.
-                &pem_encode_ed25519_private_key(TEST_KEY_PRIV_DER),
+                &pem_encode_private_key(TEST_KEY_PRIV_DER),
                 "k1",
             )
             .expect("valid Ed25519 PEM"),
@@ -3873,7 +3875,8 @@ mod tests {
             .1
             .clone();
 
-        let decoding_key = jsonwebtoken::DecodingKey::from_ed_der(TEST_KEY_PUB_RAW);
+        let decoding_key = jsonwebtoken::DecodingKey::from_ec_components(TEST_KEY_X, TEST_KEY_Y)
+            .expect("test P-256 key");
         let verified = egress_assertion::verify_with_key(
             &header,
             &decoding_key,
@@ -3903,11 +3906,9 @@ mod tests {
 
     #[tokio::test]
     async fn egress_assertion_signer_rejects_tampered_and_expired_tokens() {
-        let signing_key = AssertionSigningKey::from_ed25519_pem(
-            &pem_encode_ed25519_private_key(TEST_KEY_PRIV_DER),
-            "k1",
-        )
-        .expect("valid Ed25519 PEM");
+        let signing_key =
+            AssertionSigningKey::from_ec_pem(&pem_encode_private_key(TEST_KEY_PRIV_DER), "k1")
+                .expect("valid Ed25519 PEM");
         let assertion = egress_assertion::build_assertion(
             "spiffe://penguintech.io/alpha/svc-process",
             "tenant-a",
@@ -3919,7 +3920,8 @@ mod tests {
             30,
         );
         let token = signing_key.sign(&assertion).expect("signs");
-        let decoding_key = jsonwebtoken::DecodingKey::from_ed_der(TEST_KEY_PUB_RAW);
+        let decoding_key = jsonwebtoken::DecodingKey::from_ec_components(TEST_KEY_X, TEST_KEY_Y)
+            .expect("test P-256 key");
 
         // Tampered: flip the last base64url character of the signature.
         let mut tampered = token.clone();
@@ -3958,13 +3960,13 @@ mod tests {
         assert_ne!(verified.sub, "spiffe://penguintech.io/alpha/svc-action");
     }
 
-    /// Minimal PKCS8 PEM encoder for an Ed25519 private key DER -- avoids a
+    /// Minimal PKCS8 PEM encoder for a P-256 private key DER -- avoids a
     /// second test-only crate dependency just to wrap a fixed 48-byte DER
     /// blob in PKCS8 PEM armor. The armor label is built from parts (not a
     /// literal `"-----BEGIN...-----"` string) purely so this fixed,
     /// publicly-known, test-only DER blob doesn't trip a secrets scanner's
     /// private-key-marker heuristic on a string it merely resembles.
-    fn pem_encode_ed25519_private_key(der: &[u8]) -> Vec<u8> {
+    fn pem_encode_private_key(der: &[u8]) -> Vec<u8> {
         use base64::Engine;
         let dashes = "-".repeat(5);
         let label = "PRIVATE KEY";

@@ -673,15 +673,14 @@ fn hostile_policy() -> PlatformPolicy {
             positions: vec![Position::Path, Position::Query("q"), Position::Body("/b")],
         }],
         kinds: vec![KindPolicy {
-            kind: "chat.send",
-            method: "POST",
-            path: vec![PathSeg::Lit("p"), PathSeg::Slot("X_ID")],
             query: vec!["q"],
             slots: vec!["X_ID"],
-            header_creds: vec![],
             max_body: Some(1024),
-            text_key: "text",
-            needs_duty: false,
+            ..KindPolicy::new(
+                "chat.send",
+                "POST",
+                vec![PathSeg::Lit("p"), PathSeg::Slot("X_ID")],
+            )
         }],
         auth_prefixes: vec![],
         allowed_headers: vec!["content-type"],
@@ -1008,7 +1007,7 @@ async fn unsupported_platform_kind_and_missing_host_duty_fail_loud() {
             .unwrap_err(),
         ExecError::UnsupportedPlatform
     );
-    // youtube has no chat.delete.
+    // youtube has no EventSub (a Twitch-only op): the table has no row for it.
     let y = rig(
         PlatformPolicy::youtube(),
         youtube_send(),
@@ -1016,7 +1015,15 @@ async fn unsupported_platform_kind_and_missing_host_duty_fail_loud() {
         true,
     )
     .await;
-    let d = chat_delete("x", None, "m");
+    let d = OutboundAction::PolicyOp(crate::outbound_ops::PolicyOp {
+        op: "eventsub.list",
+        channel: None,
+        text: None,
+        message_id: None,
+        user_id: None,
+        origin_channel: None,
+        tenant_id: None,
+    });
     assert_eq!(
         y.exec
             .execute(&req("youtube", &d, Some(1)))
@@ -1222,7 +1229,7 @@ fn config_validates_digests_and_reads_them_from_env() {
     assert_eq!(cfg.digests.len(), 1);
     assert_eq!(cfg.digests["discord"], DIGEST);
     assert!(ExecutorConfig::from_env_with(|_| Some("nope".to_string())).is_err());
-    assert_eq!(cfg.policies.len(), 3);
+    assert_eq!(cfg.policies.len(), 4);
     assert!(cfg.policies.iter().all(|p| !p.allow_http));
     assert_eq!(cfg.limits.max_redirects, 0);
     assert!(cfg.allow_ips.is_empty());
