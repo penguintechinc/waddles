@@ -1,0 +1,44 @@
+// BundleScheduleService: internal gRPC contract replacing the former REST hop
+// `GET /api/v1/internal/bundle-schedules` (intra-cluster traffic is gRPC only).
+//
+// svc-ingest's scheduler polls it to learn which (tenant, community, app) scopes it must
+// tick with a `hub`/`bundle.reconcile` event. Ids, display names and the cadence only --
+// no manifest content, no secrets, no PII.
+//
+// Auth: hub-api-issued EdDSA machine JWT in the `authorization` metadata key with scope
+// "bundle-schedules:read" from the operator-plane `system` tenant; additionally only the
+// svc-ingest service identity may call (BUNDLE_SCHEDULES_ALLOWED_SERVICES overrides).
+syntax = "proto3";
+
+package waddles.hub.internal.v1;
+
+option go_package = "github.com/penguintechinc/waddles/gen/go/waddles/hub/internal/v1;hubinternalv1";
+
+service BundleScheduleService {
+  // Lists every active, scheduled bundle scope, optionally narrowed by filters.
+  // Required scope: "bundle-schedules:read".
+  rpc ListBundleSchedules(ListBundleSchedulesRequest) returns (ListBundleSchedulesResponse);
+}
+
+message ListBundleSchedulesRequest {
+  // Numeric ids only (the data plane never keys on slugs). Unset = no filter.
+  optional int64 tenant_id = 1;
+  // 0 = tenant-wide activations. Unset = no filter.
+  optional int64 community_id = 2;
+  optional string app_id = 3;
+}
+
+message BundleScheduleTarget {
+  int64 tenant_id = 1;
+  // 0 = tenant-wide (then community_name is unset).
+  int64 community_id = 2;
+  string tenant_slug = 3;
+  optional string community_name = 4;
+  string app_id = 5;
+  uint64 interval_s = 6;
+  double jitter = 7;
+}
+
+message ListBundleSchedulesResponse {
+  repeated BundleScheduleTarget targets = 1;
+}

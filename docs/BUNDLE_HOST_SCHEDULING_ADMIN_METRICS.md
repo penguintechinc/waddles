@@ -19,8 +19,23 @@ svc-ingest replica B --/   SET NX PX 0.9*interval
 * `core/svc_ingest/src/connector/bundle_schedule.rs`: `ScheduleRunner` (lease + single-flight +
   backoff), `SpineReconcileSink` (schema-v3 envelope via `publish_event_scoped`, source id =
   `app_id_slug(app_id)`), `run_manager` (one loop per target, diffed against the listing),
-  `HubScheduleSource` (`GET /api/v1/internal/bundle-schedules`, machine JWT scope
-  `bundle-schedules:read`).
+  `HubScheduleSource` (gRPC `BundleScheduleService.ListBundleSchedules` on hub-api's internal
+  TLS listener via `hub_client::bundle_schedule`, one long-lived channel, machine JWT scope
+  `bundle-schedules:read`; endpoint `HUB_API_GRPC_ENDPOINT`, CA `HUB_API_GRPC_CA_FILE`).
+* **hub-api side** (`proto/waddles/hub/internal/v1/bundle_schedule.proto`, `hub_api/grpc_internal/bundle_schedule_servicer.py`,
+  `hub_api/services/bundle_schedule_service.py`):
+  `ListBundleSchedules(tenant_id?, community_id?, app_id?)` -> `targets[{tenant_id,
+  community_id, tenant_slug, community_name?, app_id, interval_s, jitter}]` (numeric ids, the data plane
+  never keys on slugs; `community_id` 0 = tenant-wide, `community_name` null). Machine JWT scope
+  `bundle-schedules:read` from the `system` tenant (chart: svc-ingest identity only) plus a caller-name
+  allow-list (`BUNDLE_SCHEDULES_ALLOWED_SERVICES`, default `svc-ingest`). Lists only active, available,
+  globally-installed bundles whose manifest declares `schedule`.
+* **Binding contract**: a manifest with `schedule` must consume `hub` / `bundle.reconcile` with `source_id`
+  absent or `app_id_slug(app_id)` (`schedule_requires_hub_consume` otherwise; Python mirror of the Rust
+  `app_id_slug`). Activation (`app_source_binding_service.sync_bindings`) writes the
+  `(hub, app_id_slug)` `app_source_bindings` row and provisions the consumer group. The listing re-checks
+  manifest + binding per row; a failing candidate is excluded, logged at ERROR and counted on
+  `bundle_schedules_excluded_total{reason}`, never returned.
 * Exactly one replica publishes per interval; a lease-backend error never publishes (fail closed);
   a failed publish extends the lease to `min(interval * 2^fails, 1h)` so no replica retries early.
 * Telemetry: span `bundle_reconcile`, series `svc_ingest_connector_reconcile_{total,seconds}`

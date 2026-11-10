@@ -58,6 +58,7 @@ hub-api's own Deployment env (the only consumer):
 {{- $identities := list -}}
 {{- $actionConnections := $root.Values.pipeline.rustDataPlane.svcAction.dynamicConnections.enabled -}}
 {{- $actionOverlayPush := include "waddlebot.svcActionOverlayPush" $root -}}
+{{- $processGameserver := $root.Values.pipeline.rustDataPlane.svcProcess.gameserverNet.enabled -}}
 {{- range $key, $identity := .Values.serviceJwt.identities }}
 {{- /* svc-ingest's grant is a cross-tenant `system` credential on an
 internet-facing pod: render the WHOLE identity ONLY when pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled (default false). */ -}}
@@ -67,7 +68,8 @@ internet-facing pod: render the WHOLE identity ONLY when pipeline.rustDataPlane.
 {{- /* svc-action keeps its other scopes always, but its `connections:*` scopes (resolve +
 resolve:static) render ONLY when pipeline.rustDataPlane.svcAction.dynamicConnections.enabled. */ -}}
 {{- /* `presentation.overlay:push` (svc-action -> Rust svc-presentation PUSH JWT) renders ONLY while the Rust svc-presentation is the deployed runtime (waddlebot.svcActionOverlayPush). */ -}}
-{{- if and (or (ne $key "svc-action") $actionConnections (not (hasPrefix "connections:" $scope))) (or (ne $scope "presentation.overlay:push") $actionOverlayPush) }}
+{{- /* svc-process's `connections:*:gameserver` scopes render ONLY when pipeline.rustDataPlane.svcProcess.gameserverNet.enabled (default false). */ -}}
+{{- if and (or (ne $key "svc-action") $actionConnections (not (hasPrefix "connections:" $scope))) (or (ne $key "svc-process") $processGameserver (not (hasPrefix "connections:" $scope))) (or (ne $scope "presentation.overlay:push") $actionOverlayPush) }}
 {{- $scopes = append $scopes $scope -}}
 {{- end }}
 {{- end }}

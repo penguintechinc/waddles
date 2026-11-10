@@ -88,6 +88,8 @@ use crate::license::FeatureGate;
 use crate::media::MediaWiring;
 use crate::stage_metrics::{self, StageMetrics};
 
+mod gameserver_net;
+pub use gameserver_net::{GameServerNetWiring, BUNDLE_GAMESERVER_NET_CAPABILITY_FLAG};
 mod tool;
 pub use tool::ToolContext;
 
@@ -561,6 +563,11 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// `None` until [`Self::with_object_storage`] -- every `object_storage.*` call
     /// denies `not_implemented` in that state.
     object_storage: Option<ObjectStorageWiring>,
+    /// `None` until [`Self::with_gameserver_net`] -- every `gameserver_net.*` call denies
+    /// `not_implemented` in that state.
+    gameserver_net: Option<GameServerNetWiring>,
+    /// This invocation's open game-server sessions (closed when the invocation ends).
+    gs_sessions: Arc<gameserver_net::SessionTable>,
     /// `None` until [`Self::with_identity`] -- every `identity.*` call denies
     /// `not_implemented` in that state (never panics, never a default or
     /// guessed identity).
@@ -705,6 +712,8 @@ impl<K: KvBackend> StageCapabilities<K> {
             economy: None,
             platform_table: None,
             object_storage: None,
+            gameserver_net: None,
+            gs_sessions: Arc::new(gameserver_net::SessionTable::default()),
             identity: None,
             ai: None,
             ai_deadline: None,
@@ -3906,6 +3915,9 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             // `platform_table.*` ops (spec 2026-11-06): own gate permissions
             // (`platform.table.<op>:<table>.<column>`), own handler, never the
             // `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("gameserver_net.") => {
+                self.handle_gameserver_net(&call).await
+            }
             CapabilityKind::Db if call.op.starts_with("object_storage.") => {
                 self.handle_object_storage(&call).await
             }

@@ -14,9 +14,21 @@ from services.bundle_manifest_v2 import (
 from tests.test_bundle_manifest_v2 import _VALID_MANIFEST
 
 
+def _with_hub_rule(
+    source_id: str | None = None, events: tuple[str, ...] = ("bundle.reconcile",)
+) -> dict[str, object]:
+    """`_VALID_MANIFEST` whose process stage also consumes `hub` (the host's schedule stream)."""
+    rule: dict[str, object] = {"platform": "hub", "event_types": list(events)}
+    if source_id is not None:
+        rule["source_id"] = source_id
+    process = dict(_VALID_MANIFEST["stages"]["process"])  # type: ignore[index]
+    process["consumes"] = [*process["consumes"], rule]
+    return {**_VALID_MANIFEST, "stages": {"process": process}}
+
+
 def _parse(schedule: object) -> object:
     return parse_bundle_manifest_v2(
-        {**_VALID_MANIFEST, "schedule": schedule},
+        {**_with_hub_rule(), "schedule": schedule},
         known_custom_platforms=frozenset(),
         allow_wildcard_consumes=False,
         allow_prebuilt=True,

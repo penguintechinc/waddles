@@ -1811,6 +1811,12 @@ pipeline:
 
     svcProcess:
       enabled: true
+      # feature/host-gameserver-net -- renders svc-process's least-privilege
+      # `connections:resolve:gameserver` + `connections:list:gameserver` scopes (the `gameserver-net`
+      # host capability resolves admin-registered game servers; hub-api refuses these scopes for any
+      # other provider). Default OFF; also needs the waddles.bundle-gameserver-net flag ON.
+      gameserverNet:
+        enabled: false
       # fix/helm-alpha-self-provisioning -- see svcIngest.imageRepository's comment above.
       imageRepository: "svc-process"
       port: 8201
@@ -3537,6 +3543,14 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "identity:ephemeral:mint"
+        # feature/host-gameserver-net -- the `gameserver-net` host capability resolves an
+        # admin-registered game-server connection (provider `gameserver`) per call:
+        # `connections:list:gameserver` finds the (community, server id) binding,
+        # `connections:resolve:gameserver` returns the sealed host/port/RCON password to the HOST
+        # only (never the guest). Both are refused by hub-api for any provider but `gameserver`,
+        # and render only when pipeline.rustDataPlane.svcProcess.gameserverNet.enabled.
+        - "connections:resolve:gameserver"
+        - "connections:list:gameserver"
         # bundle `identity` host capability (stage-next) -- svc-process resolves
         # a free-text @handle mention through IdentityService.ResolveHandle
         # (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES) with a second,
@@ -3627,6 +3641,11 @@ serviceJwt:
         # user UUID to the raw platform user id through IdentityService.ResolvePlatformUser
         # (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES). Granted to this identity alone.
         - "identity:platform-user:resolve"
+        # feature/bundle-host-scheduling -- scheduled bundle reconcile: svc-ingest polls
+        # BundleScheduleService.ListBundleSchedules over internal gRPC (hub_api/grpc_internal/bundle_schedule_servicer.py) for the
+        # active (tenant, community, app) scopes to tick. Granted to this identity alone; hub-api
+        # additionally allow-lists the caller by name.
+        - "bundle-schedules:read"
   # Every calling pod projects its own ServiceAccount token bound to
   # `bootstrapAudience` -- this is the bootstrap credential, no shared
   # secret distributed to callers. Reusable via the

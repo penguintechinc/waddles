@@ -1032,6 +1032,84 @@ async fn try_build_platform_table_wiring(
     }
 }
 
+/// Resolver telemetry sink: fixed outcome labels only (no ids, hosts or secrets).
+struct GameServerResolverMetrics;
+
+impl connection_resolver::ResolverMetrics for GameServerResolverMetrics {
+    fn resolve(
+        &self,
+        _kind: connection_resolver::ConnectionKind,
+        outcome: &'static str,
+        latency: Duration,
+    ) {
+        tracing::debug!(outcome, ?latency, "gameserver connection resolve");
+    }
+    fn resolve_failed(&self, outcome: &'static str, latency: Duration) {
+        tracing::warn!(outcome, ?latency, "gameserver connection resolve failed");
+    }
+    fn list(&self, outcome: &'static str) {
+        tracing::debug!(outcome, "gameserver binding list");
+    }
+}
+
+/// Builds the `gameserver-net` bundle host capability's production wiring: a hub-api connection
+/// resolver (machine JWT from the projected SA token) behind a
+/// `bundle_host_gameserver_net::HubServerDirectory`, the guarded network capability with default
+/// limits and the tracing audit sink, gated on
+/// `capabilities::BUNDLE_GAMESERVER_NET_CAPABILITY_FLAG` (default OFF).
+///
+/// An unset `SERVICE_JWT_TOKEN_ENDPOINT` is an INFO-level "not provisioned" `None`; a configured
+/// endpoint the resolver refuses (e.g. plaintext hub URL outside alpha) is an ERROR-level `None`.
+/// Either way every `gameserver_net.*` call denies `not_implemented` -- fail-closed.
+fn try_build_gameserver_net_wiring(
+    cli: &config::CliConfig,
+    license_client: &Arc<penguin_licensing::LicenseClient>,
+) -> Option<capabilities::GameServerNetWiring> {
+    if cli.service_jwt_token_endpoint.is_empty() {
+        tracing::info!(
+            "SERVICE_JWT_TOKEN_ENDPOINT not set; gameserver-net capability unavailable \
+             (every gameserver_net host-call will report not_implemented until provisioned)"
+        );
+        return None;
+    }
+    // Least privilege: the gameserver-only scopes (hub-api refuses them for any other provider).
+    let mut resolver_cfg = connection_resolver::ResolverConfig::new(
+        cli.hub_api_url.clone(),
+        cli.deployment_tier.clone(),
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+    );
+    resolver_cfg.resolve_scope =
+        connection_resolver::SCOPE_CONNECTIONS_RESOLVE_GAMESERVER.to_string();
+    resolver_cfg.list_scope = connection_resolver::SCOPE_CONNECTIONS_LIST_GAMESERVER.to_string();
+    let resolver = match connection_resolver::ConnectionResolver::new(
+        resolver_cfg,
+        Arc::new(GameServerResolverMetrics),
+    ) {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "gameserver-net capability: connection resolver refused its configuration -- \
+                 capability unavailable (every gameserver_net host-call will report \
+                 not_implemented); this is a misconfiguration, not an intentional opt-out"
+            );
+            return None;
+        }
+    };
+    let directory = bundle_host_gameserver_net::HubServerDirectory::new(resolver);
+    Some(capabilities::GameServerNetWiring {
+        net: Arc::new(bundle_host_gameserver_net::GameNet::new(
+            Arc::new(directory),
+            Arc::new(bundle_host_gameserver_net::TracingAudit),
+            bundle_host_gameserver_net::GameNetConfig::default(),
+        )),
+        flag: Arc::new(license::BundleGameServerNetCapabilityGate::new(Arc::clone(
+            license_client,
+        ))),
+    })
+}
+
 /// Builds the `economy` bundle host capability's production wiring (issue
 /// #714, `spine::ProcessDeps::economy_wiring`): connects to the shared
 /// `waddles` Postgres as the least-privilege `waddles_economy_runtime` role
@@ -1431,6 +1509,7 @@ fn try_start_process_loop(
             &bundle_db_license_client,
         )
         .await;
+        let gameserver_net_wiring = try_build_gameserver_net_wiring(&cli, &bundle_db_license_client);
         let economy_wiring = try_build_economy_wiring(
             &bundle_economy_cfg,
             bundle_economy_password.as_ref(),
@@ -1582,6 +1661,7 @@ fn try_start_process_loop(
                 reputation_wiring: reputation_wiring.clone(),
                 economy_wiring: economy_wiring.clone(),
                 platform_table_wiring: platform_table_wiring.clone(),
+                gameserver_net_wiring: gameserver_net_wiring.clone(),
                 // The legacy single-bundle path runs at the `(0, 0)` fail-closed
                 // scope (no resolved tenant/community), where every
                 // community-scoped capability -- `identity` included -- refuses
@@ -2102,6 +2182,9 @@ fn try_start_changelog_consumer(
                         }
                         None => None,
                     };
+                    deps.gameserver_net_wiring = bundle_db_license_client
+                        .as_ref()
+                        .and_then(|client| try_build_gameserver_net_wiring(&config.cli, client));
                     deps.economy_wiring = match &bundle_db_license_client {
                         Some(client) => {
                             try_build_economy_wiring(
@@ -2325,6 +2408,7 @@ async fn build_source_supervisor_deps(
         reputation_wiring: None,
         economy_wiring: None,
         platform_table_wiring: None,
+        gameserver_net_wiring: None,
         identity_wiring: None,
         ai_wiring: None,
         media_wiring: None,

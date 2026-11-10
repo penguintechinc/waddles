@@ -48,6 +48,12 @@ logger = logging.getLogger(__name__)
 SCOPE_CONNECTIONS_RESOLVE: Final = "connections:resolve"
 SCOPE_CONNECTIONS_RESOLVE_STATIC: Final = "connections:resolve:static"
 SCOPE_CONNECTIONS_LIST: Final = "connections:list"
+#: Least-privilege variants for the `gameserver-net` host capability: honoured ONLY for provider
+#: `gameserver` (list: any other provider is `PERMISSION_DENIED`; resolve: any other provider is
+#: `NOT_FOUND`, checked before any refresh).
+SCOPE_CONNECTIONS_RESOLVE_GAMESERVER: Final = "connections:resolve:gameserver"
+SCOPE_CONNECTIONS_LIST_GAMESERVER: Final = "connections:list:gameserver"
+GAMESERVER_PROVIDER: Final = "gameserver"
 SCOPE_DISTRIBUTION_READ: Final = "distribution:read"
 SCOPE_MEDIA_BYOK_RESOLVE: Final = "media:byok:resolve"
 SCOPE_MEDIA_TIER_RESOLVE: Final = "media:tier:resolve"
@@ -59,8 +65,12 @@ _MEDIA = "/waddles.hub.internal.v1.MediaService/"
 #: Method -> required scope(s); merged into `servicers.REQUIRED_SCOPES` (an unlisted method fails
 #: closed in `AuthInterceptor`). A tuple means a token holding ANY one scope is accepted.
 DATAPLANE_REQUIRED_SCOPES: Final[dict[str, str | tuple[str, ...]]] = {
-    _PC + "ListBindings": SCOPE_CONNECTIONS_LIST,
-    _PC + "ResolveConnection": (SCOPE_CONNECTIONS_RESOLVE, SCOPE_CONNECTIONS_RESOLVE_STATIC),
+    _PC + "ListBindings": (SCOPE_CONNECTIONS_LIST, SCOPE_CONNECTIONS_LIST_GAMESERVER),
+    _PC + "ResolveConnection": (
+        SCOPE_CONNECTIONS_RESOLVE,
+        SCOPE_CONNECTIONS_RESOLVE_STATIC,
+        SCOPE_CONNECTIONS_RESOLVE_GAMESERVER,
+    ),
     _DIST + "ListBundles": SCOPE_DISTRIBUTION_READ,
     _MEDIA + "ResolveByok": SCOPE_MEDIA_BYOK_RESOLVE,
     _MEDIA + "GetEffectiveTier": SCOPE_MEDIA_TIER_RESOLVE,
@@ -203,9 +213,15 @@ class ProviderConnectionServicer(provider_connection_pb2_grpc.ProviderConnection
         context: _Ctx,
     ) -> provider_connection_pb2.ListBindingsResponse:
         """Usable bindings for one provider across all tenants (operator plane, no tokens)."""
-        await _system_claims(context)
+        claims = await _system_claims(context)
         if not request.provider:
             await _fail(context, grpc.StatusCode.INVALID_ARGUMENT, "provider is required")
+        if (
+            claims.get("scope") != SCOPE_CONNECTIONS_LIST
+            and request.provider != GAMESERVER_PROVIDER
+        ):
+            # A caller holding only the gameserver-scoped list token may enumerate nothing else.
+            await _fail(context, grpc.StatusCode.PERMISSION_DENIED, "forbidden")
         limit = request.limit or DEFAULT_DATAPLANE_PAGE
         if not 1 <= limit <= MAX_PAGE_SIZE or not 0 <= request.after <= 2**62:
             await _fail(context, grpc.StatusCode.INVALID_ARGUMENT, "after/limit out of range")
@@ -277,6 +293,14 @@ class ProviderConnectionServicer(provider_connection_pb2_grpc.ProviderConnection
                 community_id=request.community_id,
                 connection_id=request.connection_id,
                 static_allowed=claims.get("scope") == SCOPE_CONNECTIONS_RESOLVE_STATIC,
+                # Gameserver-only credential: any other provider is a NOT_FOUND, checked BEFORE
+                # any refresh.
+                only_provider=(
+                    None
+                    if claims.get("scope")
+                    in (SCOPE_CONNECTIONS_RESOLVE, SCOPE_CONNECTIONS_RESOLVE_STATIC)
+                    else GAMESERVER_PROVIDER
+                ),
             )
             metadata = service.binding_metadata(
                 resolved.provider, resolved.metadata, connection_id=resolved.connection_id

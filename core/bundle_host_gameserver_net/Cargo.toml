@@ -1,0 +1,41 @@
+[package]
+name = "bundle-host-gameserver-net"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Bundle `gameserver-net` host capability: host-mediated RCON / TCP / UDP access to admin-registered game-server connections. The guest names a connection by UUID only; the host resolves it (tenant+community scoped) to an address and an RCON password, runs the SSRF guard on the RESOLVED IP (resolve once, connect to that IP), performs the RCON login itself so the password never enters the guest, and enforces rate limits, concurrency caps, deadlines and byte budgets with a full audit trail. A same-repo path dependency of core/svc_process, not a penguin-libs crate."
+
+[lib]
+name = "bundle_host_gameserver_net"
+path = "src/lib.rs"
+
+[features]
+# TEST ONLY: lets a hermetic test dial a loopback fixture server. Never enabled by any
+# release build (svc_process enables it solely in [dev-dependencies]); with it off the
+# loopback escape hatch does not exist in the binary at all.
+test-loopback = []
+
+# Exact-version pins only -- rules/critical-rules.md Dependency Pinning. Versions mirror
+# core/bundle_host_http and core/connection_resolver so one graph resolves one version.
+[dependencies]
+tokio = { version = "=1.53.3", features = ["net", "time", "sync", "io-util", "rt"] }
+tracing = "=0.1.44"
+thiserror = "=2.0.20"
+zeroize = "=1.9.0"
+uuid = { version = "=1.26.1", features = ["v4"] }
+opentelemetry = "=0.32.0"
+# The egress guard's address classifier -- the ONE denylist; never re-mirrored here.
+bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
+# Connection resolution (hub-api internal resolve v2); only the generic trait is used.
+connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
+
+[dev-dependencies]
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

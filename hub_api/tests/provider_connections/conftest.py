@@ -191,7 +191,7 @@ def build_pc_metadata() -> MetaData:
         CheckConstraint(
             "resource_type IN ('discord_guild', 'twitch_channel', 'fake_room', "
             "'external_http', 'aws_lambda', 'gcp_function', 'youtube_channel', 'spectrum_community', "
-            "'wix_site', 'soundcloud_app', 'youtube_api_key', 'kick_channel')"
+            "'wix_site', 'soundcloud_app', 'youtube_api_key', 'gameserver', 'kick_channel')"
         ),
         CheckConstraint("connection_kind BETWEEN 1 AND 4"),
         CheckConstraint("sealed_api_credential IS NULL OR connection_kind = 1"),

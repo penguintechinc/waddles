@@ -30,6 +30,8 @@ from typing import Any
 import grpc
 from flask_core.service_jwt import ServiceJwtIssuer
 from waddles.hub.internal.v1 import (
+    active_context_pb2_grpc,
+    bundle_schedule_pb2_grpc,
     dataplane_scope_pb2_grpc,
     distribution_pb2_grpc,
     identity_pb2_grpc,
@@ -39,6 +41,8 @@ from waddles.hub.internal.v1 import (
     service_auth_pb2_grpc,
 )
 
+from grpc_internal.active_context_servicer import ACTIVE_CONTEXT_SCOPES, ActiveContextServicer
+from grpc_internal.bundle_schedule_servicer import BUNDLE_SCHEDULE_SCOPES, BundleScheduleServicer
 from grpc_internal.dataplane_scope_servicer import DATAPLANE_SCOPE_SCOPES, DataplaneScopeServicer
 from grpc_internal.dataplane_servicers import (
     DistributionServicer,
@@ -60,6 +64,8 @@ logger = logging.getLogger(__name__)
 #: area adds a module + one line below instead of editing a shared table.
 ALL_REQUIRED_SCOPES: dict[str, str | tuple[str, ...]] = {
     **REQUIRED_SCOPES,
+    **ACTIVE_CONTEXT_SCOPES,
+    **BUNDLE_SCHEDULE_SCOPES,
     **DATAPLANE_SCOPE_SCOPES,
 }
 
@@ -176,6 +182,12 @@ async def build_internal_grpc_server(
         from blueprints.v1.provider_connections import service_from_config
 
         service_factory = service_from_config
+    active_context_pb2_grpc.add_ActiveContextServiceServicer_to_server(
+        ActiveContextServicer(config.get("install_dal")), server
+    )
+    bundle_schedule_pb2_grpc.add_BundleScheduleServiceServicer_to_server(
+        BundleScheduleServicer(config.get("install_dal")), server
+    )
     provider_connection_pb2_grpc.add_ProviderConnectionServiceServicer_to_server(
         ProviderConnectionServicer(config, service_factory), server
     )

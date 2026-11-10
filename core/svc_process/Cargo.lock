@@ -687,6 +687,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-host-gameserver-net"
+version = "0.1.0"
+dependencies = [
+ "bundle-host-http",
+ "connection_resolver",
+ "opentelemetry",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "bundle-host-http"
 version = "0.1.0"
 dependencies = [
@@ -4269,6 +4283,7 @@ dependencies = [
  "bundle-host-credentials",
  "bundle-host-db",
  "bundle-host-economy",
+ "bundle-host-gameserver-net",
  "bundle-host-http",
  "bundle-host-kv",
  "bundle-host-media",
@@ -4279,6 +4294,7 @@ dependencies = [
  "chrono",
  "circuit-breaker",
  "clap",
+ "connection_resolver",
  "futures-util",
  "governor",
  "hex",

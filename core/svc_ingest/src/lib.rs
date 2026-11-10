@@ -629,7 +629,6 @@ async fn start_bundle_schedules(
 ) -> anyhow::Result<()> {
     use connector::bundle_schedule::{
         run_manager, HubScheduleSource, ScheduleRunner, SpineReconcileSink, ValkeyScheduleLease,
-        SCHEDULES_JWT_SCOPE,
     };
     if std::env::var(BUNDLE_SCHEDULES_ENV).as_deref() != Ok("true") {
         tracing::info!(
@@ -642,8 +641,17 @@ async fn start_bundle_schedules(
     if cli.service_jwt_token_endpoint.is_empty() {
         anyhow::bail!("{BUNDLE_SCHEDULES_ENV} is ON but SERVICE_JWT_TOKEN_ENDPOINT is unset");
     }
-    scope_resolver::check_transport(&cli.hub_api_url, &cli.environment)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let hub_grpc_endpoint = std::env::var("HUB_API_GRPC_ENDPOINT")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("{BUNDLE_SCHEDULES_ENV} is ON but HUB_API_GRPC_ENDPOINT is unset")
+        })?;
+    let hub_grpc_ca = std::env::var("HUB_API_GRPC_CA_FILE")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
     let keyring = resolve_binding_keyring(config, "bundle schedules").ok_or_else(|| {
         anyhow::anyhow!(
             "bundle schedules need a valid ENVELOPE_BINDING_KEYS + ENVELOPE_BINDING_ACTIVE_KID"
@@ -675,12 +683,13 @@ async fn start_bundle_schedules(
         .get_multiplexed_async_connection()
         .await
         .map_err(|e| anyhow::anyhow!("bundle schedules: valkey connect failed ({:?})", e.kind()))?;
-    let jwt = Arc::new(service_auth::MachineJwtClient::new(
-        cli.service_jwt_token_endpoint.clone(),
-        cli.service_jwt_sa_token_path.clone(),
-        SCHEDULES_JWT_SCOPE,
-    ));
-    let source = HubScheduleSource::new(&cli.hub_api_url, jwt)?;
+    let source = HubScheduleSource::connect(
+        &hub_grpc_endpoint,
+        &cli.service_jwt_token_endpoint,
+        &cli.service_jwt_sa_token_path,
+        hub_grpc_ca.as_deref(),
+    )
+    .await?;
     if let Err(e) = connector::reconcile_hook::register_metrics(registry) {
         tracing::warn!(error = %e, "reconcile metrics already registered; reusing");
     }

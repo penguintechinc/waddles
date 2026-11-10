@@ -19,6 +19,8 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use hub_client::bundle_schedule::{BundleScheduleClient, ScheduleFilter};
+use hub_client::pb;
 use penguin_spine::{KeyRing, PlatformEvent, Source, SpineMetrics};
 use tracing::Instrument;
 
@@ -33,8 +35,8 @@ use crate::scope_resolver::ResolvedScope;
 pub const SCHEDULE_PLATFORM: &str = "hub";
 /// Event type delivered to the bundle on every scheduled pass.
 pub const RECONCILE_EVENT_TYPE: &str = "bundle.reconcile";
-/// Machine-JWT scope hub-api requires for `GET /api/v1/internal/bundle-schedules`.
-pub const SCHEDULES_JWT_SCOPE: &str = "bundle-schedules:read";
+/// Machine-JWT scope hub-api requires for `BundleScheduleService.ListBundleSchedules`.
+pub const SCHEDULES_JWT_SCOPE: &str = hub_client::bundle_schedule::SCOPE;
 /// Longest backoff after consecutive failures.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 const KEY_PREFIX: &str = "waddles:ingest:bundle-reconcile:";
@@ -500,96 +502,91 @@ pub async fn run_manager<L, S, T>(
     }
 }
 
-/// hub-api backed [`ScheduleSource`]: `GET /api/v1/internal/bundle-schedules` with a machine JWT,
-/// returning `{"targets":[{tenant_id,community_id,tenant_slug,community_name,app_id,interval_s,jitter}]}`.
-/// A malformed row is dropped and counted in the log, never fatal to the rest.
+/// hub-api backed [`ScheduleSource`]: the `BundleScheduleService.ListBundleSchedules` gRPC call on
+/// hub-api's internal listener (TLS, machine JWT with scope [`SCHEDULES_JWT_SCOPE`]) over one
+/// long-lived channel. A malformed row is dropped and counted in the log, never fatal to the rest.
 pub struct HubScheduleSource {
-    http: reqwest::Client,
-    base_url: String,
-    jwt: Arc<service_auth::MachineJwtClient>,
+    client: BundleScheduleClient,
 }
 
-#[derive(serde::Deserialize)]
-struct TargetsDto {
-    targets: Vec<TargetDto>,
+/// Why [`HubScheduleSource::connect`] refused to start.
+#[derive(Debug, thiserror::Error)]
+pub enum HubScheduleConnectError {
+    /// The endpoint is not `https://` -- hub-api's internal gRPC listener is TLS-only.
+    #[error("HUB_API_GRPC_ENDPOINT must be an https:// URL (hub-api's internal gRPC is TLS-only)")]
+    NotTls,
+    /// Dialing/authenticating the channel failed (CA unreadable, unreachable, untrusted).
+    #[error("hub-api gRPC channel unavailable: {0}")]
+    Client(#[from] hub_client::HubClientError),
 }
 
-#[derive(serde::Deserialize)]
-struct TargetDto {
-    tenant_id: i64,
-    community_id: i32,
-    tenant_slug: String,
-    community_name: Option<String>,
-    app_id: String,
-    interval_s: u64,
-    #[serde(default)]
-    jitter: Option<f64>,
-}
-
-impl TargetDto {
-    fn into_target(self) -> Result<BundleScheduleTarget, &'static str> {
-        let mut spec =
-            ReconcileSpec::new(Duration::from_secs(self.interval_s)).map_err(|_| "interval")?;
-        if let Some(j) = self.jitter {
-            spec = spec.with_jitter(j).map_err(|_| "jitter")?;
-        }
-        let resolved = ResolvedScope {
-            tenant_id: self.tenant_id,
-            community_id: self.community_id,
-            tenant_slug: self.tenant_slug,
-            community_name: self.community_name,
-        };
-        BundleScheduleTarget::new(resolved, &self.app_id, spec).map_err(|e| e.0)
-    }
+/// Converts one wire target into a validated [`BundleScheduleTarget`] (`Err` = which field).
+fn into_target(t: pb::BundleScheduleTarget) -> Result<BundleScheduleTarget, &'static str> {
+    let spec = ReconcileSpec::new(Duration::from_secs(t.interval_s))
+        .map_err(|_| "interval")?
+        .with_jitter(t.jitter)
+        .map_err(|_| "jitter")?;
+    let resolved = ResolvedScope {
+        tenant_id: t.tenant_id,
+        community_id: i32::try_from(t.community_id).map_err(|_| "community")?,
+        tenant_slug: t.tenant_slug,
+        community_name: t.community_name,
+    };
+    BundleScheduleTarget::new(resolved, &t.app_id, spec).map_err(|e| e.0)
 }
 
 impl HubScheduleSource {
-    /// `base_url` is `HUB_API_URL`.
+    /// Dials hub-api's internal gRPC `endpoint` (`HUB_API_GRPC_ENDPOINT`, `https://` only) once;
+    /// the channel then lives as long as the source. `ca_cert_path` pins the CA that signed
+    /// hub-api's certificate (`HUB_API_GRPC_CA_FILE`).
     ///
     /// # Errors
-    /// The HTTP client could not be built.
-    pub fn new(
-        base_url: &str,
-        jwt: Arc<service_auth::MachineJwtClient>,
-    ) -> Result<Self, reqwest::Error> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .connect_timeout(Duration::from_secs(2))
-            .build()?;
-        Ok(Self {
-            http,
-            base_url: base_url.trim_end_matches('/').to_owned(),
-            jwt,
-        })
+    /// [`HubScheduleConnectError`] -- fatal at boot, never a silent fallback.
+    pub async fn connect(
+        endpoint: &str,
+        token_endpoint: &str,
+        sa_token_path: &str,
+        ca_cert_path: Option<&str>,
+    ) -> Result<Self, HubScheduleConnectError> {
+        if !endpoint.trim().to_ascii_lowercase().starts_with("https://") {
+            return Err(HubScheduleConnectError::NotTls);
+        }
+        let client = BundleScheduleClient::connect(
+            endpoint.trim(),
+            token_endpoint,
+            sa_token_path,
+            ca_cert_path,
+        )
+        .await?;
+        Ok(Self { client })
+    }
+
+    /// Wraps an already-built client (loopback servers in tests).
+    #[must_use]
+    pub fn from_client(client: BundleScheduleClient) -> Self {
+        Self { client }
     }
 }
 
 impl ScheduleSource for HubScheduleSource {
     async fn list(&self) -> Result<Vec<BundleScheduleTarget>, SourceError> {
-        let token = self
-            .jwt
-            .get_token()
+        let targets = self
+            .client
+            .list(&ScheduleFilter::default())
             .await
-            .map_err(|_| SourceError("token"))?;
-        let resp = self
-            .http
-            .get(format!(
-                "{}/api/v1/internal/bundle-schedules",
-                self.base_url
-            ))
-            .bearer_auth(&*token)
-            .send()
-            .await
-            .map_err(|_| SourceError("transport"))?;
-        if !resp.status().is_success() {
-            return Err(SourceError("status"));
-        }
-        let dto: TargetsDto = resp.json().await.map_err(|_| SourceError("parse"))?;
-        let total = dto.targets.len();
-        let out: Vec<_> = dto
-            .targets
+            .map_err(|e| {
+                tracing::warn!(error = %e, "bundle schedule listing failed");
+                SourceError(match e {
+                    hub_client::HubClientError::Auth(_) => "token",
+                    hub_client::HubClientError::CircuitOpen => "circuit_open",
+                    hub_client::HubClientError::Grpc(_) => "status",
+                    _ => "transport",
+                })
+            })?;
+        let total = targets.len();
+        let out: Vec<_> = targets
             .into_iter()
-            .filter_map(|t| t.into_target().ok())
+            .filter_map(|t| into_target(t).ok())
             .collect();
         if out.len() != total {
             tracing::warn!(total, valid = out.len(), "dropped malformed schedule rows");
@@ -807,28 +804,121 @@ mod tests {
         assert_eq!(first.await.unwrap(), TickOutcome::Fired);
     }
 
+    fn wire(interval_s: u64, jitter: f64, community_id: i64) -> pb::BundleScheduleTarget {
+        pb::BundleScheduleTarget {
+            tenant_id: 1,
+            community_id,
+            tenant_slug: "t".into(),
+            community_name: Some("c".into()),
+            app_id: "a.b".into(),
+            interval_s,
+            jitter,
+        }
+    }
+
     #[test]
     fn hub_rows_are_validated() {
-        let ok = TargetDto {
-            tenant_id: 1,
-            community_id: 2,
-            tenant_slug: "t".into(),
-            community_name: Some("c".into()),
-            app_id: "a.b".into(),
-            interval_s: 45,
-            jitter: Some(0.1),
+        let ok = into_target(wire(45, 0.1, 2)).unwrap();
+        assert_eq!(ok.resolved.community_id, 2);
+        assert_eq!(into_target(wire(5, 0.1, 2)).unwrap_err(), "interval");
+        assert_eq!(into_target(wire(45, 7.0, 2)).unwrap_err(), "jitter");
+        assert_eq!(
+            into_target(wire(45, 0.1, i64::from(i32::MAX) + 1)).unwrap_err(),
+            "community"
+        );
+    }
+
+    #[tokio::test]
+    async fn plaintext_or_non_url_endpoint_is_refused_before_dialing() {
+        for bad in ["http://hub:50204", "hub:50204", ""] {
+            let err = HubScheduleSource::connect(bad, "t", "s", None).await;
+            assert!(matches!(err, Err(HubScheduleConnectError::NotTls)), "{bad}");
+        }
+    }
+
+    /// Real tonic `BundleScheduleService` on loopback answering with `reply`; returns a
+    /// [`HubScheduleSource`] wired (real machine-JWT bootstrap against an in-process gRPC mint)
+    /// to it.
+    async fn grpc_source(
+        reply: Result<Vec<pb::BundleScheduleTarget>, tonic::Status>,
+    ) -> (HubScheduleSource, String) {
+        use hub_client::pb::bundle_schedule_service_server::{
+            BundleScheduleService, BundleScheduleServiceServer,
         };
-        assert!(ok.into_target().is_ok());
-        let short = TargetDto {
-            tenant_id: 1,
-            community_id: 2,
-            tenant_slug: "t".into(),
-            community_name: Some("c".into()),
-            app_id: "a.b".into(),
-            interval_s: 5,
-            jitter: None,
-        };
-        assert_eq!(short.into_target().unwrap_err(), "interval");
+        struct Fake(Result<Vec<pb::BundleScheduleTarget>, tonic::Status>);
+        #[tonic::async_trait]
+        impl BundleScheduleService for Fake {
+            async fn list_bundle_schedules(
+                &self,
+                request: tonic::Request<pb::ListBundleSchedulesRequest>,
+            ) -> Result<tonic::Response<pb::ListBundleSchedulesResponse>, tonic::Status>
+            {
+                let bearer = request
+                    .metadata()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default();
+                assert_eq!(bearer, "Bearer machine.jwt.value");
+                self.0.clone().map(|targets| {
+                    tonic::Response::new(pb::ListBundleSchedulesResponse { targets })
+                })
+            }
+        }
+        // The machine-JWT mint is gRPC: a real in-process `ServiceAuthService`.
+        let tokens = service_auth::test_support::MockHub::builder()
+            .mint(vec![service_auth::test_support::MintReply::token(
+                "machine.jwt.value",
+                3600,
+            )])
+            .start_detached()
+            .await;
+        let sa = std::env::temp_dir().join(format!("svc-ingest-sched-sa-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&sa, "projected-sa-token").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(BundleScheduleServiceServer::new(Fake(reply)))
+                .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener))
+                .await
+                .unwrap();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let client = BundleScheduleClient::with_channel(
+            channel,
+            Arc::new(service_auth::MachineJwtClient::new(
+                tokens.clone(),
+                sa.to_string_lossy().to_string(),
+                SCHEDULES_JWT_SCOPE,
+            )),
+        );
+        (HubScheduleSource::from_client(client), tokens)
+    }
+
+    #[tokio::test]
+    async fn grpc_source_lists_valid_rows_and_drops_malformed_ones() {
+        let (source, _tokens) = grpc_source(Ok(vec![
+            wire(45, 0.1, 2),
+            wire(5, 0.1, 2), // interval too short -> dropped, not fatal
+        ]))
+        .await;
+        let listed = source.list().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].app_id, "a.b");
+        assert_eq!(listed[0].resolved.tenant_id, 1);
+        assert_eq!(listed[0].resolved.community_id, 2);
+        assert_eq!(listed[0].resolved.community_name.as_deref(), Some("c"));
+    }
+
+    #[tokio::test]
+    async fn grpc_source_surfaces_a_refusal_as_a_source_error() {
+        let (source, _tokens) =
+            grpc_source(Err(tonic::Status::permission_denied("forbidden"))).await;
+        assert_eq!(source.list().await.unwrap_err().0, "status");
     }
 
     #[tokio::test]

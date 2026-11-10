@@ -1,0 +1,68 @@
+// ActiveContextService: internal gRPC contract replacing the former REST hop
+// `GET|PUT /api/v1/internal/dataplane/active-context` (intra-cluster traffic is gRPC only).
+//
+// A Discord guild can be paired to several communities; the invoking user's *active context*
+// picks which one processes a slash command. svc-ingest (no database) asks hub-api, which owns
+// the per-user choice (`user_active_context`, `services.app_command_registry`), and keys the
+// data plane on the NUMERIC community id returned here. `user` is the tokenized user UUID --
+// hub-api never sees a platform user id; communities are addressed by immutable `public_id`
+// UUID, never by name.
+//
+// Auth: hub-api-issued EdDSA machine JWT in the `authorization` metadata key with scope
+// "dataplane:active-context" from the operator-plane `system` tenant (granted to svc-ingest's
+// SPIFFE identity alone).
+syntax = "proto3";
+
+package waddles.hub.internal.v1;
+
+option go_package = "github.com/penguintechinc/waddles/gen/go/waddles/hub/internal/v1;hubinternalv1";
+
+service ActiveContextService {
+  // The user's active community for a source (default = first-registered).
+  // Required scope: "dataplane:active-context".
+  rpc GetActiveContext(GetActiveContextRequest) returns (GetActiveContextResponse);
+
+  // Switches the user's active community (by public_id) within the source's paired set.
+  // Required scope: "dataplane:active-context".
+  rpc SetActiveContext(SetActiveContextRequest) returns (SetActiveContextResponse);
+}
+
+message GetActiveContextRequest {
+  string platform = 1;
+  string source_id = 2;
+  // Tokenized user UUID (canonical form).
+  string user = 3;
+}
+
+message SetActiveContextRequest {
+  string platform = 1;
+  string source_id = 2;
+  string user = 3;
+  // Community public_id UUID -- names never resolve at hub-api.
+  string community = 4;
+}
+
+// One switchable community (position 0 = first-registered default).
+message SwitchableCommunity {
+  string public_id = 1;
+  string display_name = 2;
+  uint32 position = 3;
+}
+
+message GetActiveContextResponse {
+  ActiveContext context = 1;
+}
+
+message SetActiveContextResponse {
+  ActiveContext context = 1;
+}
+
+message ActiveContext {
+  string community_public_id = 1;
+  // Numeric routing key (the data plane keys on numeric ids, never slugs/names).
+  int64 community_id = 2;
+  string community_name = 3;
+  // True when the user chose it (vs the source default).
+  bool explicit = 4;
+  repeated SwitchableCommunity communities = 5;
+}

@@ -920,6 +920,10 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `BUNDLE_PLATFORM_TABLE_PASSWORD` is unset or the connection failed
     /// (every `platform_table.*` call then denies `not_implemented`).
     pub platform_table_wiring: Option<crate::capabilities::PlatformTableWiring>,
+    /// The `gameserver-net` host capability's production wiring (`crate::lib::
+    /// try_build_gameserver_net_wiring`). `None` when the connection-resolver endpoints are
+    /// unconfigured (every `gameserver_net.*` call then denies `not_implemented`).
+    pub gameserver_net_wiring: Option<crate::capabilities::GameServerNetWiring>,
     /// The `identity` host capability's production wiring
     /// (`crate::lib::try_build_identity_wiring`), cloned into every per-invoke
     /// `StageCapabilities` like [`ProcessDeps::economy_wiring`] -- paired there
@@ -1042,6 +1046,10 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
     };
     let caps = match &deps.platform_table_wiring {
         Some(pt) => caps.with_platform_table(pt.clone()),
+        None => caps,
+    };
+    let caps = match &deps.gameserver_net_wiring {
+        Some(gs) => caps.with_gameserver_net(gs.clone()),
         None => caps,
     };
     // `ai`: every model call is clamped to what remains of THIS invoke's
@@ -2553,6 +2561,7 @@ mod tests {
             reputation_wiring: None,
             economy_wiring: None,
             platform_table_wiring: None,
+            gameserver_net_wiring: None,
             identity_wiring: None,
             ai_wiring: None,
             media_wiring: None,
