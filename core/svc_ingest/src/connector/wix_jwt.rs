@@ -171,7 +171,7 @@ const OID_RSA: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
 
 /// Extracts the PKCS#1 `RSAPublicKey` DER from `text`: PEM (`PUBLIC KEY` or
 /// `RSA PUBLIC KEY`), base64 of a PEM, or base64 SPKI/PKCS#1 DER.
-fn public_key_pkcs1(text: &str) -> Result<Vec<u8>, VerifyError> {
+pub(crate) fn public_key_pkcs1(text: &str) -> Result<Vec<u8>, VerifyError> {
     let text = text.trim();
     if text.is_empty() {
         return Err(VerifyError::BadKey);
@@ -230,7 +230,7 @@ fn pem_or_der(text: &str, depth: u8) -> Result<Vec<u8>, VerifyError> {
 
 #[cfg(test)]
 #[path = "../../tests/support/wix_sign.rs"]
-mod wix_sign;
+pub(crate) mod wix_sign;
 
 #[cfg(test)]
 mod tests {

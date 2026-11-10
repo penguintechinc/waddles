@@ -135,6 +135,7 @@ impl ConnectorProfile for WixProfile {
                 platform: PLATFORM,
                 community_id: b.community_id,
                 connection_id: b.connection_id,
+                lane: Default::default(),
             },
             tenant_id: tenant,
             plan: TransportPlan::Webhook(Box::new(WebhookPlan {

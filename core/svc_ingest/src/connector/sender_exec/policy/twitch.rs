@@ -4,7 +4,8 @@
 //! ALWAYS host-resolved slots (the community's connection record), never bundle input.
 
 use super::{
-    resolver_slot, KindPolicy, PathSeg, PlatformPolicy, Position, ResultMode, SlotShape, SlotSyntax,
+    resolver_slot, KindPolicy, PathSeg, PlatformPolicy, Position, ResultMode, SlotDecl, SlotOrigin,
+    SlotShape, SlotSyntax,
 };
 
 /// Slots a user-token (community connection) Helix kind may use.
@@ -20,9 +21,32 @@ const APP_SLOTS: [&str; 5] = [
     "TWITCH_APP_TOKEN",
     "TWITCH_APP_CLIENT_ID",
     "TWITCH_APP_BROADCASTER_ID",
-    "TWITCH_EVENTSUB_CALLBACK",
-    "TWITCH_EVENTSUB_SECRET",
+    SLOT_EVENTSUB_CALLBACK,
+    SLOT_EVENTSUB_SECRET,
 ];
+
+/// Duty slot: the callback URL of an EventSub webhook subscription. The HOST derives it from its
+/// own configured base URL and the work item's opaque `callbackKey`; a bundle-written URL can
+/// never reach `transport.callback` (it would aim Twitch's deliveries at an attacker).
+pub const SLOT_EVENTSUB_CALLBACK: &str = "TWITCH_EVENTSUB_CALLBACK";
+/// Duty slot: the per-subscription webhook secret, fetched by the HOST from hub-api by
+/// `callbackKey` (origin `eventsub_secret`). It never enters guest memory.
+pub const SLOT_EVENTSUB_SECRET: &str = "TWITCH_EVENTSUB_SECRET";
+/// Duty slot: the schedule segment id (`PATCH`/`DELETE /schedule/segment?id=`). Segment ids are
+/// base64 text with `=` padding, which the literal-query grammar cannot carry, so the HOST fills
+/// (and percent-encodes) it from the producer's validated parameters.
+pub const SLOT_SEGMENT_ID: &str = "TWITCH_SEGMENT_ID";
+
+/// A host-duty slot carrying a visible-ASCII value at the given body pointers / query keys.
+fn duty_value_slot(name: &'static str, positions: Vec<Position>) -> SlotDecl {
+    SlotDecl {
+        name,
+        handle: "",
+        origin: SlotOrigin::Duty,
+        shape: SlotShape::Secret,
+        positions,
+    }
+}
 
 /// `/helix/<rest...>` as exact literal path segments.
 fn helix(rest: &[&'static str]) -> Vec<PathSeg> {
@@ -67,7 +91,46 @@ fn eventsub_kind(
         } else {
             vec![]
         },
+        // Every EventSub kind runs only with a claiming `DutyHook`: create fills the callback +
+        // secret from the work item's `callbackKey`; delete is ownership-checked (the
+        // subscription's condition must name THIS community's own broadcaster); list is claimed
+        // by no hook (the app token sees every community's subscriptions) so it fails closed.
+        needs_duty: true,
         ..KindPolicy::new(kind, method, helix(&["eventsub", "subscriptions"]))
+    }
+}
+
+/// A `/helix/schedule/segment` kind (`channel:manage:schedule`). `by_id` kinds address one segment
+/// through the [`SLOT_SEGMENT_ID`] duty slot, so they need a claiming `DutyHook`; delete carries
+/// no body, create/update carry exactly the segment fields.
+fn schedule_kind(
+    kind: &'static str,
+    method: &'static str,
+    query: Vec<&'static str>,
+    by_id: bool,
+) -> KindPolicy {
+    let has_body = kind != "schedule.delete";
+    let mut slots = USER_SLOTS.to_vec();
+    if by_id {
+        slots.push(SLOT_SEGMENT_ID);
+    }
+    KindPolicy {
+        query,
+        slots,
+        max_body: has_body.then_some(4096),
+        body_keys: if has_body {
+            vec!["start_time", "timezone", "duration", "is_recurring", "title"]
+        } else {
+            vec![]
+        },
+        result: if kind == "schedule.create" {
+            ResultMode::Body
+        } else {
+            ResultMode::None
+        },
+        needs_duty: by_id,
+        requires_pin: true,
+        ..KindPolicy::new(kind, method, helix(&["schedule", "segment"]))
     }
 }
 
@@ -131,20 +194,18 @@ impl PlatformPolicy {
                     vec![
                         Position::Body("/condition/broadcaster_user_id"),
                         Position::Body("/condition/moderator_user_id"),
+                        Position::Body("/condition/to_broadcaster_user_id"),
                     ],
                 ),
-                resolver_slot(
-                    "TWITCH_EVENTSUB_CALLBACK",
-                    "app.eventsub_callback",
-                    SlotShape::Secret,
+                duty_value_slot(
+                    SLOT_EVENTSUB_CALLBACK,
                     vec![Position::Body("/transport/callback")],
                 ),
-                resolver_slot(
-                    "TWITCH_EVENTSUB_SECRET",
-                    "app.eventsub_secret",
-                    SlotShape::Secret,
+                duty_value_slot(
+                    SLOT_EVENTSUB_SECRET,
                     vec![Position::Body("/transport/secret")],
                 ),
+                duty_value_slot(SLOT_SEGMENT_ID, vec![Position::Query("id")]),
             ],
             kinds: vec![
                 KindPolicy {
@@ -196,6 +257,33 @@ impl PlatformPolicy {
                     "DELETE",
                     vec!["broadcaster_id", "moderator_id", "user_id"],
                     None,
+                ),
+                // https://dev.twitch.tv/docs/api/reference/#create-clip
+                // (`clips:edit`; the broadcaster is the host binding. The reply body --
+                // `{data:[{id, edit_url}]}` -- is returned to the producer.)
+                KindPolicy {
+                    query: vec!["broadcaster_id"],
+                    slots: USER_SLOTS.to_vec(),
+                    result: ResultMode::Body,
+                    requires_pin: true,
+                    ..KindPolicy::new("clip.create", "POST", helix(&["clips"]))
+                },
+                // https://dev.twitch.tv/docs/api/reference/#create-channel-stream-schedule-segment
+                // (`channel:manage:schedule`)
+                schedule_kind("schedule.create", "POST", vec!["broadcaster_id"], false),
+                // https://dev.twitch.tv/docs/api/reference/#update-channel-stream-schedule-segment
+                schedule_kind(
+                    "schedule.update",
+                    "PATCH",
+                    vec!["broadcaster_id", "id"],
+                    true,
+                ),
+                // https://dev.twitch.tv/docs/api/reference/#delete-channel-stream-schedule-segment
+                schedule_kind(
+                    "schedule.delete",
+                    "DELETE",
+                    vec!["broadcaster_id", "id"],
+                    true,
                 ),
                 // https://dev.twitch.tv/docs/api/reference/#create-eventsub-subscription
                 eventsub_kind(

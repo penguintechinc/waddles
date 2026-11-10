@@ -34,6 +34,7 @@
 pub mod app_credentials;
 pub mod discord_duties;
 pub mod discord_slots;
+pub mod kick_slots;
 pub mod policy;
 pub mod router;
 pub mod subst;
@@ -912,6 +913,8 @@ where
         let prepared =
             subst::render(policy, &verified, &values, &creds).map_err(ExecError::Subst)?;
         drop((values, creds));
+        subst::check_distinct_body_ints(&kind.distinct_body_ints, prepared.body.as_deref())
+            .map_err(ExecError::Subst)?;
         let outcome = self.send(prepared, kind.result).await?;
         if kind.needs_duty {
             self.duties.after_send(&cx, &outcome).await;

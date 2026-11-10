@@ -318,6 +318,7 @@ impl ConnectorProfile for DiscordProfile {
                 platform: PLATFORM,
                 community_id: b.community_id,
                 connection_id: b.connection_id,
+                lane: Default::default(),
             },
             tenant_id: tenant,
             plan: TransportPlan::Ws(Box::new(cfg)),
@@ -423,7 +424,8 @@ mod tests {
             ConnKey {
                 platform: "discord",
                 community_id: 7,
-                connection_id: 11
+                connection_id: 11,
+                lane: Default::default(),
             }
         );
         assert_eq!(d.tenant_id, 1, "the feed's tenant");
