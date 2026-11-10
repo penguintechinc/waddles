@@ -3859,6 +3859,11 @@ components:
         kind:
           title: Kind
           type: integer
+        maxPerCommunity:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Maxpercommunity
         metadataFields:
           items:
             $ref: '#/components/schemas/MetadataFieldDTO'
@@ -3895,6 +3900,7 @@ components:
       - secretSchemes
       - credentialFields
       - metadataFields
+      - maxPerCommunity
       title: ProviderDTO
       type: object
     PublicCommunityDTO:

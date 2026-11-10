@@ -118,6 +118,10 @@ class AdapterSpec:
     #: The data-plane metadata contract (flat string->string). Empty = the provider's facts ride
     #: elsewhere (static kinds: the resolve ``endpoint``), so its binding metadata is ``{}``.
     binding_metadata: tuple[BindingKey, ...] = ()
+    #: Most live (non-revoked) connections of this provider one community may hold; ``None`` =
+    #: unlimited. Enforced by the service (fast, friendly refusal) AND, for a provider whose data
+    #: plane would otherwise be ambiguous (Kick), by a database trigger (the race-proof backstop).
+    max_connections_per_community: int | None = None
     #: For a kind-1 provider that also needs an outbound API credential beside its OAuth/public
     #: token (Wix): the secret scheme of that sealed document. ``None`` = the provider has none.
     api_credential_scheme: SecretScheme | None = None
@@ -130,6 +134,11 @@ class AdapterSpec:
             raise ValueError(f"resource_type {self.resource_type!r} is malformed")
         if not self.platform:
             raise ValueError("platform must be non-empty")
+        if (
+            self.max_connections_per_community is not None
+            and self.max_connections_per_community < 1
+        ):
+            raise ValueError("max_connections_per_community must be at least 1")
         names = [item.name for item in self.credential_fields]
         names += [item.name for item in self.metadata_fields]
         for name in names:

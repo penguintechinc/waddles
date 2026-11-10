@@ -333,6 +333,30 @@ async def community_tenant_id(db: Any, community_id: int) -> int | None:
     return int(value) if value is not None else None
 
 
+async def count_community_connections(db: Any, *, community_id: int, platform: str) -> int:
+    """How many live (non-revoked) ``platform`` connections ``community_id`` holds.
+
+    Backs the per-community cap (:attr:`AdapterSpec.max_connections_per_community`); the database
+    trigger from migration 0082 is the race-proof twin of this read.
+    """
+    t = _tables(db)
+    async with db.engine.connect() as conn:
+        value = (
+            await conn.execute(
+                select(func.count())
+                .select_from(
+                    t.grants.join(t.connections, t.connections.c.id == t.grants.c.connection_id)
+                )
+                .where(
+                    t.grants.c.community_id == community_id,
+                    t.grants.c.status != GRANT_REVOKED,
+                    t.connections.c.platform == platform,
+                )
+            )
+        ).scalar_one()
+    return int(value)
+
+
 async def insert_connection(
     db: Any,
     *,

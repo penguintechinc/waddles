@@ -11,6 +11,7 @@ import httpx
 
 from services.provider_connections.adapter import AdapterRegistry
 from services.provider_connections.discord import DiscordAdapter
+from services.provider_connections.kick import KickAdapter
 from services.provider_connections.music_keys import SoundcloudAdapter, YoutubeApiKeyAdapter
 from services.provider_connections.spectrum import SpectrumAdapter
 from services.provider_connections.static_secret import (
@@ -38,6 +39,7 @@ def build_default_registry(
     registry.register(TwitchAdapter(transport=transport))
     registry.register(DiscordAdapter(transport=transport))
     registry.register(YoutubeAdapter(transport=transport, app_credentials=youtube_app_credentials))
+    registry.register(KickAdapter(transport=transport))
     registry.register(SpectrumAdapter(transport=transport))
     registry.register(WixAdapter())
     registry.register(SoundcloudAdapter())

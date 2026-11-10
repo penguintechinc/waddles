@@ -127,6 +127,8 @@ class ProviderDTO:
     secretSchemes: list[int]
     credentialFields: list[CredentialFieldDTO]
     metadataFields: list[MetadataFieldDTO]
+    #: Most live connections of this provider one community may hold (``null`` = unlimited).
+    maxPerCommunity: int | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -298,6 +300,7 @@ def _provider_dto(spec: AdapterSpec) -> ProviderDTO:
             )
             for item in spec.metadata_fields
         ],
+        maxPerCommunity=spec.max_connections_per_community,
     )
 
 

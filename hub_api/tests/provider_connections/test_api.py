@@ -85,7 +85,9 @@ class TestDescriptors:
             "secretSchemes",
             "credentialFields",
             "metadataFields",
+            "maxPerCommunity",
         }
+        assert twitch["maxPerCommunity"] is None
         assert twitch["provider"] == "twitch" and twitch["installKind"] == "credentials"
         assert twitch["capabilities"] == ["action_relay", "chat_ingest"]
         assert twitch["requiredScopes"] == ["chat:read"]
