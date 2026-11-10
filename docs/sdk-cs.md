@@ -72,6 +72,11 @@ Use `IStateStore` in game code so either store works.
 `transform`. Limitations to document in each bundle: (1) a deadline only resolves when ANOTHER event reaches the bundle, and a bundle only receives events matching its own `consumes` filters (its command prefixes);
 (2) so a join window nobody touches again settles late - use `LateByMillis` to void stale windows; (3) one board <= 64 tasks; (4) exactly-once across racing events on db (CAS), best-effort+claim on kv.
 
+**Timers in practice (`superpenguin-timers`).** Announcement timers are the worked example of the no-scheduler rule: the schedule is one kv
+document and every chat message the bundle receives is a "tick" that announces at most one due group (claimed per group and due time, so
+racing events announce once). A quiet channel announces late, the announcement goes to the channel of the triggering message, and
+online-only / stream-start behavior is absent until a scheduled export and a stream-online signal exist.
+
 ## 5. Build and verify
 
 ```bash
