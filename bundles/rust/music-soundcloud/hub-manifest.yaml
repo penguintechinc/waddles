@@ -9,6 +9,7 @@ schema_version: 2
 app_id: waddles.core.service.music-soundcloud
 name: SoundCloud Music Service Bundle (Rust)
 version: 1.0.0
+author: github:penguintechinc
 feature: waddles.core.service
 module: core
 provider: builtin

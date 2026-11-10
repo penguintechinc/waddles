@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import jwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import (
     BOUND_TOKEN_TTL_SECONDS,
     ServiceIdentity,
@@ -18,7 +18,7 @@ SERVICE_ID = spiffe_id("alpha", "svc-ingest")
 
 
 def _issuer() -> ServiceJwtIssuer:
-    priv = Ed25519PrivateKey.generate()
+    priv = ec.generate_private_key(ec.SECP256R1())
     identity = ServiceIdentity(
         service_id=SERVICE_ID,
         k8s_namespace="waddlebot",
@@ -47,7 +47,7 @@ def test_issue_bound_token_carries_community_claim() -> None:
     assert verified["community"] == 7 and verified["conn"] == 3
     assert claims["community"] == 7
     assert verified["exp"] - verified["iat"] <= BOUND_TOKEN_TTL_SECONDS == 300
-    assert jwt.get_unverified_header(token)["alg"] == "EdDSA"
+    assert jwt.get_unverified_header(token)["alg"] == "ES256"
 
 
 def test_community_zero_sentinel_is_allowed() -> None:
