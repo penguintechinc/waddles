@@ -790,6 +790,7 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
         crate::identity_crypto::UnimplementedMachineJwtProvider,
     >,
     registry: prometheus::Registry,
+    tokenizer: Arc<dyn IdentityTokenizer>,
 ) -> anyhow::Result<Started> {
     let cli = &config.cli;
     let keyring = crate::resolve_binding_keyring(config, "connector runtime").ok_or_else(|| {
@@ -827,6 +828,7 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
             cli,
             crate::interaction_store::InteractionStore::new(lease_conn.clone()),
             &registry,
+            tokenizer,
         )?)
     } else {
         None
@@ -974,7 +976,7 @@ pub async fn start_connector_with<R: ConnectionResolve + 'static>(
     let (bridge, _) = start_bridge_with(
         &tls,
         addr,
-        deps.tokenizer,
+        Arc::clone(&deps.tokenizer),
         &settings.platforms,
         crate::shutdown_receiver,
     )
@@ -991,6 +993,7 @@ pub async fn start_connector_with<R: ConnectionResolve + 'static>(
         metrics,
         dek,
         registry,
+        deps.tokenizer,
     )
     .await
 }
@@ -1469,6 +1472,18 @@ mod tests {
         }
     }
 
+    struct NoTokenizer;
+
+    impl IdentityTokenizer for NoTokenizer {
+        fn tokenize<'a>(
+            &'a self,
+            _scope: &'a CallScope,
+            _platform_user_id: &'a str,
+        ) -> BoxFut<'a, Result<String, crate::connector::host_calls::TokenizeError>> {
+            Box::pin(async { Err(crate::connector::host_calls::TokenizeError::Unavailable) })
+        }
+    }
+
     async fn test_routing() -> InteractionRouting {
         let store = crate::interaction_store::InteractionStore::new(lease_conn().await);
         InteractionRouting {
@@ -1488,6 +1503,7 @@ mod tests {
             store,
             metrics: crate::active_context::register_routing_metrics(&prometheus::Registry::new())
                 .unwrap(),
+            tokenizer: Arc::new(NoTokenizer),
         }
     }
 
@@ -1519,14 +1535,21 @@ mod tests {
         cli.service_jwt_token_endpoint = String::new();
         let store = crate::interaction_store::InteractionStore::new(lease_conn().await);
         let registry = prometheus::Registry::new();
-        let e = InteractionRouting::from_config(&cli, store.clone(), &registry)
-            .err()
-            .expect("must fail");
+        let e =
+            InteractionRouting::from_config(&cli, store.clone(), &registry, Arc::new(NoTokenizer))
+                .err()
+                .expect("must fail");
         assert!(e.to_string().contains("SERVICE_JWT_TOKEN_ENDPOINT"));
         cli.service_jwt_token_endpoint = "http://sa/token".into();
-        assert!(InteractionRouting::from_config(&cli, store.clone(), &registry).is_ok());
+        assert!(InteractionRouting::from_config(
+            &cli,
+            store.clone(),
+            &registry,
+            Arc::new(NoTokenizer)
+        )
+        .is_ok());
         assert!(
-            InteractionRouting::from_config(&cli, store, &registry).is_err(),
+            InteractionRouting::from_config(&cli, store, &registry, Arc::new(NoTokenizer)).is_err(),
             "duplicate metric registration is a boot error"
         );
     }

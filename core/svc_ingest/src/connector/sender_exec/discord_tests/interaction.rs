@@ -666,6 +666,19 @@ fn routing_for(
             format!("{}/api/v10", r.server.uri()),
         )),
         metrics: register_routing_metrics(&prometheus::Registry::new()).unwrap(),
+        tokenizer: Arc::new(FixedIdentityTok),
+    }
+}
+
+/// Host identity-tokenizer double behind the routing factory: every raw id maps to one actor.
+struct FixedIdentityTok;
+impl crate::connector::host_calls::IdentityTokenizer for FixedIdentityTok {
+    fn tokenize<'a>(
+        &'a self,
+        _scope: &'a crate::connector::host_calls::CallScope,
+        _platform_user_id: &'a str,
+    ) -> BoxFut<'a, Result<String, crate::connector::host_calls::TokenizeError>> {
+        Box::pin(async { Ok("123e4567-e89b-12d3-a456-426614174000".to_string()) })
     }
 }
 
@@ -736,7 +749,7 @@ async fn ingest_to_routing_to_followup_is_answered_end_to_end() {
     let frame = |id: &str| {
         serde_json::to_vec(&json!({"op":0,"t":"INTERACTION_CREATE","d":{
             "id": id, "application_id": APP_ID, "type": 2, "token": IX_TOKEN,
-            "guild_id": GUILD,
+            "guild_id": GUILD, "member": {"user": {"id": "80351110224678912"}},
             "data": {"name": "ping", "type": 1}}}))
         .unwrap()
     };

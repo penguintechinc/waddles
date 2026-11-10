@@ -18,11 +18,12 @@ use connection_resolver::{ConnectionRef, ConnectionResolve};
 use super::feed::DesiredConnection;
 use super::supervisor::{SinkBuildError, SinkFactory};
 use crate::active_context::{
-    register_routing_metrics, ContextSink, ContextSource, HubContextSource, InteractionReplier,
-    RoutingMetrics, ACTIVE_CONTEXT_JWT_SCOPE,
+    register_routing_metrics, ContextError, ContextSink, ContextSource, HubContextSource,
+    InteractionReplier, InvokerTokenizer, RoutingMetrics, ACTIVE_CONTEXT_JWT_SCOPE,
 };
 use crate::commands_reconcile::BoxFut;
 use crate::config::CliConfig;
+use crate::connector::host_calls::{CallScope, IdentityTokenizer};
 use crate::connector::sink::{EventSink, SinkError};
 use crate::connector::types::{ConnectionCtx, ConnectorEvent};
 use crate::discord_rest::is_snowflake;
@@ -46,6 +47,31 @@ pub struct InteractionRouting {
     pub replier: Arc<InteractionReplier>,
     /// Registered routing instruments.
     pub metrics: RoutingMetrics,
+    /// The hub-api identity tokenizer (the same one behind the host-call allowlist); each
+    /// connection's sink binds it to its own tenant/community/connection scope.
+    pub tokenizer: Arc<dyn IdentityTokenizer>,
+}
+
+/// [`InvokerTokenizer`] bound to ONE connection's host-derived scope: the invoker's raw
+/// Discord id is minted under that connection's tenant, never one the guest names.
+struct ConnectionTokenizer {
+    inner: Arc<dyn IdentityTokenizer>,
+    scope: CallScope,
+}
+
+impl InvokerTokenizer for ConnectionTokenizer {
+    fn tokenize<'a>(
+        &'a self,
+        _source_id: &'a str,
+        raw_user_id: &'a str,
+    ) -> BoxFut<'a, Result<String, ContextError>> {
+        Box::pin(async move {
+            self.inner
+                .tokenize(&self.scope, raw_user_id)
+                .await
+                .map_err(|_| ContextError::Unavailable)
+        })
+    }
 }
 
 impl InteractionRouting {
@@ -59,6 +85,7 @@ impl InteractionRouting {
         cli: &CliConfig,
         store: InteractionStore,
         registry: &prometheus::Registry,
+        tokenizer: Arc<dyn IdentityTokenizer>,
     ) -> anyhow::Result<Self> {
         if cli.service_jwt_token_endpoint.is_empty() {
             anyhow::bail!(
@@ -95,6 +122,7 @@ impl InteractionRouting {
             store,
             replier,
             metrics,
+            tokenizer,
         })
     }
 }
@@ -190,6 +218,15 @@ where
                 routing.store.clone(),
                 application_id,
                 routing.metrics.clone(),
+                Arc::new(ConnectionTokenizer {
+                    inner: Arc::clone(&routing.tokenizer),
+                    scope: CallScope {
+                        platform: "discord",
+                        community_id: desired.key.community_id,
+                        tenant_id,
+                        connection_id: desired.key.connection_id,
+                    },
+                }),
             )))
         })
     }
