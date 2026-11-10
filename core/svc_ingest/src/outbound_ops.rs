@@ -1658,7 +1658,7 @@ mod tests {
         for (op, queue) in [
             ("mod.kick", "twitch"),
             ("eventsub.create", "youtube"),
-            ("mod.ban", "kick"),
+            ("mod.kick", "kick"),
             ("mod.nuke", "discord"),
             ("MOD.BAN", "twitch"),
         ] {
