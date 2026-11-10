@@ -62,6 +62,8 @@
 //! Per spec S4.1, this service has **no database** -- no `sea-orm`
 //! dependency, unlike `svc_process`/`svc_action`.
 
+pub mod active_context;
+pub mod commands_reconcile;
 pub mod config;
 pub mod connector;
 pub mod connector_runtime;
@@ -71,6 +73,8 @@ pub mod error;
 pub mod http;
 pub mod identity_crypto;
 pub mod ingest;
+pub mod interaction_store;
+pub mod interaction_tap;
 pub mod license;
 pub mod normalize;
 pub mod outbound;
@@ -1043,12 +1047,7 @@ fn try_start_twitch_outbound_percommunity(config: &config::Config) -> anyhow::Re
     let spine_cfg = penguin_spine::SpineConfig::from_env()
         .map_err(|e| anyhow::anyhow!("spine config unavailable for twitch outbound: {e}"))?;
     let resolver = connection_resolver::ConnectionResolver::new(
-        connection_resolver::ResolverConfig::new(
-            cli.hub_api_url.clone(),
-            cli.environment.clone(),
-            cli.service_jwt_token_endpoint.clone(),
-            cli.service_jwt_sa_token_path.clone(),
-        ),
+        cli.resolver_config()?,
         std::sync::Arc::new(twitch_sessions::boot::ResolverTelemetry),
     )
     .map_err(|e| anyhow::anyhow!("connection resolver unavailable: {e}"))?;

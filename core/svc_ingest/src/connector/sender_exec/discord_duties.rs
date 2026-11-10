@@ -11,6 +11,8 @@
 //! | `{dm.channel_id}` | the host runs `POST /users/@me/channels` for THIS operation's recipient through the guarded client and fills the slot only from that reply; no state survives the call, so another dm.send's channel can never be reused. There is no `dm.post` kind |
 //! | managed roles | the connector emits a KEY; the host maps it through the binding's allowlist to a snowflake, REFUSES any role whose permissions include `ADMINISTRATOR`, `MANAGE_ROLES` or `MANAGE_GUILD` (guild role list fetched through the guarded client, short-TTL bounded cache keyed by numeric guild id, fail closed), and pins the guild from the binding (`{target.guild_id}`); a guild/role in the payload is not expressible |
 //! | `event.*` (guild scheduled events) | the guild is pinned from the community's binding (`{target.guild_id}`); the entry's MAC-covered `expect_guild` (wire `origin_channel`) is only an ASSERTION compared to it -- a mismatch is refused (`guild_mismatch`) before anything is built. A guild/channel in the event JSON is not expressible (the connector refuses it). The reply's new event id is returned to the producer |
+//! | `interaction.callback` / `interaction.followup` | the interaction id/application id/token come ONLY from the host-held [`InteractionStore`] (captured from the verified interaction); the producer names an opaque handle (the id). The stored record's guild must equal the community binding's guild (`interaction_not_owned`), an unknown/expired handle is refused (`interaction_expired`), a store fault is `interaction_store_unavailable`; no store configured is `interaction_store_unconfigured`. The token is never in a payload, log or metric |
+//! | `commands.register.guild` | NOT bundle-callable (reconciler only). The submitted set must be EXACTLY hub-api's desired state for the binding's guild ([`crate::commands_reconcile::verify_submitted`], fetched fresh without `if_version`); any other payload is `commands_mismatch`. No lookup configured is `registry_unconfigured` |
 //! | `Authorization` | the executor's [`super::discord_slots::DiscordSlots`] (per community, per call) |
 //!
 //! **Template normalization** ([`DutyHook::bind_template`]): the connector
@@ -27,7 +29,7 @@
 //! handle or message text.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use bundle_host_http::guarded::GuardedClient;
@@ -37,7 +39,9 @@ use super::discord_slots::{Rest, API_BASE};
 use super::role_guild_scope;
 use super::subst::SlotValue;
 use super::{DutyCx, DutyHook, ExecError, RequestTpl, RoleBulkPlan, SlotError};
+use crate::commands_reconcile::{verify_submitted, DesiredLookup, RegistryError};
 use crate::discord_rest::{classify_membership, is_snowflake, Membership};
+use crate::interaction_store::{InteractionRecord, InteractionStore, StoreError};
 use crate::outbound_creds::CredError;
 use crate::outbound_creds_discord::{is_role_key, DiscordBinding, DiscordCredentialSource};
 use crate::outbound_ops::{EventKind, OutboundAction, RoleBulkKind};
@@ -151,6 +155,9 @@ fn deny(kind: &str, e: ExecError) -> ExecError {
         "event.update" => "event.update",
         "event.cancel" => "event.cancel",
         "event.delete" => "event.delete",
+        "interaction.callback" => "interaction.callback",
+        "interaction.followup" => "interaction.followup",
+        "commands.register.guild" => "commands.register.guild",
         _ => "other",
     };
     DUTY_REFUSED.with_label_values(&[kind, reason]).inc();
@@ -233,6 +240,8 @@ pub struct DiscordDuties<C: DiscordCredentialSource, U: PlatformUserResolver> {
     api_base: String,
     ttl: Duration,
     roles: Mutex<HashMap<u64, RoleSet>>,
+    interactions: Option<InteractionStore>,
+    desired: Option<Arc<dyn DesiredLookup>>,
 }
 
 impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
@@ -251,7 +260,89 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
             api_base,
             ttl,
             roles: Mutex::new(HashMap::new()),
+            interactions: None,
+            desired: None,
         }
+    }
+
+    /// Installs the host-held interaction token store (enables `interaction.*`).
+    #[must_use]
+    pub fn with_interactions(mut self, store: InteractionStore) -> Self {
+        self.interactions = Some(store);
+        self
+    }
+
+    /// Installs the desired-state lookup (enables `commands.register.guild`).
+    #[must_use]
+    pub fn with_desired_commands(mut self, lookup: Arc<dyn DesiredLookup>) -> Self {
+        self.desired = Some(lookup);
+        self
+    }
+
+    /// The interaction record of a generic op's handle, proven to belong to the
+    /// community's guild. Fail closed on every other outcome.
+    async fn owned_interaction(
+        &self,
+        cx: &DutyCx<'_>,
+    ) -> Result<(String, InteractionRecord), ExecError> {
+        let OutboundAction::PolicyOp(p) = cx.action else {
+            return Err(ExecError::BadAction);
+        };
+        let store = self
+            .interactions
+            .as_ref()
+            .ok_or_else(|| refused("interaction_store_unconfigured"))?;
+        let handle = p
+            .message_id
+            .as_deref()
+            .filter(|h| is_snowflake(h))
+            .ok_or_else(|| refused("interaction_handle_invalid"))?;
+        let (community, binding) = self.binding(cx).await?;
+        let rec = store
+            .get(handle)
+            .await
+            .map_err(|e| match e {
+                StoreError::Unavailable => refused("interaction_store_unavailable"),
+                StoreError::Corrupt => refused("interaction_record_corrupt"),
+            })?
+            .ok_or_else(|| refused("interaction_expired"))?;
+        // A DM interaction (no guild) can never be answered through a guild binding.
+        if rec.guild_id.as_deref() != Some(binding.guild_id.as_str()) {
+            return Err(refused("interaction_not_owned"));
+        }
+        // A guild can be paired to several communities and applications: the interaction must
+        // be for THIS binding's application and have been routed to THIS community. A record
+        // not yet routed (or routed elsewhere) can be answered by no one.
+        if binding.application_id.as_deref() != Some(rec.application_id.as_str())
+            || rec.routed_community_id != Some(community)
+        {
+            return Err(refused("interaction_not_owned"));
+        }
+        Ok((handle.to_string(), rec))
+    }
+
+    /// `commands.register.guild` gate: the submitted text is exactly the guild's desired set.
+    async fn commands_gate(&self, cx: &DutyCx<'_>) -> Result<(), ExecError> {
+        let OutboundAction::PolicyOp(p) = cx.action else {
+            return Err(ExecError::BadAction);
+        };
+        let lookup = self
+            .desired
+            .as_ref()
+            .ok_or_else(|| refused("registry_unconfigured"))?;
+        let (_, binding) = self.binding(cx).await?;
+        let text = p
+            .text
+            .as_deref()
+            .ok_or_else(|| refused("commands_mismatch"))?;
+        let desired = lookup
+            .desired(&binding.guild_id, None)
+            .await
+            .map_err(|e| match e {
+                RegistryError::Unavailable => refused("registry_unavailable"),
+                _ => refused("registry_malformed"),
+            })?;
+        verify_submitted(text, &desired).map_err(|_| refused("commands_mismatch"))
     }
 
     fn community(cx: &DutyCx<'_>) -> Result<i64, ExecError> {
@@ -660,6 +751,9 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DutyHook for DiscordDu
                     | "event.delete"
                     | "role.set"
                     | "role.list"
+                    | "interaction.callback"
+                    | "interaction.followup"
+                    | "commands.register.guild"
             )
     }
 
@@ -674,6 +768,12 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DutyHook for DiscordDu
             OutboundAction::DmSend { .. } => self.dm_gate(cx).await,
             OutboundAction::RoleOp { .. } => self.role_gate(cx).await,
             OutboundAction::EventOp { .. } => self.event_gate(cx).await,
+            OutboundAction::PolicyOp(_) if kind == "commands.register.guild" => {
+                self.commands_gate(cx).await
+            }
+            OutboundAction::PolicyOp(_) if kind.starts_with("interaction.") => {
+                self.owned_interaction(cx).await.map(|_| ())
+            }
             _ => Err(ExecError::BadAction),
         };
         res.map_err(|e| deny(kind, e))
@@ -681,8 +781,11 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DutyHook for DiscordDu
 
     async fn bind_template(&self, cx: &DutyCx<'_>, tpl: &mut RequestTpl) -> Result<(), ExecError> {
         let kind = cx.action.op();
-        // Event requests carry no user and no placeholders to normalize.
-        if matches!(cx.action, OutboundAction::EventOp { .. }) {
+        // Event and generic-op requests carry no user and no placeholders to normalize.
+        if matches!(
+            cx.action,
+            OutboundAction::EventOp { .. } | OutboundAction::PolicyOp(_)
+        ) {
             return Ok(());
         }
         let uuid = user_uuid(cx.action).map_err(|e| deny(kind, e))?;
@@ -727,6 +830,18 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DutyHook for DiscordDu
             return event_payload(*ek, event_id.as_deref(), event_json.as_deref())
                 .map_err(|e| deny(kind, e));
         }
+        if let OutboundAction::PolicyOp(p) = cx.action {
+            // The connector gets ONLY the text / handle under fixed keys.
+            let v = if kind == "commands.register.guild" {
+                let text = p.text.as_deref().ok_or(ExecError::BadAction)?;
+                let list: serde_json::Value =
+                    serde_json::from_str(text).map_err(|_| ExecError::BadAction)?;
+                json!({ "commands": list })
+            } else {
+                json!({ "content": p.text, "message_id": p.message_id })
+            };
+            return serde_json::to_string(&v).map_err(|_| ExecError::BadAction);
+        }
         let uuid = user_uuid(cx.action).map_err(|e| deny(kind, e))?;
         let v = match cx.action {
             OutboundAction::DmSend { text, .. } => {
@@ -757,6 +872,16 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DutyHook for DiscordDu
                 Ok((community, _)) => self.raw_user(community, cx.action).await,
                 Err(e) => Err(e),
             },
+            "interaction.id" | "interaction.application_id" | "interaction.token" => {
+                match self.owned_interaction(cx).await {
+                    Ok((id, rec)) => Ok(SlotValue::new(match slot {
+                        "interaction.id" => id,
+                        "interaction.application_id" => rec.application_id,
+                        _ => rec.token,
+                    })),
+                    Err(e) => Err(e),
+                }
+            }
             "target.role" => match self.binding(cx).await {
                 Ok((_, b)) => {
                     let rest = Rest {
