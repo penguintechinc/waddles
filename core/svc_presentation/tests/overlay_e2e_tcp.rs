@@ -110,7 +110,7 @@ async fn start() -> Harness {
         .append_query_results([vec![credential(2, 43, &key_43)]]) // viewer 43
         .into_connection();
     let mut state = AppState::new(
-        config_with(&["--push-jwks-url", &jwks_url]),
+        config_with(&["--push-jwks-endpoint", &jwks_url]),
         prometheus::Registry::new(),
         db,
     );

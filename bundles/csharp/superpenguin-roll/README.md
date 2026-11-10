@@ -149,3 +149,11 @@ Third-party-attributed (`provider: thirdparty`, `waddles.integrations.*`), so `h
 exactly `process-stage` + `action-stage` exports and rejects the `streaming-lifecycle` export every `stage-next*` world carries
 (`stage_export_mismatch`). Until S0 relaxes the validator (see `docs/sdk-cs.md` "Needs from S0") the 1.1.0 component is
 built and executor-verified (`make test-superpenguin-roll-e2e`) but not installable through the vendor pipeline.
+
+## App/service boundary (2026-11-07)
+
+This port remains C#. Game rules, wagering, and maximum-bet handling belong
+to the app; atomic ledger settlement uses the app's granted host primitive.
+The shared economy service is unchanged. Shared balance/credit/debit operations,
+where used, invoke its existing tools via the C# SDK; no private ledger is created.
+See `docs/superpenguin-port-inventory.md` for the port decisions and remaining work.

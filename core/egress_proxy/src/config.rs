@@ -21,7 +21,7 @@ pub struct Config {
     pub allowed_ports: Vec<u16>,
     pub deny_cidrs: Vec<IpNet>,
     pub deny_cluster_cidrs: Vec<IpNet>,
-    pub machine_jwt_jwks_url: String,
+    pub machine_jwt_jwks_endpoint: String,
     pub machine_jwt_audience: String,
     pub machine_jwt_trusted_issuers: Vec<String>,
     pub machine_jwt_required_scope: String,
@@ -143,8 +143,8 @@ impl Config {
         let deny_cidrs = parse_cidrs(&env_or("DENY_CIDRS", ""), "DENY_CIDRS")?;
         let deny_cluster_cidrs =
             parse_cidrs(&env_or("DENY_CLUSTER_CIDRS", ""), "DENY_CLUSTER_CIDRS")?;
-        let machine_jwt_jwks_url = std::env::var("MACHINE_JWT_JWKS_URL")
-            .map_err(|_| ConfigError::Missing("MACHINE_JWT_JWKS_URL"))?;
+        let machine_jwt_jwks_endpoint = std::env::var("MACHINE_JWT_JWKS_ENDPOINT")
+            .map_err(|_| ConfigError::Missing("MACHINE_JWT_JWKS_ENDPOINT"))?;
         let machine_jwt_audience = std::env::var("MACHINE_JWT_AUDIENCE")
             .map_err(|_| ConfigError::Missing("MACHINE_JWT_AUDIENCE"))?;
         let machine_jwt_trusted_issuers = parse_list(&env_or(
@@ -197,7 +197,7 @@ impl Config {
             allowed_ports,
             deny_cidrs,
             deny_cluster_cidrs,
-            machine_jwt_jwks_url,
+            machine_jwt_jwks_endpoint,
             machine_jwt_audience,
             machine_jwt_trusted_issuers,
             machine_jwt_required_scope,
@@ -284,8 +284,8 @@ mod tests {
     #[test]
     fn config_error_display_messages() {
         assert_eq!(
-            ConfigError::Missing("MACHINE_JWT_JWKS_URL").to_string(),
-            "missing required env var MACHINE_JWT_JWKS_URL"
+            ConfigError::Missing("MACHINE_JWT_JWKS_ENDPOINT").to_string(),
+            "missing required env var MACHINE_JWT_JWKS_ENDPOINT"
         );
         assert_eq!(
             ConfigError::Invalid("PROXY_LISTEN_PORT", "abc".into()).to_string(),
@@ -304,7 +304,7 @@ mod tests {
         "ALLOWED_PORTS",
         "DENY_CIDRS",
         "DENY_CLUSTER_CIDRS",
-        "MACHINE_JWT_JWKS_URL",
+        "MACHINE_JWT_JWKS_ENDPOINT",
         "MACHINE_JWT_AUDIENCE",
         "MACHINE_JWT_TRUSTED_ISSUERS",
         "MACHINE_JWT_REQUIRED_SCOPE",
@@ -332,7 +332,7 @@ mod tests {
         clear_env();
         // SAFETY: serialized by ENV_LOCK.
         unsafe {
-            std::env::set_var("MACHINE_JWT_JWKS_URL", "https://hub-api.example/jwks.json");
+            std::env::set_var("MACHINE_JWT_JWKS_ENDPOINT", "https://hub-api.example:50204");
             std::env::set_var("MACHINE_JWT_AUDIENCE", "egress-proxy");
         }
 
@@ -374,7 +374,7 @@ mod tests {
             std::env::set_var("ALLOWED_PORTS", "22");
             std::env::set_var("DENY_CIDRS", "10.0.0.0/8");
             std::env::set_var("DENY_CLUSTER_CIDRS", "10.244.0.0/16");
-            std::env::set_var("MACHINE_JWT_JWKS_URL", "https://hub-api.example/jwks.json");
+            std::env::set_var("MACHINE_JWT_JWKS_ENDPOINT", "https://hub-api.example:50204");
             std::env::set_var("MACHINE_JWT_AUDIENCE", "egress-proxy");
             std::env::set_var("MACHINE_JWT_TRUSTED_ISSUERS", "hub-api,hub-api-2");
             std::env::set_var("MACHINE_JWT_REQUIRED_SCOPE", "egress:custom");
@@ -421,7 +421,10 @@ mod tests {
         unsafe { std::env::set_var("MACHINE_JWT_AUDIENCE", "egress-proxy") };
 
         let err = Config::from_env().unwrap_err();
-        assert!(matches!(err, ConfigError::Missing("MACHINE_JWT_JWKS_URL")));
+        assert!(matches!(
+            err,
+            ConfigError::Missing("MACHINE_JWT_JWKS_ENDPOINT")
+        ));
 
         clear_env();
     }
@@ -431,7 +434,7 @@ mod tests {
         let _guard = crate::ENV_LOCK.blocking_lock();
         clear_env();
         // SAFETY: serialized by ENV_LOCK.
-        unsafe { std::env::set_var("MACHINE_JWT_JWKS_URL", "https://hub-api.example/jwks.json") };
+        unsafe { std::env::set_var("MACHINE_JWT_JWKS_ENDPOINT", "https://hub-api.example:50204") };
 
         let err = Config::from_env().unwrap_err();
         assert!(matches!(err, ConfigError::Missing("MACHINE_JWT_AUDIENCE")));
@@ -446,7 +449,7 @@ mod tests {
         // SAFETY: serialized by ENV_LOCK.
         unsafe {
             std::env::set_var("PROXY_LISTEN_PORT", "not-a-port");
-            std::env::set_var("MACHINE_JWT_JWKS_URL", "https://hub-api.example/jwks.json");
+            std::env::set_var("MACHINE_JWT_JWKS_ENDPOINT", "https://hub-api.example:50204");
             std::env::set_var("MACHINE_JWT_AUDIENCE", "egress-proxy");
         }
 
@@ -462,7 +465,7 @@ mod tests {
         clear_env();
         // SAFETY: serialized by ENV_LOCK.
         unsafe {
-            std::env::set_var("MACHINE_JWT_JWKS_URL", "https://hub-api.example/jwks.json");
+            std::env::set_var("MACHINE_JWT_JWKS_ENDPOINT", "https://hub-api.example:50204");
             std::env::set_var("MACHINE_JWT_AUDIENCE", "egress-proxy");
             std::env::set_var("EGRESS_PROXY_ALLOW_PRIVATE_IP", "not-a-bool");
         }

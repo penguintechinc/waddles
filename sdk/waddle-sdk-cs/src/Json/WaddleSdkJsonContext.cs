@@ -21,5 +21,7 @@ namespace WaddleSdk.Json;
 [JsonSerializable(typeof(RelayMessagePayload))]
 [JsonSerializable(typeof(WaddleSdk.Economy.EconomyViewArgs))]
 [JsonSerializable(typeof(WaddleSdk.Economy.EconomyViewResult))]
+[JsonSerializable(typeof(WaddleSdk.Economy.EconomyAdjustArgs))]
+[JsonSerializable(typeof(WaddleSdk.Economy.EconomyAmountResult))]
 [JsonSerializable(typeof(WaddleSdk.Scheduling.ScheduleBoard))]
 public sealed partial class WaddleSdkJsonContext : JsonSerializerContext;

@@ -359,8 +359,8 @@ public class RollLogicTests
         var text = Text(Rolls(1, 2, 0, 0).Run(Msg("!roll"), host));
         Assert.Contains("gems", text);
         Assert.DoesNotContain("points", text);
-        Assert.Equal("points_view", host.ToolFake.Calls[0].Tool);
-        Assert.Contains(Actor, host.ToolFake.Calls[0].Args);
+        Assert.Equal("points_view", host.ToolFake.Calls.First(c => c.Tool == "points_view").Tool);
+        Assert.Contains(Actor, host.ToolFake.Calls.First(c => c.Tool == "points_view").Args);
     }
 
     [Fact]

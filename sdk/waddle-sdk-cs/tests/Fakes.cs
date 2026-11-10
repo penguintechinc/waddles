@@ -25,7 +25,12 @@ public sealed class FakeKvClient : IKvClient
         SetCalls.Add((key, value, ttlSeconds));
     }
 
-    public void Delete(string key) => _store.Remove(key);
+    public Action<string>? BeforeDelete { get; set; }
+    public void Delete(string key)
+    {
+        BeforeDelete?.Invoke(key);
+        _store.Remove(key);
+    }
 
     public long Increment(string key, long delta, uint ttlSeconds)
     {

@@ -185,6 +185,8 @@ public sealed class FakeMediaClient : IMediaClient
 /// <summary>A full <see cref="IWaddleHostNext"/>: the base fakes plus the newer-world capabilities.</summary>
 public sealed class FakeWaddleHostNext : IWaddleHostNext
 {
+    public FakeWaddleHostNext() => EconomyToolFixture.Bind(ToolFake, EconomyFake);
+
     public FakeWaddleHost Base { get; } = new();
 
     /// <summary>Sets the invocation scope (community and message id) the stages under test see.</summary>
@@ -215,4 +217,41 @@ public sealed class FakeWaddleHostNext : IWaddleHostNext
     public IOverlayClient Overlay => OverlayFake;
     public IAiClient Ai => AiFake;
     public IMediaClient Media => MediaFake;
+}
+
+
+/// <summary>Test transport for the real economy service's documented JSON contracts.</summary>
+public static class EconomyToolFixture
+{
+    public static void Bind(FakeToolClient tools, IEconomyClient ledger)
+    {
+        foreach (var name in new[] { "get_balance", "adjust_balance" })
+        {
+            var op = name;
+            tools.Handlers[(EconomyServiceTools.Target, op)] = bytes =>
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(bytes);
+                var args = doc.RootElement;
+                var user = args.GetProperty("user").GetString()!;
+                try
+                {
+                    long balance;
+                    switch (op)
+                    {
+                        case "get_balance": balance = ledger.Balance(user); break;
+                        default:
+                            var delta = args.GetProperty("delta").GetInt64();
+                            balance = delta > 0 ? ledger.Credit(user, (ulong)delta) : ledger.Debit(user, (ulong)-delta);
+                            break;
+                    }
+                    return System.Text.Encoding.UTF8.GetBytes($"{{\"user\":\"{user}\",\"balance\":{balance}}}");
+                }
+                catch (WaddleEconomyException ex)
+                {
+                    throw new WaddleToolException(ex.Kind switch { EconomyErrorKind.Denied => ToolErrorKind.Forbidden, EconomyErrorKind.Unavailable or EconomyErrorKind.Backend => ToolErrorKind.TargetUnavailable, _ => ToolErrorKind.InvalidArgs },
+                        ex.Kind switch { EconomyErrorKind.InsufficientFunds => "insufficient_funds", EconomyErrorKind.OverCap => "over_cap", EconomyErrorKind.NotAMember => "not_a_member", _ => ex.Message });
+                }
+            };
+        }
+    }
 }

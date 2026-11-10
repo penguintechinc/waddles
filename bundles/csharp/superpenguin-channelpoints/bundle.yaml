@@ -1,0 +1,134 @@
+schema_version: 2
+app_id: waddles.integrations.superpenguin.channelpoints
+name: Channel Point Redemptions (SuperPenguinTV ChannelPoints)
+version: 1.0.0
+feature: waddles.integrations.superpenguin
+module: integrations
+provider: thirdparty
+language: csharp
+artifact: component
+execution_model: wasi-component
+is_default: false
+author: github/psychoboy
+license: MIT
+category: alternatives
+source_url: https://github.com/Psychoboy/PenguinTwitchBot
+notice: |
+  Ported from PenguinTwitchBot (Actions/SubActions/ChannelPoint* and the ChannelPointsCustomRewardRedemptionAdd trigger, Events/ChannelPointRedeemEventArgs.cs, github.com/Psychoboy/
+  PenguinTwitchBot) by superpenguintv (Psychoboy), used with permission.
+
+  MIT License
+
+  Copyright (c) 2023 Psychoboy
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+stages:
+  process:
+    entry: waddle:bundle/process-stage#transform
+    consumes:
+    - platform: twitch
+      event_types:
+      - channel.channel_points_custom_reward_redemption.add
+    - platform: twitch
+      event_types:
+      - chat.message
+      filters:
+        command_prefix:
+        - '!redeem'
+    - platform: discord
+      event_types:
+      - chat.message
+      filters:
+        command_prefix:
+        - '!redeem'
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: waddle:bundle/action-stage#dispatch
+    config: {}
+    spec:
+      required_config: []
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+- id: storage.kv
+  justification: reward-to-action mapping table, per-redemption outcome record (replay safety) and ignored-redemption
+    counters
+- id: identity.resolve
+  justification: resolve the redeeming actor to a community user uuid (uuid-only, no names)
+- id: chat.send:discord
+  justification: management replies via the relay host import (relay.push -> chat.send:discord)
+- id: chat.send:twitch
+  justification: management replies and redemption chat messages via the relay host import (relay.push
+    -> chat.send:twitch)
+- id: tool.call:waddles.core.service.economy:points_view
+  justification: Use the economy service points_view contract for the currency alias; the app owns only
+    redemption policy
+  params:
+    write: false
+- id: tool.call:waddles.core.service.economy:adjust_balance
+  justification: Use the economy service adjust_balance contract to credit award steps; the service owns
+    caps and idempotency
+  params:
+    write: true
+- id: overlay.media
+  justification: push the redemption alert to the community's alert-box overlay (no media is fetched or
+    generated)
+  params:
+    allowed_hosts:
+    - overlay.penguincloud.io
+    max_duration_seconds: 15
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: 1.0.0
+  min_version: 1.0.0
+  max_version: null
+requested_tools:
+- tool: points_view
+  access: read
+  target_app_id: waddles.core.service.economy
+- tool: adjust_balance
+  access: write
+  target_app_id: waddles.core.service.economy
+collection: superpenguintv
+overlay_assets:
+- path: index.html
+  sha256: 71eb5fa0ca0f03e12a07acb95c57ec11eb3a5ea8068cf622aba4fd5b9cf5f87b
+  content_type: text/html
+  origin: PenguinTwitchBot/wwwroot/alerts.html (layout idea only; page rewritten for this bundle)
+  license: MIT
+- path: redeem.css
+  sha256: f2f43f65a87eae12ec6b4eb38740413a4b143983d448f92319f1271d1a8a1c9f
+  content_type: text/css
+  origin: PenguinTwitchBot/wwwroot/alerts.html (transparent-body/status-pill idea only; rules rewritten)
+  license: MIT
+- path: redeem.js
+  sha256: 9158cc26e90701667bf8cf0948a9d00998a8a0652635d1940ad31bc11de3eab0
+  content_type: text/javascript
+  origin: original
+  license: MIT

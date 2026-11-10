@@ -15,6 +15,7 @@ Skipped (never failed) where `docker` or `helm` is unavailable.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -101,10 +102,12 @@ def test_every_rendered_workload_identity_authenticates_against_the_provisioned_
                 if "DB_USER" not in env:
                     continue
                 key = env["DB_PASSWORD"]["valueFrom"]["secretKeyRef"]["key"]
-                url = (
-                    env["DATABASE_URL"]["value"]
-                    .replace("$(DB_PASSWORD)", credentials[key])
-                    .replace("infra-postgres:5432", f"{db.host}:{db.port}")
+                # The chart dials the Postgres FQDN (transit TLS, verify-full via PGSSLMODE in the pod env);
+                # this test points the same role DSN at the throwaway plaintext test database instead.
+                url = re.sub(
+                    r"@[^:@/]+:5432/",
+                    f"@{db.host}:{db.port}/",
+                    env["DATABASE_URL"]["value"].replace("$(DB_PASSWORD)", credentials[key]),
                 )
                 with psycopg2.connect(url, connect_timeout=10) as conn, conn.cursor() as cur:
                     cur.execute(

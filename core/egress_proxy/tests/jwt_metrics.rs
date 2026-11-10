@@ -23,14 +23,16 @@ use service_auth::test_support::Capture;
 use service_auth::TrustBundle;
 
 const KEY_A_PRIV_DER: &[u8] = &[
-    48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 1, 204, 5, 142, 35, 153, 231, 38,
-    150, 122, 1, 218, 34, 237, 70, 125, 233, 62, 126, 103, 151, 16, 11, 238, 95, 122, 209, 74, 183,
-    9, 171, 161,
+    48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206, 61, 3,
+    1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 209, 234, 92, 37, 28, 130, 216, 139, 48, 1, 225, 220,
+    88, 158, 30, 88, 20, 126, 43, 7, 182, 151, 62, 129, 248, 115, 187, 119, 18, 12, 142, 93, 161,
+    68, 3, 66, 0, 4, 17, 138, 186, 198, 3, 136, 154, 139, 190, 114, 14, 103, 123, 44, 247, 26, 31,
+    171, 203, 86, 236, 40, 175, 97, 236, 72, 32, 22, 179, 142, 109, 144, 173, 115, 191, 94, 95,
+    104, 151, 149, 88, 212, 250, 138, 99, 63, 147, 180, 150, 85, 29, 12, 130, 136, 7, 86, 162, 99,
+    191, 4, 123, 168, 238, 207,
 ];
-const KEY_A_PUB_RAW: &[u8] = &[
-    169, 90, 255, 23, 51, 151, 156, 147, 56, 247, 214, 168, 76, 160, 67, 99, 211, 238, 208, 5, 69,
-    236, 245, 115, 4, 81, 1, 42, 23, 107, 4, 187,
-];
+const KEY_A_X: &str = "EYq6xgOImou-cg5neyz3Gh-ry1bsKK9h7EggFrOObZA";
+const KEY_A_Y: &str = "rXO_Xl9ol5VY1PqKYz-TtJZVHQyCiAdWomO_BHuo7s8";
 
 struct Bundle(HashMap<String, DecodingKey>);
 
@@ -56,8 +58,8 @@ fn sign(header: &Value, claims: &Value) -> String {
     let message = format!("{}.{}", b64(header), b64(claims));
     let signature = jsonwebtoken::crypto::sign(
         message.as_bytes(),
-        &EncodingKey::from_ed_der(KEY_A_PRIV_DER),
-        Algorithm::EdDSA,
+        &EncodingKey::from_ec_der(KEY_A_PRIV_DER),
+        Algorithm::ES256,
     )
     .expect("sign");
     format!("{message}.{signature}")
@@ -86,9 +88,9 @@ async fn both_egress_proxy_verifiers_report_into_the_shared_metric_stream() {
 
     let bundle = Bundle(HashMap::from([(
         "k1".to_string(),
-        DecodingKey::from_ed_der(KEY_A_PUB_RAW),
+        DecodingKey::from_ec_components(KEY_A_X, KEY_A_Y).expect("test P-256 key"),
     )]));
-    let header = json!({"alg": "EdDSA", "typ": "JWT", "kid": "k1"});
+    let header = json!({"alg": "ES256", "typ": "JWT", "kid": "k1"});
 
     // --- service_eddsa (service_auth::verify, the machine-JWT verifier) ----
     let good = sign(&header, &machine_claims());
@@ -160,12 +162,12 @@ async fn both_egress_proxy_verifiers_report_into_the_shared_metric_stream() {
     assert_eq!(capture.total(), before, "bare verify must not report");
 
     // --- the stream: exact label names + values -----------------------------
-    assert_eq!(capture.count("service_eddsa", "eddsa", "ok"), 1);
+    assert_eq!(capture.count("service_eddsa", "es256", "ok"), 1);
     assert_eq!(capture.count("service_eddsa", "none", "alg_none"), 1);
-    assert_eq!(capture.count("service_eddsa", "eddsa", "bad_audience"), 1);
-    assert_eq!(capture.count("egress_assertion", "eddsa", "ok"), 1);
+    assert_eq!(capture.count("service_eddsa", "es256", "bad_audience"), 1);
+    assert_eq!(capture.count("egress_assertion", "es256", "ok"), 1);
     assert_eq!(
-        capture.count("egress_assertion", "eddsa", "forbidden_header"),
+        capture.count("egress_assertion", "es256", "forbidden_header"),
         1
     );
     assert_eq!(capture.total(), 5, "one sample per reporting verification");

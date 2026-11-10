@@ -19,6 +19,7 @@ from flask_core import (
     set_bundle_dal,
 )
 from waddle_transports import NonRetryableTransportError, RetryableTransportError
+from waddle_transports.service_jwt_client import MintedToken
 from waddle_transports.transports.irc_relay import outbound_queue_key
 
 import builtin_handlers.twitch_shoutout_action as shoutout_bundle
@@ -32,6 +33,7 @@ from services.twitch_helix import TwitchHelixError
 
 _COMMUNITY_ID = 1
 _OVERLAY_CODE = "a1b2c3d4e5f60718"
+_MINT_CALLS: list[dict[str, Any]] = []
 _PUSH_JWT = "header.payload.sig"  # opaque to svc-action -- only svc-presentation verifies it
 
 
@@ -198,9 +200,16 @@ def _overlay_push_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     sa_token = tmp_path / "sa-token"
     sa_token.write_text("projected-sa-token\n")
     monkeypatch.setenv("PRESENTATION_URL", "http://presentation.test:8207")
-    monkeypatch.setenv("SERVICE_JWT_TOKEN_ENDPOINT", "http://hub-api.test/internal/service-token")
+    monkeypatch.setenv("SERVICE_JWT_TOKEN_ENDPOINT", "https://hub-grpc.test:50204")
     monkeypatch.setenv("SERVICE_JWT_SA_TOKEN_PATH", str(sa_token))
     overlay_push.reset_cache_for_tests()
+    _MINT_CALLS.clear()
+
+    async def _fake_mint(**kwargs: Any) -> MintedToken:
+        _MINT_CALLS.append(kwargs)
+        return MintedToken(token=_PUSH_JWT, expires_in=300.0)
+
+    monkeypatch.setattr(overlay_push, "mint_service_token", _fake_mint)
 
 
 def _push_router(
@@ -209,10 +218,6 @@ def _push_router(
     """MockTransport handler answering hub-api's mint endpoint and svc-presentation's push route."""
 
     def _handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/internal/service-token":
-            captured["mint_body"] = json.loads(request.content)
-            captured["mint_auth"] = request.headers["Authorization"]
-            return httpx.Response(200, json={"token": _PUSH_JWT, "expires_in": 300})
         captured["url"] = str(request.url)
         captured["auth"] = request.headers.get("Authorization")
         captured["body"] = request.content
@@ -356,11 +361,9 @@ class TestVideoShoutout:
         assert captured["url"] == f"http://presentation.test:8207/{_OVERLAY_CODE}/media/push"
         assert "/overlay/" not in captured["url"]
         assert captured["auth"] == f"Bearer {_PUSH_JWT}"
-        assert captured["mint_body"] == {
-            "scope": "presentation.overlay:push",
-            "community_id": _COMMUNITY_ID,
-        }
-        assert captured["mint_auth"] == "Bearer projected-sa-token"
+        assert [(c["scope"], c["community_id"]) for c in _MINT_CALLS] == [
+            ("presentation.overlay:push", _COMMUNITY_ID)
+        ]
         body = json.loads(captured["body"])
         assert body["title"] == "Shoutout: Shroud"
         assert body["image_url"] == "https://img.example.test/thumb.jpg"

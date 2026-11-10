@@ -44,7 +44,7 @@ fn dynamic_with_plaintext_hub_outside_alpha_is_fatal() {
             "--hub-api-url",
             "http://hub-api:8204",
             "--service-jwt-token-endpoint",
-            "http://hub-api:8204/internal/service-token",
+            "https://hub-api:50204",
             "--environment",
             env,
         ]);
@@ -58,7 +58,7 @@ fn dynamic_with_plaintext_hub_outside_alpha_is_fatal() {
         "--hub-api-url",
         "http://hub-api:8204",
         "--service-jwt-token-endpoint",
-        "http://x/internal/service-token",
+        "http://x:50204",
         "--environment",
         "alpha",
     ]);
@@ -71,7 +71,7 @@ fn dynamic_without_scope_resolver_is_fatal() {
         "--hub-api-url",
         "https://hub.example",
         "--service-jwt-token-endpoint",
-        "https://hub.example/internal/service-token",
+        "https://hub.example:50204",
     ]);
     let err = validate_dynamic_prereqs(&c, false).expect_err("resolver missing must be fatal");
     assert!(err.to_string().contains("scope resolver"), "{err}");
