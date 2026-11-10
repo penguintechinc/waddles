@@ -81,6 +81,11 @@ struct StageModel {
     /// Every capability host call made, in order: `(capability, op, args)`.
     calls: Vec<(String, String, serde_json::Value)>,
     unexpected_calls: usize,
+    /// Event type delivered to the guest; empty means `chat.message`.
+    event_type: String,
+    /// Extra members merged into the event payload (badges, or the whole body of a non-chat event when `replace_payload`).
+    extra_payload: Option<serde_json::Value>,
+    replace_payload: bool,
 }
 
 impl StageModel {
@@ -176,6 +181,11 @@ impl StageModel {
                 Some((code, message)) => err(code, message),
                 None => ok(serde_json::json!({ "balance": self.balance_after_wager })),
             },
+            (CapabilityKind::Db, "tool.invoke") if args["target"] == "waddles.core.service.media" => {
+                // The media service exports no `tts_synthesize` yet: the real stage answers target_unavailable.
+                assert_eq!(args["tool"], "tts_synthesize");
+                err("target_unavailable", "media service does not export tts_synthesize")
+            }
             (CapabilityKind::Db, "tool.invoke") => {
                 assert_eq!(args["target"], "waddles.core.service.economy");
                 let tool = args["tool"].as_str().unwrap();
@@ -295,8 +305,20 @@ async fn run_for(
         for (i, (text, prepare)) in steps.into_iter().enumerate() {
             model.calls.clear();
             prepare(&mut model);
-            let payload_json =
-                serde_json::json!({ "text": text, "channel_id": "chan-1" }).to_string();
+            let mut payload = serde_json::json!({ "text": text, "channel_id": "chan-1" });
+            if model.replace_payload {
+                payload = model.extra_payload.clone().expect("replace_payload needs extra_payload");
+            } else if let Some(extra) = &model.extra_payload {
+                for (k, v) in extra.as_object().expect("extra_payload is an object") {
+                    payload[k] = v.clone();
+                }
+            }
+            let payload_json = payload.to_string();
+            let event_type = if model.event_type.is_empty() {
+                "chat.message".to_string()
+            } else {
+                model.event_type.clone()
+            };
             write_frame(
                 &mut io,
                 &Frame::new(
@@ -306,7 +328,7 @@ async fn run_for(
                         digest: digest.clone(),
                         export: ExportKind::Transform,
                         payload: serde_json::json!({
-                            "platform": "twitch", "event_type": "chat.message", "actor": "viewer-1",
+                            "platform": "twitch", "event_type": event_type, "actor": "viewer-1",
                             "payload_json": payload_json, "occurred_at": "2026-11-07T00:00:00.000Z",
                         }),
                         deadline_ms: 30000,
@@ -667,4 +689,199 @@ async fn csharp_port_matrix_executes_commands_and_replays_through_real_executor(
     }
     assert_eq!(examined, expected, "zero or partial port coverage must fail");
     assert!(expected >= 1 && (only.is_some() || expected == 7), "zero or partial port coverage must fail");
+}
+
+/// Wave-4 apps through the production linker: bonustickets (event award), channelpoints (non-chat redemption event + mod
+/// management command) and the overlay-emitting apps. The `overlay` host import answers `not-implemented` inside the executor
+/// today, so every overlay emission must fail LOUD (a trap), never "succeed" silently.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "build all C# artifacts and set SUPERPENGUIN_WASM_DIR"]
+async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_overlay() {
+    let directory =
+        std::env::var("SUPERPENGUIN_WASM_DIR").expect("SUPERPENGUIN_WASM_DIR is required");
+    let load = |slug: &str| {
+        let path = std::path::Path::new(&directory).join(format!("superpenguin_{slug}.wasm"));
+        let wasm = std::fs::read(path).expect("a real built component is required for EVERY wave-4 app");
+        assert!(wasm.len() > 1_000_000);
+        wasm
+    };
+    let mut examined = 0;
+
+    // bonustickets: flag-off silence, a paid claim, an identical replay that moves nothing more.
+    let runs = run_for(
+        "waddles.integrations.superpenguin.bonustickets".into(),
+        "waddles.command-superpenguin-bonustickets".into(),
+        load("bonustickets"),
+        vec![
+            ("!bonus", Box::new(|m| { m.flag_on = false; m.message_id = "off".into(); })),
+            ("!bonus", Box::new(|m| { m.flag_on = true; m.message_id = "claim".into(); })),
+            ("!bonus", Box::new(|m| { m.flag_on = true; m.message_id = "claim".into(); })),
+        ],
+    )
+    .await;
+    assert!(!runs[0].trapped && runs[0].reply.is_none(), "bonustickets: flag-off contract");
+    assert!(!runs[1].trapped && runs[1].reply.is_some(), "bonustickets: claim must reply");
+    assert!(
+        runs[1].calls.iter().any(|(_, op, a)| op == "tool.invoke" && a["tool"] == "adjust_balance"),
+        "bonustickets: the credit must cross the economy service tool"
+    );
+    assert!(!runs[2].trapped && runs[2].reply == runs[1].reply, "bonustickets: replay preserves the reply");
+    examined += 1;
+    println!("C# wave-4 matrix: bonustickets PASS");
+
+    // channelpoints: a moderator maps a reward, a redemption event awards + says, the same redemption replays identically.
+    let redemption = serde_json::json!({
+        "id": "redemption-1", "status": "unfulfilled", "user_input": "", "broadcaster_user_login": "chan-1",
+        "broadcaster_user_id": "42",
+        "reward": { "id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d", "title": "Hydrate", "cost": 100 },
+    });
+    let redemption_a = redemption.clone();
+    let redemption_b = redemption.clone();
+    let runs = run_for(
+        "waddles.integrations.superpenguin.channelpoints".into(),
+        "waddles.command-superpenguin-channelpoints".into(),
+        load("channelpoints"),
+        vec![
+            ("!redeem map Hydrate award 10 && say thanks {user}", Box::new(|m| {
+                m.flag_on = true;
+                m.message_id = "map".into();
+                m.extra_payload = Some(serde_json::json!({ "is_mod": true }));
+            })),
+            ("", Box::new(move |m| {
+                m.flag_on = true;
+                m.message_id = "redeem-1".into();
+                m.event_type = "channel.channel_points_custom_reward_redemption.add".into();
+                m.extra_payload = Some(redemption_a);
+                m.replace_payload = true;
+            })),
+            ("", Box::new(move |m| {
+                m.flag_on = true;
+                m.message_id = "redeem-1".into();
+                m.event_type = "channel.channel_points_custom_reward_redemption.add".into();
+                m.extra_payload = Some(redemption_b);
+                m.replace_payload = true;
+            })),
+        ],
+    )
+    .await;
+    assert!(!runs[0].trapped && runs[0].reply.is_some(), "channelpoints: mod mapping must reply");
+    assert!(!runs[1].trapped && runs[1].reply.is_some(), "channelpoints: redemption must say its step");
+    assert!(
+        runs[1].calls.iter().any(|(_, op, a)| op == "tool.invoke" && a["tool"] == "adjust_balance"),
+        "channelpoints: the award must cross the economy service tool"
+    );
+    assert!(!runs[2].trapped && runs[2].reply == runs[1].reply, "channelpoints: redemption replay preserves the reply");
+    examined += 1;
+    println!("C# wave-4 matrix: channelpoints PASS");
+
+    let mod_on = |id: &'static str| -> Box<dyn FnOnce(&mut StageModel) + Send> {
+        Box::new(move |m| {
+            m.flag_on = true;
+            m.message_id = id.into();
+            m.extra_payload = Some(serde_json::json!({ "is_mod": true }));
+        })
+    };
+    let user_on = |id: &'static str| -> Box<dyn FnOnce(&mut StageModel) + Send> {
+        Box::new(move |m| {
+            m.flag_on = true;
+            m.message_id = id.into();
+        })
+    };
+
+    // giveaway: flag-off silence, a status reply, a paid entry through the economy tool, identical replays.
+    let runs = run_for(
+        "waddles.integrations.superpenguin.giveaway".into(),
+        "waddles.command-superpenguin-giveaway".into(),
+        load("giveaway"),
+        vec![
+            ("!tgw status", Box::new(|m| { m.flag_on = false; m.message_id = "off".into(); })),
+            ("!tgw status", user_on("status")),
+            ("!tgw enter 5", user_on("enter")),
+            ("!tgw enter 5", user_on("enter")),
+        ],
+    )
+    .await;
+    assert!(!runs[0].trapped && runs[0].reply.is_none(), "giveaway: flag-off contract");
+    assert!(!runs[1].trapped && runs[1].reply.is_some(), "giveaway: status must reply");
+    assert!(!runs[2].trapped && runs[2].reply.is_some(), "giveaway: entry must reply");
+    assert!(
+        runs[2].calls.iter().any(|(_, op, a)| op == "tool.invoke" && a["tool"] == "adjust_balance"),
+        "giveaway: the entry debit must cross the economy service tool"
+    );
+    assert!(!runs[3].trapped && runs[3].reply == runs[2].reply, "giveaway: entry replay preserves the reply");
+    examined += 1;
+    println!("C# wave-4 matrix: giveaway PASS");
+
+    // wheel: define + list work on kv alone; putting the wheel on the overlay must fail loud (host overlay not implemented).
+    let runs = run_for(
+        "waddles.integrations.superpenguin.wheel".into(),
+        "waddles.command-superpenguin-wheel".into(),
+        load("wheel"),
+        vec![
+            ("!wheel list", Box::new(|m| { m.flag_on = false; m.message_id = "off".into(); })),
+            ("!wheel define demo red*2|blue|green", mod_on("define")),
+            ("!wheel list", user_on("list")),
+            ("!wheel list", user_on("list")),
+            ("!wheel show demo", mod_on("show")),
+        ],
+    )
+    .await;
+    assert!(!runs[0].trapped && runs[0].reply.is_none(), "wheel: flag-off contract");
+    assert!(!runs[1].trapped && runs[1].reply.is_some(), "wheel: define must reply");
+    assert!(!runs[2].trapped && runs[2].reply.is_some(), "wheel: list must reply");
+    assert!(!runs[3].trapped && runs[3].reply == runs[2].reply, "wheel: list replay preserves the reply");
+    assert!(runs[4].trapped, "wheel: an overlay push must fail loud while the host overlay is not implemented");
+    examined += 1;
+    println!("C# wave-4 matrix: wheel PASS");
+
+    // audiocommand: register + list on kv; playing a sound pushes to the overlay and must fail loud.
+    let runs = run_for(
+        "waddles.integrations.superpenguin.audiocommand".into(),
+        "waddles.command-superpenguin-audiocommand".into(),
+        load("audiocommand"),
+        vec![
+            ("!sfx list", Box::new(|m| { m.flag_on = false; m.message_id = "off".into(); })),
+            ("!sfx add boom boom.mp3", mod_on("add")),
+            ("!sfx list", user_on("list")),
+            ("!sfx boom", user_on("play")),
+        ],
+    )
+    .await;
+    assert!(!runs[0].trapped && runs[0].reply.is_none(), "audiocommand: flag-off contract");
+    assert!(!runs[1].trapped && runs[1].reply.is_some(), "audiocommand: add must reply");
+    assert!(!runs[2].trapped && runs[2].reply.is_some(), "audiocommand: list must reply");
+    assert!(runs[3].trapped, "audiocommand: an overlay push must fail loud while the host overlay is not implemented");
+    examined += 1;
+    println!("C# wave-4 matrix: audiocommand PASS");
+
+    // tts: voices register on kv; with no tts_synthesize tool the refusal is explicit chat text, never a fallback.
+    let runs = run_for(
+        "waddles.integrations.superpenguin.tts".into(),
+        "waddles.command-superpenguin-tts".into(),
+        load("tts"),
+        vec![
+            ("!tts hello", Box::new(|m| { m.flag_on = false; m.message_id = "off".into(); })),
+            ("!ttsvoice add af_sky", mod_on("voice")),
+            ("!tts hello world", user_on("say")),
+            ("!tts hello world", user_on("say")),
+        ],
+    )
+    .await;
+    assert!(!runs[0].trapped && runs[0].reply.is_none(), "tts: flag-off contract");
+    assert!(!runs[1].trapped && runs[1].reply.is_some(), "tts: voice add must reply");
+    assert!(!runs[2].trapped, "tts: must refuse in chat, not trap");
+    assert!(
+        reply_text(&runs[2]).contains("TTS is unavailable"),
+        "tts: explicit refusal without a synthesis tool, got {:?}",
+        runs[2].reply
+    );
+    assert!(
+        runs[2].calls.iter().any(|(_, op, a)| op == "tool.invoke" && a["tool"] == "tts_synthesize"),
+        "tts: must have asked the media service tool"
+    );
+    assert!(!runs[3].trapped && runs[3].reply.is_some(), "tts: a repeat still gets an answer");
+    examined += 1;
+    println!("C# wave-4 matrix: tts PASS");
+
+    assert_eq!(examined, 6, "zero or partial wave-4 coverage must fail");
 }

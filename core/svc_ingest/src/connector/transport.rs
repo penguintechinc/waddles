@@ -182,3 +182,61 @@ pub trait Transport: Send {
     /// dropped frame is simply lost.
     async fn on_frame_outcome(&mut self, _outcome: FrameOutcome) {}
 }
+
+/// A placeholder [`Transport`] for a platform that has a declared policy but no transport yet
+/// (Kick). It exists so the platform is a visible, selectable entry -- and so selecting it
+/// FAILS LOUD: [`Transport::connect`] returns [`TransportError::Fatal`], which parks the
+/// source with a stated reason instead of silently doing nothing.
+#[derive(Debug, Clone)]
+pub struct UnsupportedTransport {
+    platform: &'static str,
+}
+
+impl UnsupportedTransport {
+    /// The Kick placeholder (the webhook/WS transport profile lands with the Kick bundle).
+    #[must_use]
+    pub fn kick() -> Self {
+        Self { platform: "kick" }
+    }
+}
+
+impl Transport for UnsupportedTransport {
+    fn platform(&self) -> &str {
+        self.platform
+    }
+
+    async fn connect(&mut self) -> Result<ConnectionCtx, TransportError> {
+        Err(TransportError::Fatal(format!(
+            "no transport is implemented for platform {:?}",
+            self.platform
+        )))
+    }
+
+    async fn send_handshake(&mut self, _handshake: Handshake) -> Result<(), TransportError> {
+        Err(TransportError::Handshake(
+            "no transport is implemented for this platform".to_string(),
+        ))
+    }
+
+    async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
+        Err(TransportError::Read(
+            "no transport is implemented for this platform".to_string(),
+        ))
+    }
+
+    async fn close(&mut self, _reason: &str) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_kick_placeholder_fails_loud_and_parks_never_succeeds() {
+        let mut t = UnsupportedTransport::kick();
+        assert_eq!(t.platform(), "kick");
+        let err = t.connect().await.unwrap_err();
+        assert!(err.is_fatal(), "{err}");
+        assert!(t.next_frame().await.is_err());
+    }
+}

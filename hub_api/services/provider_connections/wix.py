@@ -14,6 +14,17 @@ delivery against the public key stored here (``Scheme::WixJwt``) and refuses a t
 * **Resource** -- the Wix site, identified by ``metadata.instance_id`` (the app instance id Wix
   puts in every webhook). Non-secret; it becomes the connection's ``resource_id``.
 
+* **Outbound API credential** (optional) -- Wix REST calls made for a site owner's own integration
+  authenticate with an API key in the ``Authorization`` header plus the target site in the
+  ``wix-site-id`` header (https://dev.wix.com/docs/rest/articles/getting-started/authentication).
+  Wix states API keys are NOT available to third-party Wix apps (those use an OAuth app-instance
+  token, https://dev.wix.com/docs/build-apps/develop-your-app/auth/authenticate-using-oauth), so
+  this credential is the API-key model only; an OAuth app token is a separate, deferred flow.
+  The pair ``{api_key, site_id}`` is sealed in ``platform_connections.sealed_api_credential``
+  (row-bound AAD), write-only through the admin API, and handed to the data plane ONLY by the
+  ``connections:resolve:static`` resolve path as secret scheme ``WIX_API_KEY`` (never to the
+  public-key-only ingest identity). It is never validated against Wix, logged or echoed here.
+
 Capability ``webhook_ingest`` is what the data-plane binding list is scoped to.
 """
 
@@ -40,6 +51,7 @@ from services.provider_connections.adapter import (
     ResolvedResource,
 )
 from services.provider_connections.errors import CredentialsRejected, RefreshNotConfigured
+from services.provider_connections.kinds import SecretScheme
 
 PROVIDER_ID: Final = "wix"
 RESOURCE_TYPE_SITE: Final = "wix_site"
@@ -80,6 +92,7 @@ WIX_SPEC: Final = AdapterSpec(
     runtime_metadata_keys=frozenset({"instance_id"}),
     refreshable=False,
     binding_metadata=(BindingKey(wire="instance_id", stored="instance_id", required=True),),
+    api_credential_scheme=SecretScheme.WIX_API_KEY,
 )
 
 

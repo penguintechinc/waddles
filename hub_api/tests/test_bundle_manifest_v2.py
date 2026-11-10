@@ -18,6 +18,7 @@ _VALID_MANIFEST = {
     "feature": "waddles.socials.music",
     "module": "socials",
     "provider": "builtin",
+    "author": "github:penguintechinc",
     "language": "python",
     "artifact": "source",
     "stages": {
@@ -60,6 +61,23 @@ def test_wrong_schema_version_rejected() -> None:
     with pytest.raises(ManifestV2Error) as exc:
         _parse({"schema_version": 1})
     assert exc.value.reason == "unsupported_schema_version"
+
+
+def test_empty_stages_rejected_for_an_app() -> None:
+    for trusted in (False, True):
+        with pytest.raises(ManifestV2Error) as exc:
+            _parse({"stages": {}}, trusted_source=trusted)
+        assert exc.value.reason == "no_stages_declared"
+
+
+def test_empty_stages_allowed_only_for_trusted_service_kind() -> None:
+    """An inbound-only connector (e.g. Spectrum) runs no pluggable stage."""
+    manifest = _parse_trusted({"stages": {}, "kind": "service"})
+    assert manifest.kind == "service"  # type: ignore[attr-defined]
+    assert manifest.stages == {}  # type: ignore[attr-defined]
+    with pytest.raises(ManifestV2Error) as exc:  # untrusted path is refused before stages matter
+        _parse({"stages": {}, "kind": "service"}, trusted_source=False)
+    assert exc.value.reason == "untrusted_service_kind"
 
 
 def test_ingest_stage_rejected() -> None:
@@ -279,8 +297,8 @@ def test_unsupported_language_rejected() -> None:
 
 def test_vendor_bundle_without_author_rejected() -> None:
     with pytest.raises(ManifestV2Error) as exc:
-        _parse({"provider": "thirdparty", "license": "MIT"})
-    assert exc.value.reason == "vendor_author_required"
+        _parse({"provider": "thirdparty", "license": "MIT", "author": None})
+    assert exc.value.reason == "author_required"
 
 
 def test_vendor_bundle_without_license_rejected() -> None:
@@ -289,9 +307,15 @@ def test_vendor_bundle_without_license_rejected() -> None:
     assert exc.value.reason == "vendor_license_required"
 
 
-def test_builtin_bundle_without_attribution_parses() -> None:
+def test_builtin_bundle_without_author_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"author": None})
+    assert exc.value.reason == "author_required"
+
+
+def test_builtin_bundle_without_license_attribution_parses() -> None:
     manifest = _parse({})
-    assert manifest.author is None  # type: ignore[attr-defined]
+    assert manifest.author == "github:penguintechinc"  # type: ignore[attr-defined]
     assert manifest.license is None  # type: ignore[attr-defined]
     assert manifest.license_requires_review is False  # type: ignore[attr-defined]
 
@@ -795,3 +819,58 @@ def test_requested_tools_survive_reparse_trusted() -> None:
 
     raw = {**_VALID_MANIFEST, "requested_tools": [_rt()]}
     assert [r.tool for r in _reparse_trusted(raw).requested_tools] == ["balance"]
+
+
+def test_exported_tool_host_op_parses_to_the_summary_shape() -> None:
+    manifest = _parse_trusted(
+        {
+            "kind": "service",
+            "exported_tools": [
+                _tool("plain"),
+                _tool(
+                    "twitch.moderation.timeout",
+                    access="write",
+                    risk="dangerous",
+                    host_op={
+                        "platform": "twitch",
+                        "op": "mod.timeout",
+                        "user": "user",
+                        "text_object": {"duration": "duration_seconds", "reason": "reason"},
+                        "required": ["user", "duration_seconds"],
+                        "returns": ["id"],
+                    },
+                ),
+            ],
+        }
+    )
+    plain, hosted = manifest.exported_tools  # type: ignore[attr-defined]
+    assert plain.host_op is None
+    assert hosted.host_op == {
+        "platform": "twitch",
+        "op": "mod.timeout",
+        "user": "user",
+        "textObject": {"duration": "duration_seconds", "reason": "reason"},
+        "required": ["duration_seconds", "user"],
+        "returns": ["id"],
+    }
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "mod.ban",
+        {"platform": "slack", "op": "mod.ban"},
+        {"platform": "twitch", "op": "ban"},
+        {"platform": "twitch", "op": "mod.ban", "extra": 1},
+        {"platform": "twitch", "op": "mod.ban", "user": "User"},
+        {"platform": "twitch", "op": "mod.ban", "origin": "anywhere"},
+        {"platform": "twitch", "op": "mod.ban", "user_wire": "raw"},
+        {"platform": "twitch", "op": "mod.ban", "required": "user"},
+        {"platform": "twitch", "op": "mod.ban", "text": "a", "text_object": {"k": "a"}},
+        {"platform": "twitch", "op": "mod.ban", "text_object": {}},
+    ],
+)
+def test_exported_tool_host_op_malformed_is_rejected(bad: object) -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse_trusted({"kind": "service", "exported_tools": [_tool(host_op=bad)]})
+    assert exc.value.reason == "invalid_tool_host_op"

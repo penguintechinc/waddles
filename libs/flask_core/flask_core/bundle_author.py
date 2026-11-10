@@ -5,6 +5,9 @@ name. Accepted spellings are normalized to a structured value so the marketplace
 can render a verified profile link instead of untrusted free text:
 
 * GitHub: `github:<handle>`, `github/<handle>`, `@<handle>`, `https://github.com/<handle>[/]`
+  (all normalize to kind=github; canonical storage is `github:<handle>`, and manifest
+  text such as `github/<handle>` is never rewritten -- only the stored/display form is
+  normalized, handle case preserved as given)
 * Name: letters/digits joined by single ` `, `-`, `_` or `.` (1-64 chars)
 
 Everything else (HTML/markdown, other URLs, emoji, control characters) is rejected

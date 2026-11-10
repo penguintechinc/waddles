@@ -41,7 +41,7 @@ fn state() -> Arc<ProxyState> {
         allowed_ports: vec![443],
         deny_cidrs: vec![],
         deny_cluster_cidrs: vec![],
-        machine_jwt_jwks_url: String::new(),
+        machine_jwt_jwks_endpoint: String::new(),
         machine_jwt_audience: "egress-proxy".into(),
         machine_jwt_trusted_issuers: vec!["hub-api".into()],
         machine_jwt_required_scope: "egress:connect".into(),
@@ -201,7 +201,7 @@ fn real_binary_exits_zero_on_sigterm() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_egress-proxy"))
         .env("PROXY_LISTEN_PORT", proxy_port.to_string())
         .env("METRICS_PORT", metrics_port.to_string())
-        .env("MACHINE_JWT_JWKS_URL", "http://127.0.0.1:9/jwks.json")
+        .env("MACHINE_JWT_JWKS_ENDPOINT", "http://127.0.0.1:9")
         .env("MACHINE_JWT_AUDIENCE", "egress-proxy")
         .env("SHUTDOWN_DRAIN_SECONDS", "5")
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")

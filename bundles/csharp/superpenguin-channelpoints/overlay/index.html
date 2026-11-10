@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src http: https:" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Channel point redemptions</title>
+    <link rel="stylesheet" href="redeem.css" />
+</head>
+<body>
+    <div id="status" class="status" role="status">Starting</div>
+    <main id="stage" class="stage" aria-live="polite">
+        <div id="card" class="card hidden">
+            <p id="who" class="who"></p>
+            <p id="what" class="what"></p>
+            <p id="input" class="input"></p>
+            <p id="message" class="message"></p>
+        </div>
+    </main>
+    <script src="redeem.js"></script>
+</body>
+</html>

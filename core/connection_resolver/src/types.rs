@@ -88,6 +88,12 @@ pub enum ConnectionSecret {
     },
     /// kind 1 (`accessToken` field).
     OAuthAccessToken { access_token: SecretString },
+    /// scheme 6 on a kind-1 row: a Wix site API credential (`apiKey` + `siteId`).
+    /// hub-api serves it ONLY to callers holding `connections:resolve:static`.
+    WixApi {
+        api_key: SecretString,
+        site_id: SecretString,
+    },
 }
 
 impl std::fmt::Debug for ConnectionSecret {
@@ -130,6 +136,11 @@ impl std::fmt::Debug for ConnectionSecret {
             Self::OAuthAccessToken { .. } => f
                 .debug_struct("OAuthAccessToken")
                 .field("access_token", &"[REDACTED]")
+                .finish(),
+            Self::WixApi { .. } => f
+                .debug_struct("WixApi")
+                .field("api_key", &"[REDACTED]")
+                .field("site_id", &"[REDACTED]")
                 .finish(),
         }
     }
@@ -291,6 +302,10 @@ fn map_secret(wire: SecretWire) -> Result<ConnectionSecret, ResolveError> {
             private_key_pem: take(&mut f, "privateKey")?,
             token_uri: take_opt(&mut f, "tokenUri").map(|s| s.expose().to_owned()),
         }),
+        6 => Ok(ConnectionSecret::WixApi {
+            api_key: take(&mut f, "apiKey")?,
+            site_id: take(&mut f, "siteId")?,
+        }),
         _ => Err(ResolveError::Malformed("unknown secret scheme")),
     }
 }
@@ -304,6 +319,9 @@ fn scheme_fits_kind(kind: ConnectionKind, secret: &ConnectionSecret) -> bool {
             ConnectionSecret::Bearer { .. }
                 | ConnectionSecret::Basic { .. }
                 | ConnectionSecret::ApiKeyHeader { .. }
+        ) | (
+            ConnectionKind::PlatformOauth,
+            ConnectionSecret::WixApi { .. }
         ) | (
             ConnectionKind::AwsLambda,
             ConnectionSecret::AwsAccessKey { .. }
@@ -328,6 +346,15 @@ pub(crate) fn parse_resolved(
     }
     let kind = ConnectionKind::from_code(wire.kind)?;
     let secret = match (wire.access_token, wire.secret) {
+        // scheme 6 (Wix API credential) rides on a kind-1 row, with or without
+        // an access token alongside; it is the only secret scheme kind 1 takes.
+        (_, Some(secret)) if kind == ConnectionKind::PlatformOauth && secret.scheme == 6 => {
+            let mapped = map_secret(secret)?;
+            if !scheme_fits_kind(kind, &mapped) {
+                return Err(ResolveError::Malformed("secret scheme does not match kind"));
+            }
+            mapped
+        }
         (Some(access_token), None) if kind == ConnectionKind::PlatformOauth => {
             ConnectionSecret::OAuthAccessToken { access_token }
         }
@@ -499,6 +526,33 @@ mod tests {
                 Err(ResolveError::Malformed(_))
             ));
         }
+    }
+
+    #[test]
+    fn wix_api_credential_scheme_6_is_accepted_only_on_a_kind_1_row() {
+        let wix = r#"{"scheme":6,"fields":{"apiKey":"k-123","siteId":"site-9"}}"#;
+        let parsed = parse_resolved(&resolved_body(1, wix, "null"), REF).unwrap();
+        match &parsed.secret {
+            ConnectionSecret::WixApi { api_key, site_id } => {
+                assert_eq!(api_key.expose(), "k-123");
+                assert_eq!(site_id.expose(), "site-9");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(!format!("{:?}", parsed.secret).contains("k-123"));
+        // alongside an access token it still maps to the Wix credential
+        let both = parse_resolved(&resolved_body(1, wix, "\"at\""), REF).unwrap();
+        assert!(matches!(both.secret, ConnectionSecret::WixApi { .. }));
+        // wrong kind, and missing field, fail closed
+        for (kind, body) in [(2, wix), (1, r#"{"scheme":6,"fields":{"apiKey":"k"}}"#)] {
+            assert!(matches!(
+                parse_resolved(&resolved_body(kind, body, "null"), REF),
+                Err(ResolveError::Malformed(_))
+            ));
+        }
+        // any other scheme on kind 1 is still refused
+        let bearer = r#"{"scheme":1,"fields":{"token":"t"}}"#;
+        assert!(parse_resolved(&resolved_body(1, bearer, "null"), REF).is_err());
     }
 
     fn resolved_body(kind: i64, secret: &str, token: &str) -> Vec<u8> {

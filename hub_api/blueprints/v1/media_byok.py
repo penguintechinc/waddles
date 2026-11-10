@@ -139,6 +139,7 @@ async def get_media_byok_status(
             async_dal, dal, tenant_id=tenant_id, community_id=community_id
         )
     except ApiError as exc:
+        logger.warning("%s refused: %s: %s", request.path, type(exc).__name__, exc.message)
         return _err(exc)
     return MediaByokStatusResponse(
         success=True,
@@ -171,6 +172,7 @@ async def set_media_byok_key(
             user_id=user_id,
         )
     except ApiError as exc:
+        logger.warning("%s refused: %s: %s", request.path, type(exc).__name__, exc.message)
         return _err(exc)
     return _key_dto(info)
 
@@ -189,6 +191,7 @@ async def delete_media_byok_key(
             async_dal, dal, tenant_id=tenant_id, community_id=community_id, provider=provider
         )
     except ApiError as exc:
+        logger.warning("%s refused: %s: %s", request.path, type(exc).__name__, exc.message)
         return _err(exc)
     return MediaMessageResponse(success=True, message=f"{provider} key deactivated")
 
@@ -358,7 +361,8 @@ async def effective_tier_route(data: TierRequest) -> Any:
         tier = await media.effective_tier(
             async_dal, dal, tenant_id=data.tenant_id, community_id=data.community_id
         )
-    except media.CommunityScopeError:
+    except media.CommunityScopeError as exc:
+        logger.warning("media_tier.scope_mismatch: %s: %s", type(exc).__name__, exc)
         return error_response("community not found", 404, "NOT_FOUND")
     return TierResponse(tier=tier)
 
