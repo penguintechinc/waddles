@@ -158,6 +158,12 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
                 .map(|identity| Arc::new(identity.for_tool_call(mutation_event_id))),
             verified_scope: self.verified_scope,
             stage_metrics: Arc::clone(&self.stage_metrics),
+            // The direct caller of this hop: its own grants (not the target's)
+            // authorize the target's elevated primitives.
+            tool_caller: Some(super::ToolCaller {
+                app_id: plan.caller_app_id.clone(),
+                app_version: self.app_version,
+            }),
             tool: Some(ToolContext {
                 // Sticky: once any hop ran as a READ, the whole subtree is read-only.
                 read_only: ctx.read_only || !plan.write,

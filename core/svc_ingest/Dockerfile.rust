@@ -10,11 +10,8 @@
 # path-depends on the sibling `service_auth` crate for its dataplane scope-resolver
 # machine-JWT client (and `discord_mentions` for the Discord `allowed_mentions`
 # mass-mention guard on every message send) -- same layout as core/svc_process/Dockerfile.rust):
-#   docker build -f svc_ingest/Dockerfile.rust -t localhost:32000/waddlebot/svc-ingest-rust:alpha-<epoch> core/
-# ("svc-ingest-rust", not "svc-ingest" -- fix/helm-alpha-self-provisioning gives the Rust
-# build its own repository so it never collides with the Python Deployment's tag while
-# both coexist in alpha; the Helm chart's rustDataPlane.svcIngest.imageRepository default
-# matches this exactly.)
+#   docker build -f svc_ingest/Dockerfile.rust -t localhost:32000/waddlebot/svc-ingest:alpha-<epoch> core/
+# (matches the Helm chart's rustDataPlane.svcIngest.imageRepository default.)
 #
 # No SeaORM/database, so unlike svc_streaming's builder stage this one
 # needs no cmake/build-essential -- the M5 skeleton's `reqwest` (rustls-tls)

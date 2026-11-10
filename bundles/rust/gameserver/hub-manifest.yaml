@@ -1,0 +1,275 @@
+# hub-api install-pipeline manifest (schema_version 2) for the gameserver SERVICE bundle (`kind: service`,
+# trusted core seeder only). NO secrets and NO addresses here: server host:port + RCON password are HOST-side
+# connection secrets resolved by the host; the guest names a server only by its UUID.
+# The network capability (`gameserver-net`) is NOT yet a catalog permission/WIT import -- see README "Needs from S0";
+# until it lands every network tool fails loud with target-unavailable.
+schema_version: 2
+app_id: waddles.core.service.gameserver
+name: Game Server Service Bundle (Rust)
+version: 1.0.0
+feature: waddles.core.service
+module: core
+provider: builtin
+language: rust
+artifact: prebuilt
+execution_model: native
+is_default: false
+kind: service
+stages:
+  action:
+    entry: waddle:bundle/tool-provider#call
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 8000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+- id: storage.kv
+  justification: persists the per-community server registry (label, game, command
+    allowlist, caps), the rate-limit counters and the bounded RCON audit ring; holds
+    NO address and NO secret
+routes_to: []
+exported_tools:
+- name: gameserver.rcon.exec
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      server:
+        type: string
+        format: uuid
+      command:
+        type: string
+        minLength: 1
+        maxLength: 256
+    required:
+    - server
+    - command
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      server:
+        type: string
+        format: uuid
+      output:
+        type: string
+      truncated:
+        type: boolean
+- name: gameserver.status.query
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      server:
+        type: string
+        format: uuid
+      include_players:
+        type: boolean
+    required:
+    - server
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      server:
+        type: string
+        format: uuid
+      game:
+        type: string
+      online:
+        type: boolean
+      name:
+        type: string
+      map:
+        type:
+        - string
+        - 'null'
+      version:
+        type: string
+      players:
+        type: integer
+      max_players:
+        type: integer
+      bots:
+        type: integer
+      player_names:
+        type:
+        - array
+        - 'null'
+        items:
+          type: string
+- name: gameserver.server.list
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      servers:
+        type: array
+        items:
+          type: object
+          properties:
+            server:
+              type: string
+              format: uuid
+            label:
+              type: string
+            game:
+              enum:
+              - source
+              - minecraft
+            enabled:
+              type: boolean
+            allowlist:
+              type: array
+              items:
+                type: string
+            max_output:
+              type: integer
+            rate_per_min:
+              type: integer
+- name: gameserver.server.get
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      server:
+        type: string
+        format: uuid
+    required:
+    - server
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      server:
+        type: string
+        format: uuid
+      label:
+        type: string
+      game:
+        enum:
+        - source
+        - minecraft
+      enabled:
+        type: boolean
+      allowlist:
+        type: array
+        items:
+          type: string
+      max_output:
+        type: integer
+      rate_per_min:
+        type: integer
+- name: gameserver.server.register
+  access: write
+  risk: dangerous
+  required_scope: community:admin
+  input_schema:
+    type: object
+    properties:
+      server:
+        type: string
+        format: uuid
+      label:
+        type: string
+        minLength: 1
+        maxLength: 64
+      game:
+        enum:
+        - source
+        - minecraft
+      enabled:
+        type: boolean
+      allowlist:
+        type: array
+        maxItems: 64
+        items:
+          type: string
+          minLength: 1
+          maxLength: 128
+      max_output:
+        type: integer
+        minimum: 64
+        maximum: 8192
+      rate_per_min:
+        type: integer
+        minimum: 1
+        maximum: 60
+    required:
+    - server
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      server:
+        type: string
+        format: uuid
+      label:
+        type: string
+      game:
+        enum:
+        - source
+        - minecraft
+      enabled:
+        type: boolean
+      allowlist:
+        type: array
+        items:
+          type: string
+      max_output:
+        type: integer
+      rate_per_min:
+        type: integer
+- name: gameserver.server.remove
+  access: write
+  risk: dangerous
+  required_scope: community:admin
+  input_schema:
+    type: object
+    properties:
+      server:
+        type: string
+        format: uuid
+    required:
+    - server
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      server:
+        type: string
+        format: uuid
+      removed:
+        type: boolean
+- name: gameserver.audit.list
+  access: read
+  risk: normal
+  required_scope: community:admin
+  input_schema:
+    type: object
+    properties:
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 50
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      entries:
+        type: array
+        items:
+          type: object

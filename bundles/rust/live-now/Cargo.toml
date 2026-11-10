@@ -1,0 +1,32 @@
+[package]
+name = "waddle-bundle-live-now"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "live-now APP bundle: community who's-live aggregation across platforms (twitch/youtube/discord/kick) by consuming each platform service bundle's common <platform>.live.channels tool, plus `!live` and go-live announcements (deduped per stream session, cooldown, templated). Chat-stage app on the stage-next-tools world."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "=0.44.0", features = ["bitflags"] }
+# Sibling-crate path dependency (same repo, moves together): the SDK owns the tool client types.
+waddle-sdk-rs = { path = "../../../sdk/waddle-sdk-rs", version = "=0.1.0" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[package.metadata.component]
+package = "waddle:bundle-live-now"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-bundle"
+world = "stage-next-tools"
+
+[package.metadata.component.dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

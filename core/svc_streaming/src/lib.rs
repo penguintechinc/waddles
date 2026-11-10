@@ -16,6 +16,7 @@ pub mod ingest;
 pub mod orchestrator;
 pub mod pipeline;
 pub mod redact;
+pub mod rooms;
 pub mod rtc;
 pub mod spec_builder;
 pub mod store;
@@ -156,15 +157,18 @@ where
     state.engine = engine;
     state.hls_router_state = hls_router_state;
 
-    let orchestrator = Arc::new(orchestrator::Orchestrator::new(
-        config.clone(),
-        supervisor,
-        hls,
-        relay,
-        record,
-        registry,
-        state.whip_state.clone(),
-    ));
+    let orchestrator = Arc::new(
+        orchestrator::Orchestrator::new(
+            config.clone(),
+            supervisor,
+            hls,
+            relay,
+            record,
+            registry,
+            state.whip_state.clone(),
+        )
+        .with_whep_state(state.whep_state.clone()),
+    );
     tokio::spawn(Arc::clone(&orchestrator).run(ingest_rx));
 
     // --- Ingest listeners. `DbIngestAuth` resolves its DB connection
@@ -187,6 +191,13 @@ where
     let srt_listener = ingest::srt::SrtListener::from_config(&config).with_auth(srt_auth);
     tracing::info!(srt_port = config.cli.srt_port, "srt ingest listening");
     tokio::spawn(srt_listener.run(ingest_tx));
+
+    // --- WebRTC rooms host-API (mTLS; off + logged when HOST_API_* unset).
+    state.rooms.spawn_sweeper(Duration::from_secs(5));
+    state.whep_state.spawn_sweeper(Duration::from_secs(5));
+    rooms::host_api::spawn_from_env(config.cli.bind_addr, state.rooms.clone())
+        .await
+        .context("starting the webrtc rooms host-API listener")?;
 
     // --- HTTP + metrics.
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);

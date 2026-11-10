@@ -28,13 +28,38 @@ A helper class is folded into its owning app, not published as an extra bundle.
 | PastyGames/FFA | superpenguin-ffa | economy get_balance, adjust_balance, points_view; TickScheduler join window | Native + WASM validated; settles on the next command (no timer) |
 | PastyGames/Heist | superpenguin-heist | economy get_balance, adjust_balance, points_view; TickScheduler join window | Native + WASM validated; story condensed to one reply |
 | PastyGames/Steal | superpenguin-steal | economy get_balance, points_view, **transfer_from** (dangerous grant, contract fixture) | Native + WASM validated; fails loud ("steal not enabled") until the economy tool ships |
+| Fishing/* (game, shop, tournaments) | superpenguin-fishing | economy adjust_balance (tournament point rewards only); overlay alert_box | Native tests 99%; WASM built; ONE bundle (kv is per-app, so gold/inventory/shop/tournament share state) - see its README |
 
 The economy service exports remain unchanged by these apps (Steal depends on the separate `transfer_from` work). Each C# app owns wagering and
 maximum-bet policy and uses the atomic host ledger primitive for settlement.
 Balance and credit/debit operations reuse existing economy service tools.
 All write tools carry stable retry keys, and missing grants fail loudly.
 
-## Wave 4 (this branch: giveaway, event awards, wheel, audio, TTS, channel points)
+## Wave 3: utility and engagement ports
+
+All ten are `stage-next-tools` C# apps scaffolded by `scripts/superpenguin-scaffold/` (host adapter and export shims are the
+`superpenguin-first` boilerplate; manifests and READMEs come from `gen_manifests.py`). Role-gated commands read the host-stamped
+`is_mod` / `is_broadcaster` payload booleans and fail CLOSED when absent. Full per-bundle deviations are in each bundle's README and
+logic docstring.
+
+| Module | C# app | Service calls | Notes |
+|---|---|---|---|
+| Misc/LastSeen | superpenguin-lastseen | identity | Passive stamp on every chat message; target is an @mention |
+| Misc/DeathCounters | superpenguin-deathcounter | identity | Counter keyed on a moderator-set game label (no Twitch game lookup) |
+| Misc/DailyCounter | superpenguin-dailycounter | identity | `!dailyadd` stands in for sub events; no OBS text file |
+| Misc/QuoteSystem | superpenguin-quotes | identity | Permanent numbers (tombstones); search covers the 48 newest |
+| Misc/RaidTracker | superpenguin-raidtracker | identity | Incoming `channel.raid` history; outgoing `!raid` refused loudly (no platform raid tool) |
+| Misc/Top | superpenguin-top | economy `points_leaders`, reputation `leaderboard` | `!toptime`, `!loudest`, `!toptournaments`, `!toptickets` not ported: no service data |
+| Alias/* | superpenguin-alias | none | No re-dispatch capability: relays the resolved command text |
+| Misc/AutoTimers + TimerGroup | superpenguin-timers | identity | NO SCHEDULER: due groups are checked on every chat message |
+| Misc/Weather | superpenguin-weather | host http (`api.weatherapi.com`, GET) | Key is the `WEATHER_API_KEY` secret reference, never in the guest |
+| Features/ViewerFeature | superpenguin-viewers | identity | Presence + lurk policy only; the viewer table is the platform's |
+
+Validation: `make test-superpenguin-<name>` (xUnit, 90% line floor each), `make build-superpenguin-<name>-bundle` (real WASM),
+`make test-superpenguin-wave3-e2e` (all ten real components through the production executor against a simulated stage host),
+`scripts/ci/tests/test_superpenguin_wave3_manifests.py` (manifest sync, grants vs real service catalogs, secret-free weather).
+
+## Wave 4 (giveaway, event awards, wheel, audio, TTS, channel points)
 
 Authored from `manifest.src.yaml` (`make gen-superpenguin-manifests`); contracts in
 `scripts/ci/tests/test_superpenguin_wave4_contracts.py` (`make test-superpenguin-wave4-contracts`). Shared C# sources live in
@@ -61,13 +86,12 @@ not forward app config JSON (constants documented per bundle). Upstream binary m
 
 | Upstream modules | Decision | Service dependencies / remaining work |
 |---|---|---|
-| Fishing/* | Port C# game, shop and tournament policy | Shared economy/inventory tools where available; durable state and scheduling |
 | Games/Starship | Port C# story/voting app | Persisted state, scheduling, economy, overlay |
 | Games/Balloon, Parachute, Plinko, Curling, Golf, Racing, UfoClaw | Port C# game logic and matching visual assets | Shared overlay and economy tools; scheduling for join windows |
-| Alias/* | Port C# command alias policy | Shared command registry where available; Python alias overlap allowed |
-| Misc/AutoTimers, timer groups | Port C# announcement policy | Shared scheduler tools; activity thresholds remain app policy |
-| Misc/Weather | Port C# weather command | Reuse a weather service if available; Python weather is an app |
-| Features/ViewerFeature, Misc/LastSeen, DeathCounters, DailyCounter, QuoteSystem, RaidTracker, Top | Port C# engagement/command policy | Service reads for economy/reputation where applicable |
+| Alias/* | Ported in wave 3 (`superpenguin-alias`) | Relays the resolved command; real re-dispatch needs a host capability |
+| Misc/AutoTimers, timer groups | Ported in wave 3 (`superpenguin-timers`) | Tick-on-event emulation; a real scheduler (`scheduled-stage`) is still needed |
+| Misc/Weather | Ported in wave 3 (`superpenguin-weather`) | No weather service exists: host http egress + secret reference |
+| Features/ViewerFeature, Misc/LastSeen, DeathCounters, DailyCounter, QuoteSystem, RaidTracker, Top | Ported in wave 3 (`-viewers`, `-lastseen`, `-deathcounter`, `-dailycounter`, `-quotes`, `-raidtracker`, `-top`) | Top reads economy/reputation service leaderboards |
 | Shoutout/ClipService, Misc/ShoutoutSystem | Port C# shoutout/clip workflow | Twitch clip tools, shared AI and overlay; no tokens in app |
 | Ai/ScAi | Port C# domain prompts and command policy | Shared AI service; no separate model client |
 | Music/YtPlayer, banned songs/cooldowns, Metrics/SongRequests | Port C# request/queue policy | Shared music/media tools; no independent player transport |

@@ -1,0 +1,86 @@
+# hub-api install-pipeline manifest (bundle_manifest_v2, schema_version 2) for waddles.core.app.calendar.
+# Separate from bundle.yaml (compiler/SDK schema); the artifact is built by bundles/Dockerfile.core-bundles.
+# Keep version/permissions/requested_tools in lockstep with bundle.yaml.
+schema_version: 2
+app_id: waddles.core.app.calendar
+name: Calendar Bundle (Rust)
+version: 1.0.0
+feature: waddles.core.app
+module: core
+provider: builtin
+language: rust
+artifact: prebuilt
+execution_model: native
+is_default: false
+kind: app
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!calendar"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!calendar"]
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+egress: []
+# Storage decision: community kv, NOT `data.tables` (guest db import = one table, unfiltered query, no
+# transaction). See README "Storage".
+data:
+  tables: []
+limits:
+  timeout_ms: 8000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: storage.kv
+    justification: "events, RSVPs (keyed by user UUID), sync mappings and idempotency keys, all community-scoped"
+  - id: "chat.send:discord"
+    justification: "command replies to the invoking channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "command replies to the invoking channel via the relay host import (relay.push -> chat.send:twitch)"
+  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.create"
+    justification: "push approved events to Discord scheduled events (sync is OFF until a community admin enables it)"
+    params:
+      write: true
+  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.update"
+    justification: "push edits of synced events to Discord scheduled events"
+    params:
+      write: true
+  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.cancel"
+    justification: "cancel the Discord scheduled event when a synced event is cancelled"
+    params:
+      write: true
+  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.delete"
+    justification: "remove the Discord scheduled event when an admin hard-deletes a synced event"
+    params:
+      write: true
+requested_tools:
+  - tool: discord.scheduled_event.create
+    access: write
+    target_app_id: waddles.core.service.discord
+  - tool: discord.scheduled_event.update
+    access: write
+    target_app_id: waddles.core.service.discord
+  - tool: discord.scheduled_event.cancel
+    access: write
+    target_app_id: waddles.core.service.discord
+  - tool: discord.scheduled_event.delete
+    access: write
+    target_app_id: waddles.core.service.discord
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    approval_required: {type: boolean, default: false}
+    default_tz: {type: string, default: UTC, description: IANA timezone}
+    default_duration_minutes: {type: integer, minimum: 1, maximum: 10080, default: 60}
+    default_location: {type: string, minLength: 1, maxLength: 100, default: Online}
+    sync_discord: {type: boolean, default: false}
+    sync_twitch: {type: boolean, default: false}
+    sync_wix: {type: boolean, default: false}
+routes_to: []
