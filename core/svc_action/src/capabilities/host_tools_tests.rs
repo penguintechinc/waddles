@@ -19,7 +19,9 @@ use penguin_bundle_host::wire::{CapabilityKind, HostCallBody};
 use serde_json::{json, Value};
 
 use super::super::tests::{caps, discord_scope, scope, FakeRelayQueue};
-use super::super::{ActorId, CapabilityHandler, InvokeScope, StageCapabilities, ToolWiring};
+use super::super::{
+    ActorId, CapabilityHandler, InvokeScope, RelayOp, StageCapabilities, ToolWiring,
+};
 use super::{validate_args, OpClass};
 use crate::actor::{ActorDirectory, ActorError, BoxFuture as ActorFuture};
 use crate::host_api::ConnectionRegistry;
