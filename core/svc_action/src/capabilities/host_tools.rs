@@ -22,9 +22,8 @@
 //! caller (a created webhook's token is dropped); an op the platform table does not register is
 //! an explicit refusal, never a default.
 //!
-//! `TRANSITIONAL_DECLS` carries the declarations of the tools the Discord bundle exported
-//! BEFORE manifests could declare them (member roles, scheduled events). A manifest
-//! `host_op` always wins; delete the table once the Discord bundle declares them.
+//! Every platform service bundle (twitch, discord) declares its host tools in its own manifest;
+//! this module holds no per-tool table.
 
 use bundle_active_set::{HostOpDecl, HostOpOrigin, HostOpUserWire};
 use bundle_tool_call::{ToolPlan, ToolRefusal};
@@ -69,54 +68,6 @@ const EXTERNAL_GUILD_SCOPE_PLATFORMS: &[&str] = &["wix"];
 const MAX_TEXT_LIST: usize = 16;
 /// Largest wire `text` a host tool may build (platform bodies are bounded again by the consumer).
 const MAX_TEXT_BYTES: usize = 16_384;
-
-/// The Discord service bundle's pre-declaration tools: `(tool, decl-json)`. Same schema as the
-/// manifest `hostOp` summary object. See the module doc.
-const TRANSITIONAL_DECLS: &[(&str, &str)] = &[
-    (
-        "discord.member.roles.add",
-        r#"{"platform":"discord","op":"role.add","user":"user","userWire":"placeholder","text":"role_key","required":["user","role_key"],"origin":"guild_scope"}"#,
-    ),
-    (
-        "discord.member.roles.remove",
-        r#"{"platform":"discord","op":"role.remove","user":"user","userWire":"placeholder","text":"role_key","required":["user","role_key"],"origin":"guild_scope"}"#,
-    ),
-    (
-        "discord.member.roles.set",
-        r#"{"platform":"discord","op":"role.set","user":"user","userWire":"placeholder","textList":"role_keys","required":["user","role_keys"],"origin":"guild_scope"}"#,
-    ),
-    (
-        "discord.roles.list",
-        r#"{"platform":"discord","op":"role.list","origin":"guild_scope","returns":["roles"]}"#,
-    ),
-    (
-        "discord.scheduled_event.create",
-        r#"{"platform":"discord","op":"event.create","origin":"none","returns":["id"]}"#,
-    ),
-    (
-        "discord.scheduled_event.update",
-        r#"{"platform":"discord","op":"event.update","origin":"none","returns":["id"]}"#,
-    ),
-    (
-        "discord.scheduled_event.cancel",
-        r#"{"platform":"discord","op":"event.cancel","origin":"none"}"#,
-    ),
-    (
-        "discord.scheduled_event.delete",
-        r#"{"platform":"discord","op":"event.delete","origin":"none"}"#,
-    ),
-];
-
-/// The transitional declaration of `(target, tool)`, if it is one of the pre-declaration tools.
-#[must_use]
-pub(crate) fn transitional_decl(target: &str, tool: &str) -> Option<HostOpDecl> {
-    if target != super::event_sync::DISCORD_SERVICE_APP_ID {
-        return None;
-    }
-    let (_, raw) = TRANSITIONAL_DECLS.iter().find(|(t, _)| *t == tool)?;
-    let v: Value = serde_json::from_str(raw).ok()?;
-    HostOpDecl::from_summary(&v)
-}
 
 /// How the host executes a declared op.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -418,6 +369,19 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         self.authorize_service(scope, plan, permission)?;
         if class == OpClass::Event {
             return self.run_event_class(scope, plan).await;
+        }
+        // A `{user:<uuid>}` placeholder is resolved by the CONSUMER (svc_ingest), never put on
+        // the wire as a raw id. It is valid only for the typed role ops and for `mod.*` ops;
+        // a destructive moderation op still passes the protected-target check below, which
+        // detokenizes the user host-side for the check alone.
+        if decl.user_wire == HostOpUserWire::Placeholder
+            && !matches!(class, OpClass::Role(_))
+            && !matches!(class, OpClass::Registered(op) if op.starts_with("mod."))
+        {
+            return Err(ToolRefusal::Forbidden(format!(
+                "{NOT_SUPPORTED}: a placeholder user wire is valid only for role and moderation ops, not {:?}",
+                decl.op
+            )));
         }
         let what = decl.op.as_str();
         // Phase 1 -- validation only (no I/O): an invalid call costs no readiness probe, rate
@@ -750,4 +714,4 @@ fn shape_result(decl: &HostOpDecl, op: &str, ack: &Value) -> Result<Value, ToolR
 
 #[cfg(test)]
 #[path = "host_tools_tests.rs"]
-mod host_tools_tests;
+pub(crate) mod host_tools_tests;
