@@ -28,8 +28,14 @@ from typing import Any
 
 import grpc
 from flask_core.service_jwt import ServiceJwtIssuer
-from waddles.hub.internal.v1 import identity_pb2_grpc, key_pb2_grpc, service_auth_pb2_grpc
+from waddles.hub.internal.v1 import (
+    dataplane_scope_pb2_grpc,
+    identity_pb2_grpc,
+    key_pb2_grpc,
+    service_auth_pb2_grpc,
+)
 
+from grpc_internal.dataplane_scope_servicer import DATAPLANE_SCOPE_SCOPES, DataplaneScopeServicer
 from grpc_internal.interceptors import (
     AuthInterceptor,
     DeadlineInterceptor,
@@ -40,6 +46,10 @@ from grpc_internal.service_auth_servicer import BOOTSTRAP_METHODS, ServiceAuthSe
 from grpc_internal.servicers import REQUIRED_SCOPES, IdentityServicer, KeyServicer
 
 logger = logging.getLogger(__name__)
+
+#: Every served method -> required scope. One entry per service-area module, merged here, so a new
+#: area adds a module + one line below instead of editing a shared table.
+ALL_REQUIRED_SCOPES: dict[str, str] = {**REQUIRED_SCOPES, **DATAPLANE_SCOPE_SCOPES}
 
 #: Rejects any message over 4 MiB either direction -- generous for a
 #: <=100-item batch, small enough that one internal caller can't exhaust
@@ -90,7 +100,7 @@ def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInt
         DeadlineInterceptor(),
         AuthInterceptor(
             verifier=issuer.as_verifier(),
-            required_scopes=REQUIRED_SCOPES,
+            required_scopes=ALL_REQUIRED_SCOPES,
             public_methods=BOOTSTRAP_METHODS,
         ),
         RateLimitInterceptor(
@@ -138,6 +148,9 @@ async def build_internal_grpc_server(
     )
     identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(async_dal), server)
     key_pb2_grpc.add_KeyServiceServicer_to_server(KeyServicer(), server)
+    dataplane_scope_pb2_grpc.add_DataplaneScopeServiceServicer_to_server(
+        DataplaneScopeServicer(async_dal), server
+    )
     service_auth_pb2_grpc.add_ServiceAuthServiceServicer_to_server(
         ServiceAuthServicer(issuer, audit_logger=audit_logger), server
     )

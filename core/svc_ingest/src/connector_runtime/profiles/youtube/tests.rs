@@ -64,7 +64,8 @@ fn derived_poll_config_golden() {
         ConnKey {
             platform: "youtube",
             community_id: 7,
-            connection_id: 12
+            connection_id: 12,
+            lane: Default::default(),
         }
     );
     assert_eq!(d.tenant_id, 1, "the feed's tenant, not a placeholder");
@@ -412,6 +413,7 @@ fn key() -> ConnKey {
         platform: PLATFORM,
         community_id: 7,
         connection_id: 12,
+        lane: Default::default(),
     }
 }
 
