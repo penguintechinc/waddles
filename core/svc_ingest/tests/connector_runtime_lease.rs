@@ -33,6 +33,7 @@ fn fresh_key(platform: &'static str) -> ConnKey {
         platform,
         community_id: 1,
         connection_id: u as i64 & i64::MAX,
+        lane: Default::default(),
     }
 }
 

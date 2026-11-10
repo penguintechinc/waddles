@@ -34,5 +34,5 @@
     "mod.add",
     "mod.remove"
   ],
-  "kick": []
+  "kick": ["chat.send", "mod.ban", "mod.timeout", "mod.unban"]
 }
