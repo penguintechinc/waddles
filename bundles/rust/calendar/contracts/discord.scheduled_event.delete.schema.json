@@ -1,0 +1,16 @@
+{
+  "tool": "discord.scheduled_event.delete",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "event_id": {
+        "type": "string",
+        "pattern": "^[0-9]{1,20}$"
+      }
+    },
+    "required": [
+      "event_id"
+    ],
+    "additionalProperties": false
+  }
+}

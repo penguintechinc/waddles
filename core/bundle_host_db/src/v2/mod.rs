@@ -15,6 +15,13 @@ mod plan;
 pub mod schema;
 pub mod wire;
 
+#[cfg(test)]
+mod testkit;
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
+
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;

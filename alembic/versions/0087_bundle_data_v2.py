@@ -18,8 +18,8 @@ can ever collide with them):
   enforcing the quota). Same tenant+community RLS as the bundle tables
   themselves, so one community can never read or move another's counters.
 
-Revision ID: 0082_bundle_data_v2
-Revises: 0081_spectrum_conn_resource
+Revision ID: 0087_bundle_data_v2
+Revises: 0086_wix_api_credential
 Create Date: 2026-11-07
 """
 
@@ -27,8 +27,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0082_bundle_data_v2"
-down_revision = "0081_spectrum_conn_resource"
+revision = "0087_bundle_data_v2"
+down_revision = "0086_wix_api_credential"
 branch_labels = None
 depends_on = None
 
