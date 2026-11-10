@@ -974,8 +974,10 @@ def parse_permission_declarations(
     `justification` (Sec2.3); `storage.tables` requires `params.schema` and
     vice versa (Sec2.3's mutual-requirement rule); `overlay.media` requires
     a non-empty `allowed_hosts` and a `max_duration_seconds` within the
-    catalog ceiling; `reputation.*.write` bounds `delta_min`/`delta_max`
-    within `|delta| <= 5` and validates every `reason_codes` entry;
+    catalog ceiling unless it declares `params: {mode: data}` (data-only
+    envelopes, no media -- any other param is then rejected);
+    `reputation.*.write` bounds `delta_min`/`delta_max` within
+    `|delta| <= 5` and validates every `reason_codes` entry;
     `economy.wager`/`economy.transfer` (issue #714) each require their own
     declared per-call bound (`params.max_bet` / `params.max_amount`) as an
     integer in `1..=1000`, and reject the other permission's bound param.
@@ -1044,7 +1046,22 @@ def parse_permission_declarations(
                 "params.schema is only valid for storage.tables",
             )
 
-        if permission_id == "overlay.media":
+        if permission_id == "overlay.media" and params.get("mode") == "data":
+            # Data-only mode: the bundle pushes overlay envelopes (overlay/SCHEMA.md
+            # `{extra: envelope}`) and never references external media, so any
+            # media-mode param is a contradiction -- reject loudly.
+            _require(
+                set(params) == {"mode"},
+                "invalid_overlay_data_mode",
+                "overlay.media mode=data forbids params other than mode "
+                f"(got {sorted(set(params) - {'mode'})})",
+            )
+        elif permission_id == "overlay.media":
+            _require(
+                params.get("mode", "media") == "media",
+                "invalid_overlay_mode",
+                f"overlay.media mode must be 'media' or 'data', got {params.get('mode')!r}",
+            )
             allowed_hosts = params.get("allowed_hosts") or []
             _require(
                 bool(allowed_hosts), "invalid_overlay_hosts", "overlay.media requires allowed_hosts"

@@ -6,7 +6,7 @@ feature: waddles.core.service
 module: core
 provider: builtin
 language: rust
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: AGPL-3.0-or-later
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/music-soundcloud
 artifact: component
