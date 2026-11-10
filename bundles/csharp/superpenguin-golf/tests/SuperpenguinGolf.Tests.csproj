@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    xUnit tests for the `superpenguin-golf` bundle's logic, on the normal host CLR. Same approach as the other C# bundles: the
+    bundle's pure source files are linked (not copied) because the bundle project itself pins the wasi-wasm RuntimeIdentifier and
+    cannot be a `dotnet test` target; the wit-bindgen shims/adapter are exercised by the real-executor e2e instead. The shared
+    `superpenguin-dropgame-core` library is a normal ProjectReference (gated by its own test project), and its in-memory host world
+    (`support/DropTestWorld.cs`) is linked from there rather than copied.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>WaddleBundleSuperpenguinGolf.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="coverlet.collector" Version="10.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../../sdk/waddle-sdk-cs/waddle-sdk-cs.csproj" />
+    <ProjectReference Include="../../superpenguin-dropgame-core/DropGameCore.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../SlideShotPhysics.cs" Link="SlideShotPhysics.cs" />
+    <Compile Include="../GolfEngine.cs" Link="GolfEngine.cs" />
+    <Compile Include="../GolfLogic.cs" Link="GolfLogic.cs" />
+    <Compile Include="../GolfDispatch.cs" Link="GolfDispatch.cs" />
+    <Compile Include="../../superpenguin-dropgame-core/tests/support/DropTestWorld.cs" Link="DropTestWorld.cs" />
+    <Compile Include="../../../../sdk/waddle-sdk-cs/tests/Fakes.cs" Link="SdkFakes.cs" />
+    <Compile Include="../../../../sdk/waddle-sdk-cs/tests/FakesNext.cs" Link="SdkFakesNext.cs" />
+  </ItemGroup>
+
+</Project>
