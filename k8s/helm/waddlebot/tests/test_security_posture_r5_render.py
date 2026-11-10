@@ -42,8 +42,8 @@ _ALL_ENVS = (*_SHIPPING, "values-alpha.yaml", "values-local.yaml", "values-ci.ya
 # `baseline`, not `restricted` -- it is asserted separately in TestPodSecurityAdmission.
 _RESTRICTED_ENVS = (*_SHIPPING, "values-alpha.yaml", "values-ci.yaml")
 # Workloads whose egress/ingress is governed by a dedicated, pre-existing CNP rather than the
-# generic per-workload one (bundle-executors have no listener and an explicit deny-all ingress).
-_OWN_CNP_COMPONENTS = ("bundle-executor", "bundle-executor-action")
+# generic per-workload one (the svc-bundles-executor has no listener and an explicit deny-all ingress).
+_OWN_CNP_COMPONENTS = ("svc-bundles-executor",)
 _RFC1918_AND_METADATA = (
     "10.0.0.0/8",
     "172.16.0.0/12",

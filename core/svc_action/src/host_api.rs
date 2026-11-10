@@ -888,6 +888,8 @@ pub struct ConnectionRegistry {
     /// `ConnectionRegistry::new()` call sites across this crate's tests
     /// don't all need updating for a metric they don't exercise.
     dead_lettered_no_executor_total: std::sync::OnceLock<prometheus::IntCounter>,
+    /// Round-robin turn counter behind [`Self::pick_dispatch`].
+    dispatch_rotation: AtomicU64,
 }
 
 impl ConnectionRegistry {
@@ -984,13 +986,37 @@ impl ConnectionRegistry {
             .into_iter()
             .max_by_key(|(id, _)| *id)
             .map(|(_, conn)| conn);
+        self.track_zero_since(active.is_some());
+        active
+    }
+
+    /// Records whether a live executor was just observed, driving
+    /// [`Self::duration_without_executor`]'s "zero since" clock.
+    fn track_zero_since(&self, any_live: bool) {
         let mut zero_since = self.zero_since.lock().unwrap_or_else(|e| e.into_inner());
-        if active.is_some() {
+        if any_live {
             *zero_since = None;
         } else {
             zero_since.get_or_insert_with(Instant::now);
         }
-        active
+    }
+
+    /// Picks the live executor session to send ONE unit of work to,
+    /// **round-robin** across every live session (ordered by id). With N
+    /// executor replicas each connected to this stage, successive calls spread
+    /// work across all of them instead of pinning the newest; each call still
+    /// resolves to exactly one connection, so a work item is never delivered
+    /// to two executors. `None` when no session is live (callers fail loud,
+    /// `executor_unavailable`). [`Self::active`] stays "newest wins" for the
+    /// health/readiness probes, which only ask "is any executor connected".
+    pub fn pick_dispatch(&self) -> Option<Arc<Connection>> {
+        let mut live = self.prune_and_snapshot();
+        live.sort_by_key(|(id, _)| *id);
+        self.track_zero_since(!live.is_empty());
+        let count = u64::try_from(live.len()).ok().filter(|c| *c > 0)?;
+        let turn = self.dispatch_rotation.fetch_add(1, Ordering::Relaxed);
+        let index = usize::try_from(turn % count).ok()?;
+        live.into_iter().nth(index).map(|(_, conn)| conn)
     }
 
     /// How long this registry has held zero live executor sessions --
@@ -2366,6 +2392,44 @@ mod tests {
             Arc::ptr_eq(&second, &conn_b),
             "selection must be stable across repeated calls while both remain live"
         );
+    }
+
+    /// Multi-replica dispatch: with three executor replicas connected,
+    /// `pick_dispatch` hands successive work items to each of them in turn
+    /// (every connection served equally), never to a closed session, and each
+    /// call resolves to exactly one connection.
+    #[tokio::test]
+    async fn pick_dispatch_round_robins_across_live_executors_and_skips_closed() {
+        let registry = ConnectionRegistry::new();
+        assert!(registry.pick_dispatch().is_none(), "no executor, no pick");
+        let mut conns = Vec::new();
+        for _ in 0..3 {
+            let (tx_x, _rx_x) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+            let conn = Connection::new(tx_x);
+            registry.register(Arc::clone(&conn));
+            conns.push((conn, _rx_x));
+        }
+        let mut counts = [0usize; 3];
+        for _ in 0..9 {
+            let picked = registry.pick_dispatch().expect("a live executor exists");
+            let idx = conns
+                .iter()
+                .position(|(c, _)| Arc::ptr_eq(c, &picked))
+                .expect("picked a registered connection");
+            counts[idx] += 1;
+        }
+        assert_eq!(counts, [3, 3, 3], "work must spread evenly across replicas");
+
+        conns[1].0.mark_closed();
+        for _ in 0..6 {
+            let picked = registry.pick_dispatch().expect("two executors remain");
+            assert!(
+                !Arc::ptr_eq(&picked, &conns[1].0),
+                "a closed executor must never be picked"
+            );
+        }
+        // `active()` (health/readiness) is unaffected: still the newest live.
+        assert!(Arc::ptr_eq(&registry.active().expect("live"), &conns[2].0));
     }
 
     /// (d) The exact alpha 2026-10-03 sequence -- connect, close, reconnect

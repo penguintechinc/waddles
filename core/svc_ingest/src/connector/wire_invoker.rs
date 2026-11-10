@@ -96,6 +96,9 @@ pub enum AttachError {
     /// The executor speaks a different protocol version.
     #[error("host-api protocol version {0} is not supported (want {PROTOCOL_VERSION})")]
     ProtocolVersion(u32),
+    /// The link already holds [`MAX_SESSIONS`] live executor sessions.
+    #[error("host-api link already holds the maximum number of executor sessions")]
+    TooManySessions,
 }
 
 /// An executor's answer to one `invoke`: its `result` or typed `error`.
@@ -213,10 +216,19 @@ impl Session {
     }
 }
 
-/// svc_ingest's side of the executor host-API connection: at most one live
-/// [`Session`], replaced when the executor reconnects.
+/// Most executor sessions one link holds at once. One session per executor
+/// replica (plus a transient overlap while a replica reconnects); the cap
+/// bounds memory if a misbehaving peer keeps dialing.
+const MAX_SESSIONS: usize = 64;
+
+/// svc_ingest's side of the executor host-API connection: one live
+/// [`Session`] per attached executor replica. Each `invoke` goes to exactly ONE
+/// session, chosen round-robin, so N replicas share the connector work without
+/// any item reaching two executors. A replica that reconnects simply adds a
+/// fresh session; the old one is dropped when its connection ends.
 pub struct ExecutorLink {
-    current: Mutex<Option<Arc<Session>>>,
+    sessions: Mutex<Vec<Arc<Session>>>,
+    rotation: AtomicU64,
     call_timeout: Duration,
     max_in_flight: usize,
     enabled_flags: Arc<HashSet<String>>,
@@ -229,7 +241,8 @@ impl ExecutorLink {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            current: Mutex::new(None),
+            sessions: Mutex::new(Vec::new()),
+            rotation: AtomicU64::new(0),
             call_timeout: DEFAULT_CALL_TIMEOUT,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
             enabled_flags: Arc::new(HashSet::new()),
@@ -276,23 +289,53 @@ impl ExecutorLink {
         self
     }
 
-    /// True when a live (not closed) executor session is attached.
+    /// True when at least one live (not closed) executor session is attached.
     #[must_use]
     pub fn is_attached(&self) -> bool {
-        self.current_session().is_some()
+        self.attached_count() > 0
     }
 
-    /// The live session, if any (a closed one counts as none).
-    fn current_session(&self) -> Option<Arc<Session>> {
-        let guard = self.current.lock().ok()?;
-        guard.as_ref().filter(|s| !s.is_closed()).cloned()
+    /// How many live (not closed) executor sessions are attached -- one per
+    /// connected executor replica.
+    #[must_use]
+    pub fn attached_count(&self) -> usize {
+        match self.sessions.lock() {
+            Ok(guard) => guard.iter().filter(|s| !s.is_closed()).count(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .iter()
+                .filter(|s| !s.is_closed())
+                .count(),
+        }
+    }
+
+    /// The live sessions in the order the next `invoke` should try them:
+    /// rotated by a per-call round-robin turn so successive calls start at
+    /// successive replicas. A caller tries the first and only moves to the next
+    /// when the first REFUSED the hand-off (cap hit / writer gone), so one work
+    /// item is still executed by at most one executor.
+    fn ordered_sessions(&self) -> Vec<Arc<Session>> {
+        let guard = match self.sessions.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut live: Vec<Arc<Session>> =
+            guard.iter().filter(|s| !s.is_closed()).cloned().collect();
+        if live.is_empty() {
+            return live;
+        }
+        let turn = self.rotation.fetch_add(1, Ordering::Relaxed);
+        let start = usize::try_from(turn % live.len() as u64).unwrap_or(0);
+        live.rotate_left(start);
+        live
     }
 
     /// Runs the `hello`/`hello-ok` handshake on `io` (an accepted executor
     /// connection), then serves it in the background: replies are routed to
     /// their callers, `ping` gets `pong`, and any `host-call` is refused
-    /// typed. Replaces (and closes) a previous session, since one executor
-    /// holds one connection. Returns once the handshake completed.
+    /// typed. The session is ADDED alongside the other replicas' sessions (it
+    /// never replaces or closes them); at most [`MAX_SESSIONS`] are held and a
+    /// connection past that is refused. Returns once the handshake completed.
     pub async fn attach<IO>(self: &Arc<Self>, io: IO) -> Result<(), AttachError>
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -319,6 +362,19 @@ impl ExecutorLink {
                 return Err(AttachError::ProtocolVersion(body.protocol_version));
             }
             _ => return Err(AttachError::UnexpectedFrame),
+        }
+        if self.attached_count() >= MAX_SESSIONS {
+            let refusal = Frame::new(
+                hello_id,
+                Message::Error(ErrorBody {
+                    code: ErrorCode::HostCallFailed,
+                    message: "too many executor sessions".to_string(),
+                    detail: None,
+                }),
+            );
+            // Best effort: the connection is being refused either way.
+            let _ = write_frame(&mut writer, &refusal).await;
+            return Err(AttachError::TooManySessions);
         }
         let ok = Frame::new(
             hello_id,
@@ -369,27 +425,30 @@ impl ExecutorLink {
             info!("host-api executor session ended");
         });
 
-        let previous = match self.current.lock() {
-            Ok(mut guard) => guard.replace(session),
-            Err(poisoned) => poisoned.into_inner().replace(session),
+        let attached = {
+            let mut guard = match self.sessions.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.retain(|s| !s.is_closed());
+            guard.push(session);
+            guard.len()
         };
-        if let Some(previous) = previous {
-            previous.close();
-        }
-        info!("host-api executor session attached");
+        info!(
+            executor_sessions = attached,
+            "host-api executor session attached"
+        );
         Ok(())
     }
 
-    /// Drops `session` from `current` when it is still the installed one (a
-    /// newer reconnect must not be evicted by an older reader finishing).
+    /// Drops exactly `session` (and any other closed one) from the held set --
+    /// a finishing reader never evicts a different replica's live session.
     fn clear_if_current(&self, session: &Arc<Session>) {
-        let mut guard = match self.current.lock() {
+        let mut guard = match self.sessions.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if guard.as_ref().is_some_and(|s| Arc::ptr_eq(s, session)) {
-            *guard = None;
-        }
+        guard.retain(|s| !Arc::ptr_eq(s, session) && !s.is_closed());
     }
 
     /// Sends one `invoke` and awaits its `result`/`error`, bounded by the
@@ -401,9 +460,10 @@ impl ExecutorLink {
         export: ExportKind,
         payload: serde_json::Value,
     ) -> Result<ResultBody, ConnectorInvokeError> {
-        let session = self
-            .current_session()
-            .ok_or_else(|| unavailable("no executor is connected to this stage"))?;
+        let sessions = self.ordered_sessions();
+        if sessions.is_empty() {
+            return Err(unavailable("no executor is connected to this stage"));
+        }
         // `build-request` has no `ConnectionCtx`: the host records the
         // invocation so the cutover-flag read it triggers can be attributed
         // (see `CallOrigin::BuildRequest`); everything else is `Other`.
@@ -413,33 +473,54 @@ impl ExecutorLink {
             },
             _ => CallOrigin::Other,
         };
-        let (id, rx) = session.register(origin)?;
+        let frame_for = |id: u64| {
+            Frame::new(
+                id,
+                Message::Invoke(InvokeBody {
+                    app_id: app_id.to_string(),
+                    digest: digest.to_string(),
+                    export,
+                    payload: payload.clone(),
+                    deadline_ms: duration_ms(self.call_timeout),
+                    trace: None,
+                }),
+            )
+        };
+        // Hand the invocation to the first replica that accepts it. A session
+        // that refuses the hand-off (in-flight cap, dead writer) never saw the
+        // call, so moving on to the next cannot double-execute it.
+        let mut handed_off = None;
+        let mut last_err = unavailable("no executor is connected to this stage");
+        for session in &sessions {
+            let (id, rx) = match session.register(origin.clone()) {
+                Ok(slot) => slot,
+                Err(e) => {
+                    last_err = e;
+                    continue;
+                }
+            };
+            if session
+                .writer
+                .send_timeout(frame_for(id), WRITE_TIMEOUT)
+                .await
+                .is_err()
+            {
+                session.forget(id);
+                last_err = unavailable("could not hand the invocation to the executor");
+                continue;
+            }
+            handed_off = Some((Arc::clone(session), id, rx));
+            break;
+        }
+        let Some((session, id, rx)) = handed_off else {
+            return Err(last_err);
+        };
         // Frees the slot however this future ends, including being dropped
         // mid-await (cancellation); `forget` is idempotent.
         let _slot = SlotGuard {
             session: &session,
             id,
         };
-        let frame = Frame::new(
-            id,
-            Message::Invoke(InvokeBody {
-                app_id: app_id.to_string(),
-                digest: digest.to_string(),
-                export,
-                payload,
-                deadline_ms: duration_ms(self.call_timeout),
-                trace: None,
-            }),
-        );
-        if session
-            .writer
-            .send_timeout(frame, WRITE_TIMEOUT)
-            .await
-            .is_err()
-        {
-            session.forget(id);
-            return Err(unavailable("could not hand the invocation to the executor"));
-        }
         debug!(id, export = export.as_str(), "connector invoke sent");
         match tokio::time::timeout(self.call_timeout + REPLY_GRACE, rx).await {
             Err(_elapsed) => {
@@ -1186,7 +1267,7 @@ mod tests {
         let inv = WireConnectorInvoker::new(Arc::clone(&link), registry());
         let err = inv.on_connect(PLATFORM, &ctx()).await.unwrap_err();
         assert!(matches!(err, ConnectorInvokeError::Unavailable(ref m) if m.contains("in time")));
-        let session = link.current_session().unwrap();
+        let session = link.ordered_sessions().remove(0);
         assert!(session.pending.lock().unwrap().is_empty());
     }
 
@@ -1201,7 +1282,7 @@ mod tests {
             async move { inv.on_heartbeat_due(PLATFORM, &ctx()).await }
         });
         let (_id, _) = exec.next_invoke().await;
-        let session = link.current_session().unwrap();
+        let session = link.ordered_sessions().remove(0);
         assert_eq!(session.pending.lock().unwrap().len(), 1);
         call.abort();
         let _ = call.await;
@@ -1342,27 +1423,92 @@ mod tests {
         first.await.unwrap().unwrap();
     }
 
+    /// Several executor replicas stay attached side by side: a second attach
+    /// never replaces or fails the first replica's session or its in-flight
+    /// calls, and both are counted.
     #[tokio::test]
-    async fn reattaching_replaces_the_old_session_and_fails_its_calls() {
-        let (link, inv, _old) = rig().await;
+    async fn a_second_executor_attaches_alongside_the_first_without_failing_its_calls() {
+        let (link, inv, mut first) = rig().await;
         let pending = tokio::spawn({
             let inv = Arc::clone(&inv);
             async move { inv.on_connect(PLATFORM, &ctx()).await }
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let mut fresh = FakeExecutor::attach(&link).await;
+        let (id, _) = first.next_invoke().await;
+        let _second = FakeExecutor::attach(&link).await;
+        assert_eq!(link.attached_count(), 2, "both replicas stay attached");
+        first
+            .reply_ok(id, serde_json::json!({"bytes":"","secret_refs":[]}))
+            .await;
+        pending
+            .await
+            .unwrap()
+            .expect("the first replica's in-flight call must survive the second attach");
+    }
+
+    /// Real-path distribution: with two replicas attached, successive invokes
+    /// alternate between them, and every invoke reaches EXACTLY ONE replica
+    /// (never both, never neither).
+    #[tokio::test]
+    async fn invokes_are_spread_across_replicas_and_each_reaches_exactly_one() {
+        let (link, inv, mut a) = rig().await;
+        let mut b = FakeExecutor::attach(&link).await;
+        let mut got_a = 0usize;
+        let mut got_b = 0usize;
+        for _ in 0..6 {
+            let call = tokio::spawn({
+                let inv = Arc::clone(&inv);
+                async move { inv.on_disconnect(PLATFORM, &ctx(), "r").await }
+            });
+            let (which, id) = tokio::select! {
+                (id, _) = a.next_invoke() => (0usize, id),
+                (id, _) = b.next_invoke() => (1usize, id),
+            };
+            if which == 0 {
+                got_a += 1;
+                a.reply_ok(id, serde_json::json!({})).await;
+            } else {
+                got_b += 1;
+                b.reply_ok(id, serde_json::json!({})).await;
+            }
+            call.await.unwrap().unwrap();
+        }
+        assert_eq!((got_a, got_b), (3, 3), "work spreads evenly over replicas");
+    }
+
+    /// A replica that disconnects drops out of the rotation; the survivor keeps
+    /// serving, and only when the last one is gone is the link unavailable.
+    #[tokio::test]
+    async fn a_departed_replica_leaves_the_rotation_and_the_survivor_serves() {
+        let (link, inv, a) = rig().await;
+        let mut b = FakeExecutor::attach(&link).await;
+        drop(a);
+        for _ in 0..50 {
+            if link.attached_count() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(link.attached_count(), 1);
+        for _ in 0..3 {
+            let call = tokio::spawn({
+                let inv = Arc::clone(&inv);
+                async move { inv.on_disconnect(PLATFORM, &ctx(), "r").await }
+            });
+            let (id, _) = b.next_invoke().await;
+            b.reply_ok(id, serde_json::json!({})).await;
+            call.await.unwrap().unwrap();
+        }
+        drop(b);
+        for _ in 0..50 {
+            if !link.is_attached() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert!(matches!(
-            pending.await.unwrap().unwrap_err(),
+            inv.on_disconnect(PLATFORM, &ctx(), "r").await.unwrap_err(),
             ConnectorInvokeError::Unavailable(_)
         ));
-        // The new session serves.
-        let call = tokio::spawn({
-            let inv = Arc::clone(&inv);
-            async move { inv.on_disconnect(PLATFORM, &ctx(), "r").await }
-        });
-        let (id, _) = fresh.next_invoke().await;
-        fresh.reply_ok(id, serde_json::json!({})).await;
-        call.await.unwrap().unwrap();
     }
 
     #[tokio::test]

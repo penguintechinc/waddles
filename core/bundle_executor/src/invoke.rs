@@ -439,6 +439,14 @@ impl<S: ComponentSource> Executor<S> {
         self
     }
 
+    /// Flips this executor to refuse new `load`/`invoke` work
+    /// (`SHUTTING_DOWN`) without waiting. A multi-stage process calls this on
+    /// every per-stage executor before draining any of them, so no stage keeps
+    /// accepting work while another drains. Idempotent.
+    pub fn begin_drain(&self) {
+        self.draining.store(true, Ordering::SeqCst);
+    }
+
     /// Graceful-shutdown drain (SIGTERM): refuses new `load`/`invoke`
     /// requests (`SHUTTING_DOWN`) and waits up to `deadline` for every
     /// in-flight invoke and compile to release its permit. Returns
@@ -446,7 +454,7 @@ impl<S: ComponentSource> Executor<S> {
     /// the caller can still exit 0 -- a rollout must not hang on a stuck
     /// guest. Idempotent.
     pub async fn drain(&self, deadline: Duration) -> DrainOutcome {
-        self.draining.store(true, Ordering::SeqCst);
+        self.begin_drain();
         let started = Instant::now();
         // Acquiring EVERY permit succeeds only once all in-flight holders
         // have released theirs; held until return, which also blocks any
