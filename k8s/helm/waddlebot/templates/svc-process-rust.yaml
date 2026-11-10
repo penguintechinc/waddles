@@ -72,7 +72,7 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-process-rust
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcProcess.imageRepository | default "svc-process-rust") "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcProcess.imageRepository | default "svc-process") "imageTag" .Values.global.imageTag) }}"
         # Values-driven (.Values.global.imagePullPolicy, default IfNotPresent). Deploys carry
         # a unique per-deploy global.imageTag, so a stale same-tag node cache can no longer
         # occur -- the old hardcoded Always was unnecessary and fatal for locally-loaded

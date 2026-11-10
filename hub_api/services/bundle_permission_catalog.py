@@ -97,6 +97,12 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     "storage.tables": "normal",
     "storage.objects": "normal",
     "overlay.media": "dangerous",
+    #: Control plane of svc-streaming's WebRTC rooms/SFU (`webrtc` host capability):
+    #: create/close rooms, mint short-lived room join tokens, route tracks. `dangerous`:
+    #: it opens real-time media ingress/egress and mints credentials. Host wiring
+    #: (gate PermissionFamily + stage forwarding) is separate work -- see the webrtc
+    #: service bundle PR ("Needs from host seams (S0)").
+    "webrtc.control": "dangerous",
     #: Read-only subscribe to svc-streaming-rust's stream-lifecycle hooks
     #: (`on-start`/`on-stop`/`on-segment`/`on-recording-ready`,
     #: `wit/waddle-bundle/stage.wit`'s `streaming-lifecycle` export,
