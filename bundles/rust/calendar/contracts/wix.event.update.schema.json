@@ -1,0 +1,46 @@
+{
+  "tool": "wix.event.update",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "event_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "title": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      },
+      "description": {
+        "type": "string",
+        "maxLength": 1000
+      },
+      "start_date": {
+        "type": "string"
+      },
+      "end_date": {
+        "type": "string"
+      },
+      "timezone": {
+        "type": "string",
+        "minLength": 1
+      },
+      "location": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      }
+    },
+    "required": [
+      "event_id",
+      "title",
+      "description",
+      "start_date",
+      "end_date",
+      "timezone",
+      "location"
+    ],
+    "additionalProperties": false
+  }
+}

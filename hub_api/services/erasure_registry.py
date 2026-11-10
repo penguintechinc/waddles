@@ -382,6 +382,11 @@ RULES: tuple[Rule, ...] = (
     ref("app_version_uploads", "requested_by", reason=_ACTOR),
     ref("auto_shoutout_creators", "added_by", reason=_ACTOR),
     ref("bot_detection_results", "reviewed_by", reason=_ACTOR),
+    ref(
+        "bundle_platform_table_audit",
+        "user_uuid",
+        reason=_ACTOR + "; per-write ledger, old/new values are allowlisted non-PII columns only",
+    ),
     ref("bundle_tenant_availability", "updated_by", reason=_ACTOR),
     ref("calendar_event_admins", "revoked_by", reason=_ACTOR),
     ref("calendar_tickets", "cancelled_by", "checked_in_by", "transferred_by", reason=_ACTOR),

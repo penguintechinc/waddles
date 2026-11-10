@@ -25,7 +25,12 @@ public sealed class FakeKvClient : IKvClient
         SetCalls.Add((key, value, ttlSeconds));
     }
 
-    public void Delete(string key) => _store.Remove(key);
+    public Action<string>? BeforeDelete { get; set; }
+    public void Delete(string key)
+    {
+        BeforeDelete?.Invoke(key);
+        _store.Remove(key);
+    }
 
     public long Increment(string key, long delta, uint ttlSeconds)
     {
@@ -164,7 +169,17 @@ public sealed class FakeHttpClient : IHttpClient
 
 public sealed class FakeFlagsClient : IFlagsClient
 {
-    public bool Enabled(string key, bool defaultValue) => defaultValue;
+    /// <summary>Per-key answers; an unlisted key echoes the supplied default, like a flag-server outage.</summary>
+    public Dictionary<string, bool> Overrides { get; } = [];
+
+    public List<(string Key, bool DefaultValue)> Calls { get; } = [];
+
+    public bool Enabled(string key, bool defaultValue)
+    {
+        Calls.Add((key, defaultValue));
+        return Overrides.TryGetValue(key, out var value) ? value : defaultValue;
+    }
+
     public string Tier() => "free";
 }
 
@@ -185,7 +200,7 @@ public sealed class FakeClockClient : IClockClient
 /// hand to a <see cref="WaddleProcessStage"/>/<see cref="WaddleActionStage"/> under test.</summary>
 public sealed class FakeWaddleHost : IWaddleHost
 {
-    public BundleContextInfo Context { get; init; } = new("tenant-1", null, "waddles.test.app", "waddles.test", "1.0.0", "msg-1", "{}");
+    public BundleContextInfo Context { get; set; } = new("tenant-1", null, "waddles.test.app", "waddles.test", "1.0.0", "msg-1", "{}");
     public FakeKvClient KvFake { get; } = new();
     public FakeDbClient DbFake { get; } = new();
     public FakeRelayClient RelayFake { get; } = new();

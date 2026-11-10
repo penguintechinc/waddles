@@ -4,11 +4,11 @@
 schema_version: 2
 app_id: waddles.core.example.rank
 name: Chat Rank/Level Bundle (Python)
-version: 1.0.5
+version: 1.0.6
 feature: waddles.core.example
 module: core
 provider: builtin
-author: "superpenguintv (Psychoboy)"
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/rank
 notice: |
@@ -29,11 +29,11 @@ stages:
       - platform: twitch
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!rank"]
+          command_prefix: ["!rank", "!rep", "!reputation"]
       - platform: discord
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!rank"]
+          command_prefix: ["!rank", "!rep", "!reputation"]
   action:
     entry: "waddle:bundle/action-stage#dispatch"
 egress: []
@@ -52,4 +52,14 @@ permissions:
     justification: "rank replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
   - id: "chat.send:twitch"
     justification: "rank replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
+  - id: identity.resolve
+    justification: "resolves the verified caller to its community user UUID for the !rep reputation lookup"
+  - id: "tool.call:waddles.core.service.reputation:rep"
+    justification: "delegates the !rep read (score, tier, next tier) to the reputation service; read-only"
+    params:
+      write: false
 routes_to: []
+requested_tools:
+  - tool: rep
+    access: read
+    target_app_id: waddles.core.service.reputation

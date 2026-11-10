@@ -46,6 +46,8 @@ fn row(app: &str, version_id: i64, tools: ToolManifestInfo) -> ActiveBundleRow {
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
         declared_capabilities: Vec::new(),
+        egress: Vec::new(),
+        egress_rps: None,
         tools,
     }
 }
@@ -63,6 +65,7 @@ fn manifest(
                 name: (*n).to_string(),
                 write: *w,
                 required_scope: None,
+                host_op: None,
             })
             .collect(),
         requested: requests
@@ -97,6 +100,18 @@ fn gate(grants: &[(&str, i64, &str, &str)]) -> Arc<CapabilityGate> {
                 },
             );
     }
+    // The Discord SERVICE bundle itself holds `moderation.discord` (its manifest permission):
+    // host-executed role/event ops require it of the service, not just `tool.call` of the caller.
+    by_scope
+        .entry(("waddles.core.service.discord".to_string(), 44))
+        .or_default()
+        .insert(
+            "moderation.discord".to_string(),
+            GrantedPermission {
+                permission_id: "moderation.discord".to_string(),
+                params: serde_json::json!({}),
+            },
+        );
     for ((grantee, version), grants) in by_scope {
         snapshot.set(
             GrantScopeKey {
@@ -339,6 +354,7 @@ fn scope_for(app: &str, version: i64, chain: &[&str], deadline: Option<Instant>)
         origin_channel_id: None,
         origin_platform: None,
         origin_guild_id: None,
+        origin_user_id: None,
         tenant_id: TENANT_ID,
         community_id: COMMUNITY_ID,
         app_version: version,
@@ -840,12 +856,13 @@ async fn every_tool_call_completion_emits_a_count_and_a_latency_point() {
 }
 
 #[tokio::test]
-async fn scope_restricted_tools_are_refused_on_the_action_stage_with_a_clear_reason() {
+async fn scope_restricted_tools_are_refused_when_the_action_stage_cannot_verify_an_actor() {
     let mut svc = manifest(true, &[("get_balance", false)], &[]);
     svc.exported.push(ExportedToolInfo {
         name: "admin_op".to_string(),
         write: true,
         required_scope: Some("community:admin".to_string()),
+        host_op: None,
     });
     let rows = vec![
         row(
@@ -874,7 +891,7 @@ async fn scope_restricted_tools_are_refused_on_the_action_stage_with_a_clear_rea
     call.args["args"] = serde_json::json!({"__ctx": {"actor": "x", "scopes": ["community:owner"]}});
     let err = w.caps.handle(&app_scope(), call).await.unwrap_err();
     assert_eq!(err.code, "forbidden");
-    assert!(err.message.contains("action stage"), "{}", err.message);
+    assert!(err.message.contains("lacks the scope"), "{}", err.message);
     assert!(recorded(&w).is_empty(), "the target must never run");
 
     // Ordinary tools are unaffected, and no `__ctx` is ever forwarded here.
@@ -888,7 +905,7 @@ async fn scope_restricted_tools_are_refused_on_the_action_stage_with_a_clear_rea
 /// approved `tool.call` grant and the write key are enforced BEFORE the host-mediated producer.
 mod discord_role_tool_invoke {
     use super::*;
-    use crate::capabilities::discord_role_tools::TOOL_ROLES_ADD;
+    const TOOL_ROLES_ADD: &str = "discord.member.roles.add";
     use crate::capabilities::event_sync::DISCORD_SERVICE_APP_ID as DISCORD;
     use crate::capabilities::tests::{caps, discord_scope};
 

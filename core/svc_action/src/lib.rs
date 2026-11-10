@@ -63,6 +63,7 @@
 //! that leaves as a documented seam.
 
 pub mod active_digests;
+pub mod actor;
 pub mod bundle_loader;
 pub mod capabilities;
 pub mod changelog_consumer;
@@ -82,6 +83,7 @@ pub mod host_api;
 pub mod http;
 pub mod metrics_facade;
 pub mod pin_sig;
+pub mod platform_user;
 pub mod retry;
 pub mod senders;
 pub mod stage_metrics;
@@ -174,6 +176,43 @@ async fn build_hub_client(
              waddles.core.disable-pii-detokenization kill-switch",
             cli.hub_api_grpc_endpoint
         )),
+    }
+}
+
+/// Connects the hub client used to detokenize a host tool's target user
+/// (`IdentityService.ResolvePlatformUser`, scope [`platform_user::PLATFORM_USER_SCOPE`]).
+/// `None` (logged) when hub-api's endpoints are unset or the connect fails: host tools that
+/// name a user are then refused at call time, never run with an unresolved id.
+async fn build_platform_user_resolver(
+    cli: &config::CliConfig,
+) -> Option<Arc<dyn platform_user::PlatformUserResolver>> {
+    if cli.hub_api_grpc_endpoint.is_empty() || cli.service_jwt_token_endpoint.is_empty() {
+        tracing::warn!(
+            "HUB_API_GRPC_ENDPOINT/SERVICE_JWT_TOKEN_ENDPOINT unset; host platform tools that \
+             name a user are refused (no detokenization)"
+        );
+        return None;
+    }
+    match hub_client::HubClient::connect(
+        cli.hub_api_grpc_endpoint.clone(),
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        platform_user::PLATFORM_USER_SCOPE,
+        (!cli.hub_api_grpc_ca_file.is_empty()).then_some(cli.hub_api_grpc_ca_file.as_str()),
+    )
+    .await
+    {
+        Ok(client) => Some(Arc::new(platform_user::HubPlatformUserResolver::new(
+            client,
+        ))),
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "platform-user detokenization hub client failed to connect; host platform tools \
+                 that name a user are refused"
+            );
+            None
+        }
     }
 }
 
@@ -382,6 +421,7 @@ where
         egress_denied_total,
         license.clone(),
         config.db_reader_password.clone(),
+        config.bundle_db_password.clone(),
         host_api_metrics,
         hub_client_conn,
         app_version_snapshot.clone(),
@@ -749,8 +789,24 @@ fn build_action_egress_guard(
         .with_instance_policy(Arc::new(std::sync::RwLock::new(
             cli.instance_egress_policy(),
         )))
-        .with_cluster_denylist(cluster_denylist),
+        .with_cluster_denylist(cluster_denylist)
+        .with_credentials(bundle_credential_sources()),
     ))
+}
+
+/// The non-env credential sources + shared-credential quota for bundle
+/// `http.send` secret refs (per-community connections via hub-api, host-minted
+/// app tokens, Valkey-backed budgets). Quota counters use the durable spine
+/// Valkey; any source that cannot be built fails closed (see
+/// `bundle_host_credentials::wiring`).
+fn bundle_credential_sources() -> bundle_host_http::credentials::CredentialSources {
+    let client = penguin_spine::SpineConfig::from_env()
+        .ok()
+        .and_then(|cfg| build_redis_client(&cfg));
+    bundle_host_credentials::wiring::build_credential_sources(
+        &|key| std::env::var(key).ok(),
+        client,
+    )
 }
 
 /// Builds the real [`capabilities::StageCapabilities`] (a live Valkey
@@ -773,6 +829,7 @@ async fn build_stage_capabilities(
     egress_denied_total: prometheus::IntCounterVec,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
     db_reader_password: Option<config::Secret>,
+    bundle_db_password: Option<config::Secret>,
     hub_client_conn: Option<Arc<hub_client::HubClient>>,
     connections: Arc<host_api::ConnectionRegistry>,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
@@ -838,6 +895,7 @@ async fn build_stage_capabilities(
     // refresh loop against this same Valkey connection's client.
     let redis_client = build_redis_client(&spine_cfg);
     let poll_interval = cli.bundle_config_poll_interval();
+    let mut actor_db: Option<sea_orm::DatabaseConnection> = None;
     let gate = match db_reader_password {
         Some(password) => {
             let reader_cfg = bundle_active_set::ReaderConfig {
@@ -847,11 +905,15 @@ async fn build_stage_capabilities(
                 user: cli.db_reader_user.clone(),
             };
             match bundle_active_set::reader::connect(&reader_cfg, password.expose()).await {
-                Ok(db) => grant_gate::build_production_gate(
-                    grant_gate::PgGrantLoader::new(db),
-                    redis_client,
-                    poll_interval,
-                ),
+                Ok(db) => {
+                    // The same read-only reader connection backs the actor directory.
+                    actor_db = Some(db.clone());
+                    grant_gate::build_production_gate(
+                        grant_gate::PgGrantLoader::new(db),
+                        redis_client,
+                        poll_interval,
+                    )
+                }
                 Err(err) => {
                     tracing::warn!(error = %err, "grant-gate db-reader connection failed; every non-platform permission denies until the next connection attempt");
                     grant_gate::build_production_gate(
@@ -873,6 +935,24 @@ async fn build_stage_capabilities(
     );
     let caps = match kv_conn {
         Some(kv_conn) => caps.with_kv(kv_conn, kv_capabilities),
+        None => caps,
+    };
+    // `db` host capability (v1 + v2 `db2.*`): see `try_build_db_wiring`'s doc for
+    // its two distinct unwired outcomes.
+    let bundle_db_cfg = bundle_host_db::ConnectConfig {
+        host: cli.bundle_db_host.clone(),
+        port: cli.bundle_db_port,
+        name: cli.bundle_db_name.clone(),
+        user: cli.bundle_db_user.clone(),
+    };
+    let caps = match try_build_db_wiring(
+        &bundle_db_cfg,
+        bundle_db_password.as_ref(),
+        flag_or_closed(&license, flags::BUNDLE_DB_CAPABILITY_FLAG),
+    )
+    .await
+    {
+        Some(db) => caps.with_db(db),
         None => caps,
     };
     // Discord relay send (spec: relay providers, `discord`) -- graceful
@@ -924,6 +1004,24 @@ async fn build_stage_capabilities(
         connections,
         snapshot: app_version_snapshot,
     });
+    // Host-verified actor resolution for scope-restricted tools (`crate::actor`): without the
+    // reader connection every `required_scope` tool is refused (fail closed).
+    let caps = match actor_db {
+        Some(db) => caps.with_actor_directory(Arc::new(actor::PgActorDirectory::new(db))),
+        None => {
+            tracing::warn!(
+                "no db-reader connection; scope-restricted tools are refused on the action stage"
+            );
+            caps
+        }
+    };
+    // Producer-side user detokenization for host-executed platform tools: its OWN hub client
+    // (a client is single-scope) carrying `identity:platform-user:resolve`. Unavailable =>
+    // every host tool naming a user is refused loudly (never an unresolved id).
+    let caps = match build_platform_user_resolver(cli).await {
+        Some(resolver) => caps.with_platform_users(resolver),
+        None => caps,
+    };
     // Event-sync requests from hub-api (`EVENT_SYNC_REQUEST_KEYS`, a DEDICATED
     // verify-only ring). Without it the consumer is not started: hub-api's
     // enqueue then times out loudly instead of anything running unauthenticated.
@@ -936,6 +1034,103 @@ async fn build_stage_capabilities(
         start_event_sync_consumer(&spine_cfg, Arc::clone(&caps)).await;
     }
     Some(caps)
+}
+
+/// Builds the `db` bundle host capability's production wiring, mirroring
+/// `core/svc_process::try_build_db_wiring`: connects to the shared `waddles`
+/// Postgres as the least-privilege `waddles_bundle_runtime` role, builds the v1
+/// host and the v2 engine on that connection, and starts the v2 registry
+/// refresh from `bundle_data.table_registry`.
+///
+/// Two deliberately different unwired outcomes, never conflated: `password`
+/// unset => INFO + `None` (the deployment never opted in; every `db` call then
+/// denies `not_implemented`); `password` set but the connection fails => ERROR
+/// + `None` (a misconfiguration or outage, not an opt-out).
+async fn try_build_db_wiring(
+    cfg: &bundle_host_db::ConnectConfig,
+    password: Option<&config::Secret>,
+    flag: Arc<dyn flags::FeatureFlag>,
+) -> Option<capabilities::DbWiring> {
+    let Some(password) = password else {
+        tracing::info!(
+            "BUNDLE_DB_PASSWORD not set; db capability not wired (every db host-call will \
+             report not_implemented until BUNDLE_DB_PASSWORD is provisioned)"
+        );
+        return None;
+    };
+    match bundle_host_db::connect_runtime_db(cfg, password.expose()).await {
+        Ok(conn) => {
+            tracing::info!(
+                host = %cfg.host,
+                port = cfg.port,
+                name = %cfg.name,
+                user = %cfg.user,
+                "db capability: connected to the bundle-runtime Postgres role"
+            );
+            let registry = Arc::new(bundle_host_db::v2::SchemaRegistryV2::new());
+            spawn_v2_registry_refresh(conn.clone(), Arc::clone(&registry)).await;
+            Some(capabilities::DbWiring {
+                host: Arc::new(bundle_host_db::DbHost::new(
+                    bundle_host_db::PostgresBackend::new(conn.clone()),
+                )),
+                schemas: Arc::new(bundle_host_db::SchemaCache::new()),
+                capabilities: Arc::new(bundle_host_db::CapabilitySnapshot::new()),
+                flag,
+                v2: capabilities::DbV2Wiring {
+                    host: Arc::new(bundle_host_db::v2::DbV2Host::new(
+                        bundle_host_db::v2::PostgresV2Backend::new(conn),
+                    )),
+                    registry,
+                    capabilities: Arc::new(bundle_host_db::CapabilitySnapshot::new()),
+                },
+            })
+        }
+        Err(err) => {
+            tracing::error!(
+                host = %cfg.host,
+                port = cfg.port,
+                name = %cfg.name,
+                user = %cfg.user,
+                error = %err,
+                "db capability: BUNDLE_DB_PASSWORD is configured but the waddles_bundle_runtime \
+                 connection failed -- db capability unavailable (every db host-call will report \
+                 not_implemented); this is a misconfiguration or outage, not an intentional opt-out"
+            );
+            None
+        }
+    }
+}
+
+/// How often the `db` v2 schema registry is re-read from
+/// `bundle_data.table_registry` (picks up approvals/upgrades/uninstalls).
+const V2_REGISTRY_REFRESH: Duration = Duration::from_secs(30);
+
+/// Loads the v2 registry once (logging loudly on failure -- the table may not
+/// exist until alembic 0082 has run, in which case every v2 call reports
+/// `invalid_table`) and spawns the periodic refresh. A failed refresh keeps the
+/// previous registry and logs at ERROR; it never panics the process.
+async fn spawn_v2_registry_refresh(
+    conn: sea_orm::DatabaseConnection,
+    registry: Arc<bundle_host_db::v2::SchemaRegistryV2>,
+) {
+    match bundle_host_db::v2::load_registry(&conn, &registry).await {
+        Ok(n) => tracing::info!(bundles = n, "db v2: schema registry loaded"),
+        Err(e) => tracing::error!(
+            error = %e,
+            "db v2: initial schema registry load failed (has alembic 0082_bundle_data_v2 run?); \
+             db v2 calls will report invalid_table until a refresh succeeds"
+        ),
+    }
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(V2_REGISTRY_REFRESH);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            if let Err(e) = bundle_host_db::v2::load_registry(&conn, &registry).await {
+                tracing::error!(error = %e, "db v2: schema registry refresh failed; keeping previous registry");
+            }
+        }
+    });
 }
 
 /// Opens the two dedicated connections (blocking pop + result post) and spawns
@@ -1022,6 +1217,7 @@ fn try_start_host_api(
     egress_denied_total: prometheus::IntCounterVec,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
     db_reader_password: Option<config::Secret>,
+    bundle_db_password: Option<config::Secret>,
     metrics: telemetry::HostApiMetrics,
     hub_client_conn: Option<Arc<hub_client::HubClient>>,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
@@ -1045,6 +1241,7 @@ fn try_start_host_api(
             egress_denied_total,
             license,
             db_reader_password,
+            bundle_db_password,
             hub_client_conn,
             Arc::clone(&registry_for_task),
             app_version_snapshot,
@@ -1596,6 +1793,8 @@ fn try_start_dispatch(
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                egress: Vec::new(),
+                egress_rps: None,
                 tools: Default::default(),
             }]);
         }
@@ -1943,6 +2142,7 @@ mod tests {
             envelope_binding_keys: None,
             discord_bot_token: None,
             db_reader_password: None,
+            bundle_db_password: None,
         }
     }
 
@@ -2122,7 +2322,7 @@ mod tests {
             "--hub-api-grpc-endpoint",
             &format!("http://{hub_addr}"),
             "--service-jwt-token-endpoint",
-            &format!("http://{hub_addr}/internal/service-token"),
+            &format!("http://{hub_addr}"),
         ]);
         // Shutdown futures resolve immediately, so the servers bind, log,
         // and drain right away instead of blocking on a real OS signal.
@@ -2279,6 +2479,7 @@ mod tests {
             envelope_binding_keys: None,
             discord_bot_token: None,
             db_reader_password: None,
+            bundle_db_password: None,
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         let usage = Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new()));
@@ -2320,6 +2521,7 @@ mod tests {
             envelope_binding_keys: None,
             discord_bot_token: None,
             db_reader_password: None,
+            bundle_db_password: None,
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         let usage = Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new()));
@@ -2363,6 +2565,7 @@ mod tests {
             envelope_binding_keys: None,
             discord_bot_token: None,
             db_reader_password: None,
+            bundle_db_password: None,
         };
         assert_eq!(
             resolve_multi_tenant_path_decision(&config, &None).await,
@@ -2394,6 +2597,7 @@ mod tests {
             envelope_binding_keys: None,
             discord_bot_token: None,
             db_reader_password: Some(Secret::new("real-ro-password")),
+            bundle_db_password: None,
         };
         assert_eq!(
             resolve_multi_tenant_path_decision(&config, &None).await,
@@ -2772,7 +2976,7 @@ mod tests {
             "--hub-api-grpc-endpoint",
             &format!("http://{addr}"),
             "--service-jwt-token-endpoint",
-            &format!("http://{addr}/internal/service-token"),
+            &format!("http://{addr}"),
         ]);
         let err = match build_hub_client(&cli, true).await {
             Ok(_) => panic!("an unreachable hub-api gRPC endpoint must fail loud at startup"),

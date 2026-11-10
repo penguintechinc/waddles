@@ -10,8 +10,7 @@ alpha, which already self-provisions the underlying private key Secret via
 Fix: `templates/auto-provisioned-keys-job.yaml`'s pre-install/pre-upgrade hook
 now also publishes a JSON-map-shaped `BUNDLE_SIGNING_PUBLIC_KEYS` entry into the
 `<fullname>-bundle-signing-public` ConfigMap it already derives+publishes from
-whatever private key Secret is present; `templates/bundle-executor.yaml` and
-`bundle-executor-action.yaml` source the env var from that ConfigMap by default,
+whatever private key Secret is present; `templates/svc-bundles-executor.yaml` sources the env var from that ConfigMap by default,
 falling back to an explicit `pipeline.rustDataPlane.bundleSigningPublicKeys`
 values override when one is set (backward compat / multi-key rotation).
 
@@ -77,22 +76,14 @@ def _container_env(docs: list[dict[str, Any]], deployment_name_suffix: str, cont
 class TestBundleExecutorSourcesPublicKeysFromConfigMapByDefault:
     """No values override set -- both executors must fall back to the
     auto-provisioned ConfigMap, never a bare empty `{}` (the exact crash this
-    fix closes: bundle-executor fail-closing at startup on alpha).
+    fix closes: svc-bundles-executor fail-closing at startup on alpha).
     """
 
     def test_bundle_executor_uses_configmap_ref(self) -> None:
         docs = _render_docs(_helm_template(_ALPHA_VALUES))
-        env = _container_env(docs, "-bundle-executor", "bundle-executor")
+        env = _container_env(docs, "-svc-bundles-executor", "svc-bundles-executor")
         entry = env["BUNDLE_SIGNING_PUBLIC_KEYS"]
         assert "value" not in entry, "must not fall back to a literal empty/static value"
-        assert entry["valueFrom"]["configMapKeyRef"]["name"] == "waddlebot-bundle-signing-public"
-        assert entry["valueFrom"]["configMapKeyRef"]["key"] == "BUNDLE_SIGNING_PUBLIC_KEYS"
-
-    def test_bundle_executor_action_uses_configmap_ref(self) -> None:
-        docs = _render_docs(_helm_template(_ALPHA_VALUES))
-        env = _container_env(docs, "-bundle-executor-action", "bundle-executor")
-        entry = env["BUNDLE_SIGNING_PUBLIC_KEYS"]
-        assert "value" not in entry
         assert entry["valueFrom"]["configMapKeyRef"]["name"] == "waddlebot-bundle-signing-public"
         assert entry["valueFrom"]["configMapKeyRef"]["key"] == "BUNDLE_SIGNING_PUBLIC_KEYS"
 
@@ -107,7 +98,7 @@ class TestExplicitValuesOverrideStillWins:
         docs = _render_docs(
             _helm_template(_ALPHA_VALUES, extra_set=["pipeline.rustDataPlane.bundleSigningPublicKeys.k1=AAAA"])
         )
-        env = _container_env(docs, "-bundle-executor", "bundle-executor")
+        env = _container_env(docs, "-svc-bundles-executor", "svc-bundles-executor")
         entry = env["BUNDLE_SIGNING_PUBLIC_KEYS"]
         assert "valueFrom" not in entry
         assert entry["value"] == '{"k1":"AAAA"}'

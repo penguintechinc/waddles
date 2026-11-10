@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import grpc
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import SYSTEM_TENANT, ServiceIdentity, ServiceJwtIssuer, SigningKey
 
 _PB_ROOT = Path(__file__).resolve().parents[1] / "grpc_internal" / "pb"
@@ -53,7 +53,7 @@ def make_issuer(
 
     `tenant=""` models a legacy/misconfigured identity whose tokens carry no tenant claim.
     """
-    key = Ed25519PrivateKey.generate()
+    key = ec.generate_private_key(ec.SECP256R1())
     identity = ServiceIdentity(
         service_id=service_id,
         k8s_namespace="waddlebot",
