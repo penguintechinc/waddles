@@ -369,6 +369,7 @@ async fn boot_wiring_publishes_scoped_events_and_refuses_the_mismatched_tenant()
     let runtime = assemble(
         &settings,
         AssembleDeps {
+            interaction_routing: None,
             identify_budget: None,
             resolver: Arc::new(FakeHub {
                 conn,
