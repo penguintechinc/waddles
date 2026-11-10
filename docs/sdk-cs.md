@@ -1,6 +1,6 @@
 # Building a C# app bundle on the newer WIT worlds (`waddle-sdk-cs`)
 
-For the SuperPenguin port wave. Reference bundle: `bundles/csharp/superpenguin-roll` (economy wager, identity, tool call, kv).
+For the SuperPenguin port wave. Reference bundles: `bundles/csharp/superpenguin-roll` (wager), `bundles/csharp/superpenguin-fishing` (multi-module stateful game: replay protocol, overlay, tournaments) (economy wager, identity, tool call, kv).
 Older `stage`-world bundle (relay only): `bundles/csharp/csping`. SDK: `sdk/waddle-sdk-cs`.
 
 ## 1. Pick the world
@@ -121,3 +121,14 @@ atomic host ledger primitive. They are not economy service tools.
 `EconomyServiceClient` invokes existing service tools for balance and credit/debit
 operations, with an explicit operation identity for multiple writes in one Duel plan.
 No private currency ledger or synthesized fallback replaces a failed tool call.
+
+## Lessons from the fishing port (`superpenguin-fishing`)
+
+- **No `System.Security.Cryptography` in the NativeAOT-wasi build**: `RandomNumberGenerator` throws `PlatformNotSupportedException` at runtime (host unit tests pass, the real-executor test traps). Use `System.Random.Shared`/`WaddleRandom`; record a seed so replays reproduce.
+- **kv is per app id**: bundles cannot share state and app->app calls are forbidden, so a game whose modules share state (gold, inventory, tournaments) ships as ONE bundle; keep module boundaries behind a store interface (`IFishingStore`).
+- **Replay protocol for multi-write commands**: record the outcome under the replay key BEFORE the state write, mark the key applied inside the single-value state write (keep the last N keys), repair a crash from the recorded seed; follow-up writes (tournament, boards) must be idempotent upserts.
+- **No CAS on kv**: serialize per-player mutations with `TryClaim` + `finally Delete` (short TTL self-heals).
+- **Settlement from `TickScheduler`**: use `Pending()` then `Cancel()` after a successful, idempotent payout (not `TakeDue()`, which claims before the side effect and loses the payout on a crash). Money via service tools needs a key derived from the window id, not the event id.
+- **Overlay**: declarative only, opt-in flag default OFF, and a refused push is surfaced in the reply (the host import is `not_implemented` in the executor today).
+- **Real-executor matrix**: `SUPERPENGUIN_ONLY=<game>` runs a single port; cold compile of a ~10.8 MB component is minutes on a debug wasmtime build.
+- kv budget per command: keep reads/writes well under 64 ops (a 10-cast fishing command with two tournaments is ~26).
