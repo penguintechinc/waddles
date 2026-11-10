@@ -222,6 +222,7 @@ fn build_unchecked(
                 secret_refs: base_refs(),
             })
         }
+        "chat.clear" => crate::moderation::clear(&payload),
         "chat.delete" => {
             let message_id = id_arg(&payload, "message_id", false)?;
             Ok(Tpl {
