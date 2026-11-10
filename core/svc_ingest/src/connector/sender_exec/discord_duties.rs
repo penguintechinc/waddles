@@ -1104,11 +1104,11 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DutyHook for DiscordDu
 
     async fn bind_template(&self, cx: &DutyCx<'_>, tpl: &mut RequestTpl) -> Result<(), ExecError> {
         let kind = cx.action.op();
-        // Event and generic-op requests carry no user and no placeholders to normalize.
-        if matches!(
-            cx.action,
-            OutboundAction::EventOp { .. } | OutboundAction::PolicyOp(_)
-        ) {
+        // Event requests and the user-less generic ops (slash-command registration, interaction
+        // replies) carry no user and no placeholders to normalize; only the moderation ops do.
+        if matches!(cx.action, OutboundAction::EventOp { .. })
+            || matches!(cx.action, OutboundAction::PolicyOp(p) if !MOD_KINDS.contains(&p.op))
+        {
             return Ok(());
         }
         let uuid = user_uuid(cx.action).map_err(|e| deny(kind, e))?;
@@ -1157,7 +1157,9 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DutyHook for DiscordDu
                 .map_err(|e| deny(kind, e));
         }
         if let OutboundAction::PolicyOp(p) = cx.action {
-            return mod_payload(p, chrono::Utc::now()).map_err(|e| deny(kind, e));
+            if MOD_KINDS.contains(&p.op) {
+                return mod_payload(p, chrono::Utc::now()).map_err(|e| deny(kind, e));
+            }
             // The connector gets ONLY the text / handle under fixed keys.
             let v = if kind == "commands.register.guild" {
                 let text = p.text.as_deref().ok_or(ExecError::BadAction)?;

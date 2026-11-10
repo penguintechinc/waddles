@@ -58,6 +58,7 @@ impl DiscordCredentialSource for Creds {
         Ok(DiscordBinding {
             bot_token: SecretString::new(TOKEN.to_string()),
             guild_id: GUILD.to_string(),
+            application_id: None,
             managed_roles: BTreeMap::new(),
         })
     }
