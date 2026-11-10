@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import grpc
@@ -31,13 +32,21 @@ from flask_core.service_jwt import ServiceJwtIssuer
 from waddles.hub.internal.v1 import (
     bundle_schedule_pb2_grpc,
     dataplane_scope_pb2_grpc,
+    distribution_pb2_grpc,
     identity_pb2_grpc,
     key_pb2_grpc,
+    media_pb2_grpc,
+    provider_connection_pb2_grpc,
     service_auth_pb2_grpc,
 )
 
 from grpc_internal.bundle_schedule_servicer import BUNDLE_SCHEDULE_SCOPES, BundleScheduleServicer
 from grpc_internal.dataplane_scope_servicer import DATAPLANE_SCOPE_SCOPES, DataplaneScopeServicer
+from grpc_internal.dataplane_servicers import (
+    DistributionServicer,
+    MediaServicer,
+    ProviderConnectionServicer,
+)
 from grpc_internal.interceptors import (
     AuthInterceptor,
     DeadlineInterceptor,
@@ -51,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 #: Every served method -> required scope. One entry per service-area module, merged here, so a new
 #: area adds a module + one line below instead of editing a shared table.
-ALL_REQUIRED_SCOPES: dict[str, str] = {
+ALL_REQUIRED_SCOPES: dict[str, str | tuple[str, ...]] = {
     **REQUIRED_SCOPES,
     **BUNDLE_SCHEDULE_SCOPES,
     **DATAPLANE_SCOPE_SCOPES,
@@ -138,12 +147,16 @@ async def build_internal_grpc_server(
     *,
     issuer: ServiceJwtIssuer,
     async_dal: Any = None,
-    install_dal: Any = None,
+    app_config: Mapping[str, Any] | None = None,
+    service_factory: Callable[[Any], Any] | None = None,
     audit_logger: Any = None,
 ) -> grpc.aio.Server:
     """Builds (but does not start) the internal gRPC server.
 
-    Interceptor chain: see :func:`build_interceptor_chain`.
+    Interceptor chain: see :func:`build_interceptor_chain`. `app_config` is the Quart app's
+    `config` mapping (the data-plane servicers read `async_dal`/`dal`/`install_dal`/
+    `rate_limiter` from it -- the same objects the HTTP side uses); `service_factory` builds the
+    shared `ProviderConnectionService` from it (default: the blueprint's own factory).
     """
     server = grpc.aio.server(
         interceptors=build_interceptor_chain(issuer),
@@ -158,12 +171,24 @@ async def build_internal_grpc_server(
     )
     identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(async_dal), server)
     key_pb2_grpc.add_KeyServiceServicer_to_server(KeyServicer(), server)
-    bundle_schedule_pb2_grpc.add_BundleScheduleServiceServicer_to_server(
-        BundleScheduleServicer(install_dal), server
-    )
     dataplane_scope_pb2_grpc.add_DataplaneScopeServiceServicer_to_server(
         DataplaneScopeServicer(async_dal), server
     )
+    config: Mapping[str, Any] = app_config if app_config is not None else {}
+    if service_factory is None:
+        from blueprints.v1.provider_connections import service_from_config
+
+        service_factory = service_from_config
+    bundle_schedule_pb2_grpc.add_BundleScheduleServiceServicer_to_server(
+        BundleScheduleServicer(config.get("install_dal")), server
+    )
+    provider_connection_pb2_grpc.add_ProviderConnectionServiceServicer_to_server(
+        ProviderConnectionServicer(config, service_factory), server
+    )
+    distribution_pb2_grpc.add_DistributionServiceServicer_to_server(
+        DistributionServicer(config), server
+    )
+    media_pb2_grpc.add_MediaServiceServicer_to_server(MediaServicer(config), server)
     service_auth_pb2_grpc.add_ServiceAuthServiceServicer_to_server(
         ServiceAuthServicer(issuer, audit_logger=audit_logger), server
     )
@@ -178,15 +203,12 @@ async def start_internal_grpc_server(
     *,
     issuer: ServiceJwtIssuer,
     async_dal: Any = None,
-    install_dal: Any = None,
+    app_config: Mapping[str, Any] | None = None,
     audit_logger: Any = None,
 ) -> grpc.aio.Server:
     """Builds and starts the server -- called from `app.py`'s `before_serving`."""
     server = await build_internal_grpc_server(
-        issuer=issuer,
-        async_dal=async_dal,
-        install_dal=install_dal,
-        audit_logger=audit_logger,
+        issuer=issuer, async_dal=async_dal, app_config=app_config, audit_logger=audit_logger
     )
     await server.start()
     logger.info("hub_api.grpc_internal.started")

@@ -70,10 +70,13 @@ async def test_routes_are_discovered_by_the_real_app_factory() -> None:
         ("GET", f"{base}/<int:connection_id>"),
         ("PATCH", f"{base}/<int:connection_id>"),
         ("DELETE", f"{base}/<int:connection_id>"),
-        ("GET", "/api/v1/internal/provider-connections"),
-        ("POST", f"/api/v1/internal{base.removeprefix('/api/v1')}/<int:connection_id>/resolve"),
     ):
         assert expected in rules, expected
+    # The data-plane reads moved to gRPC: no internal REST route may remain.
+    assert not [r for _, r in rules if r.startswith("/api/v1/internal/provider-connections")]
+    assert not [
+        r for _, r in rules if r.endswith("/provider-connections/<int:connection_id>/resolve")
+    ]
 
 
 def test_admin_mutations_are_audited_as_admin_actions_and_internal_routes_are_not() -> None:
@@ -129,8 +132,6 @@ class TestCommittedOpenApiSpec:
             "/api/v1/connection-providers": {"get"},
             base: {"get", "post"},
             f"{base}/{{connection_id}}": {"get", "patch", "delete"},
-            "/api/v1/internal/provider-connections": {"get"},
-            f"/api/v1/internal{base.removeprefix('/api/v1')}/{{connection_id}}/resolve": {"post"},
         }
         for path, methods in expected.items():
             assert path in paths, path

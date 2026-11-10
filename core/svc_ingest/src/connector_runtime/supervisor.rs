@@ -322,6 +322,8 @@ where
     /// Pre-handshake admission gates (Discord IDENTIFY budget); `None` = no
     /// platform in this runtime needs one.
     pub gates: Option<Arc<dyn HandshakeGateFactory>>,
+    /// Host-side frame tap run before the connector (Discord interaction intake); `None` = none.
+    pub frame_tap: Option<Arc<dyn crate::interaction_tap::FrameTap>>,
     /// Resolves each connection's tenant from its community (never from
     /// binding metadata).
     pub tenants: Arc<dyn TenantResolve>,
@@ -371,6 +373,7 @@ struct Shared<I: ConnectorInvoker, S: EventSink, L: SessionLease> {
     lease: Arc<L>,
     secrets: Arc<dyn SecretsFactory>,
     gates: Option<Arc<dyn HandshakeGateFactory>>,
+    frame_tap: Option<Arc<dyn crate::interaction_tap::FrameTap>>,
     tenants: Arc<dyn TenantResolve>,
     status: Arc<RuntimeStatus>,
     connector_metrics: ConnectorMetrics,
@@ -618,6 +621,9 @@ where
     )
     .with_heartbeat_enabled(sh.heartbeat_enabled)
     .with_backoff_cap(sh.backoff_cap);
+    if let Some(tap) = &sh.frame_tap {
+        driver = driver.with_frame_tap(Arc::clone(tap));
+    }
     if let Some(gates) = &sh.gates {
         match gates.for_connection(&desired, Arc::clone(&secrets.0)) {
             Ok(Some(gate)) => driver = driver.with_handshake_gate(gate),
@@ -1133,6 +1139,7 @@ impl<
             lease: deps.lease,
             secrets: deps.secrets,
             gates: deps.gates,
+            frame_tap: deps.frame_tap,
             tenants: deps.tenants,
             status: status.clone(),
             connector_metrics: deps.connector_metrics,

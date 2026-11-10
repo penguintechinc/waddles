@@ -127,13 +127,23 @@ pub struct CliConfig {
     )]
     pub service_jwt_sa_token_path: String,
 
-    /// Base URL of hub-api's distribution endpoint this service will poll
-    /// once the generic-intake work lands (`GET
-    /// {HUB_API_URL}/api/v1/distribution/sources`, spec S4.1). Only used
-    /// today to report a configuration snapshot on `/health` -- no
-    /// outbound call is made yet.
+    /// hub-api base URL. Only used today for the scope resolver and to report a configuration
+    /// snapshot on `/health`. Bundle distribution is internal gRPC
+    /// (`DistributionService.ListBundles`), never REST; there is no `distribution/sources` REST
+    /// route in hub-api to poll.
     #[arg(long, env = "HUB_API_URL", default_value = "http://hub-api:8204")]
     pub hub_api_url: String,
+
+    /// hub-api's internal gRPC endpoint (`https://<hub-api>:50204`), used by the connection
+    /// resolver (`ProviderConnectionService`). Empty = unset; every consumer then fails loud at
+    /// boot (see [`CliConfig::resolver_config`]) -- there is no REST fallback.
+    #[arg(long, env = "HUB_API_GRPC_ENDPOINT", default_value = "")]
+    pub hub_api_grpc_endpoint: String,
+
+    /// PEM CA bundle that signed hub-api's gRPC server certificate (`HUB_API_GRPC_CA_FILE`);
+    /// empty = unset (webpki roots).
+    #[arg(long, env = "HUB_API_GRPC_CA_FILE", default_value = "")]
+    pub hub_api_grpc_ca_file: String,
 
     /// The `kid` every newly-minted `binding.mac` is stamped with
     /// (`penguin_spine::compute_binding_mac`'s `kid` argument) -- must name
@@ -280,6 +290,28 @@ pub fn validate_twitch_mode(cfg: &Config) -> Result<TwitchMode, ConfigError> {
 }
 
 impl CliConfig {
+    /// The connection-resolver configuration for this process: hub-api's gRPC endpoint + CA,
+    /// the machine-token bootstrap and the deployment environment.
+    ///
+    /// # Errors
+    /// `HUB_API_GRPC_ENDPOINT` unset -- the resolver has no REST fallback, so a missing
+    /// endpoint is a loud boot failure, never a silent degrade.
+    pub fn resolver_config(&self) -> anyhow::Result<connection_resolver::ResolverConfig> {
+        if self.hub_api_grpc_endpoint.trim().is_empty() {
+            anyhow::bail!(
+                "HUB_API_GRPC_ENDPOINT is required: the connection resolver reaches hub-api over \
+                 internal gRPC (there is no REST fallback)"
+            );
+        }
+        Ok(connection_resolver::ResolverConfig::new(
+            self.hub_api_grpc_endpoint.clone(),
+            self.environment.clone(),
+            self.service_jwt_token_endpoint.clone(),
+            self.service_jwt_sa_token_path.clone(),
+        )
+        .with_grpc_ca(Some(self.hub_api_grpc_ca_file.clone())))
+    }
+
     /// Validates cross-field invariants `clap`'s per-arg parsing can't
     /// express.
     pub fn validate(&self) -> Result<(), ConfigError> {

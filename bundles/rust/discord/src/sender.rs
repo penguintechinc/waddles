@@ -406,6 +406,12 @@ pub fn build_request(action: &Action) -> Result<HttpTpl> {
         "event.create" | "event.update" | "event.cancel" | "event.delete" => {
             build_event_request(action.kind.as_str(), p)
         }
+        "commands.register" | "commands.register.guild" => {
+            crate::commands::build(action.kind.as_str(), p)
+        }
+        "interaction.callback" | "interaction.followup" => {
+            crate::interaction::build(action.kind.as_str(), p)
+        }
         other => Err(ConnectorError::Unsupported(format!(
             "action kind `{other}`"
         ))),

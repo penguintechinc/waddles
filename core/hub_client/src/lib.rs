@@ -50,10 +50,12 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use pb::distribution_service_client::DistributionServiceClient;
 use pb::identity_service_client::IdentityServiceClient;
 use pb::key_service_client::KeyServiceClient;
 use pb::{
-    EphemeralPseudonym, GetStreamDekRequest, GetStreamDekResponse, MintEphemeralPseudonymRequest,
+    DistributionStage, EphemeralPseudonym, GetStreamDekRequest, GetStreamDekResponse,
+    ListBundlesRequest, ListBundlesResponse, MintEphemeralPseudonymRequest,
     MintEphemeralPseudonymsRequest, ResolveDisplayNamesRequest, ResolveDisplayNamesResponse,
     ResolveHandleRequest, ResolveHandleResponse, ResolvePlatformUserRequest,
     ResolvePlatformUserResponse,
@@ -203,6 +205,9 @@ pub struct Circuits {
     /// `ResolvePlatformUser`: outbound DM / role operations; kept off the hot path's breaker
     /// (a rate-limited detokenizer must not stall per-message tokenization).
     platform_user: Arc<CircuitBreaker>,
+    /// `DistributionService.ListBundles`: the stage-runners' activation poll, independent of
+    /// every identity/key call.
+    distribution: Arc<CircuitBreaker>,
 }
 
 impl Circuits {
@@ -213,8 +218,54 @@ impl Circuits {
             handle_lookup: breaker(),
             key: breaker(),
             platform_user: breaker(),
+            distribution: breaker(),
         }
     }
+}
+
+/// Wraps `message` in a [`Request`] carrying a per-RPC deadline and the machine JWT as
+/// `authorization: Bearer <token>` metadata. Shared by [`HubClient`] and the other crates'
+/// hub-api gRPC clients (`connection_resolver`, `bundle_host_media`) so the metadata shape the
+/// server's `AuthInterceptor` reads is defined in one place. The token value never appears in
+/// an error or log line.
+pub fn bearer_request<T>(
+    message: T,
+    token: &str,
+    deadline: Duration,
+) -> Result<Request<T>, HubClientError> {
+    let mut request = Request::new(message);
+    request.set_timeout(deadline);
+    let value = format!("Bearer {token}")
+        .parse()
+        .map_err(|_| Status::internal("invalid token metadata"))?;
+    request.metadata_mut().insert("authorization", value);
+    Ok(request)
+}
+
+/// Builds the long-lived, lazily-connecting [`Channel`] to hub-api's internal gRPC listener.
+///
+/// One channel per process, cloned into every client: tonic multiplexes concurrent RPCs over
+/// its HTTP/2 connection and transparently re-dials after a drop, so a hub-api restart is a
+/// few failed calls (retried / breaker-shed by the caller), never a stuck client. `https://`
+/// endpoints are TLS (trust = `ca_cert_path` only, hostname verification ON; `None` = the
+/// webpki roots); a plaintext `http://` endpoint is returned as-is and the CALLER owns the
+/// "plaintext only in alpha" policy. HTTP/2 keep-alive keeps idle pooled connections honest
+/// across NAT/conntrack timeouts. Must run inside a tokio runtime (the channel spawns its
+/// worker).
+pub fn lazy_channel(endpoint: &str, ca_cert_path: Option<&str>) -> Result<Channel, HubClientError> {
+    let mut builder = Endpoint::from_shared(endpoint.to_string())?
+        .connect_timeout(Duration::from_secs(2))
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .keep_alive_timeout(Duration::from_secs(10))
+        .keep_alive_while_idle(true);
+    if endpoint
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("https://")
+    {
+        builder = builder.tls_config(build_tls_config(ca_cert_path)?)?;
+    }
+    Ok(builder.connect_lazy())
 }
 
 /// Builds the `ClientTlsConfig` [`HubClient::connect`] dials with -- pulled out as its
@@ -244,6 +295,7 @@ fn build_tls_config(
 pub struct HubClient {
     identity: IdentityServiceClient<Channel>,
     key: KeyServiceClient<Channel>,
+    distribution: DistributionServiceClient<Channel>,
     token_client: Arc<MachineJwtClient>,
     circuits: Circuits,
     deadline: Duration,
@@ -282,7 +334,8 @@ impl HubClient {
             .await?;
         Ok(Self {
             identity: IdentityServiceClient::new(channel.clone()),
-            key: KeyServiceClient::new(channel),
+            key: KeyServiceClient::new(channel.clone()),
+            distribution: DistributionServiceClient::new(channel),
             token_client: Arc::new(MachineJwtClient::with_channel(
                 HubChannel::lazy(
                     token_endpoint,
@@ -306,7 +359,8 @@ impl HubClient {
     pub fn with_channel(channel: Channel, token_client: Arc<MachineJwtClient>) -> Self {
         Self {
             identity: IdentityServiceClient::new(channel.clone()),
-            key: KeyServiceClient::new(channel),
+            key: KeyServiceClient::new(channel.clone()),
+            distribution: DistributionServiceClient::new(channel),
             token_client,
             circuits: Circuits::new(5, Duration::from_secs(30)),
             deadline: DEFAULT_RPC_DEADLINE,
@@ -316,15 +370,7 @@ impl HubClient {
 
     async fn authed_request<T>(&self, message: T) -> Result<Request<T>, HubClientError> {
         let token = self.token_client.get_token().await?;
-        let mut request = Request::new(message);
-        request.set_timeout(self.deadline);
-        request.metadata_mut().insert(
-            "authorization",
-            format!("Bearer {token}")
-                .parse()
-                .map_err(|_| Status::internal("invalid token metadata"))?,
-        );
-        Ok(request)
+        bearer_request(message, &token, self.deadline)
     }
 
     /// Mints (or returns the existing) ephemeral pseudonym for each item.
@@ -453,6 +499,38 @@ impl HubClient {
                     .map_err(HubClientError::from)
             }
         })
+        .await
+    }
+
+    /// Lists every enabled, activated bundle implementing `stage` for the token's own tenant
+    /// (`DistributionService.ListBundles`; scope `distribution:read` on the machine JWT).
+    /// `community_id: None` resolves the tenant-wide availability fallback only. A read, so
+    /// retried on `UNAVAILABLE`/`DEADLINE_EXCEEDED`; runs behind its own breaker
+    /// (`Circuits::distribution`). The tenant is never a request field -- hub-api takes it from
+    /// the verified token.
+    pub async fn list_distribution_bundles(
+        &self,
+        stage: DistributionStage,
+        community_id: Option<i64>,
+    ) -> Result<ListBundlesResponse, HubClientError> {
+        self.call_with_retry(
+            &self.circuits.distribution,
+            self.max_retries,
+            || async move {
+                let request = self
+                    .authed_request(ListBundlesRequest {
+                        stage: stage.into(),
+                        community_id,
+                    })
+                    .await?;
+                let mut client = self.distribution.clone();
+                client
+                    .list_bundles(request)
+                    .await
+                    .map(|r| r.into_inner())
+                    .map_err(HubClientError::from)
+            },
+        )
         .await
     }
 
@@ -593,7 +671,8 @@ mod tests {
         let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
         HubClient {
             identity: IdentityServiceClient::new(channel.clone()),
-            key: KeyServiceClient::new(channel),
+            key: KeyServiceClient::new(channel.clone()),
+            distribution: DistributionServiceClient::new(channel),
             token_client: Arc::new(MachineJwtClient::new(
                 "http://127.0.0.1:1",
                 "/nonexistent/sa-token",
@@ -901,7 +980,8 @@ mod client_tests {
         let channel = Endpoint::from_static(DEAD_ENDPOINT).connect_lazy();
         HubClient {
             identity: IdentityServiceClient::new(channel.clone()),
-            key: KeyServiceClient::new(channel),
+            key: KeyServiceClient::new(channel.clone()),
+            distribution: DistributionServiceClient::new(channel),
             token_client: Arc::new(MachineJwtClient::new(token_endpoint, sa_path, "scope")),
             circuits: Circuits::new(threshold, Duration::from_secs(60)),
             deadline: Duration::from_millis(500),

@@ -29,6 +29,7 @@ use connection_resolver::{ConnectionRef, ConnectionResolve};
 use penguin_spine::{KeyRing, SpineMetrics};
 
 use super::feed::{ConnKey, DynFeed, FeedSet, HubBindingFeed, TransportPlan, WebhookPlan};
+use super::interaction_routing::{InteractionRouting, RoutedSink, RoutingSinkFactory};
 use super::metrics::RuntimeMetrics;
 use super::plan::{ConnectorProfile, RuntimeEnv};
 use super::profiles::{discord, kick, spectrum, twitch, wix, youtube};
@@ -495,6 +496,10 @@ where
     /// The Discord IDENTIFY budget backend. REQUIRED when Discord is ON:
     /// [`assemble`] refuses to build a Discord runtime without it.
     pub identify_budget: Option<IdentifyBudgetBackend>,
+    /// Discord interaction routing deps. REQUIRED when Discord is ON: [`assemble`]
+    /// refuses to build a Discord runtime without them (a ContextSink-less runtime
+    /// would leave every interaction followup refused).
+    pub interaction_routing: Option<InteractionRouting>,
     /// Registry that receives the runtime/connector series.
     pub registry: prometheus::Registry,
     /// Loopback test seams (`Default` in production).
@@ -502,8 +507,12 @@ where
 }
 
 /// The concrete runtime type this boot builds.
-pub type BootedRuntime<A, D> =
-    ConnectorRuntime<FeedSet, WireConnectorInvoker, ConnectionSink<A, D>, ConnectorValkeyLease>;
+pub type BootedRuntime<A, D> = ConnectorRuntime<
+    FeedSet,
+    WireConnectorInvoker,
+    RoutedSink<ConnectionSink<A, D>>,
+    ConnectorValkeyLease,
+>;
 
 /// Builds the profile-specific feed for `platform`.
 fn feed_for<R: ConnectionResolve + 'static>(
@@ -631,6 +640,23 @@ where
     } else {
         None
     };
+    // The Discord interaction intake (token capture, dedupe, 3 s ack) shares the lease
+    // Valkey connection; a runtime without discord has no tap.
+    let frame_tap: Option<Arc<dyn crate::interaction_tap::FrameTap>> =
+        settings.platforms.contains(&"discord").then(|| {
+            Arc::new(crate::interaction_tap::GatewayTap::new(
+                crate::interaction_store::InteractionStore::new(deps.lease_conn.clone()),
+                Arc::new(crate::interaction_tap::InteractionAcker::new()),
+            )) as Arc<dyn crate::interaction_tap::FrameTap>
+        });
+    let interaction_routing = if settings.platforms.contains(&"discord") {
+        Some(
+            deps.interaction_routing
+                .ok_or(BootError::Missing("the Discord interaction routing deps"))?,
+        )
+    } else {
+        None
+    };
     let env = settings.runtime_env();
     let self_echo = SelfEchoRegistry::new();
     let mut feeds = FeedSet::new();
@@ -683,6 +709,11 @@ where
         Arc::clone(&deps.scope),
     )
     .with_self_echo(self_echo.clone());
+    let sinks = RoutingSinkFactory::new(
+        Arc::new(sinks),
+        Arc::clone(&deps.resolver),
+        interaction_routing,
+    );
     // Kick routes also subscribe their broadcaster to Kick's events (host-side credential).
     let kick_subscribe: Option<Arc<dyn SubscribeOnAttach>> = match &deps.webhook {
         Some((_, env)) if env.enabled("kick") => {
@@ -720,6 +751,7 @@ where
             None => Arc::new(secrets),
         },
         gates,
+        frame_tap,
         tenants: Arc::new(ScopeTenantResolve::new(deps.scope)),
         executor: Arc::clone(&deps.bridge.link) as _,
         connector_metrics,
@@ -851,12 +883,7 @@ pub async fn build_webhook<R: ConnectionResolve + 'static>(
 /// An unusable resolver configuration.
 pub fn build_resolver(cli: &CliConfig) -> anyhow::Result<connection_resolver::ConnectionResolver> {
     connection_resolver::ConnectionResolver::new(
-        connection_resolver::ResolverConfig::new(
-            cli.hub_api_url.clone(),
-            cli.environment.clone(),
-            cli.service_jwt_token_endpoint.clone(),
-            cli.service_jwt_sa_token_path.clone(),
-        ),
+        cli.resolver_config()?,
         Arc::new(crate::twitch_sessions::boot::ResolverTelemetry),
     )
     .map_err(|e| anyhow::anyhow!("connection resolver unavailable: {e}"))
@@ -884,6 +911,7 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
         crate::identity_crypto::UnimplementedMachineJwtProvider,
     >,
     registry: prometheus::Registry,
+    tokenizer: Arc<dyn IdentityTokenizer>,
 ) -> anyhow::Result<Started> {
     let cli = &config.cli;
     let keyring = crate::resolve_binding_keyring(config, "connector runtime").ok_or_else(|| {
@@ -914,6 +942,18 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
             anyhow::anyhow!("connector runtime: valkey connect failed ({:?})", e.kind())
         })?;
     let budget_conn = lease_conn.clone();
+    // Same gate as the interaction tap: routing exists exactly when Discord is ON, and a
+    // missing dependency is a boot error here (never a ContextSink-less Discord runtime).
+    let interaction_routing = if settings.platforms.contains(&"discord") {
+        Some(InteractionRouting::from_config(
+            cli,
+            crate::interaction_store::InteractionStore::new(lease_conn.clone()),
+            &registry,
+            tokenizer,
+        )?)
+    } else {
+        None
+    };
     let link = Arc::clone(&bridge.link);
     let runtime = assemble(
         settings,
@@ -936,6 +976,7 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
             }),
             bridge,
             webhook,
+            interaction_routing,
             registry,
             seams: LoopbackSeams::default(),
         },
@@ -1042,11 +1083,21 @@ pub async fn start_connector_with<R: ConnectionResolve + 'static>(
     )
     .await?;
     state.webhook = ingress.clone();
+    crate::interaction_tap::register_metrics(&registry)
+        .map_err(|_| anyhow::anyhow!("interaction intake metrics could not be registered"))?;
+    state.interactions = Some(crate::interaction_store::InteractionStore::new(
+        redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("interaction store: valkey connect failed ({:?})", e.kind())
+            })?,
+    ));
     let (tls, addr) = crate::outbound_boot::host_api_from_lookup(cli, deps.lookup)?;
     let (bridge, _) = start_bridge_with(
         &tls,
         addr,
-        deps.tokenizer,
+        Arc::clone(&deps.tokenizer),
         &settings.platforms,
         crate::shutdown_receiver,
     )
@@ -1063,6 +1114,7 @@ pub async fn start_connector_with<R: ConnectionResolve + 'static>(
         metrics,
         dek,
         registry,
+        deps.tokenizer,
     )
     .await
 }
@@ -1100,6 +1152,8 @@ mod tests {
             "svc-ingest",
             "--environment",
             "alpha",
+            "--hub-api-grpc-endpoint",
+            "http://hub-api:50204",
             "--service-jwt-token-endpoint",
             "http://127.0.0.1:50204",
         ])
@@ -1396,9 +1450,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_resolver_builds_from_cli_defaults() {
+    #[tokio::test]
+    async fn the_resolver_builds_from_cli_defaults() {
         assert!(build_resolver(&cli_alpha()).is_ok());
+    }
+
+    /// No REST fallback: without HUB_API_GRPC_ENDPOINT the resolver refuses to build, loudly.
+    #[tokio::test]
+    async fn the_resolver_refuses_to_build_without_the_grpc_endpoint() {
+        let cli = CliConfig::parse_from(["svc-ingest", "--environment", "alpha"]);
+        let err = build_resolver(&cli).unwrap_err().to_string();
+        assert!(err.contains("HUB_API_GRPC_ENDPOINT"), "{err}");
     }
 
     struct EmptyHub(std::sync::atomic::AtomicUsize);
@@ -1513,9 +1575,117 @@ mod tests {
             lease_conn: lease_conn().await,
             bridge: HostBridge::new(Arc::new(NoTok), &["twitch", "youtube"]).unwrap(),
             webhook: None,
+            interaction_routing: Some(test_routing().await),
             registry,
             seams: LoopbackSeams::default(),
         }
+    }
+
+    struct NoHubContext;
+    impl crate::active_context::ContextSource for NoHubContext {
+        fn get<'a>(
+            &'a self,
+            _s: &'a str,
+            _u: &'a str,
+        ) -> BoxFut<
+            'a,
+            Result<crate::active_context::ContextView, crate::active_context::ContextError>,
+        > {
+            Box::pin(async { Err(crate::active_context::ContextError::Unavailable) })
+        }
+        fn put<'a>(
+            &'a self,
+            _s: &'a str,
+            _u: &'a str,
+            _c: &'a str,
+        ) -> BoxFut<
+            'a,
+            Result<crate::active_context::ContextView, crate::active_context::ContextError>,
+        > {
+            Box::pin(async { Err(crate::active_context::ContextError::Unavailable) })
+        }
+    }
+
+    struct NoTokenizer;
+
+    impl IdentityTokenizer for NoTokenizer {
+        fn tokenize<'a>(
+            &'a self,
+            _scope: &'a CallScope,
+            _platform_user_id: &'a str,
+        ) -> BoxFut<'a, Result<String, crate::connector::host_calls::TokenizeError>> {
+            Box::pin(async { Err(crate::connector::host_calls::TokenizeError::Unavailable) })
+        }
+    }
+
+    async fn test_routing() -> InteractionRouting {
+        let store = crate::interaction_store::InteractionStore::new(lease_conn().await);
+        InteractionRouting {
+            source: Arc::new(NoHubContext),
+            replier: Arc::new(crate::active_context::InteractionReplier::new(
+                store.clone(),
+                GuardedClient::new(
+                    GuardedLimits {
+                        max_redirects: 0,
+                        timeout: Duration::from_secs(1),
+                        max_response_bytes: 1024,
+                    },
+                    Vec::new(),
+                ),
+                "http://127.0.0.1:9".into(),
+            )),
+            store,
+            metrics: crate::active_context::register_routing_metrics(&prometheus::Registry::new())
+                .unwrap(),
+            tokenizer: Arc::new(NoTokenizer),
+        }
+    }
+
+    /// Discord ON without the interaction routing deps is refused at assembly (a
+    /// ContextSink-less Discord runtime would leave every followup refused); the
+    /// dependency is not needed without Discord.
+    #[tokio::test]
+    async fn assemble_refuses_discord_without_interaction_routing() {
+        let hub = Arc::new(EmptyHub(std::sync::atomic::AtomicUsize::new(0)));
+        let mut d = deps(hub.clone(), prometheus::Registry::new()).await;
+        d.interaction_routing = None;
+        assert_eq!(
+            assemble(&settings(vec!["discord"]), d).err(),
+            Some(BootError::Missing("the Discord interaction routing deps"))
+        );
+        let mut d = deps(hub, prometheus::Registry::new()).await;
+        d.interaction_routing = None;
+        assert!(
+            assemble(&settings(vec!["twitch", "youtube"]), d).is_ok(),
+            "no Discord, no routing deps needed"
+        );
+    }
+
+    /// `InteractionRouting::from_config` fails loud on a missing JWT bootstrap and a
+    /// duplicate metric registration.
+    #[tokio::test]
+    async fn interaction_routing_from_config_fails_loud() {
+        let mut cli = cli_alpha();
+        cli.service_jwt_token_endpoint = String::new();
+        let store = crate::interaction_store::InteractionStore::new(lease_conn().await);
+        let registry = prometheus::Registry::new();
+        let e =
+            InteractionRouting::from_config(&cli, store.clone(), &registry, Arc::new(NoTokenizer))
+                .err()
+                .expect("must fail");
+        assert!(e.to_string().contains("SERVICE_JWT_TOKEN_ENDPOINT"));
+        cli.service_jwt_token_endpoint = "http://sa/token".into();
+        assert!(InteractionRouting::from_config(
+            &cli,
+            store.clone(),
+            &registry,
+            Arc::new(NoTokenizer)
+        )
+        .is_ok());
+        assert!(
+            InteractionRouting::from_config(&cli, store, &registry, Arc::new(NoTokenizer)).is_err(),
+            "duplicate metric registration is a boot error"
+        );
     }
 
     /// `assemble` builds a runtime that reconciles every enabled platform's feed

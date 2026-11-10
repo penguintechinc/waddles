@@ -302,7 +302,9 @@ async def test_tls_listener_serves_the_listing_end_to_end(
     app_id = "waddles.socials.tls.default"
     await _publish_and_activate(install_dal, app_id, _scheduled(app_id), community)
 
-    server = await start_internal_grpc_server(issuer=issuer, install_dal=install_dal)
+    server = await start_internal_grpc_server(
+        issuer=issuer, app_config={"install_dal": install_dal}
+    )
     try:
         creds = grpc.ssl_channel_credentials(root_certificates=cert_pem)
         async with grpc.aio.secure_channel(f"127.0.0.1:{port}", creds) as channel:
