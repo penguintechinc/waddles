@@ -76,6 +76,28 @@ fn duration_arg(p: &Value) -> Result<u64, FrameErr> {
         })
 }
 
+/// `chat.clear`: `DELETE /moderation/chat` WITHOUT `message_id` clears the whole chat of the
+/// host-pinned channel. Takes no parameters: any `user_id` / `text` / `message_id` is refused
+/// (never ignored) so a clear can never silently degrade into a targeted delete.
+pub fn clear(payload: &Value) -> Result<Tpl, FrameErr> {
+    for key in ["user_id", "text", "message_id"] {
+        if payload.get(key).is_some() {
+            return Err(FrameErr::Malformed(format!(
+                "chat.clear takes no `{key}` parameter"
+            )));
+        }
+    }
+    Ok(Tpl {
+        method: "DELETE".to_string(),
+        url: format!(
+            "{HELIX}/moderation/chat?broadcaster_id={SLOT_BROADCASTER}&moderator_id={SLOT_SENDER}"
+        ),
+        headers: auth_headers(),
+        body: None,
+        secret_refs: base_refs(),
+    })
+}
+
 /// Builds the Helix template for `kind`. Unknown kinds fail loudly as `Unsupported`.
 pub fn build(kind: &str, payload: &Value) -> Result<Tpl, FrameErr> {
     let ban_url = format!(
@@ -251,6 +273,35 @@ mod tests {
         ] {
             let p = json!({"user_id":"1","text":text}).to_string();
             assert!(build_request("mod.timeout", "s", &p).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn chat_clear_is_a_bodyless_parameterless_delete_on_host_slots() {
+        let t = build_request("chat.clear", "s", "{}").unwrap();
+        assert_eq!(t.method, "DELETE");
+        assert_eq!(
+            t.url,
+            "https://api.twitch.tv/helix/moderation/chat?broadcaster_id={{TWITCH_BROADCASTER_ID}}&moderator_id={{TWITCH_SENDER_ID}}"
+        );
+        assert!(t.body.is_none() && !t.url.contains("message_id"));
+        for key in crate::sender::IGNORED_TARGET_KEYS {
+            let p = json!({ *key: "666" }).to_string();
+            let u = build_request("chat.clear", "s", &p).unwrap();
+            assert_eq!(u, t, "{key} influenced the template");
+        }
+        for bad in [
+            json!({"message_id":"m"}),
+            json!({"user_id":"1"}),
+            json!({"text":"{}"}),
+        ] {
+            assert!(
+                matches!(
+                    build_request("chat.clear", "s", &bad.to_string()),
+                    Err(FrameErr::Malformed(_))
+                ),
+                "{bad}"
+            );
         }
     }
 

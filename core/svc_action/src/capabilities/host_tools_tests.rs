@@ -27,6 +27,9 @@ use crate::actor::{ActorDirectory, ActorError, BoxFuture as ActorFuture};
 use crate::host_api::ConnectionRegistry;
 use crate::platform_user::{BoxFuture as UserFuture, PlatformUserResolver, ResolveError};
 
+#[path = "host_tools_twitch_manifest_tests.rs"]
+mod twitch_manifest_tests;
+
 const APP: &str = "waddles.test.app.caller";
 const TWITCH_SVC: &str = "waddles.core.service.twitch";
 const DISCORD_SVC: &str = super::super::event_sync::DISCORD_SERVICE_APP_ID;
@@ -101,6 +104,28 @@ fn exported(name: &str, scope: Option<&str>, host_op: Option<HostOpDecl>) -> Exp
     }
 }
 
+/// The host-op tools of a platform bundle's REAL manifest, loaded from the consent summary the
+/// hub approval pipeline derives from it (`scripts/host_tool_summary.py` regenerates the
+/// fixture; a Python test fails when it drifts). Zero tools is a failure, never an empty pass.
+fn manifest_tools(platform: &str) -> Vec<ExportedToolInfo> {
+    let path = format!(
+        "{}/tests/fixtures/host_tools/{platform}.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let exported: Value = serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let info = ToolManifestInfo::from_summary(
+        &json!({"capabilities": ["mcp.tools"], "exportedTools": exported}),
+    );
+    let tools: Vec<ExportedToolInfo> = info
+        .exported
+        .into_iter()
+        .filter(|t| t.host_op.is_some())
+        .collect();
+    assert!(!tools.is_empty(), "{path}: no host-op tools parsed");
+    tools
+}
+
 fn row(app: &str, version_id: i64, tools: ToolManifestInfo) -> ActiveBundleRow {
     ActiveBundleRow {
         app_id: app.to_string(),
@@ -113,6 +138,8 @@ fn row(app: &str, version_id: i64, tools: ToolManifestInfo) -> ActiveBundleRow {
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
         declared_capabilities: Vec::new(),
+        egress: Vec::new(),
+        egress_rps: None,
         tools,
     }
 }
@@ -1279,10 +1306,10 @@ async fn stable_refusal_codes_are_the_message_prefix() {
         err.message
     );
 
-    // not_supported: kick registers no ops; an unregistered op is explicit.
+    // not_supported: kick registers no `mod.kick` op; an unregistered op is explicit.
     let c = build(
         rig_for("kick"),
-        mod_tools("kick", "mod.ban"),
+        mod_tools("kick", "mod.kick"),
         FakeRelayQueue::with_live_drain(),
     );
     let err = c
@@ -1619,6 +1646,7 @@ async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() 
             "youtube",
             vec!["mod.ban", "mod.unban", "mod.add", "mod.remove"],
         ),
+        ("kick", vec!["mod.ban", "mod.timeout", "mod.unban"]),
     ] {
         for op in ops {
             let c = caps(FakeRelayQueue::with_live_drain());
@@ -1643,8 +1671,8 @@ async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() 
             checked += 1;
         }
     }
-    assert_eq!(checked, 3 + 4 + 4, "denominator: moderation ops attempted");
-    // Kick registers no ops and is not a relay provider: refused outright, never queued.
+    assert_eq!(checked, 3 + 4 + 4 + 3, "denominator: moderation ops attempted");
+    // A platform that is not a relay provider is refused outright, never queued.
     let c = caps(FakeRelayQueue::with_live_drain());
     let err = c
         .handle(
@@ -1654,7 +1682,7 @@ async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() 
                 capability: CapabilityKind::Relay,
                 op: "send".to_string(),
                 args: json!({
-                    "provider": "kick",
+                    "provider": "nosuchplatform",
                     "message_json": json!({"op": "mod.ban", "user_id": "1"}).to_string(),
                 }),
                 call_id: 1,
