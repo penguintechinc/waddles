@@ -1,0 +1,35 @@
+[package]
+name = "waddle-bundle-calendar-rust"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Calendar APP bundle (Rust, WASM component on the `stage-next-tools` world): community events, RSVP, approvals, chat commands, admin actions, and event sync to Discord scheduled events (plus config-gated Twitch schedule / Wix events adapters) by CALLING service-bundle tools. Absorbs the light `!event` kv bundle."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "=0.44.0", features = ["bitflags"] }
+# Sibling-crate path dependency (same repo, moves together): tool error types
+# and the `ToolTransport` seam the sync engine is written against.
+waddle-sdk-rs = { path = "../../../sdk/waddle-sdk-rs", version = "=0.1.0" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+thiserror = "=2.0.20"
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+chrono-tz = "=0.10.4"
+sha2 = "=0.11.1"
+
+[dev-dependencies]
+regex = "=1.12.3"
+
+[package.metadata.component]
+package = "waddle:bundle-calendar-rust"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-bundle"
+world = "stage-next-tools"
+
+[package.metadata.component.dependencies]

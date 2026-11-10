@@ -647,6 +647,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-host-credentials"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bundle-host-http",
+ "connection_resolver",
+ "redis",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bundle-host-db"
 version = "0.1.0"
 dependencies = [
@@ -933,6 +946,20 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "connection_resolver"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "service_auth",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -1870,13 +1897,14 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.20"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
+checksum = "727805d60e7938b76b826a6ef209eb70eaa1812794f9424d4a4e2d740662df5f"
 dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures-channel",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",
@@ -3844,13 +3872,21 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "hyper-util",
  "jsonwebtoken",
  "opentelemetry",
- "reqwest 0.12.28",
+ "prost",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
  "tracing",
 ]
 
@@ -4230,6 +4266,7 @@ dependencies = [
  "base64 0.22.1",
  "bundle-active-set",
  "bundle-capability-gate",
+ "bundle-host-credentials",
  "bundle-host-db",
  "bundle-host-economy",
  "bundle-host-http",

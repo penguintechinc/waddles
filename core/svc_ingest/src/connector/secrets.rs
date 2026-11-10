@@ -246,7 +246,7 @@ mod tests {
     };
     use hub_client::pb::ResolveConnectionResponse;
     use tonic::Status;
-    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::connector::poll::{PollAuth, PollConfig, PollTransport};
@@ -415,7 +415,7 @@ mod tests {
     }
 
     /// Removes the synthetic projected service-account token on every exit path.
-    struct TestSa(PathBuf);
+    struct TestSa(PathBuf, service_auth::test_support::MockHub);
     impl Drop for TestSa {
         fn drop(&mut self) {
             if let Err(error) = std::fs::remove_file(&self.0) {
@@ -424,16 +424,17 @@ mod tests {
         }
     }
 
-    /// Starts the real resolver against the in-process gRPC hub (token mint on the mock server).
+    /// Starts the real resolver against the in-process gRPC hub (gRPC token mint on an in-process hub).
     /// The synthetic projected token lives until its test guard is dropped.
     async fn resolver(env: &Env) -> (ConnectionResolver, TestSa) {
-        Mock::given(method("POST"))
-            .and(path("/internal/service-token"))
-            .and(body_partial_json(serde_json::json!({"community_id": 7})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({"token": "synthetic-machine-token", "expires_in": 3600}),
-            ))
-            .mount(&env.server)
+        // The mint is gRPC: a real in-process `ServiceAuthService` answers only community 7.
+        let hub = service_auth::test_support::MockHub::builder()
+            .mint(vec![service_auth::test_support::MintReply::when(
+                |call| call.community_id == Some(7),
+                "synthetic-machine-token",
+                3600,
+            )])
+            .start()
             .await;
         let sa = std::env::temp_dir().join(format!("transport-sa-{}", uuid::Uuid::new_v4()));
         std::fs::write(&sa, "synthetic-service-account").unwrap();
@@ -441,13 +442,13 @@ mod tests {
             ResolverConfig::new(
                 env.endpoint.clone(),
                 "alpha",
-                format!("{}/internal/service-token", env.server.uri()),
+                hub.endpoint.clone(),
                 sa.to_string_lossy().to_string(),
             ),
             Arc::new(NoMetrics),
         )
         .unwrap();
-        (resolver, TestSa(sa))
+        (resolver, TestSa(sa, hub))
     }
 
     /// The next resolve returns this rotated OAuth credential (one shot), as the real hub does.
@@ -514,10 +515,12 @@ mod tests {
         assert_eq!(
             requests
                 .iter()
-                .filter(|r| r.url.path() == "/internal/service-token")
+                .filter(|r| r.url.path().ends_with("/resolve"))
                 .count(),
-            1
+            0,
+            "resolves are gRPC, never REST"
         );
+        assert_eq!(_sa.1.mint_hits(), 1);
     }
 
     /// Authentication tokens are expanded only in the transport-owned buffer;

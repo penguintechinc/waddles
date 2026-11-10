@@ -1,4 +1,4 @@
-"""Tests for per-service EdDSA machine JWTs (service_jwt.py).
+"""Tests for per-service ES256 machine JWTs (service_jwt.py).
 
 Covers the security-critical rejection paths called out in the feature
 spec: forged, expired, wrong-audience, wrong-scope, and unknown-`kid`
@@ -14,7 +14,7 @@ import time
 import jwt as pyjwt
 import pytest
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import (
     BootstrapRejected,
     InvalidServiceToken,
@@ -34,8 +34,8 @@ SCOPE = "identity:ephemeral:mint"
 
 
 @pytest.fixture
-def keypair() -> tuple[Ed25519PrivateKey, SigningKey]:
-    priv = Ed25519PrivateKey.generate()
+def keypair() -> tuple[ec.EllipticCurvePrivateKey, SigningKey]:
+    priv = ec.generate_private_key(ec.SECP256R1())
     return priv, SigningKey(kid="k1", private_key=priv, public_key=priv.public_key())
 
 
@@ -45,7 +45,7 @@ def service_id() -> str:
 
 
 @pytest.fixture
-def issuer(keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str) -> ServiceJwtIssuer:
+def issuer(keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str) -> ServiceJwtIssuer:
     _, key = keypair
     identity = ServiceIdentity(
         service_id=service_id,
@@ -71,7 +71,7 @@ def test_issue_and_verify_round_trip(issuer: ServiceJwtIssuer, service_id: str) 
 
 
 def test_issued_token_carries_tenant_claim_from_identity_only(
-    keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str
+    keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str
 ) -> None:
     """The `tenant` claim is stamped from the allow-listed identity -- never the caller."""
     _, key = keypair
@@ -108,21 +108,21 @@ def test_issue_sets_nbf_to_iat(issuer: ServiceJwtIssuer, service_id: str) -> Non
     assert claims["nbf"] == claims["iat"]
 
 
-def test_missing_nbf_rejected(issuer: ServiceJwtIssuer, keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str) -> None:
+def test_missing_nbf_rejected(issuer: ServiceJwtIssuer, keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str) -> None:
     """A token minted without `nbf` (older issuer, or forged) must be rejected."""
     priv, _ = keypair
     now = int(time.time())
     no_nbf = pyjwt.encode(
         {"iss": "hub-api", "aud": AUDIENCE, "sub": service_id, "scope": SCOPE, "iat": now, "exp": now + 900, "jti": "x"},
         priv,
-        algorithm="EdDSA",
+        algorithm="ES256",
         headers={"kid": "k1"},
     )
     with pytest.raises(InvalidServiceToken):
         issuer.as_verifier().verify(no_nbf, required_scope=SCOPE)
 
 
-def test_not_yet_valid_token_rejected(issuer: ServiceJwtIssuer, keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str) -> None:
+def test_not_yet_valid_token_rejected(issuer: ServiceJwtIssuer, keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str) -> None:
     """`nbf` in the future, beyond clock-skew leeway, must be rejected."""
     priv, _ = keypair
     now = int(time.time())
@@ -140,14 +140,14 @@ def test_not_yet_valid_token_rejected(issuer: ServiceJwtIssuer, keypair: tuple[E
             "jti": "x",
         },
         priv,
-        algorithm="EdDSA",
+        algorithm="ES256",
         headers={"kid": "k1"},
     )
     with pytest.raises(InvalidServiceToken):
         issuer.as_verifier().verify(not_yet_valid, required_scope=SCOPE)
 
 
-def test_nbf_within_clock_skew_accepted(issuer: ServiceJwtIssuer, keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str) -> None:
+def test_nbf_within_clock_skew_accepted(issuer: ServiceJwtIssuer, keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str) -> None:
     """`nbf` slightly in the future, within clock-skew leeway, still verifies."""
     priv, _ = keypair
     now = int(time.time())
@@ -165,7 +165,7 @@ def test_nbf_within_clock_skew_accepted(issuer: ServiceJwtIssuer, keypair: tuple
             "jti": "x",
         },
         priv,
-        algorithm="EdDSA",
+        algorithm="ES256",
         headers={"kid": "k1"},
     )
     claims = issuer.as_verifier().verify(token, required_scope=SCOPE)
@@ -188,38 +188,38 @@ def test_bootstrap_rejected_for_disallowed_scope(issuer: ServiceJwtIssuer, servi
 
 
 def test_forged_token_unknown_kid_rejected(issuer: ServiceJwtIssuer, service_id: str) -> None:
-    forged_key = Ed25519PrivateKey.generate()
+    forged_key = ec.generate_private_key(ec.SECP256R1())
     now = int(time.time())
     forged = pyjwt.encode(
         {"iss": "hub-api", "aud": AUDIENCE, "sub": service_id, "scope": SCOPE, "iat": now, "exp": now + 900, "jti": "x"},
         forged_key,
-        algorithm="EdDSA",
+        algorithm="ES256",
         headers={"kid": "nonexistent-kid"},
     )
     with pytest.raises(UnknownKeyId):
         issuer.as_verifier().verify(forged, required_scope=SCOPE)
 
 
-def test_expired_token_rejected(issuer: ServiceJwtIssuer, keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str) -> None:
+def test_expired_token_rejected(issuer: ServiceJwtIssuer, keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str) -> None:
     priv, _ = keypair
     now = int(time.time())
     expired = pyjwt.encode(
         {"iss": "hub-api", "aud": AUDIENCE, "sub": service_id, "scope": SCOPE, "iat": now - 3600, "exp": now - 1800, "jti": "x"},
         priv,
-        algorithm="EdDSA",
+        algorithm="ES256",
         headers={"kid": "k1"},
     )
     with pytest.raises(InvalidServiceToken):
         issuer.as_verifier().verify(expired, required_scope=SCOPE)
 
 
-def test_wrong_audience_rejected(issuer: ServiceJwtIssuer, keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str) -> None:
+def test_wrong_audience_rejected(issuer: ServiceJwtIssuer, keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str) -> None:
     priv, _ = keypair
     now = int(time.time())
     wrong_aud = pyjwt.encode(
         {"iss": "hub-api", "aud": "some-other-audience", "sub": service_id, "scope": SCOPE, "iat": now, "exp": now + 900, "jti": "x"},
         priv,
-        algorithm="EdDSA",
+        algorithm="ES256",
         headers={"kid": "k1"},
     )
     with pytest.raises(InvalidServiceToken):
@@ -232,13 +232,13 @@ def test_wrong_scope_rejected(issuer: ServiceJwtIssuer, service_id: str) -> None
         issuer.as_verifier().verify(token, required_scope="some:other:scope")
 
 
-def test_untrusted_issuer_rejected(issuer: ServiceJwtIssuer, keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str) -> None:
+def test_untrusted_issuer_rejected(issuer: ServiceJwtIssuer, keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str) -> None:
     priv, _ = keypair
     now = int(time.time())
     bad_iss = pyjwt.encode(
         {"iss": "not-hub-api", "aud": AUDIENCE, "sub": service_id, "scope": SCOPE, "iat": now, "exp": now + 900, "jti": "x"},
         priv,
-        algorithm="EdDSA",
+        algorithm="ES256",
         headers={"kid": "k1"},
     )
     with pytest.raises(InvalidServiceToken):
@@ -246,9 +246,9 @@ def test_untrusted_issuer_rejected(issuer: ServiceJwtIssuer, keypair: tuple[Ed25
 
 
 def test_rotation_old_token_still_verifies_new_key_used_for_issuance(service_id: str) -> None:
-    old_priv = Ed25519PrivateKey.generate()
+    old_priv = ec.generate_private_key(ec.SECP256R1())
     old_key = SigningKey(kid="k1", private_key=old_priv, public_key=old_priv.public_key())
-    new_priv = Ed25519PrivateKey.generate()
+    new_priv = ec.generate_private_key(ec.SECP256R1())
     new_key = SigningKey(kid="k2", private_key=new_priv, public_key=new_priv.public_key())
     identity = ServiceIdentity(
         service_id=service_id, k8s_namespace="waddlebot", k8s_service_account="svc-process", allowed_scopes=frozenset({SCOPE})
@@ -422,7 +422,7 @@ class TestEnvWiring:
 
     def test_load_issuer_from_env_end_to_end(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The full Secret+values.yaml -> working issuer path `app.py` runs at startup."""
-        priv = Ed25519PrivateKey.generate()
+        priv = ec.generate_private_key(ec.SECP256R1())
         pem = priv.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
@@ -467,9 +467,9 @@ def _claims_for(service_id: str, **over: object) -> dict[str, object]:
     return {k: v for k, v in claims.items() if v is not None}
 
 
-def _signed(priv: Ed25519PrivateKey, service_id: str, **headers: object) -> str:
+def _signed(priv: ec.EllipticCurvePrivateKey, service_id: str, **headers: object) -> str:
     return pyjwt.encode(
-        _claims_for(service_id), priv, algorithm="EdDSA", headers={"kid": "k1", **headers}
+        _claims_for(service_id), priv, algorithm="ES256", headers={"kid": "k1", **headers}
     )
 
 
@@ -480,7 +480,7 @@ def _b64u(raw: bytes) -> str:
 
 
 def test_hardening_control_hand_signed_eddsa_token_verifies(
-    issuer: ServiceJwtIssuer, keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str
+    issuer: ServiceJwtIssuer, keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str
 ) -> None:
     priv, _ = keypair
     claims = issuer.as_verifier().verify(_signed(priv, service_id), required_scope=SCOPE)
@@ -500,8 +500,8 @@ def test_alg_none_rejected_even_with_a_known_kid(
     assert ("service_eddsa", "none", "alg_none") in metrics_capture.verifications()
 
 
-def test_hmac_token_keyed_with_the_ed25519_public_key_is_rejected(
-    issuer: ServiceJwtIssuer, keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str, metrics_capture
+def test_hmac_token_keyed_with_the_p256_public_key_is_rejected(
+    issuer: ServiceJwtIssuer, keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str, metrics_capture
 ) -> None:
     """The classic alg-confusion: attacker HMACs with the (public) verification key bytes."""
     import hashlib
@@ -510,7 +510,7 @@ def test_hmac_token_keyed_with_the_ed25519_public_key_is_rejected(
 
     _, key = keypair
     public_raw = key.public_key.public_bytes(
-        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw
+        encoding=serialization.Encoding.X962, format=serialization.PublicFormat.UncompressedPoint
     )
     head = _b64u(json.dumps({"alg": "HS256", "typ": "JWT", "kid": "k1"}).encode())
     body = _b64u(json.dumps(_claims_for(service_id)).encode())
@@ -533,7 +533,7 @@ def test_rs256_token_rejected(issuer: ServiceJwtIssuer, service_id: str, metrics
 @pytest.mark.parametrize("param", ["jku", "jwk", "x5u", "x5c", "crit"])
 def test_key_material_headers_rejected_despite_a_valid_signature(
     issuer: ServiceJwtIssuer,
-    keypair: tuple[Ed25519PrivateKey, SigningKey],
+    keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey],
     service_id: str,
     param: str,
     metrics_capture,
@@ -542,12 +542,12 @@ def test_key_material_headers_rejected_despite_a_valid_signature(
     token = _signed(priv, service_id, **{param: "https://evil.example/jwks.json"})
     with pytest.raises(InvalidServiceToken):
         issuer.as_verifier().verify(token, required_scope=SCOPE)
-    assert ("service_eddsa", "eddsa", "forbidden_header") in metrics_capture.verifications()
+    assert ("service_eddsa", "es256", "forbidden_header") in metrics_capture.verifications()
 
 
 @pytest.mark.parametrize("bad_kid", ["../../etc/passwd", "k1; DROP", "x" * 65, "k1\nINJECTED"])
 def test_hostile_kid_never_reaches_the_trust_bundle(
-    keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str, bad_kid: str, metrics_capture
+    keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str, bad_kid: str, metrics_capture
 ) -> None:
     priv, key = keypair
     looked_up: list[str] = []
@@ -564,20 +564,20 @@ def test_hostile_kid_never_reaches_the_trust_bundle(
     with pytest.raises(InvalidServiceToken):
         verifier.verify(token, required_scope=SCOPE)
     assert looked_up == []
-    assert ("service_eddsa", "eddsa", "bad_kid") in metrics_capture.verifications()
+    assert ("service_eddsa", "es256", "bad_kid") in metrics_capture.verifications()
 
 
 def test_missing_kid_is_still_unknown_key_id(
-    issuer: ServiceJwtIssuer, keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str
+    issuer: ServiceJwtIssuer, keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str
 ) -> None:
     priv, _ = keypair
-    token = pyjwt.encode(_claims_for(service_id), priv, algorithm="EdDSA")
+    token = pyjwt.encode(_claims_for(service_id), priv, algorithm="ES256")
     with pytest.raises(UnknownKeyId):
         issuer.as_verifier().verify(token, required_scope=SCOPE)
 
 
 def test_unknown_kid_error_does_not_echo_the_attacker_kid(
-    issuer: ServiceJwtIssuer, keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str
+    issuer: ServiceJwtIssuer, keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str
 ) -> None:
     priv, _ = keypair
     token = _signed(priv, service_id, kid="attacker-chosen-kid-7731")
@@ -588,7 +588,7 @@ def test_unknown_kid_error_does_not_echo_the_attacker_kid(
 
 def test_metrics_cover_success_and_every_failure_class(
     issuer: ServiceJwtIssuer,
-    keypair: tuple[Ed25519PrivateKey, SigningKey],
+    keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey],
     service_id: str,
     metrics_capture,
 ) -> None:
@@ -604,29 +604,29 @@ def test_metrics_cover_success_and_every_failure_class(
 
     attempt(issuer.issue(service_id, SCOPE))
     attempt(issuer.issue(service_id, SCOPE), scope="some:other")
-    attempt(pyjwt.encode(_claims_for(service_id, exp=now - 3600, iat=now - 7200, nbf=now - 7200), priv, algorithm="EdDSA", headers={"kid": "k1"}))
-    attempt(pyjwt.encode(_claims_for(service_id, iss="evil"), priv, algorithm="EdDSA", headers={"kid": "k1"}))
-    attempt(pyjwt.encode(_claims_for(service_id, aud="other"), priv, algorithm="EdDSA", headers={"kid": "k1"}))
-    attempt(pyjwt.encode(_claims_for(service_id), priv, algorithm="EdDSA", headers={"kid": "nope"}))
-    attempt(_signed(Ed25519PrivateKey.generate(), service_id))  # right kid, wrong key
+    attempt(pyjwt.encode(_claims_for(service_id, exp=now - 3600, iat=now - 7200, nbf=now - 7200), priv, algorithm="ES256", headers={"kid": "k1"}))
+    attempt(pyjwt.encode(_claims_for(service_id, iss="evil"), priv, algorithm="ES256", headers={"kid": "k1"}))
+    attempt(pyjwt.encode(_claims_for(service_id, aud="other"), priv, algorithm="ES256", headers={"kid": "k1"}))
+    attempt(pyjwt.encode(_claims_for(service_id), priv, algorithm="ES256", headers={"kid": "nope"}))
+    attempt(_signed(ec.generate_private_key(ec.SECP256R1()), service_id))  # right kid, wrong key
     attempt("not-a-jwt")
 
     points = metrics_capture.verifications()
-    assert points[("service_eddsa", "eddsa", "ok")] == 1
-    assert points[("service_eddsa", "eddsa", "scope_denied")] == 1
-    assert points[("service_eddsa", "eddsa", "expired")] == 1
-    assert points[("service_eddsa", "eddsa", "bad_issuer")] == 1
-    assert points[("service_eddsa", "eddsa", "bad_audience")] == 1
-    assert points[("service_eddsa", "eddsa", "unknown_kid")] == 1
-    assert points[("service_eddsa", "eddsa", "bad_signature")] == 1
+    assert points[("service_eddsa", "es256", "ok")] == 1
+    assert points[("service_eddsa", "es256", "scope_denied")] == 1
+    assert points[("service_eddsa", "es256", "expired")] == 1
+    assert points[("service_eddsa", "es256", "bad_issuer")] == 1
+    assert points[("service_eddsa", "es256", "bad_audience")] == 1
+    assert points[("service_eddsa", "es256", "unknown_kid")] == 1
+    assert points[("service_eddsa", "es256", "bad_signature")] == 1
     assert points[("service_eddsa", "absent", "malformed")] == 1
     assert sum(points.values()) == 8
-    assert metrics_capture.duration_counts()[("service_eddsa", "eddsa")] == 7
+    assert metrics_capture.duration_counts()[("service_eddsa", "es256")] == 7
 
 
 def test_rejection_log_has_no_token_or_claims(
     issuer: ServiceJwtIssuer,
-    keypair: tuple[Ed25519PrivateKey, SigningKey],
+    keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey],
     service_id: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -636,7 +636,7 @@ def test_rejection_log_has_no_token_or_claims(
     token = _signed(priv, service_id, jku="https://evil.example/SECRET-PATH-1234")
     with caplog.at_level(logging.DEBUG, logger="flask_core"), pytest.raises(InvalidServiceToken):
         issuer.as_verifier().verify(token, required_scope=SCOPE)
-    assert "JWT rejected: verifier=service_eddsa reason=forbidden_header alg=eddsa" in caplog.text
+    assert "JWT rejected: verifier=service_eddsa reason=forbidden_header alg=es256" in caplog.text
     assert token not in caplog.text
     assert "SECRET-PATH-1234" not in caplog.text
     assert service_id not in caplog.text
@@ -647,21 +647,22 @@ def test_rejection_log_has_no_token_or_claims(
 # ---------------------------------------------------------------------------
 
 
-def test_jwks_publishes_every_key_with_its_kid(issuer: ServiceJwtIssuer, keypair: tuple[Ed25519PrivateKey, SigningKey]) -> None:
+def test_jwks_publishes_every_key_with_its_kid(issuer: ServiceJwtIssuer, keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey]) -> None:
     jwks = issuer.jwks()
     assert [k["kid"] for k in jwks["keys"]] == ["k1"]
     entry = jwks["keys"][0]
-    assert (entry["kty"], entry["crv"], entry["alg"], entry["use"]) == ("OKP", "Ed25519", "EdDSA", "sig")
+    assert (entry["kty"], entry["crv"], entry["alg"], entry["use"]) == ("EC", "P-256", "ES256", "sig")
+    assert {"x", "y"} <= set(entry)
     assert "d" not in entry  # never the private scalar
 
 
-def _pem_private(key: Ed25519PrivateKey) -> str:
+def _pem_private(key: ec.EllipticCurvePrivateKey) -> str:
     return key.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
     ).decode()
 
 
-def _pem_public(key: Ed25519PrivateKey) -> str:
+def _pem_public(key: ec.EllipticCurvePrivateKey) -> str:
     return key.public_key().public_bytes(
         serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
     ).decode()
@@ -669,7 +670,7 @@ def _pem_public(key: Ed25519PrivateKey) -> str:
 
 class TestLoadIssuerFromEnv:
     def test_private_and_verify_only_keys_loaded(self, monkeypatch: pytest.MonkeyPatch, service_id: str) -> None:
-        active, retired = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
+        active, retired = ec.generate_private_key(ec.SECP256R1()), ec.generate_private_key(ec.SECP256R1())
         monkeypatch.setenv("SERVICE_JWT_ACTIVE_KID", "newkid")
         monkeypatch.setenv("SERVICE_JWT_PRIVATE_KEY_newkid", _pem_private(active))
         monkeypatch.setenv("SERVICE_JWT_PUBLIC_KEY_oldkid", _pem_public(retired))
@@ -687,32 +688,43 @@ class TestLoadIssuerFromEnv:
         assert pyjwt.get_unverified_header(token)["kid"] == "newkid"
         assert loaded.as_verifier().verify(token, required_scope=SCOPE)["sub"] == service_id
 
-    def test_non_ed25519_private_key_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cryptography.hazmat.primitives.asymmetric import ec
+    def test_non_p256_private_key_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cryptography.hazmat.primitives.asymmetric import ed25519
 
-        ec_pem = ec.generate_private_key(ec.SECP256R1()).private_bytes(
+        pem = ed25519.Ed25519PrivateKey.generate().private_bytes(
             serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
         ).decode()
-        monkeypatch.setenv("SERVICE_JWT_ACTIVE_KID", "ec")
-        monkeypatch.setenv("SERVICE_JWT_PRIVATE_KEY_ec", ec_pem)
-        with pytest.raises(ServiceJwtError, match="not an Ed25519"):
+        monkeypatch.setenv("SERVICE_JWT_ACTIVE_KID", "ed")
+        monkeypatch.setenv("SERVICE_JWT_PRIVATE_KEY_ed", pem)
+        with pytest.raises(ServiceJwtError, match="not an ECDSA P-256"):
             load_issuer_from_env([])
 
-    def test_non_ed25519_public_key_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cryptography.hazmat.primitives.asymmetric import ec
+    def test_wrong_curve_private_key_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        p384 = _pem_private(ec.generate_private_key(ec.SECP384R1()))
+        monkeypatch.setenv("SERVICE_JWT_ACTIVE_KID", "p384")
+        monkeypatch.setenv("SERVICE_JWT_PRIVATE_KEY_p384", p384)
+        with pytest.raises(ServiceJwtError, match="not an ECDSA P-256"):
+            load_issuer_from_env([])
 
-        ec_pub = ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(
+    def test_ed25519_public_key_refused_unless_legacy_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+
+        ed_pub = ed25519.Ed25519PrivateKey.generate().public_key().public_bytes(
             serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
         ).decode()
         monkeypatch.setenv("SERVICE_JWT_ACTIVE_KID", "a")
-        monkeypatch.setenv("SERVICE_JWT_PRIVATE_KEY_a", _pem_private(Ed25519PrivateKey.generate()))
-        monkeypatch.setenv("SERVICE_JWT_PUBLIC_KEY_b", ec_pub)
-        with pytest.raises(ServiceJwtError, match="not an Ed25519"):
+        monkeypatch.setenv("SERVICE_JWT_PRIVATE_KEY_a", _pem_private(ec.generate_private_key(ec.SECP256R1())))
+        monkeypatch.setenv("SERVICE_JWT_PUBLIC_KEY_b", ed_pub)
+        with pytest.raises(ServiceJwtError, match="SERVICE_JWT_ACCEPT_LEGACY_EDDSA"):
             load_issuer_from_env([])
+        monkeypatch.setenv("SERVICE_JWT_ACCEPT_LEGACY_EDDSA", "true")
+        loaded = load_issuer_from_env([])
+        assert loaded.accept_legacy_eddsa is True
+        assert {k["kty"] for k in loaded.jwks()["keys"]} == {"EC", "OKP"}
 
     def test_active_kid_without_private_key_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SERVICE_JWT_ACTIVE_KID", "ghost")
-        monkeypatch.setenv("SERVICE_JWT_PUBLIC_KEY_ghost", _pem_public(Ed25519PrivateKey.generate()))
+        monkeypatch.setenv("SERVICE_JWT_PUBLIC_KEY_ghost", _pem_public(ec.generate_private_key(ec.SECP256R1())))
         with pytest.raises(ServiceJwtError, match="no private key"):
             load_issuer_from_env([])
 
@@ -747,7 +759,7 @@ class TestRequireServiceScopeDecorator:
         assert response.status_code == 401
 
     async def test_hostile_header_token_is_401(
-        self, client, keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str
+        self, client, keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str
     ) -> None:
         priv, _ = keypair
         token = _signed(priv, service_id, jku="https://evil.example/jwks.json")
@@ -755,7 +767,7 @@ class TestRequireServiceScopeDecorator:
         assert response.status_code == 401
         assert (await response.get_json()) == {"error": "unauthorized"}  # never says which check failed
 
-    async def test_unknown_kid_is_401(self, client, keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str) -> None:
+    async def test_unknown_kid_is_401(self, client, keypair: tuple[ec.EllipticCurvePrivateKey, SigningKey], service_id: str) -> None:
         priv, _ = keypair
         token = _signed(priv, service_id, kid="not-in-bundle")
         response = await client.get("/mint", headers={"Authorization": f"Bearer {token}"})
@@ -784,3 +796,119 @@ def test_issue_with_claims_enforces_the_same_guards(
         issuer.issue_with_claims(service_id, "not:allow-listed")
     with pytest.raises(ServiceJwtError):
         issuer.issue_with_claims(service_id, SCOPE, ttl_seconds=3601)
+
+
+# ---------------------------------------------------------------------------
+# ES256 cut-over: legacy EdDSA window (SERVICE_JWT_ACCEPT_LEGACY_EDDSA), key/alg confusion.
+# ---------------------------------------------------------------------------
+
+
+def _legacy_issuer(service_id: str, *, accept_legacy: bool) -> tuple[ServiceJwtIssuer, object]:
+    """Issuer holding an ES256 active key `k1` plus a verify-only legacy Ed25519 key `old`."""
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    legacy_priv = ed25519.Ed25519PrivateKey.generate()
+    es = ec.generate_private_key(ec.SECP256R1())
+    identity = ServiceIdentity(
+        service_id=service_id, k8s_namespace="waddlebot", k8s_service_account="svc-process", allowed_scopes=frozenset({SCOPE})
+    )
+    issuer = ServiceJwtIssuer(
+        keys={
+            "k1": SigningKey(kid="k1", private_key=es, public_key=es.public_key()),
+            "old": SigningKey(kid="old", private_key=None, public_key=legacy_priv.public_key()),
+        },
+        active_kid="k1",
+        identities={service_id: identity},
+        accept_legacy_eddsa=accept_legacy,
+    )
+    return issuer, legacy_priv
+
+
+def test_issuer_signs_es256_only(issuer: ServiceJwtIssuer, service_id: str) -> None:
+    token = issuer.issue(service_id, SCOPE)
+    assert pyjwt.get_unverified_header(token)["alg"] == "ES256"
+    assert issuer.as_verifier().accept_legacy_eddsa is False
+
+
+def test_legacy_eddsa_token_rejected_by_default(service_id: str, metrics_capture) -> None:
+    issuer, legacy_priv = _legacy_issuer(service_id, accept_legacy=False)
+    token = pyjwt.encode(_claims_for(service_id), legacy_priv, algorithm="EdDSA", headers={"kid": "old"})
+    with pytest.raises(InvalidServiceToken):
+        issuer.as_verifier().verify(token, required_scope=SCOPE)
+    assert ("service_eddsa", "eddsa", "alg_mismatch") in metrics_capture.verifications()
+
+
+def test_legacy_eddsa_token_accepted_only_with_flag(service_id: str) -> None:
+    issuer, legacy_priv = _legacy_issuer(service_id, accept_legacy=True)
+    token = pyjwt.encode(_claims_for(service_id), legacy_priv, algorithm="EdDSA", headers={"kid": "old"})
+    assert issuer.as_verifier().verify(token, required_scope=SCOPE)["sub"] == service_id
+    # ES256 still works in the same window, and new tokens are never EdDSA.
+    assert issuer.as_verifier().verify(issuer.issue(service_id, SCOPE), required_scope=SCOPE)
+
+
+def test_key_alg_confusion_refused_even_in_legacy_window(service_id: str, metrics_capture) -> None:
+    """An EdDSA-signed token naming the ES256 kid (or vice versa) never reaches signature check."""
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    issuer, _ = _legacy_issuer(service_id, accept_legacy=True)
+    attacker = ed25519.Ed25519PrivateKey.generate()
+    token = pyjwt.encode(_claims_for(service_id), attacker, algorithm="EdDSA", headers={"kid": "k1"})
+    with pytest.raises(InvalidServiceToken):
+        issuer.as_verifier().verify(token, required_scope=SCOPE)
+    assert ("service_eddsa", "eddsa", "alg_mismatch") in metrics_capture.verifications()
+
+
+@pytest.mark.parametrize("alg", ["HS256", "HS512", "RS256", "ES384", "PS256"])
+def test_every_other_alg_rejected_even_in_legacy_window(service_id: str, alg: str) -> None:
+    import base64
+    import json
+
+    issuer, _ = _legacy_issuer(service_id, accept_legacy=True)
+    head = base64.urlsafe_b64encode(json.dumps({"alg": alg, "kid": "k1"}).encode()).rstrip(b"=").decode()
+    body = base64.urlsafe_b64encode(json.dumps(_claims_for(service_id)).encode()).rstrip(b"=").decode()
+    with pytest.raises(InvalidServiceToken):
+        issuer.as_verifier().verify(f"{head}.{body}.AAAA", required_scope=SCOPE)
+
+
+def test_es256_kid_rotation_old_key_still_verifies_then_dropped(service_id: str) -> None:
+    old = ec.generate_private_key(ec.SECP256R1())
+    new = ec.generate_private_key(ec.SECP256R1())
+    identity = ServiceIdentity(
+        service_id=service_id, k8s_namespace="waddlebot", k8s_service_account="svc-process", allowed_scopes=frozenset({SCOPE})
+    )
+    keys = {
+        "old": SigningKey(kid="old", private_key=old, public_key=old.public_key()),
+        "new": SigningKey(kid="new", private_key=new, public_key=new.public_key()),
+    }
+    rotating = ServiceJwtIssuer(keys=keys, active_kid="old", identities={service_id: identity})
+    old_token = rotating.issue(service_id, SCOPE)
+    rotating.active_kid = "new"
+    new_token = rotating.issue(service_id, SCOPE)
+    assert pyjwt.get_unverified_header(new_token)["kid"] == "new"
+    verifier = rotating.as_verifier()
+    assert verifier.verify(old_token, required_scope=SCOPE)
+    assert verifier.verify(new_token, required_scope=SCOPE)
+    assert sorted(k["kid"] for k in rotating.jwks()["keys"]) == ["new", "old"]
+    del rotating.keys["old"]  # old key retired: its tokens now fail closed
+    with pytest.raises(UnknownKeyId):
+        rotating.as_verifier().verify(old_token, required_scope=SCOPE)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [(None, False), ("false", False), ("true", True), ("TRUE", True), ("0", False)]
+)
+def test_legacy_flag_env_parse(monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: bool) -> None:
+    from flask_core.service_jwt import accept_legacy_eddsa_from_env
+
+    monkeypatch.delenv("SERVICE_JWT_ACCEPT_LEGACY_EDDSA", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("SERVICE_JWT_ACCEPT_LEGACY_EDDSA", raw)
+    assert accept_legacy_eddsa_from_env() is expected
+
+
+def test_legacy_flag_garbage_fails_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+    from flask_core.service_jwt import accept_legacy_eddsa_from_env
+
+    monkeypatch.setenv("SERVICE_JWT_ACCEPT_LEGACY_EDDSA", "yes-please")
+    with pytest.raises(ServiceJwtError, match="must be 'true' or 'false'"):
+        accept_legacy_eddsa_from_env()

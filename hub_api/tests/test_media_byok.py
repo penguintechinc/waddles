@@ -1,7 +1,7 @@
 """Media (Gemini) BYOK admin API + internal resolver/tier endpoints -- real pydal DB, real JWTs.
 
 Real: sqlite-backed `ai_routing_db` (tenants/communities/members/ai_byok_keys/audit_log), real
-AES-256-GCM, real Ed25519 machine JWTs through `machine_authenticated`, real rate limiter
+AES-256-GCM, real ES256 machine JWTs through `machine_authenticated`, real rate limiter
 (in-memory fallback). Stubbed only: the outbound Gemini `models` validation call and the license
 gate (`get_tier`), both external services.
 
@@ -19,7 +19,7 @@ from typing import Any
 
 import grpc
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.rate_limiter import RateLimiter
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey, spiffe_id
 from quart import Quart
@@ -70,7 +70,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def issuer() -> ServiceJwtIssuer:
-    priv = Ed25519PrivateKey.generate()
+    priv = ec.generate_private_key(ec.SECP256R1())
     ids = {
         sid: ServiceIdentity(sid, "waddlebot", name, SCOPES, "system")
         for sid, name in ((PROCESS, "svc-process"), (ACTION, "svc-action"), (ROGUE, "svc-rogue"))
@@ -379,7 +379,7 @@ class TestResolver:
 
     async def test_non_system_tenant_denied(self, app: Quart, ai_routing_db: Any) -> None:
         """An allow-listed identity bound to a NON-system tenant may not call (cross-tenant RPC)."""
-        priv = Ed25519PrivateKey.generate()
+        priv = ec.generate_private_key(ec.SECP256R1())
         tenant_issuer = ServiceJwtIssuer(
             keys={"k1": SigningKey("k1", priv, priv.public_key())},
             active_kid="k1",

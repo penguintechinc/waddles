@@ -118,6 +118,9 @@ class AdapterSpec:
     #: The data-plane metadata contract (flat string->string). Empty = the provider's facts ride
     #: elsewhere (static kinds: the resolve ``endpoint``), so its binding metadata is ``{}``.
     binding_metadata: tuple[BindingKey, ...] = ()
+    #: For a kind-1 provider that also needs an outbound API credential beside its OAuth/public
+    #: token (Wix): the secret scheme of that sealed document. ``None`` = the provider has none.
+    api_credential_scheme: SecretScheme | None = None
 
     def __post_init__(self) -> None:
         """Reject a malformed spec at registration time rather than at first request."""

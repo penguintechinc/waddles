@@ -153,17 +153,15 @@ async fn slow_and_unreachable_hubs_are_transient_and_bounded() {
 
 #[tokio::test]
 async fn token_failures_map_to_auth_or_transient() {
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
     let hub = ok_hub();
     let running = start(&hub).await;
 
     // Token endpoint rejects the bootstrap -> Auth (on both resolve and list).
-    let rejecting = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/internal/service-token"))
-        .respond_with(ResponseTemplate::new(401))
-        .mount(&rejecting)
+    let rejecting = service_auth::test_support::MockHub::builder()
+        .mint(vec![service_auth::test_support::MintReply::Reject(
+            tonic::Code::Unauthenticated,
+        )])
+        .start()
         .await;
     let r = ConnectionResolver::new(cfg(&running.endpoint, &rejecting), Arc::new(Rec::default()))
         .unwrap();
@@ -181,7 +179,7 @@ async fn token_failures_map_to_auth_or_transient() {
     let tokens = token_server().await;
     // Token endpoint unreachable -> Transient.
     let mut c = cfg(&running.endpoint, &tokens);
-    c.token_endpoint = "http://127.0.0.1:1/internal/service-token".to_string();
+    c.token_endpoint = "http://127.0.0.1:1".to_string();
     let r2 = ConnectionResolver::new(c, Arc::new(Rec::default())).unwrap();
     assert_eq!(
         r2.resolve(R).await.unwrap_err(),
@@ -316,12 +314,12 @@ async fn list_bindings_uses_the_unbound_list_token_and_paginates() {
         ]
     );
     // The list token request carried no binding fields (unbound scope), minted once.
-    let mints_seen = tokens.received_requests().await.unwrap();
+    let mints_seen = tokens.mint_calls();
     assert_eq!(mints_seen.len(), 1);
-    let body = String::from_utf8_lossy(&mints_seen[0].body).to_string();
     assert!(
-        !body.contains("community_id") && !body.contains("connection_id"),
-        "{body}"
+        mints_seen[0].community_id.is_none() && mints_seen[0].connection_id.is_none(),
+        "{:?}",
+        mints_seen[0]
     );
     assert_eq!(
         rec.calls
@@ -504,7 +502,11 @@ fn write_pem(contents: &str, label: &str) -> String {
     path.to_string_lossy().to_string()
 }
 
-fn tls_config(running_port: u16, tokens: &wiremock::MockServer, ca_path: &str) -> ResolverConfig {
+fn tls_config(
+    running_port: u16,
+    tokens: &service_auth::test_support::MockHub,
+    ca_path: &str,
+) -> ResolverConfig {
     let mut c = cfg(&format!("https://localhost:{running_port}"), tokens);
     c.environment = "beta".into(); // https is accepted in every environment
     c.with_grpc_ca(Some(ca_path.to_string()))

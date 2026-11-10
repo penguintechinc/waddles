@@ -4,16 +4,16 @@
 Reads a `helm template waddlebot k8s/helm/waddlebot --values values-alpha.yaml
 --set global.imageTag=<SHA>` multi-document YAML stream on stdin and asserts:
 
-1. Both bundle-executor Deployments (bundle-executor, bundle-executor-action)
-   render with the OOM-fix resources (request 1Gi/500m, limit 2560Mi/2000m
+1. The ONE svc-bundles-executor Deployment (it serves every stage) renders with
+   the OOM-fix resources (request 1Gi/500m, limit 2560Mi/2000m
    CPU) -- alpha was OOMKilled at the old 128Mi/64Mi tier compiling a 21MB
    CPython component plus a .NET component via Cranelift.
-2. Both bundle-executor Deployments' startupProbe failureThreshold gives a
+2. The svc-bundles-executor Deployment's startupProbe failureThreshold gives a
    cold compile up to ~5 minutes (>= 30 at periodSeconds=5), not the old 12
    (62s).
-3. Every container image referencing the bundle-executor repository uses the
+3. Every container image referencing the svc-bundles-executor repository uses the
    SHA tag this run was templated with -- never the old static `:alpha` tag
-   (the bug: nothing ever rebuilt it, so both executors ran a stale build).
+   (the bug: nothing ever rebuilt it, so the executor ran a stale build).
 4. No legacy single-bundle env var (PROCESS_APP_ID, PROCESS_INGEST_*,
    PROCESS_BUNDLE_*, ACTION_APP_ID, ACTION_BUNDLE_*) appears anywhere in the
    alpha render -- the DB-driven multi-tenant active-bundle loader is the
@@ -29,7 +29,7 @@ from typing import Any
 
 import yaml
 
-EXECUTOR_COMPONENTS = {"bundle-executor", "bundle-executor-action"}
+EXECUTOR_COMPONENTS = {"svc-bundles-executor"}
 EXPECTED_RESOURCES = {
     "requests": {"cpu": "500m", "memory": "1Gi"},
     "limits": {"cpu": "2000m", "memory": "2560Mi"},
@@ -120,7 +120,7 @@ def main() -> int:
             )
 
         image = container.get("image", "")
-        if "bundle-executor" in image:
+        if "svc-bundles-executor" in image:
             if ":" not in image or image.rsplit(":", 1)[1] != expected_tag:
                 errors.append(
                     f"{name}: image {image!r} does not use expected SHA tag {expected_tag!r}"
@@ -135,13 +135,19 @@ def main() -> int:
             )
 
     print(
-        f"Examined {executor_deployments_found} bundle-executor Deployment(s), "
+        f"Examined {executor_deployments_found} svc-bundles-executor Deployment(s), "
         f"{containers_examined} container(s), {env_names_examined} env var name(s)."
     )
     if executor_deployments_found == 0:
         print(
-            "FAIL: zero bundle-executor Deployments found -- "
-            "rustDataPlane.bundleExecutor{,Action}.enabled off, or component label changed",
+            "FAIL: zero svc-bundles-executor Deployments found -- "
+            "rustDataPlane.bundleExecutor.enabled off, or component label changed",
+            file=sys.stderr,
+        )
+        return 1
+    if executor_deployments_found != 1:
+        print(
+            f"FAIL: expected exactly ONE svc-bundles-executor Deployment, found {executor_deployments_found}",
             file=sys.stderr,
         )
         return 1
@@ -155,7 +161,7 @@ def main() -> int:
             print(f"  - {e}", file=sys.stderr)
         return 1
 
-    print("PASS: bundle-executor resources/probes/image-tag/legacy-env assertions hold.")
+    print("PASS: svc-bundles-executor resources/probes/image-tag/legacy-env assertions hold.")
     return 0
 
 

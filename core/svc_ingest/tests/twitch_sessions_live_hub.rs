@@ -113,6 +113,8 @@ struct Live {
     hub_url: String,
     /// The live hub's internal gRPC listener (plaintext loopback; the resolver allows it in alpha).
     hub_grpc_endpoint: String,
+    /// hub-api's internal gRPC endpoint (machine-JWT mint), from the live-hub manifest.
+    grpc_url: String,
     admin_token: String,
     community_a: i64,
     sa_path: PathBuf,
@@ -167,6 +169,7 @@ impl Live {
                 .as_str()
                 .expect("hub_grpc_endpoint")
                 .to_string(),
+            grpc_url: m["grpc_url"].as_str().expect("grpc_url").to_string(),
             admin_token: m["admin_token"].as_str().expect("admin_token").to_string(),
             community_a: m["community_a"].as_i64().expect("community_a"),
             sa_path,
@@ -241,7 +244,7 @@ impl Live {
                 ResolverConfig::new(
                     self.hub_grpc_endpoint.clone(),
                     "alpha",
-                    format!("{}/internal/service-token", self.hub_url),
+                    self.grpc_url.clone(),
                     self.sa_path.to_string_lossy().to_string(),
                 ),
                 Arc::new(NoopResolverMetrics),

@@ -46,8 +46,9 @@ pub struct ResolverConfig {
     pub grpc_ca_path: Option<String>,
     /// Deployment environment name (`alpha`/`beta`/...), used for the transport policy.
     pub environment: String,
-    /// hub-api machine-token endpoint (`.../internal/service-token`; token bootstrap stays
-    /// HTTP until the mint RPC lands).
+    /// hub-api's internal gRPC endpoint serving the machine-JWT mint
+    /// (`ServiceAuthService.MintServiceToken`), e.g. `https://hub-api:50204`; the CA comes
+    /// from `HUB_API_GRPC_CA_FILE`.
     pub token_endpoint: String,
     /// Path of the projected ServiceAccount token used to bootstrap machine JWTs.
     pub sa_token_path: String,
@@ -187,7 +188,8 @@ fn map_auth_error(e: &service_auth::ServiceAuthError) -> ResolveError {
     use service_auth::ServiceAuthError as E;
     match e {
         E::BootstrapRejected(_) | E::InvalidToken(_) | E::UnknownKeyId(_) => ResolveError::Auth,
-        E::Http(_) => ResolveError::Transient("token endpoint unreachable"),
+        E::Grpc(_) => ResolveError::Transient("token endpoint unreachable"),
+        E::Config(_) => ResolveError::Malformed("token endpoint misconfigured"),
         E::Io(_) => ResolveError::Transient("service account token unreadable"),
     }
 }
@@ -470,7 +472,7 @@ mod tests {
     async fn plaintext_http_hub_endpoint_refused_outside_alpha() {
         let mk = |url: &str, env: &str| {
             ConnectionResolver::new(
-                ResolverConfig::new(url, env, "http://t/internal/service-token", "/sa"),
+                ResolverConfig::new(url, env, "http://127.0.0.1:1", "/sa"),
                 Arc::new(NoMetrics),
             )
         };
@@ -488,7 +490,7 @@ mod tests {
         let cfg = ResolverConfig::new(
             "https://hub:50204",
             "beta",
-            "http://t/internal/service-token",
+            "http://127.0.0.1:1",
             "/sa",
         )
         .with_grpc_ca(Some("/nonexistent/ca.pem".into()));
@@ -500,7 +502,7 @@ mod tests {
 
     #[test]
     fn building_outside_a_tokio_runtime_is_an_error_not_a_panic() {
-        let cfg = ResolverConfig::new("http://hub:50204", "alpha", "http://t/x", "/sa");
+        let cfg = ResolverConfig::new("http://hub:50204", "alpha", "http://127.0.0.1:1", "/sa");
         assert_eq!(
             ConnectionResolver::new(cfg, Arc::new(NoMetrics)).unwrap_err(),
             ResolveError::Malformed("connection resolver must be built inside a tokio runtime")

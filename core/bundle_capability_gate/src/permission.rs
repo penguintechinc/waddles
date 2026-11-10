@@ -256,6 +256,20 @@ pub enum PermissionFamily {
     /// (addresses a specific platform identity).
     DmSend,
     Moderation,
+    /// `message.edit:<platform>` -- Edit a bot-authored message in the triggering event's own channel; op `message.edit`.
+    MessageEdit,
+    /// `chat.clear:<platform>` -- Clear the whole chat of the triggering event's own channel; op `chat.clear` (host-executed tool path only, never `relay.push`).
+    ChatClear,
+    /// `webhook.manage:<platform>` -- Create channel webhooks (the reply carries a secret token that stays host-side); op `webhook.create` (host-executed tool path only, never `relay.push`).
+    WebhookManage,
+    /// `message.reaction:<platform>` -- Add a reaction to a message in the triggering event's own channel; op `reaction.add`.
+    MessageReaction,
+    /// `commands.register:<platform>` -- App-scoped slash-command registration (bulk overwrite) for the community's own application; op `commands.register`.
+    CommandsRegister,
+    /// `eventsub.manage:<platform>` -- Create/delete/list platform event subscriptions with the APP credential; ops `eventsub.create|delete|list`.
+    EventsubManage,
+    /// `interaction.respond:<platform>` -- Answer a platform interaction with the host-held interaction token; ops `interaction.callback|followup`.
+    InteractionRespond,
     OverlayMedia,
     AiGenerate,
     MediaGenerate,
@@ -290,6 +304,19 @@ pub enum PermissionFamily {
     /// `economy.pot.pay` -- atomic multi-winner payout from the community pot
     /// (P4 Task 1). Moves existing currency; never mints.
     EconomyPotPay,
+    /// `economy.transfer_from` -- ELEVATED, per-app admin-approved: lets an APP
+    /// bundle (via the economy service bundle's tools) move or burn the funds
+    /// of a member who is NOT the invocation's actor (the SuperPenguin
+    /// `!steal` primitive). Recorded with the approving admin; host-side caps
+    /// (`max_per_op` / `max_per_day` / `max_per_target_per_day` in the grant
+    /// params) bound it per community and per app. Caller-checked: the grant
+    /// that matters is the CALLING app's, not the service bundle's.
+    EconomyTransferFrom,
+    /// `economy.app_mint` -- ELEVATED, per-app admin-approved: lets an APP
+    /// bundle create or set currency through the economy service bundle
+    /// (`adjust_balance`, `credit`, `exchange`, `points_*`, `pay_pot`). Same
+    /// approval/caps/audit model as `economy.transfer_from`.
+    EconomyAppMint,
     /// `identity.resolve` -- resolve the invocation's triggering actor (and a
     /// mention target the triggering message carried) to the community
     /// `user_uuid` that `economy.*`/`reputation.*` name their targets by.
@@ -360,6 +387,13 @@ impl PermissionFamily {
         Self::ChatDelete,
         Self::DmSend,
         Self::Moderation,
+        Self::MessageEdit,
+        Self::ChatClear,
+        Self::WebhookManage,
+        Self::MessageReaction,
+        Self::CommandsRegister,
+        Self::EventsubManage,
+        Self::InteractionRespond,
         Self::OverlayMedia,
         Self::AiGenerate,
         Self::MediaGenerate,
@@ -377,6 +411,8 @@ impl PermissionFamily {
         Self::EconomyDebit,
         Self::EconomyAdminAdjust,
         Self::EconomyPotPay,
+        Self::EconomyTransferFrom,
+        Self::EconomyAppMint,
         Self::IdentityResolve,
         Self::ConnectorPiiRead,
         Self::FlagsRead,
@@ -409,6 +445,13 @@ impl PermissionFamily {
             Self::ChatDelete => "chat.delete",
             Self::DmSend => "dm.send",
             Self::Moderation => "moderation",
+            Self::MessageEdit => "message.edit",
+            Self::ChatClear => "chat.clear",
+            Self::WebhookManage => "webhook.manage",
+            Self::MessageReaction => "message.reaction",
+            Self::CommandsRegister => "commands.register",
+            Self::EventsubManage => "eventsub.manage",
+            Self::InteractionRespond => "interaction.respond",
             Self::OverlayMedia => "overlay.media",
             Self::AiGenerate => "ai.generate",
             Self::MediaGenerate => "media.generate",
@@ -426,6 +469,8 @@ impl PermissionFamily {
             Self::EconomyDebit => "economy.debit",
             Self::EconomyAdminAdjust => "economy.admin_adjust",
             Self::EconomyPotPay => "economy.pot.pay",
+            Self::EconomyTransferFrom => "economy.transfer_from",
+            Self::EconomyAppMint => "economy.app_mint",
             Self::IdentityResolve => "identity.resolve",
             Self::ConnectorPiiRead => "connector.pii.read",
             Self::FlagsRead => "flags.read",
@@ -460,6 +505,13 @@ impl PermissionFamily {
                 | Self::ChatDelete
                 | Self::DmSend
                 | Self::Moderation
+                | Self::MessageEdit
+                | Self::ChatClear
+                | Self::WebhookManage
+                | Self::MessageReaction
+                | Self::CommandsRegister
+                | Self::EventsubManage
+                | Self::InteractionRespond
                 | Self::ToolCall
                 | Self::PlatformTableRead
                 | Self::PlatformTableWrite
@@ -497,6 +549,8 @@ impl PermissionFamily {
                 | Self::EconomyDebit
                 | Self::EconomyAdminAdjust
                 | Self::EconomyPotPay
+                | Self::EconomyTransferFrom
+                | Self::EconomyAppMint
         )
     }
 
@@ -652,6 +706,76 @@ impl PermissionFamily {
                     "existing relay-authz + UsageBatcher (wit-v1.1 SS2)",
                 ),
                 notes: "Subsumes wit-v1.1's bare `moderation` capability flag",
+            },
+            Self::MessageEdit => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Relay,
+                default_quota: Quota::Descriptive(
+                    "host-enforced exact-template policy in svc_ingest sender_exec; \
+                     destination ids come from host bindings only; UsageBatcher is metering only",
+                ),
+                notes: "Edit a bot-authored message in the triggering event's own channel; op `message.edit`",
+            },
+            Self::ChatClear => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Relay,
+                default_quota: Quota::Descriptive(
+                    "host-enforced exact-template policy in svc_ingest sender_exec; \
+                     destination ids come from host bindings only; UsageBatcher is metering only",
+                ),
+                notes: "Clear the whole chat of the triggering event's own channel; op `chat.clear` (host tool path only)",
+            },
+            Self::WebhookManage => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Relay,
+                default_quota: Quota::Descriptive(
+                    "host-enforced exact-template policy in svc_ingest sender_exec; \
+                     the created webhook's token never reaches a guest; UsageBatcher is metering only",
+                ),
+                notes: "Create channel webhooks; op `webhook.create` (host tool path only)",
+            },
+            Self::MessageReaction => CatalogEntry {
+                family: *self,
+                risk: Risk::Normal,
+                capability_kind: CapabilityKind::Relay,
+                default_quota: Quota::Descriptive(
+                    "host-enforced exact-template policy in svc_ingest sender_exec; \
+                     destination ids come from host bindings only; UsageBatcher is metering only",
+                ),
+                notes: "Add a reaction to a message in the triggering event's own channel; op `reaction.add`",
+            },
+            Self::CommandsRegister => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Relay,
+                default_quota: Quota::Descriptive(
+                    "host-enforced exact-template policy in svc_ingest sender_exec; \
+                     destination ids come from host bindings only; UsageBatcher is metering only",
+                ),
+                notes: "App-scoped slash-command registration (bulk overwrite) for the community's own application; op `commands.register`",
+            },
+            Self::EventsubManage => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Relay,
+                default_quota: Quota::Descriptive(
+                    "host-enforced exact-template policy in svc_ingest sender_exec; \
+                     destination ids come from host bindings only; UsageBatcher is metering only",
+                ),
+                notes: "Create/delete/list platform event subscriptions with the APP credential; ops `eventsub.create|delete|list`",
+            },
+            Self::InteractionRespond => CatalogEntry {
+                family: *self,
+                risk: Risk::Normal,
+                capability_kind: CapabilityKind::Relay,
+                default_quota: Quota::Descriptive(
+                    "host-enforced exact-template policy in svc_ingest sender_exec; \
+                     destination ids come from host bindings only; UsageBatcher is metering only",
+                ),
+                notes: "Answer a platform interaction with the host-held interaction token; ops `interaction.callback|followup`",
             },
             Self::OverlayMedia => CatalogEntry {
                 family: *self,
@@ -817,6 +941,26 @@ impl PermissionFamily {
                 },
                 notes: "P4 Task 1; atomic multi-winner payout from the reserved community pot account (explicit amounts, remainder stays in the pot); moves existing currency, never mints",
             },
+            Self::EconomyTransferFrom => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Economy,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 10,
+                    window: Duration::from_secs(1),
+                },
+                notes: "ELEVATED; an app moving/burning a NON-actor member's funds via the economy service; needs explicit per-app community-admin approval (recorded); durable host caps from the grant params (max_per_op/max_per_day/max_per_target_per_day) + audit row per call",
+            },
+            Self::EconomyAppMint => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Economy,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 10,
+                    window: Duration::from_secs(1),
+                },
+                notes: "ELEVATED; an app creating/setting currency via the economy service (adjust_balance+, credit, exchange, points_set/adjust, pay_pot); explicit per-app approval (recorded); durable host caps + audit row per call",
+            },
             Self::PlatformTableRead | Self::PlatformTableWrite => CatalogEntry {
                 family: *self,
                 risk: Risk::Dangerous,
@@ -971,6 +1115,13 @@ pub enum PermissionId {
     ChatDelete(String),
     DmSend(String),
     Moderation(String),
+    MessageEdit(String),
+    ChatClear(String),
+    WebhookManage(String),
+    MessageReaction(String),
+    CommandsRegister(String),
+    EventsubManage(String),
+    InteractionRespond(String),
     OverlayMedia,
     AiGenerate,
     MediaGenerate,
@@ -988,6 +1139,8 @@ pub enum PermissionId {
     EconomyDebit,
     EconomyAdminAdjust,
     EconomyPotPay,
+    EconomyTransferFrom,
+    EconomyAppMint,
     IdentityResolve,
     ConnectorPiiRead,
     FlagsRead,
@@ -1059,6 +1212,13 @@ impl PermissionId {
             Self::ChatDelete(_) => PermissionFamily::ChatDelete,
             Self::DmSend(_) => PermissionFamily::DmSend,
             Self::Moderation(_) => PermissionFamily::Moderation,
+            Self::MessageEdit(_) => PermissionFamily::MessageEdit,
+            Self::ChatClear(_) => PermissionFamily::ChatClear,
+            Self::WebhookManage(_) => PermissionFamily::WebhookManage,
+            Self::MessageReaction(_) => PermissionFamily::MessageReaction,
+            Self::CommandsRegister(_) => PermissionFamily::CommandsRegister,
+            Self::EventsubManage(_) => PermissionFamily::EventsubManage,
+            Self::InteractionRespond(_) => PermissionFamily::InteractionRespond,
             Self::OverlayMedia => PermissionFamily::OverlayMedia,
             Self::AiGenerate => PermissionFamily::AiGenerate,
             Self::MediaGenerate => PermissionFamily::MediaGenerate,
@@ -1076,6 +1236,8 @@ impl PermissionId {
             Self::EconomyDebit => PermissionFamily::EconomyDebit,
             Self::EconomyAdminAdjust => PermissionFamily::EconomyAdminAdjust,
             Self::EconomyPotPay => PermissionFamily::EconomyPotPay,
+            Self::EconomyTransferFrom => PermissionFamily::EconomyTransferFrom,
+            Self::EconomyAppMint => PermissionFamily::EconomyAppMint,
             Self::IdentityResolve => PermissionFamily::IdentityResolve,
             Self::ConnectorPiiRead => PermissionFamily::ConnectorPiiRead,
             Self::FlagsRead => PermissionFamily::FlagsRead,
@@ -1121,6 +1283,13 @@ impl PermissionId {
             Self::ChatDelete(platform) => format!("chat.delete:{platform}"),
             Self::DmSend(platform) => format!("dm.send:{platform}"),
             Self::Moderation(platform) => format!("moderation.{platform}"),
+            Self::MessageEdit(platform) => format!("message.edit:{platform}"),
+            Self::ChatClear(platform) => format!("chat.clear:{platform}"),
+            Self::WebhookManage(platform) => format!("webhook.manage:{platform}"),
+            Self::MessageReaction(platform) => format!("message.reaction:{platform}"),
+            Self::CommandsRegister(platform) => format!("commands.register:{platform}"),
+            Self::EventsubManage(platform) => format!("eventsub.manage:{platform}"),
+            Self::InteractionRespond(platform) => format!("interaction.respond:{platform}"),
             Self::ToolCall { target, tool } => format!("tool.call:{target}:{tool}"),
             Self::StorageAccess { op, owner } => format!("storage.{}:{owner}", op.as_str()),
             Self::PlatformTable { op, table, column } => {
@@ -1262,6 +1431,34 @@ impl PermissionId {
             Self::validate_platform(platform)?;
             return Ok(Self::DmSend(platform.to_string()));
         }
+        if let Some(platform) = raw.strip_prefix("message.edit:") {
+            Self::validate_platform(platform)?;
+            return Ok(Self::MessageEdit(platform.to_string()));
+        }
+        if let Some(platform) = raw.strip_prefix("chat.clear:") {
+            Self::validate_platform(platform)?;
+            return Ok(Self::ChatClear(platform.to_string()));
+        }
+        if let Some(platform) = raw.strip_prefix("webhook.manage:") {
+            Self::validate_platform(platform)?;
+            return Ok(Self::WebhookManage(platform.to_string()));
+        }
+        if let Some(platform) = raw.strip_prefix("message.reaction:") {
+            Self::validate_platform(platform)?;
+            return Ok(Self::MessageReaction(platform.to_string()));
+        }
+        if let Some(platform) = raw.strip_prefix("commands.register:") {
+            Self::validate_platform(platform)?;
+            return Ok(Self::CommandsRegister(platform.to_string()));
+        }
+        if let Some(platform) = raw.strip_prefix("eventsub.manage:") {
+            Self::validate_platform(platform)?;
+            return Ok(Self::EventsubManage(platform.to_string()));
+        }
+        if let Some(platform) = raw.strip_prefix("interaction.respond:") {
+            Self::validate_platform(platform)?;
+            return Ok(Self::InteractionRespond(platform.to_string()));
+        }
         if let Some(platform) = raw.strip_prefix("moderation.") {
             Self::validate_platform(platform)?;
             return Ok(Self::Moderation(platform.to_string()));
@@ -1327,6 +1524,20 @@ impl PermissionId {
                 },
             });
         }
+        if let Some(family) = [
+            "message.edit",
+            "chat.clear",
+            "webhook.manage",
+            "message.reaction",
+            "commands.register",
+            "eventsub.manage",
+            "interaction.respond",
+        ]
+        .into_iter()
+        .find(|f| *f == raw)
+        {
+            return Err(ParsePermissionIdError::MissingParam { family });
+        }
         if raw == "chat.send" || raw == "chat.delete" || raw == "dm.send" {
             return Err(ParsePermissionIdError::MissingParam {
                 family: match raw {
@@ -1358,6 +1569,8 @@ impl PermissionId {
             "economy.debit" => Ok(Self::EconomyDebit),
             "economy.admin_adjust" => Ok(Self::EconomyAdminAdjust),
             "economy.pot.pay" => Ok(Self::EconomyPotPay),
+            "economy.transfer_from" => Ok(Self::EconomyTransferFrom),
+            "economy.app_mint" => Ok(Self::EconomyAppMint),
             "identity.resolve" => Ok(Self::IdentityResolve),
             "connector.pii.read" => Ok(Self::ConnectorPiiRead),
             "flags.read" => Ok(Self::FlagsRead),
@@ -1626,6 +1839,68 @@ mod tests {
             assert_eq!(id.risk(), Risk::Dangerous);
             assert!(family.is_parameterized());
             assert!(PermissionFamily::ALL.contains(&family));
+        }
+    }
+
+    #[test]
+    fn platform_op_families_round_trip_and_reject_bare_and_unknown_platform() {
+        for (raw, family) in [
+            ("message.edit:discord", PermissionFamily::MessageEdit),
+            ("chat.clear:twitch", PermissionFamily::ChatClear),
+            ("webhook.manage:discord", PermissionFamily::WebhookManage),
+            (
+                "message.reaction:discord",
+                PermissionFamily::MessageReaction,
+            ),
+            (
+                "commands.register:discord",
+                PermissionFamily::CommandsRegister,
+            ),
+            ("eventsub.manage:twitch", PermissionFamily::EventsubManage),
+            (
+                "interaction.respond:discord",
+                PermissionFamily::InteractionRespond,
+            ),
+            ("moderation.kick", PermissionFamily::Moderation),
+            ("chat.delete:youtube", PermissionFamily::ChatDelete),
+        ] {
+            let id = PermissionId::parse(raw).unwrap();
+            assert_eq!(id.canonical_id(), raw);
+            assert_eq!(id.family(), family);
+            assert!(family.is_parameterized());
+            assert!(PermissionFamily::ALL.contains(&family));
+            let bare = raw
+                .split([':', '.'])
+                .take(if raw.starts_with("moderation") { 1 } else { 2 })
+                .collect::<Vec<_>>()
+                .join(".");
+            assert!(PermissionId::parse(&bare).is_err(), "{bare}");
+            let bad = format!(
+                "{}myspace",
+                &raw[..raw.len() - raw.rsplit([':', '.']).next().map_or(0, str::len)]
+            );
+            assert!(
+                matches!(
+                    PermissionId::parse(&bad),
+                    Err(ParsePermissionIdError::UnsupportedPlatform(_))
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn platform_op_family_risk_classes_are_pinned() {
+        for (raw, risk) in [
+            ("message.edit:discord", Risk::Dangerous),
+            ("chat.clear:twitch", Risk::Dangerous),
+            ("webhook.manage:discord", Risk::Dangerous),
+            ("commands.register:discord", Risk::Dangerous),
+            ("eventsub.manage:twitch", Risk::Dangerous),
+            ("message.reaction:discord", Risk::Normal),
+            ("interaction.respond:discord", Risk::Normal),
+        ] {
+            assert_eq!(PermissionId::parse(raw).unwrap().risk(), risk, "{raw}");
         }
     }
 

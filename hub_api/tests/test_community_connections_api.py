@@ -18,7 +18,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey, spiffe_id
 from quart import Quart
 from quart_schema import QuartSchema
@@ -95,8 +95,8 @@ def app(community_db: Any) -> Quart:
 
 
 def _service_issuer() -> ServiceJwtIssuer:
-    """Real Ed25519 issuer allow-listing one system-tenant service for ``connections:resolve``."""
-    private = Ed25519PrivateKey.generate()
+    """Real ES256 issuer allow-listing one system-tenant service for ``connections:resolve``."""
+    private = ec.generate_private_key(ec.SECP256R1())
     identity = ServiceIdentity(
         service_id=SERVICE_ID,
         k8s_namespace="waddlebot",

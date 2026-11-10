@@ -60,7 +60,12 @@ oversight.
 | `WaddleSdk.Types` | `PlatformEventInfo`, `StageEnvelopeInfo`, `TransportResultInfo`/`TransportErrorInfo`, `WaddleTransportException` |
 | `WaddleSdk.Stage` | `WaddleProcessStage`/`WaddleActionStage` base classes, `IWaddleHost` (aggregates every capability interface above) |
 
-## kv/db availability (2026-09-28)
+> **Newer worlds (economy, identity, tool, overlay, ai, media, state helpers, tick scheduler): see `docs/sdk-cs.md`.**
+> `IWaddleHostNext` extends `IWaddleHost` additively; `stage`-world bundles (csping) are unchanged.
+> **kv is now live on the host** (needs `storage.kv`; keys may not contain `:`). The section below describes the
+> 2026-09-28 deny-everything state and is kept for history; `CooldownGuard` keys were fixed to use `.`.
+
+## kv/db availability (2026-09-28, historical)
 
 The host `kv` capability is **currently hardcoded to deny every call** in
 svc-process/svc-action while its real backend is implemented. `db` is now

@@ -1,6 +1,6 @@
 //! Real-path tests for `HubClient::list_distribution_bundles` and the shared channel helpers:
 //! a real tonic server on loopback (the generated `DistributionService` server trait), a real
-//! `MachineJwtClient` bootstrapping from a fake token endpoint, a real lazy `Channel`. Nothing
+//! `MachineJwtClient` bootstrapping from a fake mint, a real lazy `Channel`. Nothing
 //! between the client and the wire is mocked.
 
 use std::net::SocketAddr;
@@ -12,10 +12,9 @@ use hub_client::pb::{
     DistributionBundle, DistributionStage, ListBundlesRequest, ListBundlesResponse,
 };
 use hub_client::{lazy_channel, HubClient, HubClientError};
+use service_auth::test_support::{MintReply, MockHub};
 use service_auth::MachineJwtClient;
 use tonic::{Request, Response, Status};
-use wiremock::matchers::{body_partial_json, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const SCOPE: &str = "distribution:read";
 const TOKEN: &str = "machine-jwt-for-distribution";
@@ -97,28 +96,22 @@ async fn serve(hub: FakeHub) -> String {
     format!("http://{addr}")
 }
 
-/// A `HubClient` over a lazy channel to `endpoint`, with a real bootstrap against a fake
-/// token endpoint (kept alive by the returned server).
-async fn client(endpoint: &str) -> (HubClient, MockServer) {
-    let token_server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/internal/service-token"))
-        .and(body_partial_json(serde_json::json!({"scope": SCOPE})))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"token": TOKEN, "expires_in": 3600})),
-        )
-        .mount(&token_server)
+/// A `HubClient` over a lazy channel to `endpoint`, with a real bootstrap against an in-process
+/// gRPC `ServiceAuthService` (kept alive by the returned hub); it only mints for `SCOPE`.
+async fn client(endpoint: &str) -> (HubClient, MockHub) {
+    let mint = MockHub::builder()
+        .mint(vec![MintReply::when(|c| c.scope == SCOPE, TOKEN, 3600)])
+        .start()
         .await;
     let sa = std::env::temp_dir().join(format!("hub-client-dist-sa-{}", std::process::id()));
     std::fs::write(&sa, "projected-sa-token").unwrap();
     let token_client = Arc::new(MachineJwtClient::new(
-        format!("{}/internal/service-token", token_server.uri()),
+        mint.endpoint.clone(),
         sa.to_string_lossy().to_string(),
         SCOPE,
     ));
     let channel = lazy_channel(endpoint, None).unwrap();
-    (HubClient::with_channel(channel, token_client), token_server)
+    (HubClient::with_channel(channel, token_client), mint)
 }
 
 fn hub(reply: Result<Vec<DistributionBundle>, tonic::Code>, fail_first: u32) -> (FakeHub, Seen) {
@@ -138,7 +131,7 @@ fn hub(reply: Result<Vec<DistributionBundle>, tonic::Code>, fail_first: u32) -> 
 async fn list_bundles_sends_typed_stage_bearer_token_and_decodes_the_reply() {
     let (fake, seen) = hub(Ok(vec![bundle()]), 0);
     let endpoint = serve(fake).await;
-    let (client, _token_server) = client(&endpoint).await;
+    let (client, _mint) = client(&endpoint).await;
 
     let response = client
         .list_distribution_bundles(DistributionStage::Process, Some(7))

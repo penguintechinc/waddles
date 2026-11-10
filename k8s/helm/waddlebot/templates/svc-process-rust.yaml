@@ -8,8 +8,8 @@
 # HOST_API_PORT/HOST_API_SERVER_CERT_FILE/HOST_API_SERVER_KEY_FILE/HOST_API_CLIENT_CA_FILE
 # fields and src/host_api.rs (~2.1k lines) implements the host-API server, wired the same way
 # templates/svc-action-rust.yaml's server-role host-API env/volume is --
-# bundleExecutor.stageTarget must point at svc-process-rust (not its svc-action-rust
-# default) for the ping-bundle e2e proof, since PROCESS_BUNDLE_* above is
+# bundleExecutor.stages must include svc-process-rust:8301
+# for the ping-bundle e2e proof, since PROCESS_BUNDLE_* above is
 # what drives the `load`/`invoke` calls this connection carries. CACHE_HOST/CACHE_PORT are
 # wired explicitly below (not envFrom'd) because the shared ConfigMap only exposes
 # REDIS_HOST/REDIS_PORT, a different name than this crate's CliConfig reads.
@@ -72,7 +72,7 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-process-rust
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcProcess.imageRepository | default "svc-process-rust") "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcProcess.imageRepository | default "svc-process") "imageTag" .Values.global.imageTag) }}"
         # Values-driven (.Values.global.imagePullPolicy, default IfNotPresent). Deploys carry
         # a unique per-deploy global.imageTag, so a stale same-tag node cache can no longer
         # occur -- the old hardcoded Always was unnecessary and fatal for locally-loaded
@@ -120,6 +120,7 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
+{{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.port | quote }}
         - name: METRICS_PORT
@@ -133,7 +134,7 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.heartbeatIntervalMs | default 5000 | quote }}
         # regression: readiness gated on executor connection deadlocked
         # rollouts (alpha 2026-10-02) -- NO LONGER wired into `/healthz`/
-        # `/health` (a bundle-executor dials this service through its
+        # `/health` (a svc-bundles-executor dials this service through its
         # ClusterIP Service, which only routes to Ready pods, so gating
         # readiness/liveness on executor presence deadlocked rollouts). Now
         # only the threshold for the periodic zero-executor ERROR log
@@ -160,14 +161,14 @@ spec:
         # feature/hub-grpc-env-wiring (closes #569's startup seam) -- core/hub_client::
         # HubClient needs hub-api's internal gRPC endpoint (TLS mandatory, see
         # hub_api/grpc_internal/server.py) and its machine-JWT bootstrap endpoint
-        # (hub_api/blueprints/service_jwt_bp.py POST /internal/service-token). Both
+        # (the same gRPC address: ServiceAuthService.MintServiceToken, TLS 1.3 + pinned CA). Both
         # default to hub-api's own in-cluster Service, computed here rather than
         # requiring a per-environment override (see values.yaml's own comment on this
         # key, incl. the KNOWN GAP note on hub-api's TLS wiring + hub_client's CA trust).
         - name: HUB_API_GRPC_ENDPOINT
           value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: SERVICE_JWT_TOKEN_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         # Matches the audience-scoped projected token this pod already mounts via
         # waddlebot.serviceJwtBootstrapVolume(Mount) below -- NOT the generic default
         # k8s SA token path (wrong audience, hub-api's TokenReview call would reject
@@ -193,7 +194,7 @@ spec:
         - name: CACHE_HOST
           value: {{ .Values.infrastructure.redis.service.name | quote }}
         - name: CACHE_PORT
-          value: {{ .Values.infrastructure.redis.service.port | quote }}
+          value: {{ .Values.infrastructure.redis.tls.port | quote }}
         - name: CACHE_PASSWORD
           valueFrom:
             secretKeyRef:
@@ -295,7 +296,7 @@ spec:
         # from the shared secret (empty by default -- the loader stays disabled until a
         # real RO-account password is provisioned, see templates/secrets.yaml).
         - name: DB_READER_HOST
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderHost | default .Values.infrastructure.postgresql.service.name | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderHost | default (include "waddlebot.postgres.host" .) | quote }}
         - name: DB_READER_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderPort | default .Values.infrastructure.postgresql.service.port | quote }}
         - name: DB_READER_NAME
@@ -394,6 +395,7 @@ spec:
         resources:
           {{- toYaml .Values.pipeline.rustDataPlane.svcProcess.resources | nindent 10 }}
         volumeMounts:
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
         - name: tmp
           mountPath: /tmp
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
@@ -407,6 +409,7 @@ spec:
         {{- end }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
       - name: tmp
         emptyDir: {}
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}

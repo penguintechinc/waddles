@@ -170,7 +170,7 @@ generic.
 | Never logged | Logs go through `flask_core.safe_logging` (exception type, code, category and frames -- never the message). Tokens, ciphertext, bot/channel names and provider response bodies are asserted absent from logs, spans and metric labels by tests. httpx's INFO line (which prints full URLs) is filtered for Twitch hosts. |
 | Output validation | Every response is an explicit DTO; request bodies reject unknown fields (`extra=forbid`). A regression test pins the exact field set. |
 | Outbound | Provider URLs are fixed constants but still pass the SSRF guard; redirects are never followed; responses are size-bounded; timeouts 5 s connect / 15 s total. |
-| Data plane auth | Short-lived Ed25519 **machine JWT**, scope `connections:resolve`, operator-plane `system` tenant (the routes span tenants by design). No shared key, no fallback. |
+| Data plane auth | Short-lived ES256 (ECDSA P-256) **machine JWT**, scope `connections:resolve`, operator-plane `system` tenant (the routes span tenants by design). No shared key, no fallback. |
 | Audit | Admin mutations pass `require_scope`, so the app-wide audit hook records them as `admin.action` for entitled tenants; `/api/v1/internal/` is intentionally unaudited plumbing. |
 
 > **Operational caution.** Never enable SQLAlchemy SQL echo (`sqlalchemy.engine` at INFO/DEBUG) in a
@@ -207,7 +207,7 @@ refresh to work; otherwise the connection works until the access token expires.
 
 ```
 svc-ingest                              hub-api
-   | POST /internal/service-token  (projected SA token)  -> short-lived Ed25519 JWT
+   | gRPC ServiceAuthService.MintServiceToken  (projected SA token, TLS 1.3)  -> short-lived ES256 JWT
    |                                                        scope connections:resolve, tenant=system
    | gRPC ProviderConnectionService.ListBindings{provider=twitch, capability=chat_ingest, after=0, limit=500}
    |  <- {items:[{grantId, connectionId, communityId, tenantId, resourceId, capabilities,
@@ -253,7 +253,7 @@ inbound feed runs on the same bot token as its `action_relay`; it was previously
 
 ### svc-ingest's service identity (the scope grant)
 
-hub-api's token endpoint (`hub_api/blueprints/service_jwt_bp.py`) only mints a scope the caller's
+hub-api's gRPC mint (`hub_api/grpc_internal/service_auth_servicer.py`) only mints a scope the caller's
 allow-listed identity carries. The allow-list is chart config, rendered into hub-api's
 `SERVICE_JWT_IDENTITIES` env var and parsed at startup by
 `flask_core.service_jwt.load_identities_from_env`:
@@ -370,6 +370,25 @@ fixtures: `hub_api/tests/fixtures/resolve_v2_*.json` (parsed byte-for-byte by th
 Responses are `Cache-Control: no-store`. The Rust client is `core/connection_resolver`: one authenticated
 call per send, no credential cache, zeroizing secrets, `Debug` redacts them.
 
+## Wix outbound API credential, SoundCloud and YouTube API-key connections
+
+- **Wix API credential** (`api_credential: {api_key, site_id}` on `POST`/`PATCH` of a `wix` connection):
+  sealed (AES-256-GCM, row-bound AAD) in `platform_connections.sealed_api_credential` (migration `0082`),
+  **write-only** -- admin DTOs carry only `hasApiCredential`. Wix API keys authenticate with the
+  `Authorization` header + `wix-site-id` ([auth docs](https://dev.wix.com/docs/rest/articles/getting-started/authentication));
+  Wix states keys are unavailable to third-party apps (those use an OAuth app-instance token, a separate,
+  deferred flow). Resolve returns it ONLY to a caller holding `connections:resolve:static` as
+  `secret = {scheme: 6 (wix_api_key), fields: {apiKey, siteId}}` next to the public key in `accessToken`;
+  `connections:resolve` (svc-ingest) never sees it. Replacing it bumps `secretVersion`.
+- **SoundCloud** (`soundcloud`, resource `soundcloud_app`): `credentials.access_token` = app client secret,
+  `metadata.client_id` = public app id. **YouTube Data API key** (`youtube_api`, resource `youtube_api_key`):
+  `credentials.access_token` = Google API key, `metadata.key_label` = admin name. Both resolve under the base
+  `connections:resolve` scope (secret as `accessToken`, ids in `metadata`); structural validation only, no
+  outbound call. Spotify app credentials are platform env/secret, not per community.
+- **OAuth PKCE audit** (`services/oauth_providers.py`): S256 PKCE is on for YouTube/Google, Spotify and Kick
+  (a missing challenge fails closed); Twitch, Discord and Slack do not document PKCE for the code grant.
+  `state` is single-use (`GETDEL`) and bound to the initiating browser (cookie nonce hash) and user.
+
 ## Scope matrix
 
 Each service identity mints only what it needs (chart `serviceJwt.identities`, rendered into hub-api's
@@ -401,7 +420,7 @@ AAD) still open through a fallback until you close it -- see the runbook below.
 
 The shared `X-Service-Key` header no longer authenticates either data-plane route nor the connection token
 endpoint (HIGH-2): there is **no dual-accept window**. Callers use a machine JWT minted via
-`/internal/service-token` from their projected ServiceAccount token. A request carrying only the old header
+gRPC `ServiceAuthService.MintServiceToken` from their projected ServiceAccount token. A request carrying only the old header
 gets `401` (asserted live by `live_legacy_service_key_is_rejected`).
 
 ## SPIFFE readiness and its footguns

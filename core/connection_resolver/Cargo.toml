@@ -36,14 +36,15 @@ tonic = "=0.14.6"
 # Self dev-dependency: turns `test-support` on for this crate's own integration tests.
 connection_resolver = { path = ".", features = ["test-support"] }
 tokio = { version = "=1.53.3", features = ["full", "test-util"] }
-# Fake machine-token endpoint only (the data-plane RPCs are served by a real in-process tonic
-# server); serde_json builds token bodies and loads the golden resolve fixtures.
-wiremock = "=0.6.5"
+# The data-plane RPCs are served by a real in-process tonic server; serde_json loads the golden
+# resolve fixtures.
 serde_json = "=1.0.151"
 # Throwaway PKI for the real-TLS test (no key material is committed) and the live-hub test's
 # admin-API HTTP client (admin routes stay REST: the external/webui surface).
 rcgen = "=0.14.10"
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+# The mint is gRPC: tests serve it from a real in-process `ServiceAuthService` (`MockHub`).
+service_auth = { path = "../service_auth", version = "=0.1.0", features = ["test-support"] }
 
 [profile.release]
 opt-level = 3

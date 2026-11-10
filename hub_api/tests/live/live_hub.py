@@ -1,9 +1,9 @@
 """Live hub-api harness for ``core/connection_resolver/tests/e2e_live_hub.rs``.
 
 Starts a REAL Postgres 17 container migrated to Alembic head, boots the REAL hub-api blueprints
-(provider-connections admin routes + the machine-token endpoint over HTTP, the data-plane reads
-over the internal gRPC `ProviderConnectionService`) on top of it with
-the real vault, the real Ed25519 issuer/verifier and the real ``build_default_registry`` adapters,
+(provider-connections admin routes over HTTP; the data-plane reads and the machine-JWT mint over
+the internal gRPC `ProviderConnectionService` / `ServiceAuthService`) on top of it with
+the real vault, the real ES256 issuer/verifier and the real ``build_default_registry`` adapters,
 serves them on a loopback port, writes a JSON manifest the Rust test reads, and blocks until
 SIGTERM/SIGINT (then tears the container down).
 
@@ -46,7 +46,7 @@ sys.path.insert(0, str(_REPO / "hub_api" / "grpc_internal" / "pb"))  # gRPC stub
 os.environ["SECRET_KEY"] = secrets.token_hex(32)
 os.environ["CREDENTIAL_ENCRYPTION_KEY"] = secrets.token_hex(32)
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 from flask_core import entitlement  # noqa: E402
 from flask_core.auth import create_jwt_token  # noqa: E402
 from flask_core.database import AsyncDAL  # noqa: E402
@@ -61,10 +61,11 @@ from pg_docker import migrated_postgres  # type: ignore[import-not-found]  # noq
 from pydal import Field  # noqa: E402
 from quart import Quart  # noqa: E402
 from quart_schema import QuartSchema  # noqa: E402
-from waddles.hub.internal.v1 import provider_connection_pb2_grpc  # noqa: E402
+from waddles.hub.internal.v1 import (  # noqa: E402
+    provider_connection_pb2_grpc,
+    service_auth_pb2_grpc,
+)
 
-import blueprints.service_jwt_bp as service_jwt_bp_module  # noqa: E402
-from blueprints.service_jwt_bp import service_jwt_bp  # noqa: E402
 from blueprints.v1.provider_connections import (  # noqa: E402
     SERVICE_CONFIG_KEY,
     provider_connections_bp,
@@ -73,6 +74,7 @@ from blueprints.v1.provider_connections import (  # noqa: E402
 from config import HubAPIConfig  # noqa: E402
 from grpc_internal.dataplane_servicers import ProviderConnectionServicer  # noqa: E402
 from grpc_internal.server import build_interceptor_chain  # noqa: E402
+from grpc_internal.service_auth_servicer import ServiceAuthServicer  # noqa: E402
 from services.provider_connections import (  # noqa: E402
     PlatformKeyVault,
     ProviderConnectionService,
@@ -171,14 +173,13 @@ async def _serve(manifest_path: Path) -> None:
         os.environ["SERVICE_JWT_IDENTITIES"] = identities_env
         identities = load_identities_from_env(env="alpha")
         os.environ["LIVE_NAMESPACE"] = next(iter(identities)).k8s_namespace
-        private = Ed25519PrivateKey.generate()
+        private = ec.generate_private_key(ec.SECP256R1())
         issuer = ServiceJwtIssuer(
             keys={"k1": SigningKey(kid="k1", private_key=private, public_key=private.public_key())},
             active_kid="k1",
             identities={i.service_id: i for i in identities},
             audience="waddlebot-internal",
         )
-        service_jwt_bp_module.verify_service_account_token = _fake_token_review  # type: ignore[assignment]
         previous_client = entitlement._default_client
         Entitlements().set_tier("enterprise")
 
@@ -214,7 +215,6 @@ async def _serve(manifest_path: Path) -> None:
         app = Quart(__name__)
         QuartSchema(app)
         app.register_blueprint(provider_connections_bp)
-        app.register_blueprint(service_jwt_bp)
         cfg: HubAPIConfig = hub_config()
         app.config.update(
             dal=async_dal.dal,
@@ -232,9 +232,19 @@ async def _serve(manifest_path: Path) -> None:
             },
         )
 
+        # The machine-JWT mint/JWKS and the data-plane reads are gRPC: serve the real
+        # ServiceAuthService + ProviderConnectionService (production interceptor chain) on one
+        # loopback port; only the k8s TokenReview call is faked.
         grpc_server = grpc.aio.server(interceptors=build_interceptor_chain(issuer))
         provider_connection_pb2_grpc.add_ProviderConnectionServiceServicer_to_server(
             ProviderConnectionServicer(app.config, service_from_config), grpc_server
+        )
+        service_auth_pb2_grpc.add_ServiceAuthServiceServicer_to_server(
+            ServiceAuthServicer(
+                issuer,
+                token_reviewer=lambda **kw: _fake_token_review(**kw),  # noqa: PLW0108
+            ),
+            grpc_server,
         )
         grpc_port = grpc_server.add_insecure_port("127.0.0.1:0")
         await grpc_server.start()
@@ -249,6 +259,7 @@ async def _serve(manifest_path: Path) -> None:
             "hub_url": f"http://127.0.0.1:{port}",
             # Plaintext loopback gRPC (the resolver accepts http:// only in `alpha`).
             "hub_grpc_endpoint": f"http://127.0.0.1:{grpc_port}",
+            "grpc_url": f"http://127.0.0.1:{grpc_port}",
             "admin_token": admin_token,
             "tenant_id": ids["tenant"],
             "community_a": ids["a"],

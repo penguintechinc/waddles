@@ -13,7 +13,7 @@ from typing import Any
 
 import grpc
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey, spiffe_id
 from waddles.hub.internal.v1 import distribution_pb2 as pb
 
@@ -28,7 +28,7 @@ RUNNER = spiffe_id("alpha", "svc-process")
 
 def _issuer(*, tenant: str = TENANT_SLUG, scopes: frozenset[str] | None = None) -> ServiceJwtIssuer:
     """One stage-runner identity bound to `tenant` (the claim the servicer trusts)."""
-    priv = Ed25519PrivateKey.generate()
+    priv = ec.generate_private_key(ec.SECP256R1())
     identity = ServiceIdentity(
         RUNNER,
         "waddlebot",

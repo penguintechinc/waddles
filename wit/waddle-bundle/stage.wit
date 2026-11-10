@@ -694,6 +694,27 @@ interface economy {
   /// ratio <= 1000x) and an exchange that would credit nothing is `invalid`.
   /// Needs `economy.credit`; mint-capped like `credit`. Returns the NEW balance.
   exchange: func(user: string, from-amount: u64, rate-num: u32, rate-den: u32) -> result<s64, error>;
+
+  /// The NEW balances of both parties of a `transfer-from`.
+  record transfer-result {
+    from-balance: s64,
+    to-balance: s64,
+  }
+
+  /// ELEVATED PRIMITIVE (the economy SERVICE bundle only): atomically moves
+  /// `amount` (>= 1) from `from-user` -- who need NOT be the invocation's actor
+  /// -- to `to-user` (both active members, distinct). Game rules (who may steal
+  /// from whom, odds, cooldowns) live in the calling APP bundle; this is the
+  /// I/O primitive. Needs the service's own `economy.transfer_from` grant AND
+  /// the CALLING app's explicit, admin-approved `economy.transfer_from` grant
+  /// (`denied("elevated_not_granted")` / `denied("not_granted")` otherwise).
+  /// Bounded host-side by the admin-set caps in that grant (per call -> `over-cap`,
+  /// per app per day and per victim per day -> `denied("quota_exceeded")`).
+  /// `reason` is a PII-free audit code (`[a-z0-9_.-]{1,64}`). Idempotent per
+  /// event and ordinal: a replay returns the original balances; the same key
+  /// with other parameters is `denied("idempotency_conflict")`. Fully audited
+  /// (calling app, approving grant, from, to, amount, reason).
+  transfer-from: func(from-user: string, to-user: string, amount: u64, reason: string) -> result<transfer-result, error>;
 }
 
 /// Resolves WHO an invocation is about to the community `user-uuid` that
@@ -1030,6 +1051,8 @@ world stage-next {
   import media;
   import platform-table;
   import object-storage;
+  import kv-v2;
+  import db-v2;
 
   export process-stage;
   export action-stage;
@@ -1139,6 +1162,8 @@ world stage-v2 {
   import media;
   import platform-table;
   import object-storage;
+  import kv-v2;
+  import db-v2;
 
   export process-stage;
   export action-stage-v2;

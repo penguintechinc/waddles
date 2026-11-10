@@ -971,6 +971,8 @@ mod tests {
             "alpha",
             "--hub-api-grpc-endpoint",
             "http://hub-api:50204",
+            "--service-jwt-token-endpoint",
+            "http://127.0.0.1:50204",
         ])
     }
 

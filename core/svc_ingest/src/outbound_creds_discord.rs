@@ -537,14 +537,13 @@ mod tests {
             TestSa,
         ) {
             let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/internal/service-token"))
-                .respond_with(
-                    ResponseTemplate::new(200).set_body_json(
-                        serde_json::json!({"token": "machine-tok", "expires_in": 3600}),
-                    ),
-                )
-                .mount(&server)
+            // The machine-JWT mint is gRPC: a real in-process `ServiceAuthService`.
+            let mint_endpoint = service_auth::test_support::MockHub::builder()
+                .mint(vec![service_auth::test_support::MintReply::token(
+                    "machine-tok",
+                    3600,
+                )])
+                .start_detached()
                 .await;
             let list = serde_json::json!({
                 "success": true,
@@ -562,7 +561,7 @@ mod tests {
                 ResolverConfig::new(
                     running.endpoint.clone(),
                     "alpha",
-                    format!("{}/internal/service-token", server.uri()),
+                    mint_endpoint,
                     sa.to_string_lossy().to_string(),
                 ),
                 Arc::new(NoMetrics),

@@ -88,6 +88,12 @@ pub enum ConnectionSecret {
     },
     /// kind 1 (`accessToken` field).
     OAuthAccessToken { access_token: SecretString },
+    /// scheme 6 on a kind-1 row: a Wix site API credential (`apiKey` + `siteId`).
+    /// hub-api serves it ONLY to callers holding `connections:resolve:static`.
+    WixApi {
+        api_key: SecretString,
+        site_id: SecretString,
+    },
 }
 
 impl std::fmt::Debug for ConnectionSecret {
@@ -130,6 +136,11 @@ impl std::fmt::Debug for ConnectionSecret {
             Self::OAuthAccessToken { .. } => f
                 .debug_struct("OAuthAccessToken")
                 .field("access_token", &"[REDACTED]")
+                .finish(),
+            Self::WixApi { .. } => f
+                .debug_struct("WixApi")
+                .field("api_key", &"[REDACTED]")
+                .field("site_id", &"[REDACTED]")
                 .finish(),
         }
     }
@@ -243,6 +254,10 @@ fn map_secret(
             private_key_pem: take(&mut f, "privateKey")?,
             token_uri: take_opt(&mut f, "tokenUri").map(|s| s.expose().to_owned()),
         }),
+        6 => Ok(ConnectionSecret::WixApi {
+            api_key: take(&mut f, "apiKey")?,
+            site_id: take(&mut f, "siteId")?,
+        }),
         _ => Err(ResolveError::Malformed("unknown secret scheme")),
     }
 }
@@ -256,6 +271,9 @@ fn scheme_fits_kind(kind: ConnectionKind, secret: &ConnectionSecret) -> bool {
             ConnectionSecret::Bearer { .. }
                 | ConnectionSecret::Basic { .. }
                 | ConnectionSecret::ApiKeyHeader { .. }
+        ) | (
+            ConnectionKind::PlatformOauth,
+            ConnectionSecret::WixApi { .. }
         ) | (
             ConnectionKind::AwsLambda,
             ConnectionSecret::AwsAccessKey { .. }
@@ -292,6 +310,20 @@ pub(crate) fn resolved_from_pb(
     let access_token = msg.access_token.take().map(SecretString::new);
     let secret_doc = msg.secret.take();
     let secret = match (access_token, secret_doc) {
+        // scheme 6 (Wix API credential) rides on a kind-1 row, with or without an access token
+        // alongside; it is the only secret scheme kind 1 takes.
+        (_, Some(doc)) if kind == ConnectionKind::PlatformOauth && doc.scheme == 6 => {
+            let fields = doc
+                .fields
+                .into_iter()
+                .map(|(k, v)| (k, SecretString::new(v)))
+                .collect();
+            let mapped = map_secret(doc.scheme, fields)?;
+            if !scheme_fits_kind(kind, &mapped) {
+                return Err(ResolveError::Malformed("secret scheme does not match kind"));
+            }
+            mapped
+        }
         (Some(access_token), None) if kind == ConnectionKind::PlatformOauth => {
             ConnectionSecret::OAuthAccessToken { access_token }
         }
@@ -480,6 +512,32 @@ mod tests {
             kind_from_wire(65_537),
             Err(ResolveError::Malformed("unknown connection kind"))
         ));
+    }
+
+    #[test]
+    fn wix_api_credential_scheme_6_is_accepted_only_on_a_kind_1_row() {
+        let wix = [("apiKey", "k-123"), ("siteId", "site-9")];
+        let parsed = resolved_from_pb(response(1, secret(6, &wix), None), REF).unwrap();
+        match &parsed.secret {
+            ConnectionSecret::WixApi { api_key, site_id } => {
+                assert_eq!(api_key.expose(), "k-123");
+                assert_eq!(site_id.expose(), "site-9");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(!format!("{:?}", parsed.secret).contains("k-123"));
+        // alongside an access token it still maps to the Wix credential
+        let both = resolved_from_pb(response(1, secret(6, &wix), Some("at")), REF).unwrap();
+        assert!(matches!(both.secret, ConnectionSecret::WixApi { .. }));
+        // wrong kind, and a missing field, fail closed
+        for (kind, fields) in [(2, &wix[..]), (1, &wix[..1])] {
+            assert!(matches!(
+                resolved_from_pb(response(kind, secret(6, fields), None), REF),
+                Err(ResolveError::Malformed(_))
+            ));
+        }
+        // any other scheme on kind 1 is still refused
+        assert!(resolved_from_pb(response(1, secret(1, &[("token", "t")]), None), REF).is_err());
     }
 
     const REF: crate::ConnectionRef = crate::ConnectionRef {
