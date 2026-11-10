@@ -42,6 +42,10 @@ pub enum VerifyError {
     /// Secret/key absent, empty or unusable -- fail closed.
     #[error("unusable key")]
     BadKey,
+    /// Authentic delivery, but for another connection (global-key schemes: Kick) or with a type
+    /// that does not match its body.
+    #[error("delivery is not bound to this route")]
+    NotBound,
 }
 
 /// How a signature (and an Ed25519 key) is text-encoded.
@@ -234,6 +238,14 @@ pub struct WixSpec {
     pub instance_id: String,
 }
 
+/// Kick webhook binding: the broadcaster the route's connection is for (host registration data,
+/// from the connection's non-secret binding metadata; never from the request).
+#[derive(Debug, Clone)]
+pub struct KickSpec {
+    /// The connection's Kick broadcaster user id (numeric string).
+    pub broadcaster_id: String,
+}
+
 /// The signature scheme of a registered route (host-side config only).
 #[derive(Debug, Clone)]
 pub enum Scheme {
@@ -245,6 +257,11 @@ pub enum Scheme {
     Stripe(StripeSpec),
     /// Wix app webhooks: raw RS256 JWT body, public key = the secret.
     WixJwt(WixSpec),
+    /// Kick webhooks (`connector::kick_webhook`): RSA PKCS#1 v1.5 / SHA-256 over
+    /// `id.timestamp.body` with Kick's rotating public key (resolved via `connector::kick_keys`,
+    /// never a per-community secret). The key is GLOBAL, so the route is bound to ONE connection's
+    /// broadcaster id ([`KickSpec`]); any other broadcaster's genuine delivery is refused.
+    Kick(KickSpec),
     /// The fixed Twitch EventSub preset: a distinct, constructor-only
     /// marker (not a shape). It is the ONLY scheme exempt from the
     /// adjacent-placeholder rule; a configurable `HmacSha256` never is.
@@ -288,6 +305,10 @@ enum PreparedKind {
         jwt: super::wix_jwt::ParsedJwt,
         instance_id: String,
     },
+    Kick {
+        prepared: super::kick_webhook::Prepared,
+        broadcaster_id: String,
+    },
 }
 
 fn header_str<'a>(h: &'a HeaderMap, name: &HeaderName) -> Result<&'a str, VerifyError> {
@@ -324,6 +345,22 @@ impl Scheme {
         Self::TwitchEventSub
     }
 
+    /// The Kick webhook scheme bound to `broadcaster_id` (see [`Scheme::Kick`]); registration
+    /// refuses an id that is not a Kick numeric user id.
+    #[must_use]
+    pub fn kick(broadcaster_id: impl Into<String>) -> Self {
+        Self::Kick(KickSpec {
+            broadcaster_id: broadcaster_id.into(),
+        })
+    }
+
+    /// `true` when this scheme's verification key is fetched (and rotates upstream), so a
+    /// signature mismatch is worth ONE forced key refresh before the delivery is refused.
+    #[must_use]
+    pub fn rotates_keys(&self) -> bool {
+        matches!(self, Self::Kick(_))
+    }
+
     /// Structural validation at registration time (fail loud, not per-request).
     pub fn validate(&self) -> Result<(), String> {
         let (template, id_header) = match self {
@@ -347,6 +384,13 @@ impl Scheme {
                     Err("wix route needs an instance id".into())
                 } else {
                     Ok(())
+                };
+            }
+            Self::Kick(k) => {
+                return if super::kick_webhook::valid_broadcaster_id(&k.broadcaster_id) {
+                    Ok(())
+                } else {
+                    Err("kick route needs a numeric broadcaster user id".into())
                 };
             }
             // Fixed, known-good preset; the only adjacency exemption.
@@ -427,6 +471,16 @@ impl Scheme {
                     dedup_id,
                 })
             }
+            Self::Kick(k) => {
+                let p = super::kick_webhook::prepare(headers, body, now_unix, window_secs)?;
+                Ok(Prepared {
+                    dedup_id: p.dedup_id.clone(),
+                    kind: PreparedKind::Kick {
+                        prepared: p,
+                        broadcaster_id: k.broadcaster_id.clone(),
+                    },
+                })
+            }
             Self::WixJwt(w) => {
                 let jwt = super::wix_jwt::parse(body, window_secs, now_unix, FUTURE_SKEW_SECS)?;
                 // Replay key = the Wix event id, so re-signed copies of one
@@ -491,6 +545,18 @@ impl Scheme {
 }
 
 impl Prepared {
+    /// The frame the owning connector receives for a VERIFIED delivery: the raw body for every
+    /// scheme except Kick, whose event type lives only in a header, so the guest gets the
+    /// `{"type","version","message_id","timestamp","body"}` envelope. `None` (refuse) when the
+    /// Kick body is not a JSON object.
+    #[must_use]
+    pub fn frame(&self, body: &[u8]) -> Option<Vec<u8>> {
+        match &self.kind {
+            PreparedKind::Kick { prepared, .. } => prepared.envelope(body),
+            _ => Some(body.to_vec()),
+        }
+    }
+
     /// Phase 2 -- the constant-time cryptographic check against `secret`
     /// (HMAC key bytes, or the encoded Ed25519 public key). Empty secret
     /// fails closed.
@@ -519,6 +585,10 @@ impl Prepared {
                 }
             }
             PreparedKind::Wix { jwt, instance_id } => jwt.verify(secret, instance_id),
+            PreparedKind::Kick {
+                prepared,
+                broadcaster_id,
+            } => prepared.verify_bound(secret, broadcaster_id),
             PreparedKind::Ed25519 {
                 message,
                 signature,

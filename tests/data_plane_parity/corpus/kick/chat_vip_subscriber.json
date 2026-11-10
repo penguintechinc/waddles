@@ -1,0 +1,50 @@
+{
+  "context": {},
+  "frame": {
+    "author_id": "77",
+    "badges": [
+      "vip",
+      "subscriber"
+    ],
+    "channel_slug": "acme",
+    "chatroom_id": 12345,
+    "created_at": "2026-09-11T12:00:00.000000Z",
+    "display_name": "Vee",
+    "is_mod": false,
+    "is_owner": false,
+    "is_subscriber": true,
+    "message_id": "msg-1",
+    "platform": "kick",
+    "text": "gg"
+  },
+  "golden": {
+    "actor": "77",
+    "event_type": "message",
+    "payload": {
+      "author_id": "77",
+      "badges": [
+        "vip",
+        "subscriber"
+      ],
+      "channel_slug": "acme",
+      "chatroom_id": 12345,
+      "created_at": "2026-09-11T12:00:00.000000Z",
+      "display_name": "Vee",
+      "is_mod": false,
+      "is_owner": false,
+      "is_subscriber": true,
+      "message_id": "msg-1",
+      "text": "gg"
+    },
+    "platform": "kick"
+  },
+  "golden_origin": "python",
+  "id": "kick/chat_vip_subscriber",
+  "outcome": "event",
+  "path": "kick_pusher",
+  "pii_classifier": "reject:channel_slug,chatroom_id,created_at,is_owner",
+  "platform": "kick",
+  "python_divergences": [],
+  "rust_path": null,
+  "seed": "core/svc_ingest/tests/test_builtin_kick_ingest.py"
+}
