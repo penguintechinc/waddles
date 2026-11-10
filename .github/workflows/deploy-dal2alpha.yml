@@ -101,7 +101,7 @@ jobs:
           - { service: svc-process, file: core/svc_process/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }
           - { service: svc-action, file: core/svc_action/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }
           - { service: svc-presentation, file: core/svc_presentation/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }
-          - { service: egress-proxy, file: core/egress_proxy/Dockerfile.rust, context: core, extra_ctx: "", target: "", suffix: "" }
+          - { service: egress-proxy, file: core/egress_proxy/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }
           # svc-streaming: cpu variant only; chart appends -<variant> to the tag.
           - { service: svc-streaming, file: core/svc_streaming/Dockerfile.rust, context: core/svc_streaming, extra_ctx: "", target: cpu, suffix: "-cpu" }
     steps:
