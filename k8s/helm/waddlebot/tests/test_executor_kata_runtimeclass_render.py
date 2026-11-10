@@ -1,7 +1,7 @@
 """Helm-template assertions for bundleExecutor.runtimeClass (optional Kata isolation).
 
-Off by default (no runtimeClassName anywhere); on renders it on exactly the two executor
-Deployments and no other workload; enabled with an empty name fails the render. Each test
+Off by default (no runtimeClassName anywhere); on renders it on exactly the single svc-bundles-executor
+Deployment and no other workload; enabled with an empty name fails the render. Each test
 asserts the number of executor Deployments examined (zero = failure, never a pass).
 """
 
@@ -16,7 +16,7 @@ import pytest
 import yaml
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
-_EXECUTORS = ("-bundle-executor", "-bundle-executor-action")
+_EXECUTORS = ("-svc-bundles-executor",)
 _KINDS = {"Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"}
 _ENVS = ["values-alpha.yaml", "values-dal2alpha.yaml"]
 
@@ -67,7 +67,7 @@ def _require_helm() -> None:
 @pytest.mark.parametrize("values", _ENVS)
 def test_off_by_default(values: str) -> None:
     ex, other = _split(_docs(values, []))
-    assert len(ex) == 2, f"expected 2 executor Deployments, examined {len(ex)}"
+    assert len(ex) == 1, f"expected 1 executor Deployment, examined {len(ex)}"
     for d in ex + other:
         assert "runtimeClassName" not in _pod(d) or d["metadata"]["name"].endswith("streaming")
 
@@ -77,7 +77,7 @@ def test_on_renders_only_on_executors(values: str) -> None:
     sets = ["bundleExecutor.runtimeClass.enabled=true",
             "bundleExecutor.nodeSelector.katacontainers\\.io/kata-runtime=true"]
     ex, other = _split(_docs(values, sets))
-    assert len(ex) == 2, f"expected 2 executor Deployments, examined {len(ex)}"
+    assert len(ex) == 1, f"expected 1 executor Deployment, examined {len(ex)}"
     for d in ex:
         pod = _pod(d)
         assert pod["runtimeClassName"] == "kata"

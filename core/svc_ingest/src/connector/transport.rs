@@ -5,8 +5,10 @@
 //! bundle only ever sees `receiver` calls.
 //!
 //! One impl per transport family (WebSocket, IRC, webhook, polling, Pusher).
-//! B0 ships the trait and the registration seam only: no real platform
-//! transport is implemented here (those are later phases).
+//! This module ships the trait and the registration seam only; the concrete
+//! transports are the generic `ws` / `webhook` / `poll` families, configured per
+//! platform by a `connector_runtime::profiles` profile (Kick's Pusher chat is a
+//! `WsConfig` from `profiles::kick`, not a platform-specific transport).
 
 use std::time::Duration;
 

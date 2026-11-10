@@ -1,4 +1,4 @@
-# Rust data-plane metrics (svc-process, svc-action, bundle-executor)
+# Rust data-plane metrics (svc-process, svc-action, svc-bundles-executor)
 
 OTel **metrics** for the three Rust data-plane runtimes: histograms first (latency, load, size), counters for events,
 gauges for current state. Logs and traces are unchanged (`tracing` + `penguin-logging`); this is the third leg.
@@ -9,7 +9,7 @@ Spec: `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md` §13.1.
 | Service | Pipeline | Destination |
 |---|---|---|
 | svc-process, svc-action | instruments on the **global** meter provider that `penguin-logging` installs (`telemetry::init`) | OTLP push **and** the Prometheus `/metrics` scrape on `:9090` (the provider carries both readers) |
-| bundle-executor | its own meter provider (`telemetry::init_metrics`), OTLP/gRPC only | OTLP push, **only when an endpoint variable is set**; no scrape port |
+| svc-bundles-executor | its own meter provider (`telemetry::init_metrics`), OTLP/gRPC only | OTLP push, **only when an endpoint variable is set**; no scrape port |
 
 Destination is configuration, never code — the standard OTLP variables, set per deployment:
 
@@ -92,7 +92,7 @@ Notes:
   consumer per interval.
 - Pre-existing `svc_process_*` / `svc_action_*` / `host_api_*` Prometheus-native series are untouched.
 
-## bundle-executor
+## svc-bundles-executor
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
@@ -111,10 +111,10 @@ Notes:
 | `waddles_executor_sandbox_trip_total` | counter | `app_id, limit` | `timeout`, `memory`, `trap` |
 | `waddles_executor_invocations_active` | gauge (up/down) | — | guests currently executing (decrements on every exit path) |
 | `waddles_executor_bundles_loaded` | gauge | — | resident compiled components (distinct digests); explicit `0` after a disconnect wipe |
-| `waddles_executor_connection_attempts_total` | counter | `result` | `connected`, `failed` |
-| `waddles_executor_connection_up` | gauge | — | `1` while the host-API session is established, explicit `0` otherwise |
-| `waddles_executor_session_seconds` | histogram | — | length of each established session |
-| `waddles_executor_outage_seconds` | histogram | — | downtime between a session ending and the next connecting |
+| `waddles_executor_connection_attempts_total` | counter | `result`, `stage` | `connected`, `failed` |
+| `waddles_executor_connection_up` | gauge | `stage` | `1` while that stage's host-API session is established, explicit `0` otherwise (one series per configured stage) |
+| `waddles_executor_session_seconds` | histogram | `stage` | length of each established session |
+| `waddles_executor_outage_seconds` | histogram | `stage` | downtime between a session ending and the next connecting |
 | `waddles_executor_reconnects_total` | counter | — | trips round the dial loop |
 | `waddles_executor_heartbeat_timeouts_total` | counter | — | sessions dropped as stale |
 

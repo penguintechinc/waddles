@@ -1,0 +1,78 @@
+{
+  "upstream_repo": "https://github.com/Psychoboy/PenguinTwitchBot",
+  "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+  "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)",
+  "files": [
+    {
+      "path": "js/plinko.js",
+      "sha256": "6a6fc6169d5aa9a709a82d05a09f63b70da524f5fbda47dfb4b70193cf36c8f4",
+      "size": 79341,
+      "upstream_path": "PenguinTwitchBot/wwwroot/js/plinko.js",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/plinko_drop.wav",
+      "sha256": "af95633577b9c68f6f7e9bb10f465fb00b06bf80d7424b589e37273a67f52e4f",
+      "size": 19448,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/plinko_drop.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/plinko_peg.wav",
+      "sha256": "86e0d6ae8d4f52e627da4b7ce8ec99b04708e2df06395f850dc0f1756254e0ba",
+      "size": 15920,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/plinko_peg.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/plinko_win.wav",
+      "sha256": "007bec1ca6993238ace283f7a7c41901e09f8c43182e5d8a0a64baf6b2ee51fc",
+      "size": 101472,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/plinko_win.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "plinko.html",
+      "sha256": "e509274a560c9d15da6e34624f1f4b5a928d94aba389e30629c7ce2c057bed6a",
+      "size": 2867,
+      "upstream_path": "PenguinTwitchBot/wwwroot/plinko.html",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    }
+  ],
+  "third_party_or_unclear": [
+    {
+      "path": "js/ws-client.js",
+      "reason": "upstream host WebSocket plumbing (topic subscription), not game material; the Waddles overlay transport differs, so not vendored",
+      "vendored": false
+    },
+    {
+      "path": "js/ws-status.js",
+      "reason": "upstream host WebSocket status badge, not game material; not vendored",
+      "vendored": false
+    },
+    {
+      "path": "js/reconnecting-websocket/reconnectingWS.min.js",
+      "reason": "third-party library with its own LICENSE.txt in upstream; not vendored",
+      "vendored": false
+    },
+    {
+      "path": "fonts.googleapis.com Fredoka/Rubik",
+      "reason": "loaded remotely by plinko.html at runtime (Google Fonts, OFL); not vendored",
+      "vendored": false
+    },
+    {
+      "path": "themes and character/emote images",
+      "reason": "stored in the upstream settings database and resolved from Twitch emotes at runtime, not files in the repo; nothing to vendor",
+      "vendored": false
+    }
+  ],
+  "notes": [
+    "plinko.html is vendored unmodified and still references /js/drop-games-common.js, /js/drop-games-audio.js (vendored once in superpenguin-dropgame-core/overlay/common) and the upstream WebSocket scripts listed as unvendored; see README browser-source section.",
+    "The repo carries no per-asset attribution for the .wav files; they are treated as covered by the repo MIT LICENSE."
+  ]
+}

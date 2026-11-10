@@ -485,28 +485,40 @@ impl ExecutorMetrics {
     }
 
     /// Counts one host-API connection attempt (`connected` or `failed`).
-    pub fn record_connection_attempt(&self, result: &'static str) {
-        self.connection_attempts
-            .add(1, &[KeyValue::new("result", result)]);
+    pub fn record_connection_attempt(&self, result: &'static str, stage: &str) {
+        self.connection_attempts.add(
+            1,
+            &[
+                KeyValue::new("result", result),
+                KeyValue::new("stage", stage.to_string()),
+            ],
+        );
     }
 
-    /// Sets the session gauge (`waddles_executor_connection_up`): `1` while
-    /// connected, an explicit `0` otherwise so "down" and "not reporting" are
-    /// distinguishable.
-    pub fn set_connection_up(&self, up: bool) {
-        self.connection_up.record(u64::from(up), &[]);
+    /// Sets the per-stage session gauge (`waddles_executor_connection_up`):
+    /// `1` while connected, an explicit `0` otherwise so "down" and "not
+    /// reporting" are distinguishable. One series per configured stage.
+    pub fn set_connection_up(&self, up: bool, stage: &str) {
+        self.connection_up
+            .record(u64::from(up), &[KeyValue::new("stage", stage.to_string())]);
     }
 
     /// Records the length of a session that just ended
     /// (`waddles_executor_session_seconds`).
-    pub fn record_session(&self, elapsed: Duration) {
-        self.session_seconds.record(elapsed.as_secs_f64(), &[]);
+    pub fn record_session(&self, elapsed: Duration, stage: &str) {
+        self.session_seconds.record(
+            elapsed.as_secs_f64(),
+            &[KeyValue::new("stage", stage.to_string())],
+        );
     }
 
     /// Records how long the link was down before this connection
     /// (`waddles_executor_outage_seconds`).
-    pub fn record_outage(&self, elapsed: Duration) {
-        self.outage_seconds.record(elapsed.as_secs_f64(), &[]);
+    pub fn record_outage(&self, elapsed: Duration, stage: &str) {
+        self.outage_seconds.record(
+            elapsed.as_secs_f64(),
+            &[KeyValue::new("stage", stage.to_string())],
+        );
     }
 
     /// Counts one trip round the dial loop (`waddles_executor_reconnects_total`).
@@ -931,8 +943,8 @@ mod tests {
         let (h, m) = fresh();
         m.set_bundles_loaded(3);
         m.set_bundles_loaded(0);
-        m.set_connection_up(true);
-        m.set_connection_up(false);
+        m.set_connection_up(true, "svc-process");
+        m.set_connection_up(false, "svc-process");
         assert_eq!(
             h.last("waddles_executor_bundles_loaded", &[])
                 .expect("exported")
@@ -951,11 +963,11 @@ mod tests {
     #[test]
     fn session_health_series_are_recorded() {
         let (h, m) = fresh();
-        m.record_connection_attempt("connected");
-        m.record_connection_attempt("failed");
-        m.record_connection_attempt("failed");
-        m.record_session(Duration::from_secs(90));
-        m.record_outage(Duration::from_secs(7));
+        m.record_connection_attempt("connected", "svc-process");
+        m.record_connection_attempt("failed", "svc-process");
+        m.record_connection_attempt("failed", "svc-process");
+        m.record_session(Duration::from_secs(90), "svc-process");
+        m.record_outage(Duration::from_secs(7), "svc-process");
         m.record_reconnect();
         m.record_heartbeat_timeout();
         assert_eq!(
@@ -1023,10 +1035,10 @@ mod tests {
         m.record_host_call("kv", "get", "ok", Duration::from_millis(1));
         let _active = m.invocation_started();
         m.set_bundles_loaded(1);
-        m.record_connection_attempt("connected");
-        m.set_connection_up(true);
-        m.record_session(Duration::from_secs(1));
-        m.record_outage(Duration::from_secs(1));
+        m.record_connection_attempt("connected", "svc-process");
+        m.set_connection_up(true, "svc-process");
+        m.record_session(Duration::from_secs(1), "svc-process");
+        m.record_outage(Duration::from_secs(1), "svc-process");
         m.record_reconnect();
         m.record_heartbeat_timeout();
         m.record_connector_call("a", "on-frame", "ok", Duration::from_millis(1));

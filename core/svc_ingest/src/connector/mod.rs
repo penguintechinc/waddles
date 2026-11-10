@@ -43,12 +43,16 @@ pub mod host_api_listener;
 pub mod host_calls;
 pub mod identify_budget;
 pub mod invoker;
+pub mod kick_keys;
+pub mod kick_subscribe;
+pub mod kick_webhook;
 pub mod lifecycle;
 #[cfg(test)]
 mod lifecycle_tests;
 pub mod metrics;
 pub mod poll;
 pub(crate) mod ratelimit;
+pub mod reconcile_hook;
 pub mod rediscover;
 pub mod registry;
 pub mod secrets;

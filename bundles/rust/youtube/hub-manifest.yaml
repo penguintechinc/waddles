@@ -25,7 +25,7 @@ stages:
     entry: waddle:bundle/tool-provider#call
 egress:
   - host: www.googleapis.com
-    methods: ["GET", "POST"]
+    methods: ["GET", "POST", "DELETE"]
 data:
   tables: []
 limits:
@@ -39,6 +39,10 @@ permissions:
       methods: ["GET", "POST"]
   - id: chat.send:youtube
     justification: Post chat messages into the host-pinned live chat via liveChatMessages.insert
+  - id: chat.delete:youtube
+    justification: "Delete live-chat messages in the host-pinned live chat"
+  - id: moderation.youtube
+    justification: "Ban/unban viewers and add/remove moderators in the host-pinned live chat; the live chat id is a host slot"
   - id: connector.pii.read
     justification: "gates identity.lookup, used to tokenize each chat author to its canonical UUID; first-party core only, dangerous, global-admin-approved (no raw author id leaves the connector)"
 routes_to: []

@@ -43,9 +43,11 @@
 //! **Dispatch.** [`route`] sends a parsed [`OutboundAction`] to the named
 //! platform's [`PlatformSender`]; an unknown platform or an op the platform
 //! has no sender for is [`SenderError::Unsupported`] -- fail loud, never a
-//! silent no-op. The Twitch `chat.delete`/`dm.send` implementations below
-//! are still deliberate stubs returning `Unsupported` (Helix client
-//! follow-up); Discord implements all three over `crate::discord_rest`.
+//! silent no-op. Twitch `chat.delete`/`dm.send` run through the generic executor
+//! ([`TwitchSender::with_executor`]); Discord implements all three over
+//! `crate::discord_rest`. Every other op is an [`OutboundAction::PolicyOp`] looked up in the
+//! sender-exec policy table (`crate::connector::sender_exec::policy`) -- there is no closed
+//! op enum to extend.
 
 use serde::Deserialize;
 
@@ -140,7 +142,40 @@ pub enum OutboundAction {
         /// Numeric tenant id from the MAC-bound stamp.
         tenant_id: Option<i64>,
     },
+    /// Any other op registered in the sender-exec policy table (moderation, message ops,
+    /// EventSub, command registration, interaction replies ...). The op is the table's own
+    /// `&'static` spelling, so an op string that is not in the table can never become one
+    /// ([`OutboundParseError::UnknownOp`]); the table's `KindPolicy` -- not this type -- decides
+    /// the request shape, slots, credential scope and duty.
+    PolicyOp(PolicyOp),
 }
+
+/// The generic argument bag of an [`OutboundAction::PolicyOp`]. Every field is producer-supplied
+/// and MAC-covered by the stamp, and NONE of them is a destination the host trusts: guild,
+/// broadcaster, moderator and credential values are filled by the host from bindings, and the
+/// channel is re-proven against the stamped `origin_channel` before anything is built.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyOp {
+    /// The op spelling, taken from the policy table.
+    pub op: &'static str,
+    /// Chat/channel the op acts in (re-pinned against `origin_channel`).
+    pub channel: Option<String>,
+    /// Free text / JSON object the connector shapes into the body (`text_key`).
+    pub text: Option<String>,
+    /// Target message / subscription / resource id.
+    pub message_id: Option<String>,
+    /// Target user (tokenized or platform id, per the op's duty).
+    pub user_id: Option<String>,
+    /// Stamp-proven origin channel (or `guild:` scope) of the triggering event.
+    pub origin_channel: Option<String>,
+    /// Numeric tenant id from the MAC-bound stamp.
+    pub tenant_id: Option<i64>,
+}
+
+/// Longest accepted id-like field of a [`PolicyOp`].
+const MAX_POLICY_ID_LEN: usize = 256;
+/// Longest accepted `text` of a [`PolicyOp`] (command-registration bodies are the largest).
+const MAX_POLICY_TEXT_LEN: usize = 262_144;
 
 /// Most role keys one `role.set` may name.
 pub const MAX_BULK_KEYS: usize = 16;
@@ -199,6 +234,7 @@ impl OutboundAction {
                 kind: RoleBulkKind::List,
                 ..
             } => "role.list",
+            Self::PolicyOp(p) => p.op,
         }
     }
 }
@@ -424,6 +460,35 @@ fn parse_role_bulk(
     })
 }
 
+/// Builds an [`OutboundAction::PolicyOp`], bounding every field (a field over its bound is
+/// refused, never truncated).
+fn parse_policy_op(
+    op: &'static str,
+    wire: WireEnvelope,
+) -> Result<OutboundAction, OutboundParseError> {
+    let non_empty = |v: Option<String>| v.filter(|s| !s.is_empty());
+    let bounded = |field: &'static str,
+                   v: Option<String>,
+                   max: usize|
+     -> Result<Option<String>, OutboundParseError> {
+        match non_empty(v) {
+            Some(s) if s.len() > max || s.contains('\0') => Err(OutboundParseError::Malformed(
+                format!("{op} field {field} is out of bounds"),
+            )),
+            other => Ok(other),
+        }
+    };
+    Ok(OutboundAction::PolicyOp(PolicyOp {
+        op,
+        channel: bounded("channel", wire.channel, MAX_POLICY_ID_LEN)?,
+        text: bounded("text", wire.text, MAX_POLICY_TEXT_LEN)?,
+        message_id: bounded("message_id", wire.message_id, MAX_POLICY_ID_LEN)?,
+        user_id: bounded("user_id", wire.user_id, MAX_POLICY_ID_LEN)?,
+        origin_channel: bounded("origin_channel", wire.origin_channel, MAX_POLICY_ID_LEN)?,
+        tenant_id: wire.tenant_id.filter(|t| *t > 0),
+    }))
+}
+
 fn require(
     value: Option<String>,
     op: &'static str,
@@ -514,7 +579,14 @@ pub fn parse_outbound_entry(
         "role.list" => parse_role_bulk(RoleBulkKind::List, &wire)?,
         other => match event_kind(other) {
             Some(kind) => parse_event_op(kind, &wire)?,
-            None => return Err(OutboundParseError::UnknownOp(other.to_string())),
+            // Table lookup, not a closed enum: any op registered for THIS queue's platform in
+            // the policy table is accepted; everything else is an explicit UnknownOp.
+            None => {
+                match crate::connector::sender_exec::policy::registered_op(queue_platform, other) {
+                    Some(op) => parse_policy_op(op, wire)?,
+                    None => return Err(OutboundParseError::UnknownOp(other.to_string())),
+                }
+            }
         },
     };
     Ok(OutboundEntry {
@@ -642,7 +714,8 @@ pub async fn dispatch_to<S: PlatformSender>(
         // sender has no such method -- fail loud, never a silent no-op.
         OutboundAction::RoleOp { .. }
         | OutboundAction::RoleBulk { .. }
-        | OutboundAction::EventOp { .. } => Err(SenderError::Unsupported {
+        | OutboundAction::EventOp { .. }
+        | OutboundAction::PolicyOp(_) => Err(SenderError::Unsupported {
             platform: sender.platform().to_string(),
             op: action.op(),
         }),
@@ -756,7 +829,19 @@ where
             } => {
                 enforce_pin(platform, "chat.delete", channel, origin_channel)?;
             }
-            OutboundAction::DmSend { .. }
+            // A policy op naming a channel is re-pinned against the stamp here (counted);
+            // one without a channel is pinned (or refused) by the executor from the kind's
+            // own `requires_pin` / stamp-slot declaration.
+            OutboundAction::PolicyOp(PolicyOp {
+                op,
+                channel: Some(channel),
+                origin_channel,
+                ..
+            }) => {
+                enforce_pin(platform, op, channel, origin_channel)?;
+            }
+            OutboundAction::PolicyOp(_)
+            | OutboundAction::DmSend { .. }
             | OutboundAction::RoleOp { .. }
             | OutboundAction::EventOp { .. } => {}
             // Composite host-side role ops: planned by the platform duty hook, then every
@@ -803,24 +888,58 @@ pub async fn route<T: PlatformSender, D: PlatformSender>(
     }
 }
 
-/// The Twitch adapter. `chat.send` delegates to the existing IRC sender
-/// (behavior unchanged); `chat.delete`/`dm.send` are STUBS returning
-/// `Unsupported` until the Twitch Helix client lands (follow-up PR).
-pub struct TwitchSender<'a, S: IrcOutbound> {
+/// The Twitch adapter. `chat.send` delegates to the existing IRC sender (behavior unchanged);
+/// `chat.delete` / `dm.send` have no IRC implementation and run through the generic
+/// [`ActionExecutor`] (the Helix templates in `sender_exec::policy::twitch`) when one is
+/// attached with [`Self::with_executor`]. With no executor attached they fail loud as
+/// [`SenderError::Unsupported`] -- there is no silent fallback.
+pub struct TwitchSender<'a, S: IrcOutbound, X: ActionExecutor = NoExecutor> {
     irc: &'a S,
     community_id: Option<i64>,
+    exec: Option<&'a X>,
 }
 
-impl<'a, S: IrcOutbound> TwitchSender<'a, S> {
+impl<'a, S: IrcOutbound> TwitchSender<'a, S, NoExecutor> {
     /// Wraps the IRC chat sender for one entry's `community_id` (the
     /// community whose credential the send uses).
     #[must_use]
     pub fn new(irc: &'a S, community_id: Option<i64>) -> Self {
-        Self { irc, community_id }
+        Self {
+            irc,
+            community_id,
+            exec: None,
+        }
     }
 }
 
-impl<S: IrcOutbound> PlatformSender for TwitchSender<'_, S> {
+impl<'a, S: IrcOutbound, X: ActionExecutor> TwitchSender<'a, S, X> {
+    /// Attaches the generic executor that backs the ops IRC cannot do. The executor re-applies
+    /// the destination pin, the flag gate and the template policy itself.
+    #[must_use]
+    pub fn with_executor<Y: ActionExecutor>(self, exec: &'a Y) -> TwitchSender<'a, S, Y> {
+        TwitchSender {
+            irc: self.irc,
+            community_id: self.community_id,
+            exec: Some(exec),
+        }
+    }
+
+    /// Runs `action` through the attached executor, or fails loud when none is attached.
+    async fn via_executor(&self, action: &OutboundAction) -> Result<(), SenderError> {
+        match self.exec {
+            Some(x) => x
+                .execute_action("twitch", self.community_id, action)
+                .await
+                .map(|_| ()),
+            None => Err(SenderError::Unsupported {
+                platform: "twitch".to_string(),
+                op: action.op(),
+            }),
+        }
+    }
+}
+
+impl<S: IrcOutbound, X: ActionExecutor> PlatformSender for TwitchSender<'_, S, X> {
     fn platform(&self) -> &'static str {
         "twitch"
     }
@@ -850,25 +969,30 @@ impl<S: IrcOutbound> PlatformSender for TwitchSender<'_, S> {
             })
     }
 
-    async fn delete_chat(&self, _channel: &str, _message_id: &str) -> Result<(), SenderError> {
-        // STUB: needs the Helix `DELETE /moderation/chat` client (follow-up).
-        Err(SenderError::Unsupported {
-            platform: "twitch".to_string(),
-            op: "chat.delete",
+    async fn delete_chat(&self, channel: &str, message_id: &str) -> Result<(), SenderError> {
+        // `channel` was already pinned against the stamp by `dispatch_to`, so it is its own
+        // origin here; the executor re-proves it regardless.
+        self.via_executor(&OutboundAction::ChatDelete {
+            channel: channel.to_string(),
+            message_id: message_id.to_string(),
+            origin_channel: Some(channel.to_string()),
         })
+        .await
     }
 
     async fn send_dm(
         &self,
-        _user_id: &str,
-        _text: &str,
-        _origin_channel: &str,
+        user_id: &str,
+        text: &str,
+        origin_channel: &str,
     ) -> Result<(), SenderError> {
-        // STUB: needs the Helix whisper client (follow-up).
-        Err(SenderError::Unsupported {
-            platform: "twitch".to_string(),
-            op: "dm.send",
+        self.via_executor(&OutboundAction::DmSend {
+            user_id: user_id.to_string(),
+            text: text.to_string(),
+            origin_channel: origin_channel.to_string(),
+            tenant_id: None,
         })
+        .await
     }
 }
 
@@ -1516,5 +1640,138 @@ mod tests {
             "{err}"
         );
         assert_eq!(err.ack_code(), "not_in_community");
+    }
+
+    // ---- table-driven policy ops ---------------------------------------------------------
+
+    #[test]
+    fn registered_ops_parse_to_policy_ops_and_unknown_ones_are_rejected() {
+        let raw = r##"{"v":1,"op":"mod.ban","platform":"twitch","channel":"#c","origin_channel":"#c","user_id":"123","text":"{}","tenant_id":4}"##;
+        let OutboundAction::PolicyOp(p) = parse_outbound(raw, "twitch").unwrap() else {
+            panic!("a registered op must parse to a PolicyOp");
+        };
+        assert_eq!(p.op, "mod.ban");
+        assert_eq!(p.channel.as_deref(), Some("#c"));
+        assert_eq!(p.user_id.as_deref(), Some("123"));
+        assert_eq!(p.tenant_id, Some(4));
+        // The same spelling is not registered on another platform / is not in the table.
+        for (op, queue) in [
+            ("mod.kick", "twitch"),
+            ("eventsub.create", "youtube"),
+            ("mod.kick", "kick"),
+            ("mod.nuke", "discord"),
+            ("MOD.BAN", "twitch"),
+        ] {
+            let raw = format!(r#"{{"v":1,"op":"{op}","platform":"{queue}"}}"#);
+            assert_eq!(
+                parse_outbound(&raw, queue),
+                Err(OutboundParseError::UnknownOp(op.to_string())),
+                "{queue}/{op}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_op_fields_are_bounded_not_truncated() {
+        let long = "x".repeat(MAX_POLICY_ID_LEN + 1);
+        for field in ["channel", "message_id", "user_id", "origin_channel"] {
+            let raw = format!(r#"{{"op":"mod.ban","{field}":"{long}"}}"#);
+            assert!(
+                matches!(
+                    parse_outbound(&raw, "twitch"),
+                    Err(OutboundParseError::Malformed(_))
+                ),
+                "{field}"
+            );
+        }
+        let nul = r#"{"op":"mod.ban","text":"a\u0000b"}"#;
+        assert!(matches!(
+            parse_outbound(nul, "twitch"),
+            Err(OutboundParseError::Malformed(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_policy_op_never_reaches_a_legacy_platform_sender() {
+        let irc = RecordingIrc::default();
+        let twitch = TwitchSender::new(&irc, Some(7));
+        let action = parse_outbound(
+            r##"{"op":"mod.ban","platform":"twitch","channel":"#c","origin_channel":"#c"}"##,
+            "twitch",
+        )
+        .unwrap();
+        match dispatch_to(&twitch, &action).await {
+            Err(SenderError::Unsupported { platform, op }) => {
+                assert_eq!((platform.as_str(), op), ("twitch", "mod.ban"));
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    /// Records the actions the executor was handed.
+    #[derive(Default)]
+    struct RecordingExec {
+        seen: std::sync::Mutex<Vec<(Option<i64>, OutboundAction)>>,
+    }
+
+    impl ActionExecutor for RecordingExec {
+        async fn execute_action(
+            &self,
+            _platform: &'static str,
+            community_id: Option<i64>,
+            action: &OutboundAction,
+        ) -> Result<Option<String>, SenderError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((community_id, action.clone()));
+            Ok(None)
+        }
+    }
+
+    /// Twitch `chat.delete` / `dm.send` are wired to the executor (no stub left): with one
+    /// attached they reach it, pinned; with none they fail loud.
+    #[tokio::test]
+    async fn twitch_delete_and_dm_run_through_the_attached_executor() {
+        let irc = RecordingIrc::default();
+        let exec = RecordingExec::default();
+        let twitch = TwitchSender::new(&irc, Some(7)).with_executor(&exec);
+        let del = OutboundAction::ChatDelete {
+            channel: "#c".into(),
+            message_id: "m1".into(),
+            origin_channel: Some("#c".into()),
+        };
+        dispatch_to(&twitch, &del).await.unwrap();
+        let dm = OutboundAction::DmSend {
+            user_id: "u1".into(),
+            text: "hi".into(),
+            origin_channel: "#c".into(),
+            tenant_id: Some(3),
+        };
+        dispatch_to(&twitch, &dm).await.unwrap();
+        {
+            let seen = exec.seen.lock().unwrap();
+            assert_eq!(seen.len(), 2);
+            assert_eq!(seen[0].0, Some(7));
+            assert!(matches!(
+                &seen[0].1,
+                OutboundAction::ChatDelete { channel, message_id, origin_channel }
+                    if channel == "#c" && message_id == "m1" && origin_channel.as_deref() == Some("#c")
+            ));
+            assert!(
+                matches!(&seen[1].1, OutboundAction::DmSend { user_id, .. } if user_id == "u1")
+            );
+        }
+        // The pin is still enforced before the executor is consulted.
+        let bad = OutboundAction::ChatDelete {
+            channel: "#victim".into(),
+            message_id: "m1".into(),
+            origin_channel: Some("#c".into()),
+        };
+        assert!(matches!(
+            dispatch_to(&twitch, &bad).await,
+            Err(SenderError::Rejected { .. })
+        ));
+        assert_eq!(exec.seen.lock().unwrap().len(), 2);
     }
 }

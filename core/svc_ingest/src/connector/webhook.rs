@@ -37,7 +37,7 @@ use tokio::sync::mpsc;
 
 use super::transport::{Transport, TransportError};
 use super::types::{ConnectionCtx, Handshake};
-use super::webhook_verify::{hex_encode, Scheme};
+use super::webhook_verify::{hex_encode, Scheme, VerifyError};
 use crate::ingest::twitch_eventsub::DEDUP_TTL;
 
 /// Absolute per-route ceiling on `body_limit`.
@@ -229,6 +229,28 @@ pub enum SecretError {
 pub trait WebhookSecretSource: Send + Sync {
     /// Resolve the secret for `secret_ref`.
     fn resolve(&self, secret_ref: ConnectionRef) -> BoxFut<'_, Result<SecretString, SecretError>>;
+
+    /// The key/secret for a route of `scheme`. Defaults to [`Self::resolve`] (the community-bound
+    /// connection secret); a source that owns a scheme-wide key (Kick's published public key,
+    /// which belongs to no community) overrides it. Called per request, like `resolve`.
+    fn resolve_for<'a>(
+        &'a self,
+        _scheme: &'a Scheme,
+        secret_ref: ConnectionRef,
+    ) -> BoxFut<'a, Result<SecretString, SecretError>> {
+        self.resolve(secret_ref)
+    }
+
+    /// Like [`Self::resolve_for`] but bypassing any key cache, for a scheme whose key rotates
+    /// upstream (`Scheme::rotates_keys`) after the cached key failed to verify. Sources with no
+    /// cache (the default) just resolve again.
+    fn resolve_refreshed_for<'a>(
+        &'a self,
+        scheme: &'a Scheme,
+        secret_ref: ConnectionRef,
+    ) -> BoxFut<'a, Result<SecretString, SecretError>> {
+        self.resolve_for(scheme, secret_ref)
+    }
 }
 
 /// Production [`WebhookSecretSource`] over `connection_resolver`: one
@@ -598,16 +620,41 @@ impl WebhookIngress {
         // Secret by ROUTE KEY's secret_ref, per call, scoped to this block so
         // it zeroizes on drop and never crosses an await after the check.
         let verified = {
-            let secret = match self.secrets.resolve(route.secret_ref).await {
+            let secret = match self
+                .secrets
+                .resolve_for(&route.scheme, route.secret_ref)
+                .await
+            {
                 Ok(s) => s,
                 Err(SecretError::Missing) => return fail(WebhookOutcome::Rejected),
                 Err(SecretError::Unavailable) => return WebhookOutcome::Unavailable,
             };
             prepared.check(secret.expose())
         };
+        // A rotating-key scheme gets exactly ONE forced key refresh on a mismatch (the source
+        // rate-limits the refetch, so a forged flood cannot amplify into key fetches).
+        let verified = match verified {
+            Err(VerifyError::BadSignature) if route.scheme.rotates_keys() => {
+                match self
+                    .secrets
+                    .resolve_refreshed_for(&route.scheme, route.secret_ref)
+                    .await
+                {
+                    Ok(secret) => prepared.check(secret.expose()),
+                    Err(SecretError::Missing) => return fail(WebhookOutcome::Rejected),
+                    Err(SecretError::Unavailable) => return WebhookOutcome::Unavailable,
+                }
+            }
+            other => other,
+        };
         if verified.is_err() {
             return fail(WebhookOutcome::Rejected);
         }
+        // The frame the guest sees (the raw body, or Kick's header-carrying envelope). Built
+        // only after the signature verified; a body that cannot form one is refused.
+        let Some(frame) = prepared.frame(body) else {
+            return fail(WebhookOutcome::Rejected);
+        };
         // Verified traffic is charged to the route's own budget, which
         // unauthenticated requests can never spend.
         if !entry.admit(now) {
@@ -663,7 +710,7 @@ impl WebhookIngress {
                 .get(route_key)
                 .is_some_and(|c| Arc::ptr_eq(c, &entry))
             {
-                permit.send(body.to_vec());
+                permit.send(frame);
                 true
             } else {
                 false

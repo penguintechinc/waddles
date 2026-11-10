@@ -32,6 +32,7 @@ use svc_ingest::connector::sender_exec::discord_duties::{
     DiscordDuties, PlatformUserResolver, UserResolveError,
 };
 use svc_ingest::connector::sender_exec::discord_slots::DiscordSlots;
+use svc_ingest::connector::sender_exec::kick_slots::KickSlots;
 use svc_ingest::connector::sender_exec::twitch_slots::TwitchSlots;
 use svc_ingest::connector::sender_exec::youtube_slots::YoutubeSlots;
 use svc_ingest::connector::sender_exec::{
@@ -176,9 +177,28 @@ impl TemplateBuilder for Rewrite {
     }
 }
 
+/// Kick is not exercised by this three-platform suite (`kick_outbound.rs` owns it): it has no
+/// binding here, so a Kick send would be refused.
+struct KkCreds;
+
+impl svc_ingest::outbound_creds_kick::KickCredentialSource for KkCreds {
+    async fn binding(
+        &self,
+        _c: Option<i64>,
+    ) -> Result<svc_ingest::outbound_creds_kick::KickBinding, svc_ingest::outbound_creds::CredError>
+    {
+        Err(svc_ingest::outbound_creds::CredError::NoBinding)
+    }
+}
+
 type Exec = SenderExecutor<
     Rewrite,
-    PlatformSlotRouter<TwitchSlots<TwCreds>, DiscordSlots<DcCreds>, YoutubeSlots<YtCreds>>,
+    PlatformSlotRouter<
+        TwitchSlots<TwCreds>,
+        DiscordSlots<DcCreds>,
+        YoutubeSlots<YtCreds>,
+        KickSlots<KkCreds>,
+    >,
     CachedFlagGate,
     DiscordDuties<DcCreds, Users>,
 >;
@@ -297,6 +317,7 @@ async fn rig(flag: bool) -> Rig {
         ),
         DiscordSlots::with_endpoint(DcCreds, guard(), format!("{}/api/v10", dc.uri())),
         YoutubeSlots::new(YtCreds),
+        KickSlots::new(KkCreds),
     );
     let duties = DiscordDuties::with_endpoint(
         DcCreds,
@@ -908,4 +929,116 @@ async fn flag_off_executor_refuses_everything_and_sends_nothing() {
     assert_eq!(exec_count("twitch", "chat.send", "flag_off"), off0 + 1);
     assert!(rig.tw.received_requests().await.unwrap().is_empty());
     stop(tx, h).await;
+}
+
+/// The op id of a queue entry built by [`entry`].
+fn op_id_of(raw: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(raw).unwrap()["op_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Table test of the table-driven op seam, end to end through the production drains: an op
+/// REGISTERED in the policy table reaches the connector's `build-request` (the executor ran, so
+/// the producer gets an ack that is anything but `unsupported`), while an op that is NOT in the
+/// table for that platform is rejected at parse time: dropped, never executed, never acked.
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_ops_reach_build_request_and_unregistered_ops_are_rejected_at_parse() {
+    let rig = rig(true).await;
+    mock_twitch(&rig.tw).await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x"})))
+        .mount(&rig.yt)
+        .await;
+    let (tw_tx, tw_h) = drain(&rig, "twitch");
+    let (yt_tx, yt_h) = drain(&rig, "youtube");
+
+    // (platform, queue, op, channel/origin, registered?)
+    let rows: [(&str, &str, &str, &str, bool); 7] = [
+        (
+            "twitch",
+            TWITCH_OUTBOUND_QUEUE_KEY,
+            "mod.ban",
+            "#chan",
+            true,
+        ),
+        (
+            "twitch",
+            TWITCH_OUTBOUND_QUEUE_KEY,
+            "mod.timeout",
+            "#chan",
+            true,
+        ),
+        (
+            "twitch",
+            TWITCH_OUTBOUND_QUEUE_KEY,
+            "eventsub.list",
+            "#chan",
+            true,
+        ),
+        (
+            "youtube",
+            YOUTUBE_OUTBOUND_QUEUE_KEY,
+            "mod.add",
+            "lc1",
+            true,
+        ),
+        // Not in the table for that platform (or at all): rejected at parse.
+        (
+            "twitch",
+            TWITCH_OUTBOUND_QUEUE_KEY,
+            "mod.kick",
+            "#chan",
+            false,
+        ),
+        (
+            "twitch",
+            TWITCH_OUTBOUND_QUEUE_KEY,
+            "totally.fake",
+            "#chan",
+            false,
+        ),
+        (
+            "youtube",
+            YOUTUBE_OUTBOUND_QUEUE_KEY,
+            "eventsub.create",
+            "lc1",
+            false,
+        ),
+    ];
+    let mut reached = 0;
+    let mut rejected = 0;
+    for (platform, queue, op, chan, registered) in rows {
+        let raw = entry(platform, op, chan, chan, "", "999", TENANT);
+        let op_id = op_id_of(&raw);
+        push(queue, &raw).await;
+        if registered {
+            let ack = ack_for(&op_id).await;
+            let code = ack["code"].as_str().unwrap_or("ok");
+            assert_ne!(
+                code, "unsupported",
+                "{platform}/{op}: never reached the executor"
+            );
+            reached += 1;
+        } else {
+            // Rejected at parse: no ack is ever written for it.
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            let client = redis::Client::open(std::env::var("VALKEY_URL").unwrap()).unwrap();
+            let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+            let raw_ack: Option<String> = redis::cmd("GET")
+                .arg(format!("waddles:transport:discord:ack:{op_id}"))
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert!(
+                raw_ack.is_none(),
+                "{platform}/{op}: unregistered op was acked"
+            );
+            rejected += 1;
+        }
+    }
+    assert_eq!((reached, rejected), (4, 3), "denominator: rows exercised");
+    stop(tw_tx, tw_h).await;
+    stop(yt_tx, yt_h).await;
 }

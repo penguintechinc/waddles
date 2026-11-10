@@ -141,7 +141,7 @@ The following table lists the main configurable parameters of the WaddleBot char
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `global.imageRegistry` | Global Docker image registry | `docker.io/waddlebot` |
-| `global.imagePullPolicy` | Image pull policy for **every** workload container, including `hub-api`, `svc-{action,ingest,process}-rust`, `svc-presentation` and both `bundle-executor` Deployments (no template hardcodes a policy) | `IfNotPresent` |
+| `global.imagePullPolicy` | Image pull policy for **every** workload container, including `hub-api`, `svc-{action,ingest,process}-rust`, `svc-presentation` and both `svc-bundles-executor` Deployments (no template hardcodes a policy) | `IfNotPresent` |
 | `global.imagePullSecrets` | Global image pull secrets | `[]` |
 | `global.storageClass` | Global storage class for PVCs | `standard` |
 
@@ -419,10 +419,10 @@ Tests: `tests/test_scale_and_shutdown_hardening_render.py`.
 | `shutdown.preStopSleepSeconds` | `preStop` sleep so the pod leaves Service endpoints before SIGTERM (`0` = off). Native `sleep` action on k8s >= 1.30, `exec sleep` below | `5` |
 | `startupProbe.periodSeconds` / `.failureThreshold` | Startup budget (30 x 5s = 150s) for hub-api, the Rust data-plane stages, the Python pipeline stages, svc-streaming, svc-presentation | `5` / `30` |
 | `autoscaling.defaults.*` | HPA defaults: `enabled` (off), `minReplicas`, `maxReplicas`, `targetCPUUtilizationPercentage`, optional `targetMemoryUtilizationPercentage` / `behavior` | off, `2`, `10`, `70` |
-| `autoscaling.services.<key>.*` | Per-service override (field-by-field over `defaults`); production enables it for hub-api, hub-webui, svc-{action,process}-rust, both bundle-executors, reputation | `{}` |
+| `autoscaling.services.<key>.*` | Per-service override (field-by-field over `defaults`); production enables it for hub-api, hub-webui, svc-{action,process}-rust, the single svc-bundles-executor, reputation | `{}` |
 | `podDisruptionBudget.enabled` / `.minAvailable` / `.maxUnavailable` | PDB for every registered service that effectively runs >1 replica (`services.<key>` overrides) | `true` / `1` / `""` |
 
-- HPA keys: `hubApi hubWebui svcCore svcProcess svcAction svcProcessRust svcActionRust bundleExecutor bundleExecutorAction reputation router`. PDB-only (never an HPA): `svcIngest svcIngestRust egressProxy`. Needs metrics-server + container resource requests.
+- HPA keys: `hubApi hubWebui svcCore svcProcess svcAction svcProcessRust svcActionRust bundleExecutor reputation router`. PDB-only (never an HPA): `svcIngest svcIngestRust egressProxy`. Needs metrics-server + container resource requests.
 - When a service's HPA is enabled its Deployment omits `spec.replicas`, so `helm upgrade` never resets the autoscaler.
 - A PDB is skipped for a single effective replica (it would block node drains), so alpha/beta/gamma render none.
 - **Singletons are never autoscaled or budgeted:** `svc-streaming` (stateful RTMP/SRT + stream dir, `strategy: Recreate`, replicas 1, 60s grace) and `svc-presentation` (overlay fan-out is in-process).
@@ -568,7 +568,7 @@ succeeds. Four platform key Secrets are self-provisioned by this chart:
 
 The two symmetric keys (`minioKms`, `tenantKek`) use `lookup` + Helm's own
 cryptographically-secure `randBytes`/`sha256sum` template functions -- no extra
-tooling needed. The two Ed25519 keys (`bundleSigning`, `serviceJwt`) need an
+tooling needed. The two asymmetric keys (`bundleSigning`: Ed25519, `serviceJwt`: ECDSA P-256 / ES256) need an
 `openssl`-equipped hook Job instead: Sprig/Helm has no function to derive an Ed25519
 public key from a private key, which both public-key-flow requirements below need.
 
@@ -916,7 +916,7 @@ ingress:
 ### Bundle Artifact Signing Rollout Order
 
 `feature/bundle-artifact-signing`: hub-api signs each approved bundle with a
-platform Ed25519 key; the bundle-executor(s) verify that signature before
+platform Ed25519 key; the svc-bundles-executor(s) verify that signature before
 instantiating any component and fail closed with no configured key.
 
 **fix/chart-autogen-bundle-signing-key: steps 1 and 4 below are now automatic in
@@ -925,7 +925,7 @@ pre-upgrade hook keeps the `<release>-bundle-signing` Secret and
 `<release>-bundle-signing-public` ConfigMap in sync on every `helm install`/
 `helm upgrade` (generating the Secret itself on a miss in alpha/local; requiring
 a pre-created Secret or `externalSecret: true` elsewhere), and
-`bundle-executor`/`bundle-executor-action` now source `BUNDLE_SIGNING_PUBLIC_KEYS`
+`svc-bundles-executor` now source `BUNDLE_SIGNING_PUBLIC_KEYS`
 from that ConfigMap by default -- see "Self-provisioned platform keys" above.
 `make generate-bundle-signing-key` and
 `pipeline.rustDataPlane.bundleSigningPublicKeys` remain available as an explicit
@@ -985,11 +985,11 @@ The executor boot-pins `connectors/<p>/<digest>.wasm` plus a signed sidecar
   `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`.
 - Digests are build outputs and are not committed per environment. Verify with `make test-connector-publish`.
 
-## Kata isolation for bundle executors (`bundleExecutor.runtimeClass`, default OFF)
+## Kata isolation for the bundle executor (`bundleExecutor.runtimeClass`, default OFF)
 
-The two executor Deployments (`bundle-executor`, `bundle-executor-action`) run untrusted WASM
-bundles and can optionally run inside Kata Containers micro-VMs. Every other data-plane pod
-stays on standard containers with enforced Tetragon exec allowlists (unchanged).
+The `svc-bundles-executor` Deployment runs untrusted WASM bundles and can optionally run inside
+Kata Containers micro-VMs. Every other data-plane pod stays on standard containers with enforced
+Tetragon exec allowlists (unchanged).
 
 ```yaml
 bundleExecutor:
@@ -998,12 +998,12 @@ bundleExecutor:
 ```
 
 - Renders `runtimeClassName` only when enabled; enabled with an empty `name` fails the render.
-- `nodeSelector` / `affinity` apply to the executors only, and only when enabled (default empty).
+- `nodeSelector` / `affinity` apply to the executor only, and only when enabled (default empty).
 - `runtimeClass.resources` replaces the per-environment executor resources when enabled. The
   RuntimeClass `overhead` (guest kernel + agent) is added to the pod request by Kubernetes
   automatically; size resources for the workload only.
 - Tetragon limitation: inside a Kata guest the host's Tetragon sees only the shim, not the
   executor's `execve` calls, so the executor's TracingPolicy no longer observes in-guest
-  execs. The micro-VM boundary is the isolation control for these pods instead; the policy is
+  execs. The micro-VM boundary is the isolation control for this pod instead; the policy is
   still rendered. Policies on all other data-plane pods are untouched.
 - Prerequisite: the `RuntimeClass` and KVM nodes are cluster-admin managed (not by this chart).

@@ -1,6 +1,6 @@
 name: Build svc-process
 
-# Publishes the Rust data-plane svc-process image (`svc-process-rust`) built
+# Publishes the Rust data-plane svc-process image (`svc-process`) built
 # from `core/svc_process/Dockerfile.rust`. See build-svc-ingest.yml for the
 # full rationale (self-contained build, `-rust` naming, gated Trivy scan,
 # and the PR-path job split so a build-context regression like gh-475 now
@@ -34,7 +34,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  MODULE_NAME: svc-process-rust
+  MODULE_NAME: svc-process
   MODULE_PATH: core/svc_process
   # Dockerfile.rust COPYs the sibling `bundle_active_set` crate (same-repo
   # path dependency), so the build context must be `core/` (the parent of
@@ -51,7 +51,7 @@ env:
 jobs:
   determine-version:
     name: Determine Version and Tags
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha' || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
     outputs:
       version: ${{ steps.version.outputs.version }}
       suffix: ${{ steps.version.outputs.suffix }}

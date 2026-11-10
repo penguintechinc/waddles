@@ -330,6 +330,7 @@ impl ConnectorProfile for SpectrumProfile {
                 platform: PLATFORM,
                 community_id: b.community_id,
                 connection_id: b.connection_id,
+                lane: Default::default(),
             },
             tenant_id: tenant,
             plan: TransportPlan::Spectrum(Box::new(SpectrumPlan { poll: cfg, spec })),

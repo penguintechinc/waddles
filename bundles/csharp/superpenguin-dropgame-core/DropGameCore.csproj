@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Shared library for the SuperPenguinTV drop-game ports (Plinko, Balloon, Parachute, Curling, Golf, Racing, UfoClaw): the
+    deterministic PRNG (xoshiro256** seeded through splitmix64), the seed derivation, the single-shot wagered-game host base,
+    the replay record/guard, the overlay envelope + publisher, and the vendored common overlay JS. Pure managed code over
+    `waddle-sdk-cs` only: no WIT types (a bundle's wit-bindgen output is per-project), no System.Security.Cryptography (it
+    throws PlatformNotSupportedException on wasi-wasm), no reflection JSON. Like the SDK it never sets RuntimeIdentifier /
+    PublishTrimmed: the consuming bundle's wasi-wasm publish pulls this library into its NativeAOT-LLVM compilation.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>SuperPenguin.DropGameCore</RootNamespace>
+    <AssemblyName>DropGameCore</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <!-- The sibling tests/ project's sources must never be compiled into this library. -->
+  <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../sdk/waddle-sdk-cs/waddle-sdk-cs.csproj" />
+  </ItemGroup>
+
+</Project>

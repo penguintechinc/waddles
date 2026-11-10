@@ -1,5 +1,5 @@
 # feature/e2e-helm-rust-dataplane -- cert-manager path (global.hostApiTls.certManager.
-# enabled=true) for the bundle-executor<->stage host-API mTLS identity, preferred over the
+# enabled=true) for the svc-bundles-executor<->stage host-API mTLS identity, preferred over the
 # static Secret (templates/host-api-tls-secret.yaml) whenever the cluster already runs
 # cert-manager. Mirrors templates/grpc-tls-certificate.yaml exactly, but mints into the
 # fullname-host-api-tls Secret name for the SEPARATE host-API identity -- never conflated
@@ -32,6 +32,7 @@ spec:
   # genSignedCert path uses, so the cert-manager and alpha/local-generate provisioning
   # paths can never drift apart on SANs either.
   dnsNames:
+    {{- include "waddlebot.assertNoWildcardSan" (dict "what" "global.hostApiTls (host-api-tls Certificate)" "names" (include "waddlebot.hostApiTlsDesiredDnsNames" . | splitList ",")) }}
     {{- range include "waddlebot.hostApiTlsDesiredDnsNames" . | splitList "," }}
     - {{ . | quote }}
     {{- end }}

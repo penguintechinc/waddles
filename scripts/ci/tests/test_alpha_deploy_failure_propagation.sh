@@ -41,7 +41,7 @@ if [ "\$1 \$2" = "config current-context" ]; then echo local-alpha; fi
 # decides which (if any) fail their rollout.
 case "\$args" in
     *"get deployments -n"*)
-        echo "waddlebot-hub-api waddlebot-bundle-executor"
+        echo "waddlebot-hub-api waddlebot-svc-bundles-executor"
         exit 0
         ;;
     *"rollout status"*)
@@ -139,8 +139,8 @@ else
     cases_failed=$((cases_failed + 1))
 fi
 
-run_case "one Deployment fails rollout -> exit non-zero, both Deployments still checked" "deployed" "waddlebot-bundle-executor" 0
-if grep -q "bundle-executor did not roll out cleanly" "$OUT_FILE" && grep -qE "did not roll out cleanly:" "$OUT_FILE"; then
+run_case "one Deployment fails rollout -> exit non-zero, every Deployment still checked" "deployed" "waddlebot-svc-bundles-executor" 0
+if grep -q "svc-bundles-executor did not roll out cleanly" "$OUT_FILE" && grep -qE "did not roll out cleanly:" "$OUT_FILE"; then
     echo "  - failure summary names the failed Deployment"
     cases_passed=$((cases_passed + 1))
 else

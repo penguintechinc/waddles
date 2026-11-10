@@ -37,7 +37,17 @@ BUNDLES_DIR = REPO_ROOT / "bundles" / "python"
 #: passive (acts on ordinary chat, answers no command). `hypetrain` only COUNTS `!hype` as a
 #: keyword; the `hype` bundle owns and answers it, so it is not listed as a head here.
 NO_FILTER_HEADS: dict[str, tuple[str, ...]] = {
-    "chatguard": ("!chatguard", "!permit"),
+    "chatguard": (
+        "!chatguard",
+        "!permit",
+        "!ban",
+        "!unban",
+        "!timeout",
+        "!untimeout",
+        "!kick",
+        "!purge",
+        "!modlog",
+    ),
     "greeter": ("!greeter",),
     "hypetrain": ("!hypetrain",),
     "keywordgiveaway": ("!kgiveaway",),
@@ -64,14 +74,13 @@ def _load() -> tuple[dict[str, set[str]], set[str], int]:
     for manifest in sorted(BUNDLES_DIR.glob("*/bundle.yaml")):
         scanned += 1
         data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
-        found = False
         for stage in (data.get("stages") or {}).values():
             for consume in stage.get("consumes") or []:
-                for prefix in (consume.get("filters") or {}).get("command_prefix") or []:
+                prefixes = (consume.get("filters") or {}).get("command_prefix") or []
+                for prefix in prefixes:
                     triggers[str(prefix).strip().lower()].add(manifest.parent.name)
-                    found = True
-        if not found:
-            unfiltered.add(manifest.parent.name)
+                if not prefixes:  # ANY rule that sees every line makes the bundle "unfiltered"
+                    unfiltered.add(manifest.parent.name)
     return triggers, unfiltered, scanned
 
 
