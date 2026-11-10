@@ -485,8 +485,12 @@ pub fn authorize_admin_call(
         ));
     }
     let required_scope = exported.required_scope.clone();
+    // A manifest `host_op` declaration is honoured on the self-call path too, exactly as in
+    // `authorize_tool_call`: the stage then executes it as a pinned producer op.
+    let host_op = exported.host_op.clone();
     Ok(AuthorizedCall {
         required_scope,
+        host_op,
         plan: ToolPlan {
             target_app_id: req.target,
             tool: req.tool,
