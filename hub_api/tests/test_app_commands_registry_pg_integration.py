@@ -19,17 +19,13 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey
 from quart import Quart
 from quart_schema import QuartSchema
 from sqlalchemy import func, select, text
 
-from blueprints.v1.app_commands_internal import (
-    SCOPE_ACTIVE_CONTEXT,
-    SCOPE_APP_COMMANDS,
-    app_commands_internal_bp,
-)
+from blueprints.v1.app_commands_internal import SCOPE_APP_COMMANDS, app_commands_internal_bp
 from services import app_command_registry as registry
 from services.dataplane_scope import ScopeNotFoundError
 from tests.test_seed_core_bundles_pg_integration import (
@@ -240,7 +236,7 @@ async def test_community_delete_cascades_context(dal: Any) -> None:
 async def test_http_end_to_end(dal: Any) -> None:
     w = await _world(dal)
     await _command(dal, w, "ping", w.first)
-    private = Ed25519PrivateKey.generate()
+    private = ec.generate_private_key(ec.SECP256R1())
     key = SigningKey(kid="k1", private_key=private, public_key=private.public_key())
     issuer = ServiceJwtIssuer(
         keys={"k1": key},
@@ -250,7 +246,7 @@ async def test_http_end_to_end(dal: Any) -> None:
                 service_id=INGEST,
                 k8s_namespace="waddlebot",
                 k8s_service_account="svc-ingest",
-                allowed_scopes=frozenset({SCOPE_APP_COMMANDS, SCOPE_ACTIVE_CONTEXT}),
+                allowed_scopes=frozenset({SCOPE_APP_COMMANDS}),
                 tenant="system",
             )
         },
@@ -263,7 +259,6 @@ async def test_http_end_to_end(dal: Any) -> None:
     app.config["SERVICE_JWT_VERIFIER"] = issuer.as_verifier()
     client = app.test_client()
     cmds = {"Authorization": f"Bearer {issuer.issue(INGEST, SCOPE_APP_COMMANDS)}"}
-    ctxh = {"Authorization": f"Bearer {issuer.issue(INGEST, SCOPE_ACTIVE_CONTEXT)}"}
     desired = await client.get(
         f"{BASE}/app-commands/desired?platform=discord&source_id={w.guild}", headers=cmds
     )
@@ -272,10 +267,3 @@ async def test_http_end_to_end(dal: Any) -> None:
         "context",
         "ping",
     ]
-    user = str(uuid.uuid4())
-    put = await client.put(
-        f"{BASE}/active-context",
-        json={"platform": "discord", "sourceId": w.guild, "user": user, "community": w.second_pub},
-        headers=ctxh,
-    )
-    assert put.status_code == 200 and (await put.get_json())["communityPublicId"] == w.second_pub

@@ -259,6 +259,20 @@ def test_platform_user_scope_is_granted_to_svc_ingest_alone(
             assert _PLATFORM_USER_SCOPE not in entry["allowed_scopes"], name
 
 
+_ACTIVE_CONTEXT_SCOPE = "dataplane:active-context"
+
+
+def test_dataplane_active_context_is_granted_to_svc_ingest_alone(
+    docs: list[dict[str, Any]],
+) -> None:
+    identities = _identities(docs)
+    assert _ACTIVE_CONTEXT_SCOPE in identities["svc-ingest"]["allowed_scopes"]
+    assert len(identities) >= 3, identities.keys()
+    for name, entry in identities.items():
+        if name != "svc-ingest":
+            assert _ACTIVE_CONTEXT_SCOPE not in entry["allowed_scopes"], name
+
+
 def test_dynamic_connections_alone_wires_the_hub_api_grpc_endpoint_and_ca(
     docs: list[dict[str, Any]],
 ) -> None:

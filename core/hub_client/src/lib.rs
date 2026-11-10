@@ -37,6 +37,7 @@
 //! connection(s) internally, so `HubClient` is cheaply `Clone` (an
 //! `Arc`-backed handle) rather than opening a new connection per call.
 
+pub mod active_context;
 pub mod bundle_schedule;
 pub mod resolve_scope;
 pub(crate) mod rpc;

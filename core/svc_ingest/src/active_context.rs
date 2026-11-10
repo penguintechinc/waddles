@@ -24,10 +24,10 @@
 //! no bundle is involved and no token appears in a log.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use bundle_host_http::guarded::GuardedClient;
-use serde::Deserialize;
+use hub_client::active_context::ActiveContextClient;
+use hub_client::pb;
 use serde_json::Value;
 
 use crate::commands_reconcile::BoxFut;
@@ -38,44 +38,64 @@ use prometheus::{HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry};
 use tracing::Instrument;
 
 /// Machine-JWT scope svc-ingest holds for the active-context endpoints.
-pub const ACTIVE_CONTEXT_JWT_SCOPE: &str = "dataplane:active-context";
-const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+pub const ACTIVE_CONTEXT_JWT_SCOPE: &str = hub_client::active_context::SCOPE;
 /// Discord message flag: only the invoker sees the reply.
 const FLAG_EPHEMERAL: u64 = 64;
 /// Discord's message content cap.
 const MAX_REPLY_CHARS: usize = 2000;
 
 /// One switchable community.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Community {
     /// Community `public_id` UUID.
-    #[serde(rename = "publicId")]
     pub public_id: String,
     /// Display name (a mutable alias; matched only client-side).
-    #[serde(rename = "displayName")]
     pub display_name: String,
     /// 0 = first-registered default.
     pub position: u32,
 }
 
 /// A user's active context for a source.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextView {
     /// Active community `public_id`.
-    #[serde(rename = "communityPublicId")]
     pub community_public_id: String,
     /// Active community NUMERIC id (the key the interaction ownership check compares).
     /// Required: a hub answer without it is `Malformed`, so routing fails closed.
-    #[serde(rename = "communityId")]
     pub community_id: i64,
     /// Active community display name.
-    #[serde(rename = "communityName")]
     pub community_name: String,
     /// Whether the user chose it (vs the source default).
     pub explicit: bool,
-    /// Switchable communities (absent on a PUT answer of an older hub = empty).
-    #[serde(default)]
+    /// Switchable communities.
     pub communities: Vec<Community>,
+}
+
+impl TryFrom<pb::ActiveContext> for ContextView {
+    type Error = ContextError;
+
+    /// Converts the wire answer; a missing/zero numeric id or an empty `public_id` is
+    /// `Malformed` (hub numeric ids start at 1; proto3 cannot tell "unset" from 0).
+    fn try_from(a: pb::ActiveContext) -> Result<Self, ContextError> {
+        if a.community_id <= 0 || a.community_public_id.is_empty() {
+            return Err(ContextError::Malformed);
+        }
+        Ok(Self {
+            community_public_id: a.community_public_id,
+            community_id: a.community_id,
+            community_name: a.community_name,
+            explicit: a.explicit,
+            communities: a
+                .communities
+                .into_iter()
+                .map(|c| Community {
+                    public_id: c.public_id,
+                    display_name: c.display_name,
+                    position: c.position,
+                })
+                .collect(),
+        })
+    }
 }
 
 /// Why a hub call failed (never carries ids or names).
@@ -106,40 +126,59 @@ pub trait ContextSource: Send + Sync {
     ) -> BoxFut<'a, Result<ContextView, ContextError>>;
 }
 
-/// Production [`ContextSource`]: hub-api over HTTP with a machine JWT.
+/// Production [`ContextSource`]: hub-api's internal gRPC `ActiveContextService` (TLS, machine JWT
+/// with scope [`ACTIVE_CONTEXT_JWT_SCOPE`]) over one long-lived channel.
 pub struct HubContextSource {
-    http: reqwest::Client,
-    base: String,
-    jwt: Arc<service_auth::MachineJwtClient>,
+    client: ActiveContextClient,
+}
+
+/// Why [`HubContextSource::connect`] refused to start.
+#[derive(Debug, thiserror::Error)]
+pub enum HubContextConnectError {
+    /// The endpoint is not `https://` -- hub-api's internal gRPC listener is TLS-only.
+    #[error("HUB_API_GRPC_ENDPOINT must be an https:// URL (hub-api's internal gRPC is TLS-only)")]
+    NotTls,
+    /// Dialing/authenticating the channel failed (CA unreadable, unreachable, untrusted).
+    #[error("hub-api gRPC channel unavailable: {0}")]
+    Client(#[from] hub_client::HubClientError),
 }
 
 impl HubContextSource {
-    /// `base` is the hub-api root.
+    /// Dials hub-api's internal gRPC `endpoint` (`HUB_API_GRPC_ENDPOINT`, `https://` only) once;
+    /// `ca_cert_path` pins the CA that signed hub-api's certificate (`HUB_API_GRPC_CA_FILE`).
     ///
     /// # Errors
-    /// The `reqwest` builder error.
-    pub fn new(
-        base: &str,
-        jwt: Arc<service_auth::MachineJwtClient>,
-    ) -> Result<Self, reqwest::Error> {
-        Ok(Self {
-            http: reqwest::Client::builder().timeout(CALL_TIMEOUT).build()?,
-            base: base.trim_end_matches('/').to_string(),
-            jwt,
-        })
-    }
-
-    fn url(&self) -> String {
-        format!("{}/api/v1/internal/dataplane/active-context", self.base)
-    }
-
-    async fn finish(resp: reqwest::Response) -> Result<ContextView, ContextError> {
-        if !resp.status().is_success() {
-            return Err(ContextError::Unavailable);
+    /// [`HubContextConnectError`] -- fatal at boot, never a silent fallback.
+    pub async fn connect(
+        endpoint: &str,
+        token_endpoint: &str,
+        sa_token_path: &str,
+        ca_cert_path: Option<&str>,
+    ) -> Result<Self, HubContextConnectError> {
+        if !endpoint.trim().to_ascii_lowercase().starts_with("https://") {
+            return Err(HubContextConnectError::NotTls);
         }
-        let body = resp.bytes().await.map_err(|_| ContextError::Unavailable)?;
-        serde_json::from_slice(&body).map_err(|_| ContextError::Malformed)
+        let client = ActiveContextClient::connect(
+            endpoint.trim(),
+            token_endpoint,
+            sa_token_path,
+            ca_cert_path,
+        )
+        .await?;
+        Ok(Self { client })
     }
+
+    /// Wraps an already-built client (loopback servers in tests).
+    #[must_use]
+    pub fn from_client(client: ActiveContextClient) -> Self {
+        Self { client }
+    }
+}
+
+/// Maps a hub failure to the host's two-valued error (the caller answers the user generically).
+fn classify(err: &hub_client::HubClientError) -> ContextError {
+    tracing::warn!(error = %err, "active context call failed");
+    ContextError::Unavailable
 }
 
 impl ContextSource for HubContextSource {
@@ -149,24 +188,12 @@ impl ContextSource for HubContextSource {
         user: &'a str,
     ) -> BoxFut<'a, Result<ContextView, ContextError>> {
         Box::pin(async move {
-            let token = self
-                .jwt
-                .get_token()
+            let answer = self
+                .client
+                .get("discord", source_id, user)
                 .await
-                .map_err(|_| ContextError::Unavailable)?;
-            let resp = self
-                .http
-                .get(self.url())
-                .query(&[
-                    ("platform", "discord"),
-                    ("source_id", source_id),
-                    ("user", user),
-                ])
-                .bearer_auth(&*token)
-                .send()
-                .await
-                .map_err(|_| ContextError::Unavailable)?;
-            Self::finish(resp).await
+                .map_err(|e| classify(&e))?;
+            ContextView::try_from(answer)
         })
     }
 
@@ -177,23 +204,12 @@ impl ContextSource for HubContextSource {
         community: &'a str,
     ) -> BoxFut<'a, Result<ContextView, ContextError>> {
         Box::pin(async move {
-            let token = self
-                .jwt
-                .get_token()
+            let answer = self
+                .client
+                .set("discord", source_id, user, community)
                 .await
-                .map_err(|_| ContextError::Unavailable)?;
-            let resp = self
-                .http
-                .put(self.url())
-                .bearer_auth(&*token)
-                .json(&serde_json::json!({
-                    "platform": "discord", "sourceId": source_id,
-                    "user": user, "community": community,
-                }))
-                .send()
-                .await
-                .map_err(|_| ContextError::Unavailable)?;
-            Self::finish(resp).await
+                .map_err(|e| classify(&e))?;
+            ContextView::try_from(answer)
         })
     }
 }
@@ -604,6 +620,7 @@ mod tests {
     use serde_json::json;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Mutex;
+    use std::time::Duration;
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1032,12 +1049,157 @@ mod tests {
         );
     }
 
+    fn wire(community_id: i64, public_id: &str) -> pb::ActiveContext {
+        pb::ActiveContext {
+            community_public_id: public_id.into(),
+            community_id,
+            community_name: "Alpha".into(),
+            explicit: true,
+            communities: vec![pb::SwitchableCommunity {
+                public_id: public_id.into(),
+                display_name: "Alpha".into(),
+                position: 0,
+            }],
+        }
+    }
+
     #[test]
     fn a_hub_answer_without_a_numeric_community_is_malformed() {
-        let r: Result<ContextView, _> = serde_json::from_value(json!({
-            "communityPublicId": U1, "communityName": "Alpha", "explicit": false
-        }));
-        assert!(r.is_err());
+        assert_eq!(
+            ContextView::try_from(wire(0, U1)).unwrap_err(),
+            ContextError::Malformed
+        );
+        assert_eq!(
+            ContextView::try_from(wire(-3, U1)).unwrap_err(),
+            ContextError::Malformed
+        );
+        assert_eq!(
+            ContextView::try_from(wire(12, "")).unwrap_err(),
+            ContextError::Malformed
+        );
+    }
+
+    #[test]
+    fn a_valid_hub_answer_converts_field_for_field() {
+        let view = ContextView::try_from(wire(12, U1)).unwrap();
+        assert_eq!(view.community_id, 12);
+        assert_eq!(view.community_public_id, U1);
+        assert!(view.explicit);
+        assert_eq!(view.communities.len(), 1);
+        assert_eq!(view.communities[0].display_name, "Alpha");
+    }
+
+    #[tokio::test]
+    async fn plaintext_or_non_url_endpoint_is_refused_before_dialing() {
+        for bad in ["http://hub:50204", "hub:50204", ""] {
+            let err = HubContextSource::connect(bad, "t", "s", None).await;
+            assert!(matches!(err, Err(HubContextConnectError::NotTls)), "{bad}");
+        }
+    }
+
+    /// Real tonic `ActiveContextService` on loopback answering with `reply`; returns the
+    /// production [`HubContextSource`] wired (real machine-JWT bootstrap against an in-process gRPC
+    /// mint) to it.
+    async fn grpc_source(
+        reply: Result<Option<pb::ActiveContext>, tonic::Status>,
+    ) -> (HubContextSource, String) {
+        use hub_client::pb::active_context_service_server::{
+            ActiveContextService, ActiveContextServiceServer,
+        };
+        struct Fake(Result<Option<pb::ActiveContext>, tonic::Status>);
+        #[tonic::async_trait]
+        impl ActiveContextService for Fake {
+            async fn get_active_context(
+                &self,
+                request: tonic::Request<pb::GetActiveContextRequest>,
+            ) -> Result<tonic::Response<pb::GetActiveContextResponse>, tonic::Status> {
+                assert_eq!(
+                    request.metadata().get("authorization").unwrap(),
+                    "Bearer machine.jwt.value"
+                );
+                let r = request.into_inner();
+                assert_eq!(
+                    (r.platform.as_str(), r.source_id.as_str()),
+                    ("discord", "g1")
+                );
+                self.0
+                    .clone()
+                    .map(|context| tonic::Response::new(pb::GetActiveContextResponse { context }))
+            }
+            async fn set_active_context(
+                &self,
+                request: tonic::Request<pb::SetActiveContextRequest>,
+            ) -> Result<tonic::Response<pb::SetActiveContextResponse>, tonic::Status> {
+                assert_eq!(request.into_inner().community, U1);
+                self.0
+                    .clone()
+                    .map(|context| tonic::Response::new(pb::SetActiveContextResponse { context }))
+            }
+        }
+        // The machine-JWT mint is gRPC: a real in-process `ServiceAuthService`.
+        let tokens = service_auth::test_support::MockHub::builder()
+            .mint(vec![service_auth::test_support::MintReply::token(
+                "machine.jwt.value",
+                3600,
+            )])
+            .start_detached()
+            .await;
+        let sa = std::env::temp_dir().join(format!("svc-ingest-ac-sa-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&sa, "projected-sa-token").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(ActiveContextServiceServer::new(Fake(reply)))
+                .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener))
+                .await
+                .unwrap();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let client = ActiveContextClient::with_channel(
+            channel,
+            Arc::new(service_auth::MachineJwtClient::new(
+                tokens.clone(),
+                sa.to_string_lossy().to_string(),
+                ACTIVE_CONTEXT_JWT_SCOPE,
+            )),
+        );
+        (HubContextSource::from_client(client), tokens)
+    }
+
+    #[tokio::test]
+    async fn grpc_source_get_and_put_return_the_numeric_view() {
+        let (source, _tokens) = grpc_source(Ok(Some(wire(12, U1)))).await;
+        let got = source.get("g1", USER).await.unwrap();
+        assert_eq!(
+            (got.community_id, got.community_public_id.as_str()),
+            (12, U1)
+        );
+        let put = source.put("g1", USER, U1).await.unwrap();
+        assert_eq!(put.community_id, 12);
+    }
+
+    #[tokio::test]
+    async fn grpc_source_fails_closed_on_refusal_or_a_malformed_answer() {
+        let (refused, _t1) = grpc_source(Err(tonic::Status::not_found("no"))).await;
+        assert_eq!(
+            refused.get("g1", USER).await.unwrap_err(),
+            ContextError::Unavailable
+        );
+        let (zero, _t2) = grpc_source(Ok(Some(wire(0, U1)))).await;
+        assert_eq!(
+            zero.get("g1", USER).await.unwrap_err(),
+            ContextError::Malformed
+        );
+        let (empty, _t3) = grpc_source(Ok(None)).await;
+        assert_eq!(
+            empty.get("g1", USER).await.unwrap_err(),
+            ContextError::Unavailable
+        );
     }
     #[tokio::test]
     async fn a_guest_naming_another_users_interaction_is_refused_unrouted() {
