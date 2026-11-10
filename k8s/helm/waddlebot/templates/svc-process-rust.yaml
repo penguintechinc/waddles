@@ -8,8 +8,8 @@
 # HOST_API_PORT/HOST_API_SERVER_CERT_FILE/HOST_API_SERVER_KEY_FILE/HOST_API_CLIENT_CA_FILE
 # fields and src/host_api.rs (~2.1k lines) implements the host-API server, wired the same way
 # templates/svc-action-rust.yaml's server-role host-API env/volume is --
-# bundleExecutor.stageTarget must point at svc-process-rust (not its svc-action-rust
-# default) for the ping-bundle e2e proof, since PROCESS_BUNDLE_* above is
+# bundleExecutor.stages must include svc-process-rust:8301
+# for the ping-bundle e2e proof, since PROCESS_BUNDLE_* above is
 # what drives the `load`/`invoke` calls this connection carries. CACHE_HOST/CACHE_PORT are
 # wired explicitly below (not envFrom'd) because the shared ConfigMap only exposes
 # REDIS_HOST/REDIS_PORT, a different name than this crate's CliConfig reads.
@@ -134,7 +134,7 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.heartbeatIntervalMs | default 5000 | quote }}
         # regression: readiness gated on executor connection deadlocked
         # rollouts (alpha 2026-10-02) -- NO LONGER wired into `/healthz`/
-        # `/health` (a bundle-executor dials this service through its
+        # `/health` (a svc-bundles-executor dials this service through its
         # ClusterIP Service, which only routes to Ready pods, so gating
         # readiness/liveness on executor presence deadlocked rollouts). Now
         # only the threshold for the periodic zero-executor ERROR log

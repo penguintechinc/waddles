@@ -74,6 +74,7 @@ path = "src/main.rs"
 # or `cargo deny check` fails closed on `unknown-git`.
 [dependencies]
 tokio = { version = "=1.53.3", features = ["full"] }
+socket2 = { version = "=0.6.5", features = ["all"] }
 axum = "=0.8.9"
 tower = { version = "=0.5.3", features = ["util"] }
 tower-http = { version = "=0.7.1", features = ["trace"] }
