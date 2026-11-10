@@ -469,7 +469,7 @@ gen-ops-cli-vectors:
 	python3 -I scripts/gen_ops_cli_vectors.py
 
 # SuperPenguinTV C# app ports; service-bundle tools own the shared capabilities.
-SUPERPENGUIN_GAMES := slots gamble defuse duel first roulette
+SUPERPENGUIN_GAMES := slots gamble defuse duel first roulette giveaway bonustickets wheel audiocommand tts channelpoints
 .PHONY: $(addprefix test-superpenguin-,$(SUPERPENGUIN_GAMES)) $(addsuffix -bundle,$(addprefix build-superpenguin-,$(SUPERPENGUIN_GAMES)))
 $(addprefix test-superpenguin-,$(SUPERPENGUIN_GAMES)):
 	bash scripts/test-superpenguin-bundle.sh $(@:test-superpenguin-%=%)
@@ -479,3 +479,14 @@ $(addsuffix -bundle,$(addprefix build-superpenguin-,$(SUPERPENGUIN_GAMES))):
 .PHONY: test-superpenguin-ports-e2e
 test-superpenguin-ports-e2e:
 	bash scripts/test-superpenguin-ports-e2e.sh
+
+# Wave-4 apps (giveaway, bonustickets, wheel, audiocommand, tts, channelpoints): manifests are generated from each bundle's
+# manifest.src.yaml; the contract test checks generated files are current, attribution, overlay asset hashes and provenance.
+SUPERPENGUIN_WAVE4 := giveaway bonustickets wheel audiocommand tts channelpoints
+.PHONY: gen-superpenguin-manifests test-superpenguin-wave4-contracts scaffold-superpenguin-bundle
+gen-superpenguin-manifests:
+	python3 -I scripts/gen-superpenguin-manifests.py $(SUPERPENGUIN_WAVE4)
+test-superpenguin-wave4-contracts:
+	python3 -m pytest scripts/ci/tests/test_superpenguin_wave4_contracts.py -q
+scaffold-superpenguin-bundle:
+	bash scripts/scaffold-superpenguin-bundle.sh $(NAME)
