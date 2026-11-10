@@ -1,11 +1,11 @@
 """
-Per-Service EdDSA Machine JWTs
+Per-Service ES256 Machine JWTs
 ==============================
 
 Replaces the platform-wide HS256 shared ``SECRET_KEY`` (see ``auth.py``) and
 static API keys for service-to-service calls, starting with the new internal
 PII endpoints (security.md Service-to-Service Auth). Each service is issued
-a short-lived (<=1h) Ed25519-signed JWT scoped to specific ``scope`` values
+a short-lived (<=1h) ECDSA P-256 / SHA-256 (ES256) signed JWT scoped to specific ``scope`` values
 instead of sharing one signing secret platform-wide.
 
 Bootstrap (no shared secret): a calling service authenticates to the token
@@ -33,11 +33,9 @@ built so that swap is a *configuration* change, not a rewrite --
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
-import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -48,14 +46,13 @@ from typing import Any, Protocol, TypeVar
 import jwt
 import requests
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from quart import current_app, g, jsonify, request
 
 from .jwt_hardening import (
     OUTCOME_OK,
+    REASON_ALG_MISMATCH,
     REASON_BAD_ISSUER,
     REASON_INVALID,
     REASON_SCOPE_DENIED,
@@ -71,9 +68,71 @@ from .jwt_hardening import (
 
 logger = logging.getLogger(__name__)
 
-#: The ONE algorithm the machine-JWT verifier accepts and the issuer signs with
-#: (RFC 8725 one-alg-per-verifier). Ed25519 per RFC 8037.
-SERVICE_JWT_ALGORITHM = "EdDSA"
+#: The algorithm the issuer signs with and the verifier accepts: ECDSA P-256 / SHA-256
+#: (RFC 7518 section 3.4). `alg=none`, HS* and every other algorithm are always refused.
+SERVICE_JWT_ALGORITHM = "ES256"
+
+#: Legacy algorithm accepted ONLY while `SERVICE_JWT_ACCEPT_LEGACY_EDDSA` is true -- a bounded
+#: rollout window for tokens/keys minted before the ES256 cut-over. Never issued.
+LEGACY_SERVICE_JWT_ALGORITHM = "EdDSA"
+
+#: Env flag enabling the legacy EdDSA verification window. Defaults to false.
+ACCEPT_LEGACY_EDDSA_ENV = "SERVICE_JWT_ACCEPT_LEGACY_EDDSA"
+
+#: A verification key: P-256 for ES256 tokens, Ed25519 only for the legacy window.
+ServicePublicKey = ec.EllipticCurvePublicKey | Ed25519PublicKey
+
+
+def accept_legacy_eddsa_from_env() -> bool:
+    """Parse `SERVICE_JWT_ACCEPT_LEGACY_EDDSA` strictly (`true`/`false`, default false).
+
+    Any other value raises rather than silently meaning "off" -- a typo in a security
+    toggle must be loud.
+    """
+    raw = os.getenv(ACCEPT_LEGACY_EDDSA_ENV, "false").strip().lower()
+    if raw in ("true", "1"):
+        return True
+    if raw in ("false", "0", ""):
+        return False
+    raise ServiceJwtError(
+        f"{ACCEPT_LEGACY_EDDSA_ENV} must be 'true' or 'false', got {raw!r}"
+    )
+
+
+def _require_p256_public(key: object, kid: str) -> ec.EllipticCurvePublicKey:
+    """Return `key` if it is a P-256 public key, else raise `ServiceJwtError`."""
+    if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(
+        key.curve, ec.SECP256R1
+    ):
+        raise ServiceJwtError(f"key {kid!r} is not an ECDSA P-256 key")
+    return key
+
+
+def _parse_public_key(pem: str, kid: str, *, accept_legacy: bool) -> ServicePublicKey:
+    """Load a verify-only PEM: P-256, or Ed25519 only when the legacy window is open."""
+    try:
+        key = serialization.load_pem_public_key(pem.encode())
+    except ValueError as exc:
+        raise ServiceJwtError(f"public key for kid {kid!r} is not valid PEM") from exc
+    if isinstance(key, Ed25519PublicKey):
+        if not accept_legacy:
+            raise ServiceJwtError(
+                f"key {kid!r} is Ed25519 but {ACCEPT_LEGACY_EDDSA_ENV} is not enabled"
+            )
+        return key
+    return _require_p256_public(key, kid)
+
+
+def _key_matches_alg(key: object, alg: str) -> bool:
+    """True iff `key`'s type is the one `alg` requires (blocks key/alg confusion)."""
+    if alg == SERVICE_JWT_ALGORITHM:
+        return isinstance(key, ec.EllipticCurvePublicKey) and isinstance(
+            key.curve, ec.SECP256R1
+        )
+    if alg == LEGACY_SERVICE_JWT_ALGORITHM:
+        return isinstance(key, Ed25519PublicKey)
+    return False
+
 
 #: Reserved SPIFFE trust domain (penguintech.md SPIFFE Identity) -- every
 #: `sub` this module issues or verifies lives under it, today via hub-api
@@ -168,7 +227,7 @@ class TrustBundleSource(Protocol):
     unchanged, because they only ever depend on this protocol.
     """
 
-    def get_public_key(self, kid: str) -> Ed25519PublicKey | None:
+    def get_public_key(self, kid: str) -> ServicePublicKey | None:
         """Return the public key for `kid`, or None if unknown/expired."""
         ...
 
@@ -186,6 +245,8 @@ class ServiceJwtVerifier:
     trust_bundle: TrustBundleSource
     audience: str
     trusted_issuers: frozenset[str]
+    #: Also accept legacy EdDSA tokens (bounded rollout window). Default: ES256 only.
+    accept_legacy_eddsa: bool = False
 
     def verify(self, token: str, *, required_scope: str) -> dict[str, Any]:
         """Validate signature, `iss`, `aud`, `exp` (with clock skew) and `scope`.
@@ -196,9 +257,10 @@ class ServiceJwtVerifier:
         never leak which check failed to the caller.
 
         H-2 Phase 0: the header is vetted before any key lookup -- `alg`
-        must be exactly `SERVICE_JWT_ALGORITHM` (so `alg: none`, an HMAC
-        token "signed" with the public key, or any other algorithm is
-        refused outright), `jku`/`jwk`/`x5u`/`x5c`/`crit` are refused, and a
+        must be exactly `ES256` (or `EdDSA` while `accept_legacy_eddsa` is on), so
+        `alg: none`, an HMAC token "signed" with the public key, or any other
+        algorithm is refused outright, and the key found for `kid` must be of the
+        type that `alg` requires, `jku`/`jwk`/`x5u`/`x5c`/`crit` are refused, and a
         `kid` outside the pinned charset never reaches the trust bundle.
         Every call emits `waddles_jwt_verifications_total` with
         `verifier=service_eddsa`.
@@ -209,7 +271,7 @@ class ServiceJwtVerifier:
         try:
             try:
                 header = inspect_header(
-                    token, allowed_algs=(SERVICE_JWT_ALGORITHM,), validate_kid=True
+                    token, allowed_algs=self._allowed_algs(), validate_kid=True
                 )
             except JwtRejection as rejection:
                 alg, outcome = rejection.alg, rejection.reason
@@ -222,11 +284,14 @@ class ServiceJwtVerifier:
             if public_key is None:
                 outcome = REASON_UNKNOWN_KID
                 raise UnknownKeyId("unknown or absent kid")
+            if not _key_matches_alg(public_key, header.alg):
+                outcome = REASON_ALG_MISMATCH
+                raise InvalidServiceToken("key type does not match token alg")
             try:
                 payload = jwt.decode(
                     token,
                     public_key,
-                    algorithms=[SERVICE_JWT_ALGORITHM],
+                    algorithms=[header.alg],
                     audience=self.audience,
                     leeway=CLOCK_SKEW_SECONDS,
                     # `nbf` is mandatory (security review MEDIUM finding) --
@@ -272,6 +337,12 @@ class ServiceJwtVerifier:
             if outcome != OUTCOME_OK:
                 log_rejection(verifier=VERIFIER_SERVICE_EDDSA, reason=outcome, alg=alg)
 
+    def _allowed_algs(self) -> tuple[str, ...]:
+        """Algorithms this verifier accepts (ES256, plus EdDSA only in the legacy window)."""
+        if self.accept_legacy_eddsa:
+            return (SERVICE_JWT_ALGORITHM, LEGACY_SERVICE_JWT_ALGORITHM)
+        return (SERVICE_JWT_ALGORITHM,)
+
 
 @dataclass(frozen=True, slots=True)
 class ServiceIdentity:
@@ -302,7 +373,9 @@ class ServiceIdentity:
 
 @dataclass(frozen=True, slots=True)
 class SigningKey:
-    """One Ed25519 keypair in the active JWKS, identified by `kid`.
+    """One signing keypair (ECDSA P-256) in the active JWKS, identified by `kid`.
+
+    Verify-only legacy entries (Ed25519, legacy window only) carry no private key.
 
     Holding both the private key (issuance) and public key (verification)
     lets a single hub-api process both mint and self-verify during
@@ -312,14 +385,14 @@ class SigningKey:
 
     kid: str
     private_key: (
-        Ed25519PrivateKey | None
+        ec.EllipticCurvePrivateKey | None
     )  # gitleaks:allow -- type annotation, not a secret value
-    public_key: Ed25519PublicKey
+    public_key: ServicePublicKey
 
 
 @dataclass(slots=True)
 class ServiceJwtIssuer:
-    """Issues and verifies Ed25519-signed per-service machine JWTs.
+    """Issues and verifies ES256-signed per-service machine JWTs.
 
     ``keys`` holds every key still valid for verification, keyed by `kid`;
     ``active_kid`` selects which key new tokens are signed with, enabling
@@ -332,6 +405,8 @@ class ServiceJwtIssuer:
     active_kid: str
     identities: dict[str, ServiceIdentity] = field(default_factory=dict)
     audience: str = "waddlebot-internal"
+    #: Mirrors `SERVICE_JWT_ACCEPT_LEGACY_EDDSA`; also publishes legacy OKP keys in the JWKS.
+    accept_legacy_eddsa: bool = False
 
     def issue(
         self,
@@ -407,7 +482,7 @@ class ServiceJwtIssuer:
             # supplies a scope, never a tenant (security.md Tenant Isolation).
             payload["tenant"] = identity.tenant
         payload.update(extra)
-        # PyJWT's EdDSA signer accepts a `cryptography` private-key object
+        # PyJWT's ES256 signer accepts a `cryptography` private-key object
         # directly -- extracting raw bytes here was dead code that only
         # ever created (and immediately discarded) an extra copy of the
         # private key material in memory, widening its exposure window for
@@ -420,7 +495,7 @@ class ServiceJwtIssuer:
         )
         return token, dict(payload)
 
-    def get_public_key(self, kid: str) -> Ed25519PublicKey | None:
+    def get_public_key(self, kid: str) -> ServicePublicKey | None:
         """Implements `TrustBundleSource` -- hub-api verifies its own JWKS today."""
         key = self.keys.get(kid)
         return key.public_key if key else None
@@ -436,26 +511,14 @@ class ServiceJwtIssuer:
             trust_bundle=self,
             audience=self.audience,
             trusted_issuers=frozenset({ISSUER}),
+            accept_legacy_eddsa=self.accept_legacy_eddsa,
         )
 
     def jwks(self) -> dict[str, Any]:
         """Public-key set in JWKS-shaped form for cross-service verifiers."""
-        keys = []
-        for kid, key in self.keys.items():
-            raw = key.public_key.public_bytes(
-                encoding=serialization.Encoding.Raw,
-                format=serialization.PublicFormat.Raw,
-            )
-            keys.append(
-                {
-                    "kty": "OKP",
-                    "crv": "Ed25519",
-                    "kid": kid,
-                    "x": _b64url(raw),
-                    "use": "sig",
-                    "alg": "EdDSA",
-                }
-            )
+        keys = [
+            jwk_for_public_key(kid, key.public_key) for kid, key in self.keys.items()
+        ]
         return {"keys": keys}
 
 
@@ -495,27 +558,66 @@ def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
+def jwk_for_public_key(kid: str, public_key: ServicePublicKey) -> dict[str, str]:
+    """Render one public key as a JWK: `EC`/`P-256` (ES256) or legacy `OKP`/`Ed25519`."""
+    if isinstance(public_key, Ed25519PublicKey):
+        raw = public_key.public_bytes(
+            encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw
+        )
+        return {
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "kid": kid,
+            "x": _b64url(raw),
+            "use": "sig",
+            "alg": LEGACY_SERVICE_JWT_ALGORITHM,
+        }
+    numbers = _require_p256_public(public_key, kid).public_numbers()
+    return {
+        "kty": "EC",
+        "crv": "P-256",
+        "kid": kid,
+        "x": _b64url(numbers.x.to_bytes(32, "big")),
+        "y": _b64url(numbers.y.to_bytes(32, "big")),
+        "use": "sig",
+        "alg": SERVICE_JWT_ALGORITHM,
+    }
+
+
 def load_issuer_from_env(identities: list[ServiceIdentity]) -> ServiceJwtIssuer:
     """Build a `ServiceJwtIssuer` from env-sourced key material.
 
-    `SERVICE_JWT_PRIVATE_KEY_<KID>` (PEM, PKCS8) supplies each signable
-    key; `SERVICE_JWT_PUBLIC_KEY_<KID>` supplies verify-only keys kept
-    around during rotation. Keys come from a k8s Secret projected as env
-    vars -- never logged, never written to disk by this module.
+    `SERVICE_JWT_PRIVATE_KEY_<KID>` (PEM, PKCS8, ECDSA P-256) supplies each signable
+    key; `SERVICE_JWT_PUBLIC_KEY_<KID>` supplies verify-only keys kept around during
+    rotation (P-256, or Ed25519 only while `SERVICE_JWT_ACCEPT_LEGACY_EDDSA=true`).
+    Keys come from a k8s Secret projected as env vars -- never logged, never written
+    to disk by this module.
     """
     active_kid = os.environ["SERVICE_JWT_ACTIVE_KID"]
     audience = os.getenv("SERVICE_JWT_AUDIENCE", "waddlebot-internal")
+    accept_legacy = accept_legacy_eddsa_from_env()
     keys: dict[str, SigningKey] = {}
     prefix = "SERVICE_JWT_PRIVATE_KEY_"
     for env_name, pem in os.environ.items():
         if not env_name.startswith(prefix):
             continue
         kid = env_name[len(prefix) :]
-        private_key = serialization.load_pem_private_key(pem.encode(), password=None)
-        if not isinstance(private_key, Ed25519PrivateKey):
-            raise ServiceJwtError(f"key {kid!r} is not an Ed25519 key")
+        if not is_valid_kid(kid):
+            raise ServiceJwtError("SERVICE_JWT_PRIVATE_KEY_<kid> has a malformed kid")
+        try:
+            private_key = serialization.load_pem_private_key(
+                pem.encode(), password=None
+            )
+        except (ValueError, TypeError) as exc:
+            raise ServiceJwtError(
+                f"private key for kid {kid!r} is not valid PEM"
+            ) from exc
+        if not isinstance(private_key, ec.EllipticCurvePrivateKey):
+            raise ServiceJwtError(f"key {kid!r} is not an ECDSA P-256 key")
         keys[kid] = SigningKey(
-            kid=kid, private_key=private_key, public_key=private_key.public_key()
+            kid=kid,
+            private_key=private_key,
+            public_key=_require_p256_public(private_key.public_key(), kid),
         )
     pub_prefix = "SERVICE_JWT_PUBLIC_KEY_"
     for env_name, pem in os.environ.items():
@@ -524,10 +626,13 @@ def load_issuer_from_env(identities: list[ServiceIdentity]) -> ServiceJwtIssuer:
         kid = env_name[len(pub_prefix) :]
         if kid in keys:
             continue  # already have the private half, which carries the public key too
-        public_key = serialization.load_pem_public_key(pem.encode())
-        if not isinstance(public_key, Ed25519PublicKey):
-            raise ServiceJwtError(f"key {kid!r} is not an Ed25519 key")
-        keys[kid] = SigningKey(kid=kid, private_key=None, public_key=public_key)
+        if not is_valid_kid(kid):
+            raise ServiceJwtError("SERVICE_JWT_PUBLIC_KEY_<kid> has a malformed kid")
+        keys[kid] = SigningKey(
+            kid=kid,
+            private_key=None,
+            public_key=_parse_public_key(pem, kid, accept_legacy=accept_legacy),
+        )
     if active_kid not in keys or keys[active_kid].private_key is None:
         raise ServiceJwtError(f"active kid {active_kid!r} has no private key loaded")
     return ServiceJwtIssuer(
@@ -535,6 +640,7 @@ def load_issuer_from_env(identities: list[ServiceIdentity]) -> ServiceJwtIssuer:
         active_kid=active_kid,
         identities={identity.service_id: identity for identity in identities},
         audience=audience,
+        accept_legacy_eddsa=accept_legacy,
     )
 
 
@@ -685,10 +791,10 @@ def require_service_scope(scope: str) -> Callable[[F], F]:
 
 
 # ---------------------------------------------------------------------------
-# Verify-only trust bundle + caller-side token client
+# Verify-only trust bundle (callers mint over gRPC: ServiceAuthService)
 #
 # Privilege separation (H-2 / security audit HIGH, HS256 shared secret): ONLY
-# hub-api (the issuer) may hold an Ed25519 private key. Every other service
+# hub-api (the issuer) may hold an ES256 private key. Every other service
 # verifies with public keys and mints nothing -- it obtains a short-lived
 # machine JWT from hub-api by presenting its Kubernetes SA token. A verifier
 # compromise therefore yields no forging capability, unlike the legacy HS256
@@ -701,16 +807,16 @@ _PUBLIC_PREFIX = "SERVICE_JWT_PUBLIC_KEY_"
 
 @dataclass(frozen=True, slots=True)
 class StaticTrustBundle:
-    """Immutable kid -> Ed25519 public key map (a `TrustBundleSource`).
+    """Immutable kid -> public key map (a `TrustBundleSource`).
 
     Verify-only by construction: it holds no private key, so a service built on
     it can validate machine JWTs but never mint one. Rotation = ship the new
     public key alongside the old one, flip hub-api's active kid, then drop the old.
     """
 
-    keys: Mapping[str, Ed25519PublicKey]
+    keys: Mapping[str, ServicePublicKey]
 
-    def get_public_key(self, kid: str) -> Ed25519PublicKey | None:
+    def get_public_key(self, kid: str) -> ServicePublicKey | None:
         """Return the public key for `kid`, or None if it is not in the bundle."""
         return self.keys.get(kid)
 
@@ -721,7 +827,7 @@ def load_verifier_from_env(
     """Build a verify-only `ServiceJwtVerifier` from `SERVICE_JWT_PUBLIC_KEY_<kid>` PEMs.
 
     Fails closed (raises `ServiceJwtError`) when no public key is configured, when
-    any key is not Ed25519, when a kid is malformed, or when a `SERVICE_JWT_PRIVATE_KEY_*`
+    any key is not P-256 (Ed25519 only with `SERVICE_JWT_ACCEPT_LEGACY_EDDSA=true`), when a kid is malformed, or when a `SERVICE_JWT_PRIVATE_KEY_*`
     variable is present -- a verifier-only service holding signing material defeats
     the privilege separation this module exists for, so it is refused at startup
     rather than tolerated. No HS256/shared-secret fallback exists anywhere here.
@@ -734,22 +840,15 @@ def load_verifier_from_env(
             "verify-only service must not hold a service-JWT private key "
             f"(found {len(private_vars)} {_PRIVATE_PREFIX}* variable(s))"
         )
-    keys: dict[str, Ed25519PublicKey] = {}
+    accept_legacy = accept_legacy_eddsa_from_env()
+    keys: dict[str, ServicePublicKey] = {}
     for env_name, pem in os.environ.items():
         if not env_name.startswith(_PUBLIC_PREFIX):
             continue
         kid = env_name.removeprefix(_PUBLIC_PREFIX)
         if not is_valid_kid(kid):
             raise ServiceJwtError("SERVICE_JWT_PUBLIC_KEY_<kid> has a malformed kid")
-        try:
-            public_key = serialization.load_pem_public_key(pem.encode())
-        except ValueError as exc:
-            raise ServiceJwtError(
-                f"public key for kid {kid!r} is not valid PEM"
-            ) from exc
-        if not isinstance(public_key, Ed25519PublicKey):
-            raise ServiceJwtError(f"key {kid!r} is not an Ed25519 key")
-        keys[kid] = public_key
+        keys[kid] = _parse_public_key(pem, kid, accept_legacy=accept_legacy)
     if not keys:
         raise ServiceJwtError(
             f"no {_PUBLIC_PREFIX}<kid> configured; refusing to run unauthenticated"
@@ -760,69 +859,5 @@ def load_verifier_from_env(
         trusted_issuers=trusted_issuers
         if trusted_issuers is not None
         else frozenset({ISSUER}),
+        accept_legacy_eddsa=accept_legacy,
     )
-
-
-@dataclass(slots=True)
-class ServiceTokenClient:
-    """Caller-side: exchange the pod's projected SA token for a cached machine JWT.
-
-    Replaces `jwt.encode(..., SECRET_KEY, 'HS256')` at every minting site -- the
-    caller never holds a signing key. Any failure raises `BootstrapRejected`;
-    there is deliberately no fallback token source.
-    """
-
-    token_endpoint: str
-    scope: str
-    sa_token_path: str
-    timeout_seconds: float = 5.0
-    refresh_margin_seconds: int = 60
-    _token: str = ""
-    _expires_at: float = 0.0
-    _lock: threading.Lock = field(default_factory=threading.Lock)
-
-    def get_token(self) -> str:
-        """Return a valid cached token, fetching a fresh one when near expiry."""
-        with self._lock:
-            if (
-                self._token
-                and time.time() < self._expires_at - self.refresh_margin_seconds
-            ):
-                return self._token
-            self._token, self._expires_at = self._fetch()
-            return self._token
-
-    async def get_token_async(self) -> str:
-        """`get_token` off the event loop (blocking file + HTTP I/O)."""
-        return await asyncio.to_thread(self.get_token)
-
-    def _fetch(self) -> tuple[str, float]:
-        try:
-            with open(self.sa_token_path, encoding="ascii") as fh:
-                sa_token = fh.read().strip()
-        except OSError as exc:
-            raise BootstrapRejected(
-                "projected ServiceAccount token unreadable"
-            ) from exc
-        if not sa_token:
-            raise BootstrapRejected("projected ServiceAccount token is empty")
-        try:
-            response = requests.post(
-                self.token_endpoint,
-                json={"scope": self.scope},
-                headers={"Authorization": f"Bearer {sa_token}"},
-                timeout=self.timeout_seconds,
-            )
-            response.raise_for_status()
-            body = response.json()
-            token = body["token"]
-            expires_in = int(body["expires_in"])
-        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
-            raise BootstrapRejected("service token request failed") from exc
-        if (
-            not isinstance(token, str)
-            or not token
-            or not 0 < expires_in <= MAX_TOKEN_TTL_SECONDS
-        ):
-            raise BootstrapRejected("service token response malformed")
-        return token, time.time() + expires_in

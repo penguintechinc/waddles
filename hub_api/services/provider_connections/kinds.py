@@ -52,6 +52,8 @@ class SecretScheme(IntEnum):
     API_KEY_HEADER = 3
     AWS_ACCESS_KEY = 4
     GCP_SERVICE_ACCOUNT = 5
+    #: Outbound Wix API credential (API key + site id) riding a kind-1 Wix row, not a static kind.
+    WIX_API_KEY = 6
 
     @classmethod
     def from_code(cls, code: int) -> SecretScheme:

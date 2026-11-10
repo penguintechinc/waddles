@@ -12,7 +12,10 @@ feature-depth = 1
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+  # Time-boxed, user-approved 2026-11-09. Expires 2026-12-09.
+  { id = "RUSTSEC-2026-0459", reason = "bundled SQLite via sea-orm->sqlx 0.9.0 caps libsqlite3-sys <0.38; patched >=0.39 unavailable in any released sqlx; SQLite not on the Postgres prod data path; remove when sqlx 0.9.x widens the cap - expires 2026-12-09; tracked in issue #1178" },
+]
 
 [licenses]
 version = 2

@@ -176,6 +176,8 @@ No `dm.*` permission family exists in source.
 | Permission | `overlay.media` — Dangerous — 1 call / 10 s — resource `Overlay` |
 | WIT (stage-next) | `register-widget(widget: widget-descriptor) -> result<transport-result, transport-error>`; `push(widget-id: string, surface: surface, payload-json: string) -> result<transport-result, transport-error>` |
 | Scope | Community and token resolved server-side; bundle never sees either |
+| Manifest modes | `params.mode: media` (default) requires non-empty `allowed_hosts` (no wildcards) + `max_duration_seconds` 1..30. `params: {mode: data}` is data-only (envelope pushes per `overlay/SCHEMA.md`, no external media) and must carry NO other param; `data` + `allowed_hosts`/`max_duration_seconds` is rejected (`invalid_overlay_data_mode`), unknown mode `invalid_overlay_mode`. Validated in `hub_api/services/bundle_manifest_v2.py` |
+| Runtime enforcement | Manifest validation only today. The overlay host path (svc_presentation, not hub-api) must refuse any media URL from a bundle whose grant has `mode: data` -- pending, see PR description |
 | Status | No `overlay` arm in `svc_process` or `svc_action` handlers; executor binds `world stage` only (`core/bundle_executor/src/engine.rs:24`) |
 
 ## Streaming Lifecycle (`streaming.lifecycle.subscribe`) — WIT MERGED

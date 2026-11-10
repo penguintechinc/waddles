@@ -141,20 +141,8 @@ if [ "${semgrep_status}" -gt 1 ]; then
 fi
 
 semgrep_json="$(mktemp)"
-"${PYTHON_BIN}" - "${semgrep_raw}" > "${semgrep_json}" <<'PYEOF'
-import json, sys
-d = json.load(open(sys.argv[1]))
-out = []
-for r in d["results"]:
-    out.append({
-        "kind": "fallback",
-        "rule_id": r["check_id"].rsplit(".", 1)[-1],
-        "path": r["path"],
-        "line": r["start"]["line"],
-        "text": r.get("extra", {}).get("lines", ""),
-    })
-print(json.dumps(out))
-PYEOF
+"${PYTHON_BIN}" "${REPO_ROOT}/scripts/ci/semgrep_findings.py" \
+    "${semgrep_raw}" "${REPO_ROOT}" > "${semgrep_json}"
 rm -f "${semgrep_raw}"
 
 # ---------------------------------------------------------------------------

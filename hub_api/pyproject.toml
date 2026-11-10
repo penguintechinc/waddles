@@ -64,6 +64,7 @@ convention = "google"
 "blueprints/v1/auth.py" = ["S101", "N815"]
 "blueprints/v1/identity.py" = ["N815"]
 "blueprints/v1/dataplane_scope.py" = ["N815"]  # wire DTOs are camelCase by API contract
+"blueprints/v1/app_commands_internal.py" = ["N815"]  # wire DTOs are camelCase by API contract
 "blueprints/v1/passkey.py" = ["N815"]
 "blueprints/v1/profile.py" = ["N815"]
 "blueprints/v1/marketplace_vendor.py" = ["N815"]  # wire DTOs are camelCase by API contract
@@ -282,6 +283,7 @@ convention = "google"
 # bundle_approvals.py above -- no tenant_middleware assert here (this
 # endpoint is deliberately cross-tenant), so only N815 is needed.
 "blueprints/v1/bundle_admin.py" = ["N815"]
+"blueprints/v1/bundle_admin_gateway.py" = ["N815", "S101"]  # wire DTOs are camelCase by API contract
 # Enterprise external KMS / BYOK (services/envelope/) -- camelCase DTO fields
 # (keyRef, externalId, dekVersion, ...) follow the v1 wire contract every other
 # blueprint's DTOs use; S101 is the same tenant_middleware postcondition assert
@@ -307,7 +309,7 @@ exclude = ["^\\.venv/", "^tests/"]
 # this is a boundary override for an external-to-this-service import, not
 # a relaxation of hub-api's own typing bar.
 [[tool.mypy.overrides]]
-module = ["flask_core.*", "pydal.*"]
+module = ["flask_core.*", "pydal.*", "jsonschema.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
 

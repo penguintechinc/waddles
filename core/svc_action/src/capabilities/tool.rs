@@ -93,6 +93,43 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         outcome.map_err(|r| denied(r.code(), r.message()))
     }
 
+    /// The host-VERIFIED actor of this invocation: the triggering event's platform account
+    /// resolved through the membership directory to `(user_uuid, role scopes)`, or the
+    /// fail-closed [`bundle_tool_call::ActorContext::none`] when there is no directory wiring,
+    /// the event names no author, or the account is not an active, linked member with a role.
+    /// Never guest input. Logs carry fixed codes only.
+    async fn resolve_verified_actor(&self, scope: &InvokeScope) -> bundle_tool_call::ActorContext {
+        let (Some(dir), Some(user), Some(platform)) = (
+            &self.actor_directory,
+            &scope.origin_user_id,
+            scope.origin_platform.as_deref(),
+        ) else {
+            tracing::info!(
+                app_id = %scope.app_id, community_id = scope.community_id,
+                "no actor directory / event author; scope-restricted tools are refused"
+            );
+            return bundle_tool_call::ActorContext::none();
+        };
+        match crate::actor::resolve_actor_scopes(
+            dir,
+            scope.tenant_id,
+            scope.community_id,
+            platform,
+            user.expose(),
+        )
+        .await
+        {
+            Ok(actor) => actor,
+            Err(e) => {
+                tracing::info!(
+                    app_id = %scope.app_id, community_id = scope.community_id,
+                    outcome = %e, "actor unresolved; scope-restricted tools are refused"
+                );
+                bundle_tool_call::ActorContext::none()
+            }
+        }
+    }
+
     async fn run_tool_invoke(
         &self,
         scope: &InvokeScope,
@@ -122,35 +159,27 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         // touched until this returns.
         let req = bundle_tool_call::parse_request(&call.args)?;
         let gate_scope = scope.gate_scope();
-        // svc_action has NO identity/directory wiring, so it cannot resolve a
-        // verified actor or role: scope-restricted (`required_scope`) tools are
-        // refused here, fail closed, with a clear reason. (Wiring identity
-        // resolution into svc_action is a follow-up.) `plan_tool_call` below
-        // would refuse them too -- an empty actor holds no scope -- this early
-        // check only gives the caller an actionable message.
-        if bundle_tool_call::required_scope_of(
-            &wiring.snapshot,
-            &gate_scope,
-            &req.target,
-            &req.tool,
-        )
-        .is_some()
-        {
-            return Err(ToolRefusal::Forbidden(
-                "scope-restricted tools cannot be invoked from the action stage: it has no \
-                 verified-actor resolution (use the process stage)"
-                    .to_string(),
-            ));
-        }
-        let plan = bundle_tool_call::plan_tool_call(
+        // Steps 1-5 are actor-independent and run in memory. The host-VERIFIED actor
+        // (the triggering event's platform account -> active community member -> role scopes)
+        // is resolved from the directory ONLY after they pass AND the tool declares a
+        // `required_scope` -- so an ungranted caller never triggers a lookup, and the lookup
+        // is no timing oracle. `into_plan` then enforces the scope fail-closed: no directory
+        // wiring / no actor on the event / unlinked / under-scoped all refuse.
+        let authorized = bundle_tool_call::authorize_tool_call(
             &scope.app_id,
             &chain,
             req,
             &wiring.snapshot,
             &self.gate,
             &gate_scope,
-            &bundle_tool_call::ActorContext::none(),
         )?;
+        let host_op = authorized.host_op().cloned();
+        let actor = if authorized.required_scope().is_some() {
+            self.resolve_verified_actor(scope).await
+        } else {
+            bundle_tool_call::ActorContext::none()
+        };
+        let plan = authorized.into_plan(&actor)?;
         *resolved = Some((plan.target_app_id.clone(), plan.tool.clone()));
         tracing::debug!(
             app_id = %scope.app_id, target = %plan.target_app_id, tool = %plan.tool,
@@ -158,23 +187,14 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             "tool.invoke authorized"
         );
 
-        // 5b. The Discord service bundle's tools are HOST-executed (binding-pinned guild +
+        // 5b. A platform service bundle's tools are HOST-executed (binding-pinned destination +
         // credential): the planner above has already enforced the manifest request, approved
-        // grant and write key. `discord.scheduled_event.*` first, then the member-role tools
-        // (served by the pinned `role.add|remove` outbound producer) -- ONE dispatch path.
-        if plan.target_app_id == super::event_sync::DISCORD_SERVICE_APP_ID {
-            if let Some(res) = self
-                .run_discord_event_tool(scope, &plan.tool, &plan.args)
-                .await
-            {
-                return res;
-            }
-            if let Some(res) = self
-                .run_discord_role_tool(scope, &plan.tool, &plan.args)
-                .await
-            {
-                return res;
-            }
+        // grant, write key and required scope. The manifest's `host_op` declaration (else the
+        // transitional Discord table) names the producer op; ONE generic dispatch path.
+        let decl = host_op
+            .or_else(|| super::host_tools::transitional_decl(&plan.target_app_id, &plan.tool));
+        if let Some(decl) = decl {
+            return self.run_host_tool(scope, &plan, &decl).await;
         }
 
         // 6. Nested invoke on the active executor connection.
@@ -189,6 +209,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             origin_channel_id: scope.origin_channel_id.clone(),
             origin_platform: scope.origin_platform.clone(),
             origin_guild_id: scope.origin_guild_id.clone(),
+            origin_user_id: scope.origin_user_id.clone(),
             tenant_id: scope.tenant_id,
             community_id: scope.community_id,
             app_version: plan.target_version,

@@ -451,7 +451,10 @@ async fn tool_create_queues_a_binding_pinned_envelope_and_returns_the_event_id()
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(out, json!({"ok": true, "event_id": "4242"}));
+    assert_eq!(
+        out,
+        json!({"ok": true, "id": "4242", "event_id": "4242", "status": "created"})
+    );
     let e = &c.relay_queue.envelopes()[0];
     assert_eq!(e["op"], "event.create");
     // community/tenant come from the verified scope; no guild is asserted or named.
