@@ -79,8 +79,9 @@ pub struct CliConfig {
     #[arg(long, env = "BIND_ADDR", default_value = "0.0.0.0")]
     pub bind_addr: IpAddr,
 
-    /// hub-api base URL, source of the `GET /api/v1/distribution/bundles
-    /// ?stage=process` activation poll.
+    /// hub-api base URL. The `process` activation poll is NOT REST any more: it is the internal
+    /// gRPC `DistributionService.ListBundles` (`hub_client::HubClient::list_distribution_bundles`,
+    /// scope `distribution:read`).
     /// TODO(M4): the poll loop itself is blocked on M2's compiler/executor
     /// and penguin-spine landing; this field is read by config validation
     /// only today.
@@ -185,8 +186,8 @@ pub struct CliConfig {
     #[arg(long, env = "HOST_API_MAX_CONNECTIONS", default_value_t = 64)]
     pub host_api_max_connections: usize,
 
-    /// Interim, env-driven substitute for the `GET /api/v1/distribution/
-    /// bundles?stage=process` grant list (spec SS4.2/SS6.7) -- **TODO(M4+)**:
+    /// Interim, env-driven substitute for the `DistributionService.ListBundles(stage=PROCESS)`
+    /// grant list (spec SS4.2/SS6.7) -- **TODO(M4+)**:
     /// replace with the real poll once it lands. When set together with
     /// [`Self::process_ingest_source_id`], the drain loop is granted
     /// exactly one ingest-source stream to read; when either is unset, the

@@ -412,6 +412,12 @@ pub fn build_request(action: &Action) -> Result<HttpTpl> {
         "message.edit" | "reaction.add" | "message.embed" | "webhook.create" => {
             message_ops::build(&action.kind, p)
         }
+        "commands.register" | "commands.register.guild" => {
+            crate::commands::build(action.kind.as_str(), p)
+        }
+        "interaction.callback" | "interaction.followup" => {
+            crate::interaction::build(action.kind.as_str(), p)
+        }
         other => Err(ConnectorError::Unsupported(format!(
             "action kind `{other}`"
         ))),

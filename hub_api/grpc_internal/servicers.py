@@ -14,6 +14,7 @@ from typing import Any, NoReturn
 import grpc
 from waddles.hub.internal.v1 import identity_pb2, identity_pb2_grpc, key_pb2, key_pb2_grpc
 
+from grpc_internal.dataplane_servicers import DATAPLANE_REQUIRED_SCOPES
 from grpc_internal.interceptors import service_claims
 from services.identity_resolution_service import (
     AmbiguousHandleError,
@@ -33,7 +34,7 @@ from services.identity_resolution_service import (
 )
 
 #: Method -> required scope, consumed by `interceptors.AuthInterceptor`.
-REQUIRED_SCOPES: dict[str, str] = {
+REQUIRED_SCOPES: dict[str, str | tuple[str, ...]] = {
     "/waddles.hub.internal.v1.IdentityService/MintEphemeralPseudonyms": "identity:ephemeral:mint",
     "/waddles.hub.internal.v1.IdentityService/ResolveDisplayNames": "identity:displayname:read",
     "/waddles.hub.internal.v1.IdentityService/ResolveHandle": "identity:handle:resolve",
@@ -41,6 +42,8 @@ REQUIRED_SCOPES: dict[str, str] = {
         "identity:platform-user:resolve"
     ),
     "/waddles.hub.internal.v1.KeyService/GetStreamDek": "key:stream-dek:read",
+    # Data-plane reads (provider connections, distribution, media): dataplane_servicers.py.
+    **DATAPLANE_REQUIRED_SCOPES,
 }
 
 _MATCH_KINDS: dict[str, int] = {

@@ -27,6 +27,26 @@
   },
   {
     "access": "write",
+    "name": "twitch.clip.create",
+    "risk": "dangerous"
+  },
+  {
+    "access": "read",
+    "name": "twitch.clip.get",
+    "risk": "normal"
+  },
+  {
+    "access": "read",
+    "name": "twitch.clip.list",
+    "risk": "normal"
+  },
+  {
+    "access": "read",
+    "name": "twitch.live.channels",
+    "risk": "normal"
+  },
+  {
+    "access": "write",
     "hostOp": {
       "op": "mod.ban",
       "origin": "channel",
@@ -91,6 +111,29 @@
     },
     "name": "twitch.moderation.unban",
     "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "name": "twitch.schedule.create",
+    "requiredScope": "community:admin",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "name": "twitch.schedule.delete",
+    "requiredScope": "community:admin",
+    "risk": "dangerous"
+  },
+  {
+    "access": "read",
+    "name": "twitch.schedule.list",
+    "risk": "normal"
+  },
+  {
+    "access": "write",
+    "name": "twitch.schedule.update",
+    "requiredScope": "community:admin",
     "risk": "dangerous"
   }
 ]

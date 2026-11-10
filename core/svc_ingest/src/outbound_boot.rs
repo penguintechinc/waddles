@@ -342,12 +342,7 @@ fn youtube_daily_budget() -> u32 {
 
 fn resolver(cli: &CliConfig) -> anyhow::Result<Resolver> {
     connection_resolver::ConnectionResolver::new(
-        connection_resolver::ResolverConfig::new(
-            cli.hub_api_url.clone(),
-            cli.environment.clone(),
-            cli.service_jwt_token_endpoint.clone(),
-            cli.service_jwt_sa_token_path.clone(),
-        ),
+        cli.resolver_config()?,
         Arc::new(crate::twitch_sessions::boot::ResolverTelemetry),
     )
     .map_err(|e| anyhow::anyhow!("connection resolver unavailable: {e}"))

@@ -369,7 +369,12 @@ mod chat_clear_tests {
     fn chat_clear_is_the_bodyless_delete_without_a_message_id_on_host_ids() {
         let url = format!("https://api.twitch.tv/helix/moderation/chat?{MOD}");
         assert_eq!(check(&tpl("DELETE", &url, true, None)), Ok(()));
-        assert!(PlatformPolicy::twitch().kind("chat.clear").unwrap().requires_pin);
+        assert!(
+            PlatformPolicy::twitch()
+                .kind("chat.clear")
+                .unwrap()
+                .requires_pin
+        );
         // The delete-one-message query key is NOT part of the clear kind.
         let with_msg = format!("{url}&message_id=abc");
         assert_eq!(
@@ -383,7 +388,10 @@ mod chat_clear_tests {
             Err(TemplateError::SlotMisplaced)
         );
         // Wrong method / wrong path / a body are refused.
-        assert_eq!(check(&tpl("POST", &url, true, None)), Err(TemplateError::BadMethod));
+        assert_eq!(
+            check(&tpl("POST", &url, true, None)),
+            Err(TemplateError::BadMethod)
+        );
         let wrong = format!("https://api.twitch.tv/helix/moderation/bans?{MOD}");
         assert_eq!(
             check(&tpl("DELETE", &wrong, true, None)),
