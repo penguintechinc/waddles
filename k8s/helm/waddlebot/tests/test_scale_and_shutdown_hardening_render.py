@@ -169,9 +169,42 @@ class TestStartupProbe:
 class TestAutoscalingAndPdb:
     """HPA/PDB are consumed config, gated per service, never on singletons."""
 
-    def test_off_by_default_in_alpha(self, alpha_docs: list[dict[str, Any]]) -> None:
-        assert not _of_kind(alpha_docs, "HorizontalPodAutoscaler")
-        assert not _of_kind(alpha_docs, "PodDisruptionBudget")  # all single-replica
+    def test_alpha_autoscales_only_the_executor(self, alpha_docs: list[dict[str, Any]]) -> None:
+        names = [d["metadata"]["name"] for d in _of_kind(alpha_docs, "HorizontalPodAutoscaler")]
+        assert names == ["waddlebot-svc-bundles-executor"], names
+        assert not _of_kind(alpha_docs, "PodDisruptionBudget")  # floor of 1 replica
+
+    @pytest.mark.parametrize(
+        ("values", "extra", "min_replicas", "max_replicas", "has_pdb"),
+        [
+            ("values-alpha.yaml", [], 1, 3, False),
+            ("values-dal2alpha.yaml", [], 1, 3, False),
+            ("values-beta.yaml", ["global.deploymentTier=alpha"], 2, 6, True),
+            ("values-gamma.yaml", ["global.deploymentTier=alpha"], 2, 8, True),
+            ("values-production.yaml", ["global.deploymentTier=alpha"], 2, 10, True),
+        ],
+    )
+    def test_svc_bundles_executor_scales_horizontally_per_env(
+        self, values: str, extra: list[str], min_replicas: int, max_replicas: int, has_pdb: bool
+    ) -> None:
+        docs = _render(values, extra)
+        deps = [d for d in _of_kind(docs, "Deployment") if "executor" in d["metadata"]["name"]]
+        assert [d["metadata"]["name"] for d in deps] == ["waddlebot-svc-bundles-executor"]
+        # HPA owns the replica count -> the Deployment must not pin it.
+        assert "replicas" not in deps[0]["spec"]
+        hpa = _by_suffix(docs, "HorizontalPodAutoscaler", "svc-bundles-executor")
+        assert hpa["spec"]["scaleTargetRef"]["name"] == "waddlebot-svc-bundles-executor"
+        assert (hpa["spec"]["minReplicas"], hpa["spec"]["maxReplicas"]) == (min_replicas, max_replicas)
+        metrics = {m["resource"]["name"]: m["resource"]["target"]["averageUtilization"] for m in hpa["spec"]["metrics"]}
+        assert metrics == {"cpu": 70, "memory": 80}, metrics
+        pdbs = [d for d in _of_kind(docs, "PodDisruptionBudget") if d["metadata"]["name"].endswith("svc-bundles-executor")]
+        assert bool(pdbs) is has_pdb
+        if has_pdb:
+            assert pdbs[0]["spec"]["minAvailable"] == 1
+            assert (
+                pdbs[0]["spec"]["selector"]["matchLabels"]["app.kubernetes.io/component"]
+                == "svc-bundles-executor"
+            )
 
     def test_hpa_and_pdb_render_for_scalable_service(self) -> None:
         docs = _render("values-alpha.yaml", ["autoscaling.services.hubApi.enabled=true"])
@@ -184,8 +217,8 @@ class TestAutoscalingAndPdb:
         assert pdb["spec"]["selector"]["matchLabels"]["app.kubernetes.io/component"] == "hub-api"
         # HPA owns the replica count -> Deployment must not pin it.
         assert "replicas" not in _by_suffix(docs, "Deployment", "hub-api-v3")["spec"]
-        # only the opted-in service
-        assert len(_of_kind(docs, "HorizontalPodAutoscaler")) == 1
+        # only the opted-in service (plus the executor, which carries its own HPA in alpha)
+        assert len(_of_kind(docs, "HorizontalPodAutoscaler")) == 2
 
     def test_pdb_not_rendered_for_single_replica(self) -> None:
         docs = _render("values-alpha.yaml", ["autoscaling.services.hubApi.enabled=true",
@@ -209,7 +242,7 @@ class TestAutoscalingAndPdb:
             assert not any(name.endswith(s) for s in _SINGLETONS), f"{doc['kind']} on singleton {name}"
         assert not any(d["metadata"]["name"].endswith("svc-ingest-rust") for d in hpas)  # lease holder: no HPA
         # the Rust data plane is covered
-        for suffix in ("svc-action-rust", "svc-process-rust", "bundle-executor"):
+        for suffix in ("svc-action-rust", "svc-process-rust", "svc-bundles-executor"):
             _by_suffix(docs, "HorizontalPodAutoscaler", suffix)
 
     def test_production_values_enable_hpa(self) -> None:

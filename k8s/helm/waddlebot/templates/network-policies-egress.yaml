@@ -1,5 +1,5 @@
 # Bundle egress gateway — CiliumNetworkPolicy layer (feature/bundle-egress-gateway).
-# Same convention as templates/bundle-executor-networkpolicy.yaml (devops-kubernetes.md
+# Same convention as templates/svc-bundles-executor-networkpolicy.yaml (devops-kubernetes.md
 # Cluster Security Baseline / security.md Kubernetes Network Security — CiliumNetworkPolicy,
 # never plain NetworkPolicy). Additive on top of templates/network-policies.yaml's namespace-
 # wide plain-NetworkPolicy pair.

@@ -12,7 +12,7 @@ global:
   # explicitly so all four env files declare the policy). Always only for a mutable tag.
   imagePullPolicy: IfNotPresent
   # Rust data plane TLS prerequisites (pipeline.rustDataPlane below). Names only, never material:
-  #  - host-API mTLS (svc-process/svc-action/bundle-executor): cert-manager mints
+  #  - host-API mTLS (svc-process/svc-action/svc-bundles-executor): cert-manager mints
   #    <release>-host-api-tls from the ClusterIssuer below (PREREQ: cert-manager + that issuer in
   #    this cluster); the chart derives the stage identity itself on this path.
   #  - Valkey server TLS + hub-api internal gRPC TLS: Secrets <release>-valkey-tls and
@@ -46,7 +46,7 @@ pipeline:
     bundleSigning:
       secretName: ""
   rustDataPlane:
-    # Rust data plane (svc-ingest/svc-process/svc-action + bundle-executor x2) -- the legacy
+    # Rust data plane (svc-ingest/svc-process/svc-action + svc-bundles-executor) -- the legacy
     # Python stages no longer exist in the chart, so this is the only ingest/process/action
     # path. Per-stage sub-toggles, replicas and resources inherit the base values.yaml defaults.
     enabled: true
@@ -57,26 +57,14 @@ pipeline:
       - "10.244.0.0/16"
       - "10.96.0.0/12"
       - "10.0.0.0/8"
-    # Process-stage executor dials svc-process-rust:8301 (same override values-alpha/dal2alpha
-    # carry); bundleExecutorAction keeps the svc-action-rust:8302 base default.
+    # ONE svc-bundles-executor Deployment serves BOTH stages (the `stages` default in values.yaml
+    # lists svc-process-rust:8301 + svc-action-rust:8302). Resources are sized for the two
+    # stages in one pod (the larger of the two former Deployments).
     bundleExecutor:
-      stageTarget: "svc-process-rust"
-      stagePort: 8301
       # Compiling large Python/.NET components via Cranelift OOMs below this (alpha finding).
       resources:
         requests: { cpu: "500m", memory: "1Gi" }
         limits: { cpu: "2000m", memory: "16Gi" }
-    bundleExecutorAction:
-      resources:
-        requests: { cpu: "500m", memory: "1Gi" }
-        limits: { cpu: "2000m", memory: "16Gi" }
-    # fix/chart-autogen-bundle-signing-key -- no longer required once the executor is
-    # enabled on gamma: it sources BUNDLE_SIGNING_PUBLIC_KEYS from the
-    # auto-provisioned ConfigMap by default (templates/auto-provisioned-keys-job.yaml
-    # derives+publishes it from whatever Secret pipeline.hubApi.bundleSigning above
-    # points at). Only set this explicitly to pin a specific key, e.g.:
-    #   bundleSigningPublicKeys:
-    #     2026-09-key1: "<base64 32-byte Ed25519 public key>"
     bundleSigningPublicKeys: {}
 
 # Egress lockdown — MANDATORY (fail guard blocks a render with this off).
@@ -122,3 +110,16 @@ infrastructure:
     resources:
       requests: { cpu: "50m", memory: "128Mi" }
       limits: { cpu: "250m", memory: "256Mi" }
+
+# svc-bundles-executor scales horizontally: every replica dials every stage + the connector
+# link and each listener round-robins work across the replicas (see values.yaml
+# pipeline.rustDataPlane.bundleExecutor). HPA on CPU + memory; the PDB (minAvailable 1) renders
+# automatically once the effective replica floor is >1.
+autoscaling:
+  services:
+    bundleExecutor:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 8
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: 80
