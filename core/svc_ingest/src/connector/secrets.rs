@@ -235,9 +235,17 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    use std::collections::VecDeque;
+    use std::ops::Deref;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use connection_resolver::test_support::{reply_from_json, start, Hub, Running};
     use connection_resolver::{
         ConnectionKind, ConnectionResolver, ResolverConfig, ResolverMetrics,
     };
+    use hub_client::pb::ResolveConnectionResponse;
+    use tonic::Status;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -327,15 +335,76 @@ mod tests {
         assert!(!destination_approved("spectrum", None, true, &d));
     }
 
-    /// Mounts one resolve answer with an arbitrary body.
-    async fn mount_resolve(server: &MockServer, body: serde_json::Value) {
-        Mock::given(method("POST"))
-            .and(path(
-                "/api/v1/internal/communities/7/provider-connections/12/resolve",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(body))
-            .mount(server)
-            .await;
+    /// What the in-process hub answers: one-shot OAuth tokens first (rotation), then the fixed
+    /// reply, else NOT_FOUND (as an unmounted route used to be).
+    #[derive(Default)]
+    struct Script {
+        rotating: VecDeque<String>,
+        fixed: Option<Result<ResolveConnectionResponse, Status>>,
+    }
+
+    /// One test's world: the loopback upstream/token `MockServer` (reachable through `Deref`) AND
+    /// a real in-process gRPC hub that the resolver under test talks to over a real socket.
+    struct Env {
+        server: MockServer,
+        script: Arc<Mutex<Script>>,
+        resolve_calls: Arc<AtomicUsize>,
+        endpoint: String,
+        _hub: Running,
+    }
+
+    impl Deref for Env {
+        type Target = MockServer;
+        fn deref(&self) -> &MockServer {
+            &self.server
+        }
+    }
+
+    impl Env {
+        async fn start() -> Self {
+            let script = Arc::new(Mutex::new(Script::default()));
+            let script_in_hub = script.clone();
+            let hub = Hub::resolving(move |bearer, req| {
+                if bearer != "synthetic-machine-token" {
+                    return Err(Status::unauthenticated("unauthorized"));
+                }
+                let mut s = script_in_hub.lock().unwrap();
+                if let Some(token) = s.rotating.pop_front() {
+                    return Ok(reply_from_json(&serde_json::json!({
+                        "communityId": req.community_id, "connectionId": req.connection_id,
+                        "provider": "testprov", "kind": 1, "accessToken": token,
+                        "expiresAt": null,
+                    })));
+                }
+                s.fixed
+                    .clone()
+                    .unwrap_or_else(|| Err(Status::not_found("not found")))
+            });
+            let resolve_calls = hub.resolve_calls.clone();
+            let running = start(&hub).await;
+            Self {
+                server: MockServer::start().await,
+                script,
+                resolve_calls,
+                endpoint: running.endpoint.clone(),
+                _hub: running,
+            }
+        }
+
+        /// Resolve RPCs that reached the hub.
+        fn resolves(&self) -> usize {
+            self.resolve_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Everything that reached either the token mock or the hub (zero = nothing left the process).
+    async fn traffic(env: &Env) -> usize {
+        env.received_requests().await.unwrap().len() + env.resolves()
+    }
+
+    /// Makes the hub answer `body` (the camelCase resolve view) for every resolve.
+    async fn mount_resolve(env: &Env, body: serde_json::Value) {
+        env.script.lock().unwrap().fixed = Some(Ok(reply_from_json(&body)));
     }
 
     /// Resolver telemetry is outside this authentication contract test.
@@ -355,9 +424,9 @@ mod tests {
         }
     }
 
-    /// Starts the real resolver against a loopback hub HTTP contract server.
+    /// Starts the real resolver against the in-process gRPC hub (gRPC token mint on an in-process hub).
     /// The synthetic projected token lives until its test guard is dropped.
-    async fn resolver(server: &MockServer) -> (ConnectionResolver, TestSa) {
+    async fn resolver(env: &Env) -> (ConnectionResolver, TestSa) {
         // The mint is gRPC: a real in-process `ServiceAuthService` answers only community 7.
         let hub = service_auth::test_support::MockHub::builder()
             .mint(vec![service_auth::test_support::MintReply::when(
@@ -371,7 +440,7 @@ mod tests {
         std::fs::write(&sa, "synthetic-service-account").unwrap();
         let resolver = ConnectionResolver::new(
             ResolverConfig::new(
-                server.uri(),
+                env.endpoint.clone(),
                 "alpha",
                 hub.endpoint.clone(),
                 sa.to_string_lossy().to_string(),
@@ -382,27 +451,20 @@ mod tests {
         (resolver, TestSa(sa, hub))
     }
 
-    /// Each request returns the selected credential, as the real hub does.
-    async fn credential(server: &MockServer, token: &str) {
-        Mock::given(method("POST"))
-            .and(path(
-                "/api/v1/internal/communities/7/provider-connections/12/resolve",
-            ))
-            .and(header("Authorization", "Bearer synthetic-machine-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "communityId": 7, "connectionId": 12, "provider": "testprov",
-                "kind": 1, "accessToken": token, "expiresAt": null,
-            })))
-            .up_to_n_times(1)
-            .mount(server)
-            .await;
+    /// The next resolve returns this rotated OAuth credential (one shot), as the real hub does.
+    async fn credential(env: &Env, token: &str) {
+        env.script
+            .lock()
+            .unwrap()
+            .rotating
+            .push_back(token.to_string());
     }
 
     /// The complete resolver-to-poll path must fetch rotated tokens on every
     /// request and send each one only to the host-configured upstream.
     #[tokio::test]
     async fn poll_resolves_rotated_oauth_credentials_per_request() {
-        let server = MockServer::start().await;
+        let server = Env::start().await;
         let (resolver, _sa) = resolver(&server).await;
         let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
         let mut poll = PollTransport::new(
@@ -448,13 +510,15 @@ mod tests {
             poll.next_frame().await.unwrap().unwrap();
             poll.on_frame_outcome(FrameOutcome::Published).await;
         }
+        assert_eq!(server.resolves(), 2, "no credential cache");
         let requests = server.received_requests().await.unwrap();
         assert_eq!(
             requests
                 .iter()
                 .filter(|r| r.url.path().ends_with("/resolve"))
                 .count(),
-            2
+            0,
+            "resolves are gRPC, never REST"
         );
         assert_eq!(_sa.1.mint_hits(), 1);
     }
@@ -463,7 +527,7 @@ mod tests {
     /// webhook verification continues to reject OAuth credentials.
     #[tokio::test]
     async fn handshake_substitution_keeps_oauth_out_of_verifier() {
-        let server = MockServer::start().await;
+        let server = Env::start().await;
         let (resolver, _sa) = resolver(&server).await;
         let resolver = Arc::new(resolver);
         credential(&server, "oauth-token").await;
@@ -497,7 +561,7 @@ mod tests {
     /// pairing never reaches the hub (no credential resolve happens).
     #[tokio::test]
     async fn secret_handle_only_substitutes_after_its_own_prefix() {
-        let server = MockServer::start().await;
+        let server = Env::start().await;
         let (resolver, _sa) = resolver(&server).await;
         let resolver = Arc::new(resolver);
         credential(&server, "oauth-token").await;
@@ -511,7 +575,7 @@ mod tests {
             ("nick".to_string(), vec!["NICK ".to_string()]),
         ]);
         let refs = [("{{PASS}}".to_string(), "pass".to_string())];
-        let before = server.received_requests().await.unwrap().len();
+        let before = traffic(&server).await;
         let refused = substitute_slots(
             &source,
             &handles,
@@ -522,11 +586,7 @@ mod tests {
         )
         .await;
         assert!(refused.is_err());
-        assert_eq!(
-            server.received_requests().await.unwrap().len(),
-            before,
-            "no resolve on refusal"
-        );
+        assert_eq!(traffic(&server).await, before, "no resolve on refusal");
         let ok = substitute_slots(
             &source,
             &handles,
@@ -544,7 +604,7 @@ mod tests {
     /// not merely after a foreign credential has already entered the process.
     #[tokio::test]
     async fn foreign_community_and_invalid_connection_never_reach_hub() {
-        let server = MockServer::start().await;
+        let server = Env::start().await;
         let (resolver, _sa) = resolver(&server).await;
         let resolver = Arc::new(resolver);
         assert!(TransportSecrets::new(resolver.clone(), 0).is_err());
@@ -564,7 +624,11 @@ mod tests {
                 Some(SecretError::Missing)
             );
         }
-        assert!(server.received_requests().await.unwrap().is_empty());
+        assert_eq!(
+            traffic(&server).await,
+            0,
+            "nothing reached the token mint or the hub"
+        );
     }
 
     /// Hub failures and unsupported credential schemes must fail closed,
@@ -585,21 +649,19 @@ mod tests {
                 SecretError::Missing,
             ),
         ] {
-            let server = MockServer::start().await;
+            let server = Env::start().await;
             let (resolver, _sa) = resolver(&server).await;
-            Mock::given(method("POST"))
-                .and(path(
-                    "/api/v1/internal/communities/7/provider-connections/12/resolve",
-                ))
-                .respond_with(ResponseTemplate::new(status).set_body_json(body))
-                .expect(1)
-                .mount(&server)
-                .await;
+            server.script.lock().unwrap().fixed = Some(match status {
+                503 => Err(Status::unavailable("unavailable")),
+                404 => Err(Status::not_found("not found")),
+                _ => Ok(reply_from_json(&body)),
+            });
             let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
             assert_eq!(
                 source.resolve(CONNECTION, dest()).await.err(),
                 Some(expected)
             );
+            assert_eq!(server.resolves(), 1, "exactly one hub call");
         }
     }
 
@@ -621,12 +683,9 @@ mod tests {
                 None,
             ),
         ] {
-            let server = MockServer::start().await;
+            let server = Env::start().await;
             let (resolver, _sa) = resolver(&server).await;
-            Mock::given(method("POST"))
-                .and(path("/api/v1/internal/communities/7/provider-connections/12/resolve"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "testprov", "kind": 2, "secret": secret, "endpoint": {"url": "https://127.0.0.1/x"}, "expiresAt": null})))
-                .expect(1).mount(&server).await;
+            mount_resolve(&server, serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "testprov", "kind": 2, "secret": secret, "endpoint": {"url": "https://127.0.0.1/x"}, "expiresAt": null})).await;
             let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
             let result = source.resolve(CONNECTION, dest()).await;
             match expected {
@@ -667,7 +726,7 @@ mod tests {
                 "https://evil.twitch.tv.attacker.example/x",
             ),
         ] {
-            let server = MockServer::start().await;
+            let server = Env::start().await;
             let (resolver, _sa) = resolver(&server).await;
             let mut body = serde_json::json!({"communityId": 7, "connectionId": 12, "provider": provider, "expiresAt": null});
             body.as_object_mut()
@@ -682,7 +741,7 @@ mod tests {
             );
         }
         // Approved host for the resolved provider is accepted.
-        let server = MockServer::start().await;
+        let server = Env::start().await;
         let (resolver, _sa) = resolver(&server).await;
         mount_resolve(&server, serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "twitch", "kind": 1, "accessToken": "ok", "expiresAt": null})).await;
         let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
@@ -697,7 +756,7 @@ mod tests {
     /// endpoint to harvest the credential: zero requests reach that host.
     #[tokio::test]
     async fn poll_to_unapproved_host_sends_nothing_and_cannot_echo() {
-        let hub = MockServer::start().await;
+        let hub = Env::start().await;
         let (resolver, _sa) = resolver(&hub).await;
         // Provider approves only 127.0.0.1 hosts for "twitch"? No: "twitch" hosts
         // are real names, so the loopback "attacker" is off-allowlist.
@@ -745,7 +804,7 @@ mod tests {
     #[tokio::test]
     async fn expected_provider_mismatch_is_rejected() {
         for (expected, ok) in [("twitch", true), ("discord", false)] {
-            let server = MockServer::start().await;
+            let server = Env::start().await;
             let (resolver, _sa) = resolver(&server).await;
             mount_resolve(&server, serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "twitch", "kind": 1, "accessToken": "t", "expiresAt": null})).await;
             let source = TransportSecrets::new(Arc::new(resolver), 7)
@@ -762,7 +821,7 @@ mod tests {
     /// `endpoint.url` host must also match the destination.
     #[tokio::test]
     async fn api_key_uses_stored_header_and_static_endpoint_is_enforced() {
-        let server = MockServer::start().await;
+        let server = Env::start().await;
         let (resolver, _sa) = resolver(&server).await;
         mount_resolve(&server, serde_json::json!({
             "communityId": 7, "connectionId": 12, "provider": "twitch", "kind": 2, "expiresAt": null,
@@ -789,7 +848,7 @@ mod tests {
     /// raw value, ignoring the connector's header/prefix.
     #[tokio::test]
     async fn poll_sends_api_key_under_stored_header() {
-        let server = MockServer::start().await;
+        let server = Env::start().await;
         let (resolver, _sa) = resolver(&server).await;
         mount_resolve(&server, serde_json::json!({
             "communityId": 7, "connectionId": 12, "provider": "testprov", "kind": 2, "expiresAt": null,
@@ -862,7 +921,7 @@ mod tests {
                 false,
             ),
         ] {
-            let server = MockServer::start().await;
+            let server = Env::start().await;
             let (resolver, _sa) = resolver(&server).await;
             let mut body = serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "twitch", "kind": 2, "secret": secret, "expiresAt": null});
             if let Some(u) = endpoint {
@@ -876,7 +935,7 @@ mod tests {
                 "{endpoint:?}"
             );
         }
-        let server = MockServer::start().await;
+        let server = Env::start().await;
         let (resolver, _sa) = resolver(&server).await;
         mount_resolve(&server, serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "twitch", "kind": 1, "accessToken": "t", "expiresAt": null})).await;
         let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();

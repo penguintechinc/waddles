@@ -1316,10 +1316,10 @@ async fn stable_refusal_codes_are_the_message_prefix() {
         err.message
     );
 
-    // not_supported: kick registers no ops; an unregistered op is explicit.
+    // not_supported: kick registers no `mod.kick` op; an unregistered op is explicit.
     let c = build(
         rig_for("kick"),
-        mod_tools("kick", "mod.ban"),
+        mod_tools("kick", "mod.kick"),
         FakeRelayQueue::with_live_drain(),
     );
     let err = c
@@ -1685,6 +1685,7 @@ async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() 
             "youtube",
             vec!["mod.ban", "mod.unban", "mod.add", "mod.remove"],
         ),
+        ("kick", vec!["mod.ban", "mod.timeout", "mod.unban"]),
     ] {
         for op in ops {
             let c = caps(FakeRelayQueue::with_live_drain());
@@ -1709,8 +1710,8 @@ async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() 
             checked += 1;
         }
     }
-    assert_eq!(checked, 3 + 4 + 4, "denominator: moderation ops attempted");
-    // Kick registers no ops and is not a relay provider: refused outright, never queued.
+    assert_eq!(checked, 3 + 4 + 4 + 3, "denominator: moderation ops attempted");
+    // A platform that is not a relay provider is refused outright, never queued.
     let c = caps(FakeRelayQueue::with_live_drain());
     let err = c
         .handle(
@@ -1720,7 +1721,7 @@ async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() 
                 capability: CapabilityKind::Relay,
                 op: "send".to_string(),
                 args: json!({
-                    "provider": "kick",
+                    "provider": "nosuchplatform",
                     "message_json": json!({"op": "mod.ban", "user_id": "1"}).to_string(),
                 }),
                 call_id: 1,

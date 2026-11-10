@@ -1,7 +1,8 @@
 """Live hub-api harness for ``core/connection_resolver/tests/e2e_live_hub.rs``.
 
 Starts a REAL Postgres 17 container migrated to Alembic head, boots the REAL hub-api blueprints
-(provider-connections admin + internal data-plane routes + the machine-token endpoint) over it with
+(provider-connections admin routes over HTTP; the data-plane reads and the machine-JWT mint over
+the internal gRPC `ProviderConnectionService` / `ServiceAuthService`) on top of it with
 the real vault, the real ES256 issuer/verifier and the real ``build_default_registry`` adapters,
 serves them on a loopback port, writes a JSON manifest the Rust test reads, and blocks until
 SIGTERM/SIGINT (then tears the container down).
@@ -34,16 +35,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import grpc
 import yaml
 
 _REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO / "alembic" / "tests"))
+sys.path.insert(0, str(_REPO / "hub_api" / "grpc_internal" / "pb"))  # gRPC stubs
 
 # Strong, per-run, in-memory secrets (never committed, never a real credential).
 os.environ["SECRET_KEY"] = secrets.token_hex(32)
 os.environ["CREDENTIAL_ENCRYPTION_KEY"] = secrets.token_hex(32)
 
-import grpc  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 from flask_core import entitlement  # noqa: E402
 from flask_core.auth import create_jwt_token  # noqa: E402
@@ -59,14 +61,18 @@ from pg_docker import migrated_postgres  # type: ignore[import-not-found]  # noq
 from pydal import Field  # noqa: E402
 from quart import Quart  # noqa: E402
 from quart_schema import QuartSchema  # noqa: E402
-from waddles.hub.internal.v1 import service_auth_pb2_grpc  # noqa: E402
+from waddles.hub.internal.v1 import (  # noqa: E402
+    provider_connection_pb2_grpc,
+    service_auth_pb2_grpc,
+)
 
 from blueprints.v1.provider_connections import (  # noqa: E402
     SERVICE_CONFIG_KEY,
     provider_connections_bp,
-    provider_connections_internal_bp,
+    service_from_config,
 )
 from config import HubAPIConfig  # noqa: E402
+from grpc_internal.dataplane_servicers import ProviderConnectionServicer  # noqa: E402
 from grpc_internal.server import build_interceptor_chain  # noqa: E402
 from grpc_internal.service_auth_servicer import ServiceAuthServicer  # noqa: E402
 from services.provider_connections import (  # noqa: E402
@@ -209,7 +215,6 @@ async def _serve(manifest_path: Path) -> None:
         app = Quart(__name__)
         QuartSchema(app)
         app.register_blueprint(provider_connections_bp)
-        app.register_blueprint(provider_connections_internal_bp)
         cfg: HubAPIConfig = hub_config()
         app.config.update(
             dal=async_dal.dal,
@@ -227,9 +232,13 @@ async def _serve(manifest_path: Path) -> None:
             },
         )
 
-        # The machine-JWT mint/JWKS are gRPC now: serve the real ServiceAuthService (production
-        # interceptor chain) on its own loopback port; only the k8s TokenReview call is faked.
+        # The machine-JWT mint/JWKS and the data-plane reads are gRPC: serve the real
+        # ServiceAuthService + ProviderConnectionService (production interceptor chain) on one
+        # loopback port; only the k8s TokenReview call is faked.
         grpc_server = grpc.aio.server(interceptors=build_interceptor_chain(issuer))
+        provider_connection_pb2_grpc.add_ProviderConnectionServiceServicer_to_server(
+            ProviderConnectionServicer(app.config, service_from_config), grpc_server
+        )
         service_auth_pb2_grpc.add_ServiceAuthServiceServicer_to_server(
             ServiceAuthServicer(
                 issuer,
@@ -248,6 +257,8 @@ async def _serve(manifest_path: Path) -> None:
         )  # fmt: skip
         manifest: dict[str, Any] = {
             "hub_url": f"http://127.0.0.1:{port}",
+            # Plaintext loopback gRPC (the resolver accepts http:// only in `alpha`).
+            "hub_grpc_endpoint": f"http://127.0.0.1:{grpc_port}",
             "grpc_url": f"http://127.0.0.1:{grpc_port}",
             "admin_token": admin_token,
             "tenant_id": ids["tenant"],

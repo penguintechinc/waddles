@@ -15,6 +15,7 @@
 
 pub mod boot;
 pub mod feed;
+pub mod interaction_routing;
 pub mod lease;
 pub mod metrics;
 pub mod observed;

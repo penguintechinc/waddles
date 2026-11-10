@@ -2,16 +2,21 @@
 //! for one job, is never logged, labelled or returned across the guest boundary.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use hub_client::bearer_request;
+use hub_client::pb::media_service_client::MediaServiceClient;
+use hub_client::pb::{ByokStatus, ResolveByokRequest};
+use tonic::transport::Channel;
 use zeroize::Zeroizing;
 
 use crate::auth::BearerSource;
 use crate::types::Scope;
 
-/// hub-api path (pinned by `tests/hub_contract.rs` against the Python blueprint).
-pub const BYOK_RESOLVE_PATH: &str = "/api/v1/internal/media/byok/resolve";
-/// Machine-JWT scope hub-api requires for [`BYOK_RESOLVE_PATH`].
+/// Full gRPC method name (pinned by `tests/hub_contract.rs` against hub-api's servicer).
+pub const BYOK_RESOLVE_METHOD: &str = "/waddles.hub.internal.v1.MediaService/ResolveByok";
+/// Machine-JWT scope hub-api requires for [`BYOK_RESOLVE_METHOD`].
 pub const BYOK_SCOPE: &str = "media:byok:resolve";
 
 /// A provider API key; zeroized on drop, `Debug` redacted.
@@ -55,27 +60,28 @@ pub trait CredentialResolver: Send + Sync {
     async fn resolve(&self, scope: &Scope, provider: &str) -> Result<ApiKey, CredentialError>;
 }
 
-/// Production resolver: hub-api `POST /api/v1/internal/media/byok/resolve`
-/// `{tenant_id, community_id, provider}` (machine JWT, scope `media:byok:resolve`)
-/// -> 200 `{status: ok|not_configured|tier_required, tier, api_key|null}`; any
-/// non-200 (400/401/403/404/429/503/500) and any unknown status fails closed.
+/// Production resolver: hub-api's internal gRPC `MediaService.ResolveByok`
+/// `{tenant_id, community_id, provider}` (machine JWT in `authorization` metadata, scope
+/// `media:byok:resolve`) -> `{status: OK|NOT_CONFIGURED|TIER_REQUIRED, tier, api_key?}`. Any gRPC
+/// error status (invalid argument, unauthenticated, permission denied, not found, rate limited,
+/// unavailable, internal) and any unknown/unspecified status fails closed as `Unavailable`.
+///
+/// The [`Channel`] is the process's long-lived, lazily re-dialling connection to hub-api
+/// (`hub_client::lazy_channel`); the plaintext key is moved out of the response straight into a
+/// zeroizing [`ApiKey`].
 pub struct HubCredentialResolver {
-    http: reqwest::Client,
-    base_url: String,
+    rpc: MediaServiceClient<Channel>,
     bearer: Arc<dyn BearerSource>,
+    deadline: Duration,
 }
 
 impl HubCredentialResolver {
-    /// `base_url` like `http://hub-api:8204`.
-    pub fn new(
-        http: reqwest::Client,
-        base_url: impl Into<String>,
-        bearer: Arc<dyn BearerSource>,
-    ) -> Self {
+    /// `channel` from `hub_client::lazy_channel`; `deadline` per RPC (hub-api rejects > 5s).
+    pub fn new(channel: Channel, bearer: Arc<dyn BearerSource>, deadline: Duration) -> Self {
         Self {
-            http,
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            rpc: MediaServiceClient::new(channel),
             bearer,
+            deadline,
         }
     }
 }
@@ -83,46 +89,34 @@ impl HubCredentialResolver {
 #[async_trait]
 impl CredentialResolver for HubCredentialResolver {
     async fn resolve(&self, scope: &Scope, provider: &str) -> Result<ApiKey, CredentialError> {
-        #[derive(serde::Deserialize)]
-        struct Reply {
-            status: String,
-            api_key: Option<String>,
-        }
         let token = self
             .bearer
             .bearer()
             .await
             .map_err(|e| CredentialError::Unavailable(format!("machine jwt: {e}")))?;
-        let resp = self
-            .http
-            .post(format!("{}{}", self.base_url, BYOK_RESOLVE_PATH))
-            .bearer_auth(token.as_ref())
-            .json(&serde_json::json!({
-                "tenant_id": scope.tenant_id,
-                "community_id": scope.community_id,
-                "provider": provider,
-            }))
-            .send()
-            .await
-            .map_err(|e| {
-                CredentialError::Unavailable(format!("request failed: {}", e.without_url()))
-            })?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(CredentialError::Unavailable(format!(
-                "hub-api status {}",
-                status.as_u16()
-            )));
-        }
-        let body: Reply = resp
-            .json()
-            .await
-            .map_err(|_| CredentialError::Unavailable("malformed resolver response".into()))?;
-        match (body.status.as_str(), body.api_key) {
-            ("ok", Some(k)) if !k.is_empty() => Ok(ApiKey::new(k)),
-            ("ok", _) => Err(CredentialError::Unavailable("ok without api_key".into())),
-            ("not_configured", _) => Err(CredentialError::NotConfigured),
-            ("tier_required", _) => Err(CredentialError::TierRequired),
+        let request = bearer_request(
+            ResolveByokRequest {
+                tenant_id: scope.tenant_id,
+                community_id: i64::from(scope.community_id),
+                provider: provider.to_string(),
+            },
+            token.as_ref(),
+            self.deadline,
+        )
+        .map_err(|_| CredentialError::Unavailable("invalid token metadata".into()))?;
+        let mut rpc = self.rpc.clone();
+        let reply = rpc.resolve_byok(request).await.map_err(|status| {
+            // Only the status CODE is reported -- never server text.
+            CredentialError::Unavailable(format!("hub-api status {:?}", status.code()))
+        })?;
+        let mut body = reply.into_inner();
+        match (ByokStatus::try_from(body.status), body.api_key.take()) {
+            (Ok(ByokStatus::Ok), Some(k)) if !k.is_empty() => Ok(ApiKey::new(k)),
+            (Ok(ByokStatus::Ok), _) => {
+                Err(CredentialError::Unavailable("ok without api_key".into()))
+            }
+            (Ok(ByokStatus::NotConfigured), _) => Err(CredentialError::NotConfigured),
+            (Ok(ByokStatus::TierRequired), _) => Err(CredentialError::TierRequired),
             _ => Err(CredentialError::Unavailable(
                 "unknown resolver status".into(),
             )),

@@ -804,12 +804,12 @@ dependencies = [
 name = "connection_resolver"
 version = "0.1.0"
 dependencies = [
- "reqwest 0.12.28",
+ "hub_client",
  "serde",
- "serde_json",
  "service_auth",
  "thiserror 2.0.20",
  "tokio",
+ "tonic",
  "tracing",
  "zeroize",
 ]

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use serde::Deserialize;
+use hub_client::pb;
 
 use crate::error::ResolveError;
 use crate::secret::SecretString;
@@ -43,7 +43,7 @@ impl ConnectionKind {
 }
 
 /// Non-secret target facts of a static connection; all `None` for OAuth rows.
-#[derive(Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct Endpoint {
     pub url: Option<String>,
     pub region: Option<String>,
@@ -202,85 +202,37 @@ pub struct BindingPage {
     pub next_after: Option<i64>,
 }
 
-// ---- wire DTOs (hub-api resolve v2 / data-plane list; unknown fields ignored) ----
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ResolveWire {
-    community_id: i64,
-    connection_id: i64,
-    provider: String,
-    kind: i16,
-    access_token: Option<SecretString>,
-    expires_at: Option<String>,
-    #[serde(default)]
-    endpoint: Endpoint,
-    secret: Option<SecretWire>,
-    #[serde(default)]
-    metadata: BTreeMap<String, String>,
-}
-
-#[derive(Deserialize)]
-struct SecretWire {
-    scheme: i16,
-    #[serde(default)]
-    fields: HashMap<String, Option<SecretString>>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ListWire {
-    #[serde(default)]
-    items: Vec<BindingWire>,
-    next_after: Option<i64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BindingWire {
-    community_id: i64,
-    connection_id: i64,
-    tenant_id: i64,
-    secret_version: i64,
-    provider: String,
-    #[serde(default = "default_kind")]
-    kind: i16,
-    #[serde(default)]
-    metadata: BTreeMap<String, String>,
-}
-
-fn default_kind() -> i16 {
-    ConnectionKind::PlatformOauth.code()
-}
+// ---- proto -> domain conversion (hub-api `ProviderConnectionService`) ----
 
 /// Remove a required secret field or fail `Malformed`.
 fn take(
-    fields: &mut HashMap<String, Option<SecretString>>,
+    fields: &mut HashMap<String, SecretString>,
     key: &str,
 ) -> Result<SecretString, ResolveError> {
     fields
         .remove(key)
-        .flatten()
         .ok_or(ResolveError::Malformed("secret field missing"))
 }
 
-/// Remove an optional secret field (absent or null -> `None`).
-fn take_opt(fields: &mut HashMap<String, Option<SecretString>>, key: &str) -> Option<SecretString> {
-    fields.remove(key).flatten()
+/// Remove an optional secret field (absent -> `None`; hub-api omits null fields).
+fn take_opt(fields: &mut HashMap<String, SecretString>, key: &str) -> Option<SecretString> {
+    fields.remove(key)
 }
 
 /// Remove a required non-secret field as a plain `String`.
 fn take_plain(
-    fields: &mut HashMap<String, Option<SecretString>>,
+    fields: &mut HashMap<String, SecretString>,
     key: &str,
 ) -> Result<String, ResolveError> {
     take(fields, key).map(|s| s.expose().to_owned())
 }
 
-/// Map the wire secret document to a [`ConnectionSecret`] by scheme code.
-fn map_secret(wire: SecretWire) -> Result<ConnectionSecret, ResolveError> {
-    let mut f = wire.fields;
-    match wire.scheme {
+/// Map the secret document to a [`ConnectionSecret`] by scheme code.
+fn map_secret(
+    scheme: i32,
+    mut f: HashMap<String, SecretString>,
+) -> Result<ConnectionSecret, ResolveError> {
+    match scheme {
         1 => Ok(ConnectionSecret::Bearer {
             token: take(&mut f, "token")?,
         }),
@@ -332,24 +284,41 @@ fn scheme_fits_kind(kind: ConnectionKind, secret: &ConnectionSecret) -> bool {
     )
 }
 
-/// Parse a 200 resolve body into a [`ResolvedConnection`], enforcing that it answers `want`.
-pub(crate) fn parse_resolved(
-    body: &[u8],
+/// Decode a wire kind code; out of `i16` range or unknown is `Malformed`, never a default.
+fn kind_from_wire(code: i32) -> Result<ConnectionKind, ResolveError> {
+    i16::try_from(code)
+        .map_err(|_| ResolveError::Malformed("unknown connection kind"))
+        .and_then(ConnectionKind::from_code)
+}
+
+/// Convert a `ResolveConnectionResponse` into a [`ResolvedConnection`], enforcing that it
+/// answers `want`.
+///
+/// Every secret string is MOVED out of the message into a zeroizing [`SecretString`] (no
+/// copy); the emptied message is dropped. The transport's own decode buffers are outside this
+/// crate's control and remain an accepted residual.
+pub(crate) fn resolved_from_pb(
+    mut msg: pb::ResolveConnectionResponse,
     want: crate::ConnectionRef,
 ) -> Result<ResolvedConnection, ResolveError> {
-    let wire: ResolveWire = serde_json::from_slice(body)
-        .map_err(|_| ResolveError::Malformed("invalid resolve body"))?;
-    if wire.community_id != want.community_id || wire.connection_id != want.connection_id {
+    if msg.community_id != want.community_id || msg.connection_id != want.connection_id {
         return Err(ResolveError::Malformed(
-            "resolve body is for another connection",
+            "resolve response is for another connection",
         ));
     }
-    let kind = ConnectionKind::from_code(wire.kind)?;
-    let secret = match (wire.access_token, wire.secret) {
-        // scheme 6 (Wix API credential) rides on a kind-1 row, with or without
-        // an access token alongside; it is the only secret scheme kind 1 takes.
-        (_, Some(secret)) if kind == ConnectionKind::PlatformOauth && secret.scheme == 6 => {
-            let mapped = map_secret(secret)?;
+    let kind = kind_from_wire(msg.kind)?;
+    let access_token = msg.access_token.take().map(SecretString::new);
+    let secret_doc = msg.secret.take();
+    let secret = match (access_token, secret_doc) {
+        // scheme 6 (Wix API credential) rides on a kind-1 row, with or without an access token
+        // alongside; it is the only secret scheme kind 1 takes.
+        (_, Some(doc)) if kind == ConnectionKind::PlatformOauth && doc.scheme == 6 => {
+            let fields = doc
+                .fields
+                .into_iter()
+                .map(|(k, v)| (k, SecretString::new(v)))
+                .collect();
+            let mapped = map_secret(doc.scheme, fields)?;
             if !scheme_fits_kind(kind, &mapped) {
                 return Err(ResolveError::Malformed("secret scheme does not match kind"));
             }
@@ -358,8 +327,13 @@ pub(crate) fn parse_resolved(
         (Some(access_token), None) if kind == ConnectionKind::PlatformOauth => {
             ConnectionSecret::OAuthAccessToken { access_token }
         }
-        (None, Some(secret)) if kind != ConnectionKind::PlatformOauth => {
-            let mapped = map_secret(secret)?;
+        (None, Some(doc)) if kind != ConnectionKind::PlatformOauth => {
+            let fields = doc
+                .fields
+                .into_iter()
+                .map(|(k, v)| (k, SecretString::new(v)))
+                .collect();
+            let mapped = map_secret(doc.scheme, fields)?;
             if !scheme_fits_kind(kind, &mapped) {
                 return Err(ResolveError::Malformed("secret scheme does not match kind"));
             }
@@ -367,27 +341,34 @@ pub(crate) fn parse_resolved(
         }
         _ => return Err(ResolveError::Malformed("credential does not match kind")),
     };
-    let expires_at = match wire.expires_at {
+    let expires_at = match msg.expires_at.take() {
         None => None,
         Some(s) => Some(parse_rfc3339(&s).ok_or(ResolveError::Malformed("invalid expiresAt"))?),
     };
+    let endpoint = msg
+        .endpoint
+        .take()
+        .map_or_else(Endpoint::default, |e| Endpoint {
+            url: e.url,
+            region: e.region,
+            function: e.function,
+            project: e.project,
+        });
     Ok(ResolvedConnection {
-        connection_id: wire.connection_id,
-        community_id: wire.community_id,
-        provider: wire.provider,
+        connection_id: msg.connection_id,
+        community_id: msg.community_id,
+        provider: msg.provider,
         kind,
-        endpoint: wire.endpoint,
+        endpoint,
         secret,
         expires_at,
-        metadata: wire.metadata,
+        metadata: msg.metadata.into_iter().collect(),
     })
 }
 
-/// Parse a 200 list body into a [`BindingPage`].
-pub(crate) fn parse_page(body: &[u8]) -> Result<BindingPage, ResolveError> {
-    let wire: ListWire =
-        serde_json::from_slice(body).map_err(|_| ResolveError::Malformed("invalid list body"))?;
-    let items = wire
+/// Convert a `ListBindingsResponse` into a [`BindingPage`].
+pub(crate) fn page_from_pb(msg: pb::ListBindingsResponse) -> Result<BindingPage, ResolveError> {
+    let items = msg
         .items
         .into_iter()
         .map(|b| {
@@ -408,14 +389,14 @@ pub(crate) fn parse_page(body: &[u8]) -> Result<BindingPage, ResolveError> {
                 tenant_id: b.tenant_id,
                 secret_version: b.secret_version,
                 provider: b.provider,
-                kind: ConnectionKind::from_code(b.kind)?,
-                metadata: b.metadata,
+                kind: kind_from_wire(b.kind)?,
+                metadata: b.metadata.into_iter().collect(),
             })
         })
         .collect::<Result<Vec<_>, ResolveError>>()?;
     Ok(BindingPage {
         items,
-        next_after: wire.next_after,
+        next_after: msg.next_after,
     })
 }
 
@@ -526,12 +507,17 @@ mod tests {
                 Err(ResolveError::Malformed(_))
             ));
         }
+        // A wire code outside i16 never wraps into a valid kind.
+        assert!(matches!(
+            kind_from_wire(65_537),
+            Err(ResolveError::Malformed("unknown connection kind"))
+        ));
     }
 
     #[test]
     fn wix_api_credential_scheme_6_is_accepted_only_on_a_kind_1_row() {
-        let wix = r#"{"scheme":6,"fields":{"apiKey":"k-123","siteId":"site-9"}}"#;
-        let parsed = parse_resolved(&resolved_body(1, wix, "null"), REF).unwrap();
+        let wix = [("apiKey", "k-123"), ("siteId", "site-9")];
+        let parsed = resolved_from_pb(response(1, secret(6, &wix), None), REF).unwrap();
         match &parsed.secret {
             ConnectionSecret::WixApi { api_key, site_id } => {
                 assert_eq!(api_key.expose(), "k-123");
@@ -541,26 +527,17 @@ mod tests {
         }
         assert!(!format!("{:?}", parsed.secret).contains("k-123"));
         // alongside an access token it still maps to the Wix credential
-        let both = parse_resolved(&resolved_body(1, wix, "\"at\""), REF).unwrap();
+        let both = resolved_from_pb(response(1, secret(6, &wix), Some("at")), REF).unwrap();
         assert!(matches!(both.secret, ConnectionSecret::WixApi { .. }));
-        // wrong kind, and missing field, fail closed
-        for (kind, body) in [(2, wix), (1, r#"{"scheme":6,"fields":{"apiKey":"k"}}"#)] {
+        // wrong kind, and a missing field, fail closed
+        for (kind, fields) in [(2, &wix[..]), (1, &wix[..1])] {
             assert!(matches!(
-                parse_resolved(&resolved_body(kind, body, "null"), REF),
+                resolved_from_pb(response(kind, secret(6, fields), None), REF),
                 Err(ResolveError::Malformed(_))
             ));
         }
         // any other scheme on kind 1 is still refused
-        let bearer = r#"{"scheme":1,"fields":{"token":"t"}}"#;
-        assert!(parse_resolved(&resolved_body(1, bearer, "null"), REF).is_err());
-    }
-
-    fn resolved_body(kind: i64, secret: &str, token: &str) -> Vec<u8> {
-        format!(
-            r#"{{"success":true,"communityId":7,"connectionId":12,"provider":"p","kind":{kind},
-            "accessToken":{token},"expiresAt":null,"endpoint":{{}},"metadata":{{}},"secret":{secret}}}"#
-        )
-        .into_bytes()
+        assert!(resolved_from_pb(response(1, secret(1, &[("token", "t")]), None), REF).is_err());
     }
 
     const REF: crate::ConnectionRef = crate::ConnectionRef {
@@ -568,87 +545,106 @@ mod tests {
         connection_id: 12,
     };
 
+    fn response(
+        kind: i32,
+        secret: Option<pb::ResolveSecret>,
+        token: Option<&str>,
+    ) -> pb::ResolveConnectionResponse {
+        pb::ResolveConnectionResponse {
+            community_id: 7,
+            connection_id: 12,
+            provider: "p".into(),
+            kind,
+            access_token: token.map(str::to_owned),
+            expires_at: None,
+            endpoint: Some(pb::ResolveEndpoint::default()),
+            secret,
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn secret(scheme: i32, fields: &[(&str, &str)]) -> Option<pb::ResolveSecret> {
+        Some(pb::ResolveSecret {
+            scheme,
+            fields: fields
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+        })
+    }
+
     /// regression: p6a-t6b codex-2 -- resolve surfaces the record's own
     /// metadata so callers can re-assert list-derived facts; absent -> empty.
     #[test]
-    fn resolve_body_metadata_is_surfaced() {
-        let body = br#"{"communityId":7,"connectionId":12,"provider":"twitch","kind":1,
-            "accessToken":"t","expiresAt":null,"endpoint":{},"metadata":{"channel":"abc"},"secret":null}"#;
-        let rc = parse_resolved(body, REF).unwrap();
+    fn resolve_metadata_is_surfaced() {
+        let mut msg = response(1, None, Some("t"));
+        msg.metadata.insert("channel".into(), "abc".into());
+        let rc = resolved_from_pb(msg, REF).unwrap();
         assert_eq!(rc.metadata.get("channel").map(String::as_str), Some("abc"));
-        let no_meta = br#"{"communityId":7,"connectionId":12,"provider":"twitch","kind":1,
-            "accessToken":"t","expiresAt":null,"endpoint":{},"secret":null}"#;
-        assert!(parse_resolved(no_meta, REF).unwrap().metadata.is_empty());
         assert!(
             !format!("{rc:?}").contains("abc"),
             "Debug must not print metadata"
         );
+        let none = resolved_from_pb(response(1, None, Some("t")), REF).unwrap();
+        assert!(none.metadata.is_empty());
     }
 
     #[test]
     fn unknown_kind_or_scheme_code_is_malformed() {
-        let bad_kind = resolved_body(9, "null", "\"t\"");
         assert!(matches!(
-            parse_resolved(&bad_kind, REF),
+            resolved_from_pb(response(9, None, Some("t")), REF),
             Err(ResolveError::Malformed("unknown connection kind"))
         ));
-        let bad_scheme = resolved_body(2, r#"{"scheme":9,"fields":{}}"#, "null");
         assert!(matches!(
-            parse_resolved(&bad_scheme, REF),
+            resolved_from_pb(response(2, secret(9, &[]), None), REF),
             Err(ResolveError::Malformed("unknown secret scheme"))
         ));
     }
 
     #[test]
     fn every_scheme_maps_and_missing_fields_are_malformed() {
-        let cases = [
-            (r#"{"scheme":1,"fields":{"token":"a"}}"#, true),
+        type Case<'a> = (i32, &'a [(&'a str, &'a str)], i32, bool);
+        // (scheme, fields, kind, expect_ok)
+        let cases: Vec<Case> = vec![
+            (1, &[("token", "a")], 2, true),
+            (2, &[("username", "u"), ("password", "p")], 2, true),
+            (3, &[("header", "X-K"), ("value", "v")], 2, true),
             (
-                r#"{"scheme":2,"fields":{"username":"u","password":"p"}}"#,
+                4,
+                &[
+                    ("accessKeyId", "a"),
+                    ("secretAccessKey", "s"),
+                    ("sessionToken", "t"),
+                ],
+                3,
                 true,
             ),
             (
-                r#"{"scheme":3,"fields":{"header":"X-K","value":"v"}}"#,
+                5,
+                &[("clientEmail", "e"), ("privateKey", "k"), ("tokenUri", "u")],
+                4,
                 true,
             ),
-            (
-                r#"{"scheme":4,"fields":{"accessKeyId":"a","secretAccessKey":"s","sessionToken":"t"}}"#,
-                true,
-            ),
-            (
-                r#"{"scheme":5,"fields":{"clientEmail":"e","privateKey":"k","tokenUri":"u"}}"#,
-                true,
-            ),
-            (r#"{"scheme":1,"fields":{}}"#, false),
-            (r#"{"scheme":2,"fields":{"username":"u"}}"#, false),
-            (
-                r#"{"scheme":3,"fields":{"header":null,"value":"v"}}"#,
-                false,
-            ),
-            (r#"{"scheme":4,"fields":{"accessKeyId":"a"}}"#, false),
-            (r#"{"scheme":5,"fields":{"clientEmail":"e"}}"#, false),
+            (1, &[], 2, false),
+            (2, &[("username", "u")], 2, false),
+            (3, &[("value", "v")], 2, false), // header absent
+            (4, &[("accessKeyId", "a")], 3, false),
+            (5, &[("clientEmail", "e")], 4, false),
         ];
-        for (secret, ok) in cases {
-            let kind = if secret.contains("\"scheme\":4") {
-                3
-            } else if secret.contains("\"scheme\":5") {
-                4
-            } else {
-                2
-            };
-            let r = parse_resolved(&resolved_body(kind, secret, "null"), REF);
-            assert_eq!(r.is_ok(), ok, "{secret}: {r:?}");
+        for (scheme, fields, kind, ok) in cases {
+            let r = resolved_from_pb(response(kind, secret(scheme, fields), None), REF);
+            assert_eq!(r.is_ok(), ok, "scheme {scheme} {fields:?}: {r:?}");
         }
     }
 
     #[test]
     fn kind_and_scheme_must_agree() {
-        let schemes = [
-            r#"{"scheme":1,"fields":{"token":"a"}}"#,
-            r#"{"scheme":2,"fields":{"username":"u","password":"p"}}"#,
-            r#"{"scheme":3,"fields":{"header":"X-K","value":"v"}}"#,
-            r#"{"scheme":4,"fields":{"accessKeyId":"a","secretAccessKey":"s"}}"#,
-            r#"{"scheme":5,"fields":{"clientEmail":"e","privateKey":"k"}}"#,
+        let schemes: [(i32, &[(&str, &str)]); 5] = [
+            (1, &[("token", "a")]),
+            (2, &[("username", "u"), ("password", "p")]),
+            (3, &[("header", "X-K"), ("value", "v")]),
+            (4, &[("accessKeyId", "a"), ("secretAccessKey", "s")]),
+            (5, &[("clientEmail", "e"), ("privateKey", "k")]),
         ];
         // allowed[kind-2][scheme-1]
         let allowed = [
@@ -658,8 +654,9 @@ mod tests {
         ];
         for (ki, row) in allowed.iter().enumerate() {
             for (si, ok) in row.iter().enumerate() {
-                let kind = ki as i64 + 2;
-                let r = parse_resolved(&resolved_body(kind, schemes[si], "null"), REF);
+                let kind = ki as i32 + 2;
+                let (scheme, fields) = schemes[si];
+                let r = resolved_from_pb(response(kind, secret(scheme, fields), None), REF);
                 assert_eq!(r.is_ok(), *ok, "kind {kind} scheme {}: {r:?}", si + 1);
                 if !ok {
                     assert!(matches!(
@@ -673,65 +670,134 @@ mod tests {
 
     #[test]
     fn credential_must_match_kind_and_identity() {
-        // kind 1 without accessToken, kind 2 with accessToken only, both present, mismatched ids.
-        assert!(parse_resolved(&resolved_body(1, "null", "null"), REF).is_err());
-        assert!(parse_resolved(&resolved_body(2, "null", "\"t\""), REF).is_err());
-        let both = resolved_body(1, r#"{"scheme":1,"fields":{"token":"a"}}"#, "\"t\"");
-        assert!(parse_resolved(&both, REF).is_err());
+        // kind 1 without accessToken, kind 2 with accessToken only, both present.
+        assert!(resolved_from_pb(response(1, None, None), REF).is_err());
+        assert!(resolved_from_pb(response(2, None, Some("t")), REF).is_err());
+        let both = response(1, secret(1, &[("token", "a")]), Some("t"));
+        assert!(resolved_from_pb(both, REF).is_err());
         let other = crate::ConnectionRef {
             community_id: 8,
             connection_id: 12,
         };
-        assert!(parse_resolved(&resolved_body(1, "null", "\"t\""), other).is_err());
-        assert!(parse_resolved(b"not json", REF).is_err());
+        assert!(matches!(
+            resolved_from_pb(response(1, None, Some("t")), other),
+            Err(ResolveError::Malformed(
+                "resolve response is for another connection"
+            ))
+        ));
     }
 
     #[test]
-    fn list_page_parses_and_defaults_kind() {
-        let body = br#"{"success":true,"items":[{"communityId":1,"connectionId":2,"tenantId":3,
-            "secretVersion":4,"provider":"twitch","metadata":{"a":"b"}},{"communityId":1,
-            "connectionId":3,"tenantId":3,"secretVersion":1,"kind":2,
-            "provider":"x","metadata":{}}],"nextAfter":9}"#;
-        let page = parse_page(body).unwrap();
+    fn expiry_endpoint_and_optional_fields_convert() {
+        let mut msg = response(
+            3,
+            secret(4, &[("accessKeyId", "a"), ("secretAccessKey", "s")]),
+            None,
+        );
+        msg.expires_at = Some("2026-10-10T16:00:00+00:00".into());
+        msg.endpoint = Some(pb::ResolveEndpoint {
+            url: None,
+            region: Some("us-east-1".into()),
+            function: Some("fn".into()),
+            project: None,
+        });
+        let rc = resolved_from_pb(msg, REF).unwrap();
+        assert_eq!(rc.expires_at, Some(1_791_648_000));
+        assert_eq!(rc.endpoint.region.as_deref(), Some("us-east-1"));
+        assert!(rc.endpoint.url.is_none());
+        match rc.secret {
+            ConnectionSecret::AwsAccessKey { session_token, .. } => {
+                assert!(session_token.is_none())
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut bad = response(1, None, Some("t"));
+        bad.expires_at = Some("not-a-time".into());
+        assert!(matches!(
+            resolved_from_pb(bad, REF),
+            Err(ResolveError::Malformed("invalid expiresAt"))
+        ));
+        // An absent endpoint message is an empty endpoint, not an error.
+        let mut no_ep = response(1, None, Some("t"));
+        no_ep.endpoint = None;
+        assert_eq!(
+            resolved_from_pb(no_ep, REF).unwrap().endpoint,
+            Endpoint::default()
+        );
+    }
+
+    fn binding(kind: i32, tenant_id: i64, secret_version: i64) -> pb::ConnectionBinding {
+        pb::ConnectionBinding {
+            community_id: 1,
+            connection_id: 2,
+            tenant_id,
+            secret_version,
+            provider: "twitch".into(),
+            kind,
+            metadata: [("a".to_owned(), "b".to_owned())].into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn list_page_converts_kinds_cursor_and_metadata() {
+        let page = page_from_pb(pb::ListBindingsResponse {
+            items: vec![binding(1, 3, 4), binding(2, 3, 1)],
+            next_after: Some(9),
+        })
+        .unwrap();
         assert_eq!(page.items.len(), 2);
         assert_eq!(page.items[0].kind, ConnectionKind::PlatformOauth);
         assert_eq!(page.items[1].kind, ConnectionKind::ExternalHttp);
         assert_eq!(page.next_after, Some(9));
-        let bad = br#"{"items":[{"communityId":1,"connectionId":2,"tenantId":3,
-            "secretVersion":1,"provider":"x","kind":9}]}"#;
-        assert!(parse_page(bad).is_err());
-        assert!(parse_page(b"{").is_err());
+        assert_eq!(
+            page.items[0].metadata.get("a").map(String::as_str),
+            Some("b")
+        );
+        let last = page_from_pb(pb::ListBindingsResponse::default()).unwrap();
+        assert!(last.items.is_empty() && last.next_after.is_none());
+        // An unknown (or unset = 0) kind fails the whole page closed -- no silent default.
+        for bad in [0, 9] {
+            assert!(page_from_pb(pb::ListBindingsResponse {
+                items: vec![binding(bad, 3, 1)],
+                next_after: None,
+            })
+            .is_err());
+        }
     }
 
     #[test]
     fn list_page_carries_the_feed_tenant_and_secret_version() {
-        let body = br#"{"items":[{"communityId":7,"connectionId":9,"tenantId":42,
-            "secretVersion":5,"provider":"twitch","metadata":{}}]}"#;
-        let item = &parse_page(body).unwrap().items[0];
-        assert_eq!((item.tenant_id, item.secret_version), (42, 5));
+        let page = page_from_pb(pb::ListBindingsResponse {
+            items: vec![binding(1, 42, 5)],
+            next_after: None,
+        })
+        .unwrap();
+        assert_eq!(
+            (page.items[0].tenant_id, page.items[0].secret_version),
+            (42, 5)
+        );
     }
 
     /// regression: a binding without a server-derived tenant (or a rotation
     /// counter) must fail the page closed, never run tenant-less.
     #[test]
     fn list_page_refuses_a_missing_or_non_positive_tenant_or_version() {
-        let row = |extra: &str| {
-            format!(r#"{{"items":[{{"communityId":1,"connectionId":2,"provider":"x",{extra}}}]}}"#)
-        };
-        for extra in [
-            r#""secretVersion":1"#,              // tenantId absent
-            r#""tenantId":3"#,                   // secretVersion absent
-            r#""tenantId":0,"secretVersion":1"#, // tenant not positive
-            r#""tenantId":-1,"secretVersion":1"#,
-            r#""tenantId":3,"secretVersion":0"#, // version not positive
-            r#""tenantId":3,"secretVersion":-2"#,
-        ] {
+        for (tenant, version) in [(0, 1), (3, 0), (-1, 1), (3, -2)] {
+            let page = pb::ListBindingsResponse {
+                items: vec![binding(1, tenant, version)],
+                next_after: None,
+            };
             assert!(
-                parse_page(row(extra).as_bytes()).is_err(),
-                "{extra} must be refused"
+                page_from_pb(page).is_err(),
+                "tenant {tenant} version {version} must be refused"
             );
         }
-        assert!(parse_page(row(r#""tenantId":3,"secretVersion":1"#).as_bytes()).is_ok());
+        let ok = pb::ListBindingsResponse {
+            items: vec![binding(1, 3, 1)],
+            next_after: None,
+        };
+        assert!(page_from_pb(ok).is_ok());
     }
 
     #[test]
