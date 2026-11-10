@@ -99,6 +99,11 @@ COPY bundles/rust/economy /repo/bundles/rust/economy
 WORKDIR /repo/bundles/rust/economy
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# DJ app bundle (`stage-next-tools` world): same pinned builder.
+COPY bundles/rust/dj /repo/bundles/rust/dj
+WORKDIR /repo/bundles/rust/dj
+RUN cargo component build --release --target wasm32-wasip2 --locked
+
 # Twitch clips APP bundle (world stage-next-tools): same pinned builder.
 COPY bundles/rust/twitch-clips /repo/bundles/rust/twitch-clips
 WORKDIR /repo/bundles/rust/twitch-clips
@@ -335,6 +340,7 @@ COPY bundles/rust/ping/hub-manifest.yaml /core-bundles/ping.manifest.yaml
 COPY bundles/rust/reputation/hub-manifest.yaml /core-bundles/reputation.manifest.yaml
 COPY bundles/rust/ai/hub-manifest.yaml /core-bundles/ai.manifest.yaml
 COPY bundles/rust/economy/hub-manifest.yaml /core-bundles/economy.manifest.yaml
+COPY bundles/rust/dj/hub-manifest.yaml /core-bundles/dj.manifest.yaml
 COPY bundles/rust/twitch/hub-manifest.yaml /core-bundles/twitch.manifest.yaml
 COPY bundles/rust/twitch-clips/hub-manifest.yaml /core-bundles/twitch-clips.manifest.yaml
 COPY bundles/rust/music-soundcloud/hub-manifest.yaml /core-bundles/music-soundcloud.manifest.yaml
@@ -350,6 +356,7 @@ COPY --from=rust-bundle-builder /repo/bundles/rust/reputation/target/wasm32-wasi
 COPY --from=rust-bundle-builder /repo/bundles/rust/ai/target/wasm32-wasip2/release/waddle_bundle_ai_service.wasm /core-bundles/ai.wasm
 COPY --from=csharp-bundle-builder /repo/bundles/csharp/csping/bin/Release/net10.0/wasi-wasm/publish/csping.wasm /core-bundles/csping.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/economy/target/wasm32-wasip2/release/waddle_bundle_economy_service.wasm /core-bundles/economy.wasm
+COPY --from=rust-bundle-builder /repo/bundles/rust/dj/target/wasm32-wasip2/release/waddle_bundle_dj_app.wasm /core-bundles/dj.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/twitch/target/wasm32-wasip2/release/waddle_bundle_twitch_overlay.wasm /core-bundles/twitch.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/twitch-clips/target/wasm32-wasip2/release/waddle_bundle_twitch_clips.wasm /core-bundles/twitch-clips.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/music-soundcloud/target/wasm32-wasip2/release/waddle_bundle_music_soundcloud.wasm /core-bundles/music-soundcloud.wasm

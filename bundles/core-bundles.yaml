@@ -1594,6 +1594,19 @@ bundles:
     source_dir: rust/twitch-clips
     manifest_path: twitch-clips.manifest.yaml
     artifact_path: twitch-clips.wasm
+  # DJ app bundle (Rust, `stage-next-tools`): playlists, !sr song requests, mod queue controls,
+  # deterministic song policy + optional AI DJ. Flag waddles.command-dj defaults OFF.
+  - app_id: waddles.core.example.dj
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-next-tools
+    source_dir: rust/dj
+    manifest_path: dj.manifest.yaml
+    artifact_path: dj.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
   # SoundCloud music SERVICE (Rust `kind: service`, world stage-tools): music.soundcloud.{search,
   # track,playlist.get,resolve}. Metadata + license flags only; OAuth token is a host-side secret ref.
   - app_id: waddles.core.service.music-soundcloud
