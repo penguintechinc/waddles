@@ -114,7 +114,11 @@ spec:
               key: BUNDLE_SIGNING_PUBLIC_KEYS
         {{- end }}
         - name: BUNDLE_BUCKET_ENDPOINT
-          value: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
+          value: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
+        # feature/transit-tls-core (F5): the executor's own rustls client (core/bundle_executor/src/bucket.rs) verifies the
+        # https endpoint against exactly this CA -- BUNDLE_BUCKET_CA_FILE is mandatory for https and never skipped.
+        - name: BUNDLE_BUCKET_CA_FILE
+          value: {{ include "waddlebot.transitTls.caPath" . | quote }}
         - name: BUNDLE_BUCKET_NAME
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.bucketName | quote }}
         - name: BUNDLE_BUCKET_REGION
@@ -165,6 +169,7 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
         - name: precompile-cache
           mountPath: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.precompileDir }}
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
@@ -173,6 +178,7 @@ spec:
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
       - name: precompile-cache
         emptyDir: {}
       {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
