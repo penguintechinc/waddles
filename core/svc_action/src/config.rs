@@ -315,6 +315,18 @@ pub struct CliConfig {
     /// grants this role needs.
     #[arg(long, env = "DB_READER_USER", default_value = "svc_action_ro")]
     pub db_reader_user: String,
+    /// Bundle `db` host capability connection (`crate::capabilities::DbWiring`):
+    /// same env names/defaults as `core/svc_process::config::CliConfig` -- the
+    /// shared `waddles` Postgres instance. The role is the DML-only
+    /// `waddles_bundle_runtime` (alembic 0030/0082), never the primary `DB_USER`.
+    #[arg(long, env = "BUNDLE_DB_HOST", default_value = "localhost")]
+    pub bundle_db_host: String,
+    #[arg(long, env = "BUNDLE_DB_PORT", default_value_t = 5432)]
+    pub bundle_db_port: u16,
+    #[arg(long, env = "BUNDLE_DB_NAME", default_value = "waddlebot")]
+    pub bundle_db_name: String,
+    #[arg(long, env = "BUNDLE_DB_USER", default_value = "waddles_bundle_runtime")]
+    pub bundle_db_user: String,
     // **`BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID` REMOVED**
     // (dataplane scale design, user requirement: "every svc_process/
     // svc_action pod serves ALL tenants") -- this loader now discovers and
@@ -573,6 +585,13 @@ pub struct Config {
     /// top doc), the same graceful-degradation contract as
     /// `envelope_binding_keys`/`discord_bot_token` above.
     pub db_reader_password: Option<Secret>,
+    /// `BUNDLE_DB_PASSWORD` for the bundle `db` host capability's
+    /// `waddles_bundle_runtime` connection. `Option` (empty == unset): the
+    /// capability's flag defaults OFF, so an unprovisioned deployment must
+    /// start; `db`/`db2.*` calls then deny `not_implemented`. A configured
+    /// password whose connection fails is logged at ERROR by
+    /// `crate::try_build_db_wiring`.
+    pub bundle_db_password: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -591,6 +610,10 @@ impl fmt::Debug for Config {
             .field(
                 "db_reader_password",
                 &self.db_reader_password.as_ref().map(|_| Secret::new("")),
+            )
+            .field(
+                "bundle_db_password",
+                &self.bundle_db_password.as_ref().map(|_| Secret::new("")),
             )
             .finish()
     }
@@ -625,12 +648,17 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .map(Secret::new);
+        let bundle_db_password = std::env::var("BUNDLE_DB_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Secret::new);
         Ok(Self {
             cli,
             db_password,
             envelope_binding_keys,
             discord_bot_token,
             db_reader_password,
+            bundle_db_password,
         })
     }
 }

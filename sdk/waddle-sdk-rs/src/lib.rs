@@ -56,6 +56,7 @@ pub mod kv;
 pub mod log;
 pub mod relay;
 pub mod stage;
+pub mod storage_v2;
 pub mod tool;
 pub mod types;
 

@@ -96,6 +96,7 @@ denied.
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -114,6 +115,11 @@ from services import (
     valkey_admin_client,
 )
 from services.bundle_access_grants import access_grant_diff_atoms, is_access_grant_id
+from services.bundle_data_provisioner import (
+    BundleDataProvisioner,
+    schema_from_manifest,
+)
+from services.bundle_data_v2 import SchemaDeclV2
 from services.bundle_manifest_v2 import (
     BundleManifestV2,
     ConsumeRule,
@@ -662,6 +668,43 @@ async def _write_global_install(
     return int(new_id)
 
 
+async def _live_install_schema(
+    install_dal: AsyncDB, *, app_id: str
+) -> tuple[SchemaDeclV2 | None, bool]:
+    """`data.schema` of `app_id`'s live (current, non-revoked) global install.
+
+    Returns `(schema, has_live_install)`. The schema is `None` when there is no live
+    install or the live version declared none; the flag distinguishes the two.
+    """
+    installs_table = install_dal.metadata.tables["app_global_installs"]
+    async with install_dal.engine.connect() as conn:
+        live_version = (
+            await conn.execute(
+                select(installs_table.c.version).where(
+                    (installs_table.c.app_id == app_id)
+                    & (installs_table.c.superseded_by.is_(None))
+                    & (installs_table.c.revoked_at.is_(None))
+                )
+            )
+        ).scalar_one_or_none()
+    if live_version is None:
+        return None, False
+    upload = (
+        await install_dal(
+            (install_dal.app_version_uploads.app_id == app_id)
+            & (install_dal.app_version_uploads.version == live_version)
+        ).select()
+    ).first()
+    if upload is None:
+        raise ApiError(
+            f"live install {app_id}@{live_version} has no stored manifest; refusing to "
+            "change its data tables",
+            500,
+            "missing_live_manifest",
+        )
+    return schema_from_manifest(upload.manifest_json), True
+
+
 async def install_version_globally(
     install_dal: AsyncDB,
     *,
@@ -670,6 +713,7 @@ async def install_version_globally(
     installed_by: int | None,
     expected_permission_hash: str | None = None,
     install_source: str = "human",
+    data_provisioner: BundleDataProvisioner | None = None,
 ) -> Any:
     """GLOBAL tier: install `version` into the platform catalog. Does NOT activate it anywhere.
 
@@ -687,6 +731,12 @@ async def install_version_globally(
     tenant_app_availability_service.set_available()` for it (TENANT
     tier), and no community runs it until a community-admin separately
     calls `activate_for_community()` (COMMUNITY tier, below).
+
+    **Data tables (`db` v2), fail closed.** A version whose manifest declares
+    `data.schema` has its tables provisioned (first install) or additively migrated
+    (an upgrade over a live install) by `services.bundle_data_provisioner` in this same
+    call; if provisioning fails the install is not recorded and the error propagates.
+    A manifest without `data.schema` provisions nothing.
     """
     upload_rows = await install_dal(
         (install_dal.app_version_uploads.app_id == app_id)
@@ -718,16 +768,26 @@ async def install_version_globally(
             "permission_hash_mismatch",
         )
 
-    new_id = await _write_global_install(
-        install_dal,
-        app_id=app_id,
-        version=version,
-        version_id=upload.app_version_id,
-        computed_hash=computed_hash,
-        summary=summary,
-        installed_by=installed_by,
-        install_source=install_source,
-    )
+    new_schema = schema_from_manifest(upload.manifest_json)
+    previous_schema, _has_live = await _live_install_schema(install_dal, app_id=app_id)
+    needs_data_ddl = new_schema is not None or previous_schema is not None
+    provisioner = data_provisioner or BundleDataProvisioner()
+    data_tx = provisioner.transaction(app_id) if needs_data_ddl else nullcontext(None)
+    async with data_tx as tx:
+        if tx is not None and previous_schema is None and new_schema is not None:
+            await tx.provision(app_id, new_schema)
+        elif tx is not None and previous_schema is not None:
+            await tx.migrate(app_id, previous_schema, new_schema or SchemaDeclV2(tables=()))
+        new_id = await _write_global_install(
+            install_dal,
+            app_id=app_id,
+            version=version,
+            version_id=upload.app_version_id,
+            computed_hash=computed_hash,
+            summary=summary,
+            installed_by=installed_by,
+            install_source=install_source,
+        )
     await bundle_audit.record(
         install_dal,
         actor_id=installed_by,
@@ -743,7 +803,13 @@ async def install_version_globally(
     return (await install_dal(install_dal.app_global_installs.id == new_id).select()).first()
 
 
-async def uninstall_globally(install_dal: AsyncDB, *, app_id: str, revoked_by: int | None) -> Any:
+async def uninstall_globally(
+    install_dal: AsyncDB,
+    *,
+    app_id: str,
+    revoked_by: int | None,
+    data_provisioner: BundleDataProvisioner | None = None,
+) -> Any:
     """GLOBAL tier: revoke `app_id`'s current platform-catalog install.
 
     Cascades DOWN (task requirement -- "global uninstall/deny -> hidden
@@ -753,13 +819,23 @@ async def uninstall_globally(install_dal: AsyncDB, *, app_id: str, revoked_by: i
     tenant_app_availability_service.unset_available()`'s own cascade).
     Each tenant's cascade step is best-effort -- one tenant's failure
     (logged, audited) never blocks hiding it for every other tenant.
+
+    **Data tables (`db` v2), fail closed.** When the live version declared
+    `data.schema`, its tables are dropped here -- only tables the registry proves
+    belong to `app_id` (`bundle_data_v2.teardown_schema`). If the teardown fails the
+    uninstall is not recorded and the error propagates.
     """
     from services import tenant_app_availability_service
 
     installs_table = install_dal.metadata.tables["app_global_installs"]
     now = datetime.now(UTC)
 
-    async with install_dal.engine.begin() as conn:
+    live_schema, _has_live = await _live_install_schema(install_dal, app_id=app_id)
+    provisioner = data_provisioner or BundleDataProvisioner()
+    data_tx = provisioner.transaction(app_id) if live_schema is not None else nullcontext(None)
+    async with data_tx as tx, install_dal.engine.begin() as conn:
+        if tx is not None and live_schema is not None:
+            await tx.teardown(app_id, live_schema)
         current_id = (
             await conn.execute(
                 select(installs_table.c.id).where(
