@@ -37,6 +37,9 @@ use crate::twitch_sessions::spec::{MAX_PAGES, PAGE_LIMIT};
 const PROVIDER: &str = "discord";
 /// Metadata key: the pinned guild snowflake.
 pub const META_GUILD_ID: &str = "guild_id";
+/// Metadata key: the application (client) id the bot connection belongs to (optional;
+/// required only for application-scoped ops such as command registration).
+pub const META_APPLICATION_ID: &str = "application_id";
 /// Metadata key: the managed-roles allowlist.
 pub const META_MANAGED_ROLES: &str = "managed_roles";
 /// Most managed roles one binding may list.
@@ -50,6 +53,8 @@ pub struct DiscordBinding {
     pub bot_token: SecretString,
     /// The guild the binding pins (numeric snowflake).
     pub guild_id: String,
+    /// The application (client) id, when the binding declares one.
+    pub application_id: Option<String>,
     /// Managed-role allowlist: key -> role snowflake.
     pub managed_roles: BTreeMap<String, String>,
 }
@@ -204,9 +209,16 @@ impl<R: ConnectionResolve> ResolverDiscordCredentials<R> {
         else {
             return Err(CredError::NotUsable);
         };
+        // A present-but-malformed application id makes the binding unusable (never guessed).
+        let application_id = match resolved.metadata.get(META_APPLICATION_ID).map(|a| a.trim()) {
+            None | Some("") => None,
+            Some(a) if is_snowflake(a) => Some(a.to_string()),
+            Some(_) => return Err(CredError::NotUsable),
+        };
         Ok(DiscordBinding {
             bot_token: token,
             guild_id,
+            application_id,
             managed_roles,
         })
     }
@@ -532,7 +544,7 @@ mod tests {
             list_meta: serde_json::Value,
             resolve_body: serde_json::Value,
         ) -> (
-            MockServer,
+            (MockServer, connection_resolver::test_support::Running),
             ResolverDiscordCredentials<ConnectionResolver>,
             TestSa,
         ) {
@@ -545,28 +557,21 @@ mod tests {
                 )])
                 .start_detached()
                 .await;
-            Mock::given(method("GET"))
-                .and(path("/api/v1/internal/provider-connections"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "success": true,
-                    "items": [{"communityId": 7, "connectionId": 12, "tenantId": 3, "secretVersion": 1, "provider": "discord",
-                               "kind": 1, "metadata": list_meta}],
-                    "nextAfter": null
-                })))
-                .mount(&server)
-                .await;
-            Mock::given(method("POST"))
-                .and(path(
-                    "/api/v1/internal/communities/7/provider-connections/12/resolve",
-                ))
-                .respond_with(ResponseTemplate::new(200).set_body_json(resolve_body))
-                .mount(&server)
-                .await;
+            let list = serde_json::json!({
+                "success": true,
+                "items": [{"communityId": 7, "connectionId": 12, "tenantId": 3, "secretVersion": 1, "provider": "discord",
+                           "kind": 1, "metadata": list_meta}],
+                "nextAfter": null
+            });
+            let running = connection_resolver::test_support::start(
+                &connection_resolver::test_support::json_hub(&list, &resolve_body),
+            )
+            .await;
             let sa = std::env::temp_dir().join(format!("discord-sa-{}", uuid::Uuid::new_v4()));
             std::fs::write(&sa, "synthetic-sa").unwrap();
             let resolver = ConnectionResolver::new(
                 ResolverConfig::new(
-                    server.uri(),
+                    running.endpoint.clone(),
                     "alpha",
                     mint_endpoint,
                     sa.to_string_lossy().to_string(),
@@ -575,7 +580,7 @@ mod tests {
             )
             .unwrap();
             (
-                server,
+                (server, running),
                 ResolverDiscordCredentials::new(resolver),
                 TestSa(sa),
             )

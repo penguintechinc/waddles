@@ -30,6 +30,7 @@ from tests.provider_connections.conftest import (
     admin_headers,
     make_registry,
 )
+from tests.provider_connections.grpc_internal_client import GrpcRoutingClient
 from tests.provider_connections.test_api import INTERNAL, _create
 
 GS_LIST = "connections:list:gameserver"
@@ -70,7 +71,8 @@ def mixed_app(pc_app: Quart, pc_db: Any, clock: FakeClock, fake_twitch: Any) -> 
 async def test_gameserver_scoped_credential_reaches_gameserver_rows_only(
     mixed_app: Quart, pc_db: Any, service_issuer: ServiceJwtIssuer, bot_tokens: Any
 ) -> None:
-    client = mixed_app.test_client()
+    # Data-plane reads go over real gRPC (the REST internal routes were retired).
+    client = GrpcRoutingClient(mixed_app.test_client())
     community = pc_db.seed.community_id
     base = f"/api/v1/communities/{community}/gameserver-connections"
     body = {"host": HOST, "port": 27015, "rconPassword": PASSWORD, "game": "source"}

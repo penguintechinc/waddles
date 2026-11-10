@@ -14,6 +14,10 @@ mod error;
 mod secret;
 mod types;
 
+/// Real-path gRPC fixtures for tests (feature `test-support`; never enabled in a service build).
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 pub use client::{
     ConnectionResolve, ConnectionResolver, ResolverConfig, ResolverMetrics, SCOPE_CONNECTIONS_LIST,
     SCOPE_CONNECTIONS_LIST_GAMESERVER, SCOPE_CONNECTIONS_RESOLVE_GAMESERVER,
