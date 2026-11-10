@@ -10,6 +10,7 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/service_auth/**'
+      - 'proto/waddles/hub/internal/v1/service_auth.proto'
       - '.github/workflows/rust-service-auth.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
@@ -28,7 +29,7 @@ jobs:
   # here means "not affected"; main PRs / pushes / dispatch run everything.
   changes:
     name: Detect changed areas
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main') || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha' || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -62,5 +63,5 @@ jobs:
       working_directory: core/service_auth
       # aws-lc-sys (the jsonwebtoken aws_lc_rs backend) needs cmake + a
       # C/C++ compiler to build -- same rationale as rust-egress-proxy.yml.
-      extra_apt_packages: cmake build-essential
-      extra_apt_reason: 'for aws-lc-sys (cmake, C/C++ toolchain)'
+      extra_apt_packages: cmake build-essential protobuf-compiler
+      extra_apt_reason: 'for aws-lc-sys (cmake, C/C++ toolchain) and the gRPC stubs (protoc)'

@@ -54,9 +54,9 @@ deny = [
     # security review finding: "rust_crypto" bundles the RustSec-flagged
     # `rsa` crate (RUSTSEC Marvin-attack timing sidechannel, no safe
     # upgrade) unconditionally, even though this crate only ever signs/
-    # verifies EdDSA. `rsa` staying banned is what keeps that regression
+    # verifies ES256 (+ legacy EdDSA). `rsa` staying banned is what keeps that regression
     # from silently coming back on a future jsonwebtoken feature-flag edit.
-    { crate = "rsa", reason = "Ed25519-only service_auth must never re-pull the RustSec-flagged rsa crate via jsonwebtoken's rust_crypto feature" },
+    { crate = "rsa", reason = "ES256-only service_auth must never re-pull the RustSec-flagged rsa crate via jsonwebtoken's rust_crypto feature" },
     { crate = "rustls-pemfile", reason = "unmaintained (RUSTSEC-2025-0134) -- reqwest >=0.12.13 reads PEM via rustls-pki-types directly; do not reintroduce by downgrading reqwest" },
     { crate = "openssl", reason = "rustls only -- no C OpenSSL dependency, no OpenSSL CVE exposure" },
     { crate = "openssl-sys", reason = "rustls only -- no C OpenSSL dependency, no OpenSSL CVE exposure" },

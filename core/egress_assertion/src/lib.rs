@@ -8,7 +8,7 @@
 //! on can never silently drift apart.
 //!
 //! **Design (mirrors `core/egress_proxy/src/assertion.rs`'s original
-//! doc):** a separate, short-lived EdDSA JWT, not a claim folded into the
+//! doc):** a separate, short-lived ES256 JWT, not a claim folded into the
 //! calling service's own machine JWT (`core/service_auth`) -- the machine
 //! JWT authenticates *which service* is calling and is deliberately
 //! longer-lived (cached, reused for many requests); this assertion
@@ -17,7 +17,7 @@
 //! ([`ASSERTION_MAX_TTL_SECONDS`], default 60s) than the calling pod's own
 //! machine JWT lifetime.
 //!
-//! **Signed by the calling service's own Ed25519 key** (the same key
+//! **Signed by the calling service's own ECDSA P-256 key** (the same key
 //! material it already uses to mint its own machine JWT, `core/
 //! service_auth`, PR #438's per-service JWKS) -- never a second, static,
 //! separately-distributed signing key. The `sub` claim carries the
@@ -38,7 +38,7 @@
 //! that crate. Deliberately no `service_auth` dependency here either --
 //! keeps this crate lightweight for `bundle_host_http`'s signing-only use.
 //!
-//! Header: `X-Waddles-Egress-Assertion: <compact EdDSA JWT>`. The bundle's
+//! Header: `X-Waddles-Egress-Assertion: <compact ES256 JWT>`. The bundle's
 //! own destination credential (e.g. a Discord bot token resolved from a
 //! granted `secret_ref`) never rides as this hop's `Authorization` --
 //! [`FORWARD_AUTHORIZATION_HEADER`] carries it instead, so it is never
@@ -62,7 +62,8 @@ use serde::{Deserialize, Serialize};
 pub mod reason {
     /// Not a decodable JWS.
     pub const MALFORMED: &str = "malformed";
-    /// Header `alg` is not EdDSA.
+    /// Header `alg` is not ES256 (or EdDSA while the legacy window is open), or the key's
+    /// type does not match it.
     pub const ALG_MISMATCH: &str = "alg_mismatch";
     /// Signature does not verify.
     pub const BAD_SIGNATURE: &str = "bad_signature";
@@ -158,13 +159,13 @@ pub enum AssertionError {
     Rejected(&'static str),
     #[error("assertion ttl {actual}s exceeds max {max}s")]
     TtlTooLong { actual: u64, max: u64 },
-    #[error("failed to load Ed25519 signing key: {0}")]
+    #[error("failed to load ECDSA P-256 signing key: {0}")]
     InvalidSigningKey(String),
     #[error("failed to sign assertion: {0}")]
     SigningFailed(String),
 }
 
-/// This service's own Ed25519 signing key -- loaded once at process
+/// This service's own ECDSA P-256 signing key -- loaded once at process
 /// startup from an env var or a file (K8s Secret mount), never logged.
 /// `kid` must match the `kid` the same key is registered under in hub-
 /// api's JWKS for this service's machine JWT (PR #438) -- `egress_proxy`'s
@@ -175,10 +176,10 @@ pub struct AssertionSigningKey {
 }
 
 impl AssertionSigningKey {
-    /// Builds a signing key directly from PEM bytes (SPKI/PKCS8 Ed25519
+    /// Builds a signing key directly from PEM bytes (PKCS8 ECDSA P-256
     /// private key) and its `kid`.
-    pub fn from_ed25519_pem(pem: &[u8], kid: impl Into<String>) -> Result<Self, AssertionError> {
-        let encoding_key = EncodingKey::from_ed_pem(pem)
+    pub fn from_ec_pem(pem: &[u8], kid: impl Into<String>) -> Result<Self, AssertionError> {
+        let encoding_key = EncodingKey::from_ec_pem(pem)
             .map_err(|e| AssertionError::InvalidSigningKey(e.to_string()))?;
         Ok(Self {
             encoding_key,
@@ -199,21 +200,21 @@ impl AssertionSigningKey {
             let pem = std::fs::read(&path).map_err(|e| {
                 AssertionError::InvalidSigningKey(format!("reading {path_env} ({path}): {e}"))
             })?;
-            return Self::from_ed25519_pem(&pem, kid);
+            return Self::from_ec_pem(&pem, kid);
         }
         if let Ok(pem) = std::env::var(key_env) {
-            return Self::from_ed25519_pem(pem.as_bytes(), kid);
+            return Self::from_ec_pem(pem.as_bytes(), kid);
         }
         Err(AssertionError::InvalidSigningKey(format!(
             "neither {path_env} nor {key_env} is set"
         )))
     }
 
-    /// Signs `claims` as a compact EdDSA JWT, `kid`-tagged with this key's
+    /// Signs `claims` as a compact ES256 JWT, `kid`-tagged with this key's
     /// identifier -- the exact wire format [`verify_with_key`] (and
     /// `egress_proxy`'s fuller JWKS-aware verifier) expects.
     pub fn sign(&self, claims: &EgressAssertion) -> Result<String, AssertionError> {
-        let mut header = Header::new(Algorithm::EdDSA);
+        let mut header = Header::new(Algorithm::ES256);
         header.kid = Some(self.kid.clone());
         jsonwebtoken::encode(&header, claims, &self.encoding_key)
             .map_err(|e| AssertionError::SigningFailed(e.to_string()))
@@ -320,7 +321,7 @@ fn classify_decode_error(kind: &ErrorKind) -> &'static str {
     }
 }
 
-/// Verifies signature, pinned algorithm (EdDSA only), required claims,
+/// Verifies signature, pinned algorithm (ES256 only), required claims,
 /// `exp`/`iat` (bounded skew) and the max-TTL ceiling against a single
 /// already-resolved `decoding_key` -- the dependency-free primitive a
 /// JWKS-aware verifier (looking `kid` up first, and vetting the JOSE header
@@ -341,7 +342,32 @@ pub fn verify_with_key(
     decoding_key: &DecodingKey,
     max_ttl_secs: u64,
 ) -> Result<EgressAssertion, AssertionError> {
-    let mut validation = Validation::new(Algorithm::EdDSA);
+    verify_with_key_policy(token, decoding_key, max_ttl_secs, false)
+}
+
+/// [`verify_with_key`] with an explicit legacy-EdDSA policy: when
+/// `accept_legacy_eddsa` is true (`SERVICE_JWT_ACCEPT_LEGACY_EDDSA`, a bounded
+/// rollout window) an `EdDSA` token is also accepted -- but only against an
+/// Ed25519 key, and an ES256 token only against a P-256 key. Every other
+/// algorithm (`none`, HS*, RS*, ...) is `alg_mismatch` regardless.
+pub fn verify_with_key_policy(
+    token: &str,
+    decoding_key: &DecodingKey,
+    max_ttl_secs: u64,
+    accept_legacy_eddsa: bool,
+) -> Result<EgressAssertion, AssertionError> {
+    let header = jsonwebtoken::decode_header(token)
+        .map_err(|e| AssertionError::Rejected(classify_decode_error(e.kind())))?;
+    let algorithm = match header.alg {
+        Algorithm::ES256 => Algorithm::ES256,
+        Algorithm::EdDSA if accept_legacy_eddsa => Algorithm::EdDSA,
+        _ => return Err(AssertionError::Rejected(reason::ALG_MISMATCH)),
+    };
+    // Key/alg confusion guard: the resolved key must be of the family the token claims.
+    if decoding_key.family() != algorithm.family() {
+        return Err(AssertionError::Rejected(reason::ALG_MISMATCH));
+    }
+    let mut validation = Validation::new(algorithm);
     validation.leeway = ASSERTION_CLOCK_SKEW_SECONDS;
     validation.set_required_spec_claims(&["exp", "sub"]);
     validation.validate_aud = false;
@@ -518,36 +544,47 @@ mod tests {
     // generated once with `openssl genpkey -algorithm ed25519` / `openssl
     // pkey -pubout`; never used outside this test module.
     const KEY_A_PRIV_DER: &[u8] = &[
-        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 1, 204, 5, 142, 35, 153, 231, 38,
-        150, 122, 1, 218, 34, 237, 70, 125, 233, 62, 126, 103, 151, 16, 11, 238, 95, 122, 209, 74,
-        183, 9, 171, 161,
+        48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206,
+        61, 3, 1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 209, 234, 92, 37, 28, 130, 216, 139, 48, 1,
+        225, 220, 88, 158, 30, 88, 20, 126, 43, 7, 182, 151, 62, 129, 248, 115, 187, 119, 18, 12,
+        142, 93, 161, 68, 3, 66, 0, 4, 17, 138, 186, 198, 3, 136, 154, 139, 190, 114, 14, 103, 123,
+        44, 247, 26, 31, 171, 203, 86, 236, 40, 175, 97, 236, 72, 32, 22, 179, 142, 109, 144, 173,
+        115, 191, 94, 95, 104, 151, 149, 88, 212, 250, 138, 99, 63, 147, 180, 150, 85, 29, 12, 130,
+        136, 7, 86, 162, 99, 191, 4, 123, 168, 238, 207,
     ];
+    const KEY_A_X: &str = "EYq6xgOImou-cg5neyz3Gh-ry1bsKK9h7EggFrOObZA";
+    const KEY_A_Y: &str = "rXO_Xl9ol5VY1PqKYz-TtJZVHQyCiAdWomO_BHuo7s8";
+    const KEY_B_PRIV_DER: &[u8] = &[
+        48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206,
+        61, 3, 1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 20, 206, 40, 170, 137, 187, 67, 100, 72, 148,
+        97, 198, 42, 118, 251, 253, 181, 175, 151, 157, 190, 138, 70, 223, 254, 35, 143, 55, 95,
+        203, 51, 94, 161, 68, 3, 66, 0, 4, 98, 209, 209, 125, 68, 215, 236, 61, 124, 80, 33, 30,
+        98, 233, 193, 159, 144, 225, 217, 28, 227, 168, 123, 73, 147, 40, 25, 77, 49, 223, 224,
+        212, 176, 207, 231, 228, 170, 8, 191, 45, 65, 72, 8, 104, 108, 95, 236, 201, 40, 162, 111,
+        235, 130, 235, 181, 132, 203, 245, 163, 102, 27, 85, 90, 176,
+    ];
+    /// Arbitrary bytes an attacker might HMAC with (alg-confusion tests).
     const KEY_A_PUB_RAW: &[u8] = &[
         169, 90, 255, 23, 51, 151, 156, 147, 56, 247, 214, 168, 76, 160, 67, 99, 211, 238, 208, 5,
         69, 236, 245, 115, 4, 81, 1, 42, 23, 107, 4, 187,
     ];
-    const KEY_B_PRIV_DER: &[u8] = &[
-        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 145, 56, 92, 35, 32, 192, 103,
-        161, 66, 249, 233, 0, 174, 22, 45, 100, 136, 104, 59, 129, 251, 81, 20, 214, 221, 250, 219,
-        227, 139, 109, 70, 185,
-    ];
 
     fn signing_key() -> AssertionSigningKey {
         AssertionSigningKey {
-            encoding_key: EncodingKey::from_ed_der(KEY_A_PRIV_DER),
+            encoding_key: EncodingKey::from_ec_der(KEY_A_PRIV_DER),
             kid: "k1".to_string(),
         }
     }
 
     fn forged_signing_key() -> AssertionSigningKey {
         AssertionSigningKey {
-            encoding_key: EncodingKey::from_ed_der(KEY_B_PRIV_DER),
+            encoding_key: EncodingKey::from_ec_der(KEY_B_PRIV_DER),
             kid: "k1".to_string(),
         }
     }
 
     fn decoding_key() -> DecodingKey {
-        DecodingKey::from_ed_der(KEY_A_PUB_RAW)
+        DecodingKey::from_ec_components(KEY_A_X, KEY_A_Y).expect("test P-256 key")
     }
 
     fn base_assertion() -> EgressAssertion {
@@ -869,8 +906,8 @@ mod tests {
     }
 
     #[test]
-    fn from_ed25519_pem_loads_and_signs_verifiably() {
-        let key = AssertionSigningKey::from_ed25519_pem(key_a_pem().as_bytes(), "k1")
+    fn from_ec_pem_loads_and_signs_verifiably() {
+        let key = AssertionSigningKey::from_ec_pem(key_a_pem().as_bytes(), "k1")
             .expect("valid pem loads");
         let token = key.sign(&base_assertion()).expect("sign");
         verify_with_key(&token, &decoding_key(), ASSERTION_MAX_TTL_SECONDS)
@@ -878,8 +915,8 @@ mod tests {
     }
 
     #[test]
-    fn from_ed25519_pem_rejects_garbage() {
-        let err = AssertionSigningKey::from_ed25519_pem(b"not a pem", "k1")
+    fn from_ec_pem_rejects_garbage() {
+        let err = AssertionSigningKey::from_ec_pem(b"not a pem", "k1")
             .err()
             .expect("must fail");
         assert!(matches!(err, AssertionError::InvalidSigningKey(_)));
@@ -999,8 +1036,8 @@ mod tests {
         let message = format!("{}.{}", b64(header), b64(claims));
         let signature = jsonwebtoken::crypto::sign(
             message.as_bytes(),
-            &EncodingKey::from_ed_der(KEY_A_PRIV_DER),
-            Algorithm::EdDSA,
+            &EncodingKey::from_ec_der(KEY_A_PRIV_DER),
+            Algorithm::ES256,
         )
         .expect("sign");
         format!("{message}.{signature}")
@@ -1017,7 +1054,7 @@ mod tests {
     }
 
     fn verify_raw(claims: &Value) -> Result<EgressAssertion, AssertionError> {
-        let header = json!({"alg": "EdDSA", "kid": "k1"});
+        let header = json!({"alg": "ES256", "kid": "k1"});
         verify_with_key(
             &raw_token(&header, claims),
             &decoding_key(),
@@ -1140,7 +1177,7 @@ mod tests {
     #[test]
     fn alg_none_and_alg_confusion_are_refused_by_the_pinned_validation() {
         // The JWKS-aware verifier vets the header first (see `egress_proxy`);
-        // this proves the primitive itself is independently pinned to EdDSA.
+        // this proves the primitive itself is independently pinned to ES256.
         let claims = good_claims();
         let none = format!("{}.{}.", b64(&json!({"alg": "none"})), b64(&claims));
         assert!(matches!(
@@ -1165,6 +1202,67 @@ mod tests {
                 "{alg:?}"
             );
         }
+    }
+
+    /// Sign `claims` as EdDSA with a throwaway-free fixed Ed25519 test key (legacy window only).
+    fn legacy_eddsa_token() -> (String, DecodingKey) {
+        const ED_PRIV: &[u8] = &[
+            48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 1, 204, 5, 142, 35, 153, 231,
+            38, 150, 122, 1, 218, 34, 237, 70, 125, 233, 62, 126, 103, 151, 16, 11, 238, 95, 122,
+            209, 74, 183, 9, 171, 161,
+        ];
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some("old".into());
+        let token = jsonwebtoken::encode(
+            &header,
+            &base_assertion(),
+            &EncodingKey::from_ed_der(ED_PRIV),
+        )
+        .expect("encode");
+        (token, DecodingKey::from_ed_der(KEY_A_PUB_RAW))
+    }
+
+    #[test]
+    fn legacy_eddsa_assertion_rejected_unless_policy_allows() {
+        let (token, ed_key) = legacy_eddsa_token();
+        // Default (strict) policy: EdDSA is an alg mismatch, whatever key is offered.
+        assert_eq!(
+            rejected_reason(verify_with_key(&token, &ed_key, ASSERTION_MAX_TTL_SECONDS)),
+            reason::ALG_MISMATCH
+        );
+        assert_eq!(
+            rejected_reason(verify_with_key_policy(
+                &token,
+                &decoding_key(),
+                ASSERTION_MAX_TTL_SECONDS,
+                false
+            )),
+            reason::ALG_MISMATCH
+        );
+        // Window open: accepted against the Ed25519 key, never against the P-256 key.
+        verify_with_key_policy(&token, &ed_key, ASSERTION_MAX_TTL_SECONDS, true)
+            .expect("legacy window accepts EdDSA with an Ed25519 key");
+        assert_eq!(
+            rejected_reason(verify_with_key_policy(
+                &token,
+                &decoding_key(),
+                ASSERTION_MAX_TTL_SECONDS,
+                true
+            )),
+            reason::ALG_MISMATCH,
+            "key/alg confusion"
+        );
+        // An ES256 token against the Ed25519 key is refused even with the window open.
+        let es = signing_key().sign(&base_assertion()).expect("signs");
+        assert_eq!(
+            rejected_reason(verify_with_key_policy(
+                &es,
+                &ed_key,
+                ASSERTION_MAX_TTL_SECONDS,
+                true
+            )),
+            reason::ALG_MISMATCH
+        );
     }
 
     #[test]

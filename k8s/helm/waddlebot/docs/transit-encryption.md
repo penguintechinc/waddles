@@ -1,0 +1,70 @@
+# In-cluster transit encryption (v3.0.x)
+
+Pod-to-pod traffic for the hops below is encrypted and the server identity is verified. Per-tenant transit
+separation (distinct keys per tenant) is v4.0.x; v3.0.x uses one shared CA/key set for all tenants.
+
+| Hop | Mechanism | Client verification |
+|---|---|---|
+| Any client -> Postgres | `ssl=on`, TLS 1.2+, `pg_hba` is `hostssl` + `hostnossl ... reject` | `PGSSLMODE=verify-full`, `PGSSLROOTCERT=/etc/waddles/transit-ca/ca.crt`, dial the FQDN |
+| Python modules -> cache Valkey | `--port 0` (no plaintext listener), TLS port 6380 only | `rediss://` + `ssl_cert_reqs=required` + `ssl_ca_certs` + `ssl_check_hostname=true` |
+| Rust / hub-api / seeder -> durable + kv Valkey | TLS only (unchanged) | CA pinned (`valkey-ca.crt`), hostname checked |
+| Any client -> SeaweedFS S3 | `weed server -s3.cert.file/-s3.key.file` | `https://<fqdn>:8333`, CA pinned (`BUNDLE_BUCKET_CA_FILE` / `S3_CA_FILE` / `AWS_CA_BUNDLE`), system roots off |
+
+## Algorithms and performance
+
+TLS 1.3 preferred, 1.2 minimum. ECDSA P-256 certificates signed `ecdsa-with-SHA256`, P-256 key exchange,
+AES-128-GCM or ChaCha20-Poly1305 only (Postgres `ssl_ciphers`, Valkey `tls-ciphers`/`tls-ciphersuites`; SeaweedFS uses
+the Go defaults, which are a superset of those suites). Session resumption is on (Valkey `tls-session-caching yes`,
+OpenSSL/Go tickets elsewhere). Every client keeps a pooled keep-alive connection (sqlx / SQLAlchemy / pydal pools,
+redis-py `ConnectionPool`, redis-rs connection manager, `object_store` / boto3 HTTP pools), so a handshake happens per
+connection, never per request.
+
+## One trust root (F8)
+
+- **cert-manager on** (`global.transitTls.certManager.enabled`: dal2alpha, beta, gamma, production): a dedicated trust domain that
+  exists only in the release namespace -- a SelfSigned Issuer, an ECDSA P-256 root CA Certificate (`<release>-transit-ca`, critical
+  nameConstraints permitting only the data-store FQDNs) and a namespaced CA Issuer `<release>-transit`. It signs only the Postgres,
+  SeaweedFS and Valkey server certs (`<release>-postgres-tls`, `<release>-seaweedfs-tls`, `<release>-valkey-tls`; ECDSA P-256, 90d
+  auto-renew, explicit FQDN SANs, one per durable-Valkey pod). **Data-store clients trust ONLY this root** (they mount just its
+  `tls.crt`, never the key): a leaf signed by the cluster-wide `waddlebot-internal-ca` -- even one carrying the Postgres/Valkey SAN
+  -- is rejected. The hub-api HTTPS and gRPC/host-API mTLS certs keep `waddlebot-internal-ca`, a separate trust domain. No
+  certificate this chart renders carries a wildcard SAN (`waddlebot.assertNoWildcardSan` fails the render; grpc-tls and
+  host-api-tls list explicit FQDNs). Requires cert-manager with the NameConstraints feature gate (the internal root already
+  needs it). `global.valkeyTls.externalSecret` is ignored (cert-manager owns `<release>-valkey-tls`).
+  **Recommended hardening:** the cluster-wide `waddlebot-internal-ca` ClusterIssuer can still be referenced from any namespace;
+  install cert-manager approver-policy and allow only the `waddlebot` namespace (and the grpc/host-api/hub-api SAN sets) to use it.
+- **cert-manager off** (local, values-alpha): `templates/transit-tls-secret.yaml` self-generates one ECDSA CA plus Postgres and
+  SeaweedFS leaves into `<release>-transit-tls` (CA key never stored; pre-install/pre-upgrade hook so the migration Jobs can
+  mount it); the legacy Valkey cert keeps its own (now ECDSA) CA. beta/gamma/production never use this path.
+
+Clients dial `infra-postgres.waddlebot.svc.cluster.local` etc. (FQDN), never short names.
+
+Rotation: cert-manager renews 15 days before expiry; pods pick up the new leaf on restart (Postgres/SeaweedFS/Valkey read
+the files at start). In the self-generated mode delete the Secret and `helm upgrade`.
+
+## First rollout onto an existing release (dal2alpha)
+
+The db-migrate Job is a pre-upgrade hook and now connects with `verify-full`, but the running Postgres is still the
+pre-TLS pod until the upgrade applies. For the one upgrade that introduces TLS, bring Postgres up first:
+`helm upgrade ... --set pipeline.migrationsJob.enabled=false --set pipeline.hubAdminSeedJob.enabled=false`, wait for
+`postgres`, `redis` and `seaweedfs` to roll (they restart: `Recreate`), then run the normal `helm upgrade`. Fresh installs
+need nothing special. With cert-manager on, the old self-generated `<release>-valkey-tls` Secret is replaced by the cert-manager one of the same
+name: delete the old Secret before the upgrade (cert-manager will not adopt a Secret it did not create).
+
+## Failure behaviour
+
+No plaintext fallback exists: `verify-full`, `hostnossl reject`, `--port 0`, `https://` endpoints with the CA pinned. A
+bad CA path or PEM is a hard error in the Rust S3 clients; a hostname/CA mismatch fails the handshake.
+
+## Not covered here
+
+SeaweedFS master/filer/volume ports (admin UI `9333`), hub-api HTTP/gRPC client-cert mutual auth, PostHog, Ollama/Qdrant and
+the OTel collector are tracked separately in the pod transit-encryption audit (F3, F4, F6, F7 gRPC part, F9).
+
+## Optional: stronger protection via the CNI
+
+Customers who need protection beyond application-level TLS (for example every pod hop, including the ones above not yet
+covered, plus defence in depth against a mis-issued certificate) can additionally enable CNI transparent encryption, for
+instance Cilium WireGuard (`encryption.enabled=true`, `encryption.type=wireguard`). It is independent of this chart,
+encrypts node-to-node pod traffic with per-node-pair keys, and is the cluster-operator's choice; same-node traffic does
+not cross the wire.

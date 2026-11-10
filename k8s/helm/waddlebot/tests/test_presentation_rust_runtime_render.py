@@ -93,7 +93,7 @@ def test_rust_runtime_is_the_only_presentation_deployment(rust_docs: list[dict[s
     assert len(services) == 1
     container = deployments[0]["spec"]["template"]["spec"]["containers"][0]
     assert "svc-presentation-rust" in container["image"]
-    assert "PUSH_JWKS_URL" in _env(deployments[0])  # Rust-only config surface
+    assert "PUSH_JWKS_ENDPOINT" in _env(deployments[0])  # Rust-only config surface
 
 
 def test_svc_action_can_push_overlays_when_rust_is_on(rust_docs: list[dict[str, Any]]) -> None:
@@ -101,7 +101,9 @@ def test_svc_action_can_push_overlays_when_rust_is_on(rust_docs: list[dict[str, 
     action = _by_name(rust_docs, "Deployment", "-svc-action-rust")
     assert len(action) == 1
     env = _env(action[0])
-    assert env["SERVICE_JWT_TOKEN_ENDPOINT"].endswith("/internal/service-token")
+    # The mint is gRPC now: hub-api's internal gRPC port over TLS, never the REST port/path.
+    assert env["SERVICE_JWT_TOKEN_ENDPOINT"].startswith("https://")
+    assert "/internal/service-token" not in env["SERVICE_JWT_TOKEN_ENDPOINT"]
     assert env["SERVICE_JWT_SA_TOKEN_PATH"]
     policies = _by_name(rust_docs, "CiliumNetworkPolicy", "-svc-action-presentation-egress")
     assert len(policies) == 1

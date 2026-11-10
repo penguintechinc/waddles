@@ -1,0 +1,42 @@
+slug: wheel
+title: Wheel Spin (SuperPenguinTV WheelSpin)
+version: 1.0.0
+upstream:
+  - WheelSpin/WheelService.cs
+  - WheelSpinNotifications/WheelSpinComplete.cs
+  - wwwroot/wheel.html
+  - wwwroot/js/wheel.js
+  - wwwroot/img/wheel.svg
+  - wwwroot/img/wheelBackground.svg
+consumes:
+  - platform: twitch
+    event_types: [chat.message]
+    filters:
+      command_prefix: ['!wheel']
+  - platform: discord
+    event_types: [chat.message]
+    filters:
+      command_prefix: ['!wheel']
+permissions:
+  - id: storage.kv
+    justification: wheel definitions, the wheel on screen, the recorded spin outcome (replay-safe) and the viewer-wheel signup list
+  - id: identity.resolve
+    justification: resolve the invoking actor to a community user uuid (uuid-only, no names) for spin replay keys and viewer-wheel entries
+  - id: chat.send:discord
+    justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)
+  - id: chat.send:twitch
+    justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)
+  - id: overlay.media
+    justification: pushes wheel show/spin/hide messages (alert-box surface, superpenguin.wheel.* types) to the community browser-source overlay
+    params:
+      allowed_hosts: [overlay.penguincloud.io]
+      max_duration_seconds: 15
+requested_tools: []
+overlay_origins:
+  index.html: PenguinTwitchBot/wwwroot/wheel.html (adapted)
+  wheel.css: original
+  wheel-overlay.js: PenguinTwitchBot/wwwroot/js/wheel.js (adapted)
+  img/wheel.svg: PenguinTwitchBot/wwwroot/img/wheel.svg
+  img/wheelBackground.svg: PenguinTwitchBot/wwwroot/img/wheelBackground.svg
+  vendor/spin-wheel-iife.js: third-party:spin-wheel@5.0.2 (MIT)
+  vendor/spin-wheel.LICENSE.txt: third-party:spin-wheel@5.0.2 (MIT)

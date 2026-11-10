@@ -254,7 +254,7 @@ exposure is the 15-minute access-token TTL.
 
 * The ~30 module-local `jwt.decode` call sites (listed in JWT Verification) do not go through
   `verify_jwt_token`, so they do not consult the revocation store; migrate them onto it.
-* Service EdDSA tokens (`service_jwt`) and external IdP ID tokens are not session tokens and are
+* Service ES256 tokens (`service_jwt`) and external IdP ID tokens are not session tokens and are
   not covered; the machine-token TTL ceiling (1 h) bounds them.
 * Revocation is as durable as the store; see the Valkey-flush note above.
 * `jti` is not yet mandatory on platform tokens (see Access tokens).
