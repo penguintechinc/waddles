@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::common::FrameErr;
 
-const HELIX: &str = "https://api.twitch.tv/helix";
+pub(crate) const HELIX: &str = "https://api.twitch.tv/helix";
 /// Slot: bearer token (header value after `Bearer `).
 pub const SLOT_TOKEN: &str = "{{TWITCH_TOKEN}}";
 /// Slot: application client id header.
@@ -51,14 +51,14 @@ pub const IGNORED_TARGET_KEYS: &[&str] = &[
     "target",
 ];
 
-fn auth_headers() -> Vec<(String, String)> {
+pub(crate) fn auth_headers() -> Vec<(String, String)> {
     vec![
         ("Authorization".to_string(), format!("Bearer {SLOT_TOKEN}")),
         ("Client-Id".to_string(), SLOT_CLIENT_ID.to_string()),
     ]
 }
 
-fn base_refs() -> Vec<(String, String)> {
+pub(crate) fn base_refs() -> Vec<(String, String)> {
     vec![
         (SLOT_TOKEN.to_string(), "token".to_string()),
         (SLOT_CLIENT_ID.to_string(), "client_id".to_string()),
@@ -114,17 +114,44 @@ fn clean_text(payload: &Value) -> Result<String, FrameErr> {
     Ok(raw.to_string())
 }
 
+/// Appends every object key and string leaf of `v` to `out`, space-separated.
+fn collect_strings(v: &Value, out: &mut String) {
+    match v {
+        Value::String(s) => {
+            out.push(' ');
+            out.push_str(s);
+        }
+        Value::Array(a) => a.iter().for_each(|x| collect_strings(x, out)),
+        Value::Object(m) => {
+            for (k, x) in m {
+                out.push(' ');
+                out.push_str(k);
+                collect_strings(x, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Defence in depth on the finished template: the only `{{` / `}}` pairs
 /// present must be the slots this module declares in `secret_refs`.
 fn verify_slots(t: &Tpl) -> Result<(), FrameErr> {
     let mut all = format!("{} {:?}", t.url, t.headers);
     if let Some(b) = &t.body {
-        all.push_str(&String::from_utf8_lossy(b));
+        // Scan JSON string leaves/keys, not raw bytes: nested objects legitimately end in `}}`.
+        match serde_json::from_slice::<Value>(b) {
+            Ok(v) => collect_strings(&v, &mut all),
+            Err(_) => all.push_str(&String::from_utf8_lossy(b)),
+        }
     }
+    // Host-duty slots (callback, secret, segment id) carry no `secret-refs` handle: the host
+    // fills them from its own state, so they are expected placeholders too.
     let expected: usize = t
         .secret_refs
         .iter()
-        .map(|(slot, _)| all.matches(slot.as_str()).count())
+        .map(|(slot, _)| slot.as_str())
+        .chain(crate::eventsub_sub::DUTY_SLOTS.iter().copied())
+        .map(|slot| all.matches(slot).count())
         .sum();
     if all.matches("{{").count() != expected || all.matches("}}").count() != expected {
         return Err(FrameErr::Malformed(
@@ -134,7 +161,7 @@ fn verify_slots(t: &Tpl) -> Result<(), FrameErr> {
     Ok(())
 }
 
-fn id_arg(payload: &Value, key: &str, digits_only: bool) -> Result<String, FrameErr> {
+pub(crate) fn id_arg(payload: &Value, key: &str, digits_only: bool) -> Result<String, FrameErr> {
     let v = payload
         .get(key)
         .and_then(Value::as_str)
@@ -156,6 +183,13 @@ fn id_arg(payload: &Value, key: &str, digits_only: bool) -> Result<String, Frame
     }
 }
 
+/// Auth headers plus `Content-Type: application/json`.
+pub(crate) fn json_headers() -> Vec<(String, String)> {
+    let mut h = auth_headers();
+    h.push(("Content-Type".to_string(), "application/json".to_string()));
+    h
+}
+
 /// Builds the template for `kind`. `target_source_id` must be non-empty: the
 /// host resolves and pins the destination from it (never from this output).
 fn build_unchecked(
@@ -175,12 +209,11 @@ fn build_unchecked(
             "payload-json is not an object".to_string(),
         ));
     }
-    let json_headers = || {
-        let mut h = auth_headers();
-        h.push(("Content-Type".to_string(), "application/json".to_string()));
-        h
-    };
     match kind {
+        k if crate::moderation::KINDS.contains(&k) => crate::moderation::build(k, &payload),
+        k if crate::eventsub_sub::KINDS.contains(&k) => crate::eventsub_sub::build(k, &payload),
+        k if crate::schedule::KINDS.contains(&k) => crate::schedule::build(k, &payload),
+        crate::clips::CREATE_KIND => crate::clips::build_create(&payload),
         "chat.send" => {
             let text = clean_text(&payload)?;
             let body = json!({

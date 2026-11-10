@@ -218,11 +218,13 @@ fn conn_key_orders_by_platform_then_ids() {
         platform: "twitch",
         community_id: 1,
         connection_id: 9,
+        lane: Default::default(),
     };
     let b = ConnKey {
         platform: "twitch",
         community_id: 2,
         connection_id: 1,
+        lane: Default::default(),
     };
     assert!(a < b);
 }

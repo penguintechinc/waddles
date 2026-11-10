@@ -10,6 +10,9 @@ REAL platform connectors built from `bundles/rust/{twitch,youtube,spectrum}` (re
     cd ../spectrum && cargo component build --release --target wasm32-wasip2 --locked
     cp target/wasm32-wasip2/release/waddle_bundle_spectrum_service.wasm ../../../core/connector_e2e/tests/fixtures/spectrum_connector.wasm
 
+    cd ../kick && cargo component build --release --target wasm32-wasip2 --locked
+    cp target/wasm32-wasip2/release/waddle_bundle_kick_service.wasm ../../../core/connector_e2e/tests/fixtures/kick_connector.wasm
+
 (spectrum is the inbound-only `connector` world: no outbound tools.)
 
 The discord connector is `core/bundle_executor/tests/fixtures/discord_connector.wasm`.

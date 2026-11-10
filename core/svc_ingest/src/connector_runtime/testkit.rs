@@ -59,6 +59,7 @@ pub(crate) fn desired_ws(
             platform,
             community_id: community,
             connection_id: conn,
+            lane: Default::default(),
         },
         tenant_id: 1,
         plan: TransportPlan::Ws(Box::new(ws_config(platform, port, source_key))),
@@ -97,6 +98,7 @@ pub(crate) fn desired_webhook(
             platform: "twitch",
             community_id: community,
             connection_id: conn,
+            lane: Default::default(),
         },
         tenant_id: 1,
         plan: TransportPlan::Webhook(Box::new(WebhookPlan {

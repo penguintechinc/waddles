@@ -115,12 +115,12 @@ const APP_HDRS: [(&str, &str); 3] = [
     ("Client-Id", "{{TWITCH_APP_CLIENT_ID}}"),
     ("Content-Type", "application/json"),
 ];
-const APP_REFS: [(&str, &str); 5] = [
+// The callback + secret are HOST-DUTY slots (filled by the claiming `DutyHook` from the work
+// item's `callbackKey`), so the connector declares no `secret-refs` handle for them.
+const APP_REFS: [(&str, &str); 3] = [
     ("{{TWITCH_APP_TOKEN}}", "app.token"),
     ("{{TWITCH_APP_CLIENT_ID}}", "app.client_id"),
     ("{{TWITCH_APP_BROADCASTER_ID}}", "app.broadcaster_id"),
-    ("{{TWITCH_EVENTSUB_CALLBACK}}", "app.eventsub_callback"),
-    ("{{TWITCH_EVENTSUB_SECRET}}", "app.eventsub_secret"),
 ];
 
 fn eventsub_body() -> serde_json::Value {
@@ -158,7 +158,7 @@ fn twitch_eventsub_kinds_are_app_scoped_and_key_restricted() {
     // A callback / secret literal is not a slot position: refused (host-held only).
     let mut body = eventsub_body();
     body["transport"]["secret"] = serde_json::json!("hunter2");
-    let lit = tpl("POST", url, &APP_HDRS, Some(body), &APP_REFS[..4]);
+    let lit = tpl("POST", url, &APP_HDRS, Some(body), &APP_REFS);
     assert_eq!(
         check(&p, "eventsub.create", &lit),
         Err(TemplateError::SlotMisplaced)
@@ -563,13 +563,129 @@ fn youtube_deletes_are_bodyless_with_an_exact_id_query() {
     }
 }
 
+const KK_HDRS: [(&str, &str); 2] = [
+    ("Authorization", "Bearer {{KICK_TOKEN}}"),
+    ("Content-Type", "application/json"),
+];
+const KK_TOKEN_REF: [(&str, &str); 1] = [("{{KICK_TOKEN}}", "token")];
+const KK_MOD_REFS: [(&str, &str); 2] = [
+    ("{{KICK_TOKEN}}", "token"),
+    ("{{KICK_BROADCASTER_ID}}", "broadcaster_id"),
+];
+const KK_BANS: &str = "https://api.kick.com/public/v1/moderation/bans";
+
 #[test]
-fn kick_is_declared_but_has_no_kinds_so_everything_is_refused() {
+fn kick_registers_chat_and_moderation_ops_and_refuses_everything_else() {
     let p = PlatformPolicy::kick();
     assert_eq!(p.platform, "kick");
-    assert!(p.kinds.is_empty() && p.slots.is_empty());
-    assert!(p.kind("chat.send").is_none());
-    assert!(registered_op("kick", "chat.send").is_none());
+    assert_eq!(p.hosts, ["api.kick.com"]);
+    for op in ["chat.send", "mod.ban", "mod.timeout", "mod.unban"] {
+        assert_eq!(registered_op("kick", op), Some(op), "{op}");
+    }
+    // chat.delete: a bundle-supplied global message id is not bound to the community channel.
+    for op in [
+        "chat.delete",
+        "dm.send",
+        "mod.kick",
+        "role.add",
+        "eventsub.create",
+        "",
+    ] {
+        assert!(registered_op("kick", op).is_none(), "{op}");
+    }
+}
+
+#[test]
+fn kick_moderation_broadcaster_must_be_the_host_slot_and_the_target_a_literal_integer() {
+    let p = PlatformPolicy::kick();
+    for (op, method) in [
+        ("mod.ban", "POST"),
+        ("mod.timeout", "POST"),
+        ("mod.unban", "DELETE"),
+    ] {
+        let good = tpl(
+            method,
+            KK_BANS,
+            &KK_HDRS,
+            Some(
+                serde_json::json!({"broadcaster_user_id": "{{KICK_BROADCASTER_ID}}", "user_id": 42}),
+            ),
+            &KK_MOD_REFS,
+        );
+        assert_eq!(check(&p, op, &good), Ok(()), "{op}");
+        // A literal broadcaster id (aiming the token at another channel) is refused.
+        for bc in [serde_json::json!(999), serde_json::json!("999")] {
+            let aimed = tpl(
+                method,
+                KK_BANS,
+                &KK_HDRS,
+                Some(serde_json::json!({"broadcaster_user_id": bc, "user_id": 42})),
+                &KK_TOKEN_REF,
+            );
+            assert!(check(&p, op, &aimed).is_err(), "{op}: {bc}");
+        }
+        // Keys outside the documented set are refused.
+        let extra = tpl(
+            method,
+            KK_BANS,
+            &KK_HDRS,
+            Some(
+                serde_json::json!({"broadcaster_user_id": "{{KICK_BROADCASTER_ID}}", "user_id": 42, "moderator_id": 1}),
+            ),
+            &KK_MOD_REFS,
+        );
+        assert_eq!(
+            check(&p, op, &extra),
+            Err(TemplateError::BodyKeyNotAllowed),
+            "{op}"
+        );
+    }
+}
+
+/// Real path: verify -> render (Int slot becomes a JSON integer) -> protected-target check.
+#[test]
+fn kick_moderation_renders_integers_and_refuses_the_broadcaster_as_target() {
+    use crate::connector::sender_exec::subst::{check_distinct_body_ints, render, SlotValue};
+    use std::collections::BTreeMap;
+    let p = PlatformPolicy::kick();
+    let kind = p.kind("mod.ban").unwrap();
+    let render_for = |target: serde_json::Value| {
+        let t = tpl(
+            "POST",
+            KK_BANS,
+            &KK_HDRS,
+            Some(
+                serde_json::json!({"broadcaster_user_id": "{{KICK_BROADCASTER_ID}}", "user_id": target, "duration": 10}),
+            ),
+            &KK_MOD_REFS,
+        );
+        let v = verify(&p, kind, &t).unwrap();
+        let mut values = BTreeMap::new();
+        values.insert(
+            p.slot_index("KICK_BROADCASTER_ID").unwrap(),
+            SlotValue::new("777".to_string()),
+        );
+        values.insert(
+            p.slot_index("KICK_TOKEN").unwrap(),
+            SlotValue::new("tok".to_string()),
+        );
+        render(&p, &v, &values, &BTreeMap::new())
+    };
+    let ok = render_for(serde_json::json!(42)).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(ok.body.as_ref().unwrap()).unwrap();
+    assert_eq!(body["broadcaster_user_id"], 777);
+    assert!(body["broadcaster_user_id"].is_u64());
+    assert_eq!(
+        check_distinct_body_ints(&kind.distinct_body_ints, ok.body.as_deref()),
+        Ok(())
+    );
+    for bad in [serde_json::json!(777), serde_json::json!("42")] {
+        let r = render_for(bad.clone()).unwrap();
+        assert!(
+            check_distinct_body_ints(&kind.distinct_body_ints, r.body.as_deref()).is_err(),
+            "{bad}"
+        );
+    }
 }
 
 #[test]
@@ -633,6 +749,11 @@ fn the_policy_table_matches_the_relay_op_parity_fixture() {
     .unwrap();
     // Ops with their own typed producer paths (not `relay.send`-reachable by name).
     let typed = [
+        // Twitch channel ops reached through the tool host handlers, not `relay.send` by name.
+        "clip.create",
+        "schedule.create",
+        "schedule.update",
+        "schedule.delete",
         "role.add",
         "role.remove",
         "event.create",
@@ -662,7 +783,7 @@ fn the_policy_table_matches_the_relay_op_parity_fixture() {
     }
     assert_eq!(
         checked,
-        10 + 15 + 6,
+        10 + 15 + 6 + 4,
         "denominator: ops compared with the fixture"
     );
 }
