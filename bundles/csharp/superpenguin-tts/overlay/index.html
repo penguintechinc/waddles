@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TTS overlay</title>
+    <!--
+      Browser-source page for the superpenguin-tts app bundle (audio only, nothing is drawn). Add it to OBS as a browser source
+      with "Control audio via OBS" enabled:
+        <host that serves this directory>/index.html?origin=https://<presentation-host>&code=<overlay code>&key=<view key>
+      Replaces PenguinTwitchBot's TTS player service (MIT, github.com/Psychoboy/PenguinTwitchBot), which had no overlay page.
+      No third-party network resources are loaded.
+    -->
+</head>
+<body>
+    <div id="status" role="status" hidden></div>
+    <script src="tts-overlay.js"></script>
+</body>
+</html>

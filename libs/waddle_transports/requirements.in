@@ -7,6 +7,10 @@
 # requires h2 importable.
 httpx[http2]>=0.27.0,<0.28.0
 
+# gRPC client for hub-api's ServiceAuthService (machine-JWT mint, `service_jwt_client`).
+grpcio>=1.83.0,<1.84.0
+protobuf>=6.33.5,<7.0.0
+
 # Valkey/Redis -- message_queue transport's valkey sub_type.
 redis>=5.0.1
 

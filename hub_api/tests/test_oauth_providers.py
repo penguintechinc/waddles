@@ -134,7 +134,7 @@ class TestMakePkcePair:
 class TestBuildAuthorizeUrl:
     """`build_authorize_url()` -- one test per provider's params, plus Kick's PKCE requirement."""
 
-    @pytest.mark.parametrize("name", ["youtube", "spotify", "twitch", "discord", "slack"])
+    @pytest.mark.parametrize("name", ["twitch", "discord", "slack"])
     def test_non_pkce_provider_url_has_core_params(
         self, monkeypatch: pytest.MonkeyPatch, name: str
     ) -> None:
@@ -156,11 +156,47 @@ class TestBuildAuthorizeUrl:
 
     def test_youtube_extra_params_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch, "youtube")
-        url = op.build_authorize_url("youtube", redirect_uri="https://hub.example/cb", state="s")
+        _, challenge = op.make_pkce_pair()
+        url = op.build_authorize_url(
+            "youtube", redirect_uri="https://hub.example/cb", state="s", code_challenge=challenge
+        )
         parsed = httpx.URL(url)
         assert parsed.params["access_type"] == "offline"
         assert parsed.params["prompt"] == "consent"
         assert parsed.params["include_granted_scopes"] == "true"
+
+    def test_pkce_provider_set_is_pinned(self) -> None:
+        """Every provider documented to support PKCE uses it; the rest are explicit non-PKCE."""
+        pkce = {name for name, spec in op.PROVIDERS.items() if spec.uses_pkce}
+        assert pkce == {"youtube", "spotify", "kick"}
+
+    @pytest.mark.parametrize("name", ["youtube", "spotify", "kick"])
+    def test_pkce_provider_sends_s256_challenge_derived_from_the_verifier(
+        self, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        import base64
+        import hashlib
+
+        _set_creds(monkeypatch, name)
+        verifier, challenge = op.make_pkce_pair()
+        digest = hashlib.sha256(verifier.encode("ascii")).digest()
+        assert challenge == base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+        url = op.build_authorize_url(
+            name, redirect_uri="https://hub.example/cb", state="s", code_challenge=challenge
+        )
+        parsed = httpx.URL(url)
+        assert parsed.params["code_challenge"] == challenge
+        assert parsed.params["code_challenge_method"] == "S256"
+        assert verifier not in url  # only the derived challenge ever travels via the browser
+
+    @pytest.mark.parametrize("name", ["youtube", "spotify"])
+    def test_pkce_provider_without_challenge_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        _set_creds(monkeypatch, name)
+        with pytest.raises(ValueError, match="code_challenge"):
+            op.build_authorize_url(name, redirect_uri="https://hub.example/cb", state="s")
 
     def test_kick_with_code_challenge_sets_pkce_params(
         self, monkeypatch: pytest.MonkeyPatch
@@ -275,6 +311,24 @@ class TestExchangeCodeSuccess:
         assert result.refresh_token is None
         # spotify's response has no "scope" field -- falls back to the requested scopes.
         assert result.scopes == list(op.get_provider("spotify").scopes)
+
+    @pytest.mark.parametrize("name", ["youtube", "spotify"])
+    async def test_spotify_and_youtube_exchange_sends_the_verifier(
+        self, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        _set_creds(monkeypatch, name)
+        seen_body: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_body.update(dict(httpx.QueryParams(request.content.decode())))
+            return httpx.Response(200, json={"access_token": "tok", "token_type": "Bearer"})
+
+        _install_transport(monkeypatch, handler)
+        await op.exchange_code(
+            name, code="c", redirect_uri="https://hub.example/cb", code_verifier="v" * 43
+        )
+        assert seen_body["code_verifier"] == "v" * 43
+        assert seen_body["grant_type"] == "authorization_code"
 
     async def test_kick_pkce_code_verifier_sent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch, "kick")

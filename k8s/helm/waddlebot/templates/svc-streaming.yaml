@@ -148,6 +148,7 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_streaming") | nindent 8 }}
+{{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         - name: MODULE_NAME
           value: "svc-streaming"
         - name: PIPELINE_STAGE
@@ -192,7 +193,7 @@ spec:
         - name: RECORDINGS_BUCKET
           value: "recordings"
         - name: S3_ENDPOINT
-          value: {{ printf "http://%s:%v" .Values.infrastructure.seaweedfs.service.name .Values.infrastructure.seaweedfs.service.s3Port | quote }}
+          value: {{ include "waddlebot.transitTls.s3Endpoint" . | quote }}
         - name: S3_ACCESS_KEY
           valueFrom:
             secretKeyRef:
@@ -227,6 +228,8 @@ spec:
           {{- end }}
           {{- toYaml (dict "requests" .Values.pipeline.svcStreaming.resources.requests "limits" $limits) | nindent 10 }}
         volumeMounts:
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
+        {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         # HLS segment scratch space -- tmpfs-backed (Memory medium) since segments are
         # short-lived and this keeps transcode I/O off the node's disk. Not a durable store;
         # finished recordings are pushed to MinIO (RECORDINGS_BUCKET above), not read back
@@ -241,6 +244,8 @@ spec:
           mountPath: /dev/dri
         {{- end }}
       volumes:
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
+      {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       - name: stream-data
         emptyDir:
           medium: Memory

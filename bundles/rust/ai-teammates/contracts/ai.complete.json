@@ -1,0 +1,46 @@
+{
+  "tool": "ai.complete",
+  "target": "waddles.core.service.ai",
+  "access": "read",
+  "source": "bundles/contracts/ai-tools.v1.json (PR #1120)",
+  "request": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 3500
+      },
+      "system": {
+        "type": "string",
+        "maxLength": 1200
+      },
+      "max_tokens": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 512
+      },
+      "temperature": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 2
+      }
+    },
+    "required": [
+      "prompt"
+    ],
+    "additionalProperties": false
+  },
+  "response": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "maxLength": 2000
+      }
+    },
+    "required": [
+      "text"
+    ]
+  }
+}

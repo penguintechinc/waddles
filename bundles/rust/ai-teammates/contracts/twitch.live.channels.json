@@ -1,0 +1,113 @@
+{
+  "tool": "twitch.live.channels",
+  "target": "waddles.core.service.twitch",
+  "access": "read",
+  "source": "bundles/contracts/live-channels-contract.v1.json (PR #1119)",
+  "request": {
+    "type": "object",
+    "properties": {
+      "scope": {
+        "type": "string",
+        "enum": [
+          "community",
+          "linked"
+        ]
+      },
+      "cursor": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100
+      }
+    },
+    "required": [
+      "scope"
+    ],
+    "additionalProperties": false
+  },
+  "response": {
+    "type": "object",
+    "properties": {
+      "channels": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "channel_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "display_name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "is_live": {
+              "type": "boolean"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 300
+            },
+            "category": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 100
+            },
+            "viewers": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "started_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 40
+            },
+            "thumbnail_ref": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 512
+            }
+          },
+          "required": [
+            "channel_ref",
+            "display_name",
+            "is_live"
+          ]
+        }
+      },
+      "cursor": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "maxLength": 512
+      },
+      "as_of": {
+        "type": "string",
+        "maxLength": 40
+      }
+    },
+    "required": [
+      "channels",
+      "as_of"
+    ]
+  }
+}

@@ -509,7 +509,7 @@ login, single amd64 build, gated Trivy scan on the local image):
 | Container image builds + Trivy, supply-chain, notify | not examined (also skipped by `if:`) | required |
 | CodeQL | skipped on release PRs, not examined | required |
 | connector-e2e / tool-invoke-e2e (real-media/real-path) | skipped on release PRs | required |
-| bundle-executor `flag_on_command_e2e` (docker + componentize-py; `e2e-main-tier` feature, `rust-bundle-executor-e2e.yml`) | not run (coverage job excludes it; unit coverage >=90% still required) | required (always runs, no path filter) |
+| svc-bundles-executor `flag_on_command_e2e` (docker + componentize-py; `e2e-main-tier` feature, `rust-bundle-executor-e2e.yml`) | not run (coverage job excludes it; unit coverage >=90% still required) | required (always runs, no path filter) |
 | kind install/upgrade, upgrade-path | main only (push to main) | required |
 
 - The release -> `main` PR runs EVERYTHING; it is always user-approved, never auto-merged.

@@ -145,6 +145,53 @@ def test_overlay_media_duration_over_ceiling_rejected() -> None:
     assert exc.value.reason == "invalid_overlay_duration"
 
 
+def _overlay(params: dict) -> list[dict]:
+    return [{"id": "overlay.media", "justification": "Pushes game overlay.", "params": params}]
+
+
+def test_overlay_media_data_only_accepted() -> None:
+    manifest = _parse(_overlay({"mode": "data"}))
+    assert manifest.permission_declarations[0].params == {"mode": "data"}  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"allowed_hosts": ["youtube.com"]},
+        {"max_duration_seconds": 10},
+        {"allowed_hosts": [], "max_duration_seconds": 0},
+    ],
+)
+def test_overlay_media_data_only_with_media_fields_rejected(extra: dict) -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(_overlay({"mode": "data", **extra}))
+    assert exc.value.reason == "invalid_overlay_data_mode"
+
+
+def test_overlay_media_explicit_media_mode_still_strict() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(_overlay({"mode": "media"}))
+    assert exc.value.reason == "invalid_overlay_hosts"
+    ok = _parse(
+        _overlay({"mode": "media", "allowed_hosts": ["youtube.com"], "max_duration_seconds": 5})
+    )
+    assert ok.permission_declarations[0].params["mode"] == "media"  # type: ignore[attr-defined]
+
+
+def test_overlay_media_unknown_mode_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(
+            _overlay({"mode": "both", "allowed_hosts": ["youtube.com"], "max_duration_seconds": 5})
+        )
+    assert exc.value.reason == "invalid_overlay_mode"
+
+
+def test_overlay_media_no_mode_without_hosts_still_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(_overlay({}))
+    assert exc.value.reason == "invalid_overlay_hosts"
+
+
 def test_reputation_write_delta_bounds_enforced() -> None:
     with pytest.raises(ManifestV2Error) as exc:
         _parse(
@@ -705,3 +752,53 @@ def test_malformed_tool_call_declaration_is_unknown_permission() -> None:
     with pytest.raises(ManifestV2Error) as exc:
         _parse([{"id": "tool.call:not-an-app:get_balance", "justification": "x"}])
     assert "unknown_permission" in str(exc.value)
+
+
+@pytest.mark.parametrize("permission_id", ["economy.transfer_from", "economy.app_mint"])
+def test_elevated_economy_permissions_are_dangerous_and_need_justification(
+    permission_id: str,
+) -> None:
+    from services.bundle_permission_catalog import resolve_risk
+
+    assert resolve_risk(permission_id) == "dangerous"
+    manifest = _parse([{"id": permission_id, "justification": "Steal game rules."}])
+    assert manifest.permission_declarations[0].risk == "dangerous"  # type: ignore[attr-defined]
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse([{"id": permission_id}])
+    assert exc.value.reason == "missing_justification"
+
+
+@pytest.mark.parametrize("permission_id", ["economy.transfer_from", "economy.app_mint"])
+def test_elevated_economy_permissions_accept_only_bounded_cap_params(
+    permission_id: str,
+) -> None:
+    manifest = _parse(
+        [
+            {
+                "id": permission_id,
+                "justification": "Game.",
+                "params": {"max_per_op": 50, "max_per_day": 500, "max_per_target_per_day": 100},
+            }
+        ]
+    )
+    assert manifest.permission_declarations[0].params["max_per_op"] == 50  # type: ignore[attr-defined]
+    for bad in (
+        {"max_per_op": 0},
+        {"max_per_op": 10_001},
+        {"max_per_day": True},
+        {"max_amount": 5},
+    ):
+        with pytest.raises(ManifestV2Error) as exc:
+            _parse([{"id": permission_id, "justification": "x", "params": bad}])
+        assert exc.value.reason == "invalid_economy_bound", bad
+
+
+def test_elevated_permission_ids_mirror_the_rust_catalog() -> None:
+    from pathlib import Path
+
+    rust = Path(__file__).resolve().parents[2] / "core/bundle_capability_gate/src/permission.rs"
+    if not rust.exists():
+        pytest.skip("Rust catalog source not present in this checkout")
+    text = rust.read_text()
+    for pid in ("economy.transfer_from", "economy.app_mint"):
+        assert f'=> "{pid}"' in text, pid

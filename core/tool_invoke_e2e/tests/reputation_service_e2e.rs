@@ -393,6 +393,8 @@ fn row(app: &str, version_id: i64, wasm: &[u8], tools: ToolManifestInfo) -> Acti
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
         declared_capabilities: Vec::new(),
+        egress: Vec::new(),
+        egress_rps: None,
         tools,
     }
 }
@@ -428,6 +430,7 @@ fn rows() -> Vec<ActiveBundleRow> {
                         name: (*n).to_string(),
                         write: *w,
                         required_scope: s.map(str::to_string),
+                        host_op: None,
                     })
                     .collect(),
                 requested: Vec::new(),

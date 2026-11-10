@@ -1,0 +1,35 @@
+slug: bonustickets
+title: Bonus Tickets and Add Active (SuperPenguinTV TicketGames)
+version: 1.0.0
+upstream:
+  - TicketGames/BonusTickets.cs
+  - TicketGames/AddActive.cs
+consumes:
+  - platform: twitch
+    event_types: [chat.message]
+  - platform: discord
+    event_types: [chat.message]
+permissions:
+  - id: storage.kv
+    justification: per-day claim marker, per-event outcome record, addactive pool and settlement state and the sharded active-chatter roster
+  - id: identity.resolve
+    justification: resolve the invoking actor to a community user uuid (uuid-only, no names)
+  - id: chat.send:discord
+    justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)
+  - id: chat.send:twitch
+    justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)
+  - id: tool.call:waddles.core.service.economy:points_view
+    justification: Use the economy service points_view contract for the currency alias; the app owns only award policy
+    params:
+      write: false
+  - id: tool.call:waddles.core.service.economy:adjust_balance
+    justification: Use the economy service adjust_balance contract to credit bonus awards; the service owns caps and idempotency
+    params:
+      write: true
+requested_tools:
+  - tool: points_view
+    access: read
+    target_app_id: waddles.core.service.economy
+  - tool: adjust_balance
+    access: write
+    target_app_id: waddles.core.service.economy
