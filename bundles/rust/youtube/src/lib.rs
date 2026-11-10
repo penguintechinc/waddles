@@ -7,6 +7,7 @@
 #[allow(warnings)]
 mod bindings;
 pub mod logic;
+pub mod moderation;
 
 #[cfg(target_arch = "wasm32")]
 mod component {

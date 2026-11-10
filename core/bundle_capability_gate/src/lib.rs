@@ -45,6 +45,7 @@ pub mod grant;
 pub mod instance_policy;
 pub mod membership;
 pub mod permission;
+pub mod platform_ops;
 pub mod platform_table;
 pub mod quota;
 pub mod resource;

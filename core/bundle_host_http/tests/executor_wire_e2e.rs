@@ -36,6 +36,10 @@ use bundle_executor::error::ExecutorError;
 use bundle_executor::heartbeat::Heartbeat;
 use bundle_executor::invoke::{ComponentSource, Executor};
 use bundle_executor::wire::run_connection;
+use bundle_host_http::credentials::{
+    BoxFut, CallScope, ConnField, ConnectionCredentials, CredentialError, CredentialSources,
+    MemoryQuotaStore, QuotaGuard, QuotaPolicy,
+};
 use bundle_host_http::egress::{
     boxed, EgressGuard, EgressLimits, EgressRuleRow, EgressRuleSource, HttpTransport, StaticFlag,
     TransportRequest, TransportResponse,
@@ -190,6 +194,13 @@ struct Session {
 /// fixture, then one `transform` invoke per `specs` entry (each a guest
 /// `http.send`), answering every host-call with `guard.send`.
 async fn run_session(guard: Arc<EgressGuard>, specs: &[&str]) -> Session {
+    run_session_scoped(guard, specs, CallScope::default()).await
+}
+
+/// [`run_session`] for an invocation with a host-verified `(tenant, community)`
+/// scope: the Load frame carries it and every host-call is answered through
+/// `send_scoped` exactly as a stage's `handle_http` does.
+async fn run_session_scoped(guard: Arc<EgressGuard>, specs: &[&str], scope: CallScope) -> Session {
     let (executor_io, stage_io) = tokio::io::duplex(1024 * 1024);
     let executor = Arc::new(Executor::new(&executor_config(), FixtureSource).expect("executor"));
 
@@ -215,7 +226,7 @@ async fn run_session(guard: Arc<EgressGuard>, specs: &[&str]) -> Session {
     });
 
     let specs: Vec<String> = specs.iter().map(|s| (*s).to_string()).collect();
-    let stage = tokio::spawn(stage_side(stage_io, guard, specs, fixture_digest()));
+    let stage = tokio::spawn(stage_side(stage_io, guard, specs, fixture_digest(), scope));
 
     let session = tokio::time::timeout(Duration::from_secs(120), stage)
         .await
@@ -233,6 +244,7 @@ async fn stage_side<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     guard: Arc<EgressGuard>,
     specs: Vec<String>,
     digest: String,
+    scope: CallScope,
 ) -> Session {
     let hello = read_frame(&mut io).await.expect("hello");
     write_frame(
@@ -259,7 +271,7 @@ async fn stage_side<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
             1000,
             Message::Load(LoadBody {
                 tenant_id: 1,
-                community_id: 0,
+                community_id: i32::try_from(scope.community_id).expect("test community id"),
                 app_id: APP_ID.to_string(),
                 version: "1".to_string(),
                 digest: digest.clone(),
@@ -319,7 +331,7 @@ async fn stage_side<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
                     wire_args.push(call.args.clone());
                     // The REAL guard answers, exactly as a stage's
                     // `handle_http` does after its permission gate.
-                    let body = match guard.send(&call.app_id, &call.args).await {
+                    let body = match guard.send_scoped(&call.app_id, &scope, &call.args).await {
                         Ok(value) => HostResultBody {
                             result: Some(value),
                             error: None,
@@ -543,4 +555,196 @@ async fn a_guard_denial_reaches_the_guest_as_an_error_and_sends_nothing() {
         transport.requests.lock().unwrap().is_empty(),
         "a denied request must never reach the transport"
     );
+}
+
+// ---- host-seams-2: per-community credentials through the real executor ----
+
+/// Grants `conn-token` -> the invoking community's `spotify` connection.
+struct GrantCatalog;
+
+impl EgressRuleSource for GrantCatalog {
+    fn resolve(&self, app_id: &str) -> Option<EgressRuleRow> {
+        (app_id == APP_ID).then(|| {
+            EgressRuleRow::from_legacy_patterns(
+                vec![(
+                    HOST.to_string(),
+                    vec!["GET".to_string(), "POST".to_string()],
+                )],
+                None,
+                HashMap::from([("conn-token".to_string(), "connection:spotify".to_string())]),
+            )
+        })
+    }
+}
+
+/// Community 5 and 6 each have their own Spotify connection; 7 has none.
+struct TwoCommunities;
+
+impl ConnectionCredentials for TwoCommunities {
+    fn credential<'a>(
+        &'a self,
+        community_id: i64,
+        provider: &'a str,
+        _field: &'a ConnField,
+    ) -> BoxFut<'a, Result<String, CredentialError>> {
+        let hit = match (community_id, provider) {
+            (5, "spotify") => Some("Bearer conn-tok-community-five"),
+            (6, "spotify") => Some("Bearer conn-tok-community-six"),
+            _ => None,
+        };
+        Box::pin(async move { hit.map(str::to_string).ok_or(CredentialError::NotConnected) })
+    }
+}
+
+fn guard_with_credentials(
+    transport: &Arc<ScriptedTransport>,
+    sources: CredentialSources,
+) -> Arc<EgressGuard> {
+    Arc::new(
+        EgressGuard::new(
+            Arc::clone(transport) as Arc<dyn HttpTransport>,
+            EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: 100,
+                rate_limit_burst: 100,
+                timeout: Duration::from_secs(5),
+                max_redirects: 3,
+                max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
+            },
+            Arc::new(GrantCatalog),
+            prometheus::IntCounterVec::new(
+                prometheus::Opts::new("e2e_cred_egress_denied_total", "e2e"),
+                &["app_id", "reason"],
+            )
+            .expect("static metric opts"),
+            boxed(StaticFlag(true)),
+        )
+        .with_credentials(sources),
+    )
+}
+
+fn conn_spec() -> String {
+    format!("GET https://{HOST}/v1/me - Authorization=conn-token")
+}
+
+/// Real WASM guest -> real executor -> real guard: each community's own
+/// connection credential is injected host-side into the upstream request, the
+/// guest's wire args and outputs never contain it (even when the upstream
+/// reflects it), and an unconnected community is a guest-visible denial that
+/// sends nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_community_gets_its_own_connection_credential_and_the_guest_never_sees_it() {
+    for (community, token) in [
+        (5_i64, "Bearer conn-tok-community-five"),
+        (6, "Bearer conn-tok-community-six"),
+    ] {
+        let transport = ScriptedTransport::with(vec![response(
+            200,
+            &[("x-echo", token)],
+            token.as_bytes(),
+            false,
+        )]);
+        let sources = CredentialSources {
+            connections: Some(Arc::new(TwoCommunities)),
+            ..Default::default()
+        };
+        let scope = CallScope {
+            tenant_id: 1,
+            community_id: community,
+        };
+        let session = run_session_scoped(
+            guard_with_credentials(&transport, sources),
+            &[&conn_spec()],
+            scope,
+        )
+        .await;
+
+        let requests = transport.requests.lock().unwrap();
+        assert!(
+            requests[0]
+                .headers
+                .iter()
+                .any(|(n, v)| n == "Authorization" && v == token),
+            "community {community}: {:?}",
+            requests[0].headers
+        );
+        let raw = token.trim_start_matches("Bearer ");
+        assert!(!session.wire_args[0].to_string().contains(raw));
+        assert!(
+            !session.outputs[0].contains(raw),
+            "credential leaked to the guest: {}",
+            session.outputs[0]
+        );
+        assert!(session.outputs[0].starts_with("ok;status=200;"));
+    }
+
+    // Community 7 has no connection: guest-visible denial, nothing sent.
+    let transport = ScriptedTransport::with(vec![]);
+    let sources = CredentialSources {
+        connections: Some(Arc::new(TwoCommunities)),
+        ..Default::default()
+    };
+    let session = run_session_scoped(
+        guard_with_credentials(&transport, sources),
+        &[&conn_spec()],
+        CallScope {
+            tenant_id: 1,
+            community_id: 7,
+        },
+    )
+    .await;
+    assert!(
+        session.outputs[0].starts_with("err;denied;"),
+        "{}",
+        session.outputs[0]
+    );
+    assert_eq!(session.outputs[0], "err;denied;secret_unresolved");
+    assert!(transport.requests.lock().unwrap().is_empty());
+}
+
+/// A metered shared credential: the third call in the budget is refused with
+/// an explicit quota error before anything reaches the network.
+#[tokio::test(flavor = "multi_thread")]
+async fn quota_exhaustion_reaches_the_guest_as_an_explicit_denial() {
+    let transport = ScriptedTransport::with(vec![
+        response(200, &[], b"{}", false),
+        response(200, &[], b"{}", false),
+    ]);
+    let quota = QuotaGuard::new(
+        HashMap::from([(
+            "conn-token".to_string(),
+            QuotaPolicy {
+                per_day: Some(2),
+                ..Default::default()
+            },
+        )]),
+        Arc::new(MemoryQuotaStore::default()),
+    )
+    .expect("valid policy");
+    let sources = CredentialSources {
+        connections: Some(Arc::new(TwoCommunities)),
+        quota: Some(Arc::new(quota)),
+        ..Default::default()
+    };
+    let spec = conn_spec();
+    let session = run_session_scoped(
+        guard_with_credentials(&transport, sources),
+        &[&spec, &spec, &spec],
+        CallScope {
+            tenant_id: 1,
+            community_id: 5,
+        },
+    )
+    .await;
+    assert!(session.outputs[0].starts_with("ok;"));
+    assert!(session.outputs[1].starts_with("ok;"));
+    assert!(
+        session.outputs[2].starts_with("err;denied;"),
+        "{}",
+        session.outputs[2]
+    );
+    assert_eq!(session.outputs[2], "err;denied;quota_exhausted");
+    assert_eq!(transport.requests.lock().unwrap().len(), 2);
 }

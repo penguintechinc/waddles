@@ -1,7 +1,7 @@
 [project]
 name = "waddle-bundle-chatguard"
-version = "1.0.1"
-description = "`!chatguard` / `!permit` -- configurable spam and content filters (caps, symbols/emotes, links, blacklist words) that delete the offending message (Discord) and warn; moderators are exempt."
+version = "1.1.0"
+description = "`!chatguard` / `!permit` / cross-platform `!ban`/`!timeout`/`!kick`... moderation -- configurable spam and content filters (caps, symbols/emotes, links, blacklist words) that delete the offending message (Discord) and warn; moderators are exempt."
 requires-python = ">=3.13"
 dependencies = []
 

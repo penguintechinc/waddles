@@ -1,0 +1,32 @@
+[package]
+name = "bundle-host-credentials"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Production adapters for bundle http.send secret refs (host-seams-2): community platform-connection credentials over the hub-api connection resolver (with a (community, provider) -> connection directory), and the Valkey-backed atomic shared-credential quota store. A same-repo path dependency of svc_process/svc_action; the traits and guard logic live in bundle-host-http."
+
+[lib]
+name = "bundle_host_credentials"
+path = "src/lib.rs"
+
+# Exact-version pins only; every version mirrors the pin the consuming
+# services already resolve (rules/critical-rules.md Dependency Pinning).
+[dependencies]
+bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
+connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
+redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "script"] }
+tokio = { version = "=1.53.3", features = ["rt", "sync", "time"] }
+serde_json = "=1.0.151"
+base64 = "=0.22.1"
+tracing = "=0.1.44"
+
+[dev-dependencies]
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

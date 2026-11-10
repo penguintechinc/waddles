@@ -1,0 +1,72 @@
+// ServiceAuthService: internal gRPC contract for the machine-JWT bootstrap.
+//
+// Replaces hub-api's REST `POST /internal/service-token` (mint) and
+// `GET /internal/service-jwks.json` (JWKS) -- gRPC for ALL intra-cluster
+// calls. Both RPCs are the bootstrap of every other internal RPC, so neither
+// can require a machine JWT the caller does not have yet:
+//
+//   * MintServiceToken authenticates with the caller's projected Kubernetes
+//     ServiceAccount token, sent as `authorization: Bearer <sa-token>` request
+//     metadata over the TLS 1.3 channel. hub-api validates it with the k8s
+//     TokenReview API (audience-bound) and maps the ServiceAccount to an
+//     allow-listed service identity -- the exact credential and checks the
+//     REST route used, so the security level is unchanged. When the server is
+//     started with a client CA (`GRPC_TLS_CLIENT_CA_PATH`) the channel is
+//     additionally mutually authenticated (mTLS / X.509-SVID), layered on top.
+//   * GetServiceJwks serves public keys only and needs no credential (same as
+//     the REST route it replaces).
+syntax = "proto3";
+
+package waddles.hub.internal.v1;
+
+option go_package = "github.com/penguintechinc/waddles/gen/go/waddles/hub/internal/v1;hubinternalv1";
+
+service ServiceAuthService {
+  // Exchanges the caller's projected ServiceAccount token (metadata) for a
+  // short-lived machine JWT. Any bootstrap failure is UNAUTHENTICATED without
+  // saying which check failed.
+  rpc MintServiceToken(MintServiceTokenRequest) returns (MintServiceTokenResponse);
+
+  // Public verification keys (JWK set) for machine-JWT verifiers.
+  rpc GetServiceJwks(GetServiceJwksRequest) returns (GetServiceJwksResponse);
+}
+
+message MintServiceTokenRequest {
+  // "v1" (or unset, treated as v1); anything else is UNIMPLEMENTED.
+  string api_version = 1;
+  // Requested scope, e.g. "connections:resolve". Required.
+  string scope = 2;
+  // Community binding (non-negative). Required for community-bound scopes,
+  // forbidden for every other scope. `optional` keeps "unset" distinct from 0
+  // (community 0 is a valid tenant-wide sentinel).
+  optional int64 community_id = 3;
+  // Connection binding (non-negative); only with a community-bound scope.
+  optional int64 connection_id = 4;
+}
+
+message MintServiceTokenResponse {
+  string token = 1;
+  // Seconds until the token expires.
+  uint64 expires_in = 2;
+}
+
+message GetServiceJwksRequest {
+  string api_version = 1;
+}
+
+message GetServiceJwksResponse {
+  repeated Jwk keys = 1;
+}
+
+// One public key (RFC 7517 subset). Ed25519 today: kty=OKP, crv=Ed25519, `x`
+// the base64url raw key. ECDSA P-256 keys carry kty=EC, crv=P-256, alg=ES256 and
+// both `x` and `y`, so the signing algorithm can change without a wire change.
+message Jwk {
+  string kid = 1;
+  string kty = 2;
+  string crv = 3;
+  string alg = 4;
+  string use = 5;
+  string x = 6;
+  string y = 7;
+}

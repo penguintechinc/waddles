@@ -1,4 +1,4 @@
-"""Shared gRPC server interceptor for EdDSA machine-JWT service-to-service auth.
+"""Shared gRPC server interceptor for ES256 machine-JWT service-to-service auth.
 
 Replaces the per-module copy-pasted ``grpc_auth_interceptor.py`` files that
 verified an HS256 JWT against the fleet-wide ``MODULE_SECRET_KEY``. A module
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class ServiceJwtAuthInterceptor(grpc.aio.ServerInterceptor):
-    """Verifies the EdDSA bearer JWT, scope and caller identity before any handler runs.
+    """Verifies the ES256 bearer JWT, scope and caller identity before any handler runs.
 
     ``required_scope`` should be unique per module (e.g. ``action:discord:invoke``) so a
     token minted for one module is useless at another (cross-module replay). ``allowed_callers``

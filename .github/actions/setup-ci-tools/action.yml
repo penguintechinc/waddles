@@ -1,0 +1,92 @@
+name: Setup CI tools (gh, docker CLI, buildx)
+description: >-
+  Idempotently installs the `gh` CLI, the `docker` CLI and the buildx plugin
+  when they are missing. The self-hosted dal2-alpha-ci ARC runner image
+  (actions-runner) ships none of them (the dind sidecar provides only the
+  daemon at DOCKER_HOST). Every download is a pinned exact version and its
+  SHA256 is verified; a mismatch fails the step. Interim shim: the durable fix
+  is a custom runner image that bakes these tools in.
+
+inputs:
+  gh:
+    description: Install the gh CLI if missing ('true'/'false')
+    required: false
+    default: 'true'
+  docker:
+    description: Install the docker CLI + buildx plugin if missing ('true'/'false')
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Install gh / docker CLI / buildx if missing
+      shell: bash
+      env:
+        INSTALL_GH: ${{ inputs.gh }}
+        INSTALL_DOCKER: ${{ inputs.docker }}
+        GH_VERSION: '2.103.3'
+        GH_SHA256_AMD64: '4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d'
+        GH_SHA256_ARM64: 'ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63'
+        DOCKER_VERSION: '29.9.3'
+        DOCKER_SHA256_AMD64: '3fb5d1f13014c18cc54945bc177c58a9056a482dada031e17d12cf2e6922c973'
+        DOCKER_SHA256_ARM64: '1b27fd739378ef938401e81ce5afb73b7ad7432d4f598814a9ff5f826bb464d2'
+        BUILDX_VERSION: '0.38.2'
+        BUILDX_SHA256_AMD64: '7992ec09413b80ff57ba4e081f56fc833d7bac1d5e71143c6c809e7e6065f6d6'
+        BUILDX_SHA256_ARM64: '46c0f334772de3cb0b341cc415caf7339fb5cfc8b8438ebcb5a10e7f23800d36'
+      run: | # zizmor: ignore[github-env]
+        set -euo pipefail
+
+        case "$(uname -m)" in
+          x86_64|amd64)  gh_arch=amd64; docker_arch=x86_64;  sfx=AMD64 ;;
+          aarch64|arm64) gh_arch=arm64; docker_arch=aarch64; sfx=ARM64 ;;
+          *) echo "::error::unsupported architecture $(uname -m)"; exit 1 ;;
+        esac
+
+        bindir="${RUNNER_TOOL_CACHE:-$HOME/.local}/setup-ci-tools/bin"
+        mkdir -p "$bindir"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+
+        # fetch <url> <expected-sha256> <dest>: download then verify; mismatch is fatal.
+        fetch() {
+          curl -fsSL --retry 3 --retry-delay 2 -o "$3" "$1"
+          actual="$(sha256sum "$3" | cut -d' ' -f1)"
+          if [ "$actual" != "$2" ]; then
+            echo "::error::SHA256 mismatch for $1 (expected $2, got $actual)"
+            exit 1
+          fi
+        }
+
+        if [ "$INSTALL_GH" = "true" ] && ! command -v gh >/dev/null 2>&1 && [ ! -x "$bindir/gh" ]; then
+          sum_var="GH_SHA256_${sfx}"
+          pkg="gh_${GH_VERSION}_linux_${gh_arch}"
+          fetch "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${pkg}.tar.gz" "${!sum_var}" "$work/gh.tgz"
+          tar -xzf "$work/gh.tgz" -C "$work" "${pkg}/bin/gh"
+          install -m 0755 "$work/${pkg}/bin/gh" "$bindir/gh"
+        fi
+
+        if [ "$INSTALL_DOCKER" = "true" ]; then
+          if ! command -v docker >/dev/null 2>&1 && [ ! -x "$bindir/docker" ]; then
+            sum_var="DOCKER_SHA256_${sfx}"
+            fetch "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_VERSION}.tgz" "${!sum_var}" "$work/docker.tgz"
+            tar -xzf "$work/docker.tgz" -C "$work" docker/docker
+            install -m 0755 "$work/docker/docker" "$bindir/docker"
+          fi
+          plugin_dir="$HOME/.docker/cli-plugins"
+          if [ ! -x "$plugin_dir/docker-buildx" ] && [ ! -x /usr/libexec/docker/cli-plugins/docker-buildx ] \
+             && [ ! -x /usr/local/lib/docker/cli-plugins/docker-buildx ]; then
+            sum_var="BUILDX_SHA256_${sfx}"
+            mkdir -p "$plugin_dir"
+            fetch "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-${gh_arch}" "${!sum_var}" "$work/buildx"
+            install -m 0755 "$work/buildx" "$plugin_dir/docker-buildx"
+          fi
+        fi
+
+        echo "$bindir" >> "$GITHUB_PATH"
+        export PATH="$bindir:$PATH"
+        [ "$INSTALL_GH" != "true" ] || gh --version | head -1
+        if [ "$INSTALL_DOCKER" = "true" ]; then
+          docker --version
+          docker buildx version
+        fi

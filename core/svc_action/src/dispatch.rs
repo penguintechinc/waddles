@@ -508,6 +508,7 @@ pub async fn invoke_dispatch(
         origin_channel_id: env.event.source.as_ref().and_then(|s| s.channel_id.clone()),
         origin_platform: env.event.source.as_ref().map(|s| s.platform.clone()),
         origin_guild_id: discord_event_guild(env),
+        origin_user_id: event_actor_id(env),
         tenant_id,
         community_id,
         // Resolved once at startup from the active-set row that loaded
@@ -555,6 +556,23 @@ pub async fn invoke_dispatch(
             detail: None,
         }),
     }
+}
+
+/// The platform account id of the AUTHOR of a delivered chat message: the explicit
+/// `payload.author_id` ingest sets, and ONLY for `message` events -- the one event type a user
+/// authored. Every other event type (EventSub follows/raids/subs/moderator changes, member
+/// updates, ...) names its SUBJECT in `user_id`, who is not acting; resolving it as the actor
+/// would let an event's subject borrow a moderator's tool scopes. No author => no actor.
+/// The only input of host-side actor resolution.
+fn event_actor_id(env: &penguin_spine::StageEnvelope) -> Option<crate::capabilities::ActorId> {
+    if env.event.event_type != "message" {
+        return None;
+    }
+    env.event
+        .payload
+        .get("author_id")
+        .and_then(|v| v.as_str())
+        .and_then(crate::capabilities::ActorId::new)
 }
 
 /// The guild snowflake a Discord gateway event came from (`payload.guild_id` of a `discord`
@@ -2110,6 +2128,8 @@ mod tests {
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
             declared_capabilities: Vec::new(),
+            egress: Vec::new(),
+            egress_rps: None,
             tools: Default::default(),
         }]);
         DispatchDeps {
@@ -2565,6 +2585,8 @@ mod tests {
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                egress: Vec::new(),
+                egress_rps: None,
                 tools: Default::default(),
             }]);
         assert_eq!(
@@ -3969,6 +3991,42 @@ mod tests {
             "trace": null, "binding": {"kid": "k1", "mac": "0".repeat(64)}
         }))
         .expect("test envelope")
+    }
+
+    #[test]
+    fn the_actor_is_only_the_explicit_author_of_a_message_event() {
+        let with_type = |t: &str, payload: serde_json::Value| {
+            let mut e = env_with("twitch", payload);
+            e.event.event_type = t.to_string();
+            event_actor_id(&e).map(|a| a.expose().to_string())
+        };
+        let both = serde_json::json!({"author_id": "500", "user_id": "500"});
+        assert_eq!(with_type("message", both).as_deref(), Some("500"));
+        // `user_id` alone (an EventSub subject, e.g. a new moderator or a raider) is no author.
+        assert_eq!(
+            with_type("message", serde_json::json!({"user_id": "500"})),
+            None
+        );
+        // Non-message event types never resolve an actor, even with an author_id present.
+        for t in [
+            "channel.raid",
+            "channel.moderator.add",
+            "guild.member.update",
+            "channel.follow",
+        ] {
+            assert_eq!(
+                with_type(t, serde_json::json!({"author_id": "500", "user_id": "500"})),
+                None,
+                "{t}"
+            );
+        }
+        for bad in [
+            serde_json::json!({"author_id": ""}),
+            serde_json::json!({"author_id": 5}),
+            serde_json::json!({"author_id": "a\nb"}),
+        ] {
+            assert_eq!(with_type("message", bad.clone()), None, "{bad}");
+        }
     }
 
     #[test]

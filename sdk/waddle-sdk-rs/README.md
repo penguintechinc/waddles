@@ -21,6 +21,7 @@ facade, no compatibility obligation to a prior API. See
 | `flags` | `%flags` | `Tier` enum, `enabled`/`tier` |
 | `log` | `log` | `Level`, `Fields` builder, `write` |
 | `clock` | `clock` | `now_millis`/`now_rfc3339`/`monotonic_nanos`, host-testable `elapsed_ms` |
+| `command` | -- | Shared `!cmd [sub-module] [verb] args` / `--opt value` parser, durations, mentions, `$(name)` placeholders; golden-vector parity with Python -- see `docs/sdk-rs.md` |
 | `stage` | `process-stage`/`action-stage` | `ProcessStage`/`ActionStage` traits + [`export_stage!`] macro |
 | `bindings_glue` | -- | `wasm32`-only: the single `wit_bindgen::generate!` call + WIT<->idiomatic conversions |
 

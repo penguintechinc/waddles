@@ -34,6 +34,9 @@ public static class CooldownGuard
     public static bool TryAcquire(IKvClient kv, string scope, string userId, uint cooldownSeconds)
     {
         var key = BuildKey(scope, userId);
+        // NOTE: kv is live on release (dedicated Valkey, `storage.kv` permission required). The `Denied` tolerance
+        // below remains for bundles that do not request `storage.kv`; money games should use
+        // `State.StateCooldown` instead, which fails loud.
         try
         {
             if (kv.Get(key) is not null)
@@ -52,5 +55,7 @@ public static class CooldownGuard
         }
     }
 
-    private static string BuildKey(string scope, string userId) => $"{KeyPrefix}:{scope}:{userId}";
+    // Host kv keys allow only [A-Za-z0-9_.-] (a ':' is a namespace-escape syntax error the host rejects), so the
+    // separator is '.' and the user id is hashed (stable, key-safe, never a raw actor id in a key).
+    private static string BuildKey(string scope, string userId) => State.StateKey.Of(KeyPrefix, scope, State.StateKey.Hash(userId));
 }

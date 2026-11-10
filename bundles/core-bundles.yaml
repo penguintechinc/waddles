@@ -703,11 +703,12 @@ bundles:
       - tenant_slug: global
         community_id: null
   # Wix integration (#485): `!wix` membership status/link over the Wix REST API (GET), with
-  # default-off plan-role / event-sync modules (need webhook connector + table-access grant).
+  # default-off plan-role / event-sync modules driven by the Wix webhook connector, calling the Discord
+  # service tools (tool.call grants => stage-next-tools world).
   - app_id: waddles.core.integration.wix
-    version: "1.0.2"
+    version: "1.1.0"
     language: python
-    wit_world: stage-next
+    wit_world: stage-next-tools
     source_dir: python/wix
     manifest_path: wix.manifest.yaml
     artifact_path: wix.wasm
@@ -1446,9 +1447,9 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.chatguard
-    version: "1.0.1"
+    version: "1.1.0"
     language: python
-    wit_world: stage-next
+    wit_world: stage-next-tools
     source_dir: python/chatguard
     manifest_path: chatguard.manifest.yaml
     artifact_path: chatguard.wasm
@@ -1468,6 +1469,21 @@ bundles:
     source_dir: rust/reputation
     manifest_path: reputation.manifest.yaml
     artifact_path: reputation.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
+  # Catalog bundle `ai` (P0b): AI SERVICE (Rust, always-on `kind: service`, world stage-tools).
+  # Tools ai.complete/ai.classify over host ai.generate; ai.rag.* fail loud until the host
+  # exposes a RAG capability. Built by rust-bundle-builder like reputation above.
+  - app_id: waddles.core.service.ai
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-tools
+    kind: service
+    source_dir: rust/ai
+    manifest_path: ai.manifest.yaml
+    artifact_path: ai.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null
@@ -1539,10 +1555,11 @@ bundles:
       - tenant_slug: global
         community_id: null
 
-  # Wix webhook connector (Rust `kind: service`, inbound-only, `connector-tools` world, egress []).
-  # Verified by svc-ingest Scheme::WixJwt; the cutover flag waddles.connector-wix defaults OFF.
+  # Wix connector (Rust `kind: service`, `connector-tools` world): inbound webhooks (verified by svc-ingest
+  # Scheme::WixJwt) + outbound `wix.event.*` Events V3 tools (host-executed templates; creds host-side).
+  # The cutover flag waddles.connector-wix defaults OFF.
   - app_id: waddles.core.service.wix
-    version: "1.0.1"
+    version: "1.1.0"
     language: rust
     wit_world: connector-tools
     kind: service
@@ -1567,6 +1584,16 @@ bundles:
       - tenant_slug: global
         community_id: null
 
+  # Twitch clips APP bundle (Rust, `stage-next-tools` world): `!clip`/`!clips` over the Twitch
+  # service bundle's twitch.clip.{create,get,list} tools. Needs those tools (twitch bundle) to be
+  # ACTIVATED + granted before commands work; until then create fails loud with a viewer notice.
+  - app_id: waddles.core.example.twitch-clips
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-next-tools
+    source_dir: rust/twitch-clips
+    manifest_path: twitch-clips.manifest.yaml
+    artifact_path: twitch-clips.wasm
   # SoundCloud music SERVICE (Rust `kind: service`, world stage-tools): music.soundcloud.{search,
   # track,playlist.get,resolve}. Metadata + license flags only; OAuth token is a host-side secret ref.
   - app_id: waddles.core.service.music-soundcloud
@@ -1604,6 +1631,18 @@ bundles:
     source_dir: rust/rooms
     manifest_path: rooms.manifest.yaml
     artifact_path: rooms.wasm
+
+  # Music YouTube SERVICE bundle (Rust `kind: service`, world stage-tools): common music tool
+  # contract music.youtube.{search,track,playlist.get,resolve} over the YouTube Data API v3.
+  # Built by rust-bundle-builder; credentials are host-side secret refs.
+  - app_id: waddles.core.service.music-youtube
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-tools
+    kind: service
+    source_dir: rust/music-youtube
+    manifest_path: music-youtube.manifest.yaml
+    artifact_path: music-youtube.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null
