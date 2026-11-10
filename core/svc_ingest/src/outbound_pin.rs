@@ -157,6 +157,17 @@ pub fn pin_target(platform: &str, channel: &str, origin: Option<&str>) -> Result
             }
             Ok(origin.to_string())
         }
+        // Kick: the pin is the community's bound broadcaster/chatroom id from the verified
+        // origin stamp; `channel` must equal it exactly (same charset as a YouTube chat id).
+        "kick" => {
+            if !is_youtube_chat_id(channel) || !is_youtube_chat_id(origin) {
+                return Err(PinError::InvalidChannel);
+            }
+            if channel != origin {
+                return Err(PinError::ChannelMismatch);
+            }
+            Ok(origin.to_string())
+        }
         _ => Err(PinError::UnsupportedPlatform),
     }
 }

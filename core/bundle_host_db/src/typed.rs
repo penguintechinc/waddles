@@ -50,7 +50,7 @@ use crate::scope::quote_ident;
 /// microsecond precision (`2026-01-02T01:04:05.123456Z`) -- `timestamptz`
 /// stores microseconds, so this is lossless, and fixed-width so it sorts
 /// chronologically as text too.
-const TIMESTAMPTZ_OUT_FORMAT: &str = r#"YYYY-MM-DD"T"HH24:MI:SS.US"Z""#;
+pub(crate) const TIMESTAMPTZ_OUT_FORMAT: &str = r#"YYYY-MM-DD"T"HH24:MI:SS.US"Z""#;
 
 /// The Postgres type a column actually has: a `user_ref` column is always a
 /// `uuid` in the provisioned DDL (`hub_api/services/bundle_data_ddl.py`

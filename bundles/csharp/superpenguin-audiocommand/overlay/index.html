@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Audio command overlay</title>
+    <!--
+      Browser-source page for the superpenguin-audiocommand app bundle (audio only, nothing is drawn). Add it to OBS as a browser
+      source with "Control audio via OBS" enabled:
+        <host that serves this directory>/index.html?origin=https://<presentation-host>&code=<overlay code>&key=<view key>&sounds=https://<host of your sound files>
+      Replaces PenguinTwitchBot's PlaySound sub-action page (MIT, github.com/Psychoboy/PenguinTwitchBot). No third-party network
+      resources are loaded and no audio files are bundled.
+    -->
+</head>
+<body>
+    <div id="status" role="status" hidden></div>
+    <script src="audio-overlay.js"></script>
+</body>
+</html>

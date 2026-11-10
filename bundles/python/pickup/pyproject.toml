@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-pickup"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!pickup [@user]` -> a cheesy SFW pickup line, optionally aimed at a mention. Relay only, stateless, no kv/db."
 requires-python = ">=3.13"
 dependencies = []

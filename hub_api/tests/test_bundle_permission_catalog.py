@@ -294,6 +294,8 @@ def test_malformed_tool_call_is_unknown(pid: str) -> None:
     ("family", "risk"),
     [
         ("message.edit", "dangerous"),
+        ("chat.clear", "dangerous"),
+        ("webhook.manage", "dangerous"),
         ("message.reaction", "normal"),
         ("commands.register", "dangerous"),
         ("eventsub.manage", "dangerous"),

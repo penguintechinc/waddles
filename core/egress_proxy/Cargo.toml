@@ -69,7 +69,7 @@ ipnet = "=2.11.0"
 jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs"] }
 async-trait = "=0.1.89"
 
-# hub-api-issued per-service EdDSA machine JWT verifier (PR #438,
+# hub-api-issued per-service ES256 machine JWT verifier (PR #438,
 # feature/eddsa-machine-jwt) -- authenticates every caller (svc-ingest/
 # svc-process/svc-action) before the assertion or destination is even
 # parsed. Same-repo path dependency (not a penguin-libs crate): mirrors

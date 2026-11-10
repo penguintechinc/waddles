@@ -18,7 +18,7 @@ use svc_ingest::connector::webhook::SecretError;
 use svc_ingest::connector_runtime::feed::TransportPlan;
 use svc_ingest::connector_runtime::plan::{ConnectorProfile, RuntimeEnv};
 use svc_ingest::connector_runtime::profiles::youtube::YoutubeProfile;
-use wiremock::matchers::{body_partial_json, method, path};
+use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const CHAT: &str = "Cg0KC-abc_123";
@@ -52,13 +52,14 @@ fn dest(url: &str) -> Destination {
 #[tokio::test]
 async fn real_transport_secrets_release_only_the_oauth_token_to_the_pinned_host() {
     let hub = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/internal/service-token"))
-        .and(body_partial_json(serde_json::json!({"community_id": 7})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            serde_json::json!({"token": "synthetic-machine-token", "expires_in": 3600}),
-        ))
-        .mount(&hub)
+    // The mint is gRPC: a real in-process `ServiceAuthService` answers only community 7.
+    let mint_endpoint = service_auth::test_support::MockHub::builder()
+        .mint(vec![service_auth::test_support::MintReply::when(
+            |call| call.community_id == Some(7),
+            "synthetic-machine-token",
+            3600,
+        )])
+        .start_detached()
         .await;
     Mock::given(method("POST"))
         .and(path(
@@ -76,7 +77,7 @@ async fn real_transport_secrets_release_only_the_oauth_token_to_the_pinned_host(
         ResolverConfig::new(
             hub.uri(),
             "alpha",
-            format!("{}/internal/service-token", hub.uri()),
+            mint_endpoint,
             sa.to_string_lossy().to_string(),
         ),
         Arc::new(NoMetrics),

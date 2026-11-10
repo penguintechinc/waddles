@@ -11,6 +11,7 @@ import {
   StarIcon,
   ArrowDownTrayIcon,
 } from '@heroicons/react/24/outline';
+import AuthorLink from '../../components/AuthorLink';
 import { adminApi, marketplaceApi } from '../../services/api';
 
 // Module slug mapping for dedicated config pages
@@ -502,7 +503,9 @@ function AdminModules() {
                         {module.category}
                       </span>
                       <span>v{module.version}</span>
-                      <span>by {module.author}</span>
+                      <span>
+                        by <AuthorLink author={module.author} />
+                      </span>
                     </div>
 
                     <div className="flex gap-2">
