@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.97.0"
 license = "AGPL-3.0-or-later"
 publish = false
-description = "Shared signed egress-allowlist assertion (EgressAssertion struct, EdDSA sign + verify, header names) used on both sides of the bundle-host -> egress-proxy hop -- core/bundle_host_http's client-side signer (PR #468) and core/egress_proxy's server-side verifier (PR #463/#469) -- so the wire format the two crates agree on can never drift apart."
+description = "Shared signed egress-allowlist assertion (EgressAssertion struct, ES256 sign + verify, header names) used on both sides of the bundle-host -> egress-proxy hop -- core/bundle_host_http's client-side signer (PR #468) and core/egress_proxy's server-side verifier (PR #463/#469) -- so the wire format the two crates agree on can never drift apart."
 
 [lib]
 name = "egress_assertion"
@@ -17,12 +17,12 @@ path = "src/lib.rs"
 # pinned there, so no dependent crate resolves a second version.
 [dependencies]
 # "use_pem" (on top of service_auth's aws_lc_rs-only feature set) -- this
-# crate is the one place that loads a *private* Ed25519 signing key
-# (`AssertionSigningKey::from_ed25519_pem`), not just decodes public JWKS
-# entries, so it needs `EncodingKey::from_ed_pem` in addition to
-# `DecodingKey::from_ed_pem`. Same "aws_lc_rs" backend rationale as
+# crate is the one place that loads a *private* ECDSA P-256 signing key
+# (`AssertionSigningKey::from_ec_pem`), not just decodes public JWKS
+# entries, so it needs `EncodingKey::from_ec_pem` in addition to
+# `DecodingKey::from_ec_pem`. Same "aws_lc_rs" backend rationale as
 # core/service_auth's Cargo.toml: no `rsa` crate anywhere in the graph
-# (RUSTSEC-2023-0071 Marvin timing sidechannel) even though EdDSA is the
+# (RUSTSEC-2023-0071 Marvin timing sidechannel) even though ES256 is the
 # only algorithm ever used here.
 jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 # CIDR/IP-literal parsing for `PublicIp`/`PrivateIp` grant matching

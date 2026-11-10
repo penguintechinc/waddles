@@ -276,6 +276,11 @@ fn http_error_from(err: ExecutorError) -> http::Error {
     match &err {
         ExecutorError::HostCallDenied { code, message, .. } => match code.as_str() {
             "denied" => http::Error::Denied(message.clone()),
+            // Credential / quota refusals are explicit denials carrying the
+            // stable CODE (never the message), so a bundle can tell an
+            // unconnected community from a transport failure.
+            "secret_unresolved" | "secret_unavailable" | "secret_not_granted"
+            | "quota_exhausted" | "quota_unavailable" => http::Error::Denied(code.clone()),
             "timeout" => http::Error::Timeout,
             "too_large" => http::Error::TooLarge(message.parse().unwrap_or(0)),
             "rate_limited" => http::Error::RateLimited(message.parse().unwrap_or(0)),
@@ -890,6 +895,11 @@ pub(crate) mod tests {
     async fn http_send_maps_every_denial_code() {
         for (code, expect_variant) in [
             ("denied", "denied"),
+            ("secret_unresolved", "denied"),
+            ("secret_unavailable", "denied"),
+            ("secret_not_granted", "denied"),
+            ("quota_exhausted", "denied"),
+            ("quota_unavailable", "denied"),
             ("timeout", "timeout"),
             ("too_large", "too_large"),
             ("rate_limited", "rate_limited"),

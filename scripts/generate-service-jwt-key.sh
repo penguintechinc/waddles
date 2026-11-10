@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generates the Ed25519 signing keypair for hub-api's per-service machine
+# Generates the ECDSA P-256 (ES256) signing keypair for hub-api's per-service machine
 # JWTs (flask_core.service_jwt / core/service_auth) and creates the k8s
 # Secret directly from it -- the private key is never printed to stdout,
 # never passed as a CLI arg (argv is world-readable via /proc/<pid>/cmdline
@@ -60,7 +60,7 @@ trap cleanup EXIT INT TERM
 # Writes PKCS8 PEM straight to the temp file -- the private key material
 # never passes through a shell variable (which `ps`/`/proc` can expose via
 # argv, or a stray `echo`/`set -x` could leak) at any point in this script.
-openssl genpkey -algorithm ed25519 -out "${key_file}"
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -out "${key_file}"
 pub_key="$(openssl pkey -in "${key_file}" -pubout)"
 
 # `--from-file=<VAR_NAME>=<path>` reads the file's contents directly;

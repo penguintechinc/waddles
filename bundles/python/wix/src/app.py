@@ -54,14 +54,15 @@ from waddle_sdk.safe_text import guard_leading_command
 
 import event_sync
 import plan_roles
+import toolcall
 
 COMMAND = "!wix"
 WIX_HOST = "www.wixapis.com"
 WIX_MEMBER_URL = f"https://{WIX_HOST}/members/v1/members/"
 WIX_KEY_HEADER = "Authorization"
-WIX_KEY_SECRET_REF = "WIX_API_KEY"  # noqa: S105 - a secret reference name, not a value
+WIX_KEY_SECRET_REF = "WIX_API_KEY"
 WIX_SITE_HEADER = "wix-site-id"
-WIX_SITE_SECRET_REF = "WIX_SITE_ID"  # noqa: S105 - a secret reference name, not a value
+WIX_SITE_SECRET_REF = "WIX_SITE_ID"
 
 STATUS_TTL_SECONDS = 300
 MAX_TEXT_LEN = 1000
@@ -73,7 +74,9 @@ _USAGE = (
 )
 _MODULES: dict[str, Any] = {"roles": plan_roles, "events": event_sync}
 _DENIED = "only moderators/broadcasters can do that"
-_UNAVAILABLE = "Wix membership services are unavailable right now - please try again later."
+_UNAVAILABLE = (
+    "Wix membership services are unavailable right now - please try again later."
+)
 _NOT_CONFIGURED = "The Wix link isn't configured correctly - please tell a moderator."
 _ERRORS: dict[type[identity.IdentityError], str] = {
     identity.NotLinkedError: "that account isn't linked to Waddles yet",
@@ -116,7 +119,9 @@ async def _kv_get(community: str | None, key: str) -> bytes | None:
     try:
         return await community_kv.get(community, key)
     except Exception as exc:
-        raise _KvFailureError(f"kv.get: {type(getattr(exc, 'value', exc)).__name__}") from exc
+        raise _KvFailureError(
+            f"kv.get: {type(getattr(exc, 'value', exc)).__name__}"
+        ) from exc
 
 
 async def _kv_set(community: str | None, key: str, value: bytes, ttl: int = 0) -> None:
@@ -124,7 +129,9 @@ async def _kv_set(community: str | None, key: str, value: bytes, ttl: int = 0) -
     try:
         await community_kv.set(community, key, value, ttl_seconds=ttl)
     except Exception as exc:
-        raise _KvFailureError(f"kv.set: {type(getattr(exc, 'value', exc)).__name__}") from exc
+        raise _KvFailureError(
+            f"kv.set: {type(getattr(exc, 'value', exc)).__name__}"
+        ) from exc
 
 
 async def _kv_delete(community: str | None, key: str) -> None:
@@ -132,7 +139,9 @@ async def _kv_delete(community: str | None, key: str) -> None:
     try:
         await community_kv.delete(community, key)
     except Exception as exc:
-        raise _KvFailureError(f"kv.delete: {type(getattr(exc, 'value', exc)).__name__}") from exc
+        raise _KvFailureError(
+            f"kv.delete: {type(getattr(exc, 'value', exc)).__name__}"
+        ) from exc
 
 
 async def _get_link(community: str | None, user: str) -> str | None:
@@ -163,7 +172,7 @@ async def _fetch_wix_status(wix_id: str) -> str:
                 WIX_SITE_HEADER: resolve_secret(WIX_SITE_SECRET_REF),
             },
         )
-    except Exception as exc:  # noqa: BLE001 - SDK raises Retryable/NonRetryable transport errors
+    except Exception as exc:
         log.error("wix.wix_unavailable", error_type=type(exc).__name__)
         raise _WixError(_UNAVAILABLE) from exc
     status = response["status"]
@@ -172,12 +181,18 @@ async def _fetch_wix_status(wix_id: str) -> str:
         raise _WixError(_NOT_CONFIGURED)
     if status == 404:
         log.info("wix.wix_member_not_found")
-        raise _WixError("Wix doesn't know that member id - ask a moderator to re-link it.")
+        raise _WixError(
+            "Wix doesn't know that member id - ask a moderator to re-link it."
+        )
     if status != 200 or response["truncated"]:
-        log.error("wix.wix_bad_response", status=status, truncated=bool(response["truncated"]))
+        log.error(
+            "wix.wix_bad_response", status=status, truncated=bool(response["truncated"])
+        )
         raise _WixError(_UNAVAILABLE)
     try:
-        value = json.loads(cast("bytes", response["body"]).decode("utf-8"))["member"]["status"]
+        value = json.loads(cast("bytes", response["body"]).decode("utf-8"))["member"][
+            "status"
+        ]
     except (UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
         log.error("wix.wix_bad_response", status=status, error_type=type(exc).__name__)
         raise _WixError(_UNAVAILABLE) from exc
@@ -198,7 +213,10 @@ async def _status_for(community: str | None, user: str, *, mine: bool) -> str:
         )
     cached = await _kv_get(community, f"wix.status.{user}")
     status: str
-    if cached is not None and cached.decode("utf-8", "replace").upper() in _WIX_STATUSES:
+    if (
+        cached is not None
+        and cached.decode("utf-8", "replace").upper() in _WIX_STATUSES
+    ):
         status = cached.decode("utf-8")
     else:
         try:
@@ -206,7 +224,9 @@ async def _status_for(community: str | None, user: str, *, mine: bool) -> str:
         except _WixError as exc:
             log.warn("wix.status_lookup_failed", error_type=type(exc).__name__)
             return exc.reply
-        await _kv_set(community, f"wix.status.{user}", status.encode(), STATUS_TTL_SECONDS)
+        await _kv_set(
+            community, f"wix.status.{user}", status.encode(), STATUS_TTL_SECONDS
+        )
     who = "Your" if mine else "That member's"
     return f"{who} Wix membership status: {status}"
 
@@ -308,6 +328,41 @@ async def _cmd_module(verb: str, rest: str, community: str | None) -> str:
     return f"Wix {name} module enabled."
 
 
+async def _cmd_modules(community: str | None) -> str:
+    """`!wix modules` (mod): enabled state, capability and the last tool failure per module."""
+    parts: list[str] = []
+    for name, module in _MODULES.items():
+        enabled = await _kv_get(community, f"wix.module.{name}") is not None
+        fault = await _kv_get(community, toolcall.fault_key(name))
+        state = "on" if enabled else "off"
+        cap = "tools ok" if module.capability_available() else "TOOLS MISSING"
+        err = f", last failure: {fault.decode('utf-8', 'replace')}" if fault else ""
+        parts.append(f"{name}: {state} ({cap}{err})")
+    return "Wix modules - " + "; ".join(parts)
+
+
+async def _cmd_plan(rest: str, community: str | None) -> str:
+    """`!wix plan map <plan-uuid> <role_key>` / `!wix plan unmap <plan-uuid>` (mod; WRITE)."""
+    parts = rest.split()
+    if len(parts) < 2 or parts[0].lower() not in ("map", "unmap"):
+        return _USAGE
+    plan_id = _valid_wix_id(parts[1])
+    if plan_id is None:
+        return "the Wix plan id must be a UUID - " + _USAGE
+    if parts[0].lower() == "unmap":
+        if len(parts) != 2:
+            return _USAGE
+        await plan_roles.remove_mapping(community, plan_id)
+        log.info("wix.plan_unmapped", community_id=community)
+        return "Plan mapping removed."
+    role_key = plan_roles.valid_role_key(parts[2]) if len(parts) == 3 else None
+    if role_key is None:
+        return "the role key must match [a-z][a-z0-9_-]{0,31} - " + _USAGE
+    await plan_roles.set_mapping(community, plan_id, role_key)
+    log.info("wix.plan_mapped", community_id=community)
+    return "Plan mapped. Enable it with !wix enable roles."
+
+
 async def _run(rest: str, payload: dict[str, Any], community: str | None) -> str:
     """Route one `!wix` invocation (everything after the head) to its handler."""
     verb, _, tail = rest.strip().partition(" ")
@@ -317,14 +372,44 @@ async def _run(rest: str, payload: dict[str, Any], community: str | None) -> str
         return await _cmd_status(tail, community, privileged)
     if verb == "remove":
         return await _cmd_unlink(tail, community, privileged)
-    if verb in ("set", "enable", "disable"):
+    if verb in ("set", "enable", "disable", "modules", "plan"):
         if not privileged:
             log.info("wix.permission_denied", command=verb)
             return _DENIED
         if verb == "set":
             return await _cmd_link(tail, community)
+        if verb == "modules":
+            return await _cmd_modules(community)
+        if verb == "plan":
+            return await _cmd_plan(tail, community)
         return await _cmd_module(verb, tail, community)
     return _USAGE
+
+
+async def _module_on(community: str | None, name: str) -> bool:
+    """True iff `!wix enable <name>` was run for this community."""
+    return await _kv_get(community, f"wix.module.{name}") is not None
+
+
+async def _on_wix_event(event: PlatformEvent) -> None:
+    """Route one connector-normalized Wix record to its (default-OFF) feature module.
+
+    A failure inside a module is recorded loudly by `toolcall` (shown by `!wix modules`); a kv error
+    propagates so the stage run fails visibly instead of dropping the event. Nothing is replied to
+    chat for webhook events.
+    """
+    community = get_bundle_context().community
+    kind = event.event_type
+    if kind.startswith("subscription."):
+        if await _module_on(community, "roles"):
+            await plan_roles.handle(
+                kind, event.actor, event.payload, event.occurred_at, community
+            )
+    elif kind.startswith("event."):
+        if await _module_on(community, "events"):
+            await event_sync.handle(kind, event.payload, event.occurred_at, community)
+    else:
+        log.debug("wix.event_ignored", event_type=kind)
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
@@ -333,6 +418,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     Returns `None` for non-matching text. A recognized command always yields an explicit reply
     (usage, denial or error) -- never silently dropped; kv/Wix failures are logged AND replied.
     """
+    if event.platform == "wix":
+        await _on_wix_event(event)
+        return None
     text = event.payload.get("text")
     if not isinstance(text, str) or len(text) > MAX_TEXT_LEN:
         return None
@@ -380,10 +468,14 @@ async def dispatch(
     channel_id = payload.get("channel_id")
     text = payload.get("text")
     if not channel_id:
-        raise ValueError("wix reply requires a channel_id from the inbound chat.message")
+        raise ValueError(
+            "wix reply requires a channel_id from the inbound chat.message"
+        )
     if not isinstance(text, str) or not text:
         raise ValueError("wix reply requires text produced by transform")
     provider = envelope.event.platform
-    await relay.push(provider, {"channel": channel_id, "text": guard_leading_command(text)})
+    await relay.push(
+        provider, {"channel": channel_id, "text": guard_leading_command(text)}
+    )
     log.info("wix.dispatch relayed", platform=provider)
     return DispatchResult(transport=provider, detail="relayed")
