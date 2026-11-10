@@ -1,0 +1,88 @@
+schema_version: 2
+app_id: waddles.core.app.live-now
+name: Live Now (Rust)
+# Keep in lockstep with hub-manifest.yaml (that file is what hub-api reads; this one targets the
+# bundle-compiler schema and must not diverge on what the bundle consumes/requests).
+version: 1.0.0
+feature: waddles.core.app
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: AGPL-3.0-or-later
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/live-now
+language: rust
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!live"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!live"]
+      - platform: youtube
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!live"]
+      - platform: twitch
+        event_types: ["stream.online", "stream.offline"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 10000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: "chat.send:discord"
+    justification: "relays the !live reply and go-live announcements to Discord channels via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "relays the !live reply and go-live announcements to Twitch chat via the relay host import (relay.push -> chat.send:twitch)"
+  - id: "chat.send:youtube"
+    justification: "relays the !live reply and go-live announcements to YouTube live chat via the relay host import (relay.push -> chat.send:youtube)"
+  - id: storage.kv
+    justification: "holds the latest who's-live snapshot (30 s freshness cache), per-stream-session announcement dedupe claims and per-channel cooldown claims, all community-scoped"
+  - id: "tool.call:waddles.core.service.twitch:twitch.live.channels"
+    justification: "reads the community's currently-live Twitch channels (read-only, contract live-channels v1)"
+    params:
+      write: false
+  - id: "tool.call:waddles.core.service.youtube:youtube.live.channels"
+    justification: "reads the community's currently-live YouTube channels (read-only, contract live-channels v1)"
+    params:
+      write: false
+  - id: "tool.call:waddles.core.service.discord:discord.live.channels"
+    justification: "reads members streaming (Go Live) or live stage channels in the community's linked guilds (read-only, contract live-channels v1)"
+    params:
+      write: false
+requested_tools:
+  - tool: twitch.live.channels
+    access: read
+    target_app_id: waddles.core.service.twitch
+  - tool: youtube.live.channels
+    access: read
+    target_app_id: waddles.core.service.youtube
+  - tool: discord.live.channels
+    access: read
+    target_app_id: waddles.core.service.discord
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "3.0.0"
+  min_version: "3.0.0"
+  max_version: null
