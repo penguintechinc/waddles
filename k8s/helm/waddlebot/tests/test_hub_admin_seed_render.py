@@ -123,7 +123,9 @@ def test_seed_job_hook_annotations_image_envfrom(docs: list[dict[str, Any]]) -> 
     assert c["image"] == migrate["image"]
     assert spec["restartPolicy"] == "Never" and job["spec"]["backoffLimit"] <= 3
     assert not c.get("envFrom")  # credential-separation: single-key refs only
-    env = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in c["env"]}
+    env = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in c["env"] if "valueFrom" in e}
+    plain = {e["name"]: e["value"] for e in c["env"] if "value" in e}
+    assert plain["PGSSLMODE"] == "verify-full"  # transit-tls F1: the seed Job verifies Postgres too
     assert env["DATABASE_URL"]["name"].endswith("-db-migrate-secret")
     assert env["INITIAL_ADMIN_PASSWORD"]["name"].endswith("-hub-admin-bootstrap")
     assert env["INITIAL_ADMIN_EMAIL"]["name"].endswith("-hub-admin-bootstrap")

@@ -243,6 +243,8 @@ mod tests {
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
             declared_capabilities: Vec::new(),
+            egress: Vec::new(),
+            egress_rps: None,
             tools: Default::default(),
         }
     }
@@ -257,6 +259,7 @@ mod tests {
                 name: "t".to_string(),
                 write: false,
                 required_scope: None,
+                host_op: None,
             }],
             requested: Vec::new(),
         };

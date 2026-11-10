@@ -113,7 +113,7 @@ def _repo_manifests() -> list[pathlib.Path]:
 #: bundles/rust/spectrum/hub-manifest.yaml is `kind: service` with no `stages:` block, which
 #: `parse_bundle_manifest_v2` rejects (`missing_field`). Pinned here so the test stays honest --
 #: it fails if this entry starts parsing (remove it) or any OTHER manifest stops parsing.
-_KNOWN_UNPARSEABLE = {"rust/spectrum": "missing_field"}
+_KNOWN_UNPARSEABLE: dict[str, str] = {}
 
 
 def test_every_repo_hub_manifest_parses_with_a_valid_author() -> None:
@@ -133,7 +133,9 @@ def test_every_repo_hub_manifest_parses_with_a_valid_author() -> None:
             )
         except ManifestV2Error as exc:
             failures[rel] = exc.reason
-        assert canonical_author(raw["author"]) == raw["author"], f"{rel}: author not canonical"
+        # Manifest text is never rewritten: any accepted spelling (e.g. `github/psychoboy`)
+        # must validate; only the stored/display form is normalized.
+        assert canonical_author(raw["author"]), f"{rel}: author invalid"
     assert failures == _KNOWN_UNPARSEABLE
 
 
@@ -143,11 +145,13 @@ def test_first_party_authors_and_superpenguintv_designation() -> None:
         for path in sorted((_REPO / "bundles").glob(f"*/*/{name}")):
             raw = yaml.safe_load(path.read_text())
             rel = f"{path.parent.parent.name}/{path.parent.name}"
-            if rel == "csharp/superpenguin-roll":
-                assert raw["author"] == "github:Psychoboy", path
+            if rel.startswith("csharp/superpenguin-"):
+                assert raw["author"] == "github/psychoboy", path
+                assert canonical_author(raw["author"]) == "github:psychoboy", path
                 assert raw["collection"] == "superpenguintv", path
-                assert raw["category"] == "alternatives", path
-                assert raw["license"] == "MIT" and raw["notice"].strip(), path
+                if rel == "csharp/superpenguin-roll":
+                    assert raw["category"] == "alternatives", path
+                    assert raw["license"] == "MIT" and raw["notice"].strip(), path
             else:
                 assert raw["author"] == "github:penguintechinc", path
                 assert "collection" not in raw, path

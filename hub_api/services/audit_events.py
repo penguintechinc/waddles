@@ -168,6 +168,8 @@ class AuditAction(StrEnum):
     BUNDLE_PERMISSION_CHANGED = "bundle.permission_changed"
     BUNDLE_ACTIVATION_CHANGED = "bundle.activation_changed"
     BUNDLE_VERSION_PUBLISHED = "bundle.version_published"
+    BUNDLE_CONFIG_CHANGED = "bundle.config_changed"
+    BUNDLE_ADMIN_TOOL_INVOKED = "bundle.admin_tool_invoked"
     # --- money / vendor ---
     LICENSE_TOKEN_BALANCE_CHANGED = "license.token_balance_changed"  # noqa: S105  # nosec B105
     LICENSE_PAYOUT_PROFILE_CHANGED = "license.payout_profile_changed"
@@ -584,6 +586,14 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
             ("POST", f"{_P}/marketplace/community/<int:community_id>/bundles"),
             ("DELETE", f"{_P}/marketplace/community/<int:community_id>/bundles/<app_id>"),
         ),
+    ),
+    (
+        _ra(AuditCategory.BUNDLE, AuditAction.BUNDLE_CONFIG_CHANGED),
+        (("PUT", f"{_APPS}/bundles/<app_id>/config"),),
+    ),
+    (
+        _ra(AuditCategory.BUNDLE, AuditAction.BUNDLE_ADMIN_TOOL_INVOKED),
+        (("POST", f"{_APPS}/bundles/<app_id>/admin-actions/<tool_name>"),),
     ),
     (
         _ra(AuditCategory.BUNDLE, AuditAction.BUNDLE_VERSION_PUBLISHED),

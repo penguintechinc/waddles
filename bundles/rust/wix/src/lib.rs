@@ -1,18 +1,19 @@
-//! Wix webhook connector (inbound-only `kind: service`, `connector` world).
+//! Wix connector (`kind: service`, `connector-tools` world): inbound webhooks + outbound Wix Events templates.
 //! The host owns the verified webhook ingress and every credential; this
 //! component maps verified Wix events to normalized records and tokenizes the
-//! Wix member id through `identity.lookup`. There is no egress and no sender.
+//! Wix member id through `identity.lookup`. Outbound event tools are host-executed request templates.
 #[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
 mod bindings;
 pub mod logic;
+pub mod sender;
 
 #[cfg(target_arch = "wasm32")]
 mod component {
     use super::bindings::exports::waddle::bundle::tool_provider::Guest as ToolGuest;
     use super::bindings::exports::waddle::connector::receiver::Guest as ReceiverGuest;
     use super::bindings::exports::waddle::connector::sender::{
-        Action, Guest as SenderGuest, HttpRequestTpl,
+        Action, Guest as SenderGuest, Header, HttpRequestTpl,
     };
     use super::bindings::waddle::bundle::log;
     use super::bindings::waddle::bundle::tool::ToolError as WitError;
@@ -21,6 +22,7 @@ mod component {
         ConnectionCtx, FrameError, HandshakePayload, NormalizedEvent, RawFrame,
     };
     use super::logic::{self, LogicError};
+    use super::sender;
 
     pub struct Component;
 
@@ -112,11 +114,33 @@ mod component {
     }
 
     impl SenderGuest for Component {
-        /// Inbound-only: every outbound action is refused loudly.
-        fn build_request(_action: Action) -> Result<HttpRequestTpl, FrameError> {
-            Err(FrameError::Unsupported(
-                "wix connector is inbound-only".into(),
-            ))
+        /// Wix Events REST templates (`event.{list,get,create,update,cancel}`); host fills creds.
+        fn build_request(action: Action) -> Result<HttpRequestTpl, FrameError> {
+            let act = sender::Action {
+                kind: action.kind,
+                target_source_id: action.target_source_id,
+                payload_json: action.payload_json,
+            };
+            match sender::build_request(&act) {
+                Ok(t) => Ok(HttpRequestTpl {
+                    method: t.method,
+                    url: t.url,
+                    headers: t
+                        .headers
+                        .into_iter()
+                        .map(|(name, value)| Header { name, value })
+                        .collect(),
+                    body: t.body,
+                    secret_refs: t.secret_refs,
+                }),
+                Err(e) => {
+                    log_counts(log::Level::Warn, "build_request_refused", 0, 0);
+                    Err(match e {
+                        sender::SendError::Unsupported(m) => FrameError::Unsupported(m),
+                        sender::SendError::Malformed(m) => FrameError::Malformed(m),
+                    })
+                }
+            }
         }
     }
 

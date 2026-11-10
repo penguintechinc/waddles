@@ -85,6 +85,11 @@ def _exported_tool_summary(tool: Any) -> dict[str, Any]:
     entry: dict[str, Any] = {"name": tool.name, "access": tool.access, "risk": tool.risk}
     if tool.required_scope is not None:
         entry["requiredScope"] = tool.required_scope
+    # Host-executed platform tools: the declaration is consent-relevant (it decides which
+    # platform op the tool drives), so it is hashed; present-only keeps existing hashes.
+    host_op = getattr(tool, "host_op", None)
+    if host_op is not None:
+        entry["hostOp"] = host_op
     return entry
 
 
