@@ -113,6 +113,9 @@ fn connector_http_error_from(err: ExecutorError) -> http::Error {
     match &err {
         ExecutorError::HostCallDenied { code, message, .. } => match code.as_str() {
             "denied" => http::Error::Denied(message.clone()),
+            // See `imports::http_error_from`: explicit credential/quota denials.
+            "secret_unresolved" | "secret_unavailable" | "secret_not_granted"
+            | "quota_exhausted" | "quota_unavailable" => http::Error::Denied(code.clone()),
             "timeout" => http::Error::Timeout,
             "too_large" => http::Error::TooLarge(message.parse().unwrap_or(0)),
             "rate_limited" => http::Error::RateLimited(message.parse().unwrap_or(0)),

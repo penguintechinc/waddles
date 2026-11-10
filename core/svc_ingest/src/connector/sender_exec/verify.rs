@@ -108,12 +108,15 @@ pub enum TemplateError {
     /// Body over the kind's bound.
     #[error("template body is over the size bound")]
     BodyTooLarge,
-    /// Body is not a JSON object / too deep / too large a tree.
+    /// Body is not a JSON object (or array, for bulk kinds) / too deep / too large a tree.
     #[error("template body is not a bounded json object")]
     BodyNotJson,
     /// Body without `Content-Type: application/json`.
     #[error("template body lacks the json content type")]
     BodyContentType,
+    /// A top-level body key outside the kind's exact allowlist.
+    #[error("template body carries a key the kind does not allow")]
+    BodyKeyNotAllowed,
 }
 
 impl TemplateError {
@@ -148,6 +151,7 @@ impl TemplateError {
             Self::BodyTooLarge => "body_too_large",
             Self::BodyNotJson => "body_not_json",
             Self::BodyContentType => "body_content_type",
+            Self::BodyKeyNotAllowed => "body_key_not_allowed",
         }
     }
 }
@@ -192,6 +196,61 @@ fn id_literal(s: &str) -> bool {
         && s.len() <= 128
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// A percent-encoded path literal: unreserved characters plus well-formed `%XX` escapes.
+fn enc_literal(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.is_empty() || b.len() > 128 {
+        return false;
+    }
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' => {
+                if !(b.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+                    && b.get(i + 2).is_some_and(u8::is_ascii_hexdigit))
+                {
+                    return false;
+                }
+                i += 3;
+            }
+            c if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'~') => i += 1,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// `true` when a slot this kind may use declares `key` as a query position: that query value is
+/// then a HOST-filled id (broadcaster / moderator / live-chat id) and a literal is refused --
+/// otherwise a bundle could aim the community's credential at another channel by writing the id.
+fn query_is_host_slot(cx: &Ctx<'_>, key: &str) -> bool {
+    cx.kind
+        .slots
+        .iter()
+        .filter_map(|n| cx.policy.slot_index(n))
+        .any(|i| {
+            cx.policy.slots[i]
+                .positions
+                .iter()
+                .any(|p| matches!(p, Position::Query(k) if *k == key))
+        })
+}
+
+/// Body-pointer twin of [`query_is_host_slot`]: a value at a pointer one of the kind's slots
+/// declares must be that slot, never a literal, number, object or array.
+fn body_is_host_slot(cx: &Ctx<'_>, ptr: &str) -> bool {
+    cx.kind
+        .slots
+        .iter()
+        .filter_map(|n| cx.policy.slot_index(n))
+        .any(|i| {
+            cx.policy.slots[i]
+                .positions
+                .iter()
+                .any(|p| matches!(p, Position::Body(b) if *b == ptr))
+        })
 }
 
 fn query_literal(s: &str) -> bool {
@@ -410,6 +469,12 @@ fn verify_path(cx: &mut Ctx<'_>, path: &str) -> Result<Vec<Vec<Piece>>, Template
                 }
                 out.push(vec![Piece::Lit((*seg).to_string())]);
             }
+            PathSeg::Enc => {
+                if !enc_literal(seg) {
+                    return Err(TemplateError::PathMismatch);
+                }
+                out.push(vec![Piece::Lit((*seg).to_string())]);
+            }
             PathSeg::Slot(name) => {
                 let pieces = tokenize(cx.policy, seg, Braces::Strict)?;
                 match pieces.as_slice() {
@@ -458,6 +523,9 @@ fn verify_query(
             [Piece::Slot(idx)] => {
                 let idx = *idx;
                 cx.require_position(idx, Position::Query(key))?;
+            }
+            [Piece::Lit(_)] | [] if query_is_host_slot(cx, key) => {
+                return Err(TemplateError::SlotMisplaced);
             }
             [Piece::Lit(l)] if query_literal(l) => {}
             [] => {}
@@ -569,8 +637,26 @@ fn verify_body(
         return Err(TemplateError::BodyContentType);
     }
     let value: Value = serde_json::from_slice(bytes).map_err(|_| TemplateError::BodyNotJson)?;
-    if !value.is_object() {
+    if cx.kind.array_body {
+        match &value {
+            Value::Array(items) if items.iter().all(Value::is_object) => {}
+            _ => return Err(TemplateError::BodyNotJson),
+        }
+    } else if !value.is_object() {
         return Err(TemplateError::BodyNotJson);
+    }
+    if !cx.kind.body_keys.is_empty() {
+        let keys_ok = |v: &Value| {
+            v.as_object()
+                .is_some_and(|m| m.keys().all(|k| cx.kind.body_keys.contains(&k.as_str())))
+        };
+        let ok = match &value {
+            Value::Array(items) => items.iter().all(keys_ok),
+            other => keys_ok(other),
+        };
+        if !ok {
+            return Err(TemplateError::BodyKeyNotAllowed);
+        }
     }
     let mut slots = Vec::new();
     let mut nodes = 0usize;
@@ -594,6 +680,9 @@ fn walk_body(
     *nodes += 1;
     if depth > MAX_BODY_DEPTH || *nodes > MAX_BODY_NODES {
         return Err(TemplateError::BodyNotJson);
+    }
+    if !matches!(v, Value::String(_)) && body_is_host_slot(cx, ptr) {
+        return Err(TemplateError::SlotMisplaced);
     }
     match v {
         Value::Object(m) => {
@@ -642,6 +731,9 @@ fn walk_string(
         };
     }
     let pieces = tokenize(cx.policy, s, Braces::Pairs)?;
+    if !pieces.iter().any(|x| matches!(x, Piece::Slot(_))) && body_is_host_slot(cx, ptr) {
+        return Err(TemplateError::SlotMisplaced);
+    }
     match pieces.as_slice() {
         [] => Ok(()),
         [Piece::Slot(idx)] => {

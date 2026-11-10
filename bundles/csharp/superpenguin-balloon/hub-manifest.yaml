@@ -96,6 +96,8 @@ permissions:
   justification: registers the Balloon Ascent widget once and pushes one structured flight
     envelope (seed, hazard wave, balloon keyframes, result) to the overlay after the payout settles; a failed
     push is logged and never reverses the payout
+  params:
+    mode: data
 routes_to: []
 requested_tools:
 - tool: points_view

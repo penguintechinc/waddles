@@ -96,6 +96,8 @@ permissions:
   justification: registers the Golf Chip and Putt widget once and pushes one structured shot
     envelope (seed, condition, result, keyframe path) to the overlay after the payout settles; a failed
     push is logged and never reverses the payout
+  params:
+    mode: data
 routes_to: []
 requested_tools:
 - tool: points_view

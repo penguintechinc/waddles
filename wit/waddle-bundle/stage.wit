@@ -1030,6 +1030,8 @@ world stage-next {
   import media;
   import platform-table;
   import object-storage;
+  import kv-v2;
+  import db-v2;
 
   export process-stage;
   export action-stage;
@@ -1139,6 +1141,8 @@ world stage-v2 {
   import media;
   import platform-table;
   import object-storage;
+  import kv-v2;
+  import db-v2;
 
   export process-stage;
   export action-stage-v2;

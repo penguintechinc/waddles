@@ -1,14 +1,12 @@
 # chore/deploy-svc-presentation-rust-alpha -- Rust svc-presentation (core/svc_presentation,
-# Dockerfile.rust: overlay surfaces + image upload/render) Deployment + Service. Renders
-# INSTEAD of templates/svc-presentation.yaml (Python) when presentation.rust.enabled is
-# true -- the two are mutually exclusive and share the same Deployment/Service names, so
-# enabling this is an in-place swap (Service + NodePort unchanged). Full Python decommission
-# is a later step.
+# Dockerfile.rust: overlay surfaces + image upload/render) Deployment + Service. The legacy
+# Python templates/svc-presentation.yaml was removed; this is the only presentation workload
+# (renders unless presentation.rust.enabled is explicitly set false).
 #
 # Config surface (core/svc_presentation/src/config.rs):
 #   - DB_HOST/PORT/NAME : non-secret from the shared ConfigMap (envFrom); DB_USER/DB_PASSWORD :
 #     this workload's OWN least-privilege role (waddles_svc_presentation) via waddlebot.dbEnv (H-1/H-3).
-#   - PUSH_JWKS_URL/PUSH_AUDIENCE/PUSH_TRUSTED_ISSUER : overlay_auth PUSH guard verifies
+#   - PUSH_JWKS_ENDPOINT/PUSH_AUDIENCE/PUSH_TRUSTED_ISSUER : overlay_auth PUSH guard verifies
 #     hub-api-issued machine JWTs against hub-api's service JWKS (no static shared secret,
 #     and no bundle-signing key is involved).
 #   - IMAGE_BUCKET_* : fail-fast at startup if the access key pair is blank (#696). Creds are
@@ -92,18 +90,20 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_presentation") | nindent 8 }}
+{{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.svcPresentation.port | quote }}
         - name: METRICS_PORT
           value: "9090"
-        - name: PUSH_JWKS_URL
-          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}/internal/service-jwks.json"
+        - name: PUSH_JWKS_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: PUSH_AUDIENCE
           value: {{ .Values.serviceJwt.audience | quote }}
         - name: PUSH_TRUSTED_ISSUER
           value: "hub-api"
+        {{- include "waddlebot.serviceJwtAcceptLegacyEnv" . | nindent 8 }}
         - name: IMAGE_BUCKET_ENDPOINT
-          value: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
+          value: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
         - name: IMAGE_BUCKET_NAME
           value: {{ .Values.presentation.rust.imageBucket.bucketName | default .Values.infrastructure.seaweedfs.bucketName | quote }}
         - name: IMAGE_BUCKET_REGION
@@ -126,7 +126,7 @@ spec:
         - name: HUB_API_GRPC_ENDPOINT
           value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: SERVICE_JWT_TOKEN_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         # The audience-scoped projected token mounted below (NOT the generic k8s SA token
         # path: wrong audience, hub-api's TokenReview would reject it).
         - name: SERVICE_JWT_SA_TOKEN_PATH
@@ -169,6 +169,7 @@ spec:
         resources:
           {{- toYaml .Values.pipeline.svcPresentation.resources | nindent 10 }}
         volumeMounts:
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
         - name: tmp
           mountPath: /tmp
         {{- if .Values.pipeline.hubApi.enabled }}
@@ -176,6 +177,7 @@ spec:
         {{- end }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
       - name: tmp
         emptyDir: {}
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}

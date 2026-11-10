@@ -102,6 +102,8 @@ permissions:
   justification: registers the Curling / Shuffleboard widget once and pushes one structured slide
     envelope (seed, ice, rest position, score, keyframe path) to the overlay after the payout settles; a failed
     push is logged and never reverses the payout
+  params:
+    mode: data
 routes_to: []
 requested_tools:
 - tool: points_view

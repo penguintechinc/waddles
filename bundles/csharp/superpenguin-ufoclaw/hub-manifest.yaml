@@ -98,6 +98,8 @@ permissions:
   justification: registers the UFO Claw widget once and pushes one structured grab
     envelope (seed, prize pool, winning ball, decoy feints) to the overlay after the payout settles; a failed
     push is logged and never reverses the payout
+  params:
+    mode: data
 routes_to: []
 requested_tools:
 - tool: points_view

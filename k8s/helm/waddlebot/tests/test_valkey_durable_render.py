@@ -172,28 +172,6 @@ def test_tls_on_disables_plaintext_listener_and_url():
     )
 
 
-def test_python_stage_clients_use_rediss():
-    docs = _docs("values-beta.yaml", ("infrastructure.redis.tls.enabled=true",))
-    seen = 0
-    for d in docs:
-        if d["kind"] == "Deployment" and d["metadata"]["name"].endswith(
-            ("-svc-ingest", "-svc-process", "-svc-action")
-        ):
-            keys = [
-                e["valueFrom"]["secretKeyRef"]["key"]
-                for c in d["spec"]["template"]["spec"]["containers"]
-                for e in c.get("env", [])
-                if e["name"] == "VALKEY_URL" and "valueFrom" in e
-            ]
-            assert keys == ["VALKEY_DURABLE_URL_TLS_AUTH"], d["metadata"]["name"]
-            assert any(
-                v["name"] == "valkey-ca"
-                for v in d["spec"]["template"]["spec"]["volumes"]
-            )
-            seen += 1
-    assert seen == 3, f"examined {seen} python stage clients"
-
-
 def _default_acl(cmd):
     line = [ln for ln in cmd.splitlines() if "--user default" in ln]
     assert len(line) == 1, "expected exactly one default-user ACL line"
@@ -317,10 +295,12 @@ def test_durable_without_tls_fails_render():
 
 def test_durable_disabled_without_tls_is_exempt():
     """Local/ci style: durable (and kv) disabled + TLS off still renders -- the guard only fires
-    when durable is ENABLED."""
+    when durable is ENABLED. The cache Valkey itself is TLS-only (transit-tls F2), so it is disabled
+    too: TLS off is only valid when no in-cluster cache is rendered."""
     docs = _docs(
         "values-alpha.yaml",
         (
+            "infrastructure.redis.enabled=false",
             "infrastructure.redis.tls.enabled=false",
             "infrastructure.valkeyDurable.enabled=false",
             "infrastructure.valkeyKv.enabled=false",
@@ -394,7 +374,11 @@ _ADMIN_MSG = "Set a FRESH infrastructure.valkeyDurable.adminPassword"
 def test_admin_password_required_fails_closed_outside_alpha(tier, pw):
     """beta/gamma/prod: unset/empty/placeholder adminPassword => render FAILS closed with the
     rotation message."""
-    extra = ["global.deploymentTier=" + tier, "global.valkeyTls.externalSecret=true"]
+    extra = [
+        "global.deploymentTier=" + tier,
+        "global.valkeyTls.externalSecret=true",
+        "global.transitTls.externalSecret=true",  # skip the transit-cert fail so the admin-password message is asserted
+    ]
     if pw is not None:
         extra.append("infrastructure.valkeyDurable.adminPassword=" + pw)
     r = _helm("values-beta.yaml", extra)
@@ -412,6 +396,7 @@ def test_fresh_admin_password_passes_admin_gate_outside_alpha(tier):
         (
             "global.deploymentTier=" + tier,
             "global.valkeyTls.externalSecret=true",
+            "global.transitTls.externalSecret=true",
             "infrastructure.valkeyDurable.adminPassword=" + _FRESH,
         ),
     )

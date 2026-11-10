@@ -103,6 +103,8 @@ permissions:
   justification: registers the Plinko Bounce widget once and pushes one structured drop
     envelope (seed, bucket, keyframe path) to the overlay after the payout settles; a failed
     push is logged and never reverses the payout
+  params:
+    mode: data
 config_schema: {}
 compatible_with: []
 incompatible_with: []

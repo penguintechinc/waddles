@@ -775,17 +775,18 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn hub_source(server: &MockServer) -> (HubScopeSource, std::path::PathBuf) {
-        Mock::given(method("POST"))
-            .and(path("/internal/service-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({"token": "machine.jwt.value", "expires_in": 3600}),
-            ))
-            .mount(server)
+        // The mint is gRPC: a real in-process `ServiceAuthService`.
+        let mint_endpoint = service_auth::test_support::MockHub::builder()
+            .mint(vec![service_auth::test_support::MintReply::token(
+                "machine.jwt.value",
+                3600,
+            )])
+            .start_detached()
             .await;
         let sa = std::env::temp_dir().join(format!("svc-ingest-sa-{}", uuid::Uuid::new_v4()));
         std::fs::write(&sa, "projected-sa-token").unwrap();
         let jwt = Arc::new(service_auth::MachineJwtClient::new(
-            format!("{}/internal/service-token", server.uri()),
+            mint_endpoint,
             sa.to_string_lossy().to_string(),
             RESOLVE_SCOPE_JWT_SCOPE,
         ));
@@ -837,7 +838,7 @@ mod tests {
     #[tokio::test]
     async fn hub_source_without_a_token_is_transient_not_a_panic() {
         let jwt = Arc::new(service_auth::MachineJwtClient::new(
-            "http://127.0.0.1:1/token",
+            "http://127.0.0.1:1",
             "/nonexistent/sa-token",
             RESOLVE_SCOPE_JWT_SCOPE,
         ));
