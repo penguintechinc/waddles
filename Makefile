@@ -72,6 +72,14 @@ check-wait-for-hub-api:
 check-alpha-deploy-no-wait:
 	@python3 scripts/check_alpha_deploy_no_wait.py
 
+# Live functional smoke of the deployed alpha (KUBE_CONTEXT=dal2alpha); see scripts/smoke/README.md.
+.PHONY: alpha-smoke test-alpha-smoke
+alpha-smoke:
+	@bash scripts/smoke/alpha-smoke.sh
+
+test-alpha-smoke:
+	@python3 -m pytest -q scripts/smoke/test_alpha_smoke.py
+
 # alpha-deploy.sh self-heals a release stuck in pending-* (interrupted upgrade);
 # stub-driven test of that recovery logic, no cluster touched.
 test-helm-pending-recover:
