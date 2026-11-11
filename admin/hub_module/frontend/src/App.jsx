@@ -143,6 +143,7 @@ const PlatformAnalytics = lazy(() => import('./pages/platform/PlatformAnalytics'
 const SuperAdminDashboard = lazy(() => import('./pages/superadmin/SuperAdminDashboard'));
 const SuperAdminCommunities = lazy(() => import('./pages/superadmin/SuperAdminCommunities'));
 const SuperAdminBundleApprovals = lazy(() => import('./pages/superadmin/SuperAdminBundleApprovals'));
+const SuperAdminServiceBundles = lazy(() => import('./pages/superadmin/SuperAdminServiceBundles'));
 const SuperAdminPlatformConfig = lazy(() => import('./pages/superadmin/SuperAdminPlatformConfig'));
 const SuperAdminSoftwareDiscovery = lazy(() => import('./pages/superadmin/SuperAdminSoftwareDiscovery'));
 const SuperAdminServiceDiscovery = lazy(() => import('./pages/superadmin/SuperAdminServiceDiscovery'));
@@ -412,8 +413,13 @@ function App() {
       >
         <Route path="/superadmin" element={<SuperAdminDashboard />} />
         <Route path="/superadmin/communities" element={<SuperAdminCommunities />} />
-        <Route path="/superadmin/modules" element={<Navigate to="/superadmin/bundle-approvals" replace />} />
-        <Route path="/superadmin/bundle-approvals" element={<SuperAdminBundleApprovals />} />
+        <Route path="/superadmin/modules" element={<Navigate to="/superadmin/bundles/apps" replace />} />
+        <Route path="/superadmin/bundles/apps" element={<SuperAdminBundleApprovals />} />
+        <Route path="/superadmin/bundles/services" element={<SuperAdminServiceBundles />} />
+        <Route
+          path="/superadmin/bundle-approvals"
+          element={<Navigate to="/superadmin/bundles/apps" replace />}
+        />
         <Route path="/superadmin/vendor-submissions" element={<AdminVendorReview />} />
         <Route path="/superadmin/vendor-submissions/:submissionId" element={<AdminVendorReview />} />
         <Route path="/superadmin/vendor-requests" element={<SuperAdminVendorRequests />} />

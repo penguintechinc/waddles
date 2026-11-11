@@ -722,6 +722,11 @@ components:
           - type: string
           - type: 'null'
           title: Createdat
+        installedVersion:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Installedversion
         rejectReason:
           anyOf:
           - type: string
@@ -749,6 +754,7 @@ components:
       - requestedBy
       - createdAt
       - rejectReason
+      - installedVersion
       title: BundleVersionSummaryDTO
       type: object
     ByokKeyDTO:
@@ -2270,6 +2276,48 @@ components:
       - limit
       - nextCursor
       title: IngestSourceMetaDTO
+      type: object
+    InstalledBundleDTO:
+      description: One installed bundle row.
+      properties:
+        appId:
+          title: Appid
+          type: string
+        digestShort:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Digestshort
+        installSource:
+          title: Installsource
+          type: string
+        installedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Installedat
+        kind:
+          title: Kind
+          type: string
+        name:
+          title: Name
+          type: string
+        status:
+          title: Status
+          type: string
+        version:
+          title: Version
+          type: string
+      required:
+      - appId
+      - name
+      - kind
+      - version
+      - digestShort
+      - installedAt
+      - installSource
+      - status
+      title: InstalledBundleDTO
       type: object
     InstancePolicyDTO:
       description: One `instance_permission_policies` row, DTO-shaped for the API
@@ -18534,7 +18582,7 @@ paths:
   /api/v1/marketplace/bundles:
     get:
       description: ''
-      operationId: get_list_bundles
+      operationId: get_list_bundles__get_api_v1_marketplace_bundles
       parameters: []
       responses:
         '200':
@@ -21231,6 +21279,121 @@ paths:
                 type: object
           description: Response DTO for signup settings.
       summary: Get signup settings (top-level alias -- see this module's docstring).
+  /api/v1/superadmin/bundles:
+    get:
+      description: ''
+      operationId: get_list_bundles__get_api_v1_superadmin_bundles
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /api/v1/superadmin/bundles`.
+                properties:
+                  bundles:
+                    items:
+                      $ref: '#/components/schemas/InstalledBundleDTO'
+                    title: Bundles
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - bundles
+                title: InstalledBundlesResponse
+                type: object
+          description: Response DTO for `GET /api/v1/superadmin/bundles`.
+      summary: Installed bundles, optionally filtered by `?kind=app|service`.
+  /api/v1/superadmin/bundles/{app_id}/disable:
+    post:
+      description: ''
+      operationId: post_post_disable
+      parameters:
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for disable/enable; `changed` is false on
+                  an idempotent repeat.
+                properties:
+                  appId:
+                    title: Appid
+                    type: string
+                  changed:
+                    title: Changed
+                    type: boolean
+                  status:
+                    title: Status
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantsHidden:
+                    title: Tenantshidden
+                    type: integer
+                required:
+                - success
+                - appId
+                - status
+                - changed
+                - tenantsHidden
+                title: BundleStateResponse
+                type: object
+          description: Response DTO for disable/enable; `changed` is false on an idempotent
+            repeat.
+      summary: Disable a service bundle globally; 409 `has_dependents` unless `?force=true`.
+  /api/v1/superadmin/bundles/{app_id}/enable:
+    post:
+      description: ''
+      operationId: post_post_enable
+      parameters:
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for disable/enable; `changed` is false on
+                  an idempotent repeat.
+                properties:
+                  appId:
+                    title: Appid
+                    type: string
+                  changed:
+                    title: Changed
+                    type: boolean
+                  status:
+                    title: Status
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantsHidden:
+                    title: Tenantshidden
+                    type: integer
+                required:
+                - success
+                - appId
+                - status
+                - changed
+                - tenantsHidden
+                title: BundleStateResponse
+                type: object
+          description: Response DTO for disable/enable; `changed` is false on an idempotent
+            repeat.
+      summary: Re-enable a disabled service bundle globally (idempotent).
   /api/v1/superadmin/communities:
     get:
       description: ''

@@ -15,6 +15,8 @@ export interface BundleActivation {
   communityId: number;
   tenantId: number;
   versionId: number;
+  /** Activated version string (null when unknown). */
+  version?: string | null;
   activatedAt: string | null;
 }
 
