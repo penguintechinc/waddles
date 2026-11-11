@@ -371,6 +371,9 @@ hubApi:
 # Namespace configuration
 namespace: waddlebot
 namespaceCreate: true  # Create namespace if it doesn't exist
+# Extra labels stamped on the chart-managed Namespace (only when namespaceCreate: true), alongside the
+# PSA labels. Used e.g. for a shared Gateway's allowedRoutes namespace selector (`gateway-access`).
+namespaceLabels: {}
 
 # fix/no-empty-kept-secrets -- test-only probe (templates/debug-helper-probe.yaml)
 # that renders waddlebot.secretKeyNonEmpty/waddlebot.tlsSecretComplete (_helpers.tpl)
