@@ -2171,3 +2171,53 @@ def test_real_catalog_manifest_and_artifact_filenames_are_unique() -> None:
         names = [r[key] for r in rows]
         dupes = sorted({n for n in names if names.count(n) > 1})
         assert not dupes, f"duplicate {key} in core-bundles.yaml: {dupes}"
+
+
+def _service_manifest() -> Any:
+    """The `_MANIFEST` fixture parsed, then flipped to `kind: service` (trusted-source shape)."""
+    import dataclasses
+
+    from services.bundle_manifest_v2 import parse_bundle_manifest_v2
+
+    manifest = parse_bundle_manifest_v2(
+        dict(_MANIFEST),
+        known_custom_platforms=frozenset(),
+        allow_wildcard_consumes=False,
+        allow_prebuilt=True,
+        trusted_source=True,
+    )
+    return dataclasses.replace(manifest, kind="service")
+
+
+async def test_ensure_app_catalog_row_writes_the_manifest_kind_on_insert(install_dal: Any) -> None:
+    """Regression: a fresh catalog row carries the manifest kind, not the column default.
+
+    The INSERT used to omit `kind`, so every seeded `kind: service` bundle was catalogued as
+    an app and `_validate_requested_tool_targets` rejected it (`tool_target_not_service`).
+    """
+    manifest = _service_manifest()
+    await seeder._ensure_app_catalog_row(install_dal, manifest)
+    row = (await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()).first()
+    assert row.kind == "service"
+
+
+@pytest.mark.parametrize("stale_kind", ["app", None])
+async def test_ensure_app_catalog_row_repairs_a_stale_kind_idempotently(
+    install_dal: Any, stale_kind: str | None
+) -> None:
+    """A row seeded before the fix (kind 'app'/NULL) is reconciled to the manifest kind."""
+    from services.bundle_install_dal import raw_sql_write
+
+    manifest = _service_manifest()
+    await seeder._ensure_app_catalog_row(install_dal, manifest)
+    await raw_sql_write(
+        install_dal,
+        "UPDATE app_catalog SET kind = :k WHERE app_id = :a",
+        {"k": stale_kind, "a": manifest.app_id},
+    )
+    for _ in range(2):  # second pass is a no-op
+        await seeder._ensure_app_catalog_row(install_dal, manifest)
+        row = (
+            await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()
+        ).first()
+        assert row.kind == "service"
