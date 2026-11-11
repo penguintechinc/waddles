@@ -148,6 +148,16 @@ async def resolve_tenant_context(payload: dict[str, Any], dal: Any) -> TenantCon
     )
 
 
+def _log_auth_rejection(reason: str, path: str) -> None:
+    """Log a 401 rejection with a reason code and path only (never the token or any PII)."""
+    logger.info(
+        "auth rejected reason=%s path=%s",
+        reason,
+        path,
+        extra={"event_type": "AUTH", "action": "tenant_middleware", "result": "UNAUTHORIZED"},
+    )
+
+
 def tenant_middleware(f):
     """
     Decorator enforcing security.md's ordering contract: tenant before scope.
@@ -167,12 +177,14 @@ def tenant_middleware(f):
 
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
+            _log_auth_rejection("no_bearer", request.path)
             return error_response("Authentication required", status_code=401)
 
         token = auth_header[7:]
         secret_key = require_secret_key()
         payload = verify_jwt_token(token, secret_key)
         if payload is None:
+            _log_auth_rejection("invalid_or_expired_token", request.path)
             return error_response("Invalid or expired token", status_code=401)
 
         dal = current_app.config.get("dal")
