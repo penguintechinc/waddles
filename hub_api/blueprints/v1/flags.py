@@ -64,6 +64,7 @@ CLIENT_FLAG_KEYS: tuple[str, ...] = (
     "waddles.webui.discord_bot_install_link",
     "waddles.calendar.event_discord_sync",
     "waddles.secret-messaging",
+    "waddles.community.chat-realtime",
 )
 
 _meter = metrics.get_meter("waddles.hub_api.flags")
