@@ -126,12 +126,6 @@
       "GET /api/v1/communities/:communityId/activity"
     ]
   },
-  "community-open-join": {
-    "label": "Joining open communities",
-    "endpoints": [
-      "POST /api/v1/communities/:communityId/join"
-    ]
-  },
   "community-self-create": {
     "label": "Community creation",
     "endpoints": [

@@ -671,6 +671,27 @@ async def _write_global_install(
     return int(new_id)
 
 
+async def _current_install_at_version(install_dal: AsyncDB, *, app_id: str, version: str) -> Any:
+    """The not-yet-superseded `app_global_installs` row for `(app_id, version)`, or None."""
+    rows = await install_dal(
+        (install_dal.app_global_installs.app_id == app_id)
+        & (install_dal.app_global_installs.version == version)
+        & (install_dal.app_global_installs.superseded_by == None)  # noqa: E711 - pydal idiom
+    ).select()
+    return rows.first()
+
+
+async def _same_artifact(install_dal: AsyncDB, installed_id: int, candidate_id: int) -> bool:
+    """True iff the two `app_versions` rows carry the same `artifact_digest`."""
+    if installed_id == candidate_id:
+        return True
+    rows = await install_dal(
+        install_dal.app_versions.id.belongs([installed_id, candidate_id])
+    ).select()
+    digests = {r.artifact_digest for r in rows}
+    return len(digests) == 1
+
+
 async def _live_install_schema(
     install_dal: AsyncDB, *, app_id: str
 ) -> tuple[SchemaDeclV2 | None, bool]:
@@ -769,6 +790,25 @@ async def install_version_globally(
             "the supplied permission_hash does not match the current summary",
             409,
             "permission_hash_mismatch",
+        )
+
+    existing = await _current_install_at_version(install_dal, app_id=app_id, version=version)
+    if existing is not None:
+        # `uq_app_global_installs_current` allows one current row per (app_id, version): a
+        # repeat approve of the very same artifact is a no-op, anything else is a typed 409.
+        if existing.revoked_at is None and await _same_artifact(
+            install_dal, existing.version_id, upload.app_version_id
+        ):
+            logger.info(
+                "bundle install: already installed, approve is a no-op",
+                extra={"app_id": app_id, "version": version},
+            )
+            return existing
+        raise ApiError(
+            f"version {version} of {app_id} is already installed with a different artifact "
+            "or was revoked",
+            409,
+            "version_conflict",
         )
 
     new_schema = schema_from_manifest(upload.manifest_json)

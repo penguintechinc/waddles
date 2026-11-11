@@ -1,4 +1,3 @@
-import { useCallback } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { AnnouncementsPanel } from '../../components/dashboard/AnnouncementsPanel';
 import { CommunityHeader } from '../../components/dashboard/CommunityHeader';
@@ -6,7 +5,7 @@ import { isCommunityAdminRole } from '../../components/dashboard/communityRoles'
 import CommunityReputationPanel from '../../components/dashboard/CommunityReputationPanel';
 import QuickActionsWidget from '../../components/dashboard/QuickActionsWidget';
 import { LeaderboardCard } from '../../components/leaderboard/LeaderboardCard';
-import LiveStreamGrid from '../../components/streams/LiveStreamGrid';
+import { StreamsPanel } from '../../components/dashboard/StreamsPanel';
 import BotScoreCard from '../../components/BotScoreCard';
 import { Card, CardHeader, EmptyState, ErrorState, NotAvailableYet, QueryBoundary, ServedFeature } from '../../components/ui';
 import { useAuthView } from '../../contexts/authView';
@@ -29,31 +28,16 @@ function DashboardBody({ membership }: { membership: MyCommunity }) {
   const { isSuperAdmin } = useAuthView();
   const details = usePublicCommunity(communityId);
   const streams = useLiveStreams(communityId);
-  const refetchStreams = streams.refetch;
-  const refreshStreams = useCallback(() => void refetchStreams(), [refetchStreams]);
   const canManage = isCommunityAdminRole(membership.role);
   const isOwnerOrAdmin = membership.role === 'community-owner' || membership.role === 'community-admin';
   const live = streams.data;
+  const connect = canManage || isSuperAdmin ? { connectTo: `/admin/${communityId}/connections` } : {};
 
   return (
     <div>
       <CommunityHeader membership={membership} details={details.data} canAdminister={canManage || isSuperAdmin} />
 
-      {live && live.length > 0 ? (
-        <div className="mb-8">
-          <LiveStreamGrid streams={live} onRefresh={refreshStreams} loading={false} error={null} />
-        </div>
-      ) : null}
-      {streams.isError ? (
-        <div className="mb-8" data-testid="streams-error">
-          <ErrorState
-            title="We could not load live streams"
-            error={streams.error}
-            onRetry={refreshStreams}
-            className="py-6"
-          />
-        </div>
-      ) : null}
+      <StreamsPanel communityId={communityId} query={streams} canManage={canManage || isSuperAdmin} />
 
       <AnnouncementsPanel communityId={communityId} canManage={canManage} />
 
@@ -81,8 +65,8 @@ function DashboardBody({ membership }: { membership: MyCommunity }) {
             </ServedFeature>
           ) : null}
           <CommunityReputationPanel communityId={communityId} />
-          <LeaderboardCard communityId={communityId} type="watch-time" title="Top Viewers" limit={5} />
-          <LeaderboardCard communityId={communityId} type="messages" title="Top Chatters" limit={5} />
+          <LeaderboardCard communityId={communityId} type="watch-time" title="Top Viewers" limit={5} {...connect} />
+          <LeaderboardCard communityId={communityId} type="messages" title="Top Chatters" limit={5} {...connect} />
           <QuickActionsWidget id={String(communityId)} />
         </div>
       </div>

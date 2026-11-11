@@ -249,3 +249,31 @@ class TestGetLeaderboard:
             )
         entries = await svc.get_leaderboard(async_dal, dal, community_id=community_id, limit=2)
         assert len(entries) == 2
+
+
+async def test_reputation_tenant_select_names_columns_not_id(
+    reputation_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: live alpha 500ed on `reputation_tenant.id` (composite PK, no id column).
+
+    When another binder defines the table without `primarykey=`, pydal's bare SELECT adds `id`;
+    the reputation read must therefore name its columns explicitly.
+    """
+    async_dal, community_id, tenant_id = reputation_db
+    seen: list[tuple[Any, ...]] = []
+    real = async_dal.select_async
+
+    async def spy(query: Any, *fields: Any, **kw: Any) -> Any:
+        seen.append(fields)
+        return await real(query, *fields, **kw)
+
+    monkeypatch.setattr(async_dal, "select_async", spy)
+    await svc.get_my_reputation(
+        async_dal, async_dal.dal, community_id=community_id, hub_user_id=1, tenant_id=tenant_id
+    )
+    named = [str(f) for call in seen for f in call]
+    assert named == [
+        "reputation_tenant.score",
+        "reputation_tenant.total_events",
+        "reputation_tenant.last_event_at",
+    ]

@@ -1,0 +1,89 @@
+# Refreshes the public landing-page stats snapshot in Valkey every 5 minutes
+# (hub_api/cli/refresh_landing_stats.py); GET /api/v1/public/stats only reads the snapshot.
+{{- if .Values.pipeline.hubApi.landingStatsRefresh.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-landing-stats-refresh
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: landing-stats-refresh
+spec:
+  schedule: {{ .Values.pipeline.hubApi.landingStatsRefresh.schedule | quote }}
+  concurrencyPolicy: {{ .Values.pipeline.hubApi.landingStatsRefresh.concurrencyPolicy }}
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.pipeline.hubApi.landingStatsRefresh.backoffLimit }}
+      activeDeadlineSeconds: 240
+      template:
+        metadata:
+          labels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: landing-stats-refresh
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+          {{- include "waddlebot.imagePullSecrets" . | nindent 10 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: landing-stats-refresh
+            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" (.Values.hubApi.imageTag | default .Values.global.imageTag)) }}"
+            imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+            command: ["python3", "-m", "cli.refresh_landing_stats"]
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1000
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop:
+                - ALL
+              seccompProfile:
+                type: RuntimeDefault
+            envFrom:
+            - configMapRef:
+                name: {{ include "waddlebot.fullname" . }}-config
+            - secretRef:
+                name: {{ include "waddlebot.fullname" . }}-secrets
+            env:
+            # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_hub_api;
+            # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+            # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 12 }}
+{{- include "waddlebot.transitTls.clientEnv" . | nindent 12 }}
+            - name: MODULE_NAME
+              value: "landing-stats-refresh"
+            {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+            # Same TLS-authenticated Valkey wiring hub-api / the core-bundle seeder use for build_client().
+            - name: VALKEY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "waddlebot.fullname" . }}-secrets
+                  key: VALKEY_DURABLE_URL_TLS_AUTH
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "waddlebot.fullname" . }}-secrets
+                  key: VALKEY_DURABLE_PASSWORD
+            {{- end }}
+            resources:
+              {{- toYaml .Values.pipeline.hubApi.landingStatsRefresh.resources | nindent 14 }}
+            volumeMounts:
+            {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 12 }}
+            {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 12 }}
+            - name: tmp
+              mountPath: /tmp
+          volumes:
+          {{- include "waddlebot.transitTls.caVolume" . | nindent 10 }}
+          {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 10 }}
+          - name: tmp
+            emptyDir: {}
+{{- end }}
