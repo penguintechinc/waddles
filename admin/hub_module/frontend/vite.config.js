@@ -19,6 +19,8 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
+    // react-libs ships extensionless directory imports Node ESM rejects; let vite resolve them.
+    server: { deps: { inline: ['@penguintechinc/react-libs'] } },
     setupFiles: ['./src/test/setup.js'],
     coverage: {
       provider: 'v8',
