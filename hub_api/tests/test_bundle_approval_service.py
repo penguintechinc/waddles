@@ -461,3 +461,38 @@ async def test_uninstall_globally_finishes_the_cascade_then_raises_when_the_audi
         ).select()
     ).first()
     assert revoked.revoked_at is not None
+
+
+async def test_install_version_globally_is_idempotent_for_same_artifact(install_dal: Any) -> None:
+    """Regression: a repeat approve (e.g. after the seeder) hit uq_app_global_installs_current."""
+    await _seed_published(install_dal)
+    kwargs = {"app_id": "waddles.socials.music.default", "version": "3.0.1", "installed_by": 1}
+    first = await install_version_globally(install_dal, **kwargs)
+    second = await install_version_globally(install_dal, **kwargs)
+    assert second.id == first.id
+    rows = await install_dal(install_dal.app_global_installs.version == "3.0.1").select()
+    assert len(list(rows)) == 1
+
+
+async def test_install_version_globally_different_digest_is_409_version_conflict(
+    install_dal: Any,
+) -> None:
+    """A different artifact at an already-installed (app_id, version) is a typed 409, never 500."""
+    await _seed_published(install_dal)
+    kwargs = {"app_id": "waddles.socials.music.default", "version": "3.0.1", "installed_by": 1}
+    await install_version_globally(install_dal, **kwargs)
+    other_id = await install_dal.app_versions.async_insert(
+        app_id="waddles.socials.music.default",
+        version="3.0.1-rebuild",
+        artifact_digest="sha256:" + "b" * 64,
+        language="python",
+        artifact_kind="source",
+        scan_status="scanned",
+    )
+    await install_dal(
+        (install_dal.app_version_uploads.app_id == "waddles.socials.music.default")
+        & (install_dal.app_version_uploads.version == "3.0.1")
+    ).update(app_version_id=other_id)
+    with pytest.raises(ApiError) as exc:
+        await install_version_globally(install_dal, **kwargs)
+    assert (exc.value.status_code, exc.value.code) == (409, "version_conflict")
