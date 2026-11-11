@@ -67,6 +67,7 @@ import asyncio
 import fnmatch
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -304,6 +305,34 @@ def resolve_bypass_depth(hostname: Optional[str]) -> BypassDepth:
     ):
         return "global"
     return "none"
+
+
+#: Topology switch (NOT a license switch): set only on a service reachable
+#: exclusively through the in-cluster hub-webui proxy, which overwrites
+#: `X-Forwarded-Host` with the edge-observed Host. It cannot grant a bypass by
+#: itself -- the resolved host must still match the hardcoded domain lists.
+FORWARDED_HOST_TRUST_ENV = "TRUSTED_FORWARDED_HOST"
+
+_HOSTNAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:\d{1,5})?$")
+
+
+def resolve_trusted_host(host: Optional[str], forwarded_host: Optional[str]) -> Optional[str]:
+    """
+    Pick the hostname the bypass-domain check should inspect.
+
+    The direct `Host` is used unless this deployment declares it sits behind
+    the trusted in-cluster proxy (`TRUSTED_FORWARDED_HOST=1`), in which case
+    the LAST `X-Forwarded-Host` entry (the one the nearest trusted proxy set)
+    is used instead -- the direct Host is then just the internal service name.
+    A trusted-but-malformed/absent forwarded value fails closed to None (no
+    bypass), never falls back to a client-influenced value.
+    """
+    if os.environ.get(FORWARDED_HOST_TRUST_ENV, "").strip().lower() not in ("1", "true"):
+        return host
+    if not forwarded_host:
+        return None
+    candidate = forwarded_host.split(",")[-1].strip().lower()
+    return candidate if _HOSTNAME_RE.match(candidate) else None
 
 
 def tier_check_bypassed(hostname: Optional[str], community: Optional[int]) -> bool:

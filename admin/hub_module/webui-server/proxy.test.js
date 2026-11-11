@@ -155,3 +155,25 @@ test('strips hop-by-hop headers and honours a base path on the target', async ()
     upstream.close();
   }
 });
+
+test('sets X-Forwarded-Host from the edge Host, overwriting a client-supplied value', async () => {
+  let seen;
+  const upstream = http.createServer((req, res) => {
+    seen = req.headers;
+    res.writeHead(200);
+    res.end('ok');
+  });
+  const upPort = await listen(upstream);
+  const { server, port } = await startProxy(`http://127.0.0.1:${upPort}`);
+  try {
+    await request(port, {
+      path: '/api/v1/x',
+      headers: { Host: 'waddles-alpha.penguintech.cloud:8443', 'X-Forwarded-Host': 'waddles.penguintech.cloud' },
+    });
+    assert.equal(seen['x-forwarded-host'], 'waddles-alpha.penguintech.cloud:8443');
+    assert.equal(seen.host, `127.0.0.1:${upPort}`);
+  } finally {
+    server.close();
+    upstream.close();
+  }
+});

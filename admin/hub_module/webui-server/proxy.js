@@ -49,7 +49,8 @@ function filterHeaders(headers) {
  * Mount with `app.use('/api', createProxy(url))`: the full original URL
  * (including the '/api' prefix Express strips from req.url) is forwarded, the
  * method, headers (incl. Authorization) and body are streamed through
- * unchanged, the Host header is set to the upstream host, and an unreachable
+ * unchanged, the Host header is set to the upstream host (the original is preserved in a
+ * server-set X-Forwarded-Host, overwriting any client value), and an unreachable
  * upstream yields a 502.
  */
 export function createProxy(target) {
@@ -66,7 +67,14 @@ export function createProxy(target) {
         port: upstream.port || undefined,
         method: req.method,
         path: basePath + req.originalUrl,
-        headers: { ...filterHeaders(req.headers), host: upstream.host },
+        headers: {
+          ...filterHeaders(req.headers),
+          host: upstream.host,
+          // Overwrite (never append to) any client-supplied value: hub-api's
+          // license bypass-domain check trusts this header ONLY because this
+          // proxy is the sole path to it and always sets it from the edge Host.
+          'x-forwarded-host': req.headers.host ?? '',
+        },
         agent,
       },
       (upstreamRes) => {

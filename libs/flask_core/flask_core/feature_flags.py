@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .entitlement import get_entitlement_client, tier_check_bypassed
+from .entitlement import get_entitlement_client, resolve_trusted_host, tier_check_bypassed
 from .tier_catalog import TIER_ENTERPRISE, TIER_FREE, TIER_PROFESSIONAL
 
 _CANONICAL_TIERS = frozenset({TIER_FREE, TIER_PROFESSIONAL, TIER_ENTERPRISE})
@@ -32,9 +32,14 @@ def _current_request_host() -> Optional[str]:
     try:
         from quart import request  # type: ignore[import-not-found]
 
-        return str(request.host)
+        return resolve_trusted_host(
+            str(request.host), request.headers.get("X-Forwarded-Host")
+        )
     except Exception:  # noqa: BLE001 - no active request context, or quart unavailable
         return None
+
+
+current_request_host = _current_request_host
 
 
 async def feature_enabled(

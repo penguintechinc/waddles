@@ -494,7 +494,7 @@ def test_get_entitlement_client_returns_shared_singleton(
 def test_current_request_host_reads_quart_request_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_request = types.SimpleNamespace(host="waddles.penguintech.cloud")
+    fake_request = types.SimpleNamespace(host="waddles.penguintech.cloud", headers={})
     fake_quart = types.ModuleType("quart")
     fake_quart.request = fake_request  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "quart", fake_quart)
@@ -587,3 +587,74 @@ async def test_licensed_flag_not_env_bypassable(
         flag_result=None, tier="enterprise", tier_requirements={FLAG_KEY: "enterprise"}
     )
     assert await client3.evaluate(FLAG_KEY, tenant=TENANT) is False
+
+
+@pytest.mark.parametrize(
+    ("host", "xfh", "trusted", "expected_bypass"),
+    [
+        ("hub-api:8204", "waddles-alpha.penguintech.cloud:8443", True, True),
+        ("hub-api:8204", "foo.penguincloud.io", True, True),
+        ("hub-api:8204", "penguintech.cloud.evil.com", True, False),
+        ("hub-api:8204", "evilpenguintech.cloud", True, False),
+        ("hub-api:8204", "customer.example.com", True, False),
+        # spoofed XFH from an untrusted source (deployment not behind the proxy)
+        ("hub-api:8204", "waddles-alpha.penguintech.cloud", False, False),
+        # trusted but header missing / malformed -> fail closed
+        ("waddles-alpha.penguintech.cloud", None, True, False),
+        ("hub-api:8204", "bad host!", True, False),
+        # client-prepended spoof: only the last (proxy-set) entry counts
+        ("hub-api:8204", "waddles.penguintech.cloud, customer.example.com", True, False),
+        ("hub-api:8204", "customer.example.com, waddles.penguintech.cloud", True, True),
+        # untrusted: direct Host is authoritative
+        ("waddles.penguintech.cloud", None, False, True),
+    ],
+)
+def test_forwarded_host_bypass_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    host: str,
+    xfh: Optional[str],
+    trusted: bool,
+    expected_bypass: bool,
+) -> None:
+    """Bypass follows the proxy-set forwarded host only on trusted deployments; fails closed."""
+    from flask_core.entitlement import resolve_trusted_host, tier_check_bypassed
+
+    if trusted:
+        monkeypatch.setenv("TRUSTED_FORWARDED_HOST", "1")
+    else:
+        monkeypatch.delenv("TRUSTED_FORWARDED_HOST", raising=False)
+    resolved = resolve_trusted_host(host, xfh)
+    assert tier_check_bypassed(resolved, None) is expected_bypass
+    assert tier_check_bypassed(resolved, 5) is expected_bypass
+
+
+@pytest.mark.parametrize(
+    ("xfh", "tenant_global_bypass"),
+    [
+        ("waddles.app", True),
+        ("sub.waddles.app", True),
+        ("waddles.app:8443", True),
+        ("waddles.app.evil.com", False),
+        ("evilwaddles.app", False),
+        ("waddles.apps", False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_waddles_app_lifts_tenant_and_global_limits_via_proxy(
+    monkeypatch: pytest.MonkeyPatch, xfh: str, tenant_global_bypass: bool
+) -> None:
+    """waddles.app (+subdomains) reports enterprise at tenant/global scope; look-alikes stay free."""
+    import flask_core.feature_flags as ff
+    from flask_core.entitlement import resolve_trusted_host
+
+    monkeypatch.setenv("TRUSTED_FORWARDED_HOST", "1")
+    host = resolve_trusted_host("hub-api:8204", xfh)
+    monkeypatch.setattr(ff, "_current_request_host", lambda: host)
+
+    class _NoLicense:
+        async def effective_tier(self, **_kw: object) -> str:
+            return "free"
+
+    monkeypatch.setattr(ff, "get_entitlement_client", lambda: _NoLicense())
+    # tenant-scoped and global (no community) resolution -- what the free-tier caps use
+    assert (await ff.get_tier(tenant="t1") == "enterprise") is tenant_global_bypass
