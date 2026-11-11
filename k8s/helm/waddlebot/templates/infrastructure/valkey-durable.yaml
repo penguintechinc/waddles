@@ -206,7 +206,7 @@ spec:
             {{- end }}
           initialDelaySeconds: 30
           periodSeconds: 10
-          timeoutSeconds: 5
+          timeoutSeconds: {{ $d.probeTimeoutSeconds | default 5 }}
           failureThreshold: 3
         readinessProbe:
           exec:
@@ -220,7 +220,7 @@ spec:
             {{- end }}
           initialDelaySeconds: 5
           periodSeconds: 10
-          timeoutSeconds: 5
+          timeoutSeconds: {{ $d.probeTimeoutSeconds | default 5 }}
           failureThreshold: 3
       {{- if $tls }}
       volumes:
