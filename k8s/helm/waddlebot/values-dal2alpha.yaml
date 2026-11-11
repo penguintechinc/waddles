@@ -4,6 +4,11 @@
 # NodePort), and the full security baseline (default-deny CNP, PSA restricted, Tetragon) is ON.
 # Usage: helm upgrade --install waddlebot . -n waddlebot -f values-dal2alpha.yaml (NO other -f needed).
 # Prereqs (operator-provisioned, never in git): Secret ghcr-pull + waddlebot-platform-credentials in ns waddlebot.
+# Shared Gateway gateway-system/shared listener `https` only admits routes from namespaces carrying this label;
+# without it HTTPRoute `waddlebot` is Accepted=False NotAllowedByListeners and the public URL 404s.
+namespaceLabels:
+  gateway-access: shared-dal2a
+
 webui:
   publicUrl: "https://waddles-alpha.penguintech.cloud"
   # #320 Connections: Google/Spotify only accept http (non-TLS) redirect URIs on
