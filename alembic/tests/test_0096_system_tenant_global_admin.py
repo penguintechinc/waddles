@@ -146,3 +146,49 @@ def test_both_global_and_default_present_fails_loud(pg_db: PgTestDatabase) -> No
         alembic_cli("upgrade", _REVISION, dsn=pg_db.dsn)
     # Nothing half-applied: both rows untouched.
     assert {s for (s,) in _q(pg_db, "SELECT slug FROM tenants")} == {"global", "default"}
+
+
+def test_preexisting_system_tenant_with_non_super_admin_admins_fails_loud(
+    pg_db: PgTestDatabase,
+) -> None:
+    """A `system` tenant that already has a plain user as admin must not silently promote them."""
+    _reset_to_previous(pg_db)
+    _q(pg_db, "ALTER TABLE hub_users ADD COLUMN IF NOT EXISTS is_super_admin BOOLEAN DEFAULT FALSE")
+    _q(pg_db, "ALTER TABLE hub_users ADD COLUMN IF NOT EXISTS is_bootstrap BOOLEAN DEFAULT FALSE")
+    (sid,) = _q(pg_db, "INSERT INTO tenants (slug) VALUES ('system') RETURNING id")[0]
+    (real,) = _q(
+        pg_db, "INSERT INTO hub_users (username, is_super_admin) VALUES ('sa', true) RETURNING id"
+    )[0]
+    (plain,) = _q(
+        pg_db, "INSERT INTO hub_users (username, is_super_admin) VALUES ('plain', false) RETURNING id"
+    )[0]
+    _q(
+        pg_db,
+        "INSERT INTO tenant_admins (tenant_id, user_id) VALUES (%s, %s), (%s, %s)",
+        (sid, real, sid, plain),
+    )
+    with pytest.raises(RuntimeError, match="silently become global admins") as info:
+        alembic_cli("upgrade", _REVISION, dsn=pg_db.dsn)
+    assert str(plain) in str(info.value)
+    # Nothing promoted, flag column still present (transactional DDL rolled back).
+    assert _q(pg_db, "SELECT count(*) FROM tenant_members") == [(0,)]
+    cols = _q(
+        pg_db, "SELECT column_name FROM information_schema.columns WHERE table_name='hub_users'"
+    )
+    assert ("is_super_admin",) in cols
+
+
+def test_preexisting_system_tenant_with_only_super_admin_admins_upgrades(
+    pg_db: PgTestDatabase,
+) -> None:
+    """The legitimate re-run shape (system admins are all super admins) still upgrades."""
+    _reset_to_previous(pg_db)
+    _q(pg_db, "ALTER TABLE hub_users ADD COLUMN IF NOT EXISTS is_super_admin BOOLEAN DEFAULT FALSE")
+    _q(pg_db, "ALTER TABLE hub_users ADD COLUMN IF NOT EXISTS is_bootstrap BOOLEAN DEFAULT FALSE")
+    (sid,) = _q(pg_db, "INSERT INTO tenants (slug) VALUES ('system') RETURNING id")[0]
+    (real,) = _q(
+        pg_db, "INSERT INTO hub_users (username, is_super_admin) VALUES ('sa', true) RETURNING id"
+    )[0]
+    _q(pg_db, "INSERT INTO tenant_admins (tenant_id, user_id) VALUES (%s, %s)", (sid, real))
+    alembic_cli("upgrade", _REVISION, dsn=pg_db.dsn)
+    assert _q(pg_db, "SELECT user_id FROM tenant_admins WHERE tenant_id=%s", (sid,)) == [(real,)]

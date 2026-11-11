@@ -108,6 +108,47 @@ def _ensure_system_tenant() -> int:
     return created
 
 
+def _super_admin_predicate() -> str | None:
+    """SQL predicate selecting the pre-migration super admins, or None when the flag is gone."""
+    if not _has_column("hub_users", "is_super_admin"):
+        return None
+    predicate = "is_super_admin = true"
+    if _has_column("hub_users", "is_bootstrap"):
+        predicate += " OR is_bootstrap = true"
+    return predicate
+
+
+def _refuse_preexisting_system_admins(system_id: int) -> None:
+    """Fail loud if `system` already has admins who were NOT super admins before this migration.
+
+    Promoting them silently would hand platform-wide privileges to whoever happened to hold a
+    `tenant_admins` row on a pre-existing `system` tenant. An operator must review them first.
+    """
+    predicate = _super_admin_predicate()
+    if predicate is None:
+        return  # flag already gone: this migration promotes nobody, nothing to compare against
+    rows = (
+        op.get_bind()
+        .execute(
+            sa.text(
+                "SELECT user_id FROM tenant_admins WHERE tenant_id = :sid "
+                f"AND user_id NOT IN (SELECT id FROM hub_users WHERE {predicate}) "
+                "ORDER BY user_id"
+            ),
+            {"sid": system_id},
+        )
+        .fetchall()
+    )
+    if rows:
+        ids = ", ".join(str(r[0]) for r in rows)
+        raise RuntimeError(
+            f"refusing to migrate: the pre-existing {SYSTEM_SLUG!r} tenant (id {system_id}) has "
+            f"tenant_admins rows for user ids [{ids}] who were not super admins; they would "
+            "silently become global admins. Remove those rows or make them super admins "
+            "deliberately, then re-run"
+        )
+
+
 def upgrade() -> None:
     """Create membership, rename the catch-all tenant, seed `system`, move admins, drop the flag."""
     op.execute(
@@ -148,12 +189,13 @@ def upgrade() -> None:
     )
 
     _rename_tenant(OLD_DEFAULT_SLUG, NEW_DEFAULT_SLUG, only_global_flag=False)
+    preexisting_system = _tenant_id(SYSTEM_SLUG)
+    if preexisting_system is not None:
+        _refuse_preexisting_system_admins(preexisting_system)
     system_id = _ensure_system_tenant()
 
-    if _has_column("hub_users", "is_super_admin"):
-        predicate = "is_super_admin = true"
-        if _has_column("hub_users", "is_bootstrap"):
-            predicate += " OR is_bootstrap = true"
+    predicate = _super_admin_predicate()
+    if predicate is not None:
         for table, extra_cols, extra_vals in (
             ("tenant_members", "", ""),
             ("tenant_admins", ", role", ", 'tenant-owner'"),

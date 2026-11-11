@@ -355,7 +355,12 @@ async def update_user(data: UpdateUserRequest, user_id: int) -> tuple[Any, int]:
     async_dal, dal = _dal()
     try:
         row = await svc.update_user(
-            async_dal, dal, user_id=user_id, email=data.email, is_active=data.isActive
+            async_dal,
+            dal,
+            user_id=user_id,
+            email=data.email,
+            is_active=data.isActive,
+            caller_id=get_current_user_id(request),
         )
     except ApiError as exc:
         return _err(exc)

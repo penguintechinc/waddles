@@ -62,10 +62,41 @@ def ensure_tables(dal: Any, *, migrate: bool = False) -> None:
         )
 
 
-def _system_tenant_id(dal: Any) -> int | None:
-    """Return the `system` tenant's id, or None when it does not exist (fail closed)."""
+#: Stable advisory-lock key serialising every "count the global admins, then mutate" section
+#: (revoke, deactivate, delete) so two concurrent demotions can never both pass the last-admin
+#: guard and leave the platform with zero operators.
+GLOBAL_ADMIN_LOCK_KEY = "global_admin"
+
+
+def take_global_admin_lock(dal: Any) -> None:
+    """Take the transaction-scoped `global_admin` advisory lock (Postgres; no-op elsewhere).
+
+    Blocks until any concurrent holder commits/rolls back, so the admin count read afterwards
+    sees every earlier mutation. Call it first inside the same transaction as the count and the
+    write; the lock is released by that transaction's commit/rollback. Other dialects (sqlite in
+    tests) serialise writers at the connection level and have no such function.
+    """
+    if str(getattr(dal, "_dbname", "")).startswith("postgres"):
+        dal.executesql(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))", placeholders=[GLOBAL_ADMIN_LOCK_KEY]
+        )
+
+
+def _system_tenant_row(dal: Any) -> Any | None:
+    """The `system` tenant row regardless of its active flag, or None when absent."""
     ensure_tables(dal)
-    row = dal(dal.tenants.slug == SYSTEM_TENANT_SLUG).select(dal.tenants.id).first()
+    return dal(dal.tenants.slug == SYSTEM_TENANT_SLUG).select(dal.tenants.id).first()
+
+
+def _system_tenant_id(dal: Any) -> int | None:
+    """Return the ACTIVE `system` tenant's id, or None (fail closed).
+
+    A missing tenant and a deactivated (`is_active` false or NULL) one are both "no operator
+    plane": nobody is global while the reserved tenant is switched off.
+    """
+    ensure_tables(dal)
+    query = (dal.tenants.slug == SYSTEM_TENANT_SLUG) & (dal.tenants.is_active == True)  # noqa: E712
+    row = dal(query).select(dal.tenants.id).first()
     return int(row.id) if row is not None else None
 
 
@@ -127,9 +158,15 @@ def global_admin_ids(dal: Any) -> set[int]:
 
 def ensure_system_tenant(dal: Any) -> int:
     """Return the `system` tenant id, creating the reserved row if missing (idempotent)."""
-    existing = _system_tenant_id(dal)
+    existing = _system_tenant_row(dal)
     if existing is not None:
-        return existing
+        active = _system_tenant_id(dal)
+        if active is None:
+            raise RuntimeError(
+                "the reserved `system` tenant exists but is inactive; refusing to grant "
+                "global admin until an operator re-activates it"
+            )
+        return active
     values: dict[str, Any] = {"slug": SYSTEM_TENANT_SLUG, "is_active": True}
     if "display_name" in dal.tenants.fields:  # minimal test DALs bind a reduced `tenants`
         values["display_name"] = SYSTEM_TENANT_NAME
