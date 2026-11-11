@@ -154,49 +154,6 @@ async def get_tenant_communities(
     return list(rows), total, total_pages
 
 
-async def get_tenant_modules(async_dal: Any, dal: Any, *, tenant_id: int) -> tuple[bool, list[Any]]:
-    """Return `(all_modules_allowed, modules)` for a tenant.
-
-    `allowed_module_ids IS NULL` means every published module is allowed
-    (matches Node's `tenant.allowed_module_ids === null` branch); an empty
-    list means none are; a non-empty list scopes to exactly those ids.
-    """
-    tenant = await get_tenant(async_dal, dal, tenant_id=tenant_id)
-    allowed_ids = tenant.allowed_module_ids
-
-    if allowed_ids is None:
-        rows = await async_dal.select_async(
-            dal(dal.hub_modules.is_published == True),  # noqa: E712 - pydal Field comparison
-            orderby=dal.hub_modules.category | dal.hub_modules.display_name,
-        )
-        return True, list(rows)
-
-    if len(allowed_ids) == 0:
-        return False, []
-
-    rows = await async_dal.select_async(
-        dal(dal.hub_modules.id.belongs(allowed_ids)),
-        orderby=dal.hub_modules.category | dal.hub_modules.display_name,
-    )
-    return False, list(rows)
-
-
-async def update_tenant_modules(
-    async_dal: Any, dal: Any, *, tenant_id: int, allowed_module_ids: list[int] | None
-) -> None:
-    """Set the allowed module id list (or `None` for "all modules"). Raises 400 on invalid ids."""
-    if allowed_module_ids is not None:
-        for module_id in allowed_module_ids:
-            if module_id <= 0:
-                raise bad_request("Each allowedModuleId must be a positive integer")
-
-    await async_dal.update_async(
-        dal.tenants.id == tenant_id,
-        allowed_module_ids=allowed_module_ids,
-        updated_at=datetime.now(UTC),
-    )
-
-
 async def get_tenant_admins(async_dal: Any, dal: Any, *, tenant_id: int) -> list[Any]:
     """List tenant admins, joined with `hub_users` for display fields.
 
@@ -286,11 +243,9 @@ __all__ = [
     "get_tenant",
     "get_tenant_admins",
     "get_tenant_communities",
-    "get_tenant_modules",
     "get_tenant_settings",
     "remove_tenant_admin",
     "require_matching_tenant",
     "update_tenant",
-    "update_tenant_modules",
     "update_tenant_settings",
 ]

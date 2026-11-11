@@ -7,14 +7,14 @@ A super-admin global disable sets `app_catalog.status = 'disabled'`
 This view exposes ONLY the `app_id` of disabled apps -- no manifest, author or other
 catalog column -- and the reader gets SELECT on the view alone.
 
-Chain note: down_revision is the current release head (0092). Rebase this onto
+Chain note: down_revision is the current release head (0094). Rebase this onto
 whatever head is on `release/v3.0.X` when it merges (single alembic head).
 """
 
 from alembic import op
 
 revision = "0095_bundle_disabled_apps_view"
-down_revision = "0092_leaderboard_config_toggles"
+down_revision = "0094_drop_demo_legacy_mods"
 branch_labels = None
 depends_on = None
 

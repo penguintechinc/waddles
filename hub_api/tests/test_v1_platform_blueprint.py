@@ -379,12 +379,6 @@ class TestSystem:
         assert body["status"] == "healthy"
         assert body["checks"]["database"] is True
 
-    async def test_modules_empty(self, client: Any) -> None:
-        response = await client.get("/api/v1/platform/modules", headers=_admin_headers())
-        assert response.status_code == 200
-        body = await response.get_json()
-        assert body["modules"] == []
-
     async def test_audit_log_empty(self, client: Any) -> None:
         response = await client.get("/api/v1/platform/audit-log", headers=_admin_headers())
         assert response.status_code == 200

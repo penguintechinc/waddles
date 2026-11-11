@@ -119,7 +119,9 @@ CREATE TABLE hub_user_identities (
 -- (same JSONB type/default as 071). Mirrored in pr-validation.yml's bootstrap.
 CREATE TABLE app_catalog (
     app_id VARCHAR(255) PRIMARY KEY,
-    stages JSONB DEFAULT '{}'::jsonb
+    stages JSONB DEFAULT '{}'::jsonb,
+    -- 0095_bundle_disabled_apps_view projects app_id WHERE status = 'disabled'.
+    status TEXT DEFAULT 'active'
 );
 -- 0043_hub_users_identity_uuid creates a view over community_members (a
 -- legacy config/postgres table, same minimal-bootstrap convention): only the
@@ -152,6 +154,10 @@ CREATE TABLE community_members (
 -- migrations 0020+ actually FK against (just `id`), not the real table's
 -- full column set.
 CREATE TABLE calendar_events (
+    id SERIAL PRIMARY KEY
+);
+-- 0092_leaderboard_config_toggles ALTERs this legacy table (never Alembic-created).
+CREATE TABLE community_leaderboard_config (
     id SERIAL PRIMARY KEY
 );
 -- 0063_seal_aad_version ALTERs this legacy table (config/postgres/migrations/

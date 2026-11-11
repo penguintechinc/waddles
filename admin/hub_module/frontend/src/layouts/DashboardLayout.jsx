@@ -130,7 +130,6 @@ function DashboardLayout() {
         items: [
           { name: 'Dashboard', href: '/superadmin', icon: ChartBarIcon },
           { name: 'Communities', href: '/superadmin/communities', icon: HomeIcon },
-          { name: 'Module Registry', href: '/superadmin/modules', icon: BuildingStorefrontIcon },
           { name: 'App Bundles', href: '/superadmin/bundles/apps', icon: InboxStackIcon },
           { name: 'Service Bundles', href: '/superadmin/bundles/services', icon: Cog6ToothIcon },
           { name: 'User Management', href: '/superadmin/users', icon: UserIcon },
