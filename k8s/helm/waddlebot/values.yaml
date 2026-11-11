@@ -683,6 +683,8 @@ infrastructure:
     # buffers + client buffers live OUTSIDE maxmemory. At maxmemory writes fail LOUDLY (OOM
     # error) rather than evicting -- alert on used_memory/maxmemory > 0.8.
     maxMemory: "600mb"
+    # Liveness/readiness exec probe timeout (seconds); raise when the instance is CPU-starved by handshake bursts.
+    probeTimeoutSeconds: 5
     aof:
       # `everysec` = <=1s loss on host crash. `always` fsyncs every write (zero-loss for
       # acks/tokens) at a large throughput cost -- instance-wide, Valkey has no per-key fsync.

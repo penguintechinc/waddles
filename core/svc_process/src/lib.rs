@@ -2405,6 +2405,8 @@ async fn build_source_supervisor_deps(
         // (`SupervisorDeps::breaker`'s doc) -- built here (no I/O, so no
         // reason to defer it like `kv_conn`/`db_wiring` above).
         breaker: Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics)),
+        shared_spine: Arc::new(circuit_breaker::valkey_resilience::SharedConn::new()),
+        log_throttle: Arc::new(circuit_breaker::valkey_resilience::LogThrottle::default()),
         reputation_wiring: None,
         economy_wiring: None,
         platform_table_wiring: None,

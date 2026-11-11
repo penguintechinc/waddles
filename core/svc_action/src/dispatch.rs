@@ -1311,8 +1311,34 @@ pub async fn run<A: AuditSink, T: TenantResolver>(
     rust_data_plane: Arc<dyn crate::flags::FeatureFlag>,
     shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), SpineError> {
-    let app_id = deps.app_id.clone();
     let dlq = SpineClient::connect(cfg.clone(), deps.metrics.clone()).await?;
+    run_with_client(
+        cfg,
+        grants,
+        stream_key,
+        deps,
+        rust_data_plane,
+        dlq,
+        shutdown,
+    )
+    .await
+}
+
+/// Same as [`run`] but reuses an already-connected, process-shared `dlq`
+/// [`SpineClient`] (cheap clone of one multiplexed connection) instead of
+/// opening and probing a fresh TLS connection per consumer -- the
+/// connection-storm fix (alpha incident 2026-11). Only the blocking
+/// [`GroupReader`] socket stays per-consumer (spec Sec5.7 rule 2).
+pub async fn run_with_client<A: AuditSink, T: TenantResolver>(
+    cfg: SpineConfig,
+    grants: Vec<Grant>,
+    stream_key: String,
+    deps: DispatchDeps<A, T, SpineClient>,
+    rust_data_plane: Arc<dyn crate::flags::FeatureFlag>,
+    dlq: SpineClient,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(), SpineError> {
+    let app_id = deps.app_id.clone();
     let streams: Vec<String> = grants.iter().map(|g| g.stream.clone()).collect();
     let sampler_client = dlq.clone();
     let reader = GroupReader::connect(

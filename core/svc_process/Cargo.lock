@@ -884,6 +884,7 @@ dependencies = [
 name = "circuit-breaker"
 version = "0.1.0"
 dependencies = [
+ "tokio",
  "tracing",
 ]
 

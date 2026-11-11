@@ -1649,6 +1649,12 @@ fn try_start_changelog_consumer(
                                 breaker: Arc::new(circuit_breaker::CircuitBreaker::new(
                                     Arc::clone(&breaker_metrics),
                                 )),
+                                shared_spine: Arc::new(
+                                    circuit_breaker::valkey_resilience::SharedConn::new(),
+                                ),
+                                log_throttle: Arc::new(
+                                    circuit_breaker::valkey_resilience::LogThrottle::default(),
+                                ),
                             });
                             Some(Arc::new(dispatch_supervisor::SpineConsumerSupervisor {
                                 deps,
