@@ -375,9 +375,6 @@ hubApi:
   trustForwardedHost: false
   # Peer CIDRs allowed to assert X-Forwarded-Host (required when trustForwardedHost is true).
   trustedProxyCidrs: []
-  # When non-empty, hub-api's HTTP port admits same-namespace callers from ONLY these
-  # app.kubernetes.io/component values (empty = any same-namespace pod, legacy behaviour).
-  httpIngressFromComponents: []
 
 # Namespace configuration
 namespace: waddlebot

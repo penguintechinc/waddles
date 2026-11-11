@@ -7,17 +7,6 @@
 hubApi:
   trustForwardedHost: true
   trustedProxyCidrs: ["10.244.0.0/16"]
-  # hub-webui plus the in-namespace components that call hub-api's HTTP port.
-  httpIngressFromComponents:
-    - hub-webui
-    - svc-ingest
-    - svc-ingest-rust
-    - svc-process
-    - svc-process-rust
-    - svc-action
-    - svc-action-rust
-    - svc-presentation
-    - egress-proxy
 
 webui:
   publicHostnames: ["waddles-alpha.penguintech.cloud"]

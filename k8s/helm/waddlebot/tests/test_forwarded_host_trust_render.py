@@ -44,7 +44,7 @@ def _env(docs: list[dict[str, Any]], name: str) -> dict[str, str]:
 
 
 def test_dal2alpha_enables_trust_and_allowlist() -> None:
-    """dal2alpha turns trust on, sets CIDRs/allowlist and narrows hub-api ingress."""
+    """dal2alpha turns trust on, sets CIDRs and the hostname allowlist."""
     res = _render()
     assert res.returncode == 0, res.stderr
     docs = _docs(res.stdout)
@@ -53,14 +53,6 @@ def test_dal2alpha_enables_trust_and_allowlist() -> None:
     assert api["TRUSTED_PROXY_CIDRS"] == "10.244.0.0/16"
     web = _env(docs, "waddlebot-hub-webui-v3")
     assert web["PUBLIC_HOSTNAMES"] == "waddles-alpha.penguintech.cloud"
-    cnp = [
-        d
-        for d in docs
-        if d.get("kind") == "CiliumNetworkPolicy"
-        and d["metadata"]["name"].endswith("hub-api-policy")
-    ]
-    assert cnp, "hub-api CNP not rendered"
-    assert "hub-webui" in yaml.safe_dump(cnp[0])
 
 
 def test_flag_off_renders_no_trust_env() -> None:
