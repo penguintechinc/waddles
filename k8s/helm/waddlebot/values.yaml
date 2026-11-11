@@ -5,6 +5,8 @@
 # Webui Configuration
 webui:
   publicUrl: ""
+  # Public hostnames of THIS deployment; hub-webui forwards X-Forwarded-Host only for these.
+  publicHostnames: []
   # #320 Connections: OAuth redirect_uri base. Empty by default -- hub-api falls back
   # to publicUrl above when blank. See values-alpha.yaml for why this needs its own
   # override in some environments.
@@ -367,6 +369,12 @@ global:
 # (Distinct from `pipeline.hubApi`, which holds hub-api's port/replicas/resources.)
 hubApi:
   imageTag: ""
+  # Trust X-Forwarded-Host (license bypass-domain check) from the in-cluster hub-webui proxy.
+  # Topology only, never a license switch. Rendering FAILS if true while any HTTPRoute/Ingress
+  # targets hub-api directly (only hub-webui may front it).
+  trustForwardedHost: false
+  # Peer CIDRs allowed to assert X-Forwarded-Host (required when trustForwardedHost is true).
+  trustedProxyCidrs: []
 
 # Namespace configuration
 namespace: waddlebot

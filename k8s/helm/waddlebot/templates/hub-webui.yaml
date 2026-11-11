@@ -66,6 +66,9 @@ spec:
         # default (see server.js). Same pattern as svc-ingest/svc-action/etc.
         - name: HUB_API_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+        # Allowlist for the X-Forwarded-Host the proxy sets (license bypass-domain check).
+        - name: PUBLIC_HOSTNAMES
+          value: {{ join "," .Values.webui.publicHostnames | quote }}
         livenessProbe:
           # LOCAL only -- /health never calls out to hub-api, so a slow/down
           # upstream never kills this pod via liveness.
