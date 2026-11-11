@@ -19151,7 +19151,7 @@ paths:
                 type: object
           description: Response DTO for `GET /api/v1/marketplace/catalog/<source>/<id>`.
       summary: '`GET /api/v1/marketplace/catalog/bundle/<app_id>` -- single bundle
-        entry (addressed by app_id).'
+        entry (by app_id).'
   /api/v1/marketplace/catalog/categories:
     get:
       description: ''

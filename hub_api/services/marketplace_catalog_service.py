@@ -296,6 +296,15 @@ def _vendor_of(row: Any) -> tuple[str | None, str | None]:
     return key, name
 
 
+def vendor_repo_error(vendor: str | None, repo: str | None) -> str | None:
+    """Validation message for malformed `vendor`/`repo` filters, else `None` (caller sends 400)."""
+    if vendor and not _VENDOR_RE.match(vendor.lower()):
+        return "vendor must be a GitHub org key or '_unaffiliated'"
+    if repo and not _REPO_RE.match(repo.lower()):
+        return "repo must look like 'org/repo'"
+    return None
+
+
 def _vendor_repo_filters(query: Any, catalog: Any, vendor: str | None, repo: str | None) -> Any:
     """AND the `vendor` / `repo` filters onto `query`; malformed values raise 400 (no fallback)."""
     if vendor:

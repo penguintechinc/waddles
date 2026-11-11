@@ -24,7 +24,6 @@ from flask_core.api_utils import error_response
 from quart import Blueprint, current_app, request
 from quart_schema import validate_response
 
-from services.errors import ApiError
 from services.marketplace_catalog_service import (
     CatalogEntryResponse,
     CatalogListResponse,
@@ -37,6 +36,7 @@ from services.marketplace_catalog_service import (
     get_categories,
     get_featured,
     get_vendors,
+    vendor_repo_error,
 )
 
 catalog_bp = Blueprint("v1_marketplace_catalog", __name__, url_prefix="/api/v1/marketplace/catalog")
@@ -76,26 +76,27 @@ async def browse_catalog() -> CatalogListResponse | tuple[dict[str, object], int
     `vendor` (GitHub org key, or `_unaffiliated`) and `repo` (`org/repo`) narrow to one vendor
     marketplace / one repo inside it; malformed values are a 400, never ignored.
     """
-    dal = _dal()
-    try:
-        return get_catalog(
-            dal,
-            request,
-            page=max(1, _int_arg("page", 1)),
-            limit=min(100, max(1, _int_arg("limit", 25))),
-            search=request.args.get("search", ""),
-            category=request.args.get("category") or None,
-            pricing_type=request.args.get("pricingType") or None,
-            source=request.args.get("source") or None,
-            community_id=_optional_int_arg("communityId"),
-            vendor=request.args.get("vendor") or None,
-            repo=request.args.get("repo") or None,
-        )
-    except ApiError as exc:
+    vendor = request.args.get("vendor") or None
+    repo = request.args.get("repo") or None
+    problem = vendor_repo_error(vendor, repo)
+    if problem is not None:
         return cast(
             tuple[dict[str, object], int],
-            error_response(exc.message, status_code=exc.status_code, error_code=exc.code),
+            error_response(problem, status_code=400, error_code="BAD_REQUEST"),
         )
+    return get_catalog(
+        _dal(),
+        request,
+        page=max(1, _int_arg("page", 1)),
+        limit=min(100, max(1, _int_arg("limit", 25))),
+        search=request.args.get("search", ""),
+        category=request.args.get("category") or None,
+        pricing_type=request.args.get("pricingType") or None,
+        source=request.args.get("source") or None,
+        community_id=_optional_int_arg("communityId"),
+        vendor=vendor,
+        repo=repo,
+    )
 
 
 @vendors_bp.route("", methods=["GET"])
