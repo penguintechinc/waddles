@@ -13,19 +13,35 @@ const COMMUNITY_TYPE_ICONS = {
   other: '🌐',
 };
 
+/** Render an ISO timestamp as a coarse "N min ago" freshness label. */
+function formatAge(iso) {
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  return mins < 1 ? 'just now' : `${mins} min ago`;
+}
+
 function HomePage() {
   const [stats, setStats] = useState(null);
   const [spotlighted, setSpotlighted] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [computedAt, setComputedAt] = useState(null);
+  const [warming, setWarming] = useState(false);
 
   useEffect(() => {
     async function fetchData() {
       try {
         const [statsRes, spotlightRes] = await Promise.all([
-          publicApi.getStats(),
+          publicApi.getStats().catch((err) => {
+            // 503 {"status":"warming"}: stats snapshot not yet computed by the CronJob.
+            if (err?.response?.status === 503) {
+              setWarming(true);
+              return { data: {} };
+            }
+            throw err;
+          }),
           publicApi.getSpotlightedCommunities().catch(() => ({ data: { communities: [] } })),
         ]);
-        setStats(statsRes.data.stats);
+        setStats(statsRes.data.stats || null);
+        setComputedAt(statsRes.data.computedAt || null);
         setSpotlighted(spotlightRes.data?.communities || []);
       } catch (err) {
         console.error('Failed to fetch data:', err);
@@ -84,6 +100,14 @@ function HomePage() {
               );
             })}
           </div>
+          {warming && (
+            <p className="text-center text-xs text-navy-500 mt-6">Stats are warming up...</p>
+          )}
+          {computedAt && (
+            <p className="text-center text-xs text-navy-500 mt-6">
+              Updated {formatAge(computedAt)}
+            </p>
+          )}
         </div>
       </section>
 
