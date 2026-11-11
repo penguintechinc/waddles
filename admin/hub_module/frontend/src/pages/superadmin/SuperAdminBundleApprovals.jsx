@@ -43,7 +43,17 @@ function SuperAdminBundleApprovals() {
   const [actionPending, setActionPending] = useState(false);
   const [accessAck, setAccessAck] = useState(false);
 
+  // Bulk selection: keys are `${appId}@${version}`; results map the same key to a server outcome.
+  const [selected, setSelected] = useState(new Set());
+  const [results, setResults] = useState({});
+  const [bulkDialog, setBulkDialog] = useState(null);
+  const [bulkReason, setBulkReason] = useState('');
+  const [bulkPending, setBulkPending] = useState(false);
+  const [toast, setToast] = useState(null);
+
   useEffect(() => {
+    setSelected(new Set());
+    setResults({});
     loadVersions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, page]);
@@ -151,6 +161,80 @@ function SuperAdminBundleApprovals() {
     }
   }
 
+  const rowKey = (v) => `${v.appId}@${v.version}`;
+  const selectableRows = versions.filter((v) => v.status === 'PUBLISHED');
+  const allSelected =
+    selectableRows.length > 0 && selectableRows.every((v) => selected.has(rowKey(v)));
+
+  function toggleRow(v) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowKey(v))) next.delete(rowKey(v));
+      else next.add(rowKey(v));
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    setSelected(allSelected ? new Set() : new Set(selectableRows.map(rowKey)));
+  }
+
+  function openBulkDialog(action) {
+    setBulkReason('');
+    setBulkDialog(action);
+  }
+
+  async function confirmBulk() {
+    const action = bulkDialog;
+    const items = selectableRows
+      .filter((v) => selected.has(rowKey(v)))
+      .map((v) => ({ appId: v.appId, version: v.version }));
+    setBulkPending(true);
+    try {
+      const response = await bundleApi.bulkApprovals(action, items, bulkReason.trim());
+      const { results: itemResults, summary: batch } = response.data;
+      const byKey = {};
+      itemResults.forEach((r) => {
+        byKey[`${r.appId}@${r.version}`] = r;
+      });
+      setResults(byKey);
+      // Failed rows stay selected for retry; everything else is deselected.
+      setSelected(
+        new Set(itemResults.filter((r) => r.status === 'error').map((r) => `${r.appId}@${r.version}`)),
+      );
+      setToast({
+        kind: batch.failed > 0 ? 'warn' : 'ok',
+        text: `${batch.succeeded} of ${batch.total} succeeded, ${batch.failed} failed`,
+      });
+      setBulkDialog(null);
+      await loadVersions();
+    } catch (err) {
+      setToast({
+        kind: 'error',
+        text: err.response?.data?.error?.message || 'Bulk request failed',
+      });
+      setBulkDialog(null);
+    } finally {
+      setBulkPending(false);
+    }
+  }
+
+  const resultBadge = (r) => {
+    if (!r) return null;
+    const label = r.status === 'already_installed' ? 'already installed' : r.status;
+    const tone = r.status === 'error' ? 'text-red-300' : 'text-emerald-300';
+    return (
+      <span
+        className={`ml-2 text-xs ${tone}`}
+        data-testid="bundle-approvals-result-badge"
+        title={r.error?.message}
+      >
+        {label}
+        {r.error ? `: ${r.error.message}` : ''}
+      </span>
+    );
+  };
+
   const statusIcon = (s) => {
     if (s === 'REJECTED') return <XCircleIcon className="w-5 h-5 text-red-400" />;
     if (s === 'PUBLISHED') return <ClockIcon className="w-5 h-5 text-orange-400" />;
@@ -202,11 +286,56 @@ function SuperAdminBundleApprovals() {
         </div>
       )}
 
+      {toast && (
+        <div
+          role="status"
+          data-testid="bundle-approvals-toast"
+          className="bg-navy-800 border border-navy-600 text-white px-4 py-3 rounded-lg flex justify-between"
+        >
+          <span>{toast.text}</span>
+          <button onClick={() => setToast(null)} aria-label="Dismiss" className="text-navy-300">
+            x
+          </button>
+        </div>
+      )}
+
+      {selected.size > 0 && (
+        <div className="flex items-center gap-3" data-testid="bundle-approvals-bulk-bar">
+          <span className="text-navy-300 text-sm">{selected.size} selected</span>
+          <button
+            onClick={() => openBulkDialog('approve')}
+            disabled={bulkPending}
+            data-testid="bundle-approvals-bulk-approve"
+            className="px-3 py-1 rounded bg-gold-500 text-navy-900 font-semibold hover:bg-gold-400 disabled:opacity-50"
+          >
+            Approve selected
+          </button>
+          <button
+            onClick={() => openBulkDialog('reject')}
+            disabled={bulkPending}
+            data-testid="bundle-approvals-bulk-reject"
+            className="px-3 py-1 rounded bg-red-600 text-white hover:bg-red-500 disabled:opacity-50"
+          >
+            Reject selected
+          </button>
+        </div>
+      )}
+
       {versions.length > 0 ? (
         <div className="bg-navy-800 border border-navy-700 rounded-lg overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-navy-900 text-navy-400 uppercase text-xs">
               <tr>
+                <th className="px-4 py-3 w-8">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all"
+                    data-testid="bundle-approvals-select-all"
+                    checked={allSelected}
+                    disabled={selectableRows.length === 0}
+                    onChange={toggleAll}
+                  />
+                </th>
                 <th className="text-left px-4 py-3">App ID</th>
                 <th className="text-left px-4 py-3">Version</th>
                 <th className="text-left px-4 py-3">Status</th>
@@ -218,7 +347,21 @@ function SuperAdminBundleApprovals() {
             <tbody>
               {versions.map((v) => (
                 <tr key={v.versionId} className="border-t border-navy-700" data-testid="bundle-approvals-row">
-                  <td className="px-4 py-3 text-white font-mono text-xs">{v.appId}</td>
+                  <td className="px-4 py-3">
+                    {v.status === 'PUBLISHED' && (
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${v.appId} ${v.version}`}
+                        data-testid={`bundle-approvals-select-${v.versionId}`}
+                        checked={selected.has(rowKey(v))}
+                        onChange={() => toggleRow(v)}
+                      />
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-white font-mono text-xs">
+                    {v.appId}
+                    {resultBadge(results[rowKey(v)])}
+                  </td>
                   <td className="px-4 py-3 text-navy-300">{v.version}</td>
                   <td className="px-4 py-3">
                     <span className="inline-flex items-center gap-1 text-navy-300">
@@ -273,6 +416,60 @@ function SuperAdminBundleApprovals() {
           >
             Next
           </button>
+        </div>
+      )}
+
+      {bulkDialog && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+          data-testid="bundle-approvals-bulk-dialog"
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="bundle-approvals-bulk-title"
+            className="bg-navy-800 border border-navy-700 rounded-lg max-w-md w-full p-6"
+          >
+            <h2 id="bundle-approvals-bulk-title" className="text-xl font-bold text-white mb-2">
+              {bulkDialog === 'approve' ? 'Approve' : 'Reject'} {selected.size} version(s)?
+            </h2>
+            {bulkDialog === 'approve' ? (
+              <p className="text-navy-300 text-sm mb-4">
+                Installs into the platform catalog only. Dangerous access grants still need
+                individual review.
+              </p>
+            ) : (
+              <div className="mb-4">
+                <label htmlFor="bulkReason" className="block text-sm text-navy-300 mb-1">
+                  Reason (optional)
+                </label>
+                <textarea
+                  id="bulkReason"
+                  data-testid="bundle-approvals-bulk-reason"
+                  value={bulkReason}
+                  onChange={(e) => setBulkReason(e.target.value)}
+                  rows={3}
+                  className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white"
+                />
+              </div>
+            )}
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setBulkDialog(null)}
+                className="px-4 py-2 rounded bg-navy-700 text-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmBulk}
+                disabled={bulkPending}
+                data-testid="bundle-approvals-bulk-confirm"
+                className="px-4 py-2 rounded bg-gold-500 text-navy-900 font-semibold disabled:opacity-50"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
