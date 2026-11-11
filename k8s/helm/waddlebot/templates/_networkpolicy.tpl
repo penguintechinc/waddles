@@ -124,10 +124,23 @@ spec:
   {{- if $ingressOn }}
   ingress:
     {{- if $ports }}
-    # Same-namespace callers, declared serving port(s) only.
+    # Same-namespace callers, declared serving port(s) only (optionally narrowed to
+    # `ingressFromComponents`, e.g. hub-api's HTTP port).
     - fromEndpoints:
+        {{- if .ingressFromComponents }}
         - matchLabels:
             io.kubernetes.pod.namespace: {{ $ns }}
+          matchExpressions:
+            - key: app.kubernetes.io/component
+              operator: In
+              values:
+                {{- range .ingressFromComponents }}
+                - {{ . }}
+                {{- end }}
+        {{- else }}
+        - matchLabels:
+            io.kubernetes.pod.namespace: {{ $ns }}
+        {{- end }}
       toPorts:
         - ports:
             {{- include "waddlebot.cnpPortList" $ports | trim | nindent 12 }}

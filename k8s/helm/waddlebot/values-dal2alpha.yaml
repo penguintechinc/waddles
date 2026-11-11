@@ -4,7 +4,23 @@
 # NodePort), and the full security baseline (default-deny CNP, PSA restricted, Tetragon) is ON.
 # Usage: helm upgrade --install waddlebot . -n waddlebot -f values-dal2alpha.yaml (NO other -f needed).
 # Prereqs (operator-provisioned, never in git): Secret ghcr-pull + waddlebot-platform-credentials in ns waddlebot.
+hubApi:
+  trustForwardedHost: true
+  trustedProxyCidrs: ["10.244.0.0/16"]
+  # hub-webui plus the in-namespace components that call hub-api's HTTP port.
+  httpIngressFromComponents:
+    - hub-webui
+    - svc-ingest
+    - svc-ingest-rust
+    - svc-process
+    - svc-process-rust
+    - svc-action
+    - svc-action-rust
+    - svc-presentation
+    - egress-proxy
+
 webui:
+  publicHostnames: ["waddles-alpha.penguintech.cloud"]
   publicUrl: "https://waddles-alpha.penguintech.cloud"
   # #320 Connections: Google/Spotify only accept http (non-TLS) redirect URIs on
   # `localhost` -- the LAN-IP publicUrl above is rejected by their OAuth consent screens.

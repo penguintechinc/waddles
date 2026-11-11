@@ -109,11 +109,23 @@ spec:
         # kms.enabled -- the platform-managed baseline needs none of it.
         {{- with (include "waddlebot.kms.hubApiEnvFrom" .) }}{{ . | nindent 8 }}{{- end }}
         env:
+        {{- if .Values.hubApi.trustForwardedHost }}
+        {{- range .Values.httproute.rules }}
+        {{- if contains "hub-api" (.service | toString) }}{{ fail "hubApi.trustForwardedHost=true but an HTTPRoute rule targets hub-api directly; only hub-webui may front it" }}{{ end }}
+        {{- end }}
+        {{- range .Values.ingress.hosts }}{{ range .paths }}
+        {{- if or (contains "hub-api" ((.service | default "") | toString)) (contains "hub-api" ((.rawService | default "") | toString)) }}{{ fail "hubApi.trustForwardedHost=true but an Ingress path targets hub-api directly; only hub-webui may front it" }}{{ end }}
+        {{- end }}{{ end }}
+        {{- if not .Values.hubApi.trustedProxyCidrs }}{{ fail "hubApi.trustForwardedHost=true requires hubApi.trustedProxyCidrs" }}{{ end }}
         # Topology only (not a license switch): hub-api is reachable solely via the in-cluster
-        # hub-webui proxy, which overwrites X-Forwarded-Host with the edge Host; the license
-        # bypass-domain check reads it. Still matched against the hardcoded domain list.
+        # hub-webui proxy, which sets X-Forwarded-Host from an allowlisted public hostname; the
+        # peer must also be inside trustedProxyCidrs. Result is still matched to the hardcoded
+        # bypass-domain list.
         - name: TRUSTED_FORWARDED_HOST
           value: "1"
+        - name: TRUSTED_PROXY_CIDRS
+          value: {{ join "," .Values.hubApi.trustedProxyCidrs | quote }}
+        {{- end }}
         # Event-sync request key (hub-api signs, svc-action verifies) -- templates/event-sync-request-secret.yaml.
         - name: EVENT_SYNC_REQUEST_KEYS
           valueFrom:
@@ -406,5 +418,5 @@ spec:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: hub-api
 # R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
-{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "hub-api" "ports" (list $.Values.pipeline.hubApi.port $.Values.pipeline.hubApi.grpcPort) "runtime" "python" "egress" "https" "kubeApiServer" true "excludePorts" (list $.Values.pipeline.hubApi.grpcPort)) }}
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "hub-api" "ports" (list $.Values.pipeline.hubApi.port $.Values.pipeline.hubApi.grpcPort) "runtime" "python" "egress" "https" "kubeApiServer" true "excludePorts" (list $.Values.pipeline.hubApi.grpcPort) "ingressFromComponents" $.Values.hubApi.httpIngressFromComponents) }}
 {{- end }}

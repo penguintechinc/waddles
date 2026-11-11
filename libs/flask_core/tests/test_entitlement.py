@@ -494,7 +494,7 @@ def test_get_entitlement_client_returns_shared_singleton(
 def test_current_request_host_reads_quart_request_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_request = types.SimpleNamespace(host="waddles.penguintech.cloud", headers={})
+    fake_request = types.SimpleNamespace(host="waddles.penguintech.cloud", headers={}, remote_addr="10.244.1.5")
     fake_quart = types.ModuleType("quart")
     fake_quart.request = fake_request  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "quart", fake_quart)
@@ -621,9 +621,10 @@ def test_forwarded_host_bypass_resolution(
 
     if trusted:
         monkeypatch.setenv("TRUSTED_FORWARDED_HOST", "1")
+        monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "10.244.0.0/16")
     else:
         monkeypatch.delenv("TRUSTED_FORWARDED_HOST", raising=False)
-    resolved = resolve_trusted_host(host, xfh)
+    resolved = resolve_trusted_host(host, xfh, "10.244.1.5")
     assert tier_check_bypassed(resolved, None) is expected_bypass
     assert tier_check_bypassed(resolved, 5) is expected_bypass
 
@@ -648,7 +649,8 @@ async def test_waddles_app_lifts_tenant_and_global_limits_via_proxy(
     from flask_core.entitlement import resolve_trusted_host
 
     monkeypatch.setenv("TRUSTED_FORWARDED_HOST", "1")
-    host = resolve_trusted_host("hub-api:8204", xfh)
+    monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "10.244.0.0/16")
+    host = resolve_trusted_host("hub-api:8204", xfh, "10.244.1.5")
     monkeypatch.setattr(ff, "_current_request_host", lambda: host)
 
     class _NoLicense:
@@ -658,3 +660,37 @@ async def test_waddles_app_lifts_tenant_and_global_limits_via_proxy(
     monkeypatch.setattr(ff, "get_entitlement_client", lambda: _NoLicense())
     # tenant-scoped and global (no community) resolution -- what the free-tier caps use
     assert (await ff.get_tier(tenant="t1") == "enterprise") is tenant_global_bypass
+
+
+@pytest.mark.parametrize("peer", ["203.0.113.9", "192.168.1.1", "", None, "not-an-ip"])
+def test_forwarded_host_ignored_from_untrusted_peer(
+    monkeypatch: pytest.MonkeyPatch, peer: Optional[str]
+) -> None:
+    """A spoofed X-Forwarded-Host from a peer outside TRUSTED_PROXY_CIDRS never grants bypass."""
+    from flask_core.entitlement import resolve_trusted_host, tier_check_bypassed
+
+    monkeypatch.setenv("TRUSTED_FORWARDED_HOST", "1")
+    monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "10.244.0.0/16")
+    resolved = resolve_trusted_host("hub-api:8204", "waddles-alpha.penguintech.cloud", peer)
+    assert resolved == "hub-api:8204"
+    assert tier_check_bypassed(resolved, None) is False
+
+
+def test_forwarded_host_no_cidrs_configured_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trust flag on but no CIDRs: header ignored (no bypass)."""
+    from flask_core.entitlement import resolve_trusted_host, tier_check_bypassed
+
+    monkeypatch.setenv("TRUSTED_FORWARDED_HOST", "1")
+    monkeypatch.delenv("TRUSTED_PROXY_CIDRS", raising=False)
+    resolved = resolve_trusted_host("hub-api:8204", "waddles.app", "10.244.1.5")
+    assert tier_check_bypassed(resolved, None) is False
+
+
+def test_forwarded_host_flag_off_never_trusted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Flag off: even a trusted-CIDR peer's header is ignored."""
+    from flask_core.entitlement import resolve_trusted_host, tier_check_bypassed
+
+    monkeypatch.delenv("TRUSTED_FORWARDED_HOST", raising=False)
+    monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "10.244.0.0/16")
+    resolved = resolve_trusted_host("hub-api:8204", "waddles.app", "10.244.1.5")
+    assert tier_check_bypassed(resolved, None) is False

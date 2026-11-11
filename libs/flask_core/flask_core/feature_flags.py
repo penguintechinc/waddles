@@ -33,7 +33,9 @@ def _current_request_host() -> Optional[str]:
         from quart import request  # type: ignore[import-not-found]
 
         return resolve_trusted_host(
-            str(request.host), request.headers.get("X-Forwarded-Host")
+            str(request.host),
+            request.headers.get("X-Forwarded-Host"),
+            request.remote_addr,
         )
     except Exception:  # noqa: BLE001 - no active request context, or quart unavailable
         return None

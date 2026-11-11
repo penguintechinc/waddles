@@ -156,7 +156,8 @@ test('strips hop-by-hop headers and honours a base path on the target', async ()
   }
 });
 
-test('sets X-Forwarded-Host from the edge Host, overwriting a client-supplied value', async () => {
+/** Send one request through a proxy with the given allowlist; return headers the upstream saw. */
+async function forwardedHeaders(allow, hostHeader, extra = {}) {
   let seen;
   const upstream = http.createServer((req, res) => {
     seen = req.headers;
@@ -164,16 +165,34 @@ test('sets X-Forwarded-Host from the edge Host, overwriting a client-supplied va
     res.end('ok');
   });
   const upPort = await listen(upstream);
-  const { server, port } = await startProxy(`http://127.0.0.1:${upPort}`);
+  const app = express();
+  app.use('/api', createProxy(`http://127.0.0.1:${upPort}`, allow));
+  const server = http.createServer(app);
+  const port = await listen(server);
   try {
-    await request(port, {
-      path: '/api/v1/x',
-      headers: { Host: 'waddles-alpha.penguintech.cloud:8443', 'X-Forwarded-Host': 'waddles.penguintech.cloud' },
-    });
-    assert.equal(seen['x-forwarded-host'], 'waddles-alpha.penguintech.cloud:8443');
-    assert.equal(seen.host, `127.0.0.1:${upPort}`);
+    await request(port, { path: '/api/v1/x', headers: { Host: hostHeader, ...extra } });
+    return seen;
   } finally {
     server.close();
     upstream.close();
   }
+}
+
+test('allowlisted edge Host (case/port-insensitive) is forwarded, overwriting a client value', async () => {
+  const seen = await forwardedHeaders(['waddles-alpha.penguintech.cloud'], 'Waddles-Alpha.PenguinTech.cloud:8443', {
+    'X-Forwarded-Host': 'waddles.penguintech.cloud',
+  });
+  assert.equal(seen['x-forwarded-host'], 'Waddles-Alpha.PenguinTech.cloud:8443');
+});
+
+test('non-allowlisted Host sends NO X-Forwarded-Host and strips the client value', async () => {
+  const seen = await forwardedHeaders(['waddles-alpha.penguintech.cloud'], 'evil.example.com', {
+    'X-Forwarded-Host': 'waddles-alpha.penguintech.cloud',
+  });
+  assert.equal(seen['x-forwarded-host'], undefined);
+});
+
+test('empty allowlist (default) never forwards X-Forwarded-Host', async () => {
+  const seen = await forwardedHeaders([], 'waddles-alpha.penguintech.cloud');
+  assert.equal(seen['x-forwarded-host'], undefined);
 });
