@@ -379,6 +379,9 @@ hubApi:
 # Namespace configuration
 namespace: waddlebot
 namespaceCreate: true  # Create namespace if it doesn't exist
+# Extra labels stamped on the chart-managed Namespace (only when namespaceCreate: true), alongside the
+# PSA labels. Used e.g. for a shared Gateway's allowedRoutes namespace selector (`gateway-access`).
+namespaceLabels: {}
 
 # fix/no-empty-kept-secrets -- test-only probe (templates/debug-helper-probe.yaml)
 # that renders waddlebot.secretKeyNonEmpty/waddlebot.tlsSecretComplete (_helpers.tpl)
@@ -691,6 +694,8 @@ infrastructure:
     # buffers + client buffers live OUTSIDE maxmemory. At maxmemory writes fail LOUDLY (OOM
     # error) rather than evicting -- alert on used_memory/maxmemory > 0.8.
     maxMemory: "600mb"
+    # Liveness/readiness exec probe timeout (seconds); raise when the instance is CPU-starved by handshake bursts.
+    probeTimeoutSeconds: 5
     aof:
       # `everysec` = <=1s loss on host crash. `always` fsyncs every write (zero-loss for
       # acks/tokens) at a large throughput cost -- instance-wide, Valkey has no per-key fsync.
@@ -3364,6 +3369,18 @@ egressPolicy:
       - gateway.discord.gg
       - discord.com
       - cdn.discord.com
+  # Scoped Twitch egress (toFQDNs, 443/TCP only) for the data-plane Twitch callers.
+  twitch:
+    enabled: true
+    components:
+      - svc-ingest-rust
+      - svc-action
+      - svc-action-rust
+    fqdns:
+      - irc-ws.chat.twitch.tv
+      - id.twitch.tv
+      - api.twitch.tv
+      - eventsub.wss.twitch.tv
   # Components (app.kubernetes.io/component label values) subject to the
   # egress default-deny. Extend as more Rust dataplane Deployments land.
   dataPlaneComponents:

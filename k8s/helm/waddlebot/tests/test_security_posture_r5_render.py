@@ -552,7 +552,7 @@ class TestDefaultDenyEgress:
         rules = [
             r
             for c in _cnps(docs)
-            if c not in discord
+            if c not in discord and not c["metadata"]["name"].endswith("-twitch-egress")
             for r in c["spec"].get("egress") or []
             if "toFQDNs" in r
         ]

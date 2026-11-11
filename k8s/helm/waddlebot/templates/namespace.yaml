@@ -8,6 +8,9 @@ metadata:
     app.kubernetes.io/name: waddlebot
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
+    {{- range $k, $v := .Values.namespaceLabels }}
+    {{ $k | quote }}: {{ $v | quote }}
+    {{- end }}
     {{- if .Values.podSecurity.enabled }}
     {{- if and .Values.spire.enabled (has .Values.podSecurity.enforce (list "restricted" "baseline")) }}
     {{- fail "podSecurity.enforce must be `privileged` while spire.enabled=true: the SPIRE agent DaemonSet is an approved ROOT EXCEPTION (uid 0 + hostPath Workload-API socket dir, charts/spire/templates/agent-daemonset.yaml) and is rejected by BOTH baseline and restricted. Keep audit/warn=restricted, or run SPIRE in its own namespace to enforce restricted here." }}
