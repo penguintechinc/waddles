@@ -21775,7 +21775,11 @@ paths:
       summary: Get signup settings.
   /api/v1/public/stats:
     get:
-      description: ''
+      description: '
+
+        Never queries the DB: a cache miss or Valkey error returns a typed 503
+
+        `{"status": "warming"}` and logs a WARN -- no on-request recompute fallback.'
       operationId: get_get_stats__get_api_v1_public_stats
       parameters: []
       responses:
@@ -21785,6 +21789,9 @@ paths:
               schema:
                 description: Response DTO for public stats.
                 properties:
+                  computedAt:
+                    title: Computedat
+                    type: string
                   stats:
                     $ref: '#/components/schemas/PublicStatsDTO'
                   success:
@@ -21793,10 +21800,28 @@ paths:
                 required:
                 - success
                 - stats
+                - computedAt
                 title: StatsResponse
                 type: object
           description: Response DTO for public stats.
-      summary: Get stats.
+        '503':
+          content:
+            application/json:
+              schema:
+                description: 503 body while no snapshot exists yet (CronJob has not
+                  populated the cache).
+                properties:
+                  status:
+                    title: Status
+                    type: string
+                required:
+                - status
+                title: StatsWarmingResponse
+                type: object
+          description: 503 body while no snapshot exists yet (CronJob has not populated
+            the cache).
+      summary: Serve the cached landing stats snapshot (refreshed by the 5-minute
+        CronJob).
   /api/v1/signup-settings:
     get:
       description: ''

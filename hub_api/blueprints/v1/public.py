@@ -24,6 +24,7 @@ fix applied to the `communities`-backed routes.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -33,9 +34,12 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_response
 
 from config import HubAPIConfig
+from services import landing_stats_cache
 from services import public_service as svc
 from services.errors import ApiError
 from services.pagination import parse_limit
+
+logger = logging.getLogger("waddles.hub_api.public")
 
 public_bp = Blueprint("v1_public", __name__, url_prefix="/api/v1/public")
 #: `GET /api/v1/signup-settings` -- Node's `routes/index.js` top-level alias
@@ -126,6 +130,14 @@ class StatsResponse:
 
     success: bool
     stats: PublicStatsDTO
+    computedAt: str
+
+
+@dataclass(slots=True, frozen=True)
+class StatsWarmingResponse:
+    """503 body while no snapshot exists yet (CronJob has not populated the cache)."""
+
+    status: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -365,14 +377,24 @@ class BannerResponse:
 
 @public_bp.route("/stats", methods=["GET"])
 @validate_response(StatsResponse)
-async def get_stats() -> StatsResponse | tuple[dict[str, object], int]:
-    """Get stats."""
-    async_dal, dal = _dal()
+@validate_response(StatsWarmingResponse, 503)
+async def get_stats() -> StatsResponse | tuple[StatsWarmingResponse, int]:
+    """Serve the cached landing stats snapshot (refreshed by the 5-minute CronJob).
+
+    Never queries the DB: a cache miss or Valkey error returns a typed 503
+    `{"status": "warming"}` and logs a WARN -- no on-request recompute fallback.
+    """
     try:
-        ctx = await _default_tenant_or_500()
-    except ApiError as exc:
-        return _err(exc)
-    stats = await svc.get_stats(async_dal, dal, ctx)
+        snapshot = await landing_stats_cache.read_snapshot(
+            landing_stats_cache.get_client(current_app.config)
+        )
+    except Exception:  # noqa: BLE001 - cache outage must surface as typed 503, not 500
+        logger.warning("landing stats cache read failed; returning warming", exc_info=True)
+        return StatsWarmingResponse(status="warming"), 503
+    if snapshot is None:
+        logger.warning("landing stats snapshot missing; CronJob has not populated it")
+        return StatsWarmingResponse(status="warming"), 503
+    stats = snapshot["stats"]
     return StatsResponse(
         success=True,
         stats=PublicStatsDTO(
@@ -381,6 +403,7 @@ async def get_stats() -> StatsResponse | tuple[dict[str, object], int]:
             twitch=TwitchStatsDTO(**stats["twitch"]),
             slack=SlackStatsDTO(**stats["slack"]),
         ),
+        computedAt=snapshot["computed_at"],
     )
 
 

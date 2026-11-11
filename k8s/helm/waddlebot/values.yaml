@@ -1452,6 +1452,21 @@ pipeline:
         limits:
           cpu: "500m"
           memory: "512Mi"
+    # CronJob (hub_api/cli/refresh_landing_stats.py) computing the public landing-page stats
+    # into Valkey every 5 minutes; GET /api/v1/public/stats serves only that snapshot (503
+    # {"status":"warming"} until the first run). Disabling leaves the landing stats cold.
+    landingStatsRefresh:
+      enabled: true
+      schedule: "*/5 * * * *"
+      backoffLimit: 1
+      concurrencyPolicy: Forbid
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
 
   hubWebui:
     enabled: true
