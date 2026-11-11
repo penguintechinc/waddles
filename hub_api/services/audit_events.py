@@ -356,9 +356,6 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("PUT", "/api/v1/tenant/<tenant_slug>/settings"): RouteAudit(
         AuditCategory.TENANT, AuditAction.TENANT_SETTINGS_CHANGED
     ),
-    ("PUT", "/api/v1/tenant/<tenant_slug>/modules"): RouteAudit(
-        AuditCategory.TENANT, AuditAction.TENANT_MODULES_CHANGED
-    ),
     ("POST", "/api/v1/tenant/<tenant_slug>/admins"): RouteAudit(
         AuditCategory.ROLE, AuditAction.TENANT_ADMIN_ADDED
     ),
