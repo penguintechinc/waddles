@@ -4,20 +4,21 @@
 # Checks (K8s layer here, HTTP layer in scripts/smoke/alpha_checks.py run inside a pod):
 #   k8s: all Deployments ready (count examined)        -- check_deployments
 #   k8s: Helm release status == deployed               -- check_helm
-#   k8s: core-bundle-seeder Job not failed             -- check_seeder (hook deletes it on success)
+#   k8s: seeder: helm deployed AND job absent/Succeeded AND no Failed pods -- check_seeder
 #   http: hub-api GET /health, /ready          -> 200  (hub_api/app.py:281 /ready)
 #   http: hub-webui GET / -> 200 with <div id="root">  (admin/hub_module/frontend/index.html:14)
 #   http: unauth GET /api/v1/superadmin/communities -> 401/403 (blueprints/v1/superadmin.py:446)
 #   http: POST /api/v1/auth/login (admin from Secret <release>-hub-admin-bootstrap) -> JWT (auth.py:507)
 #   http: GET /api/v1/auth/me (isSuperAdmin)            (auth.py:694)
-#   http: GET /api/v1/marketplace/catalog total >= 100  (marketplace_catalog.py:66)
+#   http: GET /api/v1/marketplace/catalog total >= bundle-versions total (marketplace_catalog.py:66)
+#   http: GET /api/v1/marketplace/vendors shape, sum==catalog total, first-party filter (ASSUMED shape)
 #   http: GET /api/v1/superadmin/communities            (superadmin.py:446)
 #   http: GET /api/v1/admin/bundle-versions             (bundle_admin.py:80)
 #   SKIP: bundle activation round-trip (only mutating paths exist)
 #
 # Env: KUBE_CONTEXT (default dal2alpha), NAMESPACE (waddlebot), RELEASE (waddlebot),
 #      SMOKE_IMAGE (default: digest-pinned image from chart values waitForHubApi.image),
-#      SMOKE_MIN_CATALOG (100). Exit 0 only if checks>0 and failed==0.
+#      SMOKE_FIRST_PARTY_VENDOR (penguintechinc). Exit 0 only if checks>0 and failed==0.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,7 +26,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CTX="${KUBE_CONTEXT:-dal2alpha}"
 NS="${NAMESPACE:-waddlebot}"
 RELEASE="${RELEASE:-waddlebot}"
-MIN_CATALOG="${SMOKE_MIN_CATALOG:-100}"
+VENDOR="${SMOKE_FIRST_PARTY_VENDOR:-penguintechinc}"
 POD="alpha-smoke-$(date +%s)-$$"
 SECRET="${RELEASE}-hub-admin-bootstrap"
 RESULTS=()
@@ -95,16 +96,22 @@ check_helm() {
     if [ "$st" = deployed ]; then record helm-release PASS "status=$st"; else record helm-release FAIL "status=$st"; fi
 }
 
-# check_seeder asserts the core-bundle seeder Job did not fail (absent = deleted on success).
+# check_seeder: Helm release deployed AND (seeder job absent OR Succeeded) AND no seeder
+# pod in Error/Failed; reports which condition held or broke.
 check_seeder() {
-    local job="${RELEASE}-core-bundle-seeder" out
-    if ! out="$(k get job "$job" -o jsonpath='{.status.succeeded}/{.status.failed}' 2>/dev/null)"; then
-        record seeder-job PASS "job absent (hook-succeeded deletes it)"; return
+    local job="${RELEASE}-core-bundle-seeder" out helm_st job_state bad_pods
+    helm_st="$(helm --kube-context "$CTX" -n "$NS" status "$RELEASE" -o json | python3 -c 'import json,sys;print(json.load(sys.stdin)["info"]["status"])')"
+    if out="$(k get job "$job" -o jsonpath='{.status.succeeded}/{.status.failed}' 2>/dev/null)"; then
+        case "$out" in 1/*) job_state="succeeded";; *) job_state="not-succeeded($out)";; esac
+    else
+        job_state="absent"
     fi
-    case "$out" in
-        1/*) record seeder-job PASS "succeeded=1";;
-        *) record seeder-job FAIL "succeeded/failed=$out";;
-    esac
+    bad_pods="$(k get pods -l "job-name=$job" -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\n"}{end}' | grep -cE '=(Failed|Error)$' || true)"
+    if [ "$helm_st" = deployed ] && { [ "$job_state" = absent ] || [ "$job_state" = succeeded ]; } && [ "$bad_pods" -eq 0 ]; then
+        record seeder-job PASS "helm=$helm_st job=$job_state bad_pods=0"
+    else
+        record seeder-job FAIL "helm=$helm_st job=$job_state bad_pods=$bad_pods"
+    fi
 }
 
 # run_http_checks starts a PSA-restricted pod and executes alpha_checks.py inside it.
@@ -131,7 +138,7 @@ spec:
     image: $image
     command: ["python3", "-c", "import time; time.sleep(600)"]
     env:
-    - {name: SMOKE_MIN_CATALOG, value: "$MIN_CATALOG"}
+    - {name: SMOKE_FIRST_PARTY_VENDOR, value: "$VENDOR"}
     - name: ADMIN_EMAIL
       valueFrom: {secretKeyRef: {name: $SECRET, key: INITIAL_ADMIN_EMAIL}}
     - name: ADMIN_PASSWORD

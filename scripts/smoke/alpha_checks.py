@@ -14,7 +14,15 @@ import urllib.request
 
 API = os.environ.get("SMOKE_API", "http://waddlebot-hub-api-v3:8204")
 WEBUI = os.environ.get("SMOKE_WEBUI", "http://waddlebot-hub-webui-v3:8080")
-MIN_CATALOG = int(os.environ.get("SMOKE_MIN_CATALOG", "100"))
+FIRST_PARTY_VENDOR = os.environ.get("SMOKE_FIRST_PARTY_VENDOR", "penguintechinc")
+# ASSUMED vendor-listing shapes (feature/marketplace-vendor-listing not yet published);
+# adjust these constants if the real API differs.
+VENDORS_PATH = "/api/v1/marketplace/vendors"
+VENDORS_LIST_KEY = "vendors"
+VENDOR_KEY_FIELD = "vendor"
+VENDOR_NAME_FIELD = "displayName"
+VENDOR_COUNT_FIELD = "count"
+CATALOG_VENDOR_PARAM = "vendor"
 TIMEOUT = 20
 
 
@@ -67,6 +75,60 @@ def total_of(data):
     return data.get("pagination", {}).get("total")
 
 
+def check_vendors(token):
+    """Validate vendor listing shape, count sum == catalog total, first-party filter."""
+    code, text = http("GET", API + VENDORS_PATH, token=token)
+    data = jsonish(text)
+    items = data.get(VENDORS_LIST_KEY) if isinstance(data, dict) else None
+    if code != 200 or not isinstance(items, list) or not items:
+        emit("marketplace-vendors", "FAIL", f"GET {VENDORS_PATH} -> {code} empty-or-missing")
+        emit("marketplace-vendor-filter", "FAIL", "not run: no vendors")
+        return
+    bad = [
+        i
+        for i in items
+        if not (
+            isinstance(i, dict)
+            and i.get(VENDOR_KEY_FIELD)
+            and i.get(VENDOR_NAME_FIELD)
+            and isinstance(i.get(VENDOR_COUNT_FIELD), int)
+        )
+    ]
+    _, ct = http("GET", API + "/api/v1/marketplace/catalog?limit=1", token=token)
+    cd = jsonish(ct)
+    ctotal = total_of(cd) if isinstance(cd, dict) else None
+    vsum = sum(
+        i[VENDOR_COUNT_FIELD]
+        for i in items
+        if isinstance(i, dict) and isinstance(i.get(VENDOR_COUNT_FIELD), int)
+    )
+    first = next(
+        (i for i in items if isinstance(i, dict) and i.get(VENDOR_KEY_FIELD) == FIRST_PARTY_VENDOR),
+        None,
+    )
+    ok = not bad and ctotal == vsum and first is not None
+    emit(
+        "marketplace-vendors",
+        "PASS" if ok else "FAIL",
+        f"vendors={len(items)} malformed={len(bad)} sum={vsum} catalog_total={ctotal} "
+        f"first_party={'found' if first else 'missing'}",
+    )
+    if first is None:
+        emit("marketplace-vendor-filter", "FAIL", f"first-party vendor {FIRST_PARTY_VENDOR} absent")
+        return
+    vkey = first[VENDOR_KEY_FIELD]
+    fc, ft = http(
+        "GET", f"{API}/api/v1/marketplace/catalog?{CATALOG_VENDOR_PARAM}={vkey}&limit=1", token=token
+    )
+    fd = jsonish(ft)
+    ftotal = total_of(fd) if isinstance(fd, dict) else None
+    emit(
+        "marketplace-vendor-filter",
+        "PASS" if fc == 200 and (ftotal or 0) > 0 else "FAIL",
+        f"catalog?{CATALOG_VENDOR_PARAM}={vkey} -> {fc} total={ftotal}",
+    )
+
+
 def main() -> int:
     """Run all HTTP checks."""
     for path in ("/health", "/ready"):
@@ -98,7 +160,7 @@ def main() -> int:
     emit("admin-login", "PASS" if ok else "FAIL", f"-> {code if email else 'no creds'} jwt={ok}")
 
     if not ok:
-        for n in ("auth/me", "marketplace-catalog", "communities", "bundle-versions"):
+        for n in ("auth/me", "bundle-versions", "marketplace-catalog", "marketplace-vendors", "marketplace-vendor-filter", "communities"):
             emit(n, "FAIL", "not run: no token")
     else:
         check_authed(
@@ -108,22 +170,32 @@ def main() -> int:
             lambda d: (bool(d.get("user")) and d["user"].get("isSuperAdmin") is True, "isSuperAdmin"),
         )
 
-        def catalog(d):
-            total = total_of(d) or -1
-            return total >= MIN_CATALOG and bool(d.get("modules")), f"total={total} min={MIN_CATALOG}"
-
-        check_authed("marketplace-catalog", "/api/v1/marketplace/catalog?limit=5", token, catalog)
-        check_authed(
-            "communities",
-            "/api/v1/superadmin/communities?limit=5",
-            token,
-            lambda d: (isinstance(d.get("communities"), list), f"total={total_of(d)}"),
-        )
+        bv_code, bv_text = http("GET", API + "/api/v1/admin/bundle-versions?limit=5", token=token)
+        bv = jsonish(bv_text)
+        bv_total = total_of(bv) if isinstance(bv, dict) else None
         check_authed(
             "bundle-versions",
             "/api/v1/admin/bundle-versions?limit=5",
             token,
             lambda d: (isinstance(d.get("versions"), list), f"total={total_of(d)}"),
+        )
+
+        def catalog(d):
+            total = d.get("pagination", {}).get("total")
+            if not isinstance(bv_total, int) or not isinstance(total, int):
+                return False, f"total={total} bundle_versions_total={bv_total}"
+            return (
+                total >= bv_total and bool(d.get("modules")),
+                f"catalog_total={total} >= bundle_versions_total={bv_total}",
+            )
+
+        check_authed("marketplace-catalog", "/api/v1/marketplace/catalog?limit=5", token, catalog)
+        check_vendors(token)
+        check_authed(
+            "communities",
+            "/api/v1/superadmin/communities?limit=5",
+            token,
+            lambda d: (isinstance(d.get("communities"), list), f"total={total_of(d)}"),
         )
 
     emit(
