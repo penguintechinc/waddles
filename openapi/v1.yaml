@@ -16319,6 +16319,20 @@ paths:
           description: Response DTO for a single-ingest-source result (create/update).
       summary: '`PATCH .../ingest-sources/<id>` -- update `label` and/or `enabled`
         only.'
+  /api/v1/communities/{community_id}/join:
+    post:
+      description: ''
+      operationId: post_join_community
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        default:
+          description: Undocumented response
+      summary: Join an open community (idempotent); tenant comes from the token only.
   /api/v1/communities/{community_id}/provider-connections:
     get:
       description: ''

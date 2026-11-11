@@ -83,6 +83,13 @@ export async function submitJoinRequest(communityId: number, message: string): P
   };
 }
 
+/** `POST /api/v1/communities/:id/join` -- direct join of an open community; `joined` is false if already a member. */
+export async function joinOpenCommunity(communityId: number): Promise<{ joined: boolean }> {
+  const { data } = await apiClient.post<unknown>(`/api/v1/communities/${communityId}/join`);
+  const body = expectRecord(data, 'open join');
+  return { joined: body['joined'] === true };
+}
+
 /** `GET /api/v1/:id/join-requests/mine`; `null` when the caller has never asked to join. */
 export async function fetchMyJoinRequest(communityId: number): Promise<MyJoinRequest | null> {
   const { data } = await apiClient.get<unknown>(`/api/v1/${communityId}/join-requests/mine`);

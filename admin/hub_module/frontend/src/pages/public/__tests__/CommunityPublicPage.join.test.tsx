@@ -150,16 +150,17 @@ describe('CommunityPublicPage join', () => {
     expect(screen.queryByTestId('join-button')).not.toBeInTheDocument();
   });
 
-  it('flags open communities as not joinable yet instead of calling a dead route', async () => {
+  it('joins an open community through the served direct-join route', async () => {
     profile.get.mockResolvedValue(community('open'));
-    const get = mockApiGet((url) => unexpectedUrl(url));
-    const post = vi.spyOn(apiClient, 'post');
+    mockApiGet((url) => unexpectedUrl(url));
+    const post = vi
+      .spyOn(apiClient, 'post')
+      .mockResolvedValue(ok({ success: true, community_id: 7, joined: true }));
     renderPage();
-    const state = await screen.findByTestId('not-available-yet');
-    expect(state).toHaveAttribute('data-feature', 'community-open-join');
-    expect(screen.queryByTestId('join-button')).not.toBeInTheDocument();
-    expect(get).not.toHaveBeenCalled();
-    expect(post).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByTestId('join-open-button'));
+    await screen.findByText('You are a member of this community.');
+    expect(post).toHaveBeenCalledWith('/api/v1/communities/7/join');
+    expect(screen.queryByTestId('not-available-yet')).not.toBeInTheDocument();
   });
 
   it('sends a signed-out visitor to log in instead of posting', async () => {

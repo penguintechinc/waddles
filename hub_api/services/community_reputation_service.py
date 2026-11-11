@@ -166,7 +166,13 @@ async def get_my_reputation(
         dal(
             (dal.reputation_tenant.tenant_id == tenant_id)
             & (dal.reputation_tenant.hub_user_id == hub_user_id)
-        )
+        ),
+        # Explicit fields: the table has a composite PK and NO `id` column, but another
+        # binder (schema.bind_erasure_reputation_tables) may have bound it without
+        # `primarykey=`, making pydal SELECT a nonexistent `reputation_tenant.id`.
+        dal.reputation_tenant.score,
+        dal.reputation_tenant.total_events,
+        dal.reputation_tenant.last_event_at,
     )
     tenant_row = tenant_rows.first() if tenant_rows else None
     tenant_score = (
