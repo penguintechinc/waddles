@@ -3361,6 +3361,18 @@ egressPolicy:
       - gateway.discord.gg
       - discord.com
       - cdn.discord.com
+  # Scoped Twitch egress (toFQDNs, 443/TCP only) for the data-plane Twitch callers.
+  twitch:
+    enabled: true
+    components:
+      - svc-ingest-rust
+      - svc-action
+      - svc-action-rust
+    fqdns:
+      - irc-ws.chat.twitch.tv
+      - id.twitch.tv
+      - api.twitch.tv
+      - eventsub.wss.twitch.tv
   # Components (app.kubernetes.io/component label values) subject to the
   # egress default-deny. Extend as more Rust dataplane Deployments land.
   dataPlaneComponents:
