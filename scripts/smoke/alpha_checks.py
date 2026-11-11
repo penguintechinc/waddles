@@ -19,8 +19,8 @@ FIRST_PARTY_VENDOR = os.environ.get("SMOKE_FIRST_PARTY_VENDOR", "penguintechinc"
 # adjust these constants if the real API differs.
 VENDORS_PATH = "/api/v1/marketplace/vendors"
 VENDORS_LIST_KEY = "vendors"
-VENDOR_KEY_FIELD = "vendor"
-VENDOR_NAME_FIELD = "displayName"
+VENDOR_KEY_FIELD = "key"
+VENDOR_NAME_FIELD = "name"
 VENDOR_COUNT_FIELD = "count"
 CATALOG_VENDOR_PARAM = "vendor"
 TIMEOUT = 20
