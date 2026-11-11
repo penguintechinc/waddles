@@ -188,7 +188,7 @@ def test_view_rebuild_backfill_vendor_derivation_and_grants() -> None:
         assert got["waddles.core.a.orphan"][:2] == (
             None,
             None,
-        )  # surfaced, read path raises
+        )  # stays NULL; API lists it as _unaffiliated
         assert got["waddles.core.a.legacy"][:2] == (
             "new-org",
             "new-org/repo",

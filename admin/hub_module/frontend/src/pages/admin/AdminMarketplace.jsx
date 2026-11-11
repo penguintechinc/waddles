@@ -148,7 +148,7 @@ export default function AdminMarketplace() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {modules.map((module) => (
             <div
-              key={module.id}
+              key={module.sourceRef || `${module.source}-${module.sourceId}`}
               className="bg-navy-800 border border-navy-700 rounded-lg p-6 hover:border-sky-500 transition-colors"
             >
               {/* Module Header */}
@@ -220,7 +220,12 @@ export default function AdminMarketplace() {
 
               {/* Actions */}
               <div className="flex gap-2">
-                {module.isInstalled ? (
+                {module.source === 'bundle' ? (
+                  <span className="text-xs text-gray-400">
+                    {module.vendorName || 'Unaffiliated'}
+                    {module.sourceRepo ? ` · ${module.sourceRepo}` : ''}
+                  </span>
+                ) : module.isInstalled ? (
                   <>
                     <button
                       onClick={() => handleToggleEnabled(module.sourceId || module.id, module.isEnabled)}

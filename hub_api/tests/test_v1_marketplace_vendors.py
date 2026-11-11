@@ -14,7 +14,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.marketplace_catalog import catalog_bp, vendors_bp
-from services.marketplace_catalog_service import VendorUnresolvedError
+from services import marketplace_catalog_service as catalog_service
 
 _NOW = "2026-01-01 00:00:00"
 
@@ -181,12 +181,49 @@ async def test_categories_count_includes_bundles(client: Any, dal: Any, seeded: 
     assert {"category": "alternatives", "count": 1} in body["categories"]
 
 
-async def test_bundle_without_vendor_fails_loud(
-    client: Any, dal: Any, caplog: pytest.LogCaptureFixture
+@pytest.fixture(autouse=True)
+def _reset_vendorless_log() -> None:
+    """The once-per-app_id ERROR dedupe is process-global; isolate each test."""
+    catalog_service._VENDORLESS_LOGGED.clear()
+
+
+async def test_vendorless_bundles_are_listed_unaffiliated_not_500(
+    client: Any, dal: Any, seeded: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """An orphan bundle is a 500 + ERROR log, never silently bucketed under a default vendor."""
-    _bundle(dal, "orphan.bundle", None, None, "Plain Name")
-    response = await client.get("/api/v1/marketplace/catalog")
-    assert response.status_code == 500
-    assert "no derivable vendor" in caplog.text
-    assert VendorUnresolvedError.__name__ in caplog.text or "orphan.bundle" in caplog.text
+    """(a) no attribution and (b) plain-name author: 200, bucketed, one ERROR per bundle."""
+    _bundle(dal, "legacy.no.versions", None, None, None)
+    _bundle(dal, "plain.name.author", None, None, "Plain Name")
+    caplog.set_level("ERROR", logger=catalog_service.logger.name)
+
+    status, page = await _json(client, "/api/v1/marketplace/catalog?limit=100")
+    assert status == 200
+    by_ref = {m["sourceRef"]: m for m in page["modules"] if m["source"] == "bundle"}
+    for ref in ("legacy.no.versions", "plain.name.author"):
+        assert by_ref[ref]["vendorKey"] is None and by_ref[ref]["vendorName"] is None
+    assert page["pagination"]["total"] == 10
+
+    status, unaff = await _json(
+        client, "/api/v1/marketplace/catalog?vendor=_unaffiliated&limit=100"
+    )
+    assert status == 200
+    assert {m["name"] for m in unaff["modules"]} == {
+        "core-widget",
+        "global-vendor-widget",
+        "legacy.no.versions",
+        "plain.name.author",
+    }
+
+    status, one = await _json(client, "/api/v1/marketplace/catalog/bundle/legacy.no.versions")
+    assert status == 200
+    assert one["module"]["vendorKey"] is None
+
+    status, vendors = await _json(client, "/api/v1/marketplace/vendors")
+    assert status == 200
+    assert vendors["total"] == page["pagination"]["total"] == 10
+    assert sum(v["count"] for v in vendors["vendors"]) == vendors["total"]
+    assert {v["key"]: v["count"] for v in vendors["vendors"]}["_unaffiliated"] == 4
+
+    # Four requests touched both rows (list, filter, entry), yet exactly one ERROR per app_id.
+    errors = [r for r in caplog.records if "no derivable vendor" in r.getMessage()]
+    assert sorted(r.app_id for r in errors) == ["legacy.no.versions", "plain.name.author"]
+    assert all(not hasattr(r, "author") for r in errors)  # PII-free: app_id + flag only

@@ -17,9 +17,14 @@ They have `sourceId = null` and are addressed by `sourceRef` (the `app_id`). Leg
 `marketplace` rows keep working; with no GitHub author they report `vendorKey = null`
 (filter value `_unaffiliated`).
 
-A `bundle` row with no derivable vendor is a data defect: the API returns 500 and logs
-`marketplace bundle has no derivable vendor`; the core-bundle seeder refuses such a manifest up
-front (`_assert_vendor_derivable`). Nothing is silently bucketed.
+A `bundle` row with no derivable vendor (legacy rows without attribution, plain-name authors)
+is listed as `_unaffiliated` everywhere (catalog, filter, `/bundle/<app_id>`, `/vendors`) -- never
+a 500, never hidden -- and logged once per `app_id` per process at ERROR. The core-bundle seeder
+still refuses to seed a manifest with no derivable vendor (`_assert_vendor_derivable`).
+
+All active `app_catalog` rows are public in browse: they are only created by a global admin
+(`install_bundle`) or the system seeder, and `app_tenant_availability` gates per-tenant
+*activation*, not visibility.
 
 ## API (public browse, same visibility rules as the catalog)
 

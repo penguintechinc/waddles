@@ -68,13 +68,9 @@ _VENDOR_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?|_unaffiliated
 _REPO_RE = re.compile(r"^[a-z0-9-]{1,100}/[a-z0-9._-]{1,150}$")
 
 
-class VendorUnresolvedError(RuntimeError):
-    """A `bundle` catalog row has neither a GitHub author nor a GitHub source repo.
-
-    Raised, never bucketed: a bundle with no derivable vendor marketplace is a data defect
-    (the seeder / install path must reject it), and hiding it under a default vendor would make
-    the defect invisible.
-    """
+#: app_ids already reported as vendorless in this process -- one ERROR per distinct bundle, not
+#: one per request.
+_VENDORLESS_LOGGED: set[str] = set()
 
 
 def _iso(value: Any) -> str | None:
@@ -278,20 +274,20 @@ def _install_status_maps(
 
 
 def _vendor_of(row: Any) -> tuple[str | None, str | None]:
-    """`(vendor_key, display_name)` for a catalog row; raises for an unresolvable bundle.
+    """`(vendor_key, display_name)` for a catalog row; `(None, None)` when no vendor derives.
 
-    `vendor_key` is derived in the view (alembic 0091). The display name keeps the GitHub
-    handle's original casing from `author` when it matches the key, else falls back to the key.
+    `vendor_key` is derived in the view (alembic 0091). A vendorless `bundle` row is listed
+    as unaffiliated (never a 500, never hidden) and reported once per app_id at ERROR. The
+    display name keeps the GitHub handle's original casing from `author` when it matches the
+    key, else falls back to the key.
     """
     key = row.vendor_key
     if not key:
-        if row.source == "bundle":
+        if row.source == "bundle" and row.source_ref not in _VENDORLESS_LOGGED:
+            _VENDORLESS_LOGGED.add(row.source_ref)
             logger.error(
-                "marketplace bundle has no derivable vendor",
-                extra={"app_id": row.source_ref},
-            )
-            raise VendorUnresolvedError(
-                f"bundle {row.source_ref!r} has neither a github author nor a github source_url"
+                "marketplace bundle has no derivable vendor; listing as _unaffiliated",
+                extra={"app_id": row.source_ref, "has_source_url": bool(row.source_url)},
             )
         return None, None
     view = author_view(row.author)
