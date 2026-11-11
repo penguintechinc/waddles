@@ -1322,8 +1322,9 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
     `marketplace_catalog`, `marketplace_subscriptions`, `marketplace_settings`,
     `vendor_discount_codes`, `discount_code_redemptions`. Each is the superset
     shape that matches the real schema (000/017/059/064 migrations + alembic
-    0012). `marketplace_catalog` is a read-only Postgres VIEW (059) bound as an
-    ordinary table (`primarykey=["source", "source_id"]`) this process only
+    0012). `marketplace_catalog` is a read-only Postgres VIEW (059, rebuilt by alembic 0091)
+    bound as an
+    ordinary table (`primarykey=["source", "name"]`) this process only
     `select()`s.
     """
     dal.define_table(
@@ -1375,7 +1376,8 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
     dal.define_table(
         "marketplace_catalog",
         Field("source", "string", length=20, notnull=True),
-        Field("source_id", "integer", notnull=True),
+        # NULL for `bundle` rows (addressed by `source_ref` = app_id, alembic 0091).
+        Field("source_id", "integer"),
         Field("name", "string", length=255),
         Field("display_name", "string", length=255),
         Field("description", "text"),
@@ -1398,7 +1400,16 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
         # NULL for 'core' rows (always globally visible); the owning tenant
         # for 'marketplace' rows -- filtered by `visible_tenant_ids()`.
         Field("tenant_id", "integer"),
-        primarykey=["source", "source_id"],
+        # alembic 0091 -- bundle branch + vendor derivation. `vendor_key` is the lower-cased
+        # GitHub org (the vendor marketplace), `source_repo` the lower-cased `org/repo`
+        # (a type/sub-group inside that vendor); both NULL when underivable.
+        Field("source_url", "text"),
+        Field("source_ref", "string", length=255),
+        Field("vendor_key", "string", length=100),
+        Field("source_repo", "string", length=255),
+        # Declarative only (the view is read-only): `source_id` is NULL for bundle rows, so
+        # `name` (app_id for bundles) is the second key part.
+        primarykey=["source", "name"],
         migrate=migrate,
     )
 

@@ -24,18 +24,23 @@ from flask_core.api_utils import error_response
 from quart import Blueprint, current_app, request
 from quart_schema import validate_response
 
+from services.errors import ApiError
 from services.marketplace_catalog_service import (
     CatalogEntryResponse,
     CatalogListResponse,
     CategoriesResponse,
     FeaturedResponse,
+    VendorsResponse,
     get_catalog,
+    get_catalog_bundle_entry,
     get_catalog_entry,
     get_categories,
     get_featured,
+    get_vendors,
 )
 
 catalog_bp = Blueprint("v1_marketplace_catalog", __name__, url_prefix="/api/v1/marketplace/catalog")
+vendors_bp = Blueprint("v1_marketplace_vendors", __name__, url_prefix="/api/v1/marketplace/vendors")
 
 
 def _dal() -> Any:
@@ -65,20 +70,39 @@ def _optional_int_arg(name: str) -> int | None:
 
 @catalog_bp.route("", methods=["GET"])
 @validate_response(CatalogListResponse)
-async def browse_catalog() -> CatalogListResponse:
-    """`GET /api/v1/marketplace/catalog` -- paginated browsing with search & filters."""
+async def browse_catalog() -> CatalogListResponse | tuple[dict[str, object], int]:
+    """`GET /api/v1/marketplace/catalog` -- paginated browsing with search & filters.
+
+    `vendor` (GitHub org key, or `_unaffiliated`) and `repo` (`org/repo`) narrow to one vendor
+    marketplace / one repo inside it; malformed values are a 400, never ignored.
+    """
     dal = _dal()
-    return get_catalog(
-        dal,
-        request,
-        page=max(1, _int_arg("page", 1)),
-        limit=min(100, max(1, _int_arg("limit", 25))),
-        search=request.args.get("search", ""),
-        category=request.args.get("category") or None,
-        pricing_type=request.args.get("pricingType") or None,
-        source=request.args.get("source") or None,
-        community_id=_optional_int_arg("communityId"),
-    )
+    try:
+        return get_catalog(
+            dal,
+            request,
+            page=max(1, _int_arg("page", 1)),
+            limit=min(100, max(1, _int_arg("limit", 25))),
+            search=request.args.get("search", ""),
+            category=request.args.get("category") or None,
+            pricing_type=request.args.get("pricingType") or None,
+            source=request.args.get("source") or None,
+            community_id=_optional_int_arg("communityId"),
+            vendor=request.args.get("vendor") or None,
+            repo=request.args.get("repo") or None,
+        )
+    except ApiError as exc:
+        return cast(
+            tuple[dict[str, object], int],
+            error_response(exc.message, status_code=exc.status_code, error_code=exc.code),
+        )
+
+
+@vendors_bp.route("", methods=["GET"])
+@validate_response(VendorsResponse)
+async def vendors() -> VendorsResponse:
+    """`GET /api/v1/marketplace/vendors` -- vendor marketplaces (GitHub orgs) with repo counts."""
+    return get_vendors(_dal(), request)
 
 
 @catalog_bp.route("/categories", methods=["GET"])
@@ -98,6 +122,19 @@ async def featured() -> FeaturedResponse:
     return FeaturedResponse(success=True, modules=modules)
 
 
+@catalog_bp.route("/bundle/<string:app_id>", methods=["GET"])
+@validate_response(CatalogEntryResponse)
+async def catalog_bundle_entry(app_id: str) -> CatalogEntryResponse | tuple[dict[str, object], int]:
+    """`GET /api/v1/marketplace/catalog/bundle/<app_id>` -- single bundle entry (by app_id)."""
+    entry = get_catalog_bundle_entry(_dal(), request, app_id, _optional_int_arg("communityId"))
+    if entry is None:
+        return cast(
+            tuple[dict[str, object], int],
+            error_response("Module not found", status_code=404, error_code="NOT_FOUND"),
+        )
+    return CatalogEntryResponse(success=True, module=entry)
+
+
 @catalog_bp.route("/<string:source>/<int:source_id>", methods=["GET"])
 @validate_response(CatalogEntryResponse)
 async def catalog_entry(
@@ -114,4 +151,4 @@ async def catalog_entry(
     return CatalogEntryResponse(success=True, module=entry)
 
 
-BLUEPRINTS: list[Blueprint] = [catalog_bp]
+BLUEPRINTS: list[Blueprint] = [catalog_bp, vendors_bp]
