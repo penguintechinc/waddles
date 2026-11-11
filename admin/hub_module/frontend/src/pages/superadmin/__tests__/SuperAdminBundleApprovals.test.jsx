@@ -19,6 +19,7 @@ vi.mock('../../../services/api', () => ({
     denyVersion: vi.fn(),
     getAccessGrants: vi.fn(),
     approvePermissions: vi.fn(),
+    bulkApprovals: vi.fn(),
   },
 }));
 
@@ -301,6 +302,89 @@ describe('SuperAdminBundleApprovals', () => {
       await screen.findByTestId('bundle-approvals-summary');
       expect(screen.queryByTestId('access-grant-warning')).not.toBeInTheDocument();
       expect(screen.getByTestId('bundle-approvals-install-button')).not.toBeDisabled();
+    });
+  });
+
+  describe('bulk actions', () => {
+    const ROWS = [
+      { ...ONE_ROW, versionId: 1, appId: 'a.one', version: '1.0.0' },
+      { ...ONE_ROW, versionId: 2, appId: 'a.two', version: '2.0.0' },
+    ];
+
+    it('select-all selects every PUBLISHED row and shows the bulk bar', async () => {
+      bundleAdminApi.listPendingVersions.mockResolvedValue(listResponse(ROWS));
+      render(<SuperAdminBundleApprovals />);
+      await screen.findAllByTestId('bundle-approvals-row');
+      fireEvent.click(screen.getByTestId('bundle-approvals-select-all'));
+      expect(screen.getByText('2 selected')).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('bundle-approvals-select-all'));
+      expect(screen.queryByTestId('bundle-approvals-bulk-bar')).not.toBeInTheDocument();
+    });
+
+    it('bulk approve confirms with the count and shows a summary toast', async () => {
+      bundleAdminApi.listPendingVersions.mockResolvedValue(listResponse(ROWS));
+      bundleApi.bulkApprovals.mockResolvedValue({
+        data: {
+          success: true,
+          results: [
+            { appId: 'a.one', version: '1.0.0', status: 'approved' },
+            { appId: 'a.two', version: '2.0.0', status: 'already_installed' },
+          ],
+          summary: { total: 2, succeeded: 2, failed: 0 },
+        },
+      });
+      render(<SuperAdminBundleApprovals />);
+      await screen.findAllByTestId('bundle-approvals-row');
+      fireEvent.click(screen.getByTestId('bundle-approvals-select-all'));
+      fireEvent.click(screen.getByTestId('bundle-approvals-bulk-approve'));
+      expect(screen.getByText(/Approve 2 version/)).toBeInTheDocument();
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('bundle-approvals-bulk-confirm'));
+      });
+      expect(bundleApi.bulkApprovals).toHaveBeenCalledWith(
+        'approve',
+        [
+          { appId: 'a.one', version: '1.0.0' },
+          { appId: 'a.two', version: '2.0.0' },
+        ],
+        '',
+      );
+      expect(await screen.findByTestId('bundle-approvals-toast')).toHaveTextContent(
+        '2 of 2 succeeded, 0 failed',
+      );
+    });
+
+    it('partial failure renders badges and keeps failed rows selected', async () => {
+      bundleAdminApi.listPendingVersions.mockResolvedValue(listResponse(ROWS));
+      bundleApi.bulkApprovals.mockResolvedValue({
+        data: {
+          success: false,
+          results: [
+            { appId: 'a.one', version: '1.0.0', status: 'approved' },
+            {
+              appId: 'a.two',
+              version: '2.0.0',
+              status: 'error',
+              error: { code: 'version_not_published', message: 'not published' },
+            },
+          ],
+          summary: { total: 2, succeeded: 1, failed: 1 },
+        },
+      });
+      render(<SuperAdminBundleApprovals />);
+      await screen.findAllByTestId('bundle-approvals-row');
+      fireEvent.click(screen.getByTestId('bundle-approvals-select-all'));
+      fireEvent.click(screen.getByTestId('bundle-approvals-bulk-reject'));
+      fireEvent.change(screen.getByTestId('bundle-approvals-bulk-reason'), {
+        target: { value: 'bad' },
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('bundle-approvals-bulk-confirm'));
+      });
+      expect(bundleApi.bulkApprovals).toHaveBeenCalledWith('reject', expect.any(Array), 'bad');
+      expect(await screen.findByText(/error: not published/)).toBeInTheDocument();
+      expect(screen.getByTestId('bundle-approvals-toast')).toHaveTextContent('1 of 2 succeeded, 1 failed');
+      expect(screen.getByText('1 selected')).toBeInTheDocument();
     });
   });
 });

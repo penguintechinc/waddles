@@ -524,6 +524,80 @@ components:
       - name
       title: AvailabilityDTO
       type: object
+    BulkItem:
+      description: One `(appId, version)` pair in a bulk request.
+      properties:
+        appId:
+          title: Appid
+          type: string
+        version:
+          title: Version
+          type: string
+      required:
+      - appId
+      - version
+      title: BulkItem
+      type: object
+    BulkItemError:
+      description: Per-item failure detail.
+      properties:
+        code:
+          title: Code
+          type: string
+        message:
+          title: Message
+          type: string
+      required:
+      - code
+      - message
+      title: BulkItemError
+      type: object
+    BulkItemResult:
+      description: 'Per-item outcome: approved / rejected / already_installed / error.'
+      properties:
+        appId:
+          title: Appid
+          type: string
+        error:
+          anyOf:
+          - $ref: '#/components/schemas/BulkItemError'
+          - type: 'null'
+          default: null
+        status:
+          enum:
+          - approved
+          - rejected
+          - already_installed
+          - error
+          title: Status
+          type: string
+        version:
+          title: Version
+          type: string
+      required:
+      - appId
+      - version
+      - status
+      title: BulkItemResult
+      type: object
+    BulkSummary:
+      description: Batch totals; `succeeded` counts approved + rejected + already_installed.
+      properties:
+        failed:
+          title: Failed
+          type: integer
+        succeeded:
+          title: Succeeded
+          type: integer
+        total:
+          title: Total
+          type: integer
+      required:
+      - total
+      - succeeded
+      - failed
+      title: BulkSummary
+      type: object
     BundleDTO:
       description: 'Response DTO: one `app_catalog` row.'
       properties:
@@ -12918,6 +12992,65 @@ paths:
         default:
           description: Undocumented response
       summary: '`GET /api/v1/analytics/platform/reputation`.'
+  /api/v1/apps/approvals/bulk:
+    post:
+      description: ''
+      operationId: post_post_bulk_approvals
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `POST /api/v1/apps/approvals/bulk`.
+              properties:
+                action:
+                  enum:
+                  - approve
+                  - reject
+                  title: Action
+                  type: string
+                items:
+                  items:
+                    $ref: '#/components/schemas/BulkItem'
+                  title: Items
+                  type: array
+                reason:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Reason
+              required:
+              - action
+              title: BulkApprovalRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for the bulk endpoint (security.md Output
+                  Validation).
+                properties:
+                  results:
+                    items:
+                      $ref: '#/components/schemas/BulkItemResult'
+                    title: Results
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                  summary:
+                    $ref: '#/components/schemas/BulkSummary'
+                required:
+                - success
+                - results
+                - summary
+                title: BulkApprovalResponse
+                type: object
+          description: Response DTO for the bulk endpoint (security.md Output Validation).
+      summary: Approve or reject many bundle versions; per-item results, partial success
+        is HTTP 200.
   /api/v1/apps/community/{community_id}/activation:
     get:
       description: ''
