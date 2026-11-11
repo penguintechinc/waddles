@@ -195,37 +195,6 @@ class CommunitiesResponse:
 
 
 @dataclass(slots=True, frozen=True)
-class ModuleDTO:
-    """Module summary DTO."""
-
-    id: int
-    name: str
-    displayName: str | None
-    description: str | None
-    category: str | None
-    isCore: bool
-    isPublished: bool
-    version: str | None
-    createdAt: str | None
-
-
-@dataclass(slots=True, frozen=True)
-class ModulesResponse:
-    """Response DTO for `GET /<tenant_slug>/modules`."""
-
-    success: bool
-    allModulesAllowed: bool
-    modules: list[ModuleDTO]
-
-
-@dataclass(slots=True, frozen=True)
-class UpdateModulesRequest:
-    """Request DTO for `PUT /<tenant_slug>/modules`."""
-
-    allowedModuleIds: list[int] | None
-
-
-@dataclass(slots=True, frozen=True)
 class TenantAdminDTO:
     """Tenant admin DTO."""
 
@@ -281,20 +250,6 @@ def _community_dto(row: Any) -> CommunityDTO:
         isActive=bool(row.is_active),
         isPublic=bool(row.is_public),
         communityType=row.community_type or "other",
-        createdAt=_iso(row.created_at),
-    )
-
-
-def _module_dto(row: Any) -> ModuleDTO:
-    return ModuleDTO(
-        id=row.id,
-        name=row.name,
-        displayName=row.display_name,
-        description=row.description,
-        category=row.category,
-        isCore=bool(row.is_core),
-        isPublished=bool(row.is_published),
-        version=row.version,
         createdAt=_iso(row.created_at),
     )
 
@@ -439,45 +394,6 @@ async def get_tenant_communities(
             page=max(1, page), limit=min(100, max(1, limit)), total=total, totalPages=total_pages
         ),
     )
-
-
-@tenant_bp.route("/<tenant_slug>/modules", methods=["GET"])
-@tenant_middleware  # type: ignore[misc]
-@require_scope("tenant:admin")  # type: ignore[misc]
-@validate_response(ModulesResponse)
-async def get_tenant_modules(tenant_slug: str) -> ModulesResponse | tuple[dict[str, object], int]:
-    """Get tenant modules."""
-    async_dal, dal = _dal()
-    try:
-        tenant_id = _tenant_id(tenant_slug)
-        all_allowed, rows = await svc.get_tenant_modules(async_dal, dal, tenant_id=tenant_id)
-    except ApiError as exc:
-        return _err(exc)
-    return ModulesResponse(
-        success=True,
-        allModulesAllowed=all_allowed,
-        modules=[_module_dto(r) for r in rows],
-    )
-
-
-@tenant_bp.route("/<tenant_slug>/modules", methods=["PUT"])
-@tenant_middleware  # type: ignore[misc]
-@require_scope("tenant:admin")  # type: ignore[misc]
-@validate_request(UpdateModulesRequest)
-@validate_response(MessageResponse)
-async def update_tenant_modules(
-    data: UpdateModulesRequest, tenant_slug: str
-) -> MessageResponse | tuple[dict[str, object], int]:
-    """Update tenant modules."""
-    async_dal, dal = _dal()
-    try:
-        tenant_id = _tenant_id(tenant_slug)
-        await svc.update_tenant_modules(
-            async_dal, dal, tenant_id=tenant_id, allowed_module_ids=data.allowedModuleIds
-        )
-    except ApiError as exc:
-        return _err(exc)
-    return MessageResponse(success=True, message="Tenant modules updated")
 
 
 @tenant_bp.route("/<tenant_slug>/admins", methods=["GET"])

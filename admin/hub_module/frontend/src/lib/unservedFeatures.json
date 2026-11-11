@@ -158,26 +158,6 @@
       "POST /api/v1/user/oauth/credentials/:id/test"
     ]
   },
-  "community-marketplace-modules": {
-    "label": "Community marketplace modules",
-    "endpoints": [
-      "GET /api/v1/admin/:communityId/marketplace/modules",
-      "GET /api/v1/admin/:communityId/marketplace/modules/:moduleId",
-      "POST /api/v1/admin/:communityId/marketplace/modules/:moduleId/install",
-      "DELETE /api/v1/admin/:communityId/marketplace/modules/:moduleId",
-      "PUT /api/v1/admin/:communityId/marketplace/modules/:moduleId/config",
-      "POST /api/v1/admin/:communityId/marketplace/modules/:moduleId/review"
-    ]
-  },
-  "community-marketplace-install": {
-    "label": "Marketplace module install",
-    "endpoints": [
-      "GET /api/v1/marketplace/communities/:communityId/installed",
-      "POST /api/v1/marketplace/communities/:communityId/install",
-      "DELETE /api/v1/marketplace/communities/:communityId/install/:moduleId",
-      "PUT /api/v1/marketplace/communities/:communityId/install/:moduleId"
-    ]
-  },
   "community-security": {
     "label": "Community security",
     "endpoints": [

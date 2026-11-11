@@ -66,9 +66,9 @@ function TenantDashboard() {
 
   const quickLinks = [
     {
-      label: 'Modules',
-      description: 'Manage allowed modules for this tenant',
-      to: `/tenant/${tenantSlug}/modules`,
+      label: 'Bundles',
+      description: 'Manage which app bundles are available to this tenant',
+      to: `/tenant/${tenantSlug}/bundles`,
       icon: (
         <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}

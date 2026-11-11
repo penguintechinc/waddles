@@ -270,62 +270,6 @@ class TestTenantCommunities:
         assert names == ["mine"]
 
 
-class TestTenantModules:
-    async def test_get_modules_all_allowed_when_null(self, client: Any) -> None:
-        response = await client.get(
-            f"/api/v1/tenant/{TENANT_SLUG}/modules", headers=_admin_headers()
-        )
-        assert response.status_code == 200
-        body = await response.get_json()
-        assert body["allModulesAllowed"] is True
-        assert body["modules"] == []
-
-    async def test_update_modules_then_get(self, client: Any, tenant_admin_db: Any) -> None:
-        # int(...) -- see _seed_user()'s comment: pydal insert() returns a
-        # `Reference`, which crashes quart-schema's test-client JSON dump.
-        mod_id = int(
-            tenant_admin_db.dal.hub_modules.insert(
-                name="widgets", display_name="Widgets", is_published=True, category="core"
-            )
-        )
-        tenant_admin_db.dal.commit()
-
-        put_response = await client.put(
-            f"/api/v1/tenant/{TENANT_SLUG}/modules",
-            headers=_admin_headers(),
-            json={"allowedModuleIds": [mod_id]},
-        )
-        assert put_response.status_code == 200
-
-        get_response = await client.get(
-            f"/api/v1/tenant/{TENANT_SLUG}/modules", headers=_admin_headers()
-        )
-        body = await get_response.get_json()
-        assert body["allModulesAllowed"] is False
-        assert [m["id"] for m in body["modules"]] == [mod_id]
-
-    async def test_update_modules_empty_list_means_none_allowed(self, client: Any) -> None:
-        await client.put(
-            f"/api/v1/tenant/{TENANT_SLUG}/modules",
-            headers=_admin_headers(),
-            json={"allowedModuleIds": []},
-        )
-        response = await client.get(
-            f"/api/v1/tenant/{TENANT_SLUG}/modules", headers=_admin_headers()
-        )
-        body = await response.get_json()
-        assert body["allModulesAllowed"] is False
-        assert body["modules"] == []
-
-    async def test_update_modules_non_positive_id_is_400(self, client: Any) -> None:
-        response = await client.put(
-            f"/api/v1/tenant/{TENANT_SLUG}/modules",
-            headers=_admin_headers(),
-            json={"allowedModuleIds": [0]},
-        )
-        assert response.status_code == 400
-
-
 class TestTenantAdmins:
     async def test_get_admins_empty(self, client: Any) -> None:
         response = await client.get(

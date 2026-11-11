@@ -112,7 +112,7 @@ function HomePage() {
               <div className="text-3xl mb-4">🔧</div>
               <h3 className="text-xl font-semibold mb-2 text-sky-100">Modular Design</h3>
               <p className="text-navy-400">
-                Add features with modules - from AI chat to music integration.
+                Add features with app bundles - from AI chat to music integration.
               </p>
             </div>
             <div className="card p-6">
