@@ -3,9 +3,9 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import { publicApi } from '../../services/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { FormModalBuilder } from '@penguintechinc/react-libs';
-import { Alert, NotAvailableYet } from '../../components/ui';
+import { Alert } from '../../components/ui';
 import { getErrorMessage } from '../../components/ui/errors';
-import { useMyJoinRequest, useSubmitJoinRequest } from '../../hooks/useJoinRequests';
+import { useJoinOpenCommunity, useMyJoinRequest, useSubmitJoinRequest } from '../../hooks/useJoinRequests';
 import {
   GlobeAltIcon,
   LockClosedIcon,
@@ -44,6 +44,7 @@ function CommunityPublicPage() {
   // route for open communities (see UNSERVED_FEATURES['community-open-join']).
   const requiresApproval = community?.joinMode === 'approval';
   const submitJoin = useSubmitJoinRequest(communityId);
+  const joinOpen = useJoinOpenCommunity(communityId);
   const myRequest = useMyJoinRequest(communityId, isAuthenticated && requiresApproval);
   const requestStatus = myRequest.data?.status;
 
@@ -213,10 +214,26 @@ function CommunityPublicPage() {
         </div>
 
         {/* Join status */}
-        {!requiresApproval && (
-          <div className="mt-4" data-testid="open-join-unavailable">
-            <NotAvailableYet feature="community-open-join" className="py-6" />
-          </div>
+        {!requiresApproval && community.joinMode === 'open' && !joinOpen.isSuccess && (
+          <button
+            type="button"
+            onClick={() => (isAuthenticated ? joinOpen.mutate() : handleJoin())}
+            disabled={joinOpen.isPending}
+            className="btn btn-primary mt-4 disabled:opacity-50"
+            data-testid="join-open-button"
+          >
+            {joinOpen.isPending ? 'Joining...' : 'Join Community'}
+          </button>
+        )}
+        {joinOpen.isSuccess && (
+          <Alert tone="success" className="mt-4">
+            You are a member of this community.
+          </Alert>
+        )}
+        {joinOpen.isError && (
+          <Alert tone="danger" className="mt-4">
+            {getErrorMessage(joinOpen.error, 'Failed to join community')}
+          </Alert>
         )}
         {submitJoin.isSuccess && (
           <Alert tone="success" className="mt-4">
