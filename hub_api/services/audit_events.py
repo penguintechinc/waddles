@@ -394,6 +394,9 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("PUT", "/api/v1/platform/users/<int:user_id>/role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_PLATFORM_USER_CHANGED
     ),
+    ("POST", "/api/v1/communities/<int:community_id>/join"): RouteAudit(
+        AuditCategory.ROLE, AuditAction.ROLE_MEMBER_CHANGED
+    ),
     ("PUT", "/api/v1/admin/<int:community_id>/members/<int:user_id>/role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_MEMBER_CHANGED
     ),

@@ -122,6 +122,22 @@ class TestScopeEnforcement:
         response = await client.get("/api/v1/superadmin/users")
         assert response.status_code == 401
 
+    async def test_401_rejection_logs_reason_code_and_path_without_token(
+        self, client: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A rejected request leaves a reason-coded INFO record (path only, never the token)."""
+        caplog.set_level("INFO")
+        response = await client.get(
+            "/api/v1/superadmin/users", headers={"Authorization": "Bearer not-a-real-jwt"}
+        )
+        assert response.status_code == 401
+        records = [r for r in caplog.records if "auth rejected" in r.getMessage()]
+        assert len(records) == 1
+        message = records[0].getMessage()
+        assert "reason=invalid_or_expired_token" in message
+        assert "path=/api/v1/superadmin/users" in message
+        assert "not-a-real-jwt" not in message
+
     async def test_list_users_wrong_scope_is_403(self, client: Any, auth_headers: Any) -> None:
         """The representative scope-check: a valid token WITHOUT users:admin is refused."""
         response = await client.get(

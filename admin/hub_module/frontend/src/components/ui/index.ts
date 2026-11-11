@@ -44,6 +44,8 @@ export { DataTable } from './DataTable';
 export type { Column, DataTableProps } from './DataTable';
 export { NotAvailableYet, ServedFeature } from './NotAvailableYet';
 export type { NotAvailableYetProps, ServedFeatureProps } from './NotAvailableYet';
+export { PanelState, PanelErrorState, classifyPanelError } from './PanelState';
+export type { PanelStateProps, PanelErrorStateProps, PanelErrorInfo, PanelErrorKind, PanelEmptyAction } from './PanelState';
 export { QueryBoundary } from './QueryBoundary';
 export type { QueryBoundaryProps } from './QueryBoundary';
 export { RouteErrorBoundary } from './RouteErrorBoundary';

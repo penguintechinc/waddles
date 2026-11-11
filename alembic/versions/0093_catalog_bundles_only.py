@@ -11,11 +11,11 @@ The view is dropped and recreated (a column-type-preserving `CREATE OR REPLACE` 
 when the UNION is removed). Existing SELECT grants are captured and re-issued, as 0091 does. A DB
 without the catalog view (minimal CI bootstrap) is skipped with a WARNING, same precedent as 0091.
 
-Revision ID: 0092_catalog_bundles_only
-Revises: 0091_marketplace_vendor_view
+Revision ID: 0093_catalog_bundles_only
+Revises: 0092_leaderboard_cfg_toggles
 Create Date: 2026-11-11
 
-Rebase risk: chained directly after the release-branch head 0091. If another PR lands a 0092
+Rebase risk: chained directly after the release-branch head 0092. If another PR lands a 0093
 first, re-point `down_revision` at that head (and renumber this file) so the chain keeps a single
 head.
 """
@@ -29,8 +29,8 @@ from types import ModuleType
 
 from alembic import op
 
-revision = "0092_catalog_bundles_only"
-down_revision = "0091_marketplace_vendor_view"
+revision = "0093_catalog_bundles_only"
+down_revision = "0092_leaderboard_cfg_toggles"
 branch_labels = None
 depends_on = None
 
@@ -84,7 +84,7 @@ def upgrade() -> None:
     conn = op.get_bind()
     if not prev._view_exists(conn):
         _LOG.warning(
-            "marketplace_catalog absent (CI bootstrap); skipping 0092 view rebuild"
+            "marketplace_catalog absent (CI bootstrap); skipping 0093 view rebuild"
         )
         return
     prev._recreate(conn, _bundle_only_view_sql(prev))

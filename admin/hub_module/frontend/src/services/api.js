@@ -1071,6 +1071,9 @@ export const bundleApi = {
       `/api/v1/apps/${encodeURIComponent(appId)}/versions/${encodeURIComponent(version)}/permissions/approve`,
       { approvedPermissions },
     ),
+  // Bulk approve/reject: `items` = [{appId, version}] (max 200); per-item results in body.
+  bulkApprovals: (action, items, reason) =>
+    api.post('/api/v1/apps/approvals/bulk', { action, items, ...(reason ? { reason } : {}) }),
 };
 
 // ── Global-Admin Bundle Approval Queue (hub_api/blueprints/v1/bundle_admin.py) ──

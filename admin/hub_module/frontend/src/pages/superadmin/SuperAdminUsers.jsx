@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   MagnifyingGlassIcon,
   PlusIcon,
@@ -12,6 +12,29 @@ import {
 import api, { superAdminApi } from '../../services/api';
 import { FormModalBuilder } from '@penguintechinc/react-libs';
 import { WADDLES_GOLD_COLORS } from '../../theme/waddlebotTheme';
+
+/** Ignore closes fired this soon after a modal opened (stray backdrop mousedown from the opening gesture). */
+const OPEN_CLOSE_GUARD_MS = 400;
+
+/**
+ * Guarded modal-close handler: FormModalBuilder closes on any backdrop mousedown, and a stray
+ * one right after the opening click made the Create User form vanish immediately. Closes that
+ * arrive within OPEN_CLOSE_GUARD_MS of opening are dropped; deliberate Cancel/backdrop clicks
+ * after that still close the modal.
+ */
+function useGuardedClose(isOpen, close) {
+  const openedAt = useRef(0);
+  useEffect(() => {
+    if (isOpen) openedAt.current = Date.now();
+  }, [isOpen]);
+  return useCallback(() => {
+    if (Date.now() - openedAt.current < OPEN_CLOSE_GUARD_MS) {
+      console.debug('[SuperAdminUsers] Ignored close right after open');
+      return;
+    }
+    close();
+  }, [close]);
+}
 
 function SuperAdminUsers() {
   const [users, setUsers] = useState([]);
@@ -44,6 +67,9 @@ function SuperAdminUsers() {
     email: '',
     isActive: true,
   });
+
+  const closeCreateModal = useGuardedClose(showCreateModal, () => setShowCreateModal(false));
+  const closeEditModal = useGuardedClose(showEditModal, () => setShowEditModal(false));
 
   // Fetch users
   useEffect(() => {
@@ -472,7 +498,7 @@ function SuperAdminUsers() {
         title="Create New User"
         fields={createUserFields}
         isOpen={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
+        onClose={closeCreateModal}
         onSubmit={handleCreateUser}
         submitButtonText="Create"
         cancelButtonText="Cancel"
@@ -485,7 +511,7 @@ function SuperAdminUsers() {
         title="Edit User"
         fields={editUserFields}
         isOpen={showEditModal && selectedUser !== null}
-        onClose={() => setShowEditModal(false)}
+        onClose={closeEditModal}
         onSubmit={handleEditUser}
         submitButtonText="Update"
         cancelButtonText="Cancel"

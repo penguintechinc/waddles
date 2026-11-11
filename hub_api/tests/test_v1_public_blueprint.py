@@ -23,7 +23,28 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.public import public_bp, signup_settings_alias_bp
 from config import HubAPIConfig
+from services import landing_stats_cache
 from tests.conftest import TENANT_SLUG
+
+
+class FakeValkey:
+    """Minimal in-memory stand-in for the redis.asyncio client (get/set with TTL record)."""
+
+    def __init__(self, fail: bool = False) -> None:
+        """Start empty; `fail=True` makes every get raise."""
+        self.store: dict[str, str] = {}
+        self.ttls: dict[str, int] = {}
+        self.fail = fail
+
+    async def get(self, key: str) -> str | None:
+        if self.fail:
+            raise ConnectionError("valkey down")
+        return self.store.get(key)
+
+    async def set(self, key: str, value: str, ex: int | None = None) -> None:
+        self.store[key] = value
+        if ex is not None:
+            self.ttls[key] = ex
 
 
 def _test_config() -> HubAPIConfig:
@@ -91,43 +112,45 @@ def _seed_community(
 
 
 class TestStatsAndBanner:
-    async def test_get_stats_no_auth_required(self, client: Any, platform_db: Any) -> None:
-        _seed_community(platform_db, tenant_id=1)
+    async def test_get_stats_serves_cached_snapshot(self, app: Quart, client: Any) -> None:
+        fake = FakeValkey()
+        app.config[landing_stats_cache.CLIENT_CONFIG_KEY] = fake
+        stats = {
+            "communities": 2,
+            "discord": {"servers": 1, "channels": 1},
+            "twitch": {"channels": 1, "live": 1, "viewers": 10},
+            "slack": {"workspaces": 1, "channels": 1},
+        }
+        snap = await landing_stats_cache.write_snapshot(fake, stats)
         response = await client.get("/api/v1/public/stats")
         assert response.status_code == 200
         body = await response.get_json()
-        assert body["stats"]["communities"] == 1
+        assert body["stats"] == stats
+        assert body["computedAt"] == snap["computed_at"]
+        assert fake.ttls[landing_stats_cache.SNAPSHOT_KEY] == 1200
 
-    async def test_get_stats_coordination_breakdown(self, client: Any, platform_db: Any) -> None:
-        platform_db.dal.coordination.insert(
-            entity_id="d1", platform="discord", server_id="srv-1", is_live=False
-        )
-        platform_db.dal.coordination.insert(
-            entity_id="t1",
-            platform="twitch",
-            server_id="srv-2",
-            is_live=True,
-            viewer_count=10,
-        )
-        platform_db.dal.coordination.insert(
-            entity_id="s1", platform="slack", server_id="srv-3", is_live=False
-        )
-        platform_db.dal.commit()
-
-        response = await client.get("/api/v1/public/stats")
-        assert response.status_code == 200
-        body = await response.get_json()
-        assert body["stats"]["discord"] == {"servers": 1, "channels": 1}
-        assert body["stats"]["twitch"] == {"channels": 1, "live": 1, "viewers": 10}
-        assert body["stats"]["slack"] == {"workspaces": 1, "channels": 1}
-
-    async def test_get_stats_missing_default_tenant_is_500(
-        self, client: Any, platform_db: Any
+    async def test_get_stats_miss_is_warming_503_without_db(
+        self, app: Quart, client: Any, platform_db: Any, caplog: Any
     ) -> None:
+        app.config[landing_stats_cache.CLIENT_CONFIG_KEY] = FakeValkey()
+        # Default tenant inactive: an on-request DB fallback would 500; warming proves none runs.
         platform_db.dal(platform_db.dal.tenants.slug == TENANT_SLUG).update(is_active=False)
         platform_db.dal.commit()
         response = await client.get("/api/v1/public/stats")
-        assert response.status_code == 500
+        assert response.status_code == 503
+        assert await response.get_json() == {"status": "warming"}
+        assert "snapshot missing" in caplog.text
+
+    async def test_get_stats_valkey_error_is_warming_503(self, app: Quart, client: Any) -> None:
+        app.config[landing_stats_cache.CLIENT_CONFIG_KEY] = FakeValkey(fail=True)
+        response = await client.get("/api/v1/public/stats")
+        assert response.status_code == 503
+        assert await response.get_json() == {"status": "warming"}
+
+    async def test_corrupt_snapshot_is_miss(self) -> None:
+        fake = FakeValkey()
+        fake.store[landing_stats_cache.SNAPSHOT_KEY] = "not json"
+        assert await landing_stats_cache.read_snapshot(fake) is None
 
     async def test_get_banner_has_no_success_envelope(self, client: Any) -> None:
         response = await client.get("/api/v1/public/banner")

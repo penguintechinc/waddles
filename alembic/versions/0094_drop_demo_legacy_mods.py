@@ -7,11 +7,11 @@ this removes them. Dependent `hub_module_installations` / `hub_module_reviews` r
 only the two named seed rows are touched, and the whole step is a no-op when a table is absent
 or the rows are already gone. The legacy tables themselves are retained.
 
-Revision ID: 0093_drop_demo_legacy_mods
-Revises: 0092_catalog_bundles_only
+Revision ID: 0094_drop_demo_legacy_mods
+Revises: 0093_catalog_bundles_only
 Create Date: 2026-11-11
 
-Rebase risk: chained after 0092 (this PR). Re-point `down_revision` if another migration lands
+Rebase risk: chained after 0093 (this PR). Re-point `down_revision` if another migration lands
 ahead of it on the release branch.
 """
 
@@ -21,8 +21,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0093_drop_demo_legacy_mods"
-down_revision = "0092_catalog_bundles_only"
+revision = "0094_drop_demo_legacy_mods"
+down_revision = "0093_catalog_bundles_only"
 branch_labels = None
 depends_on = None
 
