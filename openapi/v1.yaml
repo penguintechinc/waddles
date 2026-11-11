@@ -22022,7 +22022,17 @@ paths:
         content:
           application/json:
             schema:
-              description: Request DTO for create user endpoints.
+              description: 'Request DTO for create user: `type` is `global_admin`
+                or `tenant_admin`.
+
+
+                `tenant` (a tenant UUID / public id) is required for `tenant_admin`
+                and forbidden for
+
+                `global_admin`. Both are validated in the service; `type` is optional
+                here only so a missing
+
+                value is a 422 from the service, not an opaque schema error.'
               properties:
                 email:
                   title: Email
@@ -22030,6 +22040,18 @@ paths:
                 password:
                   title: Password
                   type: string
+                tenant:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Tenant
+                type:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Type
               required:
               - email
               - password

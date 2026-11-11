@@ -69,6 +69,7 @@ from services.cookie_consent_service import (
     log_audit_event,
 )
 from services.errors import ApiError, bad_request
+from services.global_identity import is_global_admin
 
 logger = logging.getLogger(__name__)
 
@@ -173,9 +174,8 @@ async def resolve_scope(
     user_rows = await async_dal.select_async(
         dal(dal.hub_users.id.belongs(list(user_ids))),
         dal.hub_users.id,
-        dal.hub_users.is_super_admin,
     )
-    users = {int(r.id): bool(r.is_super_admin) for r in user_rows}
+    users = {int(r.id): await is_global_admin(async_dal, dal, user_id=int(r.id)) for r in user_rows}
 
     member_rows = await async_dal.select_async(
         dal(dal.community_members.user_id.belongs([str(u) for u in user_ids])),

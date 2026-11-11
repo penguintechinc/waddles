@@ -133,7 +133,6 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("email", "string", length=255),
         Field("password_hash", "string", length=255),
         Field("avatar_url", "text"),
-        Field("is_super_admin", "boolean", default=False),
         Field("is_bootstrap", "boolean", default=False),
         Field("is_vendor", "boolean", default=False),
         Field("is_analytics_consumer", "boolean", default=False),
@@ -260,6 +259,16 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("tenant_id", "integer", notnull=True),
         Field("user_id", "integer", notnull=True),
         Field("role", "string", length=50, default="tenant-admin"),
+        Field("created_at", "datetime"),
+        migrate=migrate,
+    )
+
+    # `tenant_members` (alembic 0095): plain membership of a tenant. Membership of the reserved
+    # `system` tenant is what makes a user a "global user" (`services.global_identity`).
+    dal.define_table(
+        "tenant_members",
+        Field("tenant_id", "integer", notnull=True),
+        Field("user_id", "integer", notnull=True),
         Field("created_at", "datetime"),
         migrate=migrate,
     )
@@ -1744,6 +1753,7 @@ def bind_superadmin_tenant_fields(dal: Any, *, migrate: bool = False) -> None:
         "tenants",
         Field("slug", "string", length=100),
         Field("display_name", "string", length=255),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         Field("description", "text"),
         Field("logo_url", "text"),
         Field("is_global", "boolean", default=False),
@@ -1810,6 +1820,7 @@ def bind_tenant_tables(dal: Any, *, migrate: bool = False) -> None:
         "tenants",
         Field("slug", "string", length=100),
         Field("display_name", "string", length=255),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         Field("logo_url", "text"),
         Field("is_global", "boolean", default=False),
         Field("is_active", "boolean", default=True),
@@ -1911,7 +1922,6 @@ def bind_marketplace_vendor_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("username", "string", length=255),
             Field("email", "string", length=255),
             Field("display_name", "string", length=255),
-            Field("is_super_admin", "boolean", default=False),
             Field("is_bootstrap", "boolean", default=False),
             Field("is_vendor", "boolean", default=False),
             migrate=migrate,

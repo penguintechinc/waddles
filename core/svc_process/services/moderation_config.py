@@ -7,8 +7,8 @@ enabled category set (`community_moderation_config`, migration
 `0008_moderation_config`, empty/OFF by default -- P3 will grow a real admin
 UI on top of this same table) and a numeric tenant id for the classifier's
 own `tenant_id` logging/metering parameter. `communities` carries no
-`tenant_id` column (this codebase's tenancy model is a single global-slug
-tenant per `0007_forum_catalog.py`'s `TENANT_SLUG = "global"` convention,
+`tenant_id` column (this codebase's tenancy model is a single catch-all
+tenant (slug `default`; `0007_forum_catalog.py` used `"global"` before alembic 0095),
 not a per-community FK) -- `tenants.slug` is resolved separately instead of
 joined, so a community with no `tenants` row for its envelope's tenant slug
 still degrades to `tenant_id=None` rather than raising.

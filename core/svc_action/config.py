@@ -166,7 +166,7 @@ class ActionConfig:
             poll_interval_s=float(os.getenv("POLL_INTERVAL_S", "5.0")),
             base_backoff_s=float(os.getenv("BASE_BACKOFF_S", "1.0")),
             max_backoff_s=float(os.getenv("MAX_BACKOFF_S", "60.0")),
-            runner_tenant_slug=os.getenv("RUNNER_TENANT_SLUG", "global"),
+            runner_tenant_slug=os.getenv("RUNNER_TENANT_SLUG", "default"),
             runner_community_id=_optional_int(os.getenv("RUNNER_COMMUNITY_ID")),
             secret_key=require_secret_key(),
             jwt_scope="distribution:read",

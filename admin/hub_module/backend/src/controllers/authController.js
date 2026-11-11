@@ -315,7 +315,7 @@ export async function login(req, res, next) {
     }
 
     // Resolve tenant context
-    const tenantSlug = req.body.tenantSlug || 'global';
+    const tenantSlug = req.body.tenantSlug || 'default';
     const tenantResult = await query('SELECT id, slug FROM tenants WHERE slug = $1 AND is_active = true', [tenantSlug]);
     const tenantId = tenantResult.rows[0]?.id || null;
 
@@ -483,7 +483,7 @@ export async function startOAuth(req, res, next) {
 
     const state = uuidv4();
     const redirectUri = `${config.identity.callbackBaseUrl}/api/v1/auth/oauth/${platform}/callback`;
-    const tenantSlug = req.query.tenantSlug || 'global';
+    const tenantSlug = req.query.tenantSlug || 'default';
 
     // Store state with mode and tenant context for callback
     await query(
@@ -548,7 +548,7 @@ export async function oauthCallback(req, res, next) {
     }
 
     const { mode, metadata: stateMetadata } = stateResult.rows[0];
-    const oauthTenantSlug = stateMetadata?.tenantSlug || 'global';
+    const oauthTenantSlug = stateMetadata?.tenantSlug || 'default';
 
     // Clean up state
     await query('DELETE FROM hub_oauth_states WHERE state = $1', [state]);
@@ -1228,7 +1228,7 @@ async function createSession({ userId, username, email, avatarUrl, isSuperAdmin,
     isAnalyticsConsumer: isAnalyticsConsumer || false,
     roles,
     tenantId: tenantId || null,
-    tenantSlug: tenantSlug || 'global',
+    tenantSlug: tenantSlug || 'default',
     tenantScopes,
   };
 

@@ -1214,7 +1214,7 @@ pipeline:
   # with a RUNNER_COMMUNITY_ID here (left unset in every template below) so the
   # runner stays tenant-wide rather than community-scoped -- see roadmap DATA-MODEL
   # GAPS "guild->community" shortcut (community_id=None, activated tenant-wide).
-  runnerTenantSlug: "global"
+  runnerTenantSlug: "default"
 
   # PR-H -- ONE source of truth for the pinned connector component digests
   # (sha256:<64 lowercase hex>; empty = unset). Rendered into svc-ingest
@@ -1265,7 +1265,7 @@ pipeline:
   # Activates first-party waddles.core.* App Bundles under the platform's SYSTEM identity at
   # deploy time (hub_api/cli/seed_core_bundles.py) -- no human global-admin approval, unlike a
   # third-party vendor bundle. `tenantSlugs` is a comma-separated CORE_BUNDLES_TENANT_SLUGS
-  # override (empty = every catalog entry's own declared activation_targets, "global" tenant-
+  # override (empty = every catalog entry's own declared activation_targets, "default" tenant-
   # wide by default -- see bundles/core-bundles.yaml).
   coreBundleSeeder:
     enabled: true
@@ -1286,7 +1286,7 @@ pipeline:
     # is belt-and-suspenders headroom in case CPU alone isn't sufficient on a
     # loaded alpha node.
     activeDeadlineSeconds: 3000
-    defaultTenantSlug: "global"
+    defaultTenantSlug: "default"
     tenantSlugs: ""
     # fix/preexisting-test-failures (2026-10-02): dedicated seeder-owned ingest-source
     # list, decoupled from rustDataPlane.svcProcess's legacy single-app PROCESS_INGEST_*
@@ -1859,8 +1859,8 @@ pipeline:
       # config.rs PROCESS_INGEST_PLATFORM/_SOURCE_ID, spec SS4.2/SS6.7). Both empty
       # (default) means an empty grant list -- the drain loop connects and blocks,
       # reading nothing (see lib.rs try_start_process_loop). Together they resolve the
-      # ONE ingest-source stream this pod's `Scope::new("global", None).source_stream(...)`
-      # reads: `waddles:t:global:c:_tenant:src:{platform}:{sourceId}:events`.
+      # ONE ingest-source stream this pod's `Scope::new("default", None).source_stream(...)`
+      # reads: `waddles:t:default:c:_tenant:src:{platform}:{sourceId}:events`.
       processIngestPlatform: ""
       processIngestSourceId: ""
       # PROCESS_BUNDLE_* (core/svc_process/src/config.rs) -- interim, env-driven

@@ -53,6 +53,7 @@ from services.bundle_telemetry import get_meter, get_tracer
 from services.erasure_executor import ErasureSubject, collect_object_urls, run_registry_erasure
 from services.erasure_external import EnvExternalErasure, ExternalErasure
 from services.errors import bad_request, not_found, unauthorized
+from services.global_identity import is_global_admin
 from services.suppression_keys import PlatformKekKeySource, SuppressionKeySource
 
 logger = logging.getLogger(__name__)
@@ -105,7 +106,6 @@ async def _export_account(async_dal: Any, dal: Any, user_id: int) -> list[dict[s
         dal.hub_users.username,
         dal.hub_users.email,
         dal.hub_users.avatar_url,
-        dal.hub_users.is_super_admin,
         dal.hub_users.is_vendor,
         dal.hub_users.email_verified,
         dal.hub_users.last_login,
@@ -120,7 +120,7 @@ async def _export_account(async_dal: Any, dal: Any, user_id: int) -> list[dict[s
             "username": r.username,
             "email": r.email,
             "avatar_url": r.avatar_url,
-            "is_super_admin": bool(r.is_super_admin),
+            "is_global_admin": await is_global_admin(async_dal, dal, user_id=int(r.id)),
             "is_vendor": bool(r.is_vendor),
             "email_verified": bool(r.email_verified),
             "last_login": _iso(r.last_login),

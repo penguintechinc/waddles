@@ -105,7 +105,7 @@ stage-next-only; the build script fails on a `stage` row):
     manifest_path: chatguard.manifest.yaml
     artifact_path: chatguard.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 ```
 

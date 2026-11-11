@@ -1,28 +1,13 @@
 """Platform-level user CRUD for super admins -- ported from `userManagementController.js`.
 
-Mounted at `/api/v1/superadmin/users*` in Node (`routes/superadmin.js`);
-gated there by `requireAuth` + `requireSuperAdmin`. This port gates the
-equivalent blueprint with `require_scope("users:admin")` -- present in
-`flask_core.auth.SCOPE_BUNDLES["global"]["admin"]`, which
-`auth_service.create_session_token` grants exactly when `hub_users.
-is_super_admin` is true, so the scope check is equivalent to Node's
-boolean check, expressed the OIDC-scope way security.md requires.
+Mounted at `/api/v1/superadmin/users*`. Gated by `require_scope("users:admin")`, which
+`auth_service` grants exactly to global admins (tenant admins of the reserved `system` tenant,
+`services.global_identity.is_global_admin`) -- there is no `hub_users.is_super_admin` flag.
 
-SECURITY (C3, A01/BOLA fix): that invariant -- "`users:admin` is granted
-exactly when `hub_users.is_super_admin` is true" -- did NOT hold until
-this fix: `flask_core.auth.SCOPE_BUNDLES["tenant"]["admin"]` also granted
-the identical literal `users:admin`, so any tenant owner's JWT satisfied
-this whole blueprint's `require_scope("users:admin")` gate, including
-`assign_super_admin_role` below -- letting a tenant owner promote
-themselves (or anyone) to PLATFORM super admin. The bundle collision is
-fixed at its root in `flask_core/auth.py` (tenant bundle no longer grants
-`users:admin` at all), but `assign_super_admin_role` additionally
-re-validates the caller against `hub_users.is_super_admin` directly
-(`services.community_authz.is_super_admin`, "THE canonical super-admin
-check -- DB-authoritative") before ever toggling that flag on anyone --
-defense in depth, independent of the JWT `scope` claim, so a future
-`SCOPE_BUNDLES` regression can't silently reopen platform-wide privilege
-escalation through this one action.
+SECURITY (C3, A01/BOLA): `SCOPE_BUNDLES["tenant"]["admin"]` never carries `users:admin`, and every
+state-changing action here additionally re-validates the caller against the database
+(`is_global_admin`) -- defense in depth, independent of the JWT `scope` claim, so a future bundle
+regression cannot reopen platform-wide privilege escalation.
 """
 
 from __future__ import annotations
@@ -30,15 +15,31 @@ from __future__ import annotations
 import asyncio
 import math
 import secrets
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import bcrypt
 
 from services import session_service
-from services.community_authz import is_super_admin
-from services.errors import bad_request, conflict, forbidden, not_found
-from services.free_tier_caps import grant_super_admin_capped
+from services.errors import bad_request, conflict, forbidden, not_found, unprocessable
+from services.free_tier_caps import (
+    FREE_TIER_CAP,
+    _platform_tier_slug,
+    capped_write,
+    count_tenant_admins,
+    grant_super_admin_capped,
+    super_admin_ids,
+)
+from services.global_identity import (
+    SYSTEM_TENANT_SLUG,
+    add_tenant_admin_sync,
+    add_tenant_member_sync,
+    ensure_system_tenant,
+    global_admin_ids,
+    is_global_admin,
+    revoke_global_admin_sync,
+)
 
 SALT_ROUNDS = (
     10  # matches userManagementController.js's own SALT_ROUNDS (distinct from auth_service's 12)
@@ -76,7 +77,8 @@ async def list_users(
             f"%{search}%", case_sensitive=False
         ) | dal.hub_users.username.like(f"%{search}%", case_sensitive=False)
     if role == "super_admin":
-        query &= dal.hub_users.is_super_admin == True  # noqa: E712 - pydal Field comparison
+        admin_ids = await asyncio.to_thread(global_admin_ids, dal)
+        query &= dal.hub_users.id.belongs(sorted(admin_ids) or [-1])
     elif role == "vendor":
         query &= dal.hub_users.is_vendor == True  # noqa: E712 - pydal Field comparison
     if is_active is not None:
@@ -100,29 +102,122 @@ async def get_user(async_dal: Any, dal: Any, *, user_id: int) -> Any:
     return rows.first()
 
 
-async def create_user(async_dal: Any, dal: Any, *, email: str, password: str) -> Any:
-    """Create user."""
+#: Role written for the new admin: the full tenant-owner bundle inside its tenant.
+TENANT_OWNER_ROLE = "tenant-owner"
+USER_TYPE_GLOBAL_ADMIN = "global_admin"
+USER_TYPE_TENANT_ADMIN = "tenant_admin"
+VALID_USER_TYPES = (USER_TYPE_GLOBAL_ADMIN, USER_TYPE_TENANT_ADMIN)
+
+
+async def global_admin_id_set(async_dal: Any, dal: Any) -> set[int]:
+    """Ids of all active global admins (response DTOs derive `isSuperAdmin` from this)."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(async_dal.executor, global_admin_ids, dal)
+
+
+async def _resolve_tenant_by_public_id(async_dal: Any, dal: Any, public_id: str) -> Any:
+    """Resolve an active tenant by its public UUID (never numeric id/slug); 422 if unknown."""
+    try:
+        canonical = str(uuid.UUID(public_id))
+    except (ValueError, AttributeError, TypeError):
+        raise unprocessable("tenant must be a tenant UUID") from None
+    if "public_id" not in dal.tenants.fields:
+        raise unprocessable("Tenant lookup unavailable")
+    rows = await async_dal.select_async(dal(dal.tenants.public_id == canonical))
+    row = rows.first() if rows else None
+    if row is None or row.is_active is False:
+        raise unprocessable("Tenant not found")
+    return row
+
+
+async def create_user(
+    async_dal: Any,
+    dal: Any,
+    *,
+    email: str,
+    password: str,
+    user_type: str | None,
+    tenant_public_id: str | None,
+    caller_id: int,
+    caller_tenant_slug: str,
+) -> tuple[Any, str, Any]:
+    """Create an ADMIN user: a `global_admin` (system tenant) or a `tenant_admin` (given tenant).
+
+    Plain-user creation is not offered here (422). Fail closed: the caller is re-validated as a
+    global admin in the database, the type/tenant are validated before any write, and the user
+    row + membership + admin row are written in ONE transaction subject to the free-tier admin
+    cap. Returns `(user_row, user_type, tenant_row_or_None)`; `tenant_row` is the system tenant
+    for a global admin.
+    """
+    if not await is_global_admin(async_dal, dal, user_id=caller_id):
+        raise forbidden("Platform super admin access required")
+    if user_type not in VALID_USER_TYPES:
+        raise unprocessable("type must be one of: global_admin, tenant_admin")
     if not email or not password:
         raise bad_request("Email and password required")
     if len(password) < 8:
         raise bad_request("Password must be at least 8 characters")
+    tenant_row: Any = None
+    if user_type == USER_TYPE_TENANT_ADMIN:
+        if not tenant_public_id:
+            raise unprocessable("tenant is required when type is tenant_admin")
+        tenant_row = await _resolve_tenant_by_public_id(async_dal, dal, tenant_public_id)
+        if tenant_row.slug == SYSTEM_TENANT_SLUG:
+            raise unprocessable("The system tenant only takes global_admin users")
+    elif tenant_public_id:
+        raise unprocessable("tenant must not be set when type is global_admin")
 
     existing = await async_dal.select_async(dal(dal.hub_users.email == email))
     if existing:
         raise conflict("Email already exists")
 
     password_hash = await asyncio.to_thread(_hash_password_sync, password)
-    new_id = await async_dal.insert_async(
-        dal.hub_users,
-        email=email,
-        username=email,
-        password_hash=password_hash,
-        is_active=True,
-        email_verified=False,
-        created_at=datetime.now(UTC),
-        updated_at=datetime.now(UTC),
-    )
-    return await get_user(async_dal, dal, user_id=new_id)
+    now = datetime.now(UTC)
+    values: dict[str, Any] = {
+        "email": email,
+        "username": email,
+        "password_hash": password_hash,
+        "is_active": True,
+        "email_verified": False,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    def _insert_and_grant(d: Any, tenant_id: int | None) -> int:
+        new_id = int(d.hub_users.insert(**values))
+        target = tenant_id if tenant_id is not None else ensure_system_tenant(d)
+        add_tenant_member_sync(d, tenant_id=target, user_id=new_id)
+        add_tenant_admin_sync(d, tenant_id=target, user_id=new_id, role=TENANT_OWNER_ROLE)
+        return new_id
+
+    if user_type == USER_TYPE_GLOBAL_ADMIN:
+        tier_slug = await asyncio.to_thread(_platform_tier_slug, dal, caller_tenant_slug)
+        new_id = await capped_write(
+            async_dal,
+            dal,
+            kind="admin",
+            noun="admin user",
+            tier_slug=tier_slug,
+            lock_key="admin:platform",
+            is_full=lambda d: len(super_admin_ids(d)) >= FREE_TIER_CAP,
+            write=lambda d: _insert_and_grant(d, None),
+        )
+        tenant_row = (
+            await async_dal.select_async(dal(dal.tenants.slug == SYSTEM_TENANT_SLUG))
+        ).first()
+    else:
+        tenant_id = int(tenant_row.id)
+        new_id = await capped_write(
+            async_dal,
+            dal,
+            kind="admin",
+            noun="admin user",
+            tier_slug=str(tenant_row.slug),
+            lock_key=f"tenant_admin:{tenant_id}",
+            is_full=lambda d: count_tenant_admins(d, tenant_id=tenant_id) >= FREE_TIER_CAP,
+            write=lambda d: _insert_and_grant(d, tenant_id),
+        )
+    return await get_user(async_dal, dal, user_id=new_id), str(user_type), tenant_row
 
 
 async def update_user(
@@ -174,34 +269,38 @@ async def delete_user(async_dal: Any, dal: Any, *, user_id: int, caller_id: int)
 async def assign_super_admin_role(
     async_dal: Any, dal: Any, *, user_id: int, grant: bool, caller_id: int, tenant_slug: str
 ) -> bool:
-    """Assign super admin role.
+    """Grant/revoke global admin (admin of the `system` tenant).
 
-    SECURITY: only a caller who is already a DB-authoritative platform
-    super admin (`hub_users.is_super_admin`, never the JWT `scope` claim
-    alone -- see this module's docstring) may grant OR revoke platform
-    super admin on anyone, including themselves. This is the "separate,
-    higher authority" gate for platform-wide role promotion -- a tenant
-    owner must never be able to grant a platform-wide role, regardless of
-    what scopes their token otherwise carries.
+    SECURITY: only a caller who is already a DB-authoritative global admin (never the JWT `scope`
+    claim alone) may grant OR revoke it, including on themselves -- a tenant owner must never be
+    able to grant a platform-wide role. Revoking the LAST global admin is refused (409) so the
+    platform can never be left without an operator.
     """
-    if not await is_super_admin(async_dal, dal, user_id=caller_id):
+    if not await is_global_admin(async_dal, dal, user_id=caller_id):
         raise forbidden("Platform super admin access required")
-    user = await get_user(async_dal, dal, user_id=user_id)
-    if bool(user.is_super_admin) == grant:
+    await get_user(async_dal, dal, user_id=user_id)  # 404 if missing
+    already = await is_global_admin(async_dal, dal, user_id=user_id)
+    if already == grant:
         return False
     if grant:
         await grant_super_admin_capped(
-            async_dal,
-            dal,
-            caller_tenant_slug=tenant_slug,
-            user_id=user_id,
-            update_fields={"is_super_admin": True, "updated_at": datetime.now(UTC)},
+            async_dal, dal, caller_tenant_slug=tenant_slug, user_id=user_id
         )
     else:
-        await async_dal.update_async(
-            dal.hub_users.id == user_id, is_super_admin=False, updated_at=datetime.now(UTC)
-        )
-    if not grant:
+        admins = await global_admin_id_set(async_dal, dal)
+        if admins <= {user_id}:
+            raise conflict("Cannot remove the last global admin")
+        loop = asyncio.get_running_loop()
+
+        def _revoke() -> None:
+            try:
+                revoke_global_admin_sync(dal, user_id)
+                dal.commit()
+            except Exception:
+                dal.rollback()
+                raise
+
+        await loop.run_in_executor(async_dal.executor, _revoke)
         # A demotion must not wait out the demoted admin's remaining access-token life: their
         # existing tokens still carry the admin scope bundle.
         await session_service.revoke_user_sessions(

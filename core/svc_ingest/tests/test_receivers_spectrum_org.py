@@ -890,7 +890,7 @@ class TestRealIngestPath:
     ) -> None:
         registry = AppRegistry()
         register_default_bundles(registry)
-        store = RedisSnapshotStore(redis_client, prefix="waddles:t:global:spectrum:snapshot")
+        store = RedisSnapshotStore(redis_client, prefix="waddles:t:default:spectrum:snapshot")
         prov = ScriptedOrgProvider(roster=[[_m("1", "a")], [_m("1", "a"), _m("2", "b")]])
         rcv, _ = _receiver(prov, store)
 
@@ -912,7 +912,7 @@ class TestRealIngestPath:
         assert event.event_type == "member_joined" and event.actor == "2"
         assert event.payload["roles_added"] == ["b"] and event.payload["role_names"] == ["B"]
         # The Valkey snapshot is what carries state across restarts -- and holds no names.
-        stored = await redis_client.get("waddles:t:global:spectrum:snapshot:roster:org1")
+        stored = await redis_client.get("waddles:t:default:spectrum:snapshot:roster:org1")
         assert json.loads(stored)["members"] == {"1": "a", "2": "b"}
         assert "name-" not in stored
 

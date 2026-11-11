@@ -36,10 +36,14 @@ from typing import Any
 
 from services.errors import bad_request, conflict, forbidden, not_found
 from services.free_tier_caps import create_community_capped, create_tenant_capped
+from services.global_identity import SYSTEM_TENANT_SLUG
 from services.schema import bind_admin_tables, bind_superadmin_tenant_fields
 
 VALID_COMMUNITY_TYPES = ("shared_interest_group", "gaming", "creator", "corporate", "other")
 VALID_JOIN_MODES = ("open", "approval", "invite")
+#: Reserved tenant slugs (security.md): `system` = operator plane (its admins ARE the global
+#: admins), `default` = catch-all. Never creatable, renamable-to, renamable or deactivatable here.
+RESERVED_TENANT_SLUGS = frozenset({SYSTEM_TENANT_SLUG, "default"})
 
 
 def _ensure_tables(dal: Any) -> None:
@@ -322,6 +326,8 @@ async def create_tenant(
     slug = slug.strip()
     if not _valid_slug(slug):
         raise bad_request(_SLUG_RE_MSG)
+    if slug.lower() in RESERVED_TENANT_SLUGS:
+        raise conflict("That tenant slug is reserved")
 
     existing = await async_dal.select_async(dal(dal.tenants.slug == slug))
     if existing:
@@ -357,6 +363,14 @@ async def update_tenant(
     rows = await async_dal.select_async(dal(dal.tenants.id == tenant_id))
     if not rows:
         raise not_found("Tenant not found")
+    current_slug = str(rows.first().slug or "")
+    new_slug = fields.get("slug")
+    if new_slug is not None and str(new_slug).strip().lower() in RESERVED_TENANT_SLUGS:
+        raise forbidden("That tenant slug is reserved")
+    if current_slug in RESERVED_TENANT_SLUGS and (
+        (new_slug is not None and new_slug != current_slug) or fields.get("is_active") is False
+    ):
+        raise forbidden("A reserved tenant cannot be renamed or deactivated")
     await async_dal.update_async(dal.tenants.id == tenant_id, **fields)
 
 
@@ -367,8 +381,8 @@ async def delete_tenant(async_dal: Any, dal: Any, *, tenant_id: int) -> None:
     row = rows.first()
     if row is None:
         raise not_found("Tenant not found")
-    if row.is_global:
-        raise forbidden("Cannot delete the global tenant")
+    if row.is_global or str(row.slug or "") in RESERVED_TENANT_SLUGS:
+        raise forbidden("Cannot delete a reserved tenant")
     await async_dal.update_async(
         dal.tenants.id == tenant_id, is_active=False, updated_at=datetime.now(UTC)
     )

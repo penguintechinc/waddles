@@ -565,10 +565,10 @@ async def internal_enqueue_song_request() -> Any:
 
         # No JWT/`TenantContext` on this service-key route (see module
         # docstring) -- the slug `feature_enabled()` needs is looked up
-        # straight from the tenant row it was just derived from, "global"
+        # straight from the tenant row it was just derived from, "default"
         # fallback only for the practically-unreachable dangling-FK case.
         tenant_row = dal(dal.tenants.id == tenant_id).select(dal.tenants.slug).first()
-        tenant_slug = tenant_row.slug if tenant_row is not None else "global"
+        tenant_slug = tenant_row.slug if tenant_row is not None else "default"
         enforce_youtube_labels = await feature_enabled(
             FEATURE_MUSIC_YOUTUBE_LABELS, tenant=tenant_slug, community=community_id, default=True
         )

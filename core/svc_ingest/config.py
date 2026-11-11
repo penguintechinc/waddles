@@ -55,7 +55,7 @@ class Config:
     # Tenant Isolation: never widened at request time, fixed at deploy time
     # via this env var, matching the JWT `tenant` claim the runner mints
     # for itself.
-    RUNNER_TENANT_SLUG = os.getenv("RUNNER_TENANT_SLUG", "global")
+    RUNNER_TENANT_SLUG = os.getenv("RUNNER_TENANT_SLUG", "default")
     RUNNER_COMMUNITY_ID = _optional_int(os.getenv("RUNNER_COMMUNITY_ID"))
 
     # Shared HS256 secret -- mirrors flask_core.tenancy/authz's own

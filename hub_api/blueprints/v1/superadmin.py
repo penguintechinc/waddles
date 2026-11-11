@@ -244,6 +244,7 @@ class TenantDTO:
     seatLimit: int | None
     createdAt: str | None
     updatedAt: str | None
+    publicId: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -566,6 +567,7 @@ async def list_tenants() -> TenantsResponse:
             seatLimit=t.seat_limit,
             createdAt=_iso(t.created_at),
             updatedAt=_iso(t.updated_at),
+            publicId=getattr(t, "public_id", None),
         )
         for t in rows
     ]

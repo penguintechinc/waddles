@@ -99,7 +99,7 @@ class Config:
     REPUTATION_API_URL = os.getenv("REPUTATION_API_URL", "http://waddlebot-reputation:8021")
     SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 
-    RUNNER_TENANT_SLUG = os.getenv("RUNNER_TENANT_SLUG", "global")
+    RUNNER_TENANT_SLUG = os.getenv("RUNNER_TENANT_SLUG", "default")
     RUNNER_COMMUNITY_ID = _optional_int(os.getenv("RUNNER_COMMUNITY_ID"))
 
     #: Board-demo live activity feed (`services/activity_feed.py`) fallback

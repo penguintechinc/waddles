@@ -50,6 +50,7 @@ import blueprints.v1.admin_data_privacy as admin_module
 from blueprints.v1.admin_data_privacy import admin_data_privacy_bp
 from services import admin_data_privacy_service as svc
 from services import data_privacy_service as privacy
+from services.global_identity import grant_global_admin_sync
 from services.schema import bind_admin_privacy_tables
 from tests.conftest import OTHER_TENANT_SLUG, TENANT_SLUG, make_user_token
 from tests.entitlement_fakes import FakeFlagGate, FakeLicenseGate, install_entitlement_client
@@ -134,11 +135,12 @@ def _user(db: Any, *, name: str, is_super_admin: bool = False, password: str | N
         username=name,
         display_name=name.title(),
         password_hash=password_hash,
-        is_super_admin=is_super_admin,
         is_active=True,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
+    if is_super_admin:
+        grant_global_admin_sync(db.dal, int(user_id))
     db.dal.commit()
     return int(user_id)  # plain int: a pydal `Reference` crashes quart-schema's test client
 

@@ -64,7 +64,7 @@ from services.community_authz import (
 )
 from services.errors import ApiError
 from services.workflow_service import ProxyResult
-from tests.conftest import SECRET_KEY, TENANT_SLUG
+from tests.conftest import SECRET_KEY, TENANT_SLUG, insert_global_admin
 
 COMMUNITY_ID = 1
 
@@ -236,7 +236,7 @@ class TestRequireCommunityAdminBypasses:
 
     async def test_super_admin_bypasses_community_membership(self, automation_db: Any) -> None:
         dal = automation_db.dal
-        user_id = dal.hub_users.insert(username="root", is_super_admin=True)
+        user_id = insert_global_admin(dal, username="root")
         dal.commit()
         app = self._app(automation_db)
         client = app.test_client()
@@ -249,7 +249,7 @@ class TestRequireCommunityAdminBypasses:
     async def test_tenant_admin_bypasses_community_membership(self, automation_db: Any) -> None:
         """Positive case: tenant-admin authorizing a community IN their own tenant succeeds."""
         dal = automation_db.dal
-        user_id = dal.hub_users.insert(username="tadmin", is_super_admin=False)
+        user_id = dal.hub_users.insert(username="tadmin")
         tenant_row = dal(dal.tenants.slug == TENANT_SLUG).select().first()
         dal.tenant_admins.insert(tenant_id=tenant_row.id, user_id=user_id, role="tenant-admin")
         community_id = dal.communities.insert(name="own-tenant-community", tenant_id=tenant_row.id)
@@ -280,7 +280,7 @@ class TestRequireCommunityAdminBypasses:
         # -- this test went red (200 instead of the expected 403), confirming
         # it actually exercises the vulnerable branch. Reverted, green again.
         dal = automation_db.dal
-        user_id = dal.hub_users.insert(username="tadmin", is_super_admin=False)
+        user_id = dal.hub_users.insert(username="tadmin")
         own_tenant_row = dal(dal.tenants.slug == TENANT_SLUG).select().first()
         dal.tenant_admins.insert(tenant_id=own_tenant_row.id, user_id=user_id, role="tenant-admin")
         other_tenant_id = dal.tenants.insert(slug="other-tenant", is_active=True)
@@ -311,7 +311,7 @@ class TestRequireCommunityAdminBypasses:
 
     async def test_member_with_wrong_scope_is_403(self, automation_db: Any) -> None:
         dal = automation_db.dal
-        user_id = dal.hub_users.insert(username="member", is_super_admin=False)
+        user_id = dal.hub_users.insert(username="member")
         role_id = dal.community_roles.insert(
             community_id=COMMUNITY_ID, name="viewer", base_claims={"scopes": ["community:read"]}
         )
@@ -334,7 +334,7 @@ class TestRequireCommunityAdminBypasses:
     async def test_member_with_no_role_assigned_is_403(self, automation_db: Any) -> None:
         """Legacy member row with `community_role_id=None` -- LEFT JOIN finds nothing."""
         dal = automation_db.dal
-        user_id = dal.hub_users.insert(username="legacy-member", is_super_admin=False)
+        user_id = dal.hub_users.insert(username="legacy-member")
         dal.community_members.insert(
             community_id=COMMUNITY_ID, user_id=str(user_id), role="member", is_active=True
         )
@@ -362,7 +362,7 @@ class TestResolveCommunityMembershipScopedTenantAdminBypass:
     async def test_tenant_admin_bypass_within_own_tenant_is_admin(self, automation_db: Any) -> None:
         """Positive case: tenant-admin authorizing a community IN their own tenant succeeds."""
         dal = automation_db.dal
-        user_id = dal.hub_users.insert(username="tadmin", is_super_admin=False)
+        user_id = dal.hub_users.insert(username="tadmin")
         tenant_row = dal(dal.tenants.slug == TENANT_SLUG).select().first()
         dal.tenant_admins.insert(tenant_id=tenant_row.id, user_id=user_id, role="tenant-admin")
         community_id = dal.communities.insert(name="own-tenant-community", tenant_id=tenant_row.id)
@@ -402,7 +402,7 @@ class TestResolveCommunityMembershipScopedTenantAdminBypass:
         # / `is_admin=True` instead of the expected `None` / 403).
         # Reverted, green again.
         dal = automation_db.dal
-        user_id = dal.hub_users.insert(username="tadmin", is_super_admin=False)
+        user_id = dal.hub_users.insert(username="tadmin")
         own_tenant_row = dal(dal.tenants.slug == TENANT_SLUG).select().first()
         dal.tenant_admins.insert(tenant_id=own_tenant_row.id, user_id=user_id, role="tenant-admin")
         other_tenant_id = dal.tenants.insert(slug="other-tenant", is_active=True)
@@ -449,13 +449,13 @@ class TestIsSuperAdmin:
 
     async def test_true_for_flagged_user(self, automation_db: Any) -> None:
         dal = automation_db.dal
-        user_id = dal.hub_users.insert(username="root", is_super_admin=True)
+        user_id = insert_global_admin(dal, username="root")
         dal.commit()
         assert await is_super_admin(automation_db, dal, user_id=user_id) is True
 
     async def test_false_for_unflagged_user(self, automation_db: Any) -> None:
         dal = automation_db.dal
-        user_id = dal.hub_users.insert(username="regular", is_super_admin=False)
+        user_id = dal.hub_users.insert(username="regular")
         dal.commit()
         assert await is_super_admin(automation_db, dal, user_id=user_id) is False
 

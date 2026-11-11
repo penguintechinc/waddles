@@ -75,7 +75,7 @@ FEATURE_AUDIT_EXPORT: Final[str] = "waddles.compliance.audit_export"
 
 #: Tenant slug the platform chain is entitlement-checked against (the default tenant: on-prem
 #: it carries the deployment baseline tier, on SaaS it is Free so platform events are skipped).
-DEFAULT_GATE_TENANT: Final[str] = "global"
+DEFAULT_GATE_TENANT: Final[str] = "default"
 
 TABLE_NAME: Final[str] = "audit_events"
 MAX_APPEND_ATTEMPTS: Final[int] = 10
