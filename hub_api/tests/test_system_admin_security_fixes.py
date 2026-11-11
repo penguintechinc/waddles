@@ -305,6 +305,67 @@ class TestDeactivateDeleteLastAdmin:
         assert event.actor_user_id == 1
 
 
+class TestReactivationRestoresPrivilege:
+    """A deactivated global admin keeps its `system` row: reactivation is a guarded action."""
+
+    @staticmethod
+    async def _deactivated_admin(client: Any, auth_db: Any) -> int:
+        seed_super_admin(auth_db, user_id=1)
+        second = _seed_user(auth_db, "second@example.com")
+        grant_global_admin_sync(auth_db.dal, second)
+        auth_db.dal.commit()
+        off = await client.put(
+            f"/api/v1/superadmin/users/{second}", headers=_headers(1), json={"isActive": False}
+        )
+        assert off.status_code == 200
+        assert is_global_admin_sync(auth_db.dal, second) is False
+        return second
+
+    async def test_non_admin_with_users_admin_scope_cannot_reactivate(
+        self, client: Any, auth_db: Any, revoked: AsyncMock
+    ) -> None:
+        second = await self._deactivated_admin(client, auth_db)
+        plain = _seed_user(auth_db, "plain@example.com")
+        response = await client.put(
+            f"/api/v1/superadmin/users/{second}",
+            headers=_headers(plain),
+            json={"isActive": True},
+        )
+        assert response.status_code == 403
+        assert is_global_admin_sync(auth_db.dal, second) is False
+
+    async def test_global_admin_can_reactivate_and_it_is_audited(
+        self, client: Any, auth_db: Any, revoked: AsyncMock, audit: _FakeAudit
+    ) -> None:
+        second = await self._deactivated_admin(client, auth_db)
+        audit.events.clear()
+        response = await client.put(
+            f"/api/v1/superadmin/users/{second}", headers=_headers(1), json={"isActive": True}
+        )
+        assert response.status_code == 200
+        assert is_global_admin_sync(auth_db.dal, second) is True
+        (event,) = audit.events
+        assert event.details["operation"] == "reactivate"
+        assert event.outcome == AuditOutcome.SUCCESS
+        assert event.target_id == _uuid_of(auth_db, second)
+        assert event.actor_user_id == 1
+
+    async def test_denied_reactivation_is_audited(
+        self, client: Any, auth_db: Any, revoked: AsyncMock, audit: _FakeAudit
+    ) -> None:
+        second = await self._deactivated_admin(client, auth_db)
+        plain = _seed_user(auth_db, "plain@example.com")
+        audit.events.clear()
+        await client.put(
+            f"/api/v1/superadmin/users/{second}",
+            headers=_headers(plain),
+            json={"isActive": True},
+        )
+        (event,) = audit.events
+        assert event.outcome == AuditOutcome.DENIED
+        assert event.details == {"operation": "reactivate", "reason": "caller_not_admin"}
+
+
 class TestAdminAuditRecords:
     """Audit content: actor, target UUID, action, result -- no PII."""
 

@@ -100,6 +100,20 @@ def _system_tenant_id(dal: Any) -> int | None:
     return int(row.id) if row is not None else None
 
 
+def has_system_admin_row_sync(dal: Any, user_id: int) -> bool:
+    """True iff `user_id` holds a `tenant_admins` row on `system`, REGARDLESS of active flags.
+
+    The raw membership check (unlike `is_global_admin_sync`, which fails closed for a
+    deactivated user or tenant). Guards must use it so a deactivated global admin cannot be
+    re-enabled -- restoring their privileges -- by a caller who is not a global admin.
+    """
+    row = _system_tenant_row(dal)
+    if row is None:
+        return False
+    query = (dal.tenant_admins.tenant_id == int(row.id)) & (dal.tenant_admins.user_id == user_id)
+    return bool(dal(query).count())
+
+
 def _user_is_active(dal: Any, user_id: int) -> bool:
     """True when the user row exists and is not deactivated (NULL counts as active)."""
     if "is_active" not in dal.hub_users.fields:  # reduced test bindings only; prod has the column

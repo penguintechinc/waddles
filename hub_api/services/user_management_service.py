@@ -47,6 +47,7 @@ from services.global_identity import (
     add_tenant_member_sync,
     ensure_system_tenant,
     global_admin_ids,
+    has_system_admin_row_sync,
     is_global_admin,
     is_global_admin_sync,
     revoke_global_admin_sync,
@@ -297,9 +298,9 @@ def _guard_global_admin_target(d: Any, *, user_id: int, caller_id: int, removing
     the JWT scope says). When `removing` (deactivate/delete) and the target is the only global
     admin left it is refused with 409 -- the platform must never be left without an operator.
     """
-    if not is_global_admin_sync(d, user_id):
-        return False
-    if removing and global_admin_ids(d) <= {user_id}:
+    if not has_system_admin_row_sync(d, user_id):
+        return False  # raw row check: a DEACTIVATED global admin is still guarded
+    if removing and is_global_admin_sync(d, user_id) and global_admin_ids(d) <= {user_id}:
         raise conflict("Cannot deactivate or delete the last global admin")
     if not is_global_admin_sync(d, caller_id):
         raise forbidden("Platform super admin access required to act on a global admin")
@@ -362,8 +363,10 @@ async def update_user(
 
     update_fields["updated_at"] = datetime.now(UTC)
     deactivating = is_active is False
-    operation = "deactivate" if deactivating else "update"
-    target_was_admin = await is_global_admin(async_dal, dal, user_id=user_id)
+    operation = "deactivate" if deactivating else ("reactivate" if is_active else "update")
+    target_was_admin = await asyncio.get_running_loop().run_in_executor(
+        async_dal.executor, has_system_admin_row_sync, dal, user_id
+    )
 
     def _write(d: Any) -> bool:
         was_admin = _guard_global_admin_target(
@@ -411,7 +414,9 @@ async def delete_user(async_dal: Any, dal: Any, *, user_id: int, caller_id: int)
     if user_id == caller_id:
         raise forbidden("Cannot delete your own account")
     await get_user(async_dal, dal, user_id=user_id)  # 404 if missing
-    target_was_admin = await is_global_admin(async_dal, dal, user_id=user_id)
+    target_was_admin = await asyncio.get_running_loop().run_in_executor(
+        async_dal.executor, has_system_admin_row_sync, dal, user_id
+    )
 
     def _write(d: Any) -> bool:
         was_admin = _guard_global_admin_target(
