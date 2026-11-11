@@ -65,3 +65,27 @@ def test_cronjob_rendered_by_default() -> None:
 
 def test_cronjob_disabled_by_knob() -> None:
     assert _cron(_render(["pipeline.hubApi.landingStatsRefresh.enabled=false"])) is None
+
+
+def test_cronjob_pod_not_selected_by_dataplane_egress_deny() -> None:
+    """Alpha egress: only dataPlaneComponents are egress-denied; the cronjob must stay outside it.
+
+    Postgres/Valkey ingress policies allow any pod in the release namespace, so the CronJob
+    reaches them as long as it carries the chart selector labels and is not a data-plane component.
+    """
+    docs = _render()
+    cron = _cron(docs)
+    assert cron is not None
+    labels = cron["spec"]["jobTemplate"]["spec"]["template"]["metadata"]["labels"]
+    assert labels["app.kubernetes.io/component"] == "landing-stats-refresh"
+    assert labels["app.kubernetes.io/instance"] == "waddlebot"
+    deny = [
+        d
+        for d in docs
+        if d.get("kind") == "CiliumNetworkPolicy"
+        and d["metadata"]["name"].endswith("-dataplane-egress-deny")
+    ]
+    assert deny, "dataplane egress-deny policy must render (examined >=1)"
+    for pol in deny:
+        for expr in pol["spec"]["endpointSelector"]["matchExpressions"]:
+            assert labels["app.kubernetes.io/component"] not in expr["values"]
