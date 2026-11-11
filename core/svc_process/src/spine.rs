@@ -815,7 +815,7 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `not_implemented` rather than this loop failing to start, the same
     /// graceful-degradation posture `core/svc_action::capabilities::
     /// StageCapabilities::with_kv`'s doc describes.
-    pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    pub kv_conn: Option<redis::aio::ConnectionManager>,
     /// The manifest-declared-capability snapshot
     /// `bundle_host_kv::authorize::authorize_kv` checks before granting
     /// `kv` (coordinator fix on PR #425: "undeclared means denied").
@@ -1006,8 +1006,8 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
     verified_scope: Option<(i32, i32)>,
     trace: Option<TraceContext>,
     invocation: Option<Arc<crate::identity::InvocationIdentity>>,
-) -> StageCapabilities<redis::aio::MultiplexedConnection> {
-    let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+) -> StageCapabilities<redis::aio::ConnectionManager> {
+    let caps = StageCapabilities::<redis::aio::ConnectionManager>::new(
         tenant,
         community,
         deps.app_id.clone(),
@@ -1859,7 +1859,7 @@ pub(crate) async fn ensure_consumer_group(
     group: &str,
 ) -> Result<bool, SpineError> {
     let client = build_raw_client(cfg)?;
-    let mut conn = client.get_multiplexed_async_connection().await?;
+    let mut conn = client.get_connection_manager().await?;
     let result: Result<(), redis::RedisError> = redis::cmd("XGROUP")
         .arg("CREATE")
         .arg(stream)
@@ -4968,10 +4968,7 @@ mod tests {
 
             // Three entries; read two without acking -> pending 2, lag 1.
             let raw = redis::Client::open(cfg.valkey_url.as_str()).expect("redis client");
-            let mut conn = raw
-                .get_multiplexed_async_connection()
-                .await
-                .expect("raw connection");
+            let mut conn = raw.get_connection_manager().await.expect("raw connection");
             for _ in 0..3 {
                 let _: String = redis::cmd("XADD")
                     .arg(&stream)

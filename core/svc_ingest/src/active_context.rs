@@ -804,7 +804,7 @@ mod tests {
         let store = InteractionStore::new(
             redis::Client::open(url)
                 .unwrap()
-                .get_multiplexed_async_connection()
+                .get_connection_manager()
                 .await
                 .unwrap(),
         );

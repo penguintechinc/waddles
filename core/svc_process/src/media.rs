@@ -89,7 +89,7 @@ fn required_env(name: &'static str) -> Result<String, &'static str> {
 pub fn build_media_wiring(
     cli: &CliConfig,
     license_client: &Arc<penguin_licensing::LicenseClient>,
-    valkey: redis::aio::MultiplexedConnection,
+    valkey: redis::aio::ConnectionManager,
 ) -> Option<MediaWiring> {
     if cli.service_jwt_token_endpoint.is_empty() {
         tracing::error!(

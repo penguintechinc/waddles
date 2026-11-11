@@ -303,7 +303,7 @@ async fn rig(flag: bool) -> Rig {
     std::env::set_var("SECURITY_TRANSPORT_TLS", "false");
     std::env::set_var("SECURITY_TRANSPORT_AUTH", "false");
     let client = redis::Client::open(std::env::var("VALKEY_URL").unwrap()).unwrap();
-    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let mut conn = client.get_connection_manager().await.unwrap();
     for key in [
         TWITCH_OUTBOUND_QUEUE_KEY,
         DISCORD_OUTBOUND_QUEUE_KEY,
@@ -495,7 +495,7 @@ fn entry(
 
 async fn push(queue: &str, raw: &str) {
     let client = redis::Client::open(std::env::var("VALKEY_URL").unwrap()).unwrap();
-    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let mut conn = client.get_connection_manager().await.unwrap();
     let _: i64 = redis::cmd("LPUSH")
         .arg(queue)
         .arg(raw)
@@ -837,7 +837,7 @@ fn event_entry(op: &str, expect_guild: &str, event_id: &str, text: &str) -> (Str
 /// Polls the drain's result key for `op_id` (what svc-action's producer reads).
 async fn ack_for(op_id: &str) -> serde_json::Value {
     let client = redis::Client::open(std::env::var("VALKEY_URL").unwrap()).unwrap();
-    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let mut conn = client.get_connection_manager().await.unwrap();
     for _ in 0..200 {
         let raw: Option<String> = redis::cmd("GET")
             .arg(format!("waddles:transport:discord:ack:{op_id}"))
@@ -1113,7 +1113,7 @@ async fn registered_ops_reach_build_request_and_unregistered_ops_are_rejected_at
             // Rejected at parse: no ack is ever written for it.
             tokio::time::sleep(Duration::from_millis(600)).await;
             let client = redis::Client::open(std::env::var("VALKEY_URL").unwrap()).unwrap();
-            let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+            let mut conn = client.get_connection_manager().await.unwrap();
             let raw_ack: Option<String> = redis::cmd("GET")
                 .arg(format!("waddles:transport:discord:ack:{op_id}"))
                 .query_async(&mut conn)

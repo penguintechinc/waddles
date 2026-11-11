@@ -33,7 +33,7 @@ penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", re
 
 # Outbound-executor real-path e2e (`tests/outbound_exec.rs`): a real Valkey list queue,
 # local fake platform endpoints, the SSRF-guarded client and per-community slot sources.
-redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp"] }
+redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "connection-manager"] }
 wiremock = "=0.6.5"
 # Captures the process's tracing output so the acceptance suite can assert no raw
 # platform handle ever reaches a log line (`tests/connector_acceptance.rs`).

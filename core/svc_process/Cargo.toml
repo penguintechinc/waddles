@@ -213,7 +213,7 @@ bundle-host-economy = { path = "../bundle_host_economy", version = "=0.1.0" }
 # a direct Valkey connection, same crate/feature pins `core/svc_action`
 # uses for its own direct `relay`/usage connection, and the same version
 # already pulled in transitively via `penguin-spine`.
-redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp"] }
+redis = { version = "=1.7.0", default-features = false, features = ["connection-manager", "tokio-comp", "tls-rustls", "tokio-rustls-comp"] }
 # The bundle `http` host capability's shared, SSRF-hardened egress guard
 # (`src/capabilities.rs`'s `StageCapabilities::egress`) -- extracted from
 # `core/svc_action` (PR #459 follow-up) so this stage enforces the

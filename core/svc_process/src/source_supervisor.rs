@@ -156,7 +156,7 @@ pub struct SupervisorDeps {
     /// since opening it is async) and cloned into every binding consumer's
     /// own `ProcessDeps` in [`run_binding_consumer`] below, rather than
     /// reopened per consumer or per reconnect attempt.
-    pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    pub kv_conn: Option<redis::aio::ConnectionManager>,
     /// See `spine::ProcessDeps::kv_capabilities`'s doc -- the same shared
     /// snapshot `crate::lib::try_start_changelog_consumer`'s
     /// `changelog_consumer::run` poll writes to, cloned (the `Arc`, not the

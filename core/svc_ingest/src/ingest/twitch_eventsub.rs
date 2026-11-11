@@ -212,13 +212,13 @@ pub trait ReplayGuard: Send + Sync {
 }
 
 /// Production [`ReplayGuard`]: Valkey `SET NX PX` on a per-message-id key.
-/// Wraps a [`redis::aio::MultiplexedConnection`], cloned per call (cheap --
+/// Wraps a [`redis::aio::ConnectionManager`], cloned per call (cheap --
 /// multiplexed connections are designed for concurrent shared use, the same
 /// pattern `crate::outbound`'s drain loop and `penguin_spine::SpineClient`
 /// rely on internally).
 #[derive(Clone)]
 pub struct RedisReplayGuard {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
     ttl_ms: usize,
 }
 
@@ -226,7 +226,7 @@ impl RedisReplayGuard {
     /// Builds a guard over an already-connected Valkey connection, with the
     /// given dedup TTL.
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection, ttl: Duration) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager, ttl: Duration) -> Self {
         Self {
             conn,
             ttl_ms: usize::try_from(ttl.as_millis()).unwrap_or(usize::MAX),
@@ -282,16 +282,16 @@ pub trait RevocationSink: Send + Sync {
 }
 
 /// Production [`RevocationSink`]: `LPUSH`es onto [`REVOCATION_QUEUE_KEY`].
-/// Same cheap-clone-per-call `MultiplexedConnection` pattern as
+/// Same cheap-clone-per-call `ConnectionManager` pattern as
 /// [`RedisReplayGuard`].
 #[derive(Clone)]
 pub struct RedisRevocationSink {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
 }
 
 impl RedisRevocationSink {
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self { conn }
     }
 }

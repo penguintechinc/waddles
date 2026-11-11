@@ -13,12 +13,12 @@ fn url() -> String {
         .expect("VALKEY_URL must be set: lease tests need a REAL Valkey (no silent skip)")
 }
 
-async fn conn() -> redis::aio::MultiplexedConnection {
+async fn conn() -> redis::aio::ConnectionManager {
     let client = redis::Client::open(url()).expect("client");
-    let cfg =
-        redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(2)));
+    let cfg = redis::aio::ConnectionManagerConfig::new()
+        .set_response_timeout(Some(Duration::from_secs(2)));
     client
-        .get_multiplexed_async_connection_with_config(&cfg)
+        .get_connection_manager_with_config(cfg)
         .await
         .expect("connect")
 }

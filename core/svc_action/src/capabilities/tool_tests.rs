@@ -749,7 +749,7 @@ async fn pool_exhaustion_and_malformed_envelope_are_typed() {
 
 #[tokio::test]
 async fn unwired_tool_and_unknown_op_fail_loudly() {
-    let bare = StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
+    let bare = StageCapabilities::<_, redis::aio::ConnectionManager>::new(
         FakeRelayQueue::default(),
         test_egress(),
         Arc::new(Mutex::new(UsageBatcher::new())),

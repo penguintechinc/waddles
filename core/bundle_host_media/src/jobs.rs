@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use redis::aio::MultiplexedConnection;
+use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{MediaError, MediaKind, Scope};
@@ -96,12 +96,12 @@ fn unavailable(e: impl std::fmt::Display) -> MediaError {
 /// Valkey-backed store.
 #[derive(Clone)]
 pub struct ValkeyJobStore {
-    conn: MultiplexedConnection,
+    conn: ConnectionManager,
 }
 
 impl ValkeyJobStore {
     /// Wraps a shared multiplexed connection.
-    pub fn new(conn: MultiplexedConnection) -> Self {
+    pub fn new(conn: ConnectionManager) -> Self {
         Self { conn }
     }
 }

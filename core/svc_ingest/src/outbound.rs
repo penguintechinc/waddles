@@ -75,11 +75,10 @@ const CONTROL_CONN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 async fn connect_with_response_timeout(
     client: &redis::Client,
     response_timeout: Duration,
-) -> Result<redis::aio::MultiplexedConnection, redis::RedisError> {
-    let config = redis::AsyncConnectionConfig::new().set_response_timeout(Some(response_timeout));
-    client
-        .get_multiplexed_async_connection_with_config(&config)
-        .await
+) -> Result<redis::aio::ConnectionManager, redis::RedisError> {
+    let config =
+        redis::aio::ConnectionManagerConfig::new().set_response_timeout(Some(response_timeout));
+    client.get_connection_manager_with_config(config).await
 }
 
 /// Builds a `redis::Client` for `cfg`'s transport, mirroring
@@ -135,7 +134,7 @@ pub trait RelaySource: Send {
     async fn brpop_one(&mut self) -> Result<Option<String>, String>;
 }
 
-impl RelaySource for redis::aio::MultiplexedConnection {
+impl RelaySource for redis::aio::ConnectionManager {
     async fn brpop_one(&mut self) -> Result<Option<String>, String> {
         // `redis::AsyncCommands::brpop` (also named `brpop`, brought into
         // scope by the `use` above) would otherwise be ambiguous with this
@@ -250,13 +249,13 @@ pub trait ReplayGuard: Send + Sync {
 /// The production [`ReplayGuard`]: `SET <key> 1 NX PX <ttl>` on the existing
 /// Valkey (a connection that is not the one blocked in `BRPOP`).
 pub struct ValkeyReplayGuard {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
 }
 
 impl ValkeyReplayGuard {
     /// Wraps a dedicated (non-blocking) connection.
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self { conn }
     }
 }
@@ -753,13 +752,13 @@ pub trait DrainControl: Send + Sync {
 /// command behind a blocking pop, so the drain opens a second connection for
 /// these writes).
 pub struct ValkeyDrainControl {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
 }
 
 impl ValkeyDrainControl {
     /// Wraps a dedicated control connection.
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self { conn }
     }
 }
@@ -796,7 +795,7 @@ impl DrainControl for ValkeyDrainControl {
 /// A Valkey list queue with a caller-chosen key (the Twitch
 /// [`RelaySource`] impl on the bare connection hardcodes its key).
 pub struct ListQueue {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
     key: &'static str,
 }
 
@@ -2010,12 +2009,11 @@ mod tests {
     async fn real_valkey_replay_guard_is_atomic_single_use_with_ttl() {
         const RACERS: usize = 32;
         let (client, prefix) = real_valkey().await;
-        let guard =
-            ValkeyReplayGuard::new(client.get_multiplexed_async_connection().await.unwrap());
+        let guard = ValkeyReplayGuard::new(client.get_connection_manager().await.unwrap());
         let key = format!("{prefix}:a");
         assert!(guard.claim(&key, 400).await.unwrap(), "first claim wins");
         assert!(!guard.claim(&key, 400).await.unwrap(), "duplicate loses");
-        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let mut conn = client.get_connection_manager().await.unwrap();
         let pttl: i64 = redis::cmd("PTTL")
             .arg(&key)
             .query_async(&mut conn)

@@ -599,7 +599,7 @@ pub trait InvalidationSource: Send {
     ) -> Result<(String, Vec<HashMap<String, String>>), String>;
 }
 
-impl InvalidationSource for redis::aio::MultiplexedConnection {
+impl InvalidationSource for redis::aio::ConnectionManager {
     async fn read_after(
         &mut self,
         last_id: &str,

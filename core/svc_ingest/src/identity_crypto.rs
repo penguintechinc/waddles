@@ -465,7 +465,7 @@ pub const DEK_INVALIDATION_STREAM: &str = "keys:tenant-dek:invalidate";
 /// [`run_dek_invalidation_listener`]'s dispatch logic (which
 /// `(tenant, purpose)` entries actually trigger an invalidation) be
 /// unit-tested without a live Valkey connection. Implemented for
-/// `redis::aio::MultiplexedConnection` via `XREAD BLOCK` starting from `$`
+/// `redis::aio::ConnectionManager` via `XREAD BLOCK` starting from `$`
 /// (only entries published after this listener started -- a missed
 /// invalidation during a restart is bounded by [`DEFAULT_DEK_CACHE_TTL`]
 /// anyway, since the cache entry expires on its own).
@@ -481,7 +481,7 @@ pub trait InvalidationSource: Send {
     ) -> Result<(String, Vec<HashMap<String, String>>), String>;
 }
 
-impl InvalidationSource for redis::aio::MultiplexedConnection {
+impl InvalidationSource for redis::aio::ConnectionManager {
     async fn read_after(
         &mut self,
         last_id: &str,
@@ -525,7 +525,7 @@ impl InvalidationSource for redis::aio::MultiplexedConnection {
 /// [`DEFAULT_DEK_CACHE_TTL`] longer than the broker intended).
 ///
 /// **Not yet spawned from `src/lib.rs`** -- wiring this into the service
-/// startup path (alongside a real `redis::aio::MultiplexedConnection`) is
+/// startup path (alongside a real `redis::aio::ConnectionManager`) is
 /// a documented follow-up once #442's exact stream field names/message
 /// shape are published; the function itself is complete and unit-tested
 /// today against a fake [`InvalidationSource`].

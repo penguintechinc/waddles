@@ -945,7 +945,7 @@ fn bounded_push_pipeline(key: &str, value: &str) -> redis::Pipeline {
     pipe
 }
 
-impl RelayQueue for redis::aio::MultiplexedConnection {
+impl RelayQueue for redis::aio::ConnectionManager {
     fn lpush<'a>(
         &'a self,
         key: &'a str,
@@ -1040,7 +1040,7 @@ struct DiscordRelay {
 /// The real capability implementations this stage wires today. Generic
 /// over [`RelayQueue`] so `handle_relay` is fully unit-testable against a
 /// fake queue without a live Valkey server -- production callers
-/// instantiate `StageCapabilities<redis::aio::MultiplexedConnection>`.
+/// instantiate `StageCapabilities<redis::aio::ConnectionManager>`.
 /// Also generic over [`KvBackend`] (defaulted to the same production
 /// connection type) for the identical reason: `handle_kv`'s argument-
 /// parsing/error-mapping is unit-testable against a fake implementing the
@@ -1085,7 +1085,7 @@ pub struct DbV2Wiring {
     pub capabilities: Arc<DbCapabilitySnapshot>,
 }
 
-pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::MultiplexedConnection> {
+pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::ConnectionManager> {
     relay_queue: Q,
     egress: Arc<EgressGuard>,
     /// Shared with the dispatch loop's own `DispatchDeps::usage` so a
@@ -1357,10 +1357,10 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     }
 
     /// Enables the `kv` capability over `backend` (production:
-    /// `redis::aio::MultiplexedConnection` -- the exact same direct Valkey
+    /// `redis::aio::ConnectionManager` -- the exact same direct Valkey
     /// connection `lib.rs`'s `build_stage_capabilities` already opens for
     /// `relay`/usage metering, cloned rather than opening a second
-    /// connection, since `MultiplexedConnection::clone` is a cheap handle
+    /// connection, since `ConnectionManager::clone` is a cheap handle
     /// clone over one shared TCP connection, not a new socket). Builder-
     /// style so a deployment where the Valkey connection failed to open can
     /// still construct every other capability and simply skip this call,

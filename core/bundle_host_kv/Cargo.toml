@@ -18,7 +18,7 @@ path = "src/lib.rs"
 # crates -- both already depend on these exact versions, so a path
 # dependency on this crate introduces no second pin of the same package.
 [dependencies]
-redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "script"] }
+redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "script", "connection-manager"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 thiserror = "=2.0.20"
@@ -35,4 +35,4 @@ sha2 = "=0.10.9"
 opentelemetry = "=0.32.0"
 
 [dev-dependencies]
-tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "sync"] }

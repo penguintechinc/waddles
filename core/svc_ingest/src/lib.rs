@@ -680,7 +680,7 @@ async fn start_bundle_schedules(
         anyhow::anyhow!("bundle schedules: spine did not connect within the grace period")
     })?;
     let lease_conn = redis_client
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .map_err(|e| anyhow::anyhow!("bundle schedules: valkey connect failed ({:?})", e.kind()))?;
     let source = HubScheduleSource::connect(
@@ -1180,7 +1180,7 @@ async fn try_build_eventsub_state(
             return None;
         }
     };
-    let conn = match redis_client.get_multiplexed_async_connection().await {
+    let conn = match redis_client.get_connection_manager().await {
         Ok(conn) => conn,
         Err(err) => {
             tracing::warn!(error_kind = ?err.kind(), "valkey connect failed; twitch eventsub receiver not started");

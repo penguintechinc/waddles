@@ -239,7 +239,7 @@ return 3
 /// Valkey-backed store (one multiplexed connection).
 #[derive(Clone)]
 pub struct InteractionStore {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
     ttl: Duration,
 }
 
@@ -250,13 +250,13 @@ fn key(id: &str) -> String {
 impl InteractionStore {
     /// Wraps a connection with the production [`TOKEN_TTL`].
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self::with_ttl(conn, TOKEN_TTL)
     }
 
     /// Explicit TTL (tests exercise expiry).
     #[must_use]
-    pub fn with_ttl(conn: redis::aio::MultiplexedConnection, ttl: Duration) -> Self {
+    pub fn with_ttl(conn: redis::aio::ConnectionManager, ttl: Duration) -> Self {
         Self { conn, ttl }
     }
 
@@ -432,10 +432,7 @@ mod tests {
     async fn store(ttl: Duration) -> InteractionStore {
         let url = std::env::var("VALKEY_URL").expect("VALKEY_URL (a local valkey) is required");
         let client = redis::Client::open(url).unwrap();
-        InteractionStore::with_ttl(
-            client.get_multiplexed_async_connection().await.unwrap(),
-            ttl,
-        )
+        InteractionStore::with_ttl(client.get_connection_manager().await.unwrap(), ttl)
     }
 
     fn unique_id() -> String {

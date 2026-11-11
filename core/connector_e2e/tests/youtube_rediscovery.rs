@@ -360,7 +360,7 @@ async fn an_ended_live_chat_waits_then_rediscovers_the_new_stream_of_the_same_ch
     );
     let lease_conn = redis::Client::open(valkey.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let settings = RuntimeSettings {
@@ -526,7 +526,7 @@ async fn an_ended_live_chat_waits_then_rediscovers_the_new_stream_of_the_same_ch
     exec_conn.abort();
     let mut kc = redis::Client::open(valkey.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let keys: Vec<String> = redis::cmd("KEYS")

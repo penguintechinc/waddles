@@ -612,10 +612,10 @@ impl Ctx {
         }
     }
 
-    async fn kc(&self) -> redis::aio::MultiplexedConnection {
+    async fn kc(&self) -> redis::aio::ConnectionManager {
         redis::Client::open(self.valkey.as_str())
             .unwrap()
-            .get_multiplexed_async_connection()
+            .get_connection_manager()
             .await
             .unwrap()
     }
@@ -741,11 +741,7 @@ fn discord_env(digest: &str) -> BTreeMap<&'static str, String> {
 impl Rig {
     /// Boots the production runtime. `budget_conn` is the Valkey connection the
     /// identify budget uses (tests hand in a healthy one or a dead one).
-    async fn boot(
-        ctx: &Ctx,
-        binds: Vec<Bind>,
-        budget_conn: redis::aio::MultiplexedConnection,
-    ) -> Self {
+    async fn boot(ctx: &Ctx, binds: Vec<Bind>, budget_conn: redis::aio::ConnectionManager) -> Self {
         let cfg = CliConfig::try_parse_from([
             "bundle-executor",
             "--stage-host-api-addr",

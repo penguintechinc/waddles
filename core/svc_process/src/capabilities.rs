@@ -510,7 +510,7 @@ pub struct EconomyWiring {
 /// `app_id` across every invoke, spec §8.2 step 8), built once by this
 /// stage's own startup wiring and cloned (cheap, `Arc`) into every
 /// per-invoke `StageCapabilities`.
-pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
+pub struct StageCapabilities<K: KvBackend = redis::aio::ConnectionManager> {
     tenant: String,
     community: Option<String>,
     app_id: String,
@@ -767,7 +767,7 @@ impl<K: KvBackend> StageCapabilities<K> {
     }
 
     /// Enables the `kv` capability over `backend` (production:
-    /// `redis::aio::MultiplexedConnection`, cloned from
+    /// `redis::aio::ConnectionManager`, cloned from
     /// `crate::spine::ProcessDeps::kv_conn` on every invoke -- a cheap
     /// handle clone over one shared connection, not a new socket).
     /// Builder-style so a deployment where the Valkey connection failed to
