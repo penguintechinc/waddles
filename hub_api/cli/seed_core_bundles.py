@@ -486,6 +486,70 @@ def _guard_core_namespace(app_id: str) -> None:
         )
 
 
+_GITHUB_SOURCE_RE = re.compile(r"^https://github\.com/[A-Za-z0-9-]+(?:/|$)")
+
+#: manifest attribute -> `app_catalog` column, persisted so the marketplace can attribute a vendor.
+_CATALOG_META_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("author", "author"),
+    ("source_url", "source_url"),
+    ("homepage_url", "homepage_url"),
+    ("category", "category"),
+    ("license", "license"),
+    ("collection", "collection"),
+)
+
+
+def _assert_vendor_derivable(manifest: BundleManifestV2) -> None:
+    """Fail loud unless the bundle names a GitHub org (author or source repo): its vendor.
+
+    A vendor marketplace is one GitHub org (`marketplace_catalog.vendor_key`); a core bundle
+    with neither a `github:<org>` author nor a `https://github.com/<org>/...` source_url would
+    be unlistable under any vendor, so the seeder refuses it instead of seeding an orphan.
+    """
+    author = manifest.author or ""
+    if author.startswith("github:") or _GITHUB_SOURCE_RE.match(manifest.source_url or ""):
+        return
+    raise CoreBundleSeederError(
+        f"{manifest.app_id}: manifest needs a `github:<org>` author or a github.com "
+        "`source_url` so the marketplace can attribute a vendor"
+    )
+
+
+async def _reconcile_catalog_meta(
+    install_dal: AsyncDB, manifest: BundleManifestV2, row: Any
+) -> None:
+    """Align pre-existing `app_catalog` attribution columns with the manifest (idempotent).
+
+    Rows seeded before the marketplace vendor listing carry NULL attribution; a re-seed of an
+    already-installed bundle never rewrote them. Updates only columns that differ, then
+    verifies the write landed (fail loud, same contract as `_reconcile_catalog_kind`).
+    """
+    changes = {
+        col: getattr(manifest, attr)
+        for attr, col in _CATALOG_META_COLUMNS
+        if getattr(manifest, attr) is not None
+        and getattr(row, col, None) != getattr(manifest, attr)
+    }
+    if not changes:
+        return
+    assignments = ", ".join(f"{col} = :{col}" for col in changes)
+    await raw_sql_write(
+        install_dal,
+        f"UPDATE app_catalog SET {assignments} WHERE app_id = :app_id",  # noqa: S608 -- fixed names
+        {**changes, "app_id": manifest.app_id},
+    )
+    check = (await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()).first()
+    stale = [col for col, val in changes.items() if getattr(check, col, None) != val]
+    if stale:
+        raise CoreBundleSeederError(
+            f"app_catalog attribution for {manifest.app_id} did not update: {sorted(stale)}"
+        )
+    logger.info(
+        "core-bundle-seeder: app_catalog attribution reconciled",
+        extra={"app_id": manifest.app_id, "columns": sorted(changes)},
+    )
+
+
 async def _reconcile_catalog_kind(
     install_dal: AsyncDB, manifest: BundleManifestV2, row: Any
 ) -> None:
@@ -534,17 +598,21 @@ async def _ensure_app_catalog_row(install_dal: AsyncDB, manifest: BundleManifest
     """
     existing = await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()
     if existing:
-        await _reconcile_catalog_kind(install_dal, manifest, existing.first())
+        row = existing.first()
+        await _reconcile_catalog_kind(install_dal, manifest, row)
+        await _reconcile_catalog_meta(install_dal, manifest, row)
         return
     await raw_sql_write(
         install_dal,
         """
         INSERT INTO app_catalog (
             app_id, name, manifest_version, module, feature, provider,
-            execution_model, is_default, platform_compatibility, status, kind
+            execution_model, is_default, platform_compatibility, status, kind,
+            author, source_url, homepage_url, category, license, collection
         ) VALUES (
             :app_id, :name, :manifest_version, :module, :feature, :provider,
-            :execution_model, :is_default, :platform_compatibility, :status, :kind
+            :execution_model, :is_default, :platform_compatibility, :status, :kind,
+            :author, :source_url, :homepage_url, :category, :license, :collection
         )
         """,
         {
@@ -561,6 +629,12 @@ async def _ensure_app_catalog_row(install_dal: AsyncDB, manifest: BundleManifest
             ),
             "status": "active",
             "kind": manifest.kind,
+            "author": manifest.author,
+            "source_url": manifest.source_url,
+            "homepage_url": manifest.homepage_url,
+            "category": manifest.category,
+            "license": manifest.license,
+            "collection": manifest.collection,
         },
     )
     logger.info(
@@ -982,6 +1056,7 @@ async def seed_one(
             f"{manifest.version!r} for {entry.app_id}"
         )
 
+    _assert_vendor_derivable(manifest)
     await _ensure_app_catalog_row(install_dal, manifest)
 
     targets = _resolve_activation_targets(entry)

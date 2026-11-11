@@ -44,18 +44,33 @@ Node's logged-out browsing contract.
 
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from flask_core.auth import DEFAULT_TENANT_SLUG, verify_jwt_token
-from flask_core.bundle_author import AuthorError, canonical_author
+from flask_core.bundle_author import AuthorError, author_view, canonical_author
 from flask_core.secrets import require_secret_key
 
 from services.errors import ApiError, bad_request, conflict, not_found
 from services.marketplace_author import AuthorDTO, to_author_dto
 
 _MAX_LIMIT = 100
+
+logger = logging.getLogger(__name__)
+
+#: Filter value selecting rows with no derivable vendor (legacy/plain-name authors). Contains an
+#: underscore, which a GitHub org name can never contain, so it cannot collide with a real vendor.
+UNAFFILIATED_VENDOR = "_unaffiliated"
+_VENDOR_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?|_unaffiliated)$")
+_REPO_RE = re.compile(r"^[a-z0-9-]{1,100}/[a-z0-9._-]{1,150}$")
+
+
+#: app_ids already reported as vendorless in this process -- one ERROR per distinct bundle, not
+#: one per request.
+_VENDORLESS_LOGGED: set[str] = set()
 
 
 def _iso(value: Any) -> str | None:
@@ -120,7 +135,11 @@ class CatalogEntry:
     """One `marketplace_catalog` row -- camelCase DTO matching `formatCatalogEntry()`."""
 
     source: str
-    sourceId: int
+    sourceId: int | None
+    sourceRef: str | None
+    vendorKey: str | None
+    vendorName: str | None
+    sourceRepo: str | None
     name: str | None
     displayName: str | None
     description: str | None
@@ -160,6 +179,33 @@ class CatalogListResponse:
     success: bool
     modules: list[CatalogEntry]
     pagination: CatalogPagination
+
+
+@dataclass(slots=True, frozen=True)
+class VendorRepoEntry:
+    """One source repo (`org/repo`) inside a vendor marketplace + its entry count."""
+
+    repo: str | None
+    count: int
+
+
+@dataclass(slots=True, frozen=True)
+class VendorEntry:
+    """One vendor marketplace (a GitHub org) with its per-repo breakdown."""
+
+    key: str
+    name: str
+    count: int
+    repos: list[VendorRepoEntry]
+
+
+@dataclass(slots=True, frozen=True)
+class VendorsResponse:
+    """Response DTO for `GET /api/v1/marketplace/vendors`; counts sum to `total`."""
+
+    success: bool
+    vendors: list[VendorEntry]
+    total: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -227,6 +273,56 @@ def _install_status_maps(
     return installed_core, installed_marketplace
 
 
+def _vendor_of(row: Any) -> tuple[str | None, str | None]:
+    """`(vendor_key, display_name)` for a catalog row; `(None, None)` when no vendor derives.
+
+    `vendor_key` is derived in the view (alembic 0091). A vendorless `bundle` row is listed
+    as unaffiliated (never a 500, never hidden) and reported once per app_id at ERROR. The
+    display name keeps the GitHub handle's original casing from `author` when it matches the
+    key, else falls back to the key.
+    """
+    key = row.vendor_key
+    if not key:
+        if row.source == "bundle" and row.source_ref not in _VENDORLESS_LOGGED:
+            _VENDORLESS_LOGGED.add(row.source_ref)
+            logger.error(
+                "marketplace bundle has no derivable vendor; listing as _unaffiliated",
+                extra={"app_id": row.source_ref, "has_source_url": bool(row.source_url)},
+            )
+        return None, None
+    view = author_view(row.author)
+    handle = view["github_handle"] if view else None
+    name = handle if handle and handle.lower() == key else key
+    return key, name
+
+
+def vendor_repo_error(vendor: str | None, repo: str | None) -> str | None:
+    """Validation message for malformed `vendor`/`repo` filters, else `None` (caller sends 400)."""
+    if vendor and not _VENDOR_RE.match(vendor.lower()):
+        return "vendor must be a GitHub org key or '_unaffiliated'"
+    if repo and not _REPO_RE.match(repo.lower()):
+        return "repo must look like 'org/repo'"
+    return None
+
+
+def _vendor_repo_filters(query: Any, catalog: Any, vendor: str | None, repo: str | None) -> Any:
+    """AND the `vendor` / `repo` filters onto `query`; malformed values raise 400 (no fallback)."""
+    if vendor:
+        vendor = vendor.lower()
+        if not _VENDOR_RE.match(vendor):
+            raise bad_request("vendor must be a GitHub org key or '_unaffiliated'")
+        if vendor == UNAFFILIATED_VENDOR:
+            query &= catalog.vendor_key == None  # noqa: E711
+        else:
+            query &= catalog.vendor_key == vendor
+    if repo:
+        repo = repo.lower()
+        if not _REPO_RE.match(repo):
+            raise bad_request("repo must look like 'org/repo'")
+        query &= catalog.source_repo == repo
+    return query
+
+
 def _to_catalog_entry(
     row: Any, installed_core: dict[int, bool], installed_marketplace: dict[int, bool]
 ) -> CatalogEntry:
@@ -239,9 +335,14 @@ def _to_catalog_entry(
         is_installed = row.source_id in installed_marketplace
         is_enabled = installed_marketplace.get(row.source_id)
 
+    vendor_key, vendor_name = _vendor_of(row)
     return CatalogEntry(
         source=row.source,
         sourceId=row.source_id,
+        sourceRef=row.source_ref,
+        vendorKey=vendor_key,
+        vendorName=vendor_name,
+        sourceRepo=row.source_repo,
         name=row.name,
         displayName=row.display_name,
         description=row.description,
@@ -276,6 +377,8 @@ def get_catalog(
     pricing_type: str | None,
     source: str | None,
     community_id: int | None,
+    vendor: str | None = None,
+    repo: str | None = None,
 ) -> CatalogListResponse:
     """Paginated, filtered, tenant-scoped catalog browse -- port of `getCatalog()`."""
     page, limit = _clamp_pagination(page, limit)
@@ -295,11 +398,12 @@ def get_catalog(
         query &= catalog.pricing_type == pricing_type
     if source:
         query &= catalog.source == source
+    query = _vendor_repo_filters(query, catalog, vendor, repo)
 
     total = dal(query).count()
     offset = (page - 1) * limit
     rows = dal(query).select(
-        orderby=(~catalog.is_core, ~catalog.install_count, ~catalog.created_at),
+        orderby=(~catalog.is_core, ~catalog.install_count, ~catalog.created_at, catalog.name),
         limitby=(offset, offset + limit),
     )
 
@@ -338,6 +442,61 @@ def get_catalog_entry(
     return _to_catalog_entry(row, installed_core, installed_marketplace)
 
 
+def get_catalog_bundle_entry(
+    dal: Any, request: Any, app_id: str, community_id: int | None
+) -> CatalogEntry | None:
+    """Single `bundle` catalog entry by `app_id` (`source_ref`), tenant-scoped."""
+    catalog = dal.marketplace_catalog
+    query = _tenant_scope_query(dal, visible_tenant_ids(dal, request))
+    query &= (catalog.source == "bundle") & (catalog.source_ref == app_id)
+    row = dal(query).select(limitby=(0, 1)).first()
+    if row is None:
+        return None
+    return _to_catalog_entry(row, {}, {})
+
+
+def get_vendors(dal: Any, request: Any) -> VendorsResponse:
+    """Vendor marketplaces (GitHub orgs) with per-repo entry counts, tenant-scoped.
+
+    Same visibility scope as `get_catalog`, so the vendor counts always sum to the unfiltered
+    catalog total. Rows with no derivable vendor are reported once, as `_unaffiliated`.
+    """
+    catalog = dal.marketplace_catalog
+    query = _tenant_scope_query(dal, visible_tenant_ids(dal, request))
+    rows = dal(query).select(
+        catalog.vendor_key,
+        catalog.source_repo,
+        catalog.source.count().with_alias("n"),
+        catalog.author.min().with_alias("sample_author"),
+        groupby=catalog.vendor_key | catalog.source_repo,
+    )
+    by_vendor: dict[str, dict[str, Any]] = {}
+    total = 0
+    for r in rows:
+        key = r.marketplace_catalog.vendor_key or UNAFFILIATED_VENDOR
+        repo = r.marketplace_catalog.source_repo
+        count = int(r._extra["n"])
+        total += count
+        bucket = by_vendor.setdefault(key, {"name": None, "count": 0, "repos": []})
+        bucket["count"] += count
+        bucket["repos"].append(VendorRepoEntry(repo=repo, count=count))
+        if bucket["name"] is None and key != UNAFFILIATED_VENDOR:
+            view = author_view(r._extra["sample_author"])
+            handle = view["github_handle"] if view else None
+            bucket["name"] = handle if handle and handle.lower() == key else key
+    vendors = [
+        VendorEntry(
+            key=key,
+            name=b["name"] or "Unaffiliated",
+            count=b["count"],
+            repos=sorted(b["repos"], key=lambda e: (-e.count, e.repo or "")),
+        )
+        for key, b in by_vendor.items()
+    ]
+    vendors.sort(key=lambda v: (v.key == UNAFFILIATED_VENDOR, -v.count, v.key))
+    return VendorsResponse(success=True, vendors=vendors, total=total)
+
+
 def get_categories(dal: Any) -> list[CategoryEntry]:
     """Distinct categories + counts, whole-catalog, unfiltered by tenant -- port of `getCategories`.
 
@@ -348,8 +507,9 @@ def get_categories(dal: Any) -> list[CategoryEntry]:
     """
     catalog = dal.marketplace_catalog
     # `marketplace_catalog` has no `id` field (composite `primarykey=`, see
-    # `bind_marketplace_module_tables`'s own docstring) -- `source_id`
-    # (never NULL) stands in as the COUNT() target. Sorted in Python
+    # `bind_marketplace_module_tables`'s own docstring) -- `source`
+    # (never NULL -- `source_id` is NULL for bundle rows) stands in as the COUNT() target.
+    # Sorted in Python
     # rather than via a pydal aggregate `orderby=` (the category list is
     # a handful of rows, and ordering by an aliased aggregate expression
     # is a fragile enough pydal corner to avoid rather than lean on).
@@ -363,7 +523,7 @@ def get_categories(dal: Any) -> list[CategoryEntry]:
     # table `left=` join case).
     rows = dal(catalog.category != None).select(  # noqa: E711
         catalog.category,
-        catalog.source_id.count().with_alias("module_count"),
+        catalog.source.count().with_alias("module_count"),
         groupby=catalog.category,
     )
     entries = [

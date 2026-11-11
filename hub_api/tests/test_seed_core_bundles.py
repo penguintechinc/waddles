@@ -2221,3 +2221,79 @@ async def test_ensure_app_catalog_row_repairs_a_stale_kind_idempotently(
             await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()
         ).first()
         assert row.kind == "service"
+
+
+async def test_ensure_app_catalog_row_persists_vendor_attribution(install_dal: Any) -> None:
+    """A fresh catalog row stores author/source_url so the marketplace can derive its vendor."""
+    manifest = _service_manifest()
+    await seeder._ensure_app_catalog_row(install_dal, manifest)
+    row = (await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()).first()
+    assert row.author == "github:penguintechinc"
+
+
+async def test_ensure_app_catalog_row_backfills_null_attribution_idempotently(
+    install_dal: Any,
+) -> None:
+    """Rows seeded before attribution was written (NULL author/source_url) are reconciled."""
+    import dataclasses
+
+    from services.bundle_install_dal import raw_sql_write
+
+    manifest = dataclasses.replace(
+        _service_manifest(), source_url="https://github.com/penguintechinc/waddles/tree/main/x"
+    )
+    await seeder._ensure_app_catalog_row(install_dal, manifest)
+    await raw_sql_write(
+        install_dal,
+        "UPDATE app_catalog SET author = NULL, source_url = NULL WHERE app_id = :a",
+        {"a": manifest.app_id},
+    )
+    for _ in range(2):  # second pass is a no-op
+        await seeder._ensure_app_catalog_row(install_dal, manifest)
+        row = (
+            await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()
+        ).first()
+        assert row.author == "github:penguintechinc"
+        assert row.source_url == manifest.source_url
+
+
+@pytest.mark.parametrize(
+    ("author", "source_url", "ok"),
+    [
+        pytest.param("github:some-org", None, True, id="github-author"),
+        pytest.param("Plain Name", "https://github.com/some-org/repo/tree/main/x", True, id="url"),
+        pytest.param("Plain Name", None, False, id="neither"),
+        pytest.param(None, "https://gitlab.com/o/r", False, id="non-github-url"),
+    ],
+)
+def test_assert_vendor_derivable(author: str | None, source_url: str | None, ok: bool) -> None:
+    """The seeder refuses a bundle that no GitHub org can be attributed to."""
+    import dataclasses
+
+    manifest = dataclasses.replace(_service_manifest(), author=author, source_url=source_url)
+    if ok:
+        seeder._assert_vendor_derivable(manifest)
+    else:
+        with pytest.raises(CoreBundleSeederError, match="vendor"):
+            seeder._assert_vendor_derivable(manifest)
+
+
+def test_every_real_core_bundle_manifest_has_a_derivable_vendor() -> None:
+    """Denominator-counted: every shipped first-party manifest passes the seeder vendor gate."""
+    from services.bundle_manifest_v2 import parse_bundle_manifest_v2
+
+    bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
+    entries = seeder.load_catalog(bundles_dir / "core-bundles.yaml")
+    checked = 0
+    for entry in entries:
+        raw = yaml.safe_load((bundles_dir / entry.source_dir / "hub-manifest.yaml").read_text())
+        manifest = parse_bundle_manifest_v2(
+            raw,
+            known_custom_platforms=frozenset(),
+            allow_wildcard_consumes=False,
+            allow_prebuilt=True,
+            trusted_source=True,
+        )
+        seeder._assert_vendor_derivable(manifest)
+        checked += 1
+    assert checked >= 100, f"only {checked} manifests examined"

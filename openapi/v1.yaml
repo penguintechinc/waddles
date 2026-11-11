@@ -799,13 +799,35 @@ components:
           title: Source
           type: string
         sourceId:
+          anyOf:
+          - type: integer
+          - type: 'null'
           title: Sourceid
-          type: integer
+        sourceRef:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Sourceref
+        sourceRepo:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Sourcerepo
         updatedAt:
           anyOf:
           - type: string
           - type: 'null'
           title: Updatedat
+        vendorKey:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Vendorkey
+        vendorName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Vendorname
         version:
           anyOf:
           - type: string
@@ -814,6 +836,10 @@ components:
       required:
       - source
       - sourceId
+      - sourceRef
+      - vendorKey
+      - vendorName
+      - sourceRepo
       - name
       - displayName
       - description
@@ -1949,6 +1975,41 @@ components:
       - next_after_seq
       - exported_at
       title: ExportManifestDTO
+      type: object
+    GameServerDTO:
+      description: 'What an admin may see of a registered server: ids and display
+        fields only.'
+      properties:
+        connectionId:
+          title: Connectionid
+          type: integer
+        enabled:
+          title: Enabled
+          type: boolean
+        game:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Game
+        label:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Label
+        serverId:
+          title: Serverid
+          type: string
+        usable:
+          title: Usable
+          type: boolean
+      required:
+      - connectionId
+      - serverId
+      - game
+      - label
+      - enabled
+      - usable
+      title: GameServerDTO
       type: object
     GlobalInstallDTO:
       description: 'Response DTO: one `app_global_installs` row.'
@@ -6129,6 +6190,47 @@ components:
       - email
       - username
       title: UserDTO
+      type: object
+    VendorEntry:
+      description: One vendor marketplace (a GitHub org) with its per-repo breakdown.
+      properties:
+        count:
+          title: Count
+          type: integer
+        key:
+          title: Key
+          type: string
+        name:
+          title: Name
+          type: string
+        repos:
+          items:
+            $ref: '#/components/schemas/VendorRepoEntry'
+          title: Repos
+          type: array
+      required:
+      - key
+      - name
+      - count
+      - repos
+      title: VendorEntry
+      type: object
+    VendorRepoEntry:
+      description: One source repo (`org/repo`) inside a vendor marketplace + its
+        entry count.
+      properties:
+        count:
+          title: Count
+          type: integer
+        repo:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Repo
+      required:
+      - repo
+      - count
+      title: VendorRepoEntry
       type: object
     VendorRequestDTO:
       description: Vendor-role request as its requester sees it (no contact PII).
@@ -15696,6 +15798,149 @@ paths:
             role-sync mapping).
       summary: '`GET /api/v1/communities/<id>/discord/roles[?guild_id=]` -- the paired
         guild''s roles.'
+  /api/v1/communities/{community_id}/gameserver-connections:
+    post:
+      description: ''
+      operationId: post_create_gameserver
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: Body of ``POST``. ``host``/``port``/``rconPassword`` are
+                write-only and never echoed.
+              properties:
+                enabled:
+                  default: true
+                  title: Enabled
+                  type: boolean
+                game:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Game
+                host:
+                  title: Host
+                  type: string
+                label:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Label
+                port:
+                  title: Port
+                  type: integer
+                rconPassword:
+                  default: ''
+                  title: Rconpassword
+                  type: string
+              required:
+              - host
+              - port
+              title: CreateGameServerRequest
+              type: object
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                description: Envelope for one server.
+                properties:
+                  server:
+                    $ref: '#/components/schemas/GameServerDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - server
+                title: GameServerResponse
+                type: object
+          description: Envelope for one server.
+      summary: '``POST`` -- validate, mint the server id, seal host|port|password,
+        store.'
+  /api/v1/communities/{community_id}/gameserver-connections/{connection_id}:
+    delete:
+      description: ''
+      operationId: delete_delete_gameserver
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: connection_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Envelope for delete.
+                properties:
+                  purged:
+                    title: Purged
+                    type: boolean
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - purged
+                title: GameServerDeleteResponse
+                type: object
+          description: Envelope for delete.
+      summary: '``DELETE`` -- remove the server; the sealed secret is purged with
+        the last link.'
+  /api/v1/communities/{community_id}/gameserver-connections/{connection_id}/test:
+    post:
+      description: ''
+      operationId: post_test_gameserver
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: connection_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Closed result code of the connectivity test; never an
+                  address or secret.
+                properties:
+                  result:
+                    title: Result
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - result
+                title: GameServerTestResponse
+                type: object
+          description: Closed result code of the connectivity test; never an address
+            or secret.
+      summary: '``POST .../test`` -- pinned, guarded RCON login (or TCP connect);
+        returns a result code.'
   /api/v1/communities/{community_id}/guild-pairings:
     get:
       description: ''
@@ -18843,7 +19088,12 @@ paths:
         catalog.
   /api/v1/marketplace/catalog:
     get:
-      description: ''
+      description: '
+
+        `vendor` (GitHub org key, or `_unaffiliated`) and `repo` (`org/repo`) narrow
+        to one vendor
+
+        marketplace / one repo inside it; malformed values are a 400, never ignored.'
       operationId: get_browse_catalog
       parameters: []
       responses:
@@ -18872,6 +19122,36 @@ paths:
           description: Response DTO for `GET /api/v1/marketplace/catalog`.
       summary: '`GET /api/v1/marketplace/catalog` -- paginated browsing with search
         & filters.'
+  /api/v1/marketplace/catalog/bundle/{app_id}:
+    get:
+      description: ''
+      operationId: get_catalog_bundle_entry
+      parameters:
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /api/v1/marketplace/catalog/<source>/<id>`.
+                properties:
+                  module:
+                    $ref: '#/components/schemas/CatalogEntry'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - module
+                title: CatalogEntryResponse
+                type: object
+          description: Response DTO for `GET /api/v1/marketplace/catalog/<source>/<id>`.
+      summary: '`GET /api/v1/marketplace/catalog/bundle/<app_id>` -- single bundle
+        entry (by app_id).'
   /api/v1/marketplace/catalog/categories:
     get:
       description: ''
@@ -20345,6 +20625,40 @@ paths:
                 type: object
           description: '`{success, request}` envelope for the vendor-request routes.'
       summary: '`POST /api/v1/marketplace/vendor/request`.'
+  /api/v1/marketplace/vendors:
+    get:
+      description: ''
+      operationId: get_vendors
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /api/v1/marketplace/vendors`; counts
+                  sum to `total`.
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                  total:
+                    title: Total
+                    type: integer
+                  vendors:
+                    items:
+                      $ref: '#/components/schemas/VendorEntry'
+                    title: Vendors
+                    type: array
+                required:
+                - success
+                - vendors
+                - total
+                title: VendorsResponse
+                type: object
+          description: Response DTO for `GET /api/v1/marketplace/vendors`; counts
+            sum to `total`.
+      summary: '`GET /api/v1/marketplace/vendors` -- vendor marketplaces (GitHub orgs)
+        with repo counts.'
   /api/v1/marketplace/webhooks/paypal:
     post:
       description: ''
