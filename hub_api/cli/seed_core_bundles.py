@@ -486,6 +486,34 @@ def _guard_core_namespace(app_id: str) -> None:
         )
 
 
+async def _reconcile_catalog_kind(
+    install_dal: AsyncDB, manifest: BundleManifestV2, row: Any
+) -> None:
+    """Align a pre-existing `app_catalog.kind` with the manifest-declared kind (idempotent).
+
+    `activate` validates `requested_tools` targets against `app_catalog.kind`. Rows created
+    before the seeder wrote `kind` (NULL or the "app" default) would otherwise keep rejecting
+    every service tool target (`tool_target_not_service`) forever, because a re-seed of an
+    already-installed bundle never touches the catalog. Fails loud if the update does not land.
+    """
+    if row.kind == manifest.kind:
+        return
+    await raw_sql_write(
+        install_dal,
+        "UPDATE app_catalog SET kind = :kind WHERE app_id = :app_id",
+        {"kind": manifest.kind, "app_id": manifest.app_id},
+    )
+    check = await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()
+    if check.first().kind != manifest.kind:
+        raise CoreBundleSeederError(
+            f"app_catalog.kind for {manifest.app_id} did not update to {manifest.kind!r}"
+        )
+    logger.info(
+        "core-bundle-seeder: app_catalog kind reconciled",
+        extra={"app_id": manifest.app_id, "old_kind": row.kind, "new_kind": manifest.kind},
+    )
+
+
 async def _ensure_app_catalog_row(install_dal: AsyncDB, manifest: BundleManifestV2) -> None:
     """Idempotent `app_catalog` upsert -- the FK target `app_version_uploads`/`app_versions` need.
 
@@ -506,16 +534,17 @@ async def _ensure_app_catalog_row(install_dal: AsyncDB, manifest: BundleManifest
     """
     existing = await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()
     if existing:
+        await _reconcile_catalog_kind(install_dal, manifest, existing.first())
         return
     await raw_sql_write(
         install_dal,
         """
         INSERT INTO app_catalog (
             app_id, name, manifest_version, module, feature, provider,
-            execution_model, is_default, platform_compatibility, status
+            execution_model, is_default, platform_compatibility, status, kind
         ) VALUES (
             :app_id, :name, :manifest_version, :module, :feature, :provider,
-            :execution_model, :is_default, :platform_compatibility, :status
+            :execution_model, :is_default, :platform_compatibility, :status, :kind
         )
         """,
         {
@@ -531,6 +560,7 @@ async def _ensure_app_catalog_row(install_dal: AsyncDB, manifest: BundleManifest
                 {"tested_with": manifest.version, "min_version": None, "max_version": None}
             ),
             "status": "active",
+            "kind": manifest.kind,
         },
     )
     logger.info(
