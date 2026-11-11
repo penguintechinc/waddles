@@ -20,6 +20,7 @@ from typing import Any
 from penguin_dal import AsyncDB
 
 from services import bundle_audit
+from services.bundle_catalog_guard import assert_bundle_globally_enabled
 from services.bundle_install_dal import raw_sql_write
 from services.errors import ApiError, conflict, not_found
 
@@ -55,6 +56,7 @@ async def set_available(
     one), kept deliberately narrow rather than silently accepting a
     version this tenant never actually had a chance to review.
     """
+    await assert_bundle_globally_enabled(install_dal, app_id)
     install = await _current_global_install(install_dal, app_id)
     if install is None:
         raise conflict(f"{app_id!r} is not currently installed in the platform catalog")

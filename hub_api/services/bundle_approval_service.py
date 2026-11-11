@@ -115,6 +115,7 @@ from services import (
     valkey_admin_client,
 )
 from services.bundle_access_grants import access_grant_diff_atoms, is_access_grant_id
+from services.bundle_catalog_guard import assert_bundle_globally_enabled
 from services.bundle_data_provisioner import (
     BundleDataProvisioner,
     schema_from_manifest,
@@ -963,6 +964,7 @@ async def _write_approval_and_activate(
     `test_bundle_approval_service.py::test_approve_version_rolls_back_the_approval_if_activation_fails`
     and its artifact-signing counterpart.
     """
+    await assert_bundle_globally_enabled(install_dal, app_id)
     approvals_table = install_dal.metadata.tables["app_install_approvals"]
     active_table = install_dal.metadata.tables["app_active_versions"]
     versions_table = install_dal.metadata.tables["app_versions"]
@@ -1112,6 +1114,7 @@ async def _write_tenant_wide_approval_and_activate(
     rule" its own module doc names) -- this is that convention's write
     side, not a bug.
     """
+    await assert_bundle_globally_enabled(install_dal, app_id)
     approvals_table = install_dal.metadata.tables["app_install_approvals"]
     active_table = install_dal.metadata.tables["app_active_versions"]
     versions_table = install_dal.metadata.tables["app_versions"]

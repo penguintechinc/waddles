@@ -1104,4 +1104,15 @@ export const bundleApi = {
 // ── Global-Admin Bundle Approval Queue (hub_api/blueprints/v1/bundle_admin.py) ──
 export const bundleAdminApi = {
   listPendingVersions: (params) => api.get('/api/v1/admin/bundle-versions', { params }),
+  // Installed bundles (global current installs) -- params: { kind: 'app' | 'service' }.
+  listInstalled: (params) => api.get('/api/v1/superadmin/bundles', { params }),
+  // Service-bundle global disable (409 has_dependents unless force) / enable.
+  disableService: (appId, force = false) =>
+    api.post(
+      `/api/v1/superadmin/bundles/${encodeURIComponent(appId)}/disable`,
+      null,
+      force ? { params: { force: 'true' } } : undefined,
+    ),
+  enableService: (appId) =>
+    api.post(`/api/v1/superadmin/bundles/${encodeURIComponent(appId)}/enable`),
 };

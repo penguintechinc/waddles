@@ -191,3 +191,36 @@ async def test_disable_writes_audit_row(app: Quart, install_dal: Any) -> None:
     await app.test_client().post(f"{BASE}/{_SVC}/disable?force=true", headers=_hdr())
     rows = await install_dal(install_dal.audit_log.action == "service_bundle_disabled").select()
     assert rows.first() is not None
+
+
+async def test_disabled_bundle_cannot_reenter_tenant_or_community(
+    app: Quart, install_dal: Any
+) -> None:
+    """Security: set_available and activation both 409 `bundle_disabled`; re-enable restores."""
+    from services import bundle_approval_service as approvals
+    from services import tenant_app_availability_service as availability
+    from services.errors import ApiError
+
+    client = app.test_client()
+    await availability.set_available(install_dal, tenant_id=1, app_id=_SVC, updated_by=1)
+    community_id = int(await install_dal.communities.async_insert(tenant_id=1, name="acme"))
+
+    # Simulate the cascade race: status flips but availability/activation rows linger.
+    await install_dal(install_dal.app_catalog.app_id == _SVC).update(status="disabled")
+    with pytest.raises(ApiError) as tenant_exc:
+        await availability.set_available(install_dal, tenant_id=1, app_id=_SVC, updated_by=1)
+    assert (tenant_exc.value.status_code, tenant_exc.value.code) == (409, "bundle_disabled")
+    with pytest.raises(ApiError) as community_exc:
+        await approvals.activate_for_community(
+            install_dal,
+            tenant_id=1,
+            community_id=community_id,
+            app_id=_SVC,
+            activated_by=1,
+        )
+    assert (community_exc.value.status_code, community_exc.value.code) == (409, "bundle_disabled")
+
+    enabled = await client.post(f"{BASE}/{_SVC}/enable", headers=_hdr())
+    assert (await enabled.get_json())["status"] == "active"
+    row = await availability.set_available(install_dal, tenant_id=1, app_id=_SVC, updated_by=1)
+    assert row.available

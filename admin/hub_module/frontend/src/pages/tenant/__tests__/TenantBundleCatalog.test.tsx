@@ -26,7 +26,7 @@ const auth = vi.mocked(useAuth);
 const api = vi.mocked(bundleAvailabilityApi);
 
 const ROWS: BundleAvailability[] = [
-  { appId: 'waddles.core.ping', tenantId: 1, available: true, pinnedVersionId: 12, updatedAt: '2026-03-04T10:30:00Z' },
+  { appId: 'waddles.core.ping', tenantId: 1, available: true, pinnedVersionId: 12, version: '1.2.0', updatedAt: '2026-03-04T10:30:00Z' },
   { appId: 'waddles.core.pong', tenantId: 1, available: false, pinnedVersionId: null, updatedAt: null },
 ];
 
@@ -95,7 +95,7 @@ describe('TenantBundleCatalog listing', () => {
     expect(api.list).toHaveBeenCalledWith('acme');
     const ping = within(within(table).getByText('waddles.core.ping').closest('tr') as HTMLElement);
     expect(ping.getByText('Available')).toBeInTheDocument();
-    expect(ping.getByText('12')).toBeInTheDocument();
+    expect(ping.getByText('1.2.0')).toBeInTheDocument();
     expect(ping.getByText(new Date('2026-03-04T10:30:00Z').toLocaleString())).toBeInTheDocument();
 
     const pong = within(within(table).getByText('waddles.core.pong').closest('tr') as HTMLElement);
