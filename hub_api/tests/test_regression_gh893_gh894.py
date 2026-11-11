@@ -1,4 +1,4 @@
-"""Regression tests for gh-893 (GET /api/v1/modules 500, HTML leak) and gh-894 (analytics).
+"""Regression tests for gh-893 (modules 500, HTML leak; route since removed) and gh-894 (analytics).
 
 gh-893: `hub_modules` was defined by several schema binders with divergent
 column lists and no per-table guards, so the startup bind order produced
@@ -59,7 +59,7 @@ def app() -> Quart:
 
 class TestHubModulesBinding:
     # regression: gh-893
-    async def test_startup_binds_every_table_exactly_once_and_modules_is_200_json(
+    async def test_startup_binds_every_table_exactly_once_and_legacy_modules_route_is_gone(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from pydal import DAL
@@ -81,12 +81,9 @@ class TestHubModulesBinding:
             assert "module_name" in dal.hub_module_installations.fields
             for sql in _CREATE_SQL:
                 dal.executesql(sql)
+            # The legacy /api/v1/modules endpoint was removed with the modules model.
             response = await app.test_client().get("/api/v1/modules")
-            assert response.status_code == 200
-            assert response.content_type.startswith("application/json")
-            body = await response.get_json()
-            assert body["success"] is True
-            assert body["modules"] == []
+            assert response.status_code == 404
 
     # regression: gh-893 -- a review must reference a module (python-side write guard)
     def test_module_reviews_module_id_is_notnull(self, tmp_path: Any) -> None:

@@ -254,27 +254,6 @@ class SystemHealthResponse:
 
 
 @dataclass(slots=True, frozen=True)
-class ModuleDTO:
-    """Collector module DTO."""
-
-    moduleName: str
-    moduleVersion: str | None
-    platform: str | None
-    endpointUrl: str | None
-    status: str | None
-    lastHeartbeat: str | None
-    createdAt: str | None
-
-
-@dataclass(slots=True, frozen=True)
-class ModuleRegistryResponse:
-    """Response DTO for module registry."""
-
-    success: bool
-    modules: list[ModuleDTO]
-
-
-@dataclass(slots=True, frozen=True)
 class AuditEntryDTO:
     """Audit log entry DTO."""
 
@@ -601,36 +580,9 @@ async def get_system_health() -> tuple[SystemHealthResponse, int]:
     response = SystemHealthResponse(
         success=healthy,
         status="healthy" if healthy else "degraded",
-        checks=HealthChecksDTO(
-            database=database_ok, timestamp=datetime.now(UTC).isoformat()
-        ),
+        checks=HealthChecksDTO(database=database_ok, timestamp=datetime.now(UTC).isoformat()),
     )
     return response, 200 if healthy else 503
-
-
-@platform_bp.route("/modules", methods=["GET"])
-@tenant_middleware  # type: ignore[misc]
-@require_scope("platform:admin")  # type: ignore[misc]
-@validate_response(ModuleRegistryResponse)
-async def get_module_registry() -> ModuleRegistryResponse:
-    """Get module registry."""
-    async_dal, dal = _dal()
-    rows = await svc.get_module_registry(async_dal, dal)
-    return ModuleRegistryResponse(
-        success=True,
-        modules=[
-            ModuleDTO(
-                moduleName=r.module_name,
-                moduleVersion=r.module_version,
-                platform=r.platform,
-                endpointUrl=r.endpoint_url,
-                status=r.status,
-                lastHeartbeat=_iso(r.last_heartbeat),
-                createdAt=_iso(r.created_at),
-            )
-            for r in rows
-        ],
-    )
 
 
 @platform_bp.route("/audit-log", methods=["GET"])

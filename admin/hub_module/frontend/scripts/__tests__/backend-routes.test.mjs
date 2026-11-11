@@ -83,6 +83,7 @@ describe('backendRoutes (real hub-api blueprints)', () => {
       ['GET', '/api/v1/communities/<p>/streams'],
       ['GET', '/api/v1/admin/<p>/members'],
       ['POST', '/api/v1/<p>/join-requests'],
+      ['POST', '/api/v1/communities/<p>/join'],
       ['GET', '/api/v1/<p>/join-requests/mine'],
       ['PUT', '/api/v1/admin/<p>/join-requests/<p>/approve'],
       ['POST', '/api/v1/superadmin/communities'],
@@ -96,7 +97,6 @@ describe('backendRoutes (real hub-api blueprints)', () => {
       ['GET', '/api/v1/communities/my'],
       ['GET', '/api/v1/communities/<p>/dashboard'],
       ['GET', '/api/v1/communities/<p>/leaderboard/watch-time'],
-      ['POST', '/api/v1/communities/<p>/join'],
       ['POST', '/api/v1/admin/<p>/join-requests/<p>/approve'],
       ['GET', '/api/v1/admin/<p>/reputation/leaderboard'],
     ]) {
