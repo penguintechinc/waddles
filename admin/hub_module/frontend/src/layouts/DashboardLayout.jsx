@@ -130,7 +130,8 @@ function DashboardLayout() {
         items: [
           { name: 'Dashboard', href: '/superadmin', icon: ChartBarIcon },
           { name: 'Communities', href: '/superadmin/communities', icon: HomeIcon },
-          { name: 'Bundle Approvals', href: '/superadmin/bundle-approvals', icon: InboxStackIcon },
+          { name: 'App Bundles', href: '/superadmin/bundles/apps', icon: InboxStackIcon },
+          { name: 'Service Bundles', href: '/superadmin/bundles/services', icon: Cog6ToothIcon },
           { name: 'User Management', href: '/superadmin/users', icon: UserIcon },
           { name: 'Vendor Requests', href: '/superadmin/vendor-requests', icon: ShoppingCartIcon },
           { name: 'Analytics', href: '/superadmin/analytics', icon: ChartBarIcon },

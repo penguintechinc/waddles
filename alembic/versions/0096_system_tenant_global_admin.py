@@ -19,7 +19,7 @@ Downgrade restores the column, backfills it from `system` tenant admins and reve
 `system` tenant row are kept -- dropping them would destroy data the older code merely ignores.
 
 Revision ID: 0096_system_tenant_global_admin
-Revises: 0094_drop_demo_legacy_mods
+Revises: 0095_bundle_disabled_apps_view
 Create Date: 2026-11-11
 """
 
@@ -29,7 +29,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0096_system_tenant_global_admin"
-down_revision = "0094_drop_demo_legacy_mods"
+down_revision = "0095_bundle_disabled_apps_view"
 branch_labels = None
 depends_on = None
 

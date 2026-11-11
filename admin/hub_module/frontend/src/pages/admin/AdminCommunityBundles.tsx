@@ -170,6 +170,9 @@ export default function AdminCommunityBundles() {
           >
             <div>
               <p className="font-medium text-fg">{bundle.appId}</p>
+              <p className="text-xs text-fg-muted" data-testid={`bundle-version-${bundle.appId}`}>
+                Version {bundle.version ?? '—'}
+              </p>
               <p className="text-xs text-fg-muted">
                 Activated{' '}
                 {bundle.activatedAt ? new Date(bundle.activatedAt).toLocaleString() : 'unknown'}

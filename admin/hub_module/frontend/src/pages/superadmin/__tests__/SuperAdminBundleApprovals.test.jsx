@@ -12,7 +12,7 @@ import SuperAdminBundleApprovals from '../SuperAdminBundleApprovals';
 import { bundleAdminApi, bundleApi } from '../../../services/api';
 
 vi.mock('../../../services/api', () => ({
-  bundleAdminApi: { listPendingVersions: vi.fn() },
+  bundleAdminApi: { listPendingVersions: vi.fn(), listInstalled: vi.fn() },
   bundleApi: {
     getPermissions: vi.fn(),
     approveVersion: vi.fn(),
@@ -75,12 +75,10 @@ describe('SuperAdminBundleApprovals', () => {
   it('re-fetches with the selected status filter', async () => {
     bundleAdminApi.listPendingVersions.mockResolvedValue(listResponse([]));
     render(<SuperAdminBundleApprovals />);
-    await screen.findByTestId('bundle-approvals-status-filter');
+    await screen.findByTestId('bundle-approvals-tab-rejected');
 
     await act(async () => {
-      fireEvent.change(screen.getByTestId('bundle-approvals-status-filter'), {
-        target: { value: 'rejected' },
-      });
+      fireEvent.click(screen.getByTestId('bundle-approvals-tab-rejected'));
     });
 
     await waitFor(() =>
@@ -90,6 +88,50 @@ describe('SuperAdminBundleApprovals', () => {
         limit: 25,
       }),
     );
+  });
+
+  it('shows "installed -> new" for a pending upgrade and the bare version otherwise', async () => {
+    bundleAdminApi.listPendingVersions.mockResolvedValue(
+      listResponse([
+        { ...ONE_ROW, versionId: 1, version: '1.1.0', installedVersion: '1.0.0' },
+        { ...ONE_ROW, versionId: 2, appId: 'other.app', version: '2.0.0', installedVersion: null },
+      ]),
+    );
+    render(<SuperAdminBundleApprovals />);
+    const cells = await screen.findAllByTestId('bundle-approvals-version');
+    expect(cells[0]).toHaveTextContent('1.0.0 → 1.1.0');
+    expect(cells[1]).toHaveTextContent(/^2\.0\.0$/);
+  });
+
+  it('Installed tab lists app bundles with version, digest, kind', async () => {
+    bundleAdminApi.listPendingVersions.mockResolvedValue(listResponse([]));
+    bundleAdminApi.listInstalled.mockResolvedValue({
+      data: {
+        success: true,
+        bundles: [
+          {
+            appId: 'waddles.socials.music.default',
+            name: 'Music',
+            kind: 'app',
+            version: '3.0.1',
+            digestShort: 'sha256:abababababab',
+            installedAt: '2026-11-01T00:00:00Z',
+            installSource: 'human',
+            status: 'active',
+          },
+        ],
+      },
+    });
+    render(<SuperAdminBundleApprovals />);
+    const tab = await screen.findByTestId('bundle-approvals-tab-installed');
+    await act(async () => {
+      fireEvent.click(tab);
+    });
+    const row = await screen.findByTestId('bundle-installed-row');
+    expect(row).toHaveTextContent('Music');
+    expect(row).toHaveTextContent('3.0.1');
+    expect(row).toHaveTextContent('sha256:abababababab');
+    expect(bundleAdminApi.listInstalled).toHaveBeenCalledWith({ kind: 'app' });
   });
 
   it('opens the review panel and fetches the permission summary', async () => {

@@ -165,6 +165,20 @@ async def test_activate_happy_path(app: Quart, install_dal: Any) -> None:
         ).select()
     ).first()
     assert active is not None
+    listing = await client.get(
+        f"/api/v1/apps/community/{community_id}/activation",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    rows = (await listing.get_json())["bundles"]
+    assert set(rows[0]) == {
+        "appId",
+        "communityId",
+        "tenantId",
+        "versionId",
+        "version",
+        "activatedAt",
+    }
+    assert rows[0]["version"] == "3.0.1"
 
 
 async def test_activate_without_availability_is_409(app: Quart, install_dal: Any) -> None:
