@@ -14,14 +14,16 @@ use crate::entities::{
 };
 
 /// SQL predicate excluding apps globally disabled by a super-admin
-/// (`app_catalog.status = 'disabled'`, `hub_api/services/bundle_global_state_service.py`).
+/// (`app_catalog.status = 'disabled'`, `hub_api/services/bundle_global_state_service.py`),
+/// read through the `bundle_disabled_apps` view because the restricted
+/// `waddles_bundle_reader` role has no SELECT on `app_catalog` (migration 0095).
 /// Folded into the existing active-set queries (no extra round trip) so a disabled
 /// bundle is never runnable even if the disable cascade has not yet removed its
 /// `app_active_versions` rows -- fail closed on the race.
 pub(crate) fn not_globally_disabled() -> sea_orm::sea_query::SimpleExpr {
     sea_orm::sea_query::Expr::cust(
         "app_active_versions.app_id NOT IN \
-         (SELECT app_id FROM app_catalog WHERE status = 'disabled')",
+         (SELECT app_id FROM bundle_disabled_apps)",
     )
 }
 
@@ -719,8 +721,8 @@ mod tests {
         let read = read_active_set(&db, 1, 1, None).await.unwrap();
         assert!(read.rows.is_empty());
         let log = format!("{:?}", db.into_transaction_log());
-        assert!(log.contains("app_catalog"), "{log}");
-        assert!(log.contains("disabled"), "{log}");
+        assert!(log.contains("bundle_disabled_apps"), "{log}");
+        assert!(!log.contains("app_catalog"), "{log}");
     }
 
     #[tokio::test]
