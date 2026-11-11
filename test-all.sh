@@ -257,35 +257,6 @@ run_build_tests() {
         fi
     done
 
-    # Action modules syntax tests
-    for module_dir in action/interactive/*/; do
-        if [ -f "${module_dir}app.py" ]; then
-            module_name=$(basename "$module_dir")
-            run_test_async "builds" "syntax_action_${module_name}" "python3 -m py_compile '${module_dir}app.py'"
-        fi
-    done
-
-    # Core modules syntax tests
-    for module_dir in core/*/; do
-        if [ -f "${module_dir}app.py" ]; then
-            module_name=$(basename "$module_dir")
-            run_test_async "builds" "syntax_core_${module_name}" "python3 -m py_compile '${module_dir}app.py'"
-        fi
-    done
-
-    # Trigger modules syntax tests
-    for module_dir in trigger/receiver/*/; do
-        if [ -f "${module_dir}app.py" ]; then
-            module_name=$(basename "$module_dir")
-            run_test_async "builds" "syntax_trigger_${module_name}" "python3 -m py_compile '${module_dir}app.py'"
-        fi
-    done
-
-    # Processing module syntax test
-    if [ -f "processing/router_module/app.py" ]; then
-        run_test_async "builds" "syntax_router" "python3 -m py_compile 'processing/router_module/app.py'"
-    fi
-
     echo "Build tests launched (running in background)..."
 }
 
@@ -299,57 +270,26 @@ run_api_tests() {
 
     # Core modules
     test_scripts=(
-        "core/identity_core_module/test-api.sh:identity_core"
-        "core/labels_core_module/test-api.sh:labels_core"
-        "core/browser_source_core_module/test-api.sh:browser_source"
-        "core/community_module/test-api.sh:community"
-        "core/reputation_module/test-api.sh:reputation"
-        "core/ai_researcher_module/test-api.sh:ai_researcher"
-        "core/security_core_module/test-api.sh:security_core"
-        "core/analytics_core_module/test-api.sh:analytics_core"
-        "core/unified_music_module/test-api.sh:unified_music"
     )
 
     # Processing modules
     test_scripts+=(
-        "processing/router_module/test-api.sh:router"
     )
 
     # Action modules (interactive)
     test_scripts+=(
-        "action/interactive/ai_interaction_module/test-api.sh:ai_interaction"
-        "action/interactive/loyalty_interaction_module/test-api.sh:loyalty_interaction"
-        "action/interactive/memories_interaction_module/test-api.sh:memories_interaction"
-        "action/interactive/inventory_interaction_module/test-api.sh:inventory_interaction"
-        "action/interactive/shoutout_interaction_module/test-api.sh:shoutout_interaction"
-        "action/interactive/spotify_interaction_module/test-api.sh:spotify_interaction"
-        "action/interactive/youtube_music_interaction_module/test-api.sh:youtube_music_interaction"
-        "action/interactive/quote_interaction_module/test-api.sh:quote_interaction"
     )
 
     # Action modules (pushing)
     test_scripts+=(
-        "action/pushing/discord_action_module/test-api.sh:discord_action"
-        "action/pushing/slack_action_module/test-api.sh:slack_action"
-        "action/pushing/twitch_action_module/test-api.sh:twitch_action"
-        "action/pushing/youtube_action_module/test-api.sh:youtube_action"
-        "action/pushing/lambda_action_module/test-api.sh:lambda_action"
-        "action/pushing/gcp_functions_action_module/test-api.sh:gcp_action"
-        "action/pushing/openwhisk_action_module/test-api.sh:openwhisk_action"
     )
 
     # Trigger modules
     test_scripts+=(
-        "trigger/receiver/twitch_module/test-api.sh:twitch_trigger"
-        "trigger/receiver/discord_module/test-api.sh:discord_trigger"
-        "trigger/receiver/slack_module/test-api.sh:slack_trigger"
-        "trigger/receiver/kick_module_flask/test-api.sh:kick_trigger"
     )
 
     # Admin modules
     test_scripts+=(
-        "admin/hub_module/test-api.sh:hub_admin"
-        "admin/marketplace_module/test-api.sh:marketplace_admin"
     )
 
     # Run all API tests

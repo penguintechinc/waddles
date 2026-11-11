@@ -23,35 +23,10 @@ NAMESPACE="waddlebot"
 HELM_CHART="${PROJECT_ROOT}/k8s/helm/waddlebot"
 KUBE_CONTEXT="dal2-beta"
 
-# Services to build and push — v2.2.x consolidated architecture (22 containers)
+# Services built from this repo's Python/Node trees (Rust data-plane images come from CI)
 declare -A SERVICES=(
-    # Standalone hub services (keep as-is)
-    [hub-api]="${PROJECT_ROOT}/admin/hub_module/Dockerfile"
+    [hub-api]="${PROJECT_ROOT}/hub_api/Dockerfile"
     [hub-webui]="${PROJECT_ROOT}/admin/hub_module/Dockerfile.webui"
-    # Router & AI researcher (processing/core)
-    [router]="${PROJECT_ROOT}/processing/router_module/Dockerfile"
-    [ai-researcher]="${PROJECT_ROOT}/core/ai_researcher_module/Dockerfile"
-    # New consolidated core services (services/ directory)
-    [core-data]="${PROJECT_ROOT}/services/core-data/Dockerfile"
-    [core-identity]="${PROJECT_ROOT}/services/core-identity/Dockerfile"
-    [core-community]="${PROJECT_ROOT}/services/core-community/Dockerfile"
-    # Trigger services (separate + consolidated)
-    [trigger-discord]="${PROJECT_ROOT}/trigger/receiver/discord_module/Dockerfile"
-    [trigger-streaming]="${PROJECT_ROOT}/services/trigger-streaming/Dockerfile"
-    [trigger-webhooks]="${PROJECT_ROOT}/services/trigger-webhooks/Dockerfile"
-    # Action services (separate + consolidated)
-    [action-discord]="${PROJECT_ROOT}/action/pushing/discord_action_module/Dockerfile"
-    [action-platforms]="${PROJECT_ROOT}/services/action-platforms/Dockerfile"
-    [action-serverless]="${PROJECT_ROOT}/services/action-serverless/Dockerfile"
-    # Interactive services (separate + consolidated)
-    [interactive-ai]="${PROJECT_ROOT}/action/interactive/ai_interaction_module/Dockerfile"
-    [interactive-loyalty]="${PROJECT_ROOT}/action/interactive/loyalty_interaction_module/Dockerfile"
-    [interactive-social]="${PROJECT_ROOT}/services/interactive-social/Dockerfile"
-    [interactive-gaming]="${PROJECT_ROOT}/services/interactive-gaming/Dockerfile"
-    [interactive-media]="${PROJECT_ROOT}/services/interactive-media/Dockerfile"
-    [interactive-productivity]="${PROJECT_ROOT}/services/interactive-productivity/Dockerfile"
-    # Admin & migrations
-    [marketplace]="${PROJECT_ROOT}/admin/marketplace_module/Dockerfile"
     [migrations]="${PROJECT_ROOT}/migrations/Dockerfile"
 )
 
@@ -115,15 +90,8 @@ OPTIONS:
   --rollback             Rollback to previous deployment
   --help                 Show this help message
 
-SERVICES (v2.2.x — 22 total):
-  hub-api, hub-webui
-  router, ai-researcher
-  core-data, core-identity, core-community
-  trigger-discord, trigger-streaming, trigger-webhooks
-  action-discord, action-platforms, action-serverless
-  interactive-ai, interactive-loyalty, interactive-social
-  interactive-gaming, interactive-media, interactive-productivity
-  marketplace, migrations
+SERVICES:
+  hub-api, hub-webui, migrations
 
 EXAMPLES:
   # Deploy all services with a specific tag

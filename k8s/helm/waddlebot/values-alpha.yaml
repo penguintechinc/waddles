@@ -21,12 +21,6 @@ global:
   # This now governs EVERY workload incl. hub-api + the Rust svc-*/svc-bundles-executor Deployments.
   imagePullPolicy: IfNotPresent
   deploymentTier: "alpha"
-  # gRPC transport TLS (PR #264) -- alpha is single-node local dev with no cert material
-  # provisioned, so it uses flask_core's own documented dev-only escape hatch instead of
-  # real certs (refused outright under production posture, so this can never leak into
-  # beta/gamma/production even if this file were merged upward by mistake).
-  grpcTls:
-    insecureDev: true
   # First-run super-admin bootstrap (PR #256) -- email is non-sensitive and
   # documented so alpha's Playwright e2e suite (tests/k8s/alpha/) has a known
   # login. The password is NOT committed here (fix/alpha-helm-deploy) -- it
@@ -456,20 +450,6 @@ autoscaling:
       targetCPUUtilizationPercentage: 70
       targetMemoryUtilizationPercentage: 80
 
-# Reputation service (Issue #310) -- built locally, pushed to the local
-# registry (no CI image for it yet), same as every other alpha module.
-reputation:
-  replicas: 1
-  image:
-    repository: "localhost:32000/waddlebot/reputation-module"
-    tag: "alpha"
-  env:
-    deploymentTier: "alpha"
-    workers: 1
-  resources:
-    requests: { cpu: "50m", memory: "96Mi" }
-    limits: { cpu: "300m", memory: "256Mi" }
-
 ingress:
   enabled: false
 
@@ -518,7 +498,7 @@ spire:
 # Unlike beta (which already raises this 3x for the same reason), alpha inherited no
 # override at all and ran on the hardcoded 100 req/min production default -- too strict
 # for rapid SERIAL Playwright runs against a cold, cache-less cluster. Alpha-only,
-# env-var driven (admin/hub_module/backend/src/config/index.js); production/default
+# env-var driven; production/default
 # stays untouched at 100.
 #
 # T10 (v3 demo) -- the ~26 legacy per-module Deployments (collectors/pushing/interactive/
@@ -531,145 +511,6 @@ spire:
 # of them for a non-demo alpha run needs no re-sizing. modules.bot/social stay enabled
 # (true, from values.yaml) -- those are the MODULE_LOAD_* bundle-import toggles the
 # pipeline containers themselves read, not legacy Deployment gates.
-modules:
-  hub:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "100m", memory: "128Mi" }
-      limits: { cpu: "400m", memory: "384Mi" }
-    env:
-      RATE_LIMIT_MAX_REQUESTS: "1000"    # ~10x default; local e2e test/dev only
-      RATE_LIMIT_WINDOW_MS: "60000"      # keep 60s window unchanged
-  hubWebui:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "64Mi" }
-      limits: { cpu: "200m", memory: "256Mi" }
-  router:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  # gh-894 -- hosts the consolidated analytics (/api/v1/analytics/*) hub-api proxies to.
-  coreData:
-    enabled: true
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  coreIdentity:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  coreCommunity:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  triggerWebhooks:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  triggerStreaming:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  actionPlatforms:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  actionServerless:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  interactiveSocial:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  interactiveGaming:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  interactiveMedia:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  interactiveProductivity:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  aiResearcher:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  interactiveAi:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  interactiveLoyalty:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  marketplace:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  collectors:
-    discord:
-      enabled: false
-      replicas: 1
-      resources:
-        requests: { cpu: "50m", memory: "96Mi" }
-        limits: { cpu: "300m", memory: "384Mi" }
-    twitch:
-      enabled: false
-      replicas: 1
-      resources:
-        requests: { cpu: "50m", memory: "96Mi" }
-        limits: { cpu: "300m", memory: "384Mi" }
-    slack:
-      enabled: false
-      replicas: 1
-      resources:
-        requests: { cpu: "50m", memory: "96Mi" }
-        limits: { cpu: "300m", memory: "384Mi" }
-    youtubeLive:
-      enabled: false
-      replicas: 1
-      resources:
-        requests: { cpu: "50m", memory: "96Mi" }
-        limits: { cpu: "300m", memory: "384Mi" }
-
 # feature/alpha-command-flag-envs -- flipped back OFF: this in-cluster stack was
 # crashlooping on alpha, and the 4 command flags below are now covered by the
 # FLAG_WADDLES_COMMAND_* Docker ENV baseline on svcProcess.extraEnv above

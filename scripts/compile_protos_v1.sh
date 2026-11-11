@@ -7,7 +7,7 @@
 # other, only (independently) with the checked-in .proto source of
 # truth. buf is used for `buf lint`/`buf breaking` only (see
 # proto/buf.yaml) -- generation stays on grpc_tools.protoc, matching the
-# existing pattern in core/identity_core_module/compile_protos.sh, since
+# existing pattern in this repo, since
 # wiring a buf remote/local grpc_python plugin adds a second toolchain
 # for zero benefit over the one already used elsewhere in this repo.
 set -euo pipefail
