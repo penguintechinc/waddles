@@ -215,6 +215,7 @@ async fn world_scoped(
                         runtime: "runc".to_string(),
                         verified: false,
                     },
+                    executor_id: None,
                 }),
             ),
         )
