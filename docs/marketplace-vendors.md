@@ -39,3 +39,15 @@ All active `app_catalog` rows are public in browse: they are only created by a g
 Alembic 0091 (applied by the `db-migrate` hook) backfills `app_catalog.author/source_url` from
 the newest `app_versions` row where NULL, then rebuilds the view (SELECT grants re-issued). The
 core-bundle seeder now writes/reconciles attribution on every run.
+
+## Future: vendor fees for paid bundles
+
+> **Nothing is decided and nothing is charged today.** This is a forward-looking note only.
+
+PenguinTech may eventually charge vendors a fee for **paid** app bundles listed in the marketplace.
+Two models are under consideration: a one-time or periodic **registration fee**, or a
+**transaction fee** on sales. A registration fee is the likely direction. No model, amount, or
+date has been chosen.
+
+- **Free bundles are unaffected** -- no fee of any kind is planned for them.
+- Any change will be announced in advance and documented here before it takes effect.
