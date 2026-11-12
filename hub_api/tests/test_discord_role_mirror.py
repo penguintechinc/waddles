@@ -469,6 +469,65 @@ class TestPairingLifecycleAndBindings:
         create_binding(dal, cid, p.id, sync_scope="moderator", discord_role_id=R_OTHER)
 
 
+class TestAllowlistAndCrossCommunity:
+    @pytest.mark.parametrize(
+        ("perms", "privileged"),
+        [
+            (0, False),
+            (0x400 | 0x800 | 0x10000 | 0x40, False),  # view/send/history/reactions
+            (1 << 31 | 1 << 35 | 1 << 38, False),  # app commands, threads
+            (0x1, True),  # CREATE_INSTANT_INVITE is not on the allowlist
+            (1 << 13, True),  # MANAGE_MESSAGES
+            (1 << 40, True),  # unknown/future bit
+            (0x400 | 0x8, True),
+        ],
+    )
+    def test_allowlist(self, perms: int, privileged: bool) -> None:
+        assert is_privileged_role(perms, False) is privileged
+        assert is_privileged_role(0, True) is True  # managed always refused
+
+    async def _other_community(self, dal: Any, tenant_id: int, *guilds: str) -> int:
+        cid2 = dal.communities.insert(name="second-community", tenant_id=tenant_id)
+        dal.commit()
+        _pair(dal, cid2, *guilds)
+        return int(cid2)
+
+    async def test_mapping_rejects_role_bound_via_other_community_pairing(
+        self, guild_pairing_db: Any
+    ) -> None:
+        dal, cid, tenant_id, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        cid2 = await self._other_community(dal, tenant_id, G_A)
+        p2 = next(p for p in list_pairings(dal, cid2) if p.discord_guild_id == G_A)
+        create_binding(dal, cid2, p2.id, sync_scope="moderator", discord_role_id=R_SRC)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        assert exc.value.status_code == 409
+
+    async def test_binding_rejects_role_mirrored_by_other_community(
+        self, guild_pairing_db: Any
+    ) -> None:
+        dal, cid, tenant_id, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        cid2 = await self._other_community(dal, tenant_id, G_B)
+        p2 = next(p for p in list_pairings(dal, cid2) if p.discord_guild_id == G_B)
+        with pytest.raises(ApiError) as exc:
+            create_binding(dal, cid2, p2.id, sync_scope="moderator", discord_role_id=R_DST)
+        assert exc.value.status_code == 409
+
+    async def test_target_role_cannot_be_target_of_another_community_mapping(
+        self, guild_pairing_db: Any
+    ) -> None:
+        dal, cid, tenant_id, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        cid2 = await self._other_community(dal, tenant_id, G_B, G_C)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid2, G_C, R_SRC, G_B, R_DST)
+        assert exc.value.status_code == 409
+
+
 class TestReconcile:
     async def _setup(self, dal: Any, cid: int) -> Any:
         _pair(dal, cid, G_A, G_B)
@@ -533,7 +592,16 @@ class TestReconcile:
         dal, cid, _t, _g = guild_pairing_db
         _pair(dal, cid, G_A, G_B)
         await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
-        await _map(dal, cid, G_A, R_OTHER, G_B, R_DST)
+        # create_mapping now forbids a shared target; insert directly to keep the defensive
+        # "another mapping still wants it" removal guard covered.
+        dal.discord_role_mirror_mappings.insert(
+            community_id=cid,
+            source_guild_id=G_A,
+            source_role_id=R_OTHER,
+            target_guild_id=G_B,
+            target_role_id=R_DST,
+        )
+        dal.commit()
         fake = _FakeGuilds({G_A: {U1: {R_SRC, R_OTHER}}, G_B: {U1: set()}})
         await _run(dal, fake)
         assert len(fake.adds) == 1  # second mapping sees the role the first just granted

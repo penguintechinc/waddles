@@ -431,16 +431,13 @@ def create_binding(
     if pairing is not None:
         m = dal.discord_role_mirror_mappings
         used_by_mirror = dal(
-            (m.community_id == community_id)
-            & (
-                (
-                    (m.source_guild_id == pairing.discord_guild_id)
-                    & (m.source_role_id == discord_role_id)
-                )
-                | (
-                    (m.target_guild_id == pairing.discord_guild_id)
-                    & (m.target_role_id == discord_role_id)
-                )
+            (
+                (m.source_guild_id == pairing.discord_guild_id)
+                & (m.source_role_id == discord_role_id)
+            )
+            | (
+                (m.target_guild_id == pairing.discord_guild_id)
+                & (m.target_role_id == discord_role_id)
             )
         ).count()
         if used_by_mirror:
