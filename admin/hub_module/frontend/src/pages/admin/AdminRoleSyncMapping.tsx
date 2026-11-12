@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FormModalBuilder, type FormField } from '@penguintechinc/react-libs';
+import { type FormField } from '@penguintechinc/react-libs';
+import { FormModalBuilder } from '../../components/FormModal';
 import PairingStatusCard from '../../components/roleSync/PairingStatusCard';
 import BindingTable from '../../components/roleSync/BindingTable';
 import MirrorRolesSection from '../../components/roleSync/MirrorRolesSection';

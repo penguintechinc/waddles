@@ -9,7 +9,7 @@ import {
   ClockIcon,
 } from '@heroicons/react/24/outline';
 import { marketplaceAdminApi } from '../../services/api';
-import { FormModalBuilder } from '@penguintechinc/react-libs';
+import { FormModalBuilder } from '../../components/FormModal';
 import { WADDLES_GOLD_COLORS } from '../../theme/waddlebotTheme';
 
 /**
