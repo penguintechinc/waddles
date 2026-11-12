@@ -78,7 +78,7 @@ fn req_str<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| LogicError::Malformed(format!("missing `{key}`")))
 }
 
-/// `^[A-Za-z0-9_-]{1,128}$` (Wix member/plan/order ids are GUID-like).
+/// `^[A-Za-z0-9_-]{1,128}$` (Wix member/event ids are GUID-like).
 fn is_ref(s: &str) -> bool {
     (1..=128).contains(&s.len())
         && s.bytes()
@@ -101,23 +101,6 @@ fn text(v: Option<&Value>) -> Option<String> {
             .take(MAX_TEXT)
             .collect()
     })
-}
-
-/// Order statuses Wix documents; anything else is reported as `UNDEFINED`.
-const STATUSES: [&str; 7] = [
-    "UNDEFINED",
-    "DRAFT",
-    "PENDING",
-    "ACTIVE",
-    "PAUSED",
-    "ENDED",
-    "CANCELED",
-];
-
-fn status_of(v: Option<&Value>) -> &'static str {
-    v.and_then(Value::as_str)
-        .and_then(|s| STATUSES.iter().find(|k| **k == s))
-        .map_or("UNDEFINED", |k| *k)
 }
 
 /// The JSON-string entity carried by the domain event (create/update/delete/action).
@@ -177,54 +160,6 @@ impl Ctx<'_> {
 fn member_event(ctx: &Ctx<'_>, kind: &str, event: &Value) -> Result<Mapped> {
     let id = checked_ref(req_str(event, "entityId")?, "entityId")?;
     Ok(ctx.mapped(kind, Some(id), Map::new()))
-}
-
-/// The order object: the entity itself, or `{order: ...}` for action events.
-fn order_of(ent: &Value) -> &Value {
-    ent.get("order").unwrap_or(ent)
-}
-
-fn order_event(ctx: &Ctx<'_>, suffix: &str, ent: &Value) -> Result<Option<Mapped>> {
-    let order = order_of(ent);
-    let status = status_of(order.get("status"));
-    let (kind, reason, requires_active) = match suffix {
-        "order_purchased" | "order_started" | "order_resumed" => {
-            ("subscription.started", None, true)
-        }
-        "order_updated" | "order_marked_as_paid" => ("subscription.changed", None, false),
-        "order_ended" => ("subscription.ended", Some("ended"), false),
-        "order_canceled" => ("subscription.ended", Some("canceled"), false),
-        "order_paused" => ("subscription.ended", Some("paused"), false),
-        _ => return Ok(None),
-    };
-    if requires_active && status != "ACTIVE" {
-        return Ok(None);
-    }
-    let Some(member) = order
-        .get("buyer")
-        .and_then(|b| b.get("memberId"))
-        .and_then(Value::as_str)
-    else {
-        return Ok(None);
-    };
-    let mut extra = Map::new();
-    extra.insert(
-        "order_id".into(),
-        json!(checked_ref(req_str(order, "_id")?, "order id")?),
-    );
-    extra.insert(
-        "plan_id".into(),
-        json!(checked_ref(req_str(order, "planId")?, "plan id")?),
-    );
-    extra.insert("status".into(), json!(status));
-    if let Some(r) = reason {
-        extra.insert("reason".into(), json!(r));
-    }
-    Ok(Some(ctx.mapped(
-        kind,
-        Some(checked_ref(member, "buyer member id")?),
-        extra,
-    )))
 }
 
 fn calendar_event(ctx: &Ctx<'_>, kind: &str, deleted: bool, ent: &Value) -> Result<Mapped> {
@@ -316,12 +251,9 @@ fn map_event(ctx: &Ctx<'_>, event_type: &str, event: &Value) -> Result<Option<Ma
             _ => Ok(None),
         };
     }
-    if let Some(s) = event_type.strip_prefix("wix.pricing_plans.v2.") {
-        if !s.starts_with("order_") {
-            return Ok(None);
-        }
-        return order_event(ctx, s, &entity(event)?);
-    }
+    // Pricing-plan / order / subscription webhooks are deliberately NOT mapped:
+    // Wix syncs EVENTS only; product subscriptions go through the PenguinTech
+    // license server (decision 2026-11-12). They fall through to `skipped`.
     if let Some(s) = event_type.strip_prefix("wix.events.v3.") {
         let (kind, deleted) = match s {
             "event_created" => ("event.created", false),

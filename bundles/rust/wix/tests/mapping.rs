@@ -82,76 +82,75 @@ fn order(status: &str) -> Value {
                       "buyer": {"memberId": "mem-9", "contactId": "c-1"}}})
 }
 
+/// Wix syncs EVENTS only (decision 2026-11-12): every pricing-plan / order /
+/// subscription webhook is ignored and produces no record, whatever its shape.
 #[test]
-fn subscription_started_changed_ended() {
-    let act = |t: &str, st: &str| {
-        let ev = domain("e2", "actionEvent", "body", &order(st));
-        parse_frame(&token("inst-0001", t, &ev), RECV).expect("parses")
-    };
-    for t in ["order_purchased", "order_started", "order_resumed"] {
-        let p = act(&format!("wix.pricing_plans.v2.{t}"), "ACTIVE");
-        let m = &p.events[0];
-        assert_eq!(m.event_type, "subscription.started", "{t}");
-        assert_eq!(
-            payload(m),
-            json!({"event_id":"e2","instance_id":"inst-0001","time_source":"wix","order_id":"ord-1","plan_id":"plan-7","status":"ACTIVE"})
-        );
-        assert_eq!(m.member.as_deref(), Some("mem-9"));
-    }
-    // A purchase that has not started (PENDING) must not grant anything yet.
-    let p = act("wix.pricing_plans.v2.order_purchased", "PENDING");
-    assert_eq!((p.events.len(), p.skipped), (0, 1));
-    let p = act("wix.pricing_plans.v2.order_updated", "ACTIVE");
-    assert_eq!(p.events[0].event_type, "subscription.changed");
-    for (t, reason, st) in [
-        ("order_ended", "ended", "ENDED"),
-        ("order_canceled", "canceled", "CANCELED"),
-        ("order_paused", "paused", "PAUSED"),
-    ] {
-        let p = act(&format!("wix.pricing_plans.v2.{t}"), st);
-        assert_eq!(p.events[0].event_type, "subscription.ended");
-        assert_eq!(payload(&p.events[0])["reason"], reason);
-    }
-}
-
-#[test]
-fn order_entity_form_and_unknown_status() {
-    // order_updated is a domain update event: the order is the entity itself.
-    let o = json!({"_id": "ord-2", "planId": "plan-8", "status": "weird", "buyer": {"memberId": "mem-3"}});
-    let ev = domain("e3", "updatedEvent", "currentEntity", &o);
-    let m = one(&token(
-        "inst-0001",
-        "wix.pricing_plans.v2.order_updated",
-        &ev,
-    ));
-    assert_eq!(payload(&m)["status"], "UNDEFINED");
-    assert_eq!(payload(&m)["plan_id"], "plan-8");
-}
-
-#[test]
-fn orders_without_a_member_or_with_other_kinds_are_skipped() {
-    let mut o = order("ACTIVE");
-    o["order"]["buyer"] = json!({"contactId": "c-1"});
-    let ev = domain("e4", "actionEvent", "body", &o);
-    let p = parse_frame(
-        &token("inst-0001", "wix.pricing_plans.v2.order_started", &ev),
-        RECV,
-    )
-    .expect("ok");
-    assert_eq!((p.events.len(), p.skipped), (0, 1));
-    for t in [
+fn subscription_webhooks_are_ignored_and_emit_no_records() {
+    let kinds = [
+        "order_purchased",
+        "order_started",
+        "order_resumed",
+        "order_updated",
+        "order_marked_as_paid",
+        "order_ended",
+        "order_canceled",
+        "order_paused",
         "order_created",
         "order_cycle_started",
         "order_auto_renew_canceled",
-    ] {
-        let ev = domain("e5", "actionEvent", "body", &order("ACTIVE"));
-        let p = parse_frame(
-            &token("inst-0001", &format!("wix.pricing_plans.v2.{t}"), &ev),
-            RECV,
-        )
-        .expect("ok");
-        assert_eq!((p.events.len(), p.skipped), (0, 1), "{t}");
+        "plan_created",
+        "plan_updated",
+    ];
+    let bodies = [
+        domain("e2", "actionEvent", "body", &order("ACTIVE")),
+        domain(
+            "e3",
+            "updatedEvent",
+            "currentEntity",
+            &order("ACTIVE")["order"],
+        ),
+        // Even a hostile/malformed body is not parsed at all.
+        json!({"id": "e4"}),
+        domain(
+            "e5",
+            "actionEvent",
+            "body",
+            &json!({"order": {"_id": "o\"1", "planId": "p", "status": "ACTIVE", "buyer": {"memberId": "m"}}}),
+        ),
+    ];
+    let mut checked = 0;
+    for t in kinds {
+        for ev in &bodies {
+            let p = parse_frame(
+                &token("inst-0001", &format!("wix.pricing_plans.v2.{t}"), ev),
+                RECV,
+            )
+            .expect("ignored, not an error");
+            assert_eq!((p.events.len(), p.skipped), (0, 1), "{t}");
+            assert!(
+                p.events
+                    .iter()
+                    .all(|m| !m.event_type.starts_with("subscription."))
+            );
+            checked += 1;
+        }
     }
+    assert_eq!(checked, kinds.len() * bodies.len());
+}
+
+#[test]
+fn event_records_still_flow_alongside_ignored_subscriptions() {
+    let e = json!({"_id": "wev-1", "title": "Meetup"});
+    let ev = domain("e6", "createdEvent", "entity", &e);
+    let m = one(&token("inst-0001", "wix.events.v3.event_created", &ev));
+    assert_eq!(m.event_type, "event.created");
+    let sub = domain("e7", "actionEvent", "body", &order("ACTIVE"));
+    let p = parse_frame(
+        &token("inst-0001", "wix.pricing_plans.v2.order_started", &sub),
+        RECV,
+    )
+    .expect("ok");
+    assert!(p.events.is_empty());
 }
 
 #[test]
@@ -262,11 +261,6 @@ fn malformed_frames_fail_loud() {
         ),
         token(
             "inst-0001",
-            "wix.pricing_plans.v2.order_started",
-            &json!({"id":"e"}),
-        ),
-        token(
-            "inst-0001",
             "wix.events.v3.event_created",
             &json!({"id":"e","createdEvent":{"entity":"{}"}}),
         ),
@@ -290,11 +284,11 @@ fn malformed_frames_fail_loud() {
 
 #[test]
 fn hostile_ids_never_reach_the_payload() {
-    let o = json!({"order": {"_id": "o\"1", "planId": "p", "status": "ACTIVE", "buyer": {"memberId": "m"}}});
-    let ev = domain("e12", "actionEvent", "body", &o);
+    let e = json!({"_id": "w\"1", "title": "x"});
+    let ev = domain("e12", "createdEvent", "entity", &e);
     assert!(
         parse_frame(
-            &token("inst-0001", "wix.pricing_plans.v2.order_started", &ev),
+            &token("inst-0001", "wix.events.v3.event_created", &ev),
             RECV
         )
         .is_err()

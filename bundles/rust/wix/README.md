@@ -1,6 +1,6 @@
 # waddles.core.service.wix -- Wix connector (Rust, `connector-tools`): inbound webhooks + outbound Events tools
 
-Maps **host-verified** Wix app webhooks to normalized member / subscription / event records. The host
+Maps **host-verified** Wix app webhooks to normalized member / event records (Wix syncs EVENTS only: pricing-plan/order/subscription webhooks are ignored and emit nothing; subscriptions go through the PenguinTech license server). The host
 (`core/svc_ingest`, `Scheme::WixJwt`) owns the ingress route, the RS256 JWT verification against the connection's
 app public key, freshness, instance binding and replay; this component never verifies and must not be fed an
 unverified body. 
