@@ -155,6 +155,25 @@ pub struct ApplyOutcome {
     pub applied: bool,
 }
 
+/// Rolling-24h ceilings on soft-ban TOGGLES (a record or a lift each count
+/// once): a count-based quota, so a loop of soft-ban/lift calls cannot churn
+/// the table or flap a member's state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SoftBanLimits {
+    /// Max toggles for one user in one community per day.
+    pub per_user_daily: i64,
+    /// Max toggles across the whole community per day.
+    pub per_community_daily: i64,
+}
+
+impl SoftBanLimits {
+    /// Defaults: 5 toggles per user per day, 50 per community per day.
+    pub const DEFAULT: SoftBanLimits = SoftBanLimits {
+        per_user_daily: 5,
+        per_community_daily: 50,
+    };
+}
+
 /// A user's own aggregate across the communities of one tenant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TenantScore {
@@ -234,6 +253,10 @@ pub enum ReputationError {
     /// same one with different parameters): nothing was applied.
     #[error("idempotency key was already used by a different reputation operation")]
     IdempotencyConflict,
+    /// The soft-ban toggle quota (per user or per community, rolling 24h) is
+    /// exhausted: nothing was changed.
+    #[error("soft-ban toggle quota ({cap}/day) exhausted")]
+    RateLimited { cap: i64 },
     /// Malformed argument (bad `reason`, zero `delta`, ...).
     #[error("invalid argument: {0}")]
     Invalid(String),
@@ -250,6 +273,7 @@ impl ReputationError {
             Self::DailyCapExceeded { .. } => "daily_cap_exceeded",
             Self::ScopeQuotaExceeded { .. } => "quota_exceeded",
             Self::IdempotencyConflict => "idempotency_conflict",
+            Self::RateLimited { .. } => "rate_limited",
             Self::Invalid(_) => "invalid_args",
             Self::Backend(_) => "backend",
         }
@@ -456,6 +480,7 @@ pub trait ReputationStore: Send + Sync {
         _scope: &'a ReputationScope,
         _user: uuid::Uuid,
         _reason: &'a str,
+        _limits: SoftBanLimits,
     ) -> BoxFuture<'a, Result<bool, ReputationError>> {
         Box::pin(async { Err(unsupported("soft_ban")) })
     }
@@ -469,6 +494,7 @@ pub trait ReputationStore: Send + Sync {
         _scope: &'a ReputationScope,
         _user: uuid::Uuid,
         _only_reason: &'a str,
+        _limits: SoftBanLimits,
     ) -> BoxFuture<'a, Result<bool, ReputationError>> {
         Box::pin(async { Err(unsupported("lift_soft_ban")) })
     }

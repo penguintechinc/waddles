@@ -76,7 +76,9 @@ use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use bundle_host_platform_table::{
     Change as PlatformTableChange, PlatformTableError, PlatformTableScope, PlatformTableStore,
 };
-use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
+use bundle_host_reputation::{
+    ReputationCaps, ReputationError, ReputationScope, ReputationStore, SoftBanLimits,
+};
 use bundle_host_storage::{GrantSet as StorageGrantSet, StorageError, StorageHost, StorageScope};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
@@ -96,6 +98,9 @@ pub use tool::ToolContext;
 /// The community scope the verified caller must hold for `reputation.override`
 /// (mirrors the reputation bundle's manifest `required_scope`).
 const REPUTATION_OVERRIDE_SCOPE: &str = "community:admin";
+/// Scope a HUMAN-originated moderation-class reputation call must hold (admins
+/// hold it too: the role mapping is cumulative).
+const REPUTATION_MODERATE_SCOPE: &str = "community:moderate";
 
 /// The durable rolling-24h absolute-delta caps the store enforces for
 /// `reputation.community.write` -- the catalog's own `per_user_daily_abs_max`
@@ -3284,6 +3289,46 @@ impl<K: KvBackend> StageCapabilities<K> {
             ));
         }
 
+        // Moderation-class writes (`apply_moderation`, `soft_ban`, `lift_soft_ban`):
+        // the bundle's grant says the APP may, not that THIS caller may. A
+        // human-originated invocation must hold a moderator/admin scope for this
+        // community (host-verified actor, never guest input). Only a
+        // system-originated invocation (HOST-derived from the verified event
+        // type: the automatic floor evaluation, a moderation outcome) is exempt.
+        // Checked BEFORE the gate so a refused caller never burns quota.
+        let moderation_write = matches!(
+            op,
+            Op::SoftBan { .. }
+                | Op::LiftSoftBan { .. }
+                | Op::Apply {
+                    class: ReasonClass::Moderation,
+                    ..
+                }
+        );
+        if moderation_write {
+            let system = self
+                .invocation_identity
+                .as_deref()
+                .is_some_and(|i| i.is_system_originated());
+            if !system {
+                let actor = self.resolve_verified_actor().await;
+                if !(actor.has_scope(REPUTATION_MODERATE_SCOPE)
+                    || actor.has_scope(REPUTATION_OVERRIDE_SCOPE))
+                {
+                    tracing::info!(
+                        app_id = %self.app_id, community_id = self.community_id,
+                        "reputation moderation write refused: caller lacks community:moderate"
+                    );
+                    return Err(denied(
+                        "forbidden",
+                        format!(
+                            "this reputation operation requires the caller to hold {REPUTATION_MODERATE_SCOPE}"
+                        ),
+                    ));
+                }
+            }
+        }
+
         // Idempotency ordinal of the one mutating, replay-sensitive op.
         let claimed = matches!(op, Op::Apply { .. }).then(|| {
             self.invocation_identity
@@ -3292,9 +3337,9 @@ impl<K: KvBackend> StageCapabilities<K> {
                 .map(|(event_id, ordinal)| (event_id.to_string(), ordinal))
         });
 
-        // Gate. soft-ban writes carry no magnitude, so they authorize as a
-        // 1-point moderation write and hand it straight back.
-        let mut refund_one: Option<(PermissionId, uuid::Uuid)> = None;
+        // Gate. Soft-ban writes carry no magnitude, so they authorize as a plain
+        // (rate-limited) moderation-write call and are bounded by the store's
+        // durable count-based toggle quota (typed `rate_limited`), not refunded.
         match &op {
             Op::Apply {
                 user, delta, class, ..
@@ -3305,14 +3350,11 @@ impl<K: KvBackend> StageCapabilities<K> {
                 };
                 self.authorize_reputation(perm, Some(*user), Some(*delta))?;
             }
-            Op::SoftBan { user, .. } | Op::LiftSoftBan { user, .. } => {
-                self.authorize_reputation(
-                    PermissionId::ReputationModerationWrite,
-                    Some(*user),
-                    Some(1),
-                )?;
-                refund_one = Some((PermissionId::ReputationModerationWrite, *user));
-            }
+            Op::SoftBan { user, .. } | Op::LiftSoftBan { user, .. } => self.authorize_reputation(
+                PermissionId::ReputationModerationWrite,
+                Some(*user),
+                None,
+            )?,
             Op::GetTenant(user) => {
                 self.authorize_reputation(PermissionId::ReputationTenantRead, Some(*user), None)?
             }
@@ -3328,17 +3370,6 @@ impl<K: KvBackend> StageCapabilities<K> {
             Op::IsSoftBanned(user) => {
                 self.authorize_reputation(PermissionId::ReputationRead, Some(*user), None)?
             }
-        }
-        if let Some((perm, user)) = refund_one {
-            self.gate.refund(
-                &self.gate_scope(),
-                perm,
-                &ResourceRef::ReputationScoped(ReputationTarget {
-                    target_user: Some(user),
-                    scope_kind: ScopeKind::Community,
-                    delta: Some(1),
-                }),
-            );
         }
 
         let Some(wiring) = &self.reputation else {
@@ -3453,12 +3484,12 @@ impl<K: KvBackend> StageCapabilities<K> {
                 .map(|b| serde_json::json!({ "flag": b })),
             Op::SoftBan { user, reason } => wiring
                 .store
-                .soft_ban(&scope, *user, reason)
+                .soft_ban(&scope, *user, reason, SoftBanLimits::DEFAULT)
                 .await
                 .map(|b| serde_json::json!({ "flag": b })),
             Op::LiftSoftBan { user, only_reason } => wiring
                 .store
-                .lift_soft_ban(&scope, *user, only_reason)
+                .lift_soft_ban(&scope, *user, only_reason, SoftBanLimits::DEFAULT)
                 .await
                 .map(|b| serde_json::json!({ "flag": b })),
         };

@@ -71,6 +71,8 @@ struct RecordingStore {
     ext: Mutex<Vec<ExtCall>>,
     next_unit: Mutex<Option<Result<(), ReputationError>>>,
     next_entries: Mutex<Option<Result<Vec<bundle_host_reputation::ScoreEntry>, ReputationError>>>,
+    /// When set, the next soft-ban call answers `RateLimited { cap }`.
+    toggle_cap: Mutex<Option<i64>>,
 }
 
 impl RecordingStore {
@@ -334,14 +336,19 @@ impl ReputationStore for RecordingStore {
         scope: &'a ReputationScope,
         user: Uuid,
         reason: &'a str,
+        limits: SoftBanLimits,
     ) -> bundle_host_reputation::BoxFuture<'a, Result<bool, ReputationError>> {
         Box::pin(async move {
+            assert_eq!(limits, SoftBanLimits::DEFAULT, "host-chosen limits");
             self.ext.lock().unwrap().push(ExtCall::SoftBan(
                 scope.clone(),
                 user,
                 reason.to_string(),
             ));
-            Ok(true)
+            match self.toggle_cap.lock().unwrap().take() {
+                Some(cap) => Err(ReputationError::RateLimited { cap }),
+                None => Ok(true),
+            }
         })
     }
     fn lift_soft_ban<'a>(
@@ -349,8 +356,10 @@ impl ReputationStore for RecordingStore {
         scope: &'a ReputationScope,
         user: Uuid,
         only_reason: &'a str,
+        limits: SoftBanLimits,
     ) -> bundle_host_reputation::BoxFuture<'a, Result<bool, ReputationError>> {
         Box::pin(async move {
+            assert_eq!(limits, SoftBanLimits::DEFAULT, "host-chosen limits");
             self.ext.lock().unwrap().push(ExtCall::LiftSoftBan(
                 scope.clone(),
                 user,
@@ -1542,6 +1551,19 @@ async fn override_is_rate_limited_to_ten_calls_per_window_on_the_cap_path() {
     );
 }
 
+/// A fixture whose invocation is SYSTEM-originated (a platform event such as a
+/// follow / the automatic floor evaluation): no human actor scope is required.
+fn sys_fixture(grant_set: GrantSet) -> Fixture {
+    let f = ext_fixture_as(grant_set, None);
+    let mut f = f;
+    f.caps.invocation_identity = Some(Arc::new(
+        InvocationIdentity::new("twitch", Some("1001".to_string()), vec![])
+            .with_event_id(EVENT_ID)
+            .with_system_originated(true),
+    ));
+    f
+}
+
 fn v2_grants() -> GrantSet {
     grants(&[
         ("reputation.read", serde_json::json!({})),
@@ -1560,7 +1582,7 @@ fn v2_grants() -> GrantSet {
 
 #[tokio::test]
 async fn apply_derives_the_activity_class_and_catalog_caps_on_the_host() {
-    let f = ext_fixture(v2_grants());
+    let f = sys_fixture(v2_grants());
     f.store.answer(Ok(605));
     // A guest-supplied `class`/`tenant_id` field is ignored entirely.
     let args = serde_json::json!({
@@ -1590,7 +1612,7 @@ async fn apply_derives_the_activity_class_and_catalog_caps_on_the_host() {
 
 #[tokio::test]
 async fn apply_activity_is_bounded_to_five_and_moderation_needs_its_own_grant() {
-    let f = ext_fixture(v2_grants());
+    let f = sys_fixture(v2_grants());
     let mk =
         |d: i64| serde_json::json!({"user": f.member.to_string(), "delta": d, "reason": "r.x"});
     // Activity op: a moderation-sized delta is refused before the store.
@@ -1676,7 +1698,7 @@ async fn core_read_ops_need_their_grants_and_reach_the_store_with_host_scope() {
     );
     assert_eq!(g.store.ext_count(), 0);
 
-    let f = ext_fixture(v2_grants());
+    let f = sys_fixture(v2_grants());
     let u = f.member.to_string();
     let t = f.store.answer(Ok(512));
     let _ = t;
@@ -1730,7 +1752,7 @@ async fn core_read_ops_need_their_grants_and_reach_the_store_with_host_scope() {
 
 #[tokio::test]
 async fn community_tenant_isolation_a_non_member_target_is_refused_before_the_store() {
-    let f = ext_fixture(v2_grants());
+    let f = sys_fixture(v2_grants());
     let stranger = Uuid::new_v4().to_string();
     for (op, args) in [
         (
@@ -1753,7 +1775,7 @@ async fn community_tenant_isolation_a_non_member_target_is_refused_before_the_st
 
 #[tokio::test]
 async fn soft_ban_ops_and_below_threshold_validate_and_route() {
-    let f = ext_fixture(v2_grants());
+    let f = sys_fixture(v2_grants());
     let u = f.member.to_string();
     f.caps
         .handle(rep_call(
@@ -1812,17 +1834,6 @@ async fn soft_ban_ops_and_below_threshold_validate_and_route() {
         .await,
         "invalid_args"
     );
-    // The 1-point soft-ban authorization is handed back: many soft bans never
-    // drain the moderation quota.
-    for _ in 0..30 {
-        f.caps
-            .handle(rep_call(
-                "reputation.soft_ban",
-                serde_json::json!({"user": u, "reason": "community_soft_floor"}),
-            ))
-            .await
-            .unwrap();
-    }
 }
 
 #[tokio::test]
@@ -1835,4 +1846,107 @@ async fn apply_needs_a_replay_stable_event_id() {
         "not_implemented"
     );
     assert_eq!(f.store.ext_count(), 0);
+}
+
+fn human_fixture(role: Option<&'static str>) -> Fixture {
+    // Human-originated (chat command): `ext_fixture_as` builds a non-system invocation.
+    ext_fixture_as(v2_grants(), role)
+}
+
+fn mod_args(f: &Fixture) -> [(&'static str, serde_json::Value); 3] {
+    let u = f.member.to_string();
+    [
+        (
+            "reputation.apply_moderation",
+            serde_json::json!({"user": u, "delta": -50, "reason": "moderation.ban"}),
+        ),
+        (
+            "reputation.soft_ban",
+            serde_json::json!({"user": u, "reason": "community_soft_floor"}),
+        ),
+        (
+            "reputation.lift_soft_ban",
+            serde_json::json!({"user": u, "only_reason": "community_soft_floor"}),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn a_non_moderator_human_actor_is_denied_every_moderation_write() {
+    for role in [None, Some("member"), Some("vip")] {
+        let f = human_fixture(role);
+        for (op, args) in mod_args(&f) {
+            assert_eq!(code_of(&f, op, args).await, "forbidden", "{role:?} {op}");
+        }
+        assert_eq!(f.store.ext_count(), 0, "{role:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_moderator_or_admin_human_actor_may_make_moderation_writes() {
+    for role in [Some("moderator"), Some("community-admin")] {
+        let f = human_fixture(role);
+        f.store.answer(Ok(550));
+        for (op, args) in mod_args(&f) {
+            f.caps
+                .handle(rep_call(op, args))
+                .await
+                .unwrap_or_else(|e| panic!("{role:?} {op}: {e:?}"));
+        }
+        assert_eq!(f.store.ext_count(), 3, "{role:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_system_originated_invocation_needs_no_human_actor_scope() {
+    // The automatic floor evaluation / a moderation outcome: no human actor.
+    let f = sys_fixture(v2_grants());
+    f.store.answer(Ok(500));
+    for (op, args) in mod_args(&f) {
+        f.caps
+            .handle(rep_call(op, args))
+            .await
+            .unwrap_or_else(|e| panic!("{op}: {e:?}"));
+    }
+    assert_eq!(f.store.ext_count(), 3);
+}
+
+#[tokio::test]
+async fn a_guest_supplied_system_flag_cannot_bypass_the_scope_check() {
+    // A human-originated, non-moderator invocation: the guest smuggles
+    // `system`/`system_originated` into every arg position; the flag is
+    // host-derived only, so it is ignored and the call is refused.
+    let f = human_fixture(Some("member"));
+    let u = f.member.to_string();
+    for flag in ["system", "system_originated", "origin", "automatic"] {
+        let mut args = serde_json::json!({"user": u, "delta": -50, "reason": "moderation.ban"});
+        args[flag] = serde_json::json!(true);
+        assert_eq!(
+            code_of(&f, "reputation.apply_moderation", args).await,
+            "forbidden",
+            "{flag}"
+        );
+    }
+    assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn soft_ban_toggle_quota_exhaustion_is_a_typed_rate_limit_and_never_refunded() {
+    let f = sys_fixture(v2_grants());
+    let u = f.member.to_string();
+    // The store reports the durable count quota exhausted: typed, not generic.
+    *f.store.toggle_cap.lock().unwrap() = Some(5);
+    assert_eq!(
+        code_of(
+            &f,
+            "reputation.soft_ban",
+            serde_json::json!({"user": u, "reason": "community_soft_floor"})
+        )
+        .await,
+        "rate_limited"
+    );
+    // The bound is the store's DURABLE count quota (proven against Postgres in
+    // `soft_ban_toggles_are_quota_limited_per_user_and_per_community_and_typed`);
+    // there is no gate-side refund that could hand a toggle back.
+    assert_eq!(f.store.ext_count(), 1);
 }

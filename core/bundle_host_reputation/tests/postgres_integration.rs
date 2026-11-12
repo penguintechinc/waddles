@@ -22,7 +22,8 @@ use bundle_capability_gate::{
 use bundle_host_reputation::{
     connect, load_membership, ApplyOutcome, ConnectConfig, IdempotencyKey, PostgresReputationStore,
     ReasonClass, ReputationCaps, ReputationError, ReputationScope, ReputationStore, ScoreEntry,
-    TenantPolicy, TenantScore, MAX_BATCH, MAX_LEADERBOARD_LIMIT, MAX_SCORE, MIN_SCORE,
+    SoftBanLimits, TenantPolicy, TenantScore, MAX_BATCH, MAX_LEADERBOARD_LIMIT, MAX_SCORE,
+    MIN_SCORE,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use uuid::Uuid;
@@ -2224,13 +2225,23 @@ async fn soft_ban_is_idempotent_community_scoped_and_liftable() {
     assert_eq!(f.store.is_soft_banned(&scope(), f.member).await, Ok(false));
     assert_eq!(
         f.store
-            .soft_ban(&scope(), f.member, "community_floor")
+            .soft_ban(
+                &scope(),
+                f.member,
+                "community_floor",
+                SoftBanLimits::DEFAULT
+            )
             .await,
         Ok(true)
     );
     assert_eq!(
         f.store
-            .soft_ban(&scope(), f.member, "community_floor")
+            .soft_ban(
+                &scope(),
+                f.member,
+                "community_floor",
+                SoftBanLimits::DEFAULT
+            )
             .await,
         Ok(false),
         "second call is a no-op"
@@ -2244,23 +2255,37 @@ async fn soft_ban_is_idempotent_community_scoped_and_liftable() {
     assert_eq!(f.store.is_soft_banned(&other, f.member).await, Ok(false));
     assert_eq!(
         f.store
-            .soft_ban(&scope(), Uuid::new_v4(), "community_floor")
+            .soft_ban(
+                &scope(),
+                Uuid::new_v4(),
+                "community_floor",
+                SoftBanLimits::DEFAULT
+            )
             .await,
         Err(ReputationError::NotAMember)
     );
     assert!(matches!(
-        f.store.soft_ban(&scope(), f.member, "Bad Reason").await,
+        f.store
+            .soft_ban(&scope(), f.member, "Bad Reason", SoftBanLimits::DEFAULT)
+            .await,
         Err(ReputationError::Invalid(_))
     ));
     // Only a ban with the exact reason is lifted: a manual one is never cleared.
     assert_eq!(
-        f.store.lift_soft_ban(&scope(), f.member, "manual").await,
+        f.store
+            .lift_soft_ban(&scope(), f.member, "manual", SoftBanLimits::DEFAULT)
+            .await,
         Ok(false)
     );
     assert_eq!(f.store.is_soft_banned(&scope(), f.member).await, Ok(true));
     assert_eq!(
         f.store
-            .lift_soft_ban(&scope(), f.member, "community_floor")
+            .lift_soft_ban(
+                &scope(),
+                f.member,
+                "community_floor",
+                SoftBanLimits::DEFAULT
+            )
             .await,
         Ok(true)
     );
@@ -2268,7 +2293,12 @@ async fn soft_ban_is_idempotent_community_scoped_and_liftable() {
     // A fresh ban can be recorded again after a lift.
     assert_eq!(
         f.store
-            .soft_ban(&scope(), f.member, "community_floor")
+            .soft_ban(
+                &scope(),
+                f.member,
+                "community_floor",
+                SoftBanLimits::DEFAULT
+            )
             .await,
         Ok(true)
     );
@@ -2277,4 +2307,73 @@ async fn soft_ban_is_idempotent_community_scoped_and_liftable() {
 /// Generous caps for tests that are not about the caps.
 fn acaps() -> ReputationCaps {
     caps2(100_000, 1_000_000)
+}
+
+#[tokio::test]
+async fn soft_ban_toggles_are_quota_limited_per_user_and_per_community_and_typed() {
+    let f = fixture().await;
+    exec(&f.su, REPUTATION_APPLY_STUB).await;
+    let lim = SoftBanLimits {
+        per_user_daily: 4,
+        per_community_daily: 5,
+    };
+    let sc = scope();
+    // 2 full cycles = 4 toggles for `member`.
+    for _ in 0..2 {
+        assert_eq!(
+            f.store
+                .soft_ban(&sc, f.member, "community_soft_floor", lim)
+                .await,
+            Ok(true)
+        );
+        assert_eq!(
+            f.store
+                .lift_soft_ban(&sc, f.member, "community_soft_floor", lim)
+                .await,
+            Ok(true)
+        );
+    }
+    // The 5th toggle for the same user is rate limited, state unchanged.
+    assert_eq!(
+        f.store
+            .soft_ban(&sc, f.member, "community_soft_floor", lim)
+            .await,
+        Err(ReputationError::RateLimited { cap: 4 })
+    );
+    assert_eq!(f.store.is_soft_banned(&sc, f.member).await, Ok(false));
+    // A no-op (nothing to lift) is free and never rate limited.
+    assert_eq!(
+        f.store
+            .lift_soft_ban(&sc, f.member, "community_soft_floor", lim)
+            .await,
+        Ok(false)
+    );
+    // Another user: 1 toggle left in the community budget (4 used of 5).
+    let other = add_member(&f, COMMUNITY).await;
+    assert_eq!(
+        f.store
+            .soft_ban(&sc, other, "community_soft_floor", lim)
+            .await,
+        Ok(true)
+    );
+    let third = add_member(&f, COMMUNITY).await;
+    assert_eq!(
+        f.store
+            .soft_ban(&sc, third, "community_soft_floor", lim)
+            .await,
+        Err(ReputationError::RateLimited { cap: 5 })
+    );
+    // Old toggles roll out of the window.
+    exec(
+        &f.su,
+        "UPDATE reputation_soft_bans SET created_at = NOW() - INTERVAL '25 hours', \
+         lifted_at = CASE WHEN lifted_at IS NULL THEN NULL ELSE NOW() - INTERVAL '25 hours' END",
+    )
+    .await;
+    assert_eq!(
+        f.store
+            .soft_ban(&sc, third, "community_soft_floor", lim)
+            .await,
+        Ok(true)
+    );
 }

@@ -1435,7 +1435,10 @@ async fn handle_delivered_inner<S: SpineOps>(
         }
         // The hop-verified envelope id: identical across redeliveries of this event, the anchor
         // of the economy's idempotency keys.
-        .with_event_id(d.env.event_id.clone());
+        .with_event_id(d.env.event_id.clone())
+        // A platform/system event (follow, sub, moderation outcome, ...) is not a human command:
+        // only `chat.message` is typed by a person.
+        .with_system_originated(d.env.event.event_type != "chat.message");
         Arc::new(inv)
     });
     let capabilities: Arc<dyn CapabilityHandler> = Arc::new(build_stage_capabilities(

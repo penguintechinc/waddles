@@ -284,6 +284,13 @@ pub struct InvocationIdentity {
     /// A host-verified actor handed in by a signed hub-api bundle-admin request (never an
     /// event): resolves without a directory lookup. `None` for every event-driven invocation.
     preverified: Option<bundle_tool_call::ActorContext>,
+    /// HOST-derived: this invocation was started by a platform/system event
+    /// (a follow, a subscription, a moderation outcome, ...) rather than a
+    /// human typing a chat command. Set only by the spine from the verified
+    /// envelope's event type, never from guest input; moderation-class
+    /// reputation ops from a system-originated invocation need no human actor
+    /// scope (the automatic floor evaluation), every other caller does.
+    system_originated: bool,
 }
 
 impl fmt::Debug for InvocationIdentity {
@@ -348,6 +355,7 @@ impl InvocationIdentity {
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
             preverified: None,
+            system_originated: false,
         }
     }
 
@@ -403,6 +411,7 @@ impl InvocationIdentity {
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
             preverified: None,
+            system_originated: false,
         }
     }
 
@@ -419,6 +428,7 @@ impl InvocationIdentity {
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
             preverified: Some(actor),
+            system_originated: false,
         }
     }
 
@@ -428,6 +438,18 @@ impl InvocationIdentity {
     pub fn with_event_id(mut self, event_id: impl Into<String>) -> Self {
         self.event_id = Some(event_id.into());
         self
+    }
+
+    /// Marks this invocation as started by a platform/system event (host-derived
+    /// from the verified envelope's event type; see the field docs).
+    pub fn with_system_originated(mut self, system: bool) -> Self {
+        self.system_originated = system;
+        self
+    }
+
+    /// `true` when the invocation was started by a system event, not a human command.
+    pub(crate) fn is_system_originated(&self) -> bool {
+        self.system_originated
     }
 
     /// The host-verified retry identity exposed in bundle context. Never sourced
@@ -449,6 +471,7 @@ impl InvocationIdentity {
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
             preverified: self.preverified.clone(),
+            system_originated: self.system_originated,
         }
     }
 

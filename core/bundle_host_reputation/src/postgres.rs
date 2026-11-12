@@ -13,6 +13,8 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
+use crate::SoftBanLimits;
+
 use crate::{
     clamp_score, metrics, validate_delta, validate_reason, ApplyOutcome, BoxFuture, HistoryEntry,
     IdempotencyKey, ReasonClass, ReputationCaps, ReputationError, ReputationScope, ReputationStore,
@@ -892,6 +894,58 @@ impl PostgresReputationStore {
     }
 }
 
+/// Enforces the rolling-24h soft-ban TOGGLE quota (a record or a lift each
+/// count once) per user and per community, inside the caller's transaction
+/// with the scope advisory lock held, so concurrent toggles cannot overshoot.
+async fn check_soft_ban_quota(
+    txn: &DatabaseTransaction,
+    scope: &ReputationScope,
+    user: Uuid,
+    limits: SoftBanLimits,
+) -> Result<(), ReputationError> {
+    if limits.per_user_daily < 0 || limits.per_community_daily < 0 {
+        return Err(ReputationError::Invalid(
+            "soft-ban limits must be >= 0".to_string(),
+        ));
+    }
+    let count = |sql: &'static str, v: Vec<Value>| async move {
+        txn.query_one_raw(stmt(sql, v))
+            .await
+            .map_err(backend_err)?
+            .ok_or_else(|| backend_err("toggle count returned no row"))?
+            .try_get::<i64>("", "n")
+            .map_err(backend_err)
+    };
+    let per_user = count(
+        "SELECT (COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') + \
+                 COUNT(*) FILTER (WHERE lifted_at > NOW() - INTERVAL '24 hours'))::BIGINT AS n \
+         FROM reputation_soft_bans WHERE tenant_id = $1 AND community_id = $2 AND user_uuid = $3",
+        scope_values(scope, user),
+    )
+    .await?;
+    if per_user >= limits.per_user_daily {
+        return Err(ReputationError::RateLimited {
+            cap: limits.per_user_daily,
+        });
+    }
+    let per_community = count(
+        "SELECT (COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') + \
+                 COUNT(*) FILTER (WHERE lifted_at > NOW() - INTERVAL '24 hours'))::BIGINT AS n \
+         FROM reputation_soft_bans WHERE tenant_id = $1 AND community_id = $2",
+        vec![
+            Value::Int(Some(scope.tenant_id)),
+            Value::Int(Some(scope.community_id)),
+        ],
+    )
+    .await?;
+    if per_community >= limits.per_community_daily {
+        return Err(ReputationError::RateLimited {
+            cap: limits.per_community_daily,
+        });
+    }
+    Ok(())
+}
+
 impl PostgresReputationStore {
     /// Active soft-ban lookup (`lifted_at IS NULL`).
     async fn is_soft_banned_impl(
@@ -912,20 +966,22 @@ impl PostgresReputationStore {
         Ok(row.is_some())
     }
 
-    /// Idempotent soft-ban insert for an active member.
+    /// Idempotent soft-ban insert for an active member, charged against the
+    /// durable toggle quota. An already-active ban is a free no-op (`false`).
     async fn soft_ban_impl(
         &self,
         scope: &ReputationScope,
         user: Uuid,
         reason: &str,
+        limits: SoftBanLimits,
     ) -> Result<bool, ReputationError> {
         validate_reason(reason)?;
+        let txn = self.begin().await?;
         let member_sql = format!(
             "SELECT 1 AS ok FROM community_members cm \
              JOIN communities c ON c.id = cm.community_id WHERE {MEMBER_PREDICATE}"
         );
-        if self
-            .conn
+        if txn
             .query_one_raw(stmt(&member_sql, scope_values(scope, user)))
             .await
             .map_err(backend_err)?
@@ -933,49 +989,74 @@ impl PostgresReputationStore {
         {
             return Err(ReputationError::NotAMember);
         }
-        let mut v = scope_values(scope, user);
-        v.push(Value::String(Some(reason.to_string())));
-        let n = self
-            .conn
-            .execute_raw(stmt(
-                "INSERT INTO reputation_soft_bans \
-                 (tenant_id, community_id, user_uuid, reason_code) \
-                 SELECT $1, $2, $3, $4 WHERE NOT EXISTS ( \
-                   SELECT 1 FROM reputation_soft_bans \
-                   WHERE tenant_id = $1 AND community_id = $2 AND user_uuid = $3 \
-                     AND lifted_at IS NULL)",
-                v,
+        scope_lock(&txn, scope).await?;
+        let active = txn
+            .query_one_raw(stmt(
+                "SELECT 1 AS ok FROM reputation_soft_bans \
+                 WHERE tenant_id = $1 AND community_id = $2 AND user_uuid = $3 \
+                   AND lifted_at IS NULL",
+                scope_values(scope, user),
             ))
             .await
             .map_err(backend_err)?
-            .rows_affected();
-        Ok(n > 0)
+            .is_some();
+        if active {
+            return Ok(false);
+        }
+        check_soft_ban_quota(&txn, scope, user, limits).await?;
+        let mut v = scope_values(scope, user);
+        v.push(Value::String(Some(reason.to_string())));
+        txn.execute_raw(stmt(
+            "INSERT INTO reputation_soft_bans \
+             (tenant_id, community_id, user_uuid, reason_code) VALUES ($1, $2, $3, $4)",
+            v,
+        ))
+        .await
+        .map_err(backend_err)?;
+        txn.commit().await.map_err(backend_err)?;
+        Ok(true)
     }
 }
 
 impl PostgresReputationStore {
-    /// Lifts an active soft ban recorded with exactly `only_reason`.
+    /// Lifts an active soft ban recorded with exactly `only_reason`, charged
+    /// against the durable toggle quota (a no-op lift is free).
     async fn lift_soft_ban_impl(
         &self,
         scope: &ReputationScope,
         user: Uuid,
         only_reason: &str,
+        limits: SoftBanLimits,
     ) -> Result<bool, ReputationError> {
         validate_reason(only_reason)?;
+        let txn = self.begin().await?;
+        scope_lock(&txn, scope).await?;
         let mut v = scope_values(scope, user);
         v.push(Value::String(Some(only_reason.to_string())));
-        let n = self
-            .conn
-            .execute_raw(stmt(
-                "UPDATE reputation_soft_bans SET lifted_at = NOW() \
+        let exists = txn
+            .query_one_raw(stmt(
+                "SELECT 1 AS ok FROM reputation_soft_bans \
                  WHERE tenant_id = $1 AND community_id = $2 AND user_uuid = $3 \
                    AND lifted_at IS NULL AND reason_code = $4",
-                v,
+                v.clone(),
             ))
             .await
             .map_err(backend_err)?
-            .rows_affected();
-        Ok(n > 0)
+            .is_some();
+        if !exists {
+            return Ok(false);
+        }
+        check_soft_ban_quota(&txn, scope, user, limits).await?;
+        txn.execute_raw(stmt(
+            "UPDATE reputation_soft_bans SET lifted_at = NOW() \
+             WHERE tenant_id = $1 AND community_id = $2 AND user_uuid = $3 \
+               AND lifted_at IS NULL AND reason_code = $4",
+            v,
+        ))
+        .await
+        .map_err(backend_err)?;
+        txn.commit().await.map_err(backend_err)?;
+        Ok(true)
     }
 }
 
@@ -1457,10 +1538,11 @@ impl ReputationStore for PostgresReputationStore {
         scope: &'a ReputationScope,
         user: Uuid,
         reason: &'a str,
+        limits: SoftBanLimits,
     ) -> BoxFuture<'a, Result<bool, ReputationError>> {
         Box::pin(async move {
             let start = Instant::now();
-            let result = self.soft_ban_impl(scope, user, reason).await;
+            let result = self.soft_ban_impl(scope, user, reason, limits).await;
             metrics::record_call(
                 "soft_ban",
                 outcome_of(&result),
@@ -1475,10 +1557,13 @@ impl ReputationStore for PostgresReputationStore {
         scope: &'a ReputationScope,
         user: Uuid,
         only_reason: &'a str,
+        limits: SoftBanLimits,
     ) -> BoxFuture<'a, Result<bool, ReputationError>> {
         Box::pin(async move {
             let start = Instant::now();
-            let result = self.lift_soft_ban_impl(scope, user, only_reason).await;
+            let result = self
+                .lift_soft_ban_impl(scope, user, only_reason, limits)
+                .await;
             metrics::record_call(
                 "lift_soft_ban",
                 outcome_of(&result),
