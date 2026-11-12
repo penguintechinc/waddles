@@ -388,7 +388,7 @@ def load_catalog(catalog_path: Path) -> tuple[CatalogEntry, ...]:
                 language=item["language"],
                 manifest_path=item["manifest_path"],
                 artifact_path=item["artifact_path"],
-                activation_targets=targets or (ActivationTarget(tenant_slug="global"),),
+                activation_targets=targets or (ActivationTarget(tenant_slug="default"),),
                 source_dir=str(item.get("source_dir") or ""),
             )
         )
@@ -1296,7 +1296,7 @@ async def _ensure_sentinel_community(install_dal: AsyncDB, *, tenant_id: int) ->
     await raw_sql_write(
         install_dal,
         "INSERT INTO communities (id, tenant_id, name, is_active, is_public) "
-        "VALUES (:id, COALESCE((SELECT id FROM tenants WHERE slug = 'global'), :tenant_id), "
+        "VALUES (:id, COALESCE((SELECT id FROM tenants WHERE slug = 'default'), :tenant_id), "
         ":name, FALSE, FALSE) ON CONFLICT (id) DO NOTHING",
         {
             "id": TENANT_WIDE_COMMUNITY_SENTINEL,

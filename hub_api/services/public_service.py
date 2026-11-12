@@ -15,7 +15,7 @@ task's own SECURITY note calls this out explicitly ("public endpoints
 ... don't leak private/cross-tenant data").
 
 Fix: resolve a `TenantContext` for `HubAPIConfig.default_tenant_slug`
-(env `DEFAULT_TENANT_SLUG`, default `"global"` -- the same fallback
+(env `DEFAULT_TENANT_SLUG`, default `"default"` -- the same fallback
 `login()`/OAuth already use for pre-auth flows, see `auth_service.py`/
 `oauth_service.py`'s own `DEFAULT_TENANT_SLUG` notes) and run every
 `communities` query through `flask_core.tenancy.tenant_scoped()` -- the

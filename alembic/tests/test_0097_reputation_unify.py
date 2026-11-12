@@ -60,7 +60,7 @@ class TestMigrationMetadata:
         cfg = Config(str(_ROOT / "alembic.ini"))
         cfg.set_main_option("script_location", str(_ROOT / "alembic"))
         heads = ScriptDirectory.from_config(cfg).get_heads()
-        assert heads == ["0097_reputation_unify"]
+        assert heads == ["0098_system_tenant_global_admin"]
 
 
 @pytest.fixture(scope="module")

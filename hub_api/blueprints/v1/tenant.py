@@ -453,7 +453,9 @@ async def remove_tenant_admin(
     async_dal, dal = _dal()
     try:
         tenant_id = _tenant_id(tenant_slug)
-        await svc.remove_tenant_admin(async_dal, dal, tenant_id=tenant_id, user_id=user_id)
+        await svc.remove_tenant_admin(
+            async_dal, dal, tenant_id=tenant_id, user_id=user_id, tenant_slug=tenant_slug
+        )
     except ApiError as exc:
         return _err(exc)
     return MessageResponse(success=True, message="Tenant admin removed")

@@ -787,11 +787,11 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
     assert not missing, f"expected core bundles missing from bundles/core-bundles.yaml: {missing}"
 
     for entry in entries:
-        # ActivationTarget(tenant_slug="global") defaults community_id=None -- every real
+        # ActivationTarget(tenant_slug="default") defaults community_id=None -- every real
         # catalog entry activates tenant-wide, never scoped to one community (seeder.
         # ActivationTarget's own docstring: community_id=None is NOT a skip, see
         # activate_tenant_wide()).
-        assert entry.activation_targets == (ActivationTarget(tenant_slug="global"),)
+        assert entry.activation_targets == (ActivationTarget(tenant_slug="default"),)
 
     # regression: csping 1.0.0 is permanently retired (fix/csping-version-bump) -- alpha's
     # app_versions already had a 1.0.0 row published from the pre-#573 Dockerfile.core-bundles
@@ -804,7 +804,7 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
     assert versions_by_app_id["waddles.core.example.csping"] == "1.0.3"
 
 
-def test_load_catalog_defaults_a_missing_activation_targets_to_global(tmp_path: Path) -> None:
+def test_load_catalog_defaults_a_missing_activation_targets_to_default(tmp_path: Path) -> None:
     catalog_path = tmp_path / "catalog.yaml"
     catalog_path.write_text(
         yaml.safe_dump(
@@ -823,7 +823,7 @@ def test_load_catalog_defaults_a_missing_activation_targets_to_global(tmp_path: 
         encoding="utf-8",
     )
     entries = load_catalog(catalog_path)
-    assert entries[0].activation_targets == (ActivationTarget(tenant_slug="global"),)
+    assert entries[0].activation_targets == (ActivationTarget(tenant_slug="default"),)
 
 
 def test_load_catalog_accepts_a_connector_tools_wit_world_row(tmp_path: Path) -> None:

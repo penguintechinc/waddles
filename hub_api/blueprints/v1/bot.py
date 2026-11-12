@@ -48,6 +48,7 @@ from quart_schema import validate_request, validate_response
 from services import bot_ai_chatter, bot_ai_knowledge, bot_rcon, bot_shoutout
 from services.bot_tables import bind_bot_tables, community_belongs_to_tenant
 from services.errors import ApiError
+from services.global_identity import is_global_admin_sync
 
 bot_bp = Blueprint("v1_bot", __name__, url_prefix="/api/v1/admin")
 
@@ -630,11 +631,10 @@ async def _check_optional_community(community_id: int | None) -> tuple[dict[str,
 
 
 def _is_super_admin_sync(dal: Any, user_id: int) -> bool:
-    """DB-authoritative `hub_users.is_super_admin` lookup (never the JWT `roles` claim)."""
+    """DB-authoritative system-tenant-admin lookup (never the JWT `roles` claim)."""
     if user_id <= 0:
         return False
-    row = dal(dal.hub_users.id == user_id).select().first()
-    return bool(row is not None and row.is_super_admin)
+    return is_global_admin_sync(dal, user_id)
 
 
 async def _caller_is_super_admin() -> bool:

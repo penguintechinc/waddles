@@ -316,6 +316,7 @@ RULES: tuple[Rule, ...] = (
     delete("support_tickets", hub("reporter_user_id")),
     delete("support_ticket_comments", hub("author_user_id")),
     delete("tenant_admins", hub("user_id")),
+    delete("tenant_members", hub("user_id")),
     delete("user_access_tokens", hub("user_id")),
     delete("user_calendar_settings", hub("hub_user_id")),
     delete("user_labels", hub("user_id")),

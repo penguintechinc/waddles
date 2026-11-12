@@ -74,7 +74,7 @@ bundles:
     manifest_path: ping.manifest.yaml
     artifact_path: ping.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.pyping
     version: "1.0.2"
@@ -83,7 +83,7 @@ bundles:
     manifest_path: pyping.manifest.yaml
     artifact_path: pyping.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # C#-toolchain feasibility spike (spec
   # docs/superpowers/specs/2026-09-14-rust-data-plane-design.md S18 R13 / D35). Built by
@@ -104,7 +104,7 @@ bundles:
     manifest_path: csping.manifest.yaml
     artifact_path: csping.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # Batch 1 of first-party Python command bundles (2026-10-03, token-safe set -- relay/kv
   # only, no handle echoed back, so these ship ahead of the PII-tokenization pipeline
@@ -131,7 +131,7 @@ bundles:
     manifest_path: eightball.manifest.yaml
     artifact_path: eightball.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.roll
     version: "1.0.6"
@@ -140,7 +140,7 @@ bundles:
     manifest_path: roll.manifest.yaml
     artifact_path: roll.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # First Python core bundles to declare the `storage.kv` permission (lurk, count) --
   # see hub_api/services/bundle_approval_service.py::KV_PERMISSION_ID.
@@ -162,7 +162,7 @@ bundles:
     manifest_path: lurk.manifest.yaml
     artifact_path: lurk.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # 1.0.3: promoted from a trivial self-counter to dynamic, per-community named counters --
   # see bundles/python/count/src/app.py's own module docstring (feature/count-dynamic-counters).
@@ -176,7 +176,7 @@ bundles:
     manifest_path: count.manifest.yaml
     artifact_path: count.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # Generic per-community custom TEXT commands + timers (Twitch-style `!command set/remove/
   # list`, plus direct `!<name>` invocation). Second Python core bundle (after count/lurk) to
@@ -191,7 +191,7 @@ bundles:
     manifest_path: command.manifest.yaml
     artifact_path: command.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # Batch 1 of 11 example Python app bundles (2026-10-06, feature/bundle-batch1-registration):
   # kv-only minigames/utilities built post-#638 (SDK kv-key charset validation), no DB
@@ -215,7 +215,7 @@ bundles:
     manifest_path: rps.manifest.yaml
     artifact_path: rps.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.music
     version: "1.0.6"
@@ -224,7 +224,7 @@ bundles:
     manifest_path: music.manifest.yaml
     artifact_path: music.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.coinflip
     version: "1.0.6"
@@ -233,7 +233,7 @@ bundles:
     manifest_path: coinflip.manifest.yaml
     artifact_path: coinflip.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # `waddles.command-announce` has a known command-prefix collision with the legacy
   # `core/svc_process/builtin_handlers/community_announcements_process.py` / `..._action.py`
@@ -248,7 +248,7 @@ bundles:
     manifest_path: announce.manifest.yaml
     artifact_path: announce.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.raffle
     version: "1.0.6"
@@ -257,7 +257,7 @@ bundles:
     manifest_path: raffle.manifest.yaml
     artifact_path: raffle.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.social
     version: "1.0.5"
@@ -266,7 +266,7 @@ bundles:
     manifest_path: social.manifest.yaml
     artifact_path: social.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.socials
     version: "1.0.4"
@@ -275,7 +275,7 @@ bundles:
     manifest_path: socials.manifest.yaml
     artifact_path: socials.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.wheel
     version: "1.0.6"
@@ -284,7 +284,7 @@ bundles:
     manifest_path: wheel.manifest.yaml
     artifact_path: wheel.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.love
     version: "1.0.5"
@@ -293,7 +293,7 @@ bundles:
     manifest_path: love.manifest.yaml
     artifact_path: love.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.roulette
     version: "1.0.6"
@@ -302,7 +302,7 @@ bundles:
     manifest_path: roulette.manifest.yaml
     artifact_path: roulette.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.joke
     version: "1.0.6"
@@ -311,7 +311,7 @@ bundles:
     manifest_path: joke.manifest.yaml
     artifact_path: joke.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.first
     version: "1.0.6"
@@ -320,7 +320,7 @@ bundles:
     manifest_path: first.manifest.yaml
     artifact_path: first.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # Batch 2 of example Python app bundles (2026-10-08, feat/register-batch2-bundles):
   # kv-only minigames/utilities (about/compliment/rules/trivia/hangman/countdown/remind/
@@ -337,7 +337,7 @@ bundles:
     manifest_path: about.manifest.yaml
     artifact_path: about.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.compliment
     version: "1.0.6"
@@ -346,7 +346,7 @@ bundles:
     manifest_path: compliment.manifest.yaml
     artifact_path: compliment.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.rules
     version: "1.0.6"
@@ -355,7 +355,7 @@ bundles:
     manifest_path: rules.manifest.yaml
     artifact_path: rules.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.trivia
     version: "1.0.5"
@@ -364,7 +364,7 @@ bundles:
     manifest_path: trivia.manifest.yaml
     artifact_path: trivia.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.hangman
     version: "1.0.5"
@@ -373,7 +373,7 @@ bundles:
     manifest_path: hangman.manifest.yaml
     artifact_path: hangman.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.countdown
     version: "1.0.5"
@@ -382,7 +382,7 @@ bundles:
     manifest_path: countdown.manifest.yaml
     artifact_path: countdown.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.remind
     version: "1.0.5"
@@ -391,7 +391,7 @@ bundles:
     manifest_path: remind.manifest.yaml
     artifact_path: remind.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.duel
     version: "1.0.6"
@@ -400,7 +400,7 @@ bundles:
     manifest_path: duel.manifest.yaml
     artifact_path: duel.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.slots
     version: "1.0.6"
@@ -409,7 +409,7 @@ bundles:
     manifest_path: slots.manifest.yaml
     artifact_path: slots.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.fish
     version: "1.0.6"
@@ -418,7 +418,7 @@ bundles:
     manifest_path: fish.manifest.yaml
     artifact_path: fish.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.poll
     version: "1.0.5"
@@ -427,7 +427,7 @@ bundles:
     manifest_path: poll.manifest.yaml
     artifact_path: poll.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.shoutout
     version: "1.0.7"
@@ -436,7 +436,7 @@ bundles:
     manifest_path: shoutout.manifest.yaml
     artifact_path: shoutout.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # Batch 3 of example Python app bundles (2026-10-08, feat/register-batch3-bundles):
   # three DB-backed economy bundles (rank, loyalty, inventory -- each grants `db` via a
@@ -454,7 +454,7 @@ bundles:
     manifest_path: rank.manifest.yaml
     artifact_path: rank.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.quote
     version: "1.0.6"
@@ -463,7 +463,7 @@ bundles:
     manifest_path: quote.manifest.yaml
     artifact_path: quote.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.loyalty
     version: "1.0.7"
@@ -473,7 +473,7 @@ bundles:
     manifest_path: loyalty.manifest.yaml
     artifact_path: loyalty.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.inventory
     version: "1.0.6"
@@ -482,7 +482,7 @@ bundles:
     manifest_path: inventory.manifest.yaml
     artifact_path: inventory.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.choose
     version: "1.0.4"
@@ -491,7 +491,7 @@ bundles:
     manifest_path: choose.manifest.yaml
     artifact_path: choose.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.dadjoke
     version: "1.0.6"
@@ -500,7 +500,7 @@ bundles:
     manifest_path: dadjoke.manifest.yaml
     artifact_path: dadjoke.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.wave
     version: "1.0.4"
@@ -509,7 +509,7 @@ bundles:
     manifest_path: wave.manifest.yaml
     artifact_path: wave.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.slap
     version: "1.0.4"
@@ -518,7 +518,7 @@ bundles:
     manifest_path: slap.manifest.yaml
     artifact_path: slap.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.hug
     version: "1.0.3"
@@ -527,7 +527,7 @@ bundles:
     manifest_path: hug.manifest.yaml
     artifact_path: hug.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.boop
     version: "1.0.3"
@@ -536,7 +536,7 @@ bundles:
     manifest_path: boop.manifest.yaml
     artifact_path: boop.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.highfive
     version: "1.0.3"
@@ -545,7 +545,7 @@ bundles:
     manifest_path: highfive.manifest.yaml
     artifact_path: highfive.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # Facts pack: three stateless, self-contained random-content bundles (no kv, no external
   # API calls), each gated behind its own `waddles.command-<name>` flag (default OFF).
@@ -556,7 +556,7 @@ bundles:
     manifest_path: catfact.manifest.yaml
     artifact_path: catfact.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.dogfact
     version: "1.0.3"
@@ -565,7 +565,7 @@ bundles:
     manifest_path: dogfact.manifest.yaml
     artifact_path: dogfact.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.advice
     version: "1.0.3"
@@ -574,7 +574,7 @@ bundles:
     manifest_path: advice.manifest.yaml
     artifact_path: advice.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.scramble
     version: "1.0.3"
@@ -583,7 +583,7 @@ bundles:
     manifest_path: scramble.manifest.yaml
     artifact_path: scramble.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.guess
     version: "1.0.3"
@@ -592,7 +592,7 @@ bundles:
     manifest_path: guess.manifest.yaml
     artifact_path: guess.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.rip
     version: "1.0.4"
@@ -601,7 +601,7 @@ bundles:
     manifest_path: rip.manifest.yaml
     artifact_path: rip.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.hype
     version: "1.0.4"
@@ -610,7 +610,7 @@ bundles:
     manifest_path: hype.manifest.yaml
     artifact_path: hype.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.cringe
     version: "1.0.4"
@@ -619,7 +619,7 @@ bundles:
     manifest_path: cringe.manifest.yaml
     artifact_path: cringe.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.gamble
     version: "1.0.4"
@@ -628,7 +628,7 @@ bundles:
     manifest_path: gamble.manifest.yaml
     artifact_path: gamble.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.greeter
     version: "1.0.3"
@@ -637,7 +637,7 @@ bundles:
     manifest_path: greeter.manifest.yaml
     artifact_path: greeter.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.giveaway
     version: "1.0.3"
@@ -646,7 +646,7 @@ bundles:
     manifest_path: giveaway.manifest.yaml
     artifact_path: giveaway.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.heist
     version: "1.0.4"
@@ -655,7 +655,7 @@ bundles:
     manifest_path: heist.manifest.yaml
     artifact_path: heist.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.dice
     version: "1.0.3"
@@ -664,7 +664,7 @@ bundles:
     manifest_path: dice.manifest.yaml
     artifact_path: dice.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.discord
     version: "1.0.4"
@@ -673,7 +673,7 @@ bundles:
     manifest_path: discord.manifest.yaml
     artifact_path: discord.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.vote
     version: "1.0.4"
@@ -682,7 +682,7 @@ bundles:
     manifest_path: vote.manifest.yaml
     artifact_path: vote.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.fortune
     version: "1.0.3"
@@ -691,7 +691,7 @@ bundles:
     manifest_path: fortune.manifest.yaml
     artifact_path: fortune.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.event
     version: "1.0.4"
@@ -700,7 +700,7 @@ bundles:
     manifest_path: event.manifest.yaml
     artifact_path: event.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # Wix integration (#485): `!wix` membership status/link over the Wix REST API (GET), with
   # default-off plan-role / event-sync modules driven by the Wix webhook connector, calling the Discord
@@ -713,7 +713,7 @@ bundles:
     manifest_path: wix.manifest.yaml
     artifact_path: wix.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.echo
     version: "1.0.3"
@@ -722,7 +722,7 @@ bundles:
     manifest_path: echo.manifest.yaml
     artifact_path: echo.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.waddle
     version: "1.0.3"
@@ -731,7 +731,7 @@ bundles:
     manifest_path: waddle.manifest.yaml
     artifact_path: waddle.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.hello
     version: "1.0.3"
@@ -740,7 +740,7 @@ bundles:
     manifest_path: hello.manifest.yaml
     artifact_path: hello.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.bot
     version: "1.0.3"
@@ -749,7 +749,7 @@ bundles:
     manifest_path: bot.manifest.yaml
     artifact_path: bot.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.time
     version: "1.0.3"
@@ -758,7 +758,7 @@ bundles:
     manifest_path: time.manifest.yaml
     artifact_path: time.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.bookmark
     version: "1.0.4"
@@ -767,7 +767,7 @@ bundles:
     manifest_path: bookmark.manifest.yaml
     artifact_path: bookmark.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.lfg
     version: "1.0.4"
@@ -776,7 +776,7 @@ bundles:
     manifest_path: lfg.manifest.yaml
     artifact_path: lfg.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.ticket
     version: "1.0.4"
@@ -785,7 +785,7 @@ bundles:
     manifest_path: ticket.manifest.yaml
     artifact_path: ticket.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.label
     version: "1.0.4"
@@ -794,7 +794,7 @@ bundles:
     manifest_path: label.manifest.yaml
     artifact_path: label.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.faq
     version: "1.0.2"
@@ -803,7 +803,7 @@ bundles:
     manifest_path: faq.manifest.yaml
     artifact_path: faq.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.death
     version: "1.0.4"
@@ -812,7 +812,7 @@ bundles:
     manifest_path: death.manifest.yaml
     artifact_path: death.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.roast
     version: "1.0.3"
@@ -821,7 +821,7 @@ bundles:
     manifest_path: roast.manifest.yaml
     artifact_path: roast.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.ship
     version: "1.0.4"
@@ -830,7 +830,7 @@ bundles:
     manifest_path: ship.manifest.yaml
     artifact_path: ship.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.iq
     version: "1.0.4"
@@ -839,7 +839,7 @@ bundles:
     manifest_path: iq.manifest.yaml
     artifact_path: iq.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.mood
     version: "1.0.3"
@@ -848,7 +848,7 @@ bundles:
     manifest_path: mood.manifest.yaml
     artifact_path: mood.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.winner
     version: "1.0.4"
@@ -857,7 +857,7 @@ bundles:
     manifest_path: winner.manifest.yaml
     artifact_path: winner.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # Utility pack (2026-10-09, feature/bundles-utility-pack): alias / lastseen / dailycounter /
   # weather. All gate behind `waddles.command-<name>` flags (default OFF) inside `transform()`;
@@ -873,7 +873,7 @@ bundles:
     manifest_path: alias.manifest.yaml
     artifact_path: alias.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.lastseen
     version: "1.0.4"
@@ -882,7 +882,7 @@ bundles:
     manifest_path: lastseen.manifest.yaml
     artifact_path: lastseen.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.memories
     version: "1.0.3"
@@ -891,7 +891,7 @@ bundles:
     manifest_path: memories.manifest.yaml
     artifact_path: memories.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.dailycounter
     version: "1.0.4"
@@ -900,7 +900,7 @@ bundles:
     manifest_path: dailycounter.manifest.yaml
     artifact_path: dailycounter.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.uptime
     version: "1.0.3"
@@ -909,7 +909,7 @@ bundles:
     manifest_path: uptime.manifest.yaml
     artifact_path: uptime.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.weather
     version: "1.0.3"
@@ -918,7 +918,7 @@ bundles:
     manifest_path: weather.manifest.yaml
     artifact_path: weather.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.pronouns
     version: "1.0.3"
@@ -927,7 +927,7 @@ bundles:
     manifest_path: pronouns.manifest.yaml
     artifact_path: pronouns.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.secret
     version: "1.0.1"
@@ -936,7 +936,7 @@ bundles:
     manifest_path: secret.manifest.yaml
     artifact_path: secret.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.donate
     version: "1.0.3"
@@ -945,7 +945,7 @@ bundles:
     manifest_path: donate.manifest.yaml
     artifact_path: donate.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.merch
     version: "1.0.3"
@@ -954,7 +954,7 @@ bundles:
     manifest_path: merch.manifest.yaml
     artifact_path: merch.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.birthday
     version: "1.0.4"
@@ -963,7 +963,7 @@ bundles:
     manifest_path: birthday.manifest.yaml
     artifact_path: birthday.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # Hardened command-bundle batch (feature/bundle-batch-integration): 37 first-party Python
   # bundles, all 1.0.0 (never published before, so no version-retirement history). Same shape
@@ -988,7 +988,7 @@ bundles:
     manifest_path: affirmation.manifest.yaml
     artifact_path: affirmation.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.clap
     version: "1.0.1"
@@ -997,7 +997,7 @@ bundles:
     manifest_path: clap.manifest.yaml
     artifact_path: clap.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.commands
     version: "1.0.1"
@@ -1006,7 +1006,7 @@ bundles:
     manifest_path: commands.manifest.yaml
     artifact_path: commands.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.dance
     version: "1.0.1"
@@ -1015,7 +1015,7 @@ bundles:
     manifest_path: dance.manifest.yaml
     artifact_path: dance.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.emojify
     version: "1.0.1"
@@ -1024,7 +1024,7 @@ bundles:
     manifest_path: emojify.manifest.yaml
     artifact_path: emojify.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.fact
     version: "1.0.1"
@@ -1033,7 +1033,7 @@ bundles:
     manifest_path: fact.manifest.yaml
     artifact_path: fact.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.horoscope
     version: "1.0.1"
@@ -1042,7 +1042,7 @@ bundles:
     manifest_path: horoscope.manifest.yaml
     artifact_path: horoscope.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.insult
     version: "1.0.1"
@@ -1051,7 +1051,7 @@ bundles:
     manifest_path: insult.manifest.yaml
     artifact_path: insult.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.kiss
     version: "1.0.1"
@@ -1060,7 +1060,7 @@ bundles:
     manifest_path: kiss.manifest.yaml
     artifact_path: kiss.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.mock
     version: "1.0.1"
@@ -1069,7 +1069,7 @@ bundles:
     manifest_path: mock.manifest.yaml
     artifact_path: mock.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.motivate
     version: "1.0.1"
@@ -1078,7 +1078,7 @@ bundles:
     manifest_path: motivate.manifest.yaml
     artifact_path: motivate.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.numberfact
     version: "1.0.1"
@@ -1087,7 +1087,7 @@ bundles:
     manifest_path: numberfact.manifest.yaml
     artifact_path: numberfact.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.pat
     version: "1.0.1"
@@ -1096,7 +1096,7 @@ bundles:
     manifest_path: pat.manifest.yaml
     artifact_path: pat.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.pickup
     version: "1.0.1"
@@ -1105,7 +1105,7 @@ bundles:
     manifest_path: pickup.manifest.yaml
     artifact_path: pickup.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.poke
     version: "1.0.1"
@@ -1114,7 +1114,7 @@ bundles:
     manifest_path: poke.manifest.yaml
     artifact_path: poke.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.rate
     version: "1.0.1"
@@ -1123,7 +1123,7 @@ bundles:
     manifest_path: rate.manifest.yaml
     artifact_path: rate.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.reverse
     version: "1.0.1"
@@ -1132,7 +1132,7 @@ bundles:
     manifest_path: reverse.manifest.yaml
     artifact_path: reverse.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.riddle
     version: "1.0.1"
@@ -1141,7 +1141,7 @@ bundles:
     manifest_path: riddle.manifest.yaml
     artifact_path: riddle.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.say
     version: "1.0.1"
@@ -1150,7 +1150,7 @@ bundles:
     manifest_path: say.manifest.yaml
     artifact_path: say.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.truthordare
     version: "1.0.1"
@@ -1159,7 +1159,7 @@ bundles:
     manifest_path: truthordare.manifest.yaml
     artifact_path: truthordare.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.uwu
     version: "1.0.1"
@@ -1168,7 +1168,7 @@ bundles:
     manifest_path: uwu.manifest.yaml
     artifact_path: uwu.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.vibecheck
     version: "1.0.1"
@@ -1177,7 +1177,7 @@ bundles:
     manifest_path: vibecheck.manifest.yaml
     artifact_path: vibecheck.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.wordcount
     version: "1.0.1"
@@ -1186,7 +1186,7 @@ bundles:
     manifest_path: wordcount.manifest.yaml
     artifact_path: wordcount.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.wouldyourather
     version: "1.0.1"
@@ -1195,7 +1195,7 @@ bundles:
     manifest_path: wouldyourather.manifest.yaml
     artifact_path: wouldyourather.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.yomama
     version: "1.0.1"
@@ -1204,7 +1204,7 @@ bundles:
     manifest_path: yomama.manifest.yaml
     artifact_path: yomama.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # 12 bundles on `stage-next` (economy + AI):
   - app_id: waddles.core.example.ask
@@ -1215,7 +1215,7 @@ bundles:
     manifest_path: ask.manifest.yaml
     artifact_path: ask.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.define
     version: "1.0.1"
@@ -1225,7 +1225,7 @@ bundles:
     manifest_path: define.manifest.yaml
     artifact_path: define.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.defuse
     version: "1.0.1"
@@ -1235,7 +1235,7 @@ bundles:
     manifest_path: defuse.manifest.yaml
     artifact_path: defuse.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.eli5
     version: "1.0.1"
@@ -1245,7 +1245,7 @@ bundles:
     manifest_path: eli5.manifest.yaml
     artifact_path: eli5.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.jackpot
     version: "1.0.1"
@@ -1255,7 +1255,7 @@ bundles:
     manifest_path: jackpot.manifest.yaml
     artifact_path: jackpot.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.rephrase
     version: "1.0.1"
@@ -1265,7 +1265,7 @@ bundles:
     manifest_path: rephrase.manifest.yaml
     artifact_path: rephrase.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.sentiment
     version: "1.0.1"
@@ -1275,7 +1275,7 @@ bundles:
     manifest_path: sentiment.manifest.yaml
     artifact_path: sentiment.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.steal
     version: "1.0.1"
@@ -1285,7 +1285,7 @@ bundles:
     manifest_path: steal.manifest.yaml
     artifact_path: steal.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.summarize
     version: "1.0.1"
@@ -1295,7 +1295,7 @@ bundles:
     manifest_path: summarize.manifest.yaml
     artifact_path: summarize.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.tldr
     version: "1.0.1"
@@ -1305,7 +1305,7 @@ bundles:
     manifest_path: tldr.manifest.yaml
     artifact_path: tldr.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.top
     version: "1.0.1"
@@ -1315,7 +1315,7 @@ bundles:
     manifest_path: top.manifest.yaml
     artifact_path: top.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.translate
     version: "1.0.1"
@@ -1325,7 +1325,7 @@ bundles:
     manifest_path: translate.manifest.yaml
     artifact_path: translate.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # Second dozen of the hardened command-bundle batch (feature/bundle-batch-integration): 12
   # more first-party Python bundles, all 1.0.0 (registered for the first time -- never
@@ -1350,7 +1350,7 @@ bundles:
     manifest_path: customcommand.manifest.yaml
     artifact_path: customcommand.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.counter
     version: "1.0.1"
@@ -1359,7 +1359,7 @@ bundles:
     manifest_path: counter.manifest.yaml
     artifact_path: counter.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.queue
     version: "1.0.1"
@@ -1368,7 +1368,7 @@ bundles:
     manifest_path: queue.manifest.yaml
     artifact_path: queue.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.timer
     version: "1.0.1"
@@ -1377,7 +1377,7 @@ bundles:
     manifest_path: timer.manifest.yaml
     artifact_path: timer.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.level
     version: "1.0.1"
@@ -1386,7 +1386,7 @@ bundles:
     manifest_path: level.manifest.yaml
     artifact_path: level.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.hypetrain
     version: "1.0.1"
@@ -1395,7 +1395,7 @@ bundles:
     manifest_path: hypetrain.manifest.yaml
     artifact_path: hypetrain.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.keywordgiveaway
     version: "1.0.1"
@@ -1404,7 +1404,7 @@ bundles:
     manifest_path: keywordgiveaway.manifest.yaml
     artifact_path: keywordgiveaway.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.bingo
     version: "1.0.1"
@@ -1413,7 +1413,7 @@ bundles:
     manifest_path: bingo.manifest.yaml
     artifact_path: bingo.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # 4 bundles on `stage-next` (economy + identity.resolve host capabilities):
   - app_id: waddles.core.example.prediction
@@ -1424,7 +1424,7 @@ bundles:
     manifest_path: prediction.manifest.yaml
     artifact_path: prediction.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.lottery
     version: "1.0.1"
@@ -1434,7 +1434,7 @@ bundles:
     manifest_path: lottery.manifest.yaml
     artifact_path: lottery.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.blackjack
     version: "1.0.1"
@@ -1444,7 +1444,7 @@ bundles:
     manifest_path: blackjack.manifest.yaml
     artifact_path: blackjack.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.chatguard
     version: "1.1.0"
@@ -1454,7 +1454,7 @@ bundles:
     manifest_path: chatguard.manifest.yaml
     artifact_path: chatguard.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
   # bundle-MCP-tools P5: reputation SERVICE bundle (Rust, always-on `kind: service`). Built by
   # bundles/Dockerfile.core-bundles's rust-bundle-builder stage (cargo-component, NOT the Python
@@ -1470,7 +1470,7 @@ bundles:
     manifest_path: reputation.manifest.yaml
     artifact_path: reputation.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # Catalog bundle `ai` (P0b): AI SERVICE (Rust, always-on `kind: service`, world stage-tools).
@@ -1485,7 +1485,7 @@ bundles:
     manifest_path: ai.manifest.yaml
     artifact_path: ai.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # Atomic community currency service, installed by the trusted core seeder.
@@ -1498,7 +1498,7 @@ bundles:
     manifest_path: economy.manifest.yaml
     artifact_path: economy.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # bundle-MCP-tools P6b: twitch platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
@@ -1512,7 +1512,7 @@ bundles:
     manifest_path: twitch.manifest.yaml
     artifact_path: twitch.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # bundle-MCP-tools P6b: discord platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
@@ -1526,7 +1526,7 @@ bundles:
     manifest_path: discord-connector.manifest.yaml
     artifact_path: discord-connector.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # bundle-MCP-tools P6b: youtube platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
@@ -1540,7 +1540,7 @@ bundles:
     manifest_path: youtube.manifest.yaml
     artifact_path: youtube.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # Kick platform service bundle (`kind: service`, `connector-tools` world): Pusher chat + signed
@@ -1555,7 +1555,7 @@ bundles:
     manifest_path: kick.manifest.yaml
     artifact_path: kick.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # Community feed reader (#484): `!feed` events/info from a per-community configured public
@@ -1567,7 +1567,7 @@ bundles:
     manifest_path: community-feed.manifest.yaml
     artifact_path: community-feed.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # Wix connector (Rust `kind: service`, `connector-tools` world): inbound webhooks (verified by svc-ingest
@@ -1582,7 +1582,7 @@ bundles:
     manifest_path: wix-connector.manifest.yaml
     artifact_path: wix-connector.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # RSI Spectrum platform CONNECTOR (gh #486, Rust `kind: service`, `connector` world, inbound-only).
@@ -1596,7 +1596,7 @@ bundles:
     manifest_path: spectrum.manifest.yaml
     artifact_path: spectrum.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # Twitch clips APP bundle (Rust, `stage-next-tools` world): `!clip`/`!clips` over the Twitch
@@ -1623,7 +1623,7 @@ bundles:
     manifest_path: gameserver.manifest.yaml
     artifact_path: gameserver.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   - app_id: waddles.core.example.game-servers
@@ -1634,7 +1634,7 @@ bundles:
     manifest_path: game-servers.manifest.yaml
     artifact_path: game-servers.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # AI Teammates APP bundle (Rust, `stage-next-tools` world): Researcher, Receptionist, Producer --
@@ -1647,7 +1647,7 @@ bundles:
     manifest_path: ai-teammates.manifest.yaml
     artifact_path: ai-teammates.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # Calendar APP bundle (Rust, `stage-next-tools`): community events, RSVP, approvals, `!calendar`
@@ -1662,7 +1662,7 @@ bundles:
     manifest_path: calendar.manifest.yaml
     artifact_path: calendar.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # DJ app bundle (Rust, `stage-next-tools`): playlists, !sr song requests, mod queue controls,
@@ -1675,7 +1675,7 @@ bundles:
     manifest_path: dj.manifest.yaml
     artifact_path: dj.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # Reputation ACCRUAL app (Rust, `stage-next-tools`, `provides: reputation-logic`): default logic
@@ -1704,7 +1704,7 @@ bundles:
     manifest_path: music-soundcloud.manifest.yaml
     artifact_path: music-soundcloud.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # WebRTC control-plane SERVICE bundle (Rust `kind: service`, `stage-tools-webrtc` world): tools over
@@ -1718,7 +1718,7 @@ bundles:
     manifest_path: webrtc.manifest.yaml
     artifact_path: webrtc.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # Rooms APP bundle (Rust, `stage-next-tools` world): per-community / per-event / virtual rooms over
@@ -1743,7 +1743,7 @@ bundles:
     manifest_path: music-youtube.manifest.yaml
     artifact_path: music-youtube.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # live-now APP bundle (Rust, stage-next-tools): community who's-live + !live + go-live announcements,
@@ -1757,7 +1757,7 @@ bundles:
     manifest_path: live-now.manifest.yaml
     artifact_path: live-now.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # Spotify music SERVICE bundle (Rust `kind: service`, world stage-tools): music.spotify.*
@@ -1772,5 +1772,5 @@ bundles:
     manifest_path: music-spotify.manifest.yaml
     artifact_path: music-spotify.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
