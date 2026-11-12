@@ -838,6 +838,14 @@ async fn soft_bans_route_only_through_the_floor_wrappers_and_manual_bans_are_unt
         .await,
         "1|system:floor"
     );
+    // Still below the floor: the SQL refuses the lift (typed not-recovered).
+    assert_eq!(
+        f.store
+            .lift_soft_ban(&scope(), u, FLOOR_SOFT_BAN_REASON)
+            .await,
+        Ok(false)
+    );
+    set_balance_su(&f, u, 600).await;
     assert_eq!(
         f.store
             .lift_soft_ban(&scope(), u, FLOOR_SOFT_BAN_REASON)
@@ -989,4 +997,132 @@ async fn a_retried_adjust_with_the_same_key_is_counted_once() {
     );
     assert_eq!(f.store.get(&scope(), f.member).await, Ok(605));
     assert_eq!(ledger_count(&f).await, 1);
+}
+
+async fn set_balance_su(f: &Fixture, user: Uuid, balance: i64) {
+    exec(
+        &f.su,
+        &format!(
+            "UPDATE bundle_reputation_scores SET balance = {balance} \
+             WHERE community_id = 10 AND user_uuid = '{user}'"
+        ),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_floor_lift_while_the_score_is_still_below_the_floor_is_not_an_error_and_keeps_the_ban() {
+    let f = fixture().await;
+    policy(&f, 1000, true).await; // floor 550
+    apply(&f, f.member, -100, ReasonClass::Moderation, "m1")
+        .await
+        .unwrap(); // 500
+    assert_eq!(
+        f.store
+            .soft_ban(&scope(), f.member, FLOOR_SOFT_BAN_REASON)
+            .await,
+        Ok(true)
+    );
+    assert_eq!(
+        f.store
+            .lift_soft_ban(&scope(), f.member, FLOOR_SOFT_BAN_REASON)
+            .await,
+        Ok(false),
+        "floor_still_breached is a typed not-recovered result"
+    );
+    assert_eq!(f.store.is_soft_banned(&scope(), f.member).await, Ok(true));
+}
+
+#[tokio::test]
+async fn a_floor_lift_after_recovery_clears_the_ban() {
+    let f = fixture().await;
+    policy(&f, 1000, true).await;
+    apply(&f, f.member, -100, ReasonClass::Moderation, "m1")
+        .await
+        .unwrap();
+    f.store
+        .soft_ban(&scope(), f.member, FLOOR_SOFT_BAN_REASON)
+        .await
+        .unwrap();
+    set_balance_su(&f, f.member, 600).await; // recovered without going through apply
+    assert_eq!(
+        f.store
+            .lift_soft_ban(&scope(), f.member, FLOOR_SOFT_BAN_REASON)
+            .await,
+        Ok(true)
+    );
+    assert_eq!(f.store.is_soft_banned(&scope(), f.member).await, Ok(false));
+}
+
+#[tokio::test]
+async fn floor_lifts_are_quota_limited_in_sql_and_map_to_rate_limited() {
+    let f = fixture().await;
+    policy(&f, 1000, true).await;
+    exec(
+        &f.su,
+        "UPDATE bundle_reputation_policy SET floor_lift_user_daily_quota = 1 WHERE community_id = 10",
+    )
+    .await;
+    apply(&f, f.member, -100, ReasonClass::Moderation, "m1")
+        .await
+        .unwrap();
+    // First ban/recover/lift cycle consumes the 1/day per-user lift quota.
+    f.store
+        .soft_ban(&scope(), f.member, FLOOR_SOFT_BAN_REASON)
+        .await
+        .unwrap();
+    set_balance_su(&f, f.member, 600).await;
+    assert_eq!(
+        f.store
+            .lift_soft_ban(&scope(), f.member, FLOOR_SOFT_BAN_REASON)
+            .await,
+        Ok(true)
+    );
+    // Second cycle: a ban again, recovery again, the lift is refused.
+    set_balance_su(&f, f.member, 500).await;
+    f.store
+        .soft_ban(&scope(), f.member, FLOOR_SOFT_BAN_REASON)
+        .await
+        .unwrap();
+    set_balance_su(&f, f.member, 600).await;
+    assert!(matches!(
+        f.store
+            .lift_soft_ban(&scope(), f.member, FLOOR_SOFT_BAN_REASON)
+            .await,
+        Err(ReputationError::RateLimited { .. })
+    ));
+    assert_eq!(f.store.is_soft_banned(&scope(), f.member).await, Ok(true));
+}
+
+#[tokio::test]
+async fn the_bundle_role_is_denied_direct_writes_on_every_reputation_table() {
+    let f = fixture().await;
+    let u = f.member;
+    for sql in [
+        format!("INSERT INTO bundle_reputation_scores (tenant_id, community_id, user_uuid) VALUES (1, 10, '{}')", Uuid::new_v4()),
+        "UPDATE bundle_reputation_scores SET balance = 850".to_string(),
+        "DELETE FROM bundle_reputation_scores".to_string(),
+        "INSERT INTO bundle_reputation_adjustments (tenant_id, community_id, target_user_uuid, scope, delta, reason_code) VALUES (1, 10, 'x', 'community', 1, '1')".to_string(),
+        "UPDATE bundle_reputation_adjustments SET delta = 0".to_string(),
+        format!("INSERT INTO bundle_reputation_soft_bans (tenant_id, community_id, user_uuid, reason_code, set_by) VALUES (1, 10, '{u}', 1, 'x')"),
+        "INSERT INTO bundle_reputation_policy (tenant_id, community_id) VALUES (1, 10)".to_string(),
+        "UPDATE bundle_reputation_tenant_policy SET tenant_auto_ban_enabled = true".to_string(),
+    ] {
+        let err = f.rep_conn.execute_unprepared(&sql).await.unwrap_err().to_string();
+        assert!(err.contains("permission denied"), "{sql} -> {err}");
+    }
+    // Reads it legitimately needs still work.
+    for t in [
+        "bundle_reputation_scores",
+        "bundle_reputation_adjustments",
+        "bundle_reputation_policy",
+    ] {
+        assert!(
+            f.rep_conn
+                .execute_unprepared(&format!("SELECT 1 FROM {t}"))
+                .await
+                .is_ok(),
+            "{t}"
+        );
+    }
 }
