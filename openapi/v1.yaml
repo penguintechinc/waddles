@@ -4160,6 +4160,67 @@ components:
       - ok
       title: RewrapDTO
       type: object
+    RoleMirrorMapping:
+      description: One `discord_role_mirror_mappings` row -- the wire-shape DTO for
+        API responses.
+      properties:
+        community_id:
+          title: Community Id
+          type: integer
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        id:
+          title: Id
+          type: integer
+        last_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Error
+        last_roles_added:
+          title: Last Roles Added
+          type: integer
+        last_roles_removed:
+          title: Last Roles Removed
+          type: integer
+        last_skipped_not_member:
+          title: Last Skipped Not Member
+          type: integer
+        last_synced_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Synced At
+        source_guild_id:
+          title: Source Guild Id
+          type: string
+        source_role_id:
+          title: Source Role Id
+          type: string
+        target_guild_id:
+          title: Target Guild Id
+          type: string
+        target_role_id:
+          title: Target Role Id
+          type: string
+      required:
+      - id
+      - community_id
+      - source_guild_id
+      - source_role_id
+      - target_guild_id
+      - target_role_id
+      - last_synced_at
+      - last_roles_added
+      - last_roles_removed
+      - last_skipped_not_member
+      - last_error
+      - created_at
+      title: RoleMirrorMapping
+      type: object
     RoleSyncBinding:
       description: One `community_role_sync_bindings` row -- the wire-shape DTO for
         blueprint/API responses.
@@ -15947,6 +16008,87 @@ paths:
         default:
           description: Undocumented response
       summary: '`POST /api/v1/communities/<id>/connections/<provider>/authorize`.'
+  /api/v1/communities/{community_id}/discord/role-mirrors:
+    get:
+      description: ''
+      operationId: get_list_role_mirrors
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: List-of-mirror-mappings response envelope.
+                properties:
+                  mappings:
+                    items:
+                      $ref: '#/components/schemas/RoleMirrorMapping'
+                    title: Mappings
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - mappings
+                title: RoleMirrorMappingListResponse
+                type: object
+          description: List-of-mirror-mappings response envelope.
+      summary: '`GET /api/v1/communities/<id>/discord/role-mirrors` -- mappings +
+        last sync counters.'
+    post:
+      description: ''
+      operationId: post_create_role_mirror
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                description: Single mirror-mapping response envelope.
+                properties:
+                  mapping:
+                    $ref: '#/components/schemas/RoleMirrorMapping'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - mapping
+                title: RoleMirrorMappingResponse
+                type: object
+          description: Single mirror-mapping response envelope.
+      summary: '`POST /api/v1/communities/<id>/discord/role-mirrors` -- one-way source
+        -> target mapping.'
+  /api/v1/communities/{community_id}/discord/role-mirrors/{mapping_id}:
+    delete:
+      description: ''
+      operationId: delete_delete_role_mirror
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: mapping_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        default:
+          description: Undocumented response
+      summary: '`DELETE /api/v1/communities/<id>/discord/role-mirrors/<mapping_id>`.'
   /api/v1/communities/{community_id}/discord/roles:
     get:
       description: ''

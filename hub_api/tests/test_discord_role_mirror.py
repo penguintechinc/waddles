@@ -1,0 +1,505 @@
+"""Cross-guild Discord role mirror: mapping validation, reconcile pass, routes (migration 0099).
+
+Discord is faked through the `DiscordRoleTargetClient` seam (no network); the 429 handling test
+drives the real `HttpDiscordRoleTargetClient` over `httpx.MockTransport`.
+"""
+
+from __future__ import annotations
+
+import json as json_module
+from typing import Any
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+from quart import Quart
+from quart_schema import QuartSchema
+
+from blueprints.v1.guild_pairing import guild_pairing_bp
+from services import discord_role_mirror as mirror
+from services import role_sync_service as svc
+from services.credential_resolver import PlatformCredentials, TransportUnavailable
+from services.discord_guild_roles import DiscordRole
+from services.errors import ApiError
+from services.guild_pairing import create_pairing
+
+G_A = "111111111111111111"  # gitleaks:allow - fake snowflakes
+G_B = "222222222222222222"
+G_C = "333333333333333333"
+R_SRC = "900000000000000001"
+R_DST = "900000000000000002"
+R_OTHER = "900000000000000003"
+U1, U2, U3 = "700000000000000001", "700000000000000002", "700000000000000003"
+
+
+@pytest.fixture(autouse=True)
+def _flag_on(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """PostHog flag ON for the reconcile pass; individual tests override."""
+    stub = AsyncMock(return_value=True)
+    monkeypatch.setattr(svc, "feature_enabled", stub)
+    return stub
+
+
+class _FakeGuilds:
+    """In-memory two-guild Discord: guild -> user -> role-id set; records writes."""
+
+    def __init__(self, guilds: dict[str, dict[str, set[str]]], *, complete: bool = True) -> None:
+        self.guilds = guilds
+        self.complete = complete
+        self.adds: list[tuple[str, str, str]] = []
+        self.removes: list[tuple[str, str, str]] = []
+
+    async def get_member_role_ids(self, *, guild_id: str, user_id: str) -> set[str] | None:
+        return self.guilds[guild_id].get(user_id)
+
+    async def add_role(self, *, guild_id: str, user_id: str, role_id: str) -> bool:
+        self.adds.append((guild_id, user_id, role_id))
+        self.guilds[guild_id][user_id].add(role_id)
+        return True
+
+    async def remove_role(self, *, guild_id: str, user_id: str, role_id: str) -> bool:
+        self.removes.append((guild_id, user_id, role_id))
+        self.guilds[guild_id][user_id].discard(role_id)
+        return True
+
+    async def list_guild_members(self, *, guild_id: str) -> list[svc.DiscordGuildMember]:
+        return (await self.list_guild_members_checked(guild_id=guild_id)).members
+
+    async def list_guild_members_checked(self, *, guild_id: str) -> svc.GuildMemberSnapshot:
+        members = [
+            svc.DiscordGuildMember(user_id=u, role_ids=frozenset(r))
+            for u, r in self.guilds[guild_id].items()
+        ]
+        return svc.GuildMemberSnapshot(members=members, complete=self.complete)
+
+
+class _Creds:
+    async def resolve(
+        self, dal: Any, *, tenant_id: int, is_global_tenant: bool, platform: str
+    ) -> PlatformCredentials:
+        return PlatformCredentials(
+            tenant_id=tenant_id,
+            platform=platform,
+            payload={"bot_token": "fake-bot-token"},  # noqa: S106 - test fixture
+            source="tenant",
+        )
+
+
+class _NoCreds:
+    async def resolve(self, *a: Any, **k: Any) -> Any:
+        raise TransportUnavailable("no creds")
+
+
+def _lister(roles_by_guild: dict[str, list[str]]) -> Any:
+    async def _list(dal: Any, community_id: int, guild_id: str) -> list[DiscordRole]:
+        return [DiscordRole(id=r, name=r, color=0, position=1) for r in roles_by_guild[guild_id]]
+
+    return _list
+
+
+_ALL_ROLES = {
+    G_A: [R_SRC, R_DST, R_OTHER],
+    G_B: [R_SRC, R_DST, R_OTHER],
+    G_C: [R_SRC, R_DST],
+}
+
+
+def _pair(dal: Any, community_id: int, *guilds: str) -> None:
+    for g in guilds:
+        create_pairing(
+            dal,
+            community_id,
+            discord_guild_id=g,
+            direction="bidirectional",
+            role_name_prefix="[T]",
+            actor_user_id=None,
+        )
+
+
+async def _map(dal: Any, community_id: int, sg: str, sr: str, tg: str, tr: str) -> Any:
+    return await mirror.create_mapping(
+        dal,
+        community_id,
+        source_guild_id=sg,
+        source_role_id=sr,
+        target_guild_id=tg,
+        target_role_id=tr,
+        list_roles=_lister(_ALL_ROLES),
+    )
+
+
+async def _run(dal: Any, fake: _FakeGuilds, creds: Any = None) -> mirror.MirrorSummary:
+    return await mirror.reconcile_role_mirrors(
+        dal, credential_resolver=creds or _Creds(), make_discord_client=lambda _t: fake
+    )
+
+
+class TestMappingValidation:
+    async def test_create_and_list(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        m = await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        assert (m.source_guild_id, m.target_guild_id) == (G_A, G_B)
+        assert [x.id for x in mirror.list_mappings(dal, cid)] == [m.id]
+
+    async def test_guild_not_paired_rejected(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        assert exc.value.code == "DISCORD_PAIRING_NOT_FOUND"
+
+    async def test_guild_paired_to_other_community_rejected(self, guild_pairing_db: Any) -> None:
+        dal, cid, tenant_id, _g = guild_pairing_db
+        other = dal.communities.insert(name="other-community", tenant_id=tenant_id)
+        dal.commit()
+        _pair(dal, cid, G_A)
+        _pair(dal, other, G_B)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        assert exc.value.status_code == 404
+
+    async def test_different_tenant_guild_rejected(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        other_tenant = dal.tenants.insert(slug="other-corp", is_active=True, is_global=False)
+        other = dal.communities.insert(name="oc", tenant_id=other_tenant)
+        dal.commit()
+        _pair(dal, cid, G_A)
+        _pair(dal, other, G_B)
+        with pytest.raises(ApiError):
+            await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+
+    async def test_same_guild_rejected(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid, G_A, R_SRC, G_A, R_DST)
+        assert exc.value.status_code == 400
+
+    @pytest.mark.parametrize("bad", ["", "abc", "12 3"])
+    async def test_bad_snowflake_rejected(self, guild_pairing_db: Any, bad: str) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid, G_A, bad, G_B, R_DST)
+        assert exc.value.status_code == 400
+
+    async def test_missing_role_rejected(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        with pytest.raises(ApiError) as exc:
+            await mirror.create_mapping(
+                dal,
+                cid,
+                source_guild_id=G_A,
+                source_role_id=R_SRC,
+                target_guild_id=G_B,
+                target_role_id="999999999999999999",
+                list_roles=_lister(_ALL_ROLES),
+            )
+        assert exc.value.status_code == 404
+
+    async def test_duplicate_rejected(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        assert exc.value.status_code == 409
+
+    async def test_direct_cycle_rejected(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid, G_B, R_DST, G_A, R_SRC)
+        assert exc.value.status_code == 409
+
+    async def test_transitive_cycle_rejected_but_other_role_pair_ok(
+        self, guild_pairing_db: Any
+    ) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B, G_C)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        await _map(dal, cid, G_B, R_DST, G_C, R_DST)
+        with pytest.raises(ApiError):
+            await _map(dal, cid, G_C, R_DST, G_A, R_SRC)
+        # A different role pair in the reverse direction is NOT a cycle.
+        await _map(dal, cid, G_B, R_OTHER, G_A, R_OTHER)
+
+    def test_would_create_cycle_pure(self) -> None:
+        a, b, c = ("g1", "r"), ("g2", "r"), ("g3", "r")
+        assert mirror.would_create_cycle([(a, b)], (b, a))
+        assert mirror.would_create_cycle([(a, b), (b, c)], (c, a))
+        assert not mirror.would_create_cycle([(a, b)], (a, c))
+
+    async def test_delete_mapping(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        m = await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        assert mirror.delete_mapping(dal, cid, m.id) is True
+        assert mirror.list_mappings(dal, cid) == []
+        assert mirror.delete_mapping(dal, cid, m.id) is False
+
+
+class TestReconcile:
+    async def _setup(self, dal: Any, cid: int) -> Any:
+        _pair(dal, cid, G_A, G_B)
+        return await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+
+    async def test_adds_target_role_and_skips_non_member(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        m = await self._setup(dal, cid)
+        fake = _FakeGuilds(
+            {G_A: {U1: {R_SRC}, U2: {R_SRC}, U3: set()}, G_B: {U1: set(), U3: set()}}
+        )
+        summary = await _run(dal, fake)
+        assert fake.adds == [(G_B, U1, R_DST)]  # U2 not in B -> skipped; U3 lacks src role
+        assert (summary.roles_added, summary.skipped_not_member, summary.mappings_failed) == (
+            1,
+            1,
+            0,
+        )
+        row = mirror.list_mappings(dal, cid)[0]
+        assert (row.id, row.last_roles_added, row.last_skipped_not_member) == (m.id, 1, 1)
+        assert row.last_error is None and row.last_synced_at is not None
+
+    async def test_idempotent_second_pass(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        await self._setup(dal, cid)
+        fake = _FakeGuilds({G_A: {U1: {R_SRC}}, G_B: {U1: set()}})
+        await _run(dal, fake)
+        await _run(dal, fake)
+        assert len(fake.adds) == 1 and fake.removes == []
+
+    async def test_removes_only_mirror_granted_role(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        await self._setup(dal, cid)
+        # U1: mirror will grant. U3: already holds target role manually, also holds source.
+        fake = _FakeGuilds({G_A: {U1: {R_SRC}, U3: {R_SRC}}, G_B: {U1: set(), U3: {R_DST}}})
+        await _run(dal, fake)
+        assert fake.adds == [(G_B, U1, R_DST)]
+        # Both lose the source role.
+        fake.guilds[G_A][U1].discard(R_SRC)
+        fake.guilds[G_A][U3].discard(R_SRC)
+        summary = await _run(dal, fake)
+        assert fake.removes == [(G_B, U1, R_DST)]  # U3's manual role survives
+        assert R_DST in fake.guilds[G_B][U3]
+        assert summary.roles_removed == 1
+        # Ledger is clean now -> a further pass is a no-op.
+        await _run(dal, fake)
+        assert len(fake.removes) == 1
+
+    async def test_no_removal_when_member_list_incomplete(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        await self._setup(dal, cid)
+        fake = _FakeGuilds({G_A: {U1: {R_SRC}}, G_B: {U1: set()}})
+        await _run(dal, fake)
+        fake.guilds[G_A][U1].discard(R_SRC)
+        fake.complete = False
+        await _run(dal, fake)
+        assert fake.removes == []  # unprovable read => demote nobody
+
+    async def test_shared_target_role_kept_while_other_mapping_holds_it(
+        self, guild_pairing_db: Any
+    ) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        await _map(dal, cid, G_A, R_OTHER, G_B, R_DST)
+        fake = _FakeGuilds({G_A: {U1: {R_SRC, R_OTHER}}, G_B: {U1: set()}})
+        await _run(dal, fake)
+        assert len(fake.adds) == 1  # second mapping sees the role the first just granted
+        fake.guilds[G_A][U1].discard(R_SRC)  # still held via the OTHER mapping's source role
+        await _run(dal, fake)
+        assert fake.removes == [] and R_DST in fake.guilds[G_B][U1]
+        fake.guilds[G_A][U1].discard(R_OTHER)
+        await _run(dal, fake)
+        assert fake.removes == [(G_B, U1, R_DST)]
+
+    async def test_flag_off_does_nothing(self, guild_pairing_db: Any, _flag_on: AsyncMock) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        await self._setup(dal, cid)
+        _flag_on.return_value = False
+        fake = _FakeGuilds({G_A: {U1: {R_SRC}}, G_B: {U1: set()}})
+        await _run(dal, fake)
+        assert fake.adds == []
+
+    async def test_credential_failure_marks_error(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        await self._setup(dal, cid)
+        summary = await _run(dal, _FakeGuilds({G_A: {}, G_B: {}}), creds=_NoCreds())
+        assert summary.mappings_failed == 1
+        assert mirror.list_mappings(dal, cid)[0].last_error == "TransportUnavailable"
+
+    async def test_discord_error_is_isolated_and_recorded(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        await self._setup(dal, cid)
+        fake = _FakeGuilds({G_A: {U1: {R_SRC}}, G_B: {U1: set()}})
+        fake.add_role = AsyncMock(side_effect=svc.DiscordSyncError("403"))  # type: ignore[method-assign]
+        summary = await _run(dal, fake)
+        assert summary.mappings_failed == 1
+        assert mirror.list_mappings(dal, cid)[0].last_error == "DiscordSyncError"
+
+    async def test_batch_runs_mirror_pass(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        await self._setup(dal, cid)
+        fake = _FakeGuilds({G_A: {U1: {R_SRC}}, G_B: {U1: set()}})
+
+        async def _no_token(_c: int) -> str | None:
+            return None
+
+        summary = await svc.run_role_sync_reconcile_batch(
+            dal,
+            get_broadcaster_user_token=_no_token,
+            credential_resolver=_Creds(),
+            make_discord_client=lambda _t: fake,
+        )
+        assert summary.mirror_roles_added == 1 and summary.mirror_mappings_examined == 1
+
+
+class TestRateLimit:
+    async def test_429_retry_after_honoured_then_succeeds(self) -> None:
+        calls = {"n": 0}
+        slept: list[float] = []
+
+        def handler(_r: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(429, headers={"Retry-After": "2"})
+            return httpx.Response(204)
+
+        async def _sleep(s: float) -> None:
+            slept.append(s)
+
+        client = svc.HttpDiscordRoleTargetClient(
+            httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            bot_token="t",  # noqa: S106 - test fixture
+            api_base="https://t.test",
+            rate_limit_retries=2,
+            sleep=_sleep,
+        )
+        assert await client.add_role(guild_id="g", user_id="u", role_id="r") is True
+        assert slept == [2.0] and calls["n"] == 2
+
+    async def test_429_exhausted_raises_and_retry_after_capped(self) -> None:
+        slept: list[float] = []
+
+        async def _sleep(s: float) -> None:
+            slept.append(s)
+
+        client = svc.HttpDiscordRoleTargetClient(
+            httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda _r: httpx.Response(429, headers={"Retry-After": "9999"})
+                )
+            ),
+            bot_token="t",  # noqa: S106 - test fixture
+            api_base="https://t.test",
+            rate_limit_retries=2,
+            sleep=_sleep,
+        )
+        with pytest.raises(svc.DiscordSyncError, match="429"):
+            await client.remove_role(guild_id="g", user_id="u", role_id="r")
+        assert slept == [10.0, 10.0]
+
+
+@pytest.fixture
+def app(guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch) -> Quart:
+    import blueprints.v1.guild_pairing as bp
+
+    dal, *_ = guild_pairing_db
+    quart_app = Quart(__name__)
+    QuartSchema(quart_app)
+    quart_app.register_blueprint(guild_pairing_bp)
+    quart_app.config["dal"] = dal
+    monkeypatch.setattr(bp, "feature_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(bp, "_list_roles_for_mirror", _lister(_ALL_ROLES))
+    return quart_app
+
+
+class TestRoutes:
+    def _body(self, **o: str) -> str:
+        b = {
+            "source_guild_id": G_A,
+            "source_role_id": R_SRC,
+            "target_guild_id": G_B,
+            "target_role_id": R_DST,
+        }
+        b.update(o)
+        return json_module.dumps(b)
+
+    async def test_member_forbidden(
+        self, app: Quart, auth_headers: Any, guild_pairing_db: Any
+    ) -> None:
+        _d, cid, *_ = guild_pairing_db
+        c = app.test_client()
+        url = f"/api/v1/communities/{cid}/discord/role-mirrors"
+        assert (await c.get(url, headers=auth_headers(scope="profile:read"))).status_code == 403
+        r = await c.post(
+            url,
+            headers={
+                **auth_headers(scope="community.guild_pairing:read"),
+                "Content-Type": "application/json",
+            },
+            data=self._body(),
+        )
+        assert r.status_code == 403
+        assert (
+            await c.delete(f"{url}/1", headers=auth_headers(scope="community.guild_pairing:read"))
+        ).status_code == 403
+
+    async def test_create_list_delete_roundtrip(
+        self, app: Quart, auth_headers: Any, guild_pairing_db: Any
+    ) -> None:
+        dal, cid, *_ = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        c = app.test_client()
+        url = f"/api/v1/communities/{cid}/discord/role-mirrors"
+        w = {
+            **auth_headers(scope="community.guild_pairing:write"),
+            "Content-Type": "application/json",
+        }
+        r = await c.post(url, headers=w, data=self._body())
+        assert r.status_code == 201
+        mapping = (await r.get_json())["mapping"]
+        assert set(mapping) == {
+            "id",
+            "community_id",
+            "source_guild_id",
+            "source_role_id",
+            "target_guild_id",
+            "target_role_id",
+            "last_synced_at",
+            "last_roles_added",
+            "last_roles_removed",
+            "last_skipped_not_member",
+            "last_error",
+            "created_at",
+        }
+        lst = await c.get(url, headers=auth_headers(scope="community.guild_pairing:read"))
+        assert [m["id"] for m in (await lst.get_json())["mappings"]] == [mapping["id"]]
+        rev = await c.post(
+            url,
+            headers=w,
+            data=self._body(
+                source_guild_id=G_B, source_role_id=R_DST, target_guild_id=G_A, target_role_id=R_SRC
+            ),
+        )
+        assert rev.status_code == 409
+        d = await c.delete(f"{url}/{mapping['id']}", headers=w)
+        assert d.status_code == 204
+        assert (await c.delete(f"{url}/{mapping['id']}", headers=w)).status_code == 404
+
+    async def test_cross_tenant_community_404(
+        self, app: Quart, auth_headers: Any, guild_pairing_db: Any
+    ) -> None:
+        dal, *_ = guild_pairing_db
+        t2 = dal.tenants.insert(slug="other-corp", is_active=True, is_global=False)
+        c2 = dal.communities.insert(name="oc", tenant_id=t2)
+        dal.commit()
+        r = await app.test_client().get(
+            f"/api/v1/communities/{c2}/discord/role-mirrors",
+            headers=auth_headers(scope="community.guild_pairing:read"),
+        )
+        assert r.status_code == 404

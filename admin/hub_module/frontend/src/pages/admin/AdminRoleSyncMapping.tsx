@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FormModalBuilder, type FormField } from '@penguintechinc/react-libs';
 import PairingStatusCard from '../../components/roleSync/PairingStatusCard';
 import BindingTable from '../../components/roleSync/BindingTable';
+import MirrorRolesSection from '../../components/roleSync/MirrorRolesSection';
 import { useAuth } from '../../contexts/AuthContext';
 import { useFeatureFlag } from '../../lib/useFeatureFlag';
 import {
@@ -344,6 +345,14 @@ export default function AdminRoleSyncMapping() {
         <p role="alert" className="mt-3 text-sm text-red-400">
           {extractErrorMessage(deleteMutation.error, 'Failed to delete role binding. Please try again.')}
         </p>
+      )}
+
+      {(pairings?.length ?? 0) > 0 && (
+        <MirrorRolesSection
+          communityId={communityId}
+          pairings={pairings ?? []}
+          canManage={canManage}
+        />
       )}
 
       <FormModalBuilder

@@ -111,6 +111,7 @@ Discord username.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import Awaitable, Callable
@@ -146,6 +147,8 @@ _REQUEST_TIMEOUT_SECONDS = 10.0
 _MAX_PAGES = 20
 #: Discord's own documented max page size for `GET /guilds/{id}/members`.
 _DISCORD_MEMBER_PAGE_SIZE = 1000
+#: Upper bound on one `Retry-After` sleep so a hostile/buggy header can't stall the CronJob.
+_MAX_RETRY_AFTER_SECONDS = 10.0
 
 #: Opt-in for demote-on-role-remove (Discord -> platform): comma-separated
 #: `guild_tenant_pairings.id` list. Unset/empty (the default) = grant-only, exactly the
@@ -396,12 +399,38 @@ class HttpDiscordRoleTargetClient:
     """
 
     def __init__(
-        self, http_client: httpx.AsyncClient, *, bot_token: str, api_base: str = DISCORD_API_BASE
+        self,
+        http_client: httpx.AsyncClient,
+        *,
+        bot_token: str,
+        api_base: str = DISCORD_API_BASE,
+        rate_limit_retries: int = 0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
-        """Bind to a shared `httpx.AsyncClient` + this pairing's tenant's resolved bot token."""
+        """Bind to a shared `httpx.AsyncClient` + this pairing's tenant's resolved bot token.
+
+        `rate_limit_retries` > 0 makes a 429 wait `Retry-After` (capped) and retry that many
+        times before surfacing the usual `DiscordSyncError`; 0 (default) keeps fail-fast.
+        """
         self._http = http_client
         self._bot_token = bot_token
         self._api_base = api_base
+        self._rate_limit_retries = rate_limit_retries
+        self._sleep = sleep
+
+    async def _send(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Issue one request, honouring Discord's 429 `Retry-After` up to the retry budget."""
+        attempt = 0
+        while True:
+            response = await self._http.request(method, url, **kwargs)
+            if response.status_code != 429 or attempt >= self._rate_limit_retries:
+                return response
+            attempt += 1
+            try:
+                wait = float(response.headers.get("Retry-After", "1"))
+            except ValueError:
+                wait = 1.0
+            await self._sleep(min(max(wait, 0.0), _MAX_RETRY_AFTER_SECONDS))
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bot {self._bot_token}"}
@@ -409,7 +438,8 @@ class HttpDiscordRoleTargetClient:
     async def get_member_role_ids(self, *, guild_id: str, user_id: str) -> set[str] | None:
         """`GET /guilds/{guild_id}/members/{user_id}` -- `None` if not a guild member (404)."""
         try:
-            response = await self._http.get(
+            response = await self._send(
+                "GET",
                 f"{self._api_base}/guilds/{guild_id}/members/{user_id}",
                 headers=self._headers(),
                 timeout=_REQUEST_TIMEOUT_SECONDS,
@@ -425,7 +455,7 @@ class HttpDiscordRoleTargetClient:
         method = "PUT" if add else "DELETE"
         action = "role add" if add else "role remove"
         try:
-            response = await self._http.request(
+            response = await self._send(
                 method,
                 f"{self._api_base}/guilds/{guild_id}/members/{user_id}/roles/{role_id}",
                 headers=self._headers(),
@@ -469,7 +499,8 @@ class HttpDiscordRoleTargetClient:
             if after:
                 params["after"] = after
             try:
-                response = await self._http.get(
+                response = await self._send(
+                    "GET",
                     f"{self._api_base}/guilds/{guild_id}/members",
                     headers=self._headers(),
                     params=params,
@@ -543,6 +574,11 @@ class ReconcileSummary:
     roles_added: int = 0
     roles_removed: int = 0
     community_roles_applied: int = 0
+    mirror_mappings_examined: int = 0
+    mirror_mappings_failed: int = 0
+    mirror_roles_added: int = 0
+    mirror_roles_removed: int = 0
+    mirror_skipped_not_member: int = 0
 
 
 def _list_enabled_pairings(dal: Any) -> list[Any]:
@@ -1179,7 +1215,9 @@ async def run_role_sync_reconcile_batch(
     if make_discord_client is None:
 
         def make_discord_client(bot_token: str) -> DiscordRoleTargetClient:
-            return HttpDiscordRoleTargetClient(bound_http_client, bot_token=bot_token)
+            return HttpDiscordRoleTargetClient(
+                bound_http_client, bot_token=bot_token, rate_limit_retries=2
+            )
 
     summary = ReconcileSummary()
     try:
@@ -1237,6 +1275,27 @@ async def run_role_sync_reconcile_batch(
                 summary.pairings_failed += 1
             else:
                 summary.pairings_synced += 1
+
+        # Cross-guild Discord role mirror (migration 0099): independent of pairing direction.
+        # Imported lazily -- the mirror module imports this one.
+        from services.discord_role_mirror import reconcile_role_mirrors
+
+        try:
+            mirror = await reconcile_role_mirrors(
+                dal,
+                credential_resolver=credential_resolver,
+                make_discord_client=make_discord_client,
+            )
+        except Exception as exc:  # noqa: BLE001 - mirror failure must not mask the pairing summary
+            logger.error("role_mirror.batch_failed error_type=%s", type(exc).__name__)
+            _sync_errors_counter.add(1)
+            summary.mirror_mappings_failed += 1
+        else:
+            summary.mirror_mappings_examined = mirror.mappings_examined
+            summary.mirror_mappings_failed = mirror.mappings_failed
+            summary.mirror_roles_added = mirror.roles_added
+            summary.mirror_roles_removed = mirror.roles_removed
+            summary.mirror_skipped_not_member = mirror.skipped_not_member
         return summary
     finally:
         if owns_http_client:
@@ -1271,7 +1330,12 @@ async def main() -> int:
         f"pairings_failed={summary.pairings_failed} "
         f"pairings_skipped_wrong_direction={summary.pairings_skipped_wrong_direction} "
         f"roles_added={summary.roles_added} roles_removed={summary.roles_removed} "
-        f"community_roles_applied={summary.community_roles_applied}"
+        f"community_roles_applied={summary.community_roles_applied} "
+        f"mirror_mappings={summary.mirror_mappings_examined} "
+        f"mirror_failed={summary.mirror_mappings_failed} "
+        f"mirror_added={summary.mirror_roles_added} "
+        f"mirror_removed={summary.mirror_roles_removed} "
+        f"mirror_skipped_not_member={summary.mirror_skipped_not_member}"
     )
     return 0
 
