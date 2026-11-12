@@ -77,7 +77,7 @@ class TestEventCalendarProxyConfigFromEnv:
         for name in ("CALENDAR_API_URL", "SERVICE_API_KEY", "CALENDAR_PROXY_TIMEOUT_MS"):
             monkeypatch.delenv(name, raising=False)
         cfg = EventCalendarProxyConfig.from_env()
-        assert cfg.base_url == "http://calendar-interaction:8038"
+        assert cfg.base_url == ""
         assert cfg.timeout_seconds == 5.0
 
     def test_reads_env_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -193,3 +193,24 @@ class TestEventCalendarProxyClientRequest:
             user_context=UserContext(user_id="u1", username="alice", role="admin"),
         )
         assert result == ProxyResult(ok=False, status_code=502, body=None)
+
+
+@pytest.mark.asyncio
+async def test_unset_base_url_returns_typed_503_and_logs_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """regression: legacy calendar-interaction deleted -- unset URL is a loud typed 503."""
+    from services.event_calendar_proxy import EventCalendarProxyClient, UserContext
+
+    client = EventCalendarProxyClient(
+        EventCalendarProxyConfig(base_url="", api_key="k", timeout_seconds=1.0)
+    )
+    with caplog.at_level("ERROR"):
+        result = await client.request(
+            "GET",
+            "/api/v1/calendar/x",
+            user_context=UserContext(user_id="u", username=None, role="user"),
+        )
+    assert (result.ok, result.status_code) == (False, 503)
+    assert result.body == {"error": "service_unavailable", "service": "calendar-interaction"}
+    assert any("event_calendar_proxy_service_unavailable" in r.message for r in caplog.records)

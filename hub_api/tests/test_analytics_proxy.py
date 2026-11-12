@@ -48,7 +48,7 @@ class TestAnalyticsProxyConfigFromEnv:
         for name in ("ANALYTICS_CORE_API_URL", "SERVICE_API_KEY", "ANALYTICS_PROXY_TIMEOUT_MS"):
             monkeypatch.delenv(name, raising=False)
         cfg = AnalyticsProxyConfig.from_env()
-        assert cfg.base_url == "http://analytics-core:8040"
+        assert cfg.base_url == ""
         assert cfg.timeout_seconds == 10.0
 
     def test_reads_env_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -174,3 +174,19 @@ class TestAnalyticsCoreProxyClientGet:
         client = AnalyticsCoreProxyClient(_CONFIG)
         result = await client.get("/api/v1/analytics/platform/summary")
         assert result == ProxyResult(ok=False, status_code=502, body=None, transport_error=True)
+
+
+@pytest.mark.asyncio
+async def test_unset_base_url_returns_typed_503_and_logs_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """regression: legacy analytics-core deleted -- unset URL is a loud typed 503."""
+    client = AnalyticsCoreProxyClient(
+        AnalyticsProxyConfig(base_url="", api_key="k", timeout_seconds=1.0)
+    )
+    with caplog.at_level("ERROR"):
+        result = await client.get("/api/v1/analytics/platform/summary")
+    assert result.ok is False
+    assert result.status_code == 503
+    assert result.body == {"error": "service_unavailable", "service": "analytics-core"}
+    assert any("analytics_proxy_service_unavailable" in r.message for r in caplog.records)

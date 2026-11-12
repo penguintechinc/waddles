@@ -125,7 +125,7 @@ class TestGracefulShutdown:
     @pytest.mark.parametrize("fixture", ["alpha_docs", "base_docs"])
     def test_grace_and_prestop_on_every_deployment(self, fixture: str, request: pytest.FixtureRequest) -> None:
         deployments = _of_kind(request.getfixturevalue(fixture), "Deployment")
-        assert len(deployments) >= 14, f"examined only {len(deployments)} Deployments"
+        assert len(deployments) >= 10, f"examined only {len(deployments)} Deployments"
         for dep in deployments:
             pod = dep["spec"]["template"]["spec"]
             name = dep["metadata"]["name"]

@@ -51,3 +51,18 @@ Absent = defaults; present-but-invalid = loud `invalid-args`, never silently def
 * The e2e fixture `core/tool_invoke_e2e/tests/fixtures/reputation_service.wasm` must be rebuilt when the bundle
   changes (see the README beside it).
 * Migration: `alembic/versions/0072_reputation_host_ops.py` (score clamp CHECK + ledger columns).
+
+## Legacy v2 defaults (reference for rebuild)
+
+Captured from the deleted `core/reputation_module` (`services/weight_manager.py`, `services/policy_enforcer.py`,
+`config.py`) before removal; see git history of `release/v3.0.X` prior to PR #1233.
+
+* Score scale: FICO-style integer, `min_score` 300, `max_score` 850, `starting_score` 600.
+* Activity weights (per event; whole integers): chat_message 1, command_usage 1, giveaway_entry -1, follow 1,
+  subscription 5 (tier2 10, tier3 20), gift_subscription 3, donation_per_dollar 1, cheer_per_100bits 1, raid 2, boost 5.
+* Moderation deltas: warn -25, timeout -50, kick -75, ban -200.
+* Tiers: exceptional 800-850, very_good 740-799, good 670-739, fair 580-669, poor 300-579.
+* Policy: `auto_ban_enabled` false by default, `auto_ban_threshold` 450 (score <= threshold triggers auto-ban,
+  recorded as an `auto_ban` row in `reputation_events`, member status set to banned); score <= 450 and above the
+  threshold produces a low-score notification only (no action).
+* Premium-community weight overrides were stored per community (`CommunityWeights.is_premium`).

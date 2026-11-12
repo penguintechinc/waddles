@@ -223,20 +223,6 @@ spec:
         # above (shared -config/-secrets objects) -- same whole-object envFrom pattern
         # svc-action.yaml/svc-ingest.yaml use for the same keys; no per-key duplicates
         # added here.
-        # gh-894 -- analytics-core was consolidated into core-data (services/core-data/app.py
-        # registers the analytics platform/user blueprints on :8040, same /api/v1/analytics prefix,
-        # same SERVICE_API_KEY from the shared -secrets Secret). hub_api/services/analytics_proxy.py
-        # defaults to the retired http://analytics-core:8040, so point it at the core-data Service.
-        # pipeline.hubApi.analyticsCoreUrl overrides; omitted only when coreData is disabled and
-        # no override is set (proxy then fails loud with a 502, never a masked 500).
-        {{- $analyticsUrl := .Values.pipeline.hubApi.analyticsCoreUrl | default "" }}
-        {{- if and (not $analyticsUrl) .Values.modules.coreData.enabled }}
-        {{- $analyticsUrl = printf "http://%s-core-data.%s.svc:%v" (include "waddlebot.fullname" .) .Values.namespace .Values.modules.coreData.service.port }}
-        {{- end }}
-        {{- if $analyticsUrl }}
-        - name: ANALYTICS_CORE_API_URL
-          value: {{ $analyticsUrl | quote }}
-        {{- end }}
         - name: CONNECTIONS_STATE_TTL_S
           value: {{ .Values.pipeline.hubApi.connectionsStateTtlS | quote }}
         # feature/seaweedfs-object-storage -- least-privilege "hub-api" S3 identity
