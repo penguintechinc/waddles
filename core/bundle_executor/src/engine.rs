@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wasmtime::component::{HasData, Linker};
-use wasmtime::{Collector, Config, Engine, InstanceAllocationStrategy, PoolingAllocationConfig};
+use wasmtime::Engine;
 
 use crate::config::CliConfig;
 use crate::error::ExecutorError;
@@ -327,34 +327,9 @@ impl HasData for HasExecState {
 /// `cfg.executor_wasm_collector` is validated to be exactly `"drc"` by
 /// [`CliConfig::validate`], so this function does not re-validate it).
 pub fn build_engine(_cfg: &CliConfig) -> Result<Engine, ExecutorError> {
-    let mut config = Config::new();
-    config.wasm_component_model(true);
-    config.epoch_interruption(true);
-    // Connector spec SS0 condition 4: fuel metering alongside the epoch
-    // deadline above. Epoch ticks bound wall-clock time between yield
-    // points; fuel bounds the amount of guest-executed work directly, so a
-    // tight loop that never reaches a yield point (component-model host
-    // calls are the only yield points under `async` instantiation) still
-    // traps deterministically rather than riding out the remainder of an
-    // epoch tick. `crate::invoke::on_invoke` arms the actual per-call budget
-    // via `Store::set_fuel`; this only turns fuel accounting on for the
-    // engine -- a `Store` with accounting on and no fuel set traps
-    // immediately (zero fuel), so every call site MUST call `set_fuel`.
-    config.consume_fuel(true);
-    config.collector(Collector::DeferredReferenceCounting);
-
-    let mut pooling = PoolingAllocationConfig::default();
-    // spec SS7.2 defaults: EXECUTOR_INSTANCES_PER_BUNDLE (4) resident
-    // stores per bundle, EXECUTOR_MAX_CONCURRENT_CALLS (32) globally. The
-    // pooling allocator's own ceiling is set generously above both so a
-    // legitimate per-bundle/global config override never gets silently
-    // capped by an allocator limit not visible in SS7.3's table.
-    pooling.total_component_instances(256);
-    pooling.total_memories(256);
-    pooling.total_tables(256);
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
-
-    Ok(Engine::new(&config)?)
+    // The Config lives in `crate::engine_config` so the AOT precompiler
+    // (`crate::precompile`) builds byte-identical engines -- no drift.
+    Ok(Engine::new(&crate::engine_config::engine_config())?)
 }
 
 /// Wires every WIT import the `stage` world declares -- `context`, `http`,
