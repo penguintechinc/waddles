@@ -2998,6 +2998,31 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         migrate=migrate,
     )
 
+    # migration 0099_discord_role_mirror -- one-way cross-guild role mirror + its grant ledger.
+    dal.define_table(
+        "discord_role_mirror_mappings",
+        Field("community_id", "integer", notnull=True),
+        Field("source_guild_id", "string", length=255, notnull=True),
+        Field("source_role_id", "string", length=255, notnull=True),
+        Field("target_guild_id", "string", length=255, notnull=True),
+        Field("target_role_id", "string", length=255, notnull=True),
+        Field("last_synced_at", "datetime"),
+        Field("last_roles_added", "integer", notnull=True, default=0),
+        Field("last_roles_removed", "integer", notnull=True, default=0),
+        Field("last_skipped_not_member", "integer", notnull=True, default=0),
+        Field("last_error", "string", length=80),
+        Field("created_at", "datetime"),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "discord_role_mirror_grants",
+        Field("mapping_id", "integer", notnull=True),
+        Field("platform", "string", length=50, notnull=True, default="discord"),
+        Field("platform_user_id", "string", length=255, notnull=True),
+        Field("granted_at", "datetime"),
+        migrate=migrate,
+    )
+
 
 def bind_calendar_sync_tables(dal: Any, *, migrate: bool = False) -> None:
     """Define `calendar_events` (legacy, read/write subset) + `calendar_event_discord_syncs`.

@@ -39,6 +39,7 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_response
 
 from services import discord_guild_roles as roles_svc
+from services import discord_role_mirror as mirror_svc
 from services import guild_pairing as pairing_svc
 from services.community_common import community_in_tenant
 from services.current_user import get_current_user_id
@@ -95,6 +96,22 @@ class DiscordGuildRolesResponse:
 
     success: bool
     roles: list[roles_svc.DiscordRole]
+
+
+@dataclass(slots=True, frozen=True)
+class RoleMirrorMappingResponse:
+    """Single mirror-mapping response envelope."""
+
+    success: bool
+    mapping: mirror_svc.RoleMirrorMapping
+
+
+@dataclass(slots=True, frozen=True)
+class RoleMirrorMappingListResponse:
+    """List-of-mirror-mappings response envelope."""
+
+    success: bool
+    mappings: list[mirror_svc.RoleMirrorMapping]
 
 
 # ---------------------------------------------------------------------------
@@ -318,9 +335,6 @@ async def delete_binding(community_id: int, pairing_id: int, binding_id: int) ->
     return "", 204
 
 
-BLUEPRINTS: list[Blueprint] = [guild_pairing_bp]
-
-
 # ---------------------------------------------------------------------------
 # Discord guild roles (role-sync mapping dropdown source)
 # ---------------------------------------------------------------------------
@@ -344,3 +358,76 @@ async def list_discord_roles(
     except ApiError as exc:
         return _err(exc)
     return DiscordGuildRolesResponse(success=True, roles=roles)
+
+
+# ---------------------------------------------------------------------------
+# Cross-guild Discord role mirror (migration 0099)
+# ---------------------------------------------------------------------------
+
+
+async def _list_roles_for_mirror(dal: Any, community_id: int, guild_id: str) -> list[Any]:
+    """Role lister used to prove both mapped roles exist (live Discord check)."""
+    return await roles_svc.list_guild_roles(dal, community_id, guild_id=guild_id)
+
+
+@guild_pairing_bp.route("/communities/<int:community_id>/discord/role-mirrors", methods=["GET"])
+@tenant_middleware  # type: ignore[untyped-decorator]
+@require_scope("community.guild_pairing:read")  # type: ignore[untyped-decorator]
+@validate_response(RoleMirrorMappingListResponse)
+async def list_role_mirrors(
+    community_id: int,
+) -> RoleMirrorMappingListResponse | tuple[dict[str, object], int]:
+    """`GET /api/v1/communities/<id>/discord/role-mirrors` -- mappings + last sync counters."""
+    gate_error = await _feature_gate_and_tenant_check(community_id)
+    if gate_error is not None:
+        return gate_error
+    return RoleMirrorMappingListResponse(
+        success=True, mappings=mirror_svc.list_mappings(_dal(), community_id)
+    )
+
+
+@guild_pairing_bp.route("/communities/<int:community_id>/discord/role-mirrors", methods=["POST"])
+@tenant_middleware  # type: ignore[untyped-decorator]
+@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@validate_response(RoleMirrorMappingResponse, status_code=201)
+async def create_role_mirror(
+    community_id: int,
+) -> tuple[RoleMirrorMappingResponse, int] | tuple[dict[str, object], int]:
+    """`POST /api/v1/communities/<id>/discord/role-mirrors` -- one-way source -> target mapping."""
+    gate_error = await _feature_gate_and_tenant_check(community_id)
+    if gate_error is not None:
+        return gate_error
+    body = await request.get_json(force=True, silent=True) or {}
+    if not isinstance(body, dict):
+        return _err(bad_request("Request body must be a JSON object"))
+    try:
+        mapping = await mirror_svc.create_mapping(
+            _dal(),
+            community_id,
+            source_guild_id=body.get("source_guild_id", ""),
+            source_role_id=body.get("source_role_id", ""),
+            target_guild_id=body.get("target_guild_id", ""),
+            target_role_id=body.get("target_role_id", ""),
+            list_roles=_list_roles_for_mirror,
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return RoleMirrorMappingResponse(success=True, mapping=mapping), 201
+
+
+@guild_pairing_bp.route(
+    "/communities/<int:community_id>/discord/role-mirrors/<int:mapping_id>", methods=["DELETE"]
+)
+@tenant_middleware  # type: ignore[untyped-decorator]
+@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+async def delete_role_mirror(community_id: int, mapping_id: int) -> tuple[Any, int]:
+    """`DELETE /api/v1/communities/<id>/discord/role-mirrors/<mapping_id>`."""
+    gate_error = await _feature_gate_and_tenant_check(community_id)
+    if gate_error is not None:
+        return gate_error
+    if not mirror_svc.delete_mapping(_dal(), community_id, mapping_id):
+        return _err(not_found("Mirror mapping not found"))
+    return "", 204
+
+
+BLUEPRINTS: list[Blueprint] = [guild_pairing_bp]

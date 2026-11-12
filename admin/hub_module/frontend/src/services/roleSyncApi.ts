@@ -101,7 +101,72 @@ interface RoleSyncBindingResponse {
   binding: RoleSyncBinding;
 }
 
+/** One Discord guild role (`GET .../discord/roles`) -- `id` is a string snowflake. */
+export interface DiscordRole {
+  id: string;
+  name: string;
+  color: number;
+  position: number;
+  permissions: number;
+  managed: boolean;
+  /** Server-computed: carries a privileged permission or is a managed role -- never a mirror target. */
+  privileged: boolean;
+}
+
+/** One cross-guild role mirror mapping (`discord_role_mirror_mappings`) + last sync counters. */
+export interface RoleMirrorMapping {
+  id: number;
+  community_id: number;
+  source_guild_id: string;
+  source_role_id: string;
+  target_guild_id: string;
+  target_role_id: string;
+  last_synced_at: string | null;
+  last_roles_added: number;
+  last_roles_removed: number;
+  last_skipped_not_member: number;
+  last_error: string | null;
+  created_at: string | null;
+}
+
+export interface CreateRoleMirrorPayload {
+  source_guild_id: string;
+  source_role_id: string;
+  target_guild_id: string;
+  target_role_id: string;
+}
+
 export const roleSyncApi = {
+  /** `GET .../discord/roles?guild_id=` -- a paired guild's roles; requires `community.guild_pairing:read`. */
+  listGuildRoles: (communityId: number, guildId: string) =>
+    apiClient
+      .get<{ success: boolean; roles: DiscordRole[] }>(
+        `/api/v1/communities/${communityId}/discord/roles`,
+        { params: { guild_id: guildId } },
+      )
+      .then((res) => res.data.roles),
+
+  /** `GET .../discord/role-mirrors` -- mirror mappings + last sync counters. */
+  listMirrors: (communityId: number) =>
+    apiClient
+      .get<{ success: boolean; mappings: RoleMirrorMapping[] }>(
+        `/api/v1/communities/${communityId}/discord/role-mirrors`,
+      )
+      .then((res) => res.data.mappings),
+
+  /** `POST .../discord/role-mirrors` -- one-way source -> target mapping; requires `...:write`. */
+  createMirror: (communityId: number, payload: CreateRoleMirrorPayload) =>
+    apiClient
+      .post<{ success: boolean; mapping: RoleMirrorMapping }>(
+        `/api/v1/communities/${communityId}/discord/role-mirrors`,
+        payload,
+      )
+      .then((res) => res.data.mapping),
+
+  /** `DELETE .../discord/role-mirrors/<mappingId>`. */
+  deleteMirror: (communityId: number, mappingId: number) =>
+    apiClient.delete<void>(`/api/v1/communities/${communityId}/discord/role-mirrors/${mappingId}`),
+
   /** `GET /api/v1/communities/<communityId>/guild-pairings` -- requires `community.guild_pairing:read`. */
   listPairings: (communityId: number) =>
     apiClient

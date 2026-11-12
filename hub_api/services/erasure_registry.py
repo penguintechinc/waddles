@@ -274,6 +274,7 @@ RULES: tuple[Rule, ...] = (
     delete("community_call_rooms", hub("created_by")),
     delete("community_join_requests", hub("user_id")),
     delete("connected_calendars", hub("hub_user_id")),
+    delete("discord_role_mirror_grants", platform("platform", "platform_user_id")),
     delete("economy_balances", uuid("user_uuid")),
     delete("user_active_context", uuid("user_uuid")),
     delete("economy_ledger", uuid("user_uuid")),
