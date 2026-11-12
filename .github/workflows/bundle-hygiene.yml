@@ -124,6 +124,12 @@ jobs:
       - name: Role badges are read as strict booleans in bundles + svc-ingest (mod-gate bypass)
         run: python3 scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness
 
+      - name: Self-test the platform-flag authz gate
+        run: python3 -m pytest scripts/ci/tests/test_check_platform_flag_authz.py -v -p no:cacheprovider
+
+      - name: Bundles authorize via caller_can(scope), not is_mod/is_broadcaster badges
+        run: python3 scripts/ci/check_platform_flag_authz.py
+
       # Behavioural proof on the real modules: every bundle's gate helper denies hostile
       # non-boolean badges and admits genuine ones; every transform() forwards a string badge
       # as a real False. Asserts its own denominators (>=30 bundles, >=20 transforms exercised).

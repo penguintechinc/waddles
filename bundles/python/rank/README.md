@@ -20,8 +20,8 @@ establishes for a `db`+`kv` bundle; this bundle mirrors that shape end to end.
 | `!rank` | bare | Caller's own level + XP. |
 | `!rank <user>` | documented grammar extension (see `src/app.py`) | That user's level + XP. Level 1 / 0 XP if they have never earned any. |
 | `!rank top` | `top` sub-module | Leaderboard: top 10 ranks, highest XP first. |
-| `!rank add <amount> <user>` | `add` verb | Broadcaster/moderator only. Adds `<amount>` XP to `<user>`. |
-| `!rank sub <amount> <user>` | `sub` verb | Broadcaster/moderator only. Removes `<amount>` XP from `<user>`, clamped at `0` (never negative). |
+| `!rank add <amount> <user>` | `add` verb | Community admin only. Adds `<amount>` XP to `<user>`. |
+| `!rank sub <amount> <user>` | `sub` verb | Community admin only. Removes `<amount>` XP from `<user>`, clamped at `0` (never negative). |
 
 Any other grammar-legal verb (`enable`/`disable`/`remove`/`reset`) or a malformed `!rank ...`
 replies with usage text -- never silently dropped.
@@ -72,7 +72,7 @@ bot>    Added 150 XP to viewer. Now level 2 (150 XP).
 viewer> !rank top
 bot>    Top rank: 1. player-3f2a9c1e: level 2 (150 XP)
 viewer> !rank add 5 viewer
-bot>    only moderators/broadcasters can adjust rank XP
+bot>    only community admins can adjust rank XP
 ```
 
 ## Permissions (V2 structured)
@@ -83,8 +83,9 @@ bot>    only moderators/broadcasters can adjust rank XP
 
 `data.tables: [rank_progress]` additionally grants the `db` capability (derived by
 `bundle_approval_service._derive_capabilities`; no separate permission id). No egress. Mod gate:
-`add`/`sub` require a real `is_mod` or `is_broadcaster` `True`; **absent** badge fields (e.g. the
-Discord normalizer today) are **denied** (fail closed) with zero `kv`/`db` access.
+`add`/`sub` require `await caller_can(SCOPE_ADMIN)` (host-resolved community role); platform
+`is_mod`/`is_broadcaster` badges are never read and an unavailable host denies (fail closed),
+with zero `kv`/`db` access.
 
 ## Platforms
 

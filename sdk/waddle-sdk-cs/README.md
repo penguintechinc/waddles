@@ -197,6 +197,13 @@ Your logic class (step 1) has zero WASI-only surface, so test it in a
 target). See `bundles/csharp/superpenguin-roll/tests/
 SuperpenguinRoll.Tests.csproj` for the exact shape.
 
+## Authorization: `Authz.CallerCan` (not `is_mod`)
+
+Payload `is_mod` / `is_broadcaster` are **display-only, never authorization**. Gate privileged actions on
+`Authz.CallerCan(host.Authz, AuthzScopes.Ban, host.Log)` (`WaddleSdk.Authorization`). `IWaddleHostNext.Authz`
+defaults to deny-all; a `stage-next`/`stage-v2`/`stage-tools` bundle overrides it with an adapter over the generated
+`authz` import. Fail-closed: invalid scope (no host call), null client or any host exception returns `false`.
+
 ## Building the component
 
 ```bash

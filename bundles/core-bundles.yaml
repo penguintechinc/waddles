@@ -447,7 +447,7 @@ bundles:
   # gates its own reply behind a `waddles.command-<name>` PostHog flag (default OFF) inside
   # `transform()` -- this catalog entry only installs the bundle, it does not make it respond.
   - app_id: waddles.core.example.rank
-    version: "1.0.6"
+    version: "1.0.7"
     language: python
     wit_world: stage-next-tools
     source_dir: python/rank
@@ -640,8 +640,9 @@ bundles:
       - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.giveaway
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
+    wit_world: stage-next
     source_dir: python/giveaway
     manifest_path: giveaway.manifest.yaml
     artifact_path: giveaway.wasm
@@ -1342,10 +1343,12 @@ bundles:
   # chat trigger is `!vqueue` (renamed to dodge the music `!queue` collision); its bundle
   # directory and app_id are unchanged.
   #
-  # 8 bundles on the default `stage` world:
+  # 8 bundles on the default `stage` world (customcommand is the exception: `wit_world: stage-next`
+  # because it authorizes writes via the `authz` import):
   - app_id: waddles.core.example.customcommand
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
+    wit_world: stage-next
     source_dir: python/customcommand
     manifest_path: customcommand.manifest.yaml
     artifact_path: customcommand.wasm

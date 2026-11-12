@@ -17,9 +17,9 @@ branding shared).
 
 | Command | Who | Behavior |
 |---|---|---|
-| `!cc add <name> <response>` | mod/broadcaster | Creates `!name` (refuses to overwrite). |
-| `!cc edit <name> <response>` | mod/broadcaster | Replaces the response; the `$(count)` total is kept. `set` works too. |
-| `!cc del <name>` | mod/broadcaster | Removes the command, its counter and its index entry. `delete`/`remove` work too. |
+| `!cc add <name> <response>` | community admin | Creates `!name` (refuses to overwrite). |
+| `!cc edit <name> <response>` | community admin | Replaces the response; the `$(count)` total is kept. `set` works too. |
+| `!cc del <name>` | community admin | Removes the command, its counter and its index entry. `delete`/`remove` work too. |
 | `!cc list` | anyone | Lists the names (shortened to one chat message). |
 | `!cc` / `!cc help` | anyone | Usage and the variable list. |
 | `!<name> [args]` | anyone | Runs a stored command. |

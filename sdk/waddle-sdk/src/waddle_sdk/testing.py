@@ -53,6 +53,7 @@ __all__ = [
     "ACTION_ONLY_CAPABILITIES",
     "PROCESS_ONLY_CAPABILITIES",
     "FakeAiHost",
+    "FakeAuthzHost",
     "FakeEconomyHost",
     "FakeIdentityHost",
     "FakeKvHost",
@@ -61,6 +62,7 @@ __all__ = [
     "StageGuard",
     "StageViolationError",
     "install_fake_ai_host",
+    "install_fake_authz_host",
     "install_fake_economy_host",
     "install_fake_identity_host",
     "install_fake_platform_table_host",
@@ -526,6 +528,78 @@ def install_fake_identity_host(
 
 
 _Error_NotAllowlisted = _variant("Error_NotAllowlisted", True)
+
+#: Mirrors ``bundle_tool_call::scopes_for_role`` (community layer); unknown role -> none.
+_ROLE_SCOPES: dict[str, frozenset[str]] = {
+    "owner": frozenset(
+        f"community:{n}" for n in ("member", "vip", "moderate", "ban", "timeout", "admin", "owner")
+    ),
+    "community-admin": frozenset(
+        f"community:{n}" for n in ("member", "vip", "moderate", "ban", "timeout", "admin")
+    ),
+    "moderator": frozenset(f"community:{n}" for n in ("member", "moderate", "ban", "timeout")),
+    "vip": frozenset(("community:member", "community:vip")),
+    "member": frozenset(("community:member",)),
+}
+_ROLE_SCOPES["community-owner"] = _ROLE_SCOPES["owner"]
+
+
+@dataclass(slots=True)
+class FakeAuthzHost:
+    """In-memory stand-in for `wit_world.imports.authz`: answers from a fixed scope set.
+
+    `scopes` are the scopes the fake actor holds (`for_role` builds the set the real
+    role map grants); `unavailable` makes every call raise `Error_Unavailable`, like an
+    unreachable hub-api. `calls` records every scope the host actually received, so a
+    test can assert a malformed scope never cost a host round trip.
+    """
+
+    scopes: set[str] = field(default_factory=set)
+    unavailable: bool = False
+    calls: list[str] = field(default_factory=list)
+
+    @property
+    def call_count(self) -> int:
+        """Number of host calls received."""
+        return len(self.calls)
+
+    @classmethod
+    def for_role(cls, role: str) -> FakeAuthzHost:
+        """Return a host whose actor holds exactly the scopes `role` expands to (unknown: none)."""
+        return cls(scopes=set(_ROLE_SCOPES.get(role, frozenset())))
+
+    def caller_can(self, scope: str) -> bool:
+        """Answer like the host: raise on unavailable, else membership of `scope`."""
+        self.calls.append(scope)
+        if self.unavailable:
+            raise _FakeWitError(_Error_Unavailable("authz unavailable"))
+        return scope in self.scopes
+
+
+def install_fake_authz_host(
+    monkeypatch: Any,
+    scopes: set[str] | None = None,
+    *,
+    role: str | None = None,
+    unavailable: bool = False,
+) -> FakeAuthzHost:
+    """Install a fresh `FakeAuthzHost` as `wit_world.imports.authz` and return it.
+
+    Pass explicit `scopes`, or `role=` to get the scopes the real role map grants
+    (`FakeAuthzHost.for_role`); `unavailable=True` simulates an unreachable host.
+    """
+    host = (
+        FakeAuthzHost.for_role(role)
+        if role is not None
+        else FakeAuthzHost(scopes=set(scopes or ()))
+    )
+    host.unavailable = unavailable
+    fake_wit_world = types.ModuleType("wit_world")
+    fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
+        authz=types.SimpleNamespace(caller_can=host.caller_can)
+    )
+    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
+    return host
 
 
 @dataclass(slots=True)

@@ -193,6 +193,14 @@ def test_catalog_rows_agree_with_their_manifests_and_are_unique() -> None:
         assert not dupes, f"duplicate catalog {field}: {dupes} (two rows would overwrite)"
 
 
+#: Bundles that call `waddle_sdk.caller_can` (WIT `authz`, permission-free, stage-next only)
+#: and so need stage-next even when their permissions alone would allow `stage`. Grows with
+#: the caller-can sweep (feature/sdk-caller-can).
+AUTHZ_CALLER_APP_IDS = frozenset(
+    {"waddles.core.example.customcommand", "waddles.core.example.giveaway"}
+)
+
+
 def test_every_row_resolves_to_exactly_the_world_its_permissions_need() -> None:
     """Real catalog x real manifests: the declared world equals the required world, both ways."""
     rows = _python_rows()
@@ -200,7 +208,11 @@ def test_every_row_resolves_to_exactly_the_world_its_permissions_need() -> None:
     for row in rows:
         perms = bpb._permission_ids(_manifest(row))
         resolved = bpb.resolve_wit_world(row["app_id"], row.get("wit_world"), perms)
-        assert resolved == bpb.required_wit_world(perms), (
+        required = bpb.required_wit_world(perms)
+        if row["app_id"] in AUTHZ_CALLER_APP_IDS and required == bpb.WIT_WORLD_STAGE:
+            # `authz.caller-can` needs no permission but exists only in stage-next.
+            required = bpb.WIT_WORLD_STAGE_NEXT
+        assert resolved == required, (
             f"{row['app_id']}: resolves to {resolved!r} but its permissions need "
             f"{bpb.required_wit_world(perms)!r}"
         )

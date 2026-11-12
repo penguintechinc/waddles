@@ -16,6 +16,7 @@ import json
 from typing import Any
 
 import pytest
+from waddle_sdk.testing import FakeAuthzHost
 from test_app import (
     _FakeHost,
     _install,
@@ -64,29 +65,34 @@ def _adjust(verb: str, target: str, amount: int, **kwargs: Any) -> Any:
     )
 
 
-# -- mod gate fails closed, zero side effects
+# -- admin gate fails closed, zero side effects
 @pytest.mark.parametrize("verb", ["add", "sub"])
-@pytest.mark.parametrize(
-    ("is_mod", "is_broadcaster"),
-    [(None, None), (False, None), (None, False), (False, False)],
-    ids=["no-badges", "mod-false", "broadcaster-false", "both-false"],
-)
-def test_adjust_is_denied_without_a_true_badge_and_does_no_kv_or_db_io(
-    host: _FakeHost, verb: str, is_mod: bool | None, is_broadcaster: bool | None
+@pytest.mark.parametrize("role", ["moderator", "vip", "member", "unknown-role"])
+def test_adjust_is_denied_without_admin_scope_and_does_no_kv_or_db_io(
+    host: _FakeHost, verb: str, role: str
 ) -> None:
-    result = _adjust(verb, "alice", 50, is_mod=is_mod, is_broadcaster=is_broadcaster)
+    host.authz.scopes = set(FakeAuthzHost.for_role(role).scopes)
+    # platform badges claim mod+broadcaster; display-only, must not admit
+    result = _adjust(verb, "alice", 50, is_mod=True, is_broadcaster=True)
 
     assert result.detail == f"{verb}:denied"
     assert _reply(host) == _PERMISSION_DENIED_MSG
     assert host.kv.calls == [] and host.db.calls == []
 
 
-@pytest.mark.parametrize("badge", ["is_mod", "is_broadcaster"])
-def test_either_true_badge_may_add_then_sub(host: _FakeHost, badge: str) -> None:
-    kwargs: dict[str, Any] = {badge: True}
-    assert _adjust("add", "alice", 150, **kwargs).detail == "add"
+@pytest.mark.parametrize("verb", ["add", "sub"])
+def test_adjust_is_denied_when_authz_host_unavailable(host: _FakeHost, verb: str) -> None:
+    host.authz.unavailable = True
+    result = _adjust(verb, "alice", 50, is_mod=True)
+
+    assert result.detail == f"{verb}:denied"
+    assert host.kv.calls == [] and host.db.calls == []
+
+
+def test_admin_may_add_then_sub_without_any_badge(host: _FakeHost) -> None:
+    assert _adjust("add", "alice", 150).detail == "add"
     assert "level 2 (150 XP)" in _reply(host)
-    assert _adjust("sub", "alice", 60, **kwargs).detail == "sub"
+    assert _adjust("sub", "alice", 60).detail == "sub"
     assert "level 1 (90 XP)" in _reply(host)
 
 

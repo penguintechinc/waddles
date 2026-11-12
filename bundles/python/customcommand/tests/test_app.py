@@ -19,8 +19,9 @@ import types
 from pathlib import Path
 
 import pytest
-from waddle_sdk import identity
+from waddle_sdk import SCOPE_ADMIN, SCOPE_BAN, SCOPE_TIMEOUT, identity
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.testing import FakeAuthzHost
 
 import app
 from app import (
@@ -123,12 +124,16 @@ def fake_host(monkeypatch: pytest.MonkeyPatch):
         ),
     )
     fake_wit_world = types.ModuleType("wit_world")
+    authz = FakeAuthzHost.for_role("community-admin")  # default: admin; tests narrow it
     fake_wit_world.imports = types.SimpleNamespace(
-        kv=fake_kv, relay=relay_mod, log=log_mod
+        kv=fake_kv,
+        relay=relay_mod,
+        log=log_mod,
+        authz=types.SimpleNamespace(caller_can=authz.caller_can),
     )  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
     return types.SimpleNamespace(
-        kv=fake_kv, relay_calls=relay_calls, log_calls=log_calls
+        kv=fake_kv, relay_calls=relay_calls, log_calls=log_calls, authz=authz
     )
 
 
@@ -404,30 +409,44 @@ def test_list_is_shortened_to_one_chat_message(fake_host) -> None:
     assert "more" in reply and reply.startswith("Custom commands (60): !cmd000")
 
 
-@pytest.mark.parametrize(
-    "event_kwargs",
-    [
-        {},  # plain viewer
-        {"is_mod": "false"},  # string badge: truthy but not True
-        {"is_mod": "true"},
-        {"is_mod": 1},
-        {"is_broadcaster": "yes"},
-        {"is_mod": None, "is_broadcaster": None},  # Discord today: no badge keys at all
-    ],
-)
-@pytest.mark.parametrize("text", ["!cc add x hi", "!cc edit x hi", "!cc del x"])
-def test_mutation_requires_a_strict_true_badge_and_fails_closed(
-    text: str, event_kwargs: dict, fake_host
-) -> None:
-    reply = _say(text, **event_kwargs)
-    assert reply == "Only the broadcaster or a moderator can change custom commands."
+_MUTATIONS = ["!cc add x hi", "!cc edit x hi", "!cc del x"]
+
+
+def _assert_denied(reply: str, fake_host) -> None:
+    assert reply == "Only a community admin can change custom commands."
     assert NAMES_KEY not in fake_host.kv.store
     assert CMD_KEY_PREFIX + "x" not in fake_host.kv.store
     assert not [c for c in fake_host.kv.calls if c[0] in ("set", "increment", "delete")]
 
 
-def test_broadcaster_without_mod_badge_is_allowed(fake_host) -> None:
-    assert _say("!cc add x hi", is_mod=False, is_broadcaster=True).startswith("Added")
+@pytest.mark.parametrize("text", _MUTATIONS)
+@pytest.mark.parametrize("role", ["moderator", "vip", "member", "unknown-role"])
+def test_platform_mod_badge_without_admin_role_cannot_mutate(
+    text: str, role: str, fake_host
+) -> None:
+    fake_host.authz.scopes = set(FakeAuthzHost.for_role(role).scopes)
+    # the platform badges claim mod AND broadcaster; they are display-only and must not matter
+    reply = _say(text, is_mod=True, is_broadcaster=True)
+    _assert_denied(reply, fake_host)
+
+
+@pytest.mark.parametrize("text", _MUTATIONS)
+def test_host_unavailable_denies_mutation(text: str, fake_host) -> None:
+    fake_host.authz.unavailable = True
+    _assert_denied(_say(text, is_mod=True), fake_host)
+
+
+@pytest.mark.parametrize("role", ["community-admin", "owner"])
+def test_community_admin_can_add_without_any_badge(role: str, fake_host) -> None:
+    fake_host.authz.scopes = set(FakeAuthzHost.for_role(role).scopes)
+    assert _say("!cc add x hi", is_mod=False, is_broadcaster=False).startswith("Added")
+    assert SCOPE_ADMIN in fake_host.authz.calls
+
+
+def test_moderator_map_still_allows_ban_and_timeout() -> None:
+    mod = FakeAuthzHost.for_role("moderator")
+    assert mod.caller_can(SCOPE_BAN) and mod.caller_can(SCOPE_TIMEOUT)
+    assert not mod.caller_can(SCOPE_ADMIN)
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@ using WaddleSdk.Ai;
 using WaddleSdk.Clock;
 using WaddleSdk.Economy;
 using WaddleSdk.Flags;
+using WaddleSdk.Authorization;
 using WaddleSdk.Identity;
 using WaddleSdk.Media;
 using WaddleSdk.Overlay;
@@ -125,6 +126,40 @@ public sealed class FakeEconomyClient : IEconomyClient
     public void PayPot(IReadOnlyList<EconomyCredit> winners) => BatchCredit(winners);
 }
 
+/// <summary>Holds a fixed scope set (see <see cref="ForRole"/>); can throw like an unavailable host; counts host calls.</summary>
+public sealed class FakeAuthzClient : IAuthzClient
+{
+    public HashSet<string> Scopes { get; } = [];
+    public Exception? ThrowOnCall { get; set; }
+    public int Calls { get; private set; }
+
+    public static FakeAuthzClient ForRole(string role)
+    {
+        var fake = new FakeAuthzClient();
+        var names = role switch
+        {
+            "owner" or "community-owner" => new[] { "member", "vip", "moderate", "ban", "timeout", "admin", "owner" },
+            "community-admin" => ["member", "vip", "moderate", "ban", "timeout", "admin"],
+            "moderator" => ["member", "moderate", "ban", "timeout"],
+            "vip" => ["member", "vip"],
+            "member" => ["member"],
+            _ => Array.Empty<string>(),
+        };
+        foreach (var n in names)
+        {
+            fake.Scopes.Add("community:" + n);
+        }
+
+        return fake;
+    }
+
+    public bool CallerCan(string scope)
+    {
+        Calls++;
+        return ThrowOnCall is null ? Scopes.Contains(scope) : throw ThrowOnCall;
+    }
+}
+
 public sealed class FakeIdentityClient : IIdentityClient
 {
     public string Actor { get; set; } = "11111111-1111-4111-8111-111111111111";
@@ -212,6 +247,8 @@ public sealed class FakeWaddleHostNext : IWaddleHostNext
     public Log.ILogClient Log => Base.Log;
     public IClockClient Clock => Base.Clock;
     public IEconomyClient Economy => EconomyFake;
+    public FakeAuthzClient AuthzFake { get; } = new();
+    public IAuthzClient Authz => AuthzFake;
     public IIdentityClient Identity => IdentityFake;
     public IToolClient Tool => ToolFake;
     public IOverlayClient Overlay => OverlayFake;

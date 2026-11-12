@@ -51,7 +51,7 @@ Failure handling
 ----------------
 Activation is enforced by the bundle runtime (installed -> tenant enabled -> community activated)
 before `transform()` is called. Inside `transform()`, the cheap head match comes first, then the
-moderator gate (fail-closed: absent or non-boolean badges deny, via the strict `is True` read),
+community-admin gate (`await caller_can(SCOPE_ADMIN)`, fail-closed; `is_mod`/`is_broadcaster` badges are never read),
 then `kv`. A `kv` failure or a corrupt stored value becomes a private
 `_KvError`, is logged at ERROR and answered with an explicit reply -- never a silent no-op, never
 a default substituted for a bad parse. Logs are PII-free: op names, counts and exception types
@@ -71,7 +71,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from waddle_sdk import clock, kv, log, relay
+from waddle_sdk import SCOPE_ADMIN, caller_can, clock, kv, log, relay
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 #: The single `kv` key this bundle owns (community-scoped by the host; `.`, never `:`).
@@ -101,7 +101,7 @@ _USAGE = (
     "Usage: !giveaway enter | !giveaway status | !giveaway start <5m|30s|1h> | "
     "!giveaway draw | !giveaway cancel (start/draw/cancel are mod only)"
 )
-_PERMISSION_DENIED_MSG = "only moderators/broadcasters can do that"
+_PERMISSION_DENIED_MSG = "only community admins can do that"
 _KV_FAILURE_REPLY = "Something went wrong with giveaway storage - please try again."
 _MOD_COMMANDS = frozenset({"start", "draw", "cancel"})
 _NO_ACTIVE_MSG = "no giveaway is running right now"
@@ -159,15 +159,6 @@ def humanize_duration(duration_ms: int) -> str:
     if minutes:
         return f"{minutes}m {seconds}s"
     return f"{seconds}s"
-
-
-def _is_privileged(payload: dict[str, Any]) -> bool:
-    """`True` only for a genuine moderator/broadcaster -- strict-boolean, fail-closed.
-
-    Absent badge fields (e.g. Discord's normalizer today), strings like ``"false"``/``"true"``
-    and ints all deny: only the real boolean ``True`` admits (fix/bundle-defects-wave).
-    """
-    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 def _pseudonym(platform: str, author: str) -> str:
@@ -363,7 +354,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
 
     command, arg = _resolve(head, rest.strip())
-    if command in _MOD_COMMANDS and not _is_privileged(event.payload):
+    if command in _MOD_COMMANDS and not await caller_can(SCOPE_ADMIN):
         log.info("giveaway.permission_denied", command=command)
         reply = _PERMISSION_DENIED_MSG
     elif command == "usage":

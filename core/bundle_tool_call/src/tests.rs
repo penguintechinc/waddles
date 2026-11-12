@@ -741,6 +741,16 @@ fn role_scope_map_is_cumulative_and_fails_closed() {
     assert!(scopes_for_role("community-admin").contains(&"community:moderate"));
     assert!(!scopes_for_role("moderator").contains(&"community:admin"));
     assert!(!scopes_for_role("vip").contains(&"community:moderate"));
+    for s in ["community:ban", "community:timeout"] {
+        assert!(scopes_for_role("moderator").contains(&s));
+        assert!(scopes_for_role("community-admin").contains(&s));
+        assert!(scopes_for_role("owner").contains(&s));
+        assert!(!scopes_for_role("vip").contains(&s));
+        assert!(!scopes_for_role("member").contains(&s));
+    }
+    assert_eq!(scopes_for_role("owner").len(), 7);
+    assert_eq!(scopes_for_role("community-admin").len(), 6);
+    assert_eq!(scopes_for_role("moderator").len(), 4);
     for bad in ["", "admin", "COMMUNITY-ADMIN", "root"] {
         assert!(scopes_for_role(bad).is_empty(), "{bad:?}");
     }
@@ -898,4 +908,27 @@ fn actor_with_non_object_args_is_rejected() {
     p.args = serde_json::json!([1]);
     p.idempotency_key = None;
     assert!(nested_payload(&p).is_err());
+}
+
+#[test]
+fn authz_scope_shape_is_enforced() {
+    for ok in ["community:admin", "community:ban", "a:b", "a.b_c1:d.e_f2"] {
+        assert!(is_valid_authz_scope(ok), "{ok:?}");
+    }
+    for bad in [
+        "",
+        "community",
+        ":admin",
+        "community:",
+        "Community:admin",
+        "community:admin:x",
+        "1a:b",
+        "a:1b",
+        "a:b-c",
+        "a:b\n",
+    ] {
+        assert!(!is_valid_authz_scope(bad), "{bad:?}");
+    }
+    assert!(is_valid_authz_scope(&format!("a:{}", "b".repeat(62))));
+    assert!(!is_valid_authz_scope(&format!("a:{}", "b".repeat(63))));
 }
