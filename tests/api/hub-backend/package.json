@@ -30,5 +30,13 @@
     "jest": "30.4.2",
     "nock": "14.0.16",
     "supertest": "7.2.2"
+  },
+  "overrides": {
+    "minimatch@^9.0.0": "11.0.1",
+    "brace-expansion@^5.0.0": "5.0.12",
+    "@isaacs/nonrecursive-glob-match": "1.0.1",
+    "js-yaml@^3.0.0": "3.15.2",
+    "brace-expansion@^1.0.0": "1.1.21",
+    "qs": "6.16.1"
   }
 }
