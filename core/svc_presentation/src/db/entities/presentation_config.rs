@@ -19,6 +19,9 @@ pub struct Model {
     pub font_family: Option<String>,
     pub music_enabled: bool,
     pub crawler_speed_seconds: i32,
+    pub canvas_resolution: String,
+    pub canvas_width: i32,
+    pub canvas_height: i32,
     pub config: Json,
 }
 

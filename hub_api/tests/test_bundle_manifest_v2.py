@@ -795,3 +795,78 @@ def test_requested_tools_survive_reparse_trusted() -> None:
 
     raw = {**_VALID_MANIFEST, "requested_tools": [_rt()]}
     assert [r.tool for r in _reparse_trusted(raw).requested_tools] == ["balance"]
+
+
+def test_overlay_widgets_default_empty() -> None:
+    manifest = _parse({})
+    assert manifest.overlay_widgets == ()
+
+
+def test_overlay_widgets_valid_parse() -> None:
+    raw = {
+        "overlay_widgets": [
+            {
+                "widget_id": "dj.music.album_now_playing",
+                "display_name": "Now Playing",
+                "description": "Displays current track and album art",
+                "category": "music",
+                "output_kind": "surface",
+                "surface_id": "music.now_playing",
+                "allow_standalone_output": True,
+                "default_x": 48,
+                "default_y": 860,
+                "default_width": 460,
+                "default_height": 160,
+                "default_z_index": 10,
+                "props_schema": {"theme": {"type": "string"}},
+            }
+        ]
+    }
+    manifest = _parse(raw)
+    assert len(manifest.overlay_widgets) == 1
+    w = manifest.overlay_widgets[0]
+    assert w.widget_id == "dj.music.album_now_playing"
+    assert w.display_name == "Now Playing"
+    assert w.output_kind == "surface"
+    assert w.default_x == 48
+    assert w.default_width == 460
+    assert w.props_schema == {"theme": {"type": "string"}}
+
+
+def test_overlay_widgets_duplicate_id_rejected() -> None:
+    raw = {
+        "overlay_widgets": [
+            {"widget_id": "custom.w", "display_name": "W1", "output_kind": "text"},
+            {"widget_id": "custom.w", "display_name": "W2", "output_kind": "text"},
+        ]
+    }
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(raw)
+    assert exc.value.reason == "duplicate_overlay_widget"
+
+
+def test_overlay_widgets_invalid_output_kind_rejected() -> None:
+    raw = {
+        "overlay_widgets": [
+            {"widget_id": "custom.w", "display_name": "W1", "output_kind": "raw_canvas"}
+        ]
+    }
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(raw)
+    assert exc.value.reason == "invalid_widget_output_kind"
+
+
+def test_overlay_widgets_invalid_bounds_rejected() -> None:
+    raw = {
+        "overlay_widgets": [
+            {
+                "widget_id": "custom.w",
+                "display_name": "W1",
+                "output_kind": "text",
+                "default_width": 5000,
+            }
+        ]
+    }
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(raw)
+    assert exc.value.reason == "invalid_widget_width"

@@ -231,6 +231,14 @@ export const adminApi = {
   updateOverlay: (communityId, data) => api.put(`/api/v1/admin/${communityId}/overlay`, data),
   rotateOverlayKey: (communityId) => api.post(`/api/v1/admin/${communityId}/overlay/rotate`),
   getOverlayStats: (communityId) => api.get(`/api/v1/admin/${communityId}/overlay/stats`),
+  // Overlay Builder & Scene Layout
+  getAvailableOverlayWidgets: (communityId) => api.get(`/api/v1/admin/${communityId}/overlay/widgets`),
+  getOverlaySceneLayout: (communityId) => api.get(`/api/v1/admin/${communityId}/overlay/layout`),
+  addOverlaySceneComponent: (communityId, data) => api.post(`/api/v1/admin/${communityId}/overlay/layout/components`, data),
+  updateOverlaySceneComponent: (communityId, instanceId, data) => api.patch(`/api/v1/admin/${communityId}/overlay/layout/components/${instanceId}`, data),
+  removeOverlaySceneComponent: (communityId, instanceId) => api.delete(`/api/v1/admin/${communityId}/overlay/layout/components/${instanceId}`),
+  clearOverlaySceneLayout: (communityId) => api.delete(`/api/v1/admin/${communityId}/overlay/layout/clear`),
+  setOverlayCanvasTheme: (communityId, data) => api.post(`/api/v1/admin/${communityId}/overlay/layout/theme`, data),
   // Loyalty configuration
   getLoyaltyConfig: (communityId) =>
     api.get(`/api/v1/admin/${communityId}/loyalty/config`),

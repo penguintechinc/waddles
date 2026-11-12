@@ -163,30 +163,50 @@ fn decode_entries(
         .map_err(|e| reputation::Error::Backend(format!("malformed host-result: {e}")))
 }
 
-fn overlay_not_implemented() -> types::TransportError {
-    types::TransportError {
-        retryable: false,
-        code: "not_implemented".to_string(),
-        message: "overlay host capability has no stage-side handler yet".to_string(),
-        retry_after_ms: None,
-    }
-}
+
 
 impl overlay::Host for ExecState {
     async fn register_widget(
         &mut self,
-        _widget: overlay::WidgetDescriptor,
+        widget: overlay::WidgetDescriptor,
     ) -> Result<types::TransportResult, types::TransportError> {
-        Err(overlay_not_implemented())
+        let args = serde_json::json!({
+            "widget_id": widget.widget_id,
+            "display_name": widget.display_name,
+            "surface": format!("{:?}", widget.surface).to_ascii_lowercase(),
+            "descriptor_json": widget.descriptor_json,
+        });
+        match call(self, CapabilityKind::Db, "overlay.register_widget", args).await {
+            Ok(_) => Ok(types::TransportResult {
+                ok: true,
+                status: None,
+                detail: None,
+                provider_message_id: None,
+            }),
+            Err(e) => Err(surface_transport_error(e)),
+        }
     }
 
     async fn push(
         &mut self,
-        _widget_id: String,
-        _surface: overlay::Surface,
-        _payload_json: String,
+        widget_id: String,
+        surface: overlay::Surface,
+        payload_json: String,
     ) -> Result<types::TransportResult, types::TransportError> {
-        Err(overlay_not_implemented())
+        let args = serde_json::json!({
+            "widget_id": widget_id,
+            "surface": format!("{:?}", surface).to_ascii_lowercase(),
+            "payload_json": payload_json,
+        });
+        match call(self, CapabilityKind::Db, "overlay.push", args).await {
+            Ok(_) => Ok(types::TransportResult {
+                ok: true,
+                status: None,
+                detail: None,
+                provider_message_id: None,
+            }),
+            Err(e) => Err(surface_transport_error(e)),
+        }
     }
 
     /// Bundle state surface publish: rides the usual host-call round trip as

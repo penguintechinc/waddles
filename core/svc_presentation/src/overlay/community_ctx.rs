@@ -243,6 +243,9 @@ mod tests {
             font_family: None,
             music_enabled: true,
             crawler_speed_seconds: 20,
+            canvas_resolution: "1080p".to_string(),
+            canvas_width: 1920,
+            canvas_height: 1080,
             config: serde_json::json!({}),
         }
     }

@@ -9,6 +9,7 @@ import {
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline';
 import { adminApi } from '../../services/api';
+import OverlayBuilderTab from './OverlayBuilderTab';
 
 function AdminStreamOverlays() {
   const { communityId } = useParams();
@@ -123,6 +124,7 @@ function AdminStreamOverlays() {
   }
 
   const sourceInfo = {
+    scene: { label: 'Composite Scene', desc: 'Custom multi-component overlay scene', icon: '🎨' },
     ticker: { label: 'Ticker', desc: 'Scrolling text notifications and alerts', icon: '📢' },
     media: { label: 'Media', desc: 'Music and video display with album art', icon: '🎵' },
     general: { label: 'General', desc: 'Custom HTML content and announcements', icon: '📋' },
@@ -130,6 +132,7 @@ function AdminStreamOverlays() {
 
   const tabs = [
     { id: 'all-in-one', label: 'All-in-One Overlay' },
+    { id: 'builder', label: 'Overlay Builder' },
     { id: 'individual', label: 'Individual Sources' },
   ];
 
@@ -160,6 +163,11 @@ function AdminStreamOverlays() {
           ))}
         </nav>
       </div>
+
+      {/* Overlay Builder Tab Content */}
+      {activeTab === 'builder' && (
+        <OverlayBuilderTab communityId={communityId} />
+      )}
 
       {/* All-in-One Tab Content */}
       {activeTab === 'all-in-one' && (

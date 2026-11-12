@@ -1484,6 +1484,46 @@ bundles:
       - tenant_slug: global
         community_id: null
 
+  # Overlay SERVICE bundle (Rust, always-on `kind: service`). Full-screen composite overlay
+  # designer backing service: manages scene layouts, component placement, and widget registration.
+  - app_id: waddles.core.service.overlay
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-tools
+    kind: service
+    source_dir: rust/overlay-service
+    manifest_path: overlay-service.manifest.yaml
+    artifact_path: overlay-service.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
+  # Stream alerts overlay presentation bundle (Rust): provides Alert Box, Sub Banner, Follow Toast.
+  - app_id: waddles.core.overlay.alerts
+    version: "1.0.0"
+    language: rust
+    wit_world: stage
+    kind: app
+    source_dir: rust/stream-alerts
+    manifest_path: stream-alerts.manifest.yaml
+    artifact_path: stream-alerts.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
+  # Galactic avatars overlay presentation bundle (Rust): provides Star Wars-inspired stage strip & duel arena.
+  - app_id: waddles.core.overlay.galactic_avatars
+    version: "1.0.0"
+    language: rust
+    wit_world: stage
+    kind: app
+    source_dir: rust/galactic-avatars
+    manifest_path: galactic-avatars.manifest.yaml
+    artifact_path: galactic-avatars.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
   # bundle-MCP-tools P6b: twitch platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-twitch defaults OFF.
   - app_id: waddles.core.service.twitch

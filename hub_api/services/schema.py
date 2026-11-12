@@ -664,6 +664,13 @@ def bind_overlay_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("is_active", "boolean", default=True),
             Field("theme_config", "json"),
             Field("enabled_sources", "json"),
+            # Canvas dimensions stored as first-class columns (migration 105 / 0083).
+            # canvas_resolution is one of '1080p', '2k', '4k'.
+            # canvas_width / canvas_height store the corresponding pixel values so
+            # consumers never need to re-derive them from the resolution string.
+            Field("canvas_resolution", "string", length=8, default="1080p"),
+            Field("canvas_width", "integer", default=1920),
+            Field("canvas_height", "integer", default=1080),
             Field("last_accessed", "datetime"),
             Field("access_count", "integer", default=0),
             Field("created_at", "datetime"),
@@ -694,6 +701,89 @@ def bind_overlay_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("previous_key_hash", "string", length=64),
             Field("is_active", "boolean", default=True),
             Field("rotated_at", "datetime"),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
+
+    # `config/postgres/migrations/104_overlay_scene_components.sql`
+    if "overlay_widget_registry" not in dal.tables:
+        dal.define_table(
+            "overlay_widget_registry",
+            Field("public_id", "string", length=36, notnull=True, unique=True),
+            Field("tenant_id", "integer", notnull=True),
+            Field("community_id", "integer", notnull=True),
+            Field("widget_id", "string", length=128, notnull=True),
+            Field("bundle_app_id", "string", length=128, notnull=True),
+            Field("display_name", "string", length=120, notnull=True),
+            Field("description", "text", default=""),
+            Field("category", "string", length=64, default="custom"),
+            Field("output_kind_code", "integer", notnull=True, default=1),
+            Field("surface_id", "string", length=64),
+            Field("allow_standalone_output", "boolean", default=True),
+            Field("default_x_px", "integer", default=48),
+            Field("default_y_px", "integer", default=48),
+            Field("default_width_px", "integer", default=400),
+            Field("default_height_px", "integer", default=200),
+            Field("default_z_index", "integer", default=10),
+            Field("props_schema", "json", default={}),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
+
+    if "overlay_scene_components" not in dal.tables:
+        dal.define_table(
+            "overlay_scene_components",
+            Field("public_id", "string", length=36, notnull=True, unique=True),
+            Field("tenant_id", "integer", notnull=True),
+            Field("community_id", "integer", notnull=True),
+            Field("bundle_app_id", "string", length=128, notnull=True),
+            Field("widget_id", "string", length=128, notnull=True),
+            Field("surface_id", "string", length=64, default="custom"),
+            Field("output_kind_code", "integer", default=1),
+            Field("display_name", "string", length=120, notnull=True),
+            Field("x_px", "integer", default=48),
+            Field("y_px", "integer", default=48),
+            Field("width_px", "integer", default=400),
+            Field("height_px", "integer", default=200),
+            Field("z_index", "integer", default=10),
+            Field("status_code", "integer", default=1),
+            Field("props", "json", default={}),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
+
+    if "presentation_config" not in dal.tables:
+        dal.define_table(
+            "presentation_config",
+            Field("community_id", "integer", notnull=True, unique=True),
+            Field("theme", "string", length=50, default="default"),
+            Field("primary_color", "string", length=20),
+            Field("secondary_color", "string", length=20),
+            Field("font_family", "string", length=100),
+            Field("music_enabled", "boolean", default=True),
+            Field("crawler_speed_seconds", "integer", default=30),
+            Field("canvas_resolution", "string", length=8, default="1080p"),
+            Field("canvas_width", "integer", default=1920),
+            Field("canvas_height", "integer", default=1080),
+            Field("config", "json", default={}),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
+
+    if "overlay_surfaces" not in dal.tables:
+        dal.define_table(
+            "overlay_surfaces",
+            Field("community_id", "integer", notnull=True),
+            Field("surface", "string", length=50, notnull=True),
+            Field("enabled", "boolean", default=True),
+            Field("canvas_resolution", "string", length=8, default="1080p"),
+            Field("canvas_width", "integer", default=1920),
+            Field("canvas_height", "integer", default=1080),
+            Field("config", "json", default={}),
             Field("created_at", "datetime"),
             Field("updated_at", "datetime"),
             migrate=migrate,

@@ -38,7 +38,7 @@ from typing import Any, cast
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
-from quart import Blueprint, current_app, request
+from quart import Blueprint, current_app, jsonify, request
 from quart_schema import validate_request
 
 from config import HubAPIConfig
@@ -300,6 +300,123 @@ async def get_overlay_stats(community_id: int) -> Any:
     except ApiError as exc:
         return _err(exc)
     return jsonify_dto(OverlayStatsResponse(success=True, stats=stats))
+
+
+@overlay_bp.route("/<int:community_id>/overlay/widgets", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+async def get_available_widgets(community_id: int) -> Any:
+    """List overlay widgets available from bundles active for this community."""
+    try:
+        await _require_admin(community_id)
+        async_dal, dal = _dal()
+        widgets = await overlay_service.list_available_widgets(
+            async_dal, dal, community_id=community_id
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify({"success": True, "widgets": widgets})
+
+
+@overlay_bp.route("/<int:community_id>/overlay/layout", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+async def get_scene_layout(community_id: int) -> Any:
+    """Get the full-screen composite overlay layout and active components."""
+    try:
+        await _require_admin(community_id)
+        async_dal, dal = _dal()
+        layout = await overlay_service.get_scene_layout(async_dal, dal, community_id=community_id)
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify({"success": True, "layout": layout})
+
+
+@overlay_bp.route("/<int:community_id>/overlay/layout/components", methods=["POST"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+async def add_scene_component(community_id: int) -> Any:
+    """Add a component to the community's composite overlay scene."""
+    try:
+        await _require_admin(community_id)
+        ctx = get_tenant_context(request)
+        tenant_id = ctx.tenant_id if ctx else 1
+        data = await request.get_json() or {}
+        async_dal, dal = _dal()
+        comp = await overlay_service.add_scene_component(
+            async_dal, dal, community_id=community_id, tenant_id=tenant_id, data=data
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify({"success": True, "component": comp}), 201
+
+
+@overlay_bp.route(
+    "/<int:community_id>/overlay/layout/components/<string:instance_id>", methods=["PATCH"]
+)
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+async def update_scene_component(community_id: int, instance_id: str) -> Any:
+    """Update position, size, visibility, or props of a placed scene component."""
+    try:
+        await _require_admin(community_id)
+        data = await request.get_json() or {}
+        async_dal, dal = _dal()
+        comp = await overlay_service.update_scene_component(
+            async_dal, dal, community_id=community_id, instance_id=instance_id, data=data
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify({"success": True, "component": comp})
+
+
+@overlay_bp.route(
+    "/<int:community_id>/overlay/layout/components/<string:instance_id>", methods=["DELETE"]
+)
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+async def remove_scene_component(community_id: int, instance_id: str) -> Any:
+    """Remove a component from the composite overlay scene."""
+    try:
+        await _require_admin(community_id)
+        async_dal, dal = _dal()
+        removed = await overlay_service.remove_scene_component(
+            async_dal, dal, community_id=community_id, instance_id=instance_id
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify({"success": True, "removed": removed})
+
+
+@overlay_bp.route("/<int:community_id>/overlay/layout/clear", methods=["DELETE"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+async def clear_scene_layout(community_id: int) -> Any:
+    """Remove all placed components from the composite overlay scene."""
+    try:
+        await _require_admin(community_id)
+        async_dal, dal = _dal()
+        count = await overlay_service.clear_scene_layout(async_dal, dal, community_id=community_id)
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify({"success": True, "removed_count": count})
+
+
+@overlay_bp.route("/<int:community_id>/overlay/layout/theme", methods=["POST"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+async def set_scene_canvas_theme(community_id: int) -> Any:
+    """Configure canvas theme and resolution (1080p, 2k, 4k)."""
+    try:
+        await _require_admin(community_id)
+        data = await request.get_json() or {}
+        async_dal, dal = _dal()
+        theme = await overlay_service.set_scene_canvas_theme(
+            async_dal, dal, community_id=community_id, data=data
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify({"success": True, "canvas": theme})
 
 
 BLUEPRINTS: list[Blueprint] = [overlay_bp]

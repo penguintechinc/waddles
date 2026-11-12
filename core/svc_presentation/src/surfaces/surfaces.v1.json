@@ -23,7 +23,8 @@
         "title": { "type": "string", "maxLength": 200 },
         "artist": { "type": "string", "maxLength": 200 },
         "duration_s": { "type": "integer", "minimum": 0, "maximum": 86400 },
-        "url": { "oneOf": [ { "$ref": "#/definitions/https_url" }, { "type": "null" } ] }
+        "url": { "oneOf": [ { "$ref": "#/definitions/https_url" }, { "type": "null" } ] },
+        "artwork_url": { "oneOf": [ { "$ref": "#/definitions/https_url" }, { "type": "null" } ] }
       },
       "required": ["id", "provider", "track_id", "title", "artist", "duration_s"],
       "additionalProperties": false

@@ -166,6 +166,25 @@ class PermissionDeclaration:
 
 
 @dataclass(slots=True, frozen=True)
+class OverlayWidgetDeclaration:
+    """One declared overlay widget for composite or standalone overlay display."""
+
+    widget_id: str
+    display_name: str
+    description: str
+    category: str
+    output_kind: str
+    surface_id: str | None
+    allow_standalone_output: bool
+    default_x: int
+    default_y: int
+    default_width: int
+    default_height: int
+    default_z_index: int
+    props_schema: dict[str, Any]
+
+
+@dataclass(slots=True, frozen=True)
 class ExportedTool:
     """One MCP tool a service bundle exports (spec Sec5.1): name, JSON schemas, access, risk."""
 
@@ -259,6 +278,8 @@ class BundleManifestV2:
     # (op, owner) is ALSO folded into `permission_declarations` as a dangerous
     # `storage.<op>:<owner>` id. Defaulted last for hand-built fixtures.
     storage_access: tuple[StorageAccessRequest, ...] = ()
+    # Declared overlay widgets for composite overlay designer discovery
+    overlay_widgets: tuple[OverlayWidgetDeclaration, ...] = ()
 
     def supports_platform(self, platform: str) -> bool:
         """Return True when this bundle may run on `platform` (absent field = every platform)."""
@@ -611,6 +632,139 @@ def requested_tool_declarations(
             ),
         )
     return tuple(seen.values())
+
+
+_WIDGET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
+_ALLOWED_OUTPUT_KINDS = frozenset({"text", "image", "sanitized_html", "surface"})
+
+
+def parse_overlay_widgets(raw_entries: Any) -> tuple[OverlayWidgetDeclaration, ...]:
+    """Validate optional `overlay_widgets:` list; absent (`None`) parses to empty tuple."""
+    if raw_entries is None:
+        return ()
+    _require(
+        isinstance(raw_entries, list), "invalid_overlay_widgets", "overlay_widgets must be a list"
+    )
+    widgets: list[OverlayWidgetDeclaration] = []
+    seen: set[str] = set()
+    for entry in raw_entries:
+        _require(
+            isinstance(entry, dict),
+            "invalid_overlay_widgets",
+            "each overlay_widgets entry must be a mapping",
+        )
+        widget_id = entry.get("widget_id")
+        _require(
+            isinstance(widget_id, str) and bool(_WIDGET_ID_RE.fullmatch(widget_id)),
+            "invalid_widget_id",
+            f"widget_id {widget_id!r} must match [a-z0-9][a-z0-9_.-]{{0,127}}",
+        )
+        assert isinstance(widget_id, str)
+        _require(
+            widget_id not in seen,
+            "duplicate_overlay_widget",
+            f"widget {widget_id!r} declared twice",
+        )
+        seen.add(widget_id)
+
+        display_name = entry.get("display_name")
+        _require(
+            isinstance(display_name, str) and 1 <= len(display_name.strip()) <= 120,
+            "invalid_widget_display_name",
+            "display_name must be a non-empty string <= 120 chars",
+        )
+        assert isinstance(display_name, str)
+
+        output_kind = entry.get("output_kind")
+        _require(
+            isinstance(output_kind, str) and output_kind in _ALLOWED_OUTPUT_KINDS,
+            "invalid_widget_output_kind",
+            f"output_kind must be one of {sorted(_ALLOWED_OUTPUT_KINDS)}, got {output_kind!r}",
+        )
+        assert isinstance(output_kind, str)
+
+        description = entry.get("description", "")
+        _require(
+            isinstance(description, str),
+            "invalid_widget_description",
+            "description must be a string",
+        )
+
+        category = entry.get("category", "custom")
+        _require(isinstance(category, str), "invalid_widget_category", "category must be a string")
+
+        surface_id = entry.get("surface_id")
+        if surface_id is not None:
+            _require(
+                isinstance(surface_id, str),
+                "invalid_widget_surface_id",
+                "surface_id must be a string",
+            )
+
+        allow_standalone = entry.get("allow_standalone_output", True)
+        _require(
+            isinstance(allow_standalone, bool),
+            "invalid_widget_standalone",
+            "allow_standalone_output must be a bool",
+        )
+
+        def_x = entry.get("default_x", 48)
+        def_y = entry.get("default_y", 48)
+        def_w = entry.get("default_width", 400)
+        def_h = entry.get("default_height", 200)
+        def_z = entry.get("default_z_index", 10)
+
+        _require(
+            isinstance(def_x, int) and 0 <= def_x <= 3840,
+            "invalid_widget_x",
+            "default_x must be in 0..=3840",
+        )
+        _require(
+            isinstance(def_y, int) and 0 <= def_y <= 2160,
+            "invalid_widget_y",
+            "default_y must be in 0..=2160",
+        )
+        _require(
+            isinstance(def_w, int) and 1 <= def_w <= 3840,
+            "invalid_widget_width",
+            "default_width must be in 1..=3840",
+        )
+        _require(
+            isinstance(def_h, int) and 1 <= def_h <= 2160,
+            "invalid_widget_height",
+            "default_height must be in 1..=2160",
+        )
+        _require(
+            isinstance(def_z, int) and -1000 <= def_z <= 1000,
+            "invalid_widget_z_index",
+            "default_z_index must be in -1000..=1000",
+        )
+
+        props_schema = entry.get("props_schema", {})
+        _require(
+            isinstance(props_schema, dict),
+            "invalid_widget_props_schema",
+            "props_schema must be an object",
+        )
+
+        widgets.append(
+            OverlayWidgetDeclaration(
+                widget_id=widget_id,
+                display_name=display_name.strip(),
+                description=description,
+                category=category,
+                output_kind=output_kind,
+                surface_id=surface_id,
+                allow_standalone_output=allow_standalone,
+                default_x=def_x,
+                default_y=def_y,
+                default_width=def_w,
+                default_height=def_h,
+                default_z_index=def_z,
+                props_schema=props_schema,
+            )
+        )
+    return tuple(widgets)
 
 
 def _parse_consumes(
@@ -1097,6 +1251,8 @@ def parse_bundle_manifest_v2(
         if pid not in declared_ids
     )
 
+    overlay_widgets = parse_overlay_widgets(raw.get("overlay_widgets"))
+
     return BundleManifestV2(
         schema_version=raw["schema_version"],
         app_id=raw["app_id"],
@@ -1133,4 +1289,5 @@ def parse_bundle_manifest_v2(
         trusted_source=trusted_source,
         table_access=table_access,
         storage_access=storage_access,
+        overlay_widgets=overlay_widgets,
     )

@@ -1,0 +1,50 @@
+schema_version: 2
+app_id: waddles.core.overlay.galactic_avatars
+name: Galactic Avatars Overlay Bundle (Rust)
+version: 1.0.0
+feature: waddles.core.overlay
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: AGPL-3.0-or-later
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/galactic-avatars
+language: rust
+artifact: component
+execution_model: wasi-component
+is_default: false
+kind: app
+stages:
+  presentation:
+    entry: "waddle:bundle/stage@1.0.0"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions: []
+overlay_widgets:
+  - widget_id: avatars.galactic.stage_strip
+    display_name: "Galactic Avatars Stage Strip"
+    description: "Star Wars-inspired animated avatars roaming the bottom strip of the stream"
+    category: avatars
+    output_kind: sanitized_html
+    default_x: 48
+    default_y: 900
+    default_width: 1824
+    default_height: 140
+    allow_standalone_output: true
+  - widget_id: avatars.galactic.duel_arena
+    display_name: "Galactic Duel Arena"
+    description: "Animated lightsaber and blaster duel arena for viewer clashes"
+    category: avatars
+    output_kind: sanitized_html
+    default_x: 660
+    default_y: 680
+    default_width: 600
+    default_height: 260
+    allow_standalone_output: true

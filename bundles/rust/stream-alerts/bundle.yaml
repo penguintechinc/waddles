@@ -1,0 +1,60 @@
+schema_version: 2
+app_id: waddles.core.overlay.alerts
+name: Stream Alerts Overlay Bundle (Rust)
+version: 1.0.0
+feature: waddles.core.overlay
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: AGPL-3.0-or-later
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/stream-alerts
+language: rust
+artifact: component
+execution_model: wasi-component
+is_default: false
+kind: app
+stages:
+  presentation:
+    entry: "waddle:bundle/stage@1.0.0"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions: []
+overlay_widgets:
+  - widget_id: alerts.stream.event_box
+    display_name: "Alert Box"
+    description: "Multi-event alert box displaying sub, follow, cheer, and raid animations"
+    category: alerts
+    output_kind: sanitized_html
+    default_x: 660
+    default_y: 120
+    default_width: 600
+    default_height: 220
+    allow_standalone_output: true
+  - widget_id: alerts.stream.sub_banner
+    display_name: "Subscription Banner"
+    description: "Top or bottom banner celebrating new subscribers"
+    category: alerts
+    output_kind: sanitized_html
+    default_x: 480
+    default_y: 40
+    default_width: 960
+    default_height: 100
+    allow_standalone_output: true
+  - widget_id: alerts.stream.follow_toast
+    display_name: "Follower Toast"
+    description: "Compact corner toast popup for new followers"
+    category: alerts
+    output_kind: sanitized_html
+    default_x: 1480
+    default_y: 920
+    default_width: 400
+    default_height: 120
+    allow_standalone_output: true

@@ -43,6 +43,10 @@ pub struct TextImageContent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
     pub cleared: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub widget_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
 }
 
 /// `crawler`/`ticker`'s rendered content -- `render.py`'s `crawler` handler
@@ -135,7 +139,12 @@ pub fn validate_text_image(
             ..Default::default()
         });
     }
-    if push.title.is_none() && push.body.is_none() && push.image_url.is_none() {
+    if push.title.is_none()
+        && push.body.is_none()
+        && push.image_url.is_none()
+        && push.sanitized_html.is_none()
+        && push.widget_id.is_none()
+    {
         return Err(RenderError::EmptyPush { surface });
     }
     if let Some(title) = &push.title {
@@ -161,11 +170,18 @@ pub fn validate_text_image(
         .as_deref()
         .map(|url| validate_image_url(surface, url))
         .transpose()?;
+    let html = if let Some(ref h) = push.sanitized_html {
+        Some(crate::overlay::sanitize::sanitize_widget_html(h).unwrap_or_default())
+    } else {
+        None
+    };
     Ok(TextImageContent {
         title: sanitize_opt(&push.title),
         body: sanitize_opt(&push.body),
         image_url,
         cleared: false,
+        widget_id: push.widget_id.clone(),
+        html,
     })
 }
 

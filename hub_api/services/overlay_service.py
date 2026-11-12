@@ -53,6 +53,7 @@ import hashlib
 import logging
 import re
 import secrets
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -570,6 +571,7 @@ BROWSER_SOURCE_SURFACES: dict[str, str] = {
     "ticker": "ticker",
     "media": "media",
     "general": "full_screen",
+    "scene": "scene",
 }
 
 
@@ -651,3 +653,417 @@ async def get_overlay_stats(
         last_accessed=_iso(total.last_accessed) if total is not None else None,
         daily=daily_stats,
     )
+
+
+RESOLUTION_DIMENSIONS: dict[str, tuple[int, int]] = {
+    "1080p": (1920, 1080),
+    "2k": (2560, 1440),
+    "4k": (3840, 2160),
+}
+
+
+async def list_available_widgets(
+    async_dal: Any, dal: Any, *, community_id: int
+) -> list[dict[str, Any]]:
+    """Discover overlay widgets available for this community.
+
+    Gathers declared widgets from active/enabled app bundles for `community_id`
+    plus any dynamically registered widgets in `overlay_widget_registry`.
+    """
+    _bind(dal)
+    from services.schema import bind_lifecycle_tables
+
+    bind_lifecycle_tables(dal)
+
+    widgets_by_id: dict[str, dict[str, Any]] = {}
+
+    # 1. Query active bundles for this community
+    def _query_active_bundles() -> list[dict[str, Any]]:
+        if "app_activations" not in dal.tables:
+            return []
+        try:
+            query = (dal.app_activations.community_id == community_id) & (
+                dal.app_activations.enabled == True  # noqa: E712
+            )
+            fields = [dal.app_activations.app_id]
+            has_catalog = "app_catalog" in dal.tables
+            has_stages = has_catalog and hasattr(dal.app_catalog, "stages")
+            if has_stages:
+                fields.append(dal.app_catalog.stages)
+            left = (
+                dal.app_catalog.on(dal.app_activations.app_id == dal.app_catalog.app_id)
+                if has_catalog
+                else None
+            )
+
+            rows = dal(query).select(*fields, left=left) if left else dal(query).select(*fields)
+            found = []
+            for r in rows:
+                stages_obj = (
+                    r.app_catalog.stages
+                    if hasattr(r, "app_catalog") and hasattr(r.app_catalog, "stages")
+                    else {}
+                )
+                found.append({"app_id": r.app_activations.app_id, "stages": stages_obj or {}})
+            return found
+        except Exception:
+            return []
+
+    active_bundles = await asyncio.get_running_loop().run_in_executor(
+        async_dal.executor, _query_active_bundles
+    )
+
+    for item in active_bundles:
+        app_id = item["app_id"]
+        stages = item.get("stages") or {}
+        pres_stage = stages.get("presentation") or {}
+        declared_widgets = pres_stage.get("overlay_widgets") or []
+        for w in declared_widgets:
+            if isinstance(w, dict) and "widget_id" in w:
+                wid = w["widget_id"]
+                widgets_by_id[wid] = {
+                    "widget_id": wid,
+                    "bundle_app_id": app_id,
+                    "display_name": w.get("display_name", wid),
+                    "description": w.get("description", ""),
+                    "category": w.get("category", "custom"),
+                    "output_kind": w.get("output_kind", "text"),
+                    "surface_id": w.get("surface_id"),
+                    "allow_standalone_output": w.get("allow_standalone_output", True),
+                    "default_x": w.get("default_x", 48),
+                    "default_y": w.get("default_y", 48),
+                    "default_width": w.get("default_width", 400),
+                    "default_height": w.get("default_height", 200),
+                    "default_z_index": w.get("default_z_index", 10),
+                    "props_schema": w.get("props_schema", {}),
+                }
+
+    # 2. Query overlay_widget_registry for dynamic widgets
+    def _query_registry() -> list[dict[str, Any]]:
+        rows = dal(dal.overlay_widget_registry.id > 0).select()
+        return [
+            {
+                "widget_id": r.widget_id,
+                "bundle_app_id": r.bundle_app_id,
+                "display_name": r.display_name,
+                "description": r.description or "",
+                "category": r.category or "custom",
+                "output_kind": {1: "text", 2: "image", 3: "sanitized_html", 4: "surface"}.get(
+                    r.output_kind_code, "text"
+                ),
+                "surface_id": r.surface_id,
+                "allow_standalone_output": r.allow_standalone_output,
+                "default_x": r.default_x,
+                "default_y": r.default_y,
+                "default_width": r.default_width,
+                "default_height": r.default_height,
+                "default_z_index": r.default_z_index,
+                "props_schema": r.props_schema or {},
+            }
+            for r in rows
+        ]
+
+    registry_widgets = await asyncio.get_running_loop().run_in_executor(
+        async_dal.executor, _query_registry
+    )
+    for rw in registry_widgets:
+        widgets_by_id[rw["widget_id"]] = rw
+
+    return list(widgets_by_id.values())
+
+
+async def get_scene_layout(async_dal: Any, dal: Any, *, community_id: int) -> dict[str, Any]:
+    """Get the full-screen composite scene layout (canvas theme + active components)."""
+    _bind(dal)
+
+    def _query() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        tok = dal(dal.community_overlay_tokens.community_id == community_id).select().first()
+        theme_cfg = (tok.theme_config if tok and tok.theme_config else {}) or {}
+
+        # Prefer the dedicated canvas columns (migration 105 / 0083); fall back to
+        # the legacy theme_config JSON blob for rows not yet migrated.
+        if tok and getattr(tok, "canvas_resolution", None):
+            res = tok.canvas_resolution
+            w = tok.canvas_width or RESOLUTION_DIMENSIONS.get(res, (1920, 1080))[0]
+            h = tok.canvas_height or RESOLUTION_DIMENSIONS.get(res, (1920, 1080))[1]
+        else:
+            res = theme_cfg.get("resolution", "1080p")
+            dims = RESOLUTION_DIMENSIONS.get(res, (1920, 1080))
+            w, h = dims[0], dims[1]
+
+        canvas = {
+            "theme": theme_cfg.get("theme", "default"),
+            "resolution": res,
+            "width": w,
+            "height": h,
+            "primary_color": theme_cfg.get("primary_color", "#1db954"),
+            "secondary_color": theme_cfg.get("secondary_color", "#1ed760"),
+            "font_family": theme_cfg.get("font_family", "sans-serif"),
+        }
+
+        comp_rows = dal(dal.overlay_scene_components.community_id == community_id).select(
+            orderby=dal.overlay_scene_components.z_index | dal.overlay_scene_components.id
+        )
+        components = [
+            {
+                "instance_id": r.public_id,
+                "bundle_app_id": r.bundle_app_id,
+                "widget_id": r.widget_id,
+                "surface_id": r.surface_id,
+                "output_kind": {1: "text", 2: "image", 3: "sanitized_html", 4: "surface"}.get(
+                    r.output_kind_code, "text"
+                ),
+                "display_name": r.display_name,
+                "x": r.x_px,
+                "y": r.y_px,
+                "width": r.width_px,
+                "height": r.height_px,
+                "z_index": r.z_index,
+                "status": "active" if r.status_code == 1 else "hidden",
+                "props": r.props or {},
+            }
+            for r in comp_rows
+        ]
+        return canvas, components
+
+    canvas, components = await asyncio.get_running_loop().run_in_executor(
+        async_dal.executor, _query
+    )
+    return {"canvas": canvas, "components": components}
+
+
+async def add_scene_component(
+    async_dal: Any,
+    dal: Any,
+    *,
+    community_id: int,
+    tenant_id: int,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    """Add a component to the community's composite overlay scene."""
+    _bind(dal)
+    widget_id = data.get("widget_id")
+    if not widget_id or not isinstance(widget_id, str):
+        raise ApiError("widget_id is required", status_code=400, code="BAD_REQUEST")
+
+    x = int(data.get("x", 48))
+    y = int(data.get("y", 48))
+    width = int(data.get("width", 400))
+    height = int(data.get("height", 200))
+    z_index = int(data.get("z_index", 10))
+
+    if not (0 <= x <= 3840 and 0 <= y <= 2160):
+        raise ApiError(
+            "coordinates out of canvas bounds (max 3840x2160)", status_code=400, code="BAD_REQUEST"
+        )
+    if not (1 <= width <= 3840 and 1 <= height <= 2160):
+        raise ApiError(
+            "component dimensions out of canvas bounds", status_code=400, code="BAD_REQUEST"
+        )
+    if not (-1000 <= z_index <= 1000):
+        raise ApiError("z_index must be in -1000..=1000", status_code=400, code="BAD_REQUEST")
+
+    public_id = str(uuid.uuid4())
+    now = datetime.now(UTC)
+
+    def _insert() -> dict[str, Any]:
+        count = dal(dal.overlay_scene_components.community_id == community_id).count()
+        if count >= 128:
+            raise ApiError(
+                "Maximum of 128 scene components reached", status_code=400, code="CAPACITY_REACHED"
+            )
+
+        bundle_app_id = data.get("bundle_app_id", "custom")
+        surface_id = data.get("surface_id", "custom")
+        output_kind = data.get("output_kind", "text")
+        output_kind_code = {"text": 1, "image": 2, "sanitized_html": 3, "surface": 4}.get(
+            output_kind, 1
+        )
+        display_name = data.get("display_name", widget_id)
+
+        dal.overlay_scene_components.insert(
+            public_id=public_id,
+            tenant_id=tenant_id,
+            community_id=community_id,
+            bundle_app_id=bundle_app_id,
+            widget_id=widget_id,
+            surface_id=surface_id,
+            output_kind_code=output_kind_code,
+            display_name=display_name,
+            x_px=x,
+            y_px=y,
+            width_px=width,
+            height_px=height,
+            z_index=z_index,
+            status_code=1,
+            props=data.get("props", {}),
+            created_at=now,
+            updated_at=now,
+        )
+        return {
+            "instance_id": public_id,
+            "bundle_app_id": bundle_app_id,
+            "widget_id": widget_id,
+            "surface_id": surface_id,
+            "output_kind": output_kind,
+            "display_name": display_name,
+            "x": x,
+            "y": y,
+            "width": width,
+            "height": height,
+            "z_index": z_index,
+            "status": "active",
+            "props": data.get("props", {}),
+        }
+
+    return await _run_atomic(async_dal, dal, _insert)
+
+
+async def update_scene_component(
+    async_dal: Any,
+    dal: Any,
+    *,
+    community_id: int,
+    instance_id: str,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    """Update a scene component's position, size, visibility, or props."""
+    _bind(dal)
+    now = datetime.now(UTC)
+
+    def _update() -> dict[str, Any]:
+        row = (
+            dal(
+                (dal.overlay_scene_components.public_id == instance_id)
+                & (dal.overlay_scene_components.community_id == community_id)
+            )
+            .select()
+            .first()
+        )
+        if not row:
+            raise not_found("Component not found")
+
+        updates: dict[str, Any] = {"updated_at": now}
+        if "x" in data and data["x"] is not None:
+            updates["x_px"] = int(data["x"])
+        if "y" in data and data["y"] is not None:
+            updates["y_px"] = int(data["y"])
+        if "width" in data and data["width"] is not None:
+            updates["width_px"] = int(data["width"])
+        if "height" in data and data["height"] is not None:
+            updates["height_px"] = int(data["height"])
+        if "z_index" in data and data["z_index"] is not None:
+            updates["z_index"] = int(data["z_index"])
+        if "visible" in data and data["visible"] is not None:
+            updates["status_code"] = 1 if data["visible"] else 2
+        if "props" in data and data["props"] is not None:
+            updates["props"] = data["props"]
+
+        row.update_record(**updates)
+        return {
+            "instance_id": row.public_id,
+            "bundle_app_id": row.bundle_app_id,
+            "widget_id": row.widget_id,
+            "surface_id": row.surface_id,
+            "output_kind": {1: "text", 2: "image", 3: "sanitized_html", 4: "surface"}.get(
+                row.output_kind_code, "text"
+            ),
+            "display_name": row.display_name,
+            "x": row.x_px,
+            "y": row.y_px,
+            "width": row.width_px,
+            "height": row.height_px,
+            "z_index": row.z_index,
+            "status": "active" if row.status_code == 1 else "hidden",
+            "props": row.props or {},
+        }
+
+    return await _run_atomic(async_dal, dal, _update)
+
+
+async def remove_scene_component(
+    async_dal: Any, dal: Any, *, community_id: int, instance_id: str
+) -> bool:
+    """Remove a scene component by its instance UUID."""
+    _bind(dal)
+
+    def _delete() -> bool:
+        count = dal(
+            (dal.overlay_scene_components.public_id == instance_id)
+            & (dal.overlay_scene_components.community_id == community_id)
+        ).delete()
+        return bool(count > 0)
+
+    return await _run_atomic(async_dal, dal, _delete)
+
+
+async def clear_scene_layout(async_dal: Any, dal: Any, *, community_id: int) -> int:
+    """Clear all scene components for a community."""
+    _bind(dal)
+
+    def _clear() -> int:
+        return dal(dal.overlay_scene_components.community_id == community_id).delete()
+
+    return await _run_atomic(async_dal, dal, _clear)
+
+
+async def set_scene_canvas_theme(
+    async_dal: Any, dal: Any, *, community_id: int, data: dict[str, Any]
+) -> dict[str, Any]:
+    """Configure the canvas theme, resolution (1080p, 2k, 4k), and colors.
+
+    Canvas size (resolution / width / height) is persisted in the dedicated
+    ``canvas_resolution``, ``canvas_width``, ``canvas_height`` columns on
+    ``community_overlay_tokens`` (migration 105 / alembic 0083).  The legacy
+    ``theme_config`` JSON blob is kept in sync for backward compatibility with
+    svc-presentation rendering that may still read it.
+    """
+    _bind(dal)
+    res = data.get("resolution", "1080p")
+    if res not in RESOLUTION_DIMENSIONS:
+        raise ApiError(
+            f"Unsupported resolution '{res}', must be '1080p', '2k', or '4k'",
+            status_code=400,
+            code="BAD_REQUEST",
+        )
+
+    dims = RESOLUTION_DIMENSIONS[res]
+    canvas_w, canvas_h = dims[0], dims[1]
+
+    def _set() -> dict[str, Any]:
+        tok = dal(dal.community_overlay_tokens.community_id == community_id).select().first()
+        theme_cfg = (tok.theme_config if tok and tok.theme_config else {}) or {}
+
+        # Dedicated columns — primary source of truth from migration 105 onward.
+        theme_cfg["resolution"] = res  # kept in sync for svc-presentation back-compat
+        theme_cfg["width"] = canvas_w
+        theme_cfg["height"] = canvas_h
+        if "theme" in data and data["theme"] is not None:
+            theme_cfg["theme"] = data["theme"]
+        if "primary_color" in data and data["primary_color"] is not None:
+            theme_cfg["primary_color"] = data["primary_color"]
+        if "secondary_color" in data and data["secondary_color"] is not None:
+            theme_cfg["secondary_color"] = data["secondary_color"]
+        if "font_family" in data and data["font_family"] is not None:
+            theme_cfg["font_family"] = data["font_family"]
+
+        if tok:
+            tok.update_record(
+                theme_config=theme_cfg,
+                canvas_resolution=res,
+                canvas_width=canvas_w,
+                canvas_height=canvas_h,
+                updated_at=datetime.now(UTC),
+            )
+
+        return {
+            "theme": theme_cfg.get("theme", "default"),
+            "resolution": res,
+            "width": canvas_w,
+            "height": canvas_h,
+            "primary_color": theme_cfg.get("primary_color", "#1db954"),
+            "secondary_color": theme_cfg.get("secondary_color", "#1ed760"),
+            "font_family": theme_cfg.get("font_family", "sans-serif"),
+        }
+
+    return await _run_atomic(async_dal, dal, _set)

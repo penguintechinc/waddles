@@ -23,6 +23,7 @@ pub mod hub;
 pub mod push_trust;
 pub mod render;
 pub mod router;
+pub mod sanitize;
 pub mod view_store;
 
 pub use caption_store::{CaptionStore, SeaOrmCaptionStore};
@@ -30,4 +31,5 @@ pub use code::{OverlayCodeResolver, SeaOrmOverlayCodeResolver, StaticOverlayCode
 pub use community_ctx::{CommunityContextStore, SeaOrmCommunityContextStore};
 pub use hub::PresentationHub;
 pub use push_trust::AppPushTrustSource;
+pub use sanitize::{sanitize_widget_html, HtmlSanitizeError};
 pub use view_store::SeaOrmViewCredentialStore;

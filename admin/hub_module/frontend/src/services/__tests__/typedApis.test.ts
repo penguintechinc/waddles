@@ -66,7 +66,15 @@ describe('bundleActivationApi', () => {
     await expect(bundleActivationApi.activate(7, 'a.b')).resolves.toEqual({ success: true, message: 'activated' });
     expect(sent().method).toBe('post');
     expect(sent().url).toBe('/api/v1/apps/community/7/activation');
-    expect(bodyOf(sent())).toEqual({ appId: 'a.b' });
+    // acknowledgedAccessGrants defaults to [] and is always included in the request body
+    expect(bodyOf(sent())).toEqual({ appId: 'a.b', acknowledgedAccessGrants: [] });
+  });
+
+  it('activate includes explicitly-passed acknowledgedAccessGrants', async () => {
+    rec.reply.data = { success: true, message: 'activated' };
+
+    await bundleActivationApi.activate(7, 'a.b', ['grant-1', 'grant-2']);
+    expect(bodyOf(sent())).toEqual({ appId: 'a.b', acknowledgedAccessGrants: ['grant-1', 'grant-2'] });
   });
 
   it('deactivate DELETEs the per-app activation path', async () => {

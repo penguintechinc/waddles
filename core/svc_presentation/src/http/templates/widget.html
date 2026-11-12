@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="no-referrer">
+<title>Waddles Standalone Widget</title>
+<style>
+  :root {
+    --primary: #1db954;
+    --secondary: #1ed760;
+    --font: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    color: #fff;
+    font-family: var(--font);
+  }
+  #widget-container {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    position: relative;
+  }
+  #status {
+    position: fixed;
+    top: 4px;
+    right: 4px;
+    z-index: 9999;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    background: rgba(244, 67, 54, 0.85);
+  }
+  #status[hidden] {
+    display: none;
+  }
+  .surface-music-card {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    width: 100%;
+    height: 100%;
+    background: rgba(18, 18, 24, 0.85);
+    border-left: 4px solid var(--primary);
+    border-radius: 12px;
+    padding: 12px 16px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(8px);
+  }
+  .surface-music-art {
+    width: 80px;
+    height: 80px;
+    border-radius: 8px;
+    object-fit: cover;
+  }
+  .surface-music-info {
+    flex: 1;
+    overflow: hidden;
+  }
+  .surface-music-title {
+    font-size: 18px;
+    font-weight: bold;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .surface-music-artists {
+    font-size: 14px;
+    color: #b3b3b3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+<div id="widget-container"></div>
+<div id="status" hidden>Connecting...</div>
+<script>
+'use strict';
+
+(function () {
+  const container = document.getElementById('widget-container');
+  const statusEl = document.getElementById('status');
+  const url = new URL(window.location.href);
+  const key = url.searchParams.get('key');
+  const pathParts = window.location.pathname.split('/').filter(Boolean);
+  const overlayCode = pathParts[0] || '';
+  const widgetId = pathParts[2] || '';
+
+  function renderFrame(data) {
+    if (!container || !data) return;
+    if (data.html) {
+      container.innerHTML = data.html;
+    } else if (data.image_url) {
+      const img = document.createElement('img');
+      img.src = data.image_url;
+      img.style.maxWidth = '100%';
+      img.style.maxHeight = '100%';
+      img.style.objectFit = 'contain';
+      container.innerHTML = '';
+      container.appendChild(img);
+    } else if (data.text) {
+      container.textContent = data.text;
+    } else if (data.payload && data.output_kind === 'surface') {
+      renderSurface(data.surface_id, data.payload);
+    }
+  }
+
+  function renderSurface(surfaceId, payload) {
+    if (surfaceId === 'music.now_playing' || payload.now_playing !== undefined) {
+      const track = payload.now_playing;
+      if (!track) {
+        container.innerHTML = '';
+        return;
+      }
+      const card = document.createElement('div');
+      card.className = 'surface-music-card';
+
+      if (track.artwork_url) {
+        const art = document.createElement('img');
+        art.className = 'surface-music-art';
+        art.src = track.artwork_url;
+        card.appendChild(art);
+      }
+
+      const info = document.createElement('div');
+      info.className = 'surface-music-info';
+
+      const title = document.createElement('div');
+      title.className = 'surface-music-title';
+      title.textContent = track.title || 'Unknown Title';
+      info.appendChild(title);
+
+      const artists = document.createElement('div');
+      artists.className = 'surface-music-artists';
+      artists.textContent = Array.isArray(track.artists) ? track.artists.join(', ') : (track.artists || 'Unknown Artist');
+      info.appendChild(artists);
+
+      card.appendChild(info);
+      container.innerHTML = '';
+      container.appendChild(card);
+    }
+  }
+
+  function connectSse() {
+    if (!key) return;
+    const sseUrl = '/' + overlayCode + '/fullscreen/live?key=' + encodeURIComponent(key);
+    const es = new EventSource(sseUrl);
+
+    es.onopen = function () {
+      statusEl.hidden = true;
+    };
+
+    es.onmessage = function (ev) {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data.widget_id === widgetId || (!data.widget_id && widgetId === '')) {
+          renderFrame(data);
+        }
+      } catch (e) {}
+    };
+
+    es.onerror = function () {
+      statusEl.textContent = 'Disconnected';
+      statusEl.hidden = false;
+    };
+  }
+
+  connectSse();
+})();
+</script>
+</body>
+</html>

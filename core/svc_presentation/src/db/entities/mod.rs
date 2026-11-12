@@ -37,6 +37,8 @@ pub mod caption_event;
 pub mod community;
 pub mod community_overlay_code;
 pub mod overlay_image;
+pub mod overlay_scene_component;
 pub mod overlay_surface;
 pub mod overlay_view_credential;
+pub mod overlay_widget_registry;
 pub mod presentation_config;

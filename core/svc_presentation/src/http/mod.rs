@@ -13,6 +13,8 @@ pub mod captions;
 pub mod health;
 pub mod overlay;
 pub mod overlay_page;
+pub mod scene_page;
+pub mod widget_page;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -314,6 +316,9 @@ async fn record_http_metrics(State(state): State<AppState>, req: Request, next: 
 pub fn router(state: AppState) -> Router {
     let overlay_view = crate::overlay::router::with_view_guard(
         Router::new()
+            .route("/{overlay_code}/scene", get(scene_page::page))
+            .route("/{overlay_code}/scene/layout", get(scene_page::layout))
+            .route("/{overlay_code}/widget/{widget_id}", get(widget_page::page))
             .route("/{overlay_code}/{surface}", get(overlay_page::page))
             .route("/{overlay_code}/{surface}/live", get(overlay::live_sse))
             .route("/{overlay_code}/{surface}/live/ws", get(overlay::live_ws)),
@@ -321,7 +326,9 @@ pub fn router(state: AppState) -> Router {
         state.view_store.clone(),
     );
     let overlay_push = crate::overlay::router::with_push_guard(
-        Router::new().route("/{overlay_code}/{surface}/push", post(overlay::push)),
+        Router::new()
+            .route("/{overlay_code}/widget/{widget_id}/push", post(widget_page::push))
+            .route("/{overlay_code}/{surface}/push", post(overlay::push)),
         state.overlay_codes.clone(),
         state.push_trust_source.clone(),
     );

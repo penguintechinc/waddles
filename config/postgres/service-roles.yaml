@@ -174,6 +174,8 @@ roles:
       overlay_surfaces: [SELECT]
       presentation_config: [SELECT]
       overlay_view_credentials: [SELECT]
+      overlay_widget_registry: [SELECT]
+      overlay_scene_components: [SELECT]
       overlay_images: [SELECT, INSERT]
       caption_events: [SELECT, INSERT, DELETE]
 

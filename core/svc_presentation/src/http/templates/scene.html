@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="no-referrer">
+<title>Waddles Composite Overlay Scene</title>
+<style>
+  :root {
+    --primary: #1db954;
+    --secondary: #1ed760;
+    --font: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    color: #fff;
+    font-family: var(--font);
+  }
+  #viewport {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  #scene-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform-origin: top left;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .scene-component {
+    position: absolute;
+    box-sizing: border-box;
+    pointer-events: none;
+  }
+  .scene-component[hidden] {
+    display: none !important;
+  }
+  #status {
+    position: fixed;
+    top: 8px;
+    right: 8px;
+    z-index: 99999;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: bold;
+    background: rgba(244, 67, 54, 0.85);
+  }
+  #status[hidden] {
+    display: none;
+  }
+  /* Surface rendering defaults */
+  .surface-music-card {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    width: 100%;
+    height: 100%;
+    background: rgba(18, 18, 24, 0.85);
+    border-left: 4px solid var(--primary);
+    border-radius: 12px;
+    padding: 12px 16px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(8px);
+  }
+  .surface-music-art {
+    width: 80px;
+    height: 80px;
+    border-radius: 8px;
+    object-fit: cover;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+  .surface-music-info {
+    flex: 1;
+    overflow: hidden;
+  }
+  .surface-music-title {
+    font-size: 18px;
+    font-weight: bold;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .surface-music-artists {
+    font-size: 14px;
+    color: #b3b3b3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+<div id="viewport">
+  <div id="scene-canvas"></div>
+</div>
+<div id="status" hidden>Connecting...</div>
+<script>
+'use strict';
+
+(function () {
+  const canvas = document.getElementById('scene-canvas');
+  const statusEl = document.getElementById('status');
+  let canvasW = 1920;
+  let canvasH = 1080;
+  const components = new Map();
+
+  function resizeStage() {
+    if (!canvas) return;
+    const winW = window.innerWidth || 1920;
+    const winH = window.innerHeight || 1080;
+    const scale = Math.min(winW / canvasW, winH / canvasH);
+    const offsetX = Math.max(0, (winW - canvasW * scale) / 2);
+    const offsetY = Math.max(0, (winH - canvasH * scale) / 2);
+    canvas.style.width = canvasW + 'px';
+    canvas.style.height = canvasH + 'px';
+    canvas.style.transform = 'translate(' + offsetX + 'px, ' + offsetY + 'px) scale(' + scale + ')';
+  }
+
+  window.addEventListener('resize', resizeStage);
+
+  function applyCanvasTheme(theme) {
+    if (!theme) return;
+    if (theme.width && theme.height) {
+      canvasW = theme.width;
+      canvasH = theme.height;
+    } else if (theme.resolution === '2k') {
+      canvasW = 2560;
+      canvasH = 1440;
+    } else if (theme.resolution === '4k') {
+      canvasW = 3840;
+      canvasH = 2160;
+    } else {
+      canvasW = 1920;
+      canvasH = 1080;
+    }
+    if (theme.primary_color) {
+      document.documentElement.style.setProperty('--primary', theme.primary_color);
+    }
+    if (theme.secondary_color) {
+      document.documentElement.style.setProperty('--secondary', theme.secondary_color);
+    }
+    if (theme.font_family) {
+      document.documentElement.style.setProperty('--font', theme.font_family);
+    }
+    resizeStage();
+  }
+
+  function mountComponent(c) {
+    let el = document.getElementById('comp-' + c.instance_id);
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'comp-' + c.instance_id;
+      el.className = 'scene-component';
+      canvas.appendChild(el);
+    }
+    el.style.left = c.x + 'px';
+    el.style.top = c.y + 'px';
+    el.style.width = c.width + 'px';
+    el.style.height = c.height + 'px';
+    el.style.zIndex = c.z_index || 10;
+    if (c.status === 'hidden' || c.status === 2) {
+      el.hidden = true;
+    } else {
+      el.hidden = false;
+    }
+    components.set(c.widget_id, el);
+    return el;
+  }
+
+  function renderFrame(el, data) {
+    if (!el || !data) return;
+    if (data.html) {
+      el.innerHTML = data.html;
+    } else if (data.image_url) {
+      const img = document.createElement('img');
+      img.src = data.image_url;
+      img.style.maxWidth = '100%';
+      img.style.maxHeight = '100%';
+      img.style.objectFit = 'contain';
+      el.innerHTML = '';
+      el.appendChild(img);
+    } else if (data.text) {
+      el.textContent = data.text;
+    } else if (data.payload && data.output_kind === 'surface') {
+      renderSurface(el, data.surface_id, data.payload);
+    }
+  }
+
+  function renderSurface(el, surfaceId, payload) {
+    if (surfaceId === 'music.now_playing' || payload.now_playing !== undefined) {
+      const track = payload.now_playing;
+      if (!track) {
+        el.innerHTML = '';
+        return;
+      }
+      const card = document.createElement('div');
+      card.className = 'surface-music-card';
+
+      if (track.artwork_url) {
+        const art = document.createElement('img');
+        art.className = 'surface-music-art';
+        art.src = track.artwork_url;
+        card.appendChild(art);
+      }
+
+      const info = document.createElement('div');
+      info.className = 'surface-music-info';
+
+      const title = document.createElement('div');
+      title.className = 'surface-music-title';
+      title.textContent = track.title || 'Unknown Title';
+      info.appendChild(title);
+
+      const artists = document.createElement('div');
+      artists.className = 'surface-music-artists';
+      artists.textContent = Array.isArray(track.artists) ? track.artists.join(', ') : (track.artists || 'Unknown Artist');
+      info.appendChild(artists);
+
+      card.appendChild(info);
+      el.innerHTML = '';
+      el.appendChild(card);
+    }
+  }
+
+  const url = new URL(window.location.href);
+  const key = url.searchParams.get('key');
+  const pathParts = window.location.pathname.split('/').filter(Boolean);
+  const overlayCode = pathParts[0] || '';
+
+  async function loadLayout() {
+    try {
+      const layoutUrl = '/' + overlayCode + '/scene/layout' + (key ? '?key=' + encodeURIComponent(key) : '');
+      const resp = await fetch(layoutUrl);
+      if (!resp.ok) {
+        statusEl.textContent = 'Layout error (' + resp.status + ')';
+        statusEl.hidden = false;
+        return;
+      }
+      const layout = await resp.json();
+      if (layout.canvas) {
+        applyCanvasTheme(layout.canvas);
+      }
+      if (Array.isArray(layout.components)) {
+        for (const c of layout.components) {
+          mountComponent(c);
+        }
+      }
+    } catch (e) {
+      statusEl.textContent = 'Failed to load layout';
+      statusEl.hidden = false;
+    }
+  }
+
+  function connectSse() {
+    if (!key) return;
+    const sseUrl = '/' + overlayCode + '/fullscreen/live?key=' + encodeURIComponent(key);
+    const es = new EventSource(sseUrl);
+
+    es.onopen = function () {
+      statusEl.hidden = true;
+    };
+
+    es.onmessage = function (ev) {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data.widget_id && components.has(data.widget_id)) {
+          renderFrame(components.get(data.widget_id), data);
+        } else if (data.components) {
+          for (const c of data.components) {
+            mountComponent(c);
+          }
+        }
+      } catch (e) {
+        // Ignored unparseable frame
+      }
+    };
+
+    es.onerror = function () {
+      statusEl.textContent = 'Disconnected, reconnecting...';
+      statusEl.hidden = false;
+    };
+  }
+
+  loadLayout();
+  connectSse();
+  resizeStage();
+})();
+</script>
+</body>
+</html>

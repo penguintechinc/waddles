@@ -318,3 +318,171 @@ class TestGetOverlayStats:
         assert len(body["stats"]["daily"]) == 1
         assert body["stats"]["daily"][0]["access_count"] == 2
         assert body["stats"]["daily"][0]["unique_ips"] == 2
+
+
+class TestOverlayBuilderLayoutAndWidgets:
+    async def test_browser_sources_includes_scene(self, client: Any, overlay_db: Any) -> None:
+        headers, community_id, _ = _owner_headers(overlay_db)
+        overlay_db.dal.executesql("ALTER TABLE communities ADD COLUMN overlay_code VARCHAR(16)")
+        overlay_db.dal.commit()
+        response = await client.get(
+            f"/api/v1/admin/{community_id}/browser-sources", headers=headers
+        )
+        assert response.status_code == 200
+        sources = (await response.get_json())["sources"]
+        source_types = [s["sourceType"] for s in sources]
+        assert "scene" in source_types
+        scene_source = next(s for s in sources if s["sourceType"] == "scene")
+        assert "/scene?key=" in scene_source["url"]
+
+    async def test_get_available_widgets(self, client: Any, overlay_db: Any) -> None:
+        headers, community_id, _ = _owner_headers(overlay_db)
+        response = await client.get(
+            f"/api/v1/admin/{community_id}/overlay/widgets", headers=headers
+        )
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert body["success"] is True
+        assert isinstance(body["widgets"], list)
+
+    async def test_layout_and_component_lifecycle(self, client: Any, overlay_db: Any) -> None:
+        headers, community_id, _ = _owner_headers(overlay_db)
+
+        # 1. Initial layout has default canvas
+        res_layout = await client.get(
+            f"/api/v1/admin/{community_id}/overlay/layout", headers=headers
+        )
+        assert res_layout.status_code == 200
+        layout = (await res_layout.get_json())["layout"]
+        assert layout["canvas"]["resolution"] == "1080p"
+        assert layout["canvas"]["width"] == 1920
+        assert layout["canvas"]["height"] == 1080
+        assert layout["components"] == []
+
+        # 2. Add component
+        add_res = await client.post(
+            f"/api/v1/admin/{community_id}/overlay/layout/components",
+            headers=headers,
+            json={
+                "widget_id": "dj.music.album_now_playing",
+                "display_name": "Now Playing",
+                "x": 48,
+                "y": 860,
+                "width": 460,
+                "height": 160,
+                "z_index": 10,
+            },
+        )
+        assert add_res.status_code == 201
+        comp = (await add_res.get_json())["component"]
+        instance_id = comp["instance_id"]
+        assert comp["widget_id"] == "dj.music.album_now_playing"
+        assert comp["x"] == 48
+
+        # 3. Update component
+        upd_res = await client.patch(
+            f"/api/v1/admin/{community_id}/overlay/layout/components/{instance_id}",
+            headers=headers,
+            json={"x": 100, "visible": False},
+        )
+        assert upd_res.status_code == 200
+        upd_comp = (await upd_res.get_json())["component"]
+        assert upd_comp["x"] == 100
+        assert upd_comp["status"] == "hidden"
+
+        # 4. Remove component
+        del_res = await client.delete(
+            f"/api/v1/admin/{community_id}/overlay/layout/components/{instance_id}",
+            headers=headers,
+        )
+        assert del_res.status_code == 200
+        assert (await del_res.get_json())["removed"] is True
+
+        # 5. Configure 4k resolution
+        theme_res = await client.post(
+            f"/api/v1/admin/{community_id}/overlay/layout/theme",
+            headers=headers,
+            json={"resolution": "4k", "theme": "cyberpunk"},
+        )
+        assert theme_res.status_code == 200
+        canvas = (await theme_res.get_json())["canvas"]
+        assert canvas["resolution"] == "4k"
+        assert canvas["width"] == 3840
+        assert canvas["height"] == 2160
+
+    async def test_canvas_resolution_persisted_in_dedicated_columns(
+        self, client: Any, overlay_db: Any
+    ) -> None:
+        """Resolution is stored in canvas_resolution/width/height columns (migration 105).
+
+        It is not only in the theme_config JSON blob, so it survives independent reads.
+        """
+        headers, community_id, _ = _owner_headers(overlay_db)
+
+        # First, create the overlay token by fetching it (auto-provisions).
+        await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+
+        # Set 2K resolution via the layout/theme endpoint.
+        theme_res = await client.post(
+            f"/api/v1/admin/{community_id}/overlay/layout/theme",
+            headers=headers,
+            json={"resolution": "2k", "theme": "retro"},
+        )
+        assert theme_res.status_code == 200
+        canvas = (await theme_res.get_json())["canvas"]
+        assert canvas["resolution"] == "2k"
+        assert canvas["width"] == 2560
+        assert canvas["height"] == 1440
+
+        # Verify the dedicated DB columns were written (not just theme_config).
+        dal = overlay_db.dal
+        from services.schema import bind_overlay_tables
+        bind_overlay_tables(dal, migrate=False)
+        tok = dal(dal.community_overlay_tokens.community_id == community_id).select().first()
+        assert tok is not None
+        assert tok.canvas_resolution == "2k"
+        assert tok.canvas_width == 2560
+        assert tok.canvas_height == 1440
+
+        # Set 4K and verify it round-trips through the layout endpoint too.
+        await client.post(
+            f"/api/v1/admin/{community_id}/overlay/layout/theme",
+            headers=headers,
+            json={"resolution": "4k"},
+        )
+        layout_res = await client.get(
+            f"/api/v1/admin/{community_id}/overlay/layout", headers=headers
+        )
+        layout_canvas = (await layout_res.get_json())["layout"]["canvas"]
+        assert layout_canvas["resolution"] == "4k"
+        assert layout_canvas["width"] == 3840
+        assert layout_canvas["height"] == 2160
+
+    async def test_canvas_resolution_roundtrips_1080p(
+        self, client: Any, overlay_db: Any
+    ) -> None:
+        """Default 1080p is returned from layout endpoint even without explicit set."""
+        headers, community_id, _ = _owner_headers(overlay_db)
+        # Provision overlay token.
+        await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+
+        layout_res = await client.get(
+            f"/api/v1/admin/{community_id}/overlay/layout", headers=headers
+        )
+        assert layout_res.status_code == 200
+        canvas = (await layout_res.get_json())["layout"]["canvas"]
+        assert canvas["resolution"] == "1080p"
+        assert canvas["width"] == 1920
+        assert canvas["height"] == 1080
+
+    async def test_invalid_resolution_is_400(self, client: Any, overlay_db: Any) -> None:
+        """Unknown resolution strings are rejected with 400."""
+        headers, community_id, _ = _owner_headers(overlay_db)
+        await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        res = await client.post(
+            f"/api/v1/admin/{community_id}/overlay/layout/theme",
+            headers=headers,
+            json={"resolution": "8k"},
+        )
+        assert res.status_code == 400
+

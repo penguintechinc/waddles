@@ -1,0 +1,25 @@
+[package]
+name = "waddle-bundle-stream-alerts"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Stream Alerts Presentation Bundle: renders sub, follow, cheer, and raid alerts for composite and standalone overlays."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+waddle-sdk-rs = { path = "../../../sdk/waddle-sdk-rs", version = "=0.1.0" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[package.metadata.component]
+package = "waddle:bundle-stream-alerts"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-bundle"
+world = "stage"
+
+[package.metadata.component.dependencies]
