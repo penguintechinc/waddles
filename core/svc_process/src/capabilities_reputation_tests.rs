@@ -45,6 +45,22 @@ enum ExtCall {
     },
     GetMany(ReputationScope, Vec<Uuid>),
     Leaderboard(ReputationScope, u32),
+    Apply {
+        scope: ReputationScope,
+        user: Uuid,
+        delta: i32,
+        class: bundle_host_reputation::ReasonClass,
+        source: String,
+        caps: ReputationCaps,
+        key: String,
+    },
+    GetTenant(ReputationScope, Uuid),
+    TenantPolicy(ReputationScope),
+    History(ReputationScope, Uuid, u32, Option<i64>),
+    Below(ReputationScope, i64, u32),
+    IsSoftBanned(ReputationScope, Uuid),
+    SoftBan(ReputationScope, Uuid, String),
+    LiftSoftBan(ReputationScope, Uuid, String),
 }
 
 /// Records every store call; answers with a canned result.
@@ -188,6 +204,161 @@ impl ReputationStore for RecordingStore {
                 .unwrap_or(Ok(vec![]))
         })
     }
+
+    fn apply<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        delta: i32,
+        class: bundle_host_reputation::ReasonClass,
+        source_event: &'a str,
+        caps: ReputationCaps,
+        key: &'a bundle_host_reputation::IdempotencyKey,
+    ) -> bundle_host_reputation::BoxFuture<
+        'a,
+        Result<bundle_host_reputation::ApplyOutcome, ReputationError>,
+    > {
+        Box::pin(async move {
+            self.ext.lock().unwrap().push(ExtCall::Apply {
+                scope: scope.clone(),
+                user,
+                delta,
+                class,
+                source: source_event.to_string(),
+                caps,
+                key: key.as_str().to_string(),
+            });
+            self.take()
+                .map(|new_score| bundle_host_reputation::ApplyOutcome {
+                    new_score,
+                    applied: true,
+                })
+        })
+    }
+    fn get_tenant<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+    ) -> bundle_host_reputation::BoxFuture<
+        'a,
+        Result<bundle_host_reputation::TenantScore, ReputationError>,
+    > {
+        Box::pin(async move {
+            self.ext
+                .lock()
+                .unwrap()
+                .push(ExtCall::GetTenant(scope.clone(), user));
+            self.take()
+                .map(|score| bundle_host_reputation::TenantScore {
+                    score,
+                    communities: 2,
+                })
+        })
+    }
+    fn tenant_policy<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+    ) -> bundle_host_reputation::BoxFuture<
+        'a,
+        Result<Option<bundle_host_reputation::TenantPolicy>, ReputationError>,
+    > {
+        Box::pin(async move {
+            self.ext
+                .lock()
+                .unwrap()
+                .push(ExtCall::TenantPolicy(scope.clone()));
+            Ok(Some(bundle_host_reputation::TenantPolicy {
+                auto_ban_enabled: false,
+                auto_ban_floor: 350,
+                at_risk_threshold: 450,
+            }))
+        })
+    }
+    fn history<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        limit: u32,
+        before: Option<i64>,
+    ) -> bundle_host_reputation::BoxFuture<
+        'a,
+        Result<Vec<bundle_host_reputation::HistoryEntry>, ReputationError>,
+    > {
+        Box::pin(async move {
+            self.ext
+                .lock()
+                .unwrap()
+                .push(ExtCall::History(scope.clone(), user, limit, before));
+            Ok(vec![bundle_host_reputation::HistoryEntry {
+                id: 9,
+                delta: -3,
+                reason_code: "activity:evt".into(),
+                kind: "apply".into(),
+                balance_after: Some(597),
+                occurred_at: "2026-11-11T00:00:00Z".into(),
+            }])
+        })
+    }
+    fn below_threshold<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        threshold: i64,
+        limit: u32,
+    ) -> bundle_host_reputation::BoxFuture<
+        'a,
+        Result<Vec<bundle_host_reputation::ScoreEntry>, ReputationError>,
+    > {
+        Box::pin(async move {
+            self.ext
+                .lock()
+                .unwrap()
+                .push(ExtCall::Below(scope.clone(), threshold, limit));
+            Ok(vec![])
+        })
+    }
+    fn is_soft_banned<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+    ) -> bundle_host_reputation::BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async move {
+            self.ext
+                .lock()
+                .unwrap()
+                .push(ExtCall::IsSoftBanned(scope.clone(), user));
+            Ok(true)
+        })
+    }
+    fn soft_ban<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        reason: &'a str,
+    ) -> bundle_host_reputation::BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async move {
+            self.ext.lock().unwrap().push(ExtCall::SoftBan(
+                scope.clone(),
+                user,
+                reason.to_string(),
+            ));
+            Ok(true)
+        })
+    }
+    fn lift_soft_ban<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        only_reason: &'a str,
+    ) -> bundle_host_reputation::BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async move {
+            self.ext.lock().unwrap().push(ExtCall::LiftSoftBan(
+                scope.clone(),
+                user,
+                only_reason.to_string(),
+            ));
+            Ok(true)
+        })
+    }
 }
 
 struct Fixture {
@@ -222,12 +393,23 @@ fn fixture_with(
     wired: bool,
     community: Option<(&str, i32)>,
 ) -> Fixture {
+    fixture_app(APP_ID, grant_set, flag_on, wired, community)
+}
+
+/// [`fixture_with`] for an arbitrary `app_id` (core vs third-party).
+fn fixture_app(
+    app_id: &str,
+    grant_set: GrantSet,
+    flag_on: bool,
+    wired: bool,
+    community: Option<(&str, i32)>,
+) -> Fixture {
     let snapshot = InMemoryGrantSnapshot::new();
     snapshot.set(
         GrantScopeKey {
             tenant_id: TENANT_ID,
             community_id: community.map_or(0, |c| c.1),
-            app_id: APP_ID.to_string(),
+            app_id: app_id.to_string(),
             app_version: VERSION,
         },
         grant_set,
@@ -266,7 +448,7 @@ fn fixture_with(
     let mut caps = StageCapabilities::new(
         "acme".to_string(),
         community.map(|c| c.0.to_string()),
-        APP_ID.to_string(),
+        app_id.to_string(),
         TENANT_ID,
         community.map_or(0, |c| c.1),
         VERSION,
@@ -1358,4 +1540,299 @@ async fn override_is_rate_limited_to_ten_calls_per_window_on_the_cap_path() {
         10,
         "the 11th call never reached the store"
     );
+}
+
+fn v2_grants() -> GrantSet {
+    grants(&[
+        ("reputation.read", serde_json::json!({})),
+        (
+            "reputation.community.write",
+            serde_json::json!({"delta_min": -5, "delta_max": 5}),
+        ),
+        (
+            "reputation.moderation.write",
+            serde_json::json!({"delta_min": -200, "delta_max": 200}),
+        ),
+        ("reputation.history.read", serde_json::json!({})),
+        ("reputation.tenant.read", serde_json::json!({})),
+    ])
+}
+
+#[tokio::test]
+async fn apply_derives_the_activity_class_and_catalog_caps_on_the_host() {
+    let f = ext_fixture(v2_grants());
+    f.store.answer(Ok(605));
+    // A guest-supplied `class`/`tenant_id` field is ignored entirely.
+    let args = serde_json::json!({
+        "user": f.member.to_string(), "delta": 5, "reason": "activity.follow",
+        "class": "moderation", "tenant_id": 999,
+    });
+    let out = f
+        .caps
+        .handle(rep_call("reputation.apply", args))
+        .await
+        .unwrap();
+    assert_eq!(out, serde_json::json!({"new_score": 605, "applied": true}));
+    let caps = reputation_caps_for(PermissionFamily::ReputationCommunityWrite);
+    assert_eq!(
+        f.store.ext_calls(),
+        vec![ExtCall::Apply {
+            scope: rep_scope(),
+            user: f.member,
+            delta: 5,
+            class: bundle_host_reputation::ReasonClass::Activity,
+            source: "activity.follow".into(),
+            caps,
+            key: format!("{EVENT_ID}:reputation_apply:0"),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn apply_activity_is_bounded_to_five_and_moderation_needs_its_own_grant() {
+    let f = ext_fixture(v2_grants());
+    let mk =
+        |d: i64| serde_json::json!({"user": f.member.to_string(), "delta": d, "reason": "r.x"});
+    // Activity op: a moderation-sized delta is refused before the store.
+    assert_eq!(
+        code_of(&f, "reputation.apply", mk(-200)).await,
+        "invalid_args"
+    );
+    assert_eq!(f.store.ext_count(), 0);
+    // Moderation op: -200 passes with the grant and carries the moderation class + caps.
+    f.store.answer(Ok(400));
+    f.caps
+        .handle(rep_call("reputation.apply_moderation", mk(-200)))
+        .await
+        .unwrap();
+    let calls = f.store.ext_calls();
+    assert!(matches!(
+        &calls[0],
+        ExtCall::Apply { class: bundle_host_reputation::ReasonClass::Moderation, delta: -200, caps, .. }
+            if *caps == reputation_caps_for(PermissionFamily::ReputationModerationWrite)
+    ));
+    // Without `reputation.moderation.write` the same call is not_granted.
+    let g = ext_fixture(full_grants());
+    assert_eq!(
+        code_of(&g, "reputation.apply_moderation", mk(-200)).await,
+        "not_granted"
+    );
+    assert_eq!(g.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn core_only_ops_are_forbidden_for_a_third_party_app_even_when_granted() {
+    let f = fixture_app(
+        "acme.third-party",
+        v2_grants(),
+        true,
+        true,
+        Some(("main", COMMUNITY_ID)),
+    );
+    let u = f.member.to_string();
+    let cases = [
+        (
+            "reputation.history",
+            serde_json::json!({"user": u, "limit": 5}),
+        ),
+        ("reputation.get_tenant", serde_json::json!({"user": u})),
+        ("reputation.get_tenant_policy", serde_json::json!({})),
+        (
+            "reputation.soft_ban",
+            serde_json::json!({"user": u, "reason": "community_soft_floor"}),
+        ),
+        (
+            "reputation.lift_soft_ban",
+            serde_json::json!({"user": u, "only_reason": "community_soft_floor"}),
+        ),
+        (
+            "reputation.apply_moderation",
+            serde_json::json!({"user": u, "delta": -10, "reason": "m.x"}),
+        ),
+    ];
+    for (op, args) in cases {
+        assert_eq!(code_of(&f, op, args).await, "forbidden", "{op}");
+    }
+    assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn core_read_ops_need_their_grants_and_reach_the_store_with_host_scope() {
+    // Not granted: read-only grants cannot reach history / tenant reads.
+    let g = ext_fixture(full_grants());
+    let u = g.member.to_string();
+    assert_eq!(
+        code_of(
+            &g,
+            "reputation.history",
+            serde_json::json!({"user": u, "limit": 5})
+        )
+        .await,
+        "not_granted"
+    );
+    assert_eq!(
+        code_of(&g, "reputation.get_tenant", serde_json::json!({"user": u})).await,
+        "not_granted"
+    );
+    assert_eq!(g.store.ext_count(), 0);
+
+    let f = ext_fixture(v2_grants());
+    let u = f.member.to_string();
+    let t = f.store.answer(Ok(512));
+    let _ = t;
+    let out = f
+        .caps
+        .handle(rep_call(
+            "reputation.get_tenant",
+            serde_json::json!({"user": u}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(out, serde_json::json!({"score": 512, "communities": 2}));
+    let h = f
+        .caps
+        .handle(rep_call(
+            "reputation.history",
+            serde_json::json!({"user": u, "limit": 10, "before": 50}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(h["entries"][0]["id"], 9);
+    let p = f
+        .caps
+        .handle(rep_call(
+            "reputation.get_tenant_policy",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(p["policy"]["auto_ban_floor"], 350);
+    assert_eq!(
+        f.store.ext_calls(),
+        vec![
+            ExtCall::GetTenant(rep_scope(), f.member),
+            ExtCall::History(rep_scope(), f.member, 10, Some(50)),
+            ExtCall::TenantPolicy(rep_scope()),
+        ]
+    );
+    // Argument validation: limit bounds, non-positive cursor.
+    for args in [
+        serde_json::json!({"user": u, "limit": 0}),
+        serde_json::json!({"user": u, "limit": 101}),
+        serde_json::json!({"user": u, "limit": 5, "before": 0}),
+    ] {
+        assert_eq!(
+            code_of(&f, "reputation.history", args).await,
+            "invalid_args"
+        );
+    }
+}
+
+#[tokio::test]
+async fn community_tenant_isolation_a_non_member_target_is_refused_before_the_store() {
+    let f = ext_fixture(v2_grants());
+    let stranger = Uuid::new_v4().to_string();
+    for (op, args) in [
+        (
+            "reputation.get_tenant",
+            serde_json::json!({"user": stranger}),
+        ),
+        (
+            "reputation.history",
+            serde_json::json!({"user": stranger, "limit": 5}),
+        ),
+        (
+            "reputation.is_soft_banned",
+            serde_json::json!({"user": stranger}),
+        ),
+    ] {
+        assert_eq!(code_of(&f, op, args).await, "user_not_in_scope", "{op}");
+    }
+    assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn soft_ban_ops_and_below_threshold_validate_and_route() {
+    let f = ext_fixture(v2_grants());
+    let u = f.member.to_string();
+    f.caps
+        .handle(rep_call(
+            "reputation.is_soft_banned",
+            serde_json::json!({"user": u}),
+        ))
+        .await
+        .unwrap();
+    f.caps
+        .handle(rep_call(
+            "reputation.soft_ban",
+            serde_json::json!({"user": u, "reason": "community_soft_floor"}),
+        ))
+        .await
+        .unwrap();
+    f.caps
+        .handle(rep_call(
+            "reputation.lift_soft_ban",
+            serde_json::json!({"user": u, "only_reason": "community_soft_floor"}),
+        ))
+        .await
+        .unwrap();
+    f.caps
+        .handle(rep_call(
+            "reputation.below_threshold",
+            serde_json::json!({"threshold": 450, "limit": 20}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store.ext_calls(),
+        vec![
+            ExtCall::IsSoftBanned(rep_scope(), f.member),
+            ExtCall::SoftBan(rep_scope(), f.member, "community_soft_floor".into()),
+            ExtCall::LiftSoftBan(rep_scope(), f.member, "community_soft_floor".into()),
+            ExtCall::Below(rep_scope(), 450, 20),
+        ]
+    );
+    for args in [
+        serde_json::json!({"threshold": 299, "limit": 5}),
+        serde_json::json!({"threshold": 900, "limit": 5}),
+        serde_json::json!({"threshold": 450, "limit": 101}),
+    ] {
+        assert_eq!(
+            code_of(&f, "reputation.below_threshold", args).await,
+            "invalid_args"
+        );
+    }
+    // Bad reason (free text) rejected.
+    assert_eq!(
+        code_of(
+            &f,
+            "reputation.soft_ban",
+            serde_json::json!({"user": u, "reason": "Bad Reason"})
+        )
+        .await,
+        "invalid_args"
+    );
+    // The 1-point soft-ban authorization is handed back: many soft bans never
+    // drain the moderation quota.
+    for _ in 0..30 {
+        f.caps
+            .handle(rep_call(
+                "reputation.soft_ban",
+                serde_json::json!({"user": u, "reason": "community_soft_floor"}),
+            ))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn apply_needs_a_replay_stable_event_id() {
+    // No event id on the invocation -> not_implemented, nothing applied.
+    let f = fixture_with(v2_grants(), true, true, Some(("main", COMMUNITY_ID)));
+    let args = serde_json::json!({"user": f.member.to_string(), "delta": 1, "reason": "r.x"});
+    assert_eq!(
+        code_of(&f, "reputation.apply", args).await,
+        "not_implemented"
+    );
+    assert_eq!(f.store.ext_count(), 0);
 }
