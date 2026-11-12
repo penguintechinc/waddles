@@ -1739,9 +1739,9 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("registered_at", DateTime),
         UniqueConstraint("tenant_id", "community_id", "app_id", "command"),
     )
-    # bundle_precompile_requests (migration 0100) -- AOT precompile queue, enqueued by the
+    # bundle_precompile_requests (migration 0101) -- AOT precompile queue, enqueued by the
     # approval/signing paths. sqlite mirror; the lease SQL is Postgres-only and proven in
-    # alembic/tests/test_0100_bundle_precompile_requests.py.
+    # alembic/tests/test_0101_bundle_precompile_requests.py.
     Table(
         "bundle_precompile_requests",
         metadata,
