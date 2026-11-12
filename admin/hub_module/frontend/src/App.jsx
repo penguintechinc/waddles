@@ -65,7 +65,10 @@ const LiveActivity = lazy(() => import('./pages/community/LiveActivity'));
 const AdminMirrorGroups = lazy(() => import('./pages/admin/AdminMirrorGroups'));
 const AdminLeaderboardConfig = lazy(() => import('./pages/admin/AdminLeaderboardConfig'));
 const AdminCommunityProfile = lazy(() => import('./pages/admin/AdminCommunityProfile'));
-const ReputationSettings = lazy(() => import('./pages/admin/ReputationSettings'));
+const CommunityReputationPolicy = lazy(() => import('./pages/admin/CommunityReputationPolicy'));
+const CommunityReputationBans = lazy(() => import('./pages/admin/CommunityReputationBans'));
+const CommunityReputationHistory = lazy(() => import('./pages/admin/CommunityReputationHistory'));
+const TenantReputationSettings = lazy(() => import('./pages/tenant/TenantReputationSettings'));
 const AdminAIInsights = lazy(() => import('./pages/admin/AdminAIInsights'));
 const AdminAIResearcherConfig = lazy(() => import('./pages/admin/AdminAIResearcherConfig'));
 const AdminAIChatterConfig = lazy(() => import('./pages/admin/AdminAIChatterConfig'));
@@ -164,6 +167,12 @@ const AdminAIKnowledge = lazy(() => import('./pages/admin/AdminAIKnowledge'));
 
 // Living style guide: development builds only (tree-shaken from production).
 const DesignSystem = import.meta.env.DEV ? lazy(() => import('./pages/dev/DesignSystem')) : null;
+
+// Legacy v2 reputation editor route; scoring weights now live in the reputation bundle.
+function ReputationRedirect() {
+  const { communityId } = useParams();
+  return <Navigate to={`/admin/${communityId}/reputation/policy`} replace />;
+}
 
 // Legacy "modules" URLs were superseded by app bundles; redirect so bookmarks do not 404.
 function CommunityBundlesRedirect() {
@@ -332,7 +341,10 @@ function App() {
         <Route path="/admin/:communityId/mirror-groups" element={<ServedFeature feature="mirror-groups"><AdminMirrorGroups /></ServedFeature>} />
         <Route path="/admin/:communityId/leaderboard" element={<AdminLeaderboardConfig />} />
         <Route path="/admin/:communityId/profile" element={<AdminCommunityProfile />} />
-        <Route path="/admin/:communityId/reputation" element={<ReputationSettings />} />
+        <Route path="/admin/:communityId/reputation" element={<ReputationRedirect />} />
+        <Route path="/admin/:communityId/reputation/policy" element={<CommunityReputationPolicy />} />
+        <Route path="/admin/:communityId/reputation/bans" element={<CommunityReputationBans />} />
+        <Route path="/admin/:communityId/reputation/history" element={<CommunityReputationHistory />} />
         <Route path="/admin/:communityId/ai-insights" element={<ServedFeature feature="ai-insights"><AdminAIInsights /></ServedFeature>} />
         <Route path="/admin/:communityId/ai-config" element={<ServedFeature feature="ai-researcher"><AdminAIResearcherConfig /></ServedFeature>} />
         <Route path="/admin/:communityId/ai-chatter" element={<AdminAIChatterConfig />} />
@@ -445,6 +457,7 @@ function App() {
         <Route path="/tenant/:tenantSlug" element={<TenantDashboard />} />
         <Route path="/tenant/:tenantSlug/modules" element={<TenantBundlesRedirect />} />
         <Route path="/tenant/:tenantSlug/admins" element={<TenantAdmins />} />
+        <Route path="/tenant/:tenantSlug/reputation" element={<TenantReputationSettings />} />
         <Route path="/tenant/:tenantSlug/communities" element={<TenantCommunities />} />
         {/* Wave-1 stub: tenant bundle catalog slice */}
         <Route path="/tenant/:tenantSlug/bundles" element={<TenantBundleCatalog />} />
