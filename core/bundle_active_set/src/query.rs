@@ -108,7 +108,9 @@ fn declared_capabilities_from_summary(summary_json: &sea_orm::JsonValue) -> Vec<
 
 /// Extracts `summary_json.egress` (`[{host, methods}]`) and `egressRps`.
 /// Malformed entries are dropped (fail closed: less egress, never more).
-fn egress_from_summary(summary_json: &sea_orm::JsonValue) -> (Vec<(String, Vec<String>)>, Option<u32>) {
+fn egress_from_summary(
+    summary_json: &sea_orm::JsonValue,
+) -> (Vec<(String, Vec<String>)>, Option<u32>) {
     let egress = summary_json
         .get("egress")
         .and_then(|v| v.as_array())

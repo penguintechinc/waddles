@@ -696,6 +696,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-host-credentials"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bundle-host-http",
+ "connection_resolver",
+ "redis",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bundle-host-db"
 version = "0.1.0"
 dependencies = [
@@ -720,6 +733,20 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "bundle-host-gameserver-net"
+version = "0.1.0"
+dependencies = [
+ "bundle-host-http",
+ "connection_resolver",
+ "opentelemetry",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -760,6 +787,7 @@ dependencies = [
  "bundle-host-http",
  "bytes",
  "http",
+ "hub_client",
  "object_store",
  "opentelemetry",
  "redis",
@@ -768,6 +796,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tonic",
  "tracing",
  "uuid",
  "zeroize",
@@ -1007,6 +1036,20 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "connection_resolver"
+version = "0.1.0"
+dependencies = [
+ "hub_client",
+ "serde",
+ "service_auth",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -2189,13 +2232,14 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.20"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
+checksum = "727805d60e7938b76b826a6ef209eb70eaa1812794f9424d4a4e2d740662df5f"
 dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures-channel",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",
@@ -4289,13 +4333,21 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "hyper-util",
  "jsonwebtoken",
  "opentelemetry",
- "reqwest 0.12.28",
+ "prost",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
  "tracing",
 ]
 
@@ -4685,8 +4737,10 @@ dependencies = [
  "base64 0.22.1",
  "bundle-active-set",
  "bundle-capability-gate",
+ "bundle-host-credentials",
  "bundle-host-db",
  "bundle-host-economy",
+ "bundle-host-gameserver-net",
  "bundle-host-http",
  "bundle-host-kv",
  "bundle-host-media",
@@ -4697,6 +4751,7 @@ dependencies = [
  "chrono",
  "circuit-breaker",
  "clap",
+ "connection_resolver",
  "futures-util",
  "governor",
  "hex",
