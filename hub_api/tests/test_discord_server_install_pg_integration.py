@@ -474,7 +474,11 @@ class TestManualPairById:
         assert (await response.get_json())["error"]["code"] == "DISCORD_BOT_NOT_IN_GUILD"
         assert _pairings(adal.dal, community_id) == []
 
-    async def test_already_paired(self, client: Any, auth_headers: Any, community_id: int) -> None:
+    async def test_already_paired(
+        self, client: Any, auth_headers: Any, adal: AsyncDAL, community_id: int
+    ) -> None:
+        tid = pg.scalar(adal.dal, "SELECT tenant_id FROM communities WHERE id=%s", [community_id])
+        _grant(adal.dal, int(tid), community_id, GUILD)
         assert (await self._post(client, auth_headers, community_id, GUILD)).status_code == 201
         again = await self._post(client, auth_headers, community_id, GUILD)
         assert again.status_code == 409
