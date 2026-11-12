@@ -26,13 +26,44 @@ this port's other service modules assume.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from services.admin_service import VALID_MEMBER_ROLES
-from services.errors import bad_request, conflict, not_found
+from services.errors import ApiError, bad_request, conflict, not_found
 from services.schema import bind_guild_pairing_tables
+
+logger = logging.getLogger(__name__)
+
+#: Deliberately detail-free: a cross-tenant collision must not reveal another tenant's config.
+ROLE_UNAVAILABLE_MESSAGE = "This role can't be used for mirroring"
+
+
+def community_tenant_id(dal: Any, community_id: int) -> int | None:
+    """Tenant id owning `community_id` (`None` if the community row is missing).
+
+    Used to scope cross-community role conflicts to the caller's own tenant.
+    """
+    row = dal(dal.communities.id == community_id).select(dal.communities.tenant_id).first()
+    return int(row.tenant_id) if row is not None else None
+
+
+def role_unavailable(reason: str, community_id: int, other_community_id: int) -> ApiError:
+    """Generic 409 for a cross-tenant collision on the same physical Discord role.
+
+    The specific reason is logged server-side (numeric ids only, PII-free); the response
+    carries no ids or names from the other tenant.
+    """
+    logger.warning(
+        "role_conflict.cross_tenant reason=%s community_id=%s other_community_id=%s",
+        reason,
+        community_id,
+        other_community_id,
+    )
+    return ApiError(ROLE_UNAVAILABLE_MESSAGE, 409, "ROLE_UNAVAILABLE")
+
 
 #: `guild_tenant_pairings.direction` -- migration 0034's own CHECK constraint values.
 #: `discord_to_twitch` is the Discord -> platform direction's historical name (kept
@@ -430,7 +461,7 @@ def create_binding(
     pairing = get_pairing(dal, community_id, pairing_id)
     if pairing is not None:
         m = dal.discord_role_mirror_mappings
-        used_by_mirror = dal(
+        mirror_rows = dal(
             (
                 (m.source_guild_id == pairing.discord_guild_id)
                 & (m.source_role_id == discord_role_id)
@@ -439,9 +470,14 @@ def create_binding(
                 (m.target_guild_id == pairing.discord_guild_id)
                 & (m.target_role_id == discord_role_id)
             )
-        ).count()
-        if used_by_mirror:
-            raise conflict(f"discord role {discord_role_id} is used by a Discord role mirror")
+        ).select(m.community_id)
+        own_tenant = community_tenant_id(dal, community_id)
+        for row in mirror_rows:
+            other = int(row.community_id)
+            if community_tenant_id(dal, other) == own_tenant:
+                raise conflict(f"discord role {discord_role_id} is used by a Discord role mirror")
+        for row in mirror_rows:
+            raise role_unavailable("used_by_mirror", community_id, int(row.community_id))
     try:
         cross_direction = dal(
             (b.pairing_id == pairing_id) & (b.discord_role_id == discord_role_id)

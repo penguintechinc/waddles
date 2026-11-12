@@ -17,6 +17,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.guild_pairing import guild_pairing_bp
 from services import discord_role_mirror as mirror
+from services import guild_pairing as pairing_svc_mod
 from services import role_sync_service as svc
 from services.credential_resolver import PlatformCredentials, TransportUnavailable
 from services.discord_guild_roles import DiscordRole, is_privileged_role
@@ -515,6 +516,51 @@ class TestAllowlistAndCrossCommunity:
         with pytest.raises(ApiError) as exc:
             create_binding(dal, cid2, p2.id, sync_scope="moderator", discord_role_id=R_DST)
         assert exc.value.status_code == 409
+
+    async def _foreign_community(self, dal: Any, *guilds: str) -> int:
+        t2 = dal.tenants.insert(slug="foreign-corp", is_active=True, is_global=False)
+        cid2 = dal.communities.insert(name="foreign-community", tenant_id=t2)
+        dal.commit()
+        _pair(dal, cid2, *guilds)
+        return int(cid2)
+
+    @staticmethod
+    def _assert_generic(err: ApiError, *leaks: Any) -> None:
+        assert err.status_code == 409
+        assert str(err.message) == pairing_svc_mod.ROLE_UNAVAILABLE_MESSAGE
+        for leak in leaks:
+            assert str(leak) not in str(err.message)
+
+    async def test_cross_tenant_binding_conflict_is_generic(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        cid2 = await self._foreign_community(dal, G_A)
+        p2 = next(p for p in list_pairings(dal, cid2) if p.discord_guild_id == G_A)
+        create_binding(dal, cid2, p2.id, sync_scope="moderator", discord_role_id=R_SRC)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        self._assert_generic(exc.value, cid2, p2.id, "foreign", "binding")
+
+    async def test_cross_tenant_target_conflict_is_generic(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        cid2 = await self._foreign_community(dal, G_B, G_C)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid2, G_C, R_SRC, G_B, R_DST)
+        self._assert_generic(exc.value, cid, "mirror mapping")
+        assert mirror.list_mappings(dal, cid2) == []
+
+    async def test_cross_tenant_binding_vs_mirror_is_generic(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        cid2 = await self._foreign_community(dal, G_B)
+        p2 = next(p for p in list_pairings(dal, cid2) if p.discord_guild_id == G_B)
+        with pytest.raises(ApiError) as exc:
+            create_binding(dal, cid2, p2.id, sync_scope="moderator", discord_role_id=R_DST)
+        self._assert_generic(exc.value, cid, R_DST)
+        assert exc.value.details is None
 
     async def test_target_role_cannot_be_target_of_another_community_mapping(
         self, guild_pairing_db: Any
