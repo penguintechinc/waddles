@@ -2817,6 +2817,10 @@ serviceJwt:
         # Granted to this identity alone; hub-api additionally allow-lists the caller by name.
         - "media:byok:resolve"
         - "media:tier:resolve"
+        # feature/bundle-community-config-live -- get-context().config_json: the live per-community
+        # bundle config (BundleConfigService, hub_api/grpc_internal/bundle_config_servicer.py).
+        # Read-only, ids only; hub-api additionally allow-lists the caller by name.
+        - "bundle-config:read"
     svc-action:
       spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-action"
       serviceAccount: svc-action
@@ -2845,6 +2849,9 @@ serviceJwt:
         # (never wider). Filtered out of the rendered allow-list unless presentation.rust.enabled
         # (waddlebot.svcActionOverlayPush); the Python svc-presentation was removed, Rust is the default.
         - "presentation.overlay:push"
+        # feature/bundle-community-config-live -- live per-community bundle config for
+        # get-context().config_json (hub_api BundleConfigService); read-only, ids only.
+        - "bundle-config:read"
     # Overlay detokenization (core/svc_presentation/src/overlay/detok.rs): resolves
     # `{user:<uuid>}` to display names via ResolveDisplayNames only -- never mints
     # pseudonyms or calls egress, so exactly one scope.

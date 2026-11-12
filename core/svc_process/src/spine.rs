@@ -194,6 +194,10 @@ pub async fn ensure_loaded(
     let metrics = stage_metrics::stage_metrics();
     let result = if outcome.is_ok() { "ok" } else { "error" };
     metrics.record_bundle_load(app_id, "load", result, started.elapsed());
+    if outcome.is_ok() {
+        // Seed the live-config cache for this scope (lazy-load still covers a failed seed).
+        hub_client::bundle_config::seed_scope_in_background(tenant_id, community_id, app_id);
+    }
     if let Ok(loaded) = &outcome {
         // The executor's own account of the load (`precompile_ms`, covering
         // fetch + verify + compile on its side) -- the stage cannot see
@@ -1068,6 +1072,9 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
         ),
         None => caps,
     };
+    // Live per-community config for `get-context().config_json` (None when hub-api is not
+    // configured): served only for the verified envelope scope.
+    let caps = caps.with_bundle_config(hub_client::bundle_config::global());
     // `identity`: the invocation's host-derived identity facts (see the callers).
     match (&deps.identity_wiring, invocation) {
         (Some(identity), Some(invocation)) => caps.with_identity(identity.clone(), invocation),

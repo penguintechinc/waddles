@@ -607,6 +607,10 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// guest then sees no scope and fails closed). Set only via
     /// [`Self::with_verified_scope`] from the verified envelope.
     verified_scope: Option<(i32, i32)>,
+    /// Live per-community config cache (`hub_client::bundle_config`); `None` until
+    /// [`Self::with_bundle_config`] (hub-api not configured) -- `get-context` then carries no
+    /// `config_json` (the guest sees `{}`), exactly as before this feature.
+    bundle_config: Option<Arc<hub_client::bundle_config::BundleConfigCache>>,
     /// The OTel instruments every `host-call` served by this value is timed
     /// into (`waddles_host_call_latency_seconds`). Always the process-wide
     /// set in production; tests swap it via `with_stage_metrics` so they can
@@ -732,6 +736,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             media_deadline: None,
             invocation_identity: None,
             verified_scope: None,
+            bundle_config: None,
             stage_metrics: stage_metrics::stage_metrics(),
             tool: None,
             tool_caller: None,
@@ -745,6 +750,41 @@ impl<K: KvBackend> StageCapabilities<K> {
     pub fn with_verified_scope(mut self, scope: Option<(i32, i32)>) -> Self {
         self.verified_scope = scope;
         self
+    }
+
+    /// Attaches the live community-config cache so `get-context` carries `config_json`.
+    #[must_use]
+    pub fn with_bundle_config(
+        mut self,
+        cache: Option<Arc<hub_client::bundle_config::BundleConfigCache>>,
+    ) -> Self {
+        self.bundle_config = cache;
+        self
+    }
+
+    /// Adds `config_json` (this community's merged live config for this app) to the
+    /// `get-context` reply. Served ONLY for the verified envelope scope -- the same
+    /// `(tenant_id, community_id)` guard as the ids themselves -- so an unverified/legacy
+    /// invoke never receives another scope's config. The key's `app_id` is host-derived.
+    async fn attach_config_json(&self, ctx: &mut serde_json::Value) {
+        let (Some(cache), Some((tenant_id, community_id))) =
+            (&self.bundle_config, self.verified_scope)
+        else {
+            return;
+        };
+        if tenant_id < 1 || community_id < 0 {
+            return;
+        }
+        let key = hub_client::bundle_config::ConfigKey::new(
+            i64::from(tenant_id),
+            i64::from(community_id),
+            self.app_id.clone(),
+        );
+        // Kill switch ON: no lookup, no `config_json` (pre-feature behaviour).
+        let Some(config) = cache.lookup_if_enabled(&key).await else {
+            return;
+        };
+        ctx["config_json"] = serde_json::json!(&*config);
     }
 
     /// Test seam: routes this value's host-call timings into `metrics`
@@ -4428,7 +4468,11 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
         self.gate.ensure_grants_loaded(&self.gate_scope()).await;
         match call.capability {
             CapabilityKind::Clock => self.handle_clock(&call.op),
-            CapabilityKind::Context => self.handle_context(),
+            CapabilityKind::Context => {
+                let mut ctx = self.handle_context()?;
+                self.attach_config_json(&mut ctx).await;
+                Ok(ctx)
+            }
             CapabilityKind::Log => self.handle_log(&call.args),
             CapabilityKind::Kv => self.handle_kv(&call).await,
             // Gate call FIRST (spec SS5, PR #433): the classified
@@ -4685,6 +4729,74 @@ mod tests {
     /// The default fixture: [`test_egress`] (an empty catalog, so every
     /// `http` call denies `host_not_declared` once the gate has already
     /// granted the classified permission) plus a [`permissive_gate`].
+    /// Kill switch `waddles.disable-bundle-community-config`: OFF/unset serves config, ON adds none.
+    #[tokio::test]
+    async fn get_context_config_kill_switch_both_states() {
+        use hub_client::bundle_config::{
+            BundleConfigCache, CacheConfig, ConfigKey, StaticConfigSource, StaticLiveGate,
+        };
+        let src = Arc::new(StaticConfigSource::new());
+        src.set(ConfigKey::new(10, 7, "waddles.bot.commands.default"), 3, r#"{"x":1}"#);
+        for (live, expect) in [(true, true), (false, false)] {
+            let cache = Arc::new(BundleConfigCache::new(
+                Arc::clone(&src) as Arc<dyn hub_client::bundle_config::ConfigSource>,
+                None,
+                CacheConfig::default(),
+            ));
+            cache.set_gate(Arc::new(StaticLiveGate(live)));
+            let h = caps().with_verified_scope(Some((10, 7)))
+                .with_bundle_config(Some(Arc::clone(&cache)));
+            let mut ctx = h.handle_context().expect("context");
+            h.attach_config_json(&mut ctx).await;
+            assert_eq!(ctx.get("config_json").is_some(), expect);
+            assert_eq!(cache.len() == 1, expect, "disabled switch must not load");
+        }
+    }
+
+    /// Live community config rides `get-context` only for the verified envelope scope.
+    #[tokio::test]
+    async fn get_context_carries_live_community_config_only_for_the_verified_scope() {
+        use hub_client::bundle_config::{
+            BundleConfigCache, CacheConfig, ConfigKey, StaticConfigSource,
+        };
+        let src = Arc::new(StaticConfigSource::new());
+        src.set(
+            ConfigKey::new(10, 7, "waddles.bot.commands.default"),
+            3,
+            r#"{"default_duration_minutes":45}"#,
+        );
+        let cache = Arc::new(BundleConfigCache::new(src, None, CacheConfig::default()));
+        let with = caps()
+            .with_verified_scope(Some((10, 7)))
+            .with_bundle_config(Some(Arc::clone(&cache)));
+        let mut ctx = with.handle_context().expect("context");
+        with.attach_config_json(&mut ctx).await;
+        assert_eq!(ctx["config_json"], r#"{"default_duration_minutes":45}"#);
+
+        // No verified scope (legacy envelope): no config, never another scope's.
+        let unverified = caps().with_bundle_config(Some(Arc::clone(&cache)));
+        let mut ctx = unverified.handle_context().expect("context");
+        unverified.attach_config_json(&mut ctx).await;
+        assert!(ctx.get("config_json").is_none());
+
+        // Another community of the same tenant has no entry: hub-api refuses -> loud empty `{}`.
+        let other = caps()
+            .with_verified_scope(Some((10, 8)))
+            .with_bundle_config(Some(cache));
+        let mut ctx = other.handle_context().expect("context");
+        other.attach_config_json(&mut ctx).await;
+        assert_eq!(ctx["config_json"], "{}");
+    }
+
+    /// Without a cache (hub-api not configured) `get-context` is unchanged.
+    #[tokio::test]
+    async fn get_context_has_no_config_json_without_a_cache() {
+        let c = caps().with_verified_scope(Some((10, 7)));
+        let mut ctx = c.handle_context().expect("context");
+        c.attach_config_json(&mut ctx).await;
+        assert!(ctx.get("config_json").is_none());
+    }
+
     /// A v3 envelope's verified ids reach `get-context`; without them the
     /// numeric keys are absent (a v2 guest fails closed).
     #[test]

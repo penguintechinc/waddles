@@ -31,6 +31,7 @@ import grpc
 from flask_core.service_jwt import ServiceJwtIssuer
 from waddles.hub.internal.v1 import (
     active_context_pb2_grpc,
+    bundle_config_pb2_grpc,
     bundle_schedule_pb2_grpc,
     dataplane_scope_pb2_grpc,
     distribution_pb2_grpc,
@@ -42,6 +43,7 @@ from waddles.hub.internal.v1 import (
 )
 
 from grpc_internal.active_context_servicer import ACTIVE_CONTEXT_SCOPES, ActiveContextServicer
+from grpc_internal.bundle_config_servicer import BUNDLE_CONFIG_SCOPES, BundleConfigServicer
 from grpc_internal.bundle_schedule_servicer import BUNDLE_SCHEDULE_SCOPES, BundleScheduleServicer
 from grpc_internal.dataplane_scope_servicer import DATAPLANE_SCOPE_SCOPES, DataplaneScopeServicer
 from grpc_internal.dataplane_servicers import (
@@ -66,6 +68,7 @@ ALL_REQUIRED_SCOPES: dict[str, str | tuple[str, ...]] = {
     **REQUIRED_SCOPES,
     **ACTIVE_CONTEXT_SCOPES,
     **BUNDLE_SCHEDULE_SCOPES,
+    **BUNDLE_CONFIG_SCOPES,
     **DATAPLANE_SCOPE_SCOPES,
 }
 
@@ -184,6 +187,9 @@ async def build_internal_grpc_server(
         service_factory = service_from_config
     active_context_pb2_grpc.add_ActiveContextServiceServicer_to_server(
         ActiveContextServicer(config.get("install_dal")), server
+    )
+    bundle_config_pb2_grpc.add_BundleConfigServiceServicer_to_server(
+        BundleConfigServicer(config.get("install_dal")), server
     )
     bundle_schedule_pb2_grpc.add_BundleScheduleServiceServicer_to_server(
         BundleScheduleServicer(config.get("install_dal")), server

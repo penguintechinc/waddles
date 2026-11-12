@@ -907,6 +907,30 @@ def parse_config_schema(raw: Any) -> dict[str, Any] | None:
     return dict(raw)
 
 
+def check_legacy_config_schema(raw: dict[str, Any]) -> None:
+    """Reject or flag the dead pre-v2 `config_schema:` key (`community_config_schema:` replaced it).
+
+    Nothing reads `config_schema`, so a schema declared there silently never reaches a community
+    admin. Non-empty content raises `ManifestV2Error` (`deprecated_config_schema`); an empty
+    placeholder (`config_schema: {}`, still present in many catalog manifests) only logs a
+    deprecation warning so it cannot be mistaken for a working declaration.
+    """
+    if "config_schema" not in raw:
+        return
+    legacy = raw["config_schema"]
+    if legacy:
+        raise ManifestV2Error(
+            "deprecated_config_schema",
+            "`config_schema` is deprecated and ignored; declare the per-community JSON Schema "
+            "under `community_config_schema` instead",
+        )
+    logger.warning(
+        "bundle manifest %s declares an empty deprecated `config_schema`; remove it "
+        "(per-community settings use `community_config_schema`)",
+        raw.get("app_id", "<unknown>"),
+    )
+
+
 def parse_admin_tools(raw_entries: Any, *, own_app_id: str) -> tuple[AdminTool, ...]:
     """Validate the optional `admin_tools:` list; absent (`None`) parses to none.
 
@@ -1502,6 +1526,7 @@ def parse_bundle_manifest_v2(
     )
 
     requested_tools = parse_requested_tools(raw.get("requested_tools"), own_app_id=raw["app_id"])
+    check_legacy_config_schema(raw)
     community_config_schema = parse_config_schema(raw.get("community_config_schema"))
     admin_tools = parse_admin_tools(raw.get("admin_tools"), own_app_id=raw["app_id"])
     _check_admin_tools_declared(

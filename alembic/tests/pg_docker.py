@@ -228,7 +228,7 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _wait_ready(container: str, user: str, dbname: str, timeout_s: float = 60.0) -> None:
+def _wait_ready(container: str, user: str, dbname: str, timeout_s: float = 180.0) -> None:
     """Block until `dbname` actually accepts a real query.
 
     `pg_isready` alone is insufficient: the official Postgres image

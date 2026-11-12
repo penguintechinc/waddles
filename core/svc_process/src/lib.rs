@@ -2235,6 +2235,28 @@ fn try_start_changelog_consumer(
                             None
                         }
                     };
+                    // Live per-community bundle config (`get-context().config_json`): hub-api
+                    // gRPC + Valkey version-key invalidation; non-fatal when unconfigured.
+                    // The version key lives on hub-api's own (durable spine) Valkey, not the
+                    // dedicated kv instance.
+                    let config_probe_conn = match build_redis_client(&deps.spine_cfg) {
+                        Some(client) => client.get_multiplexed_async_connection().await.ok(),
+                        None => None,
+                    };
+                    let live_cache = hub_client::bundle_config::connect_and_install(
+                        &config.cli.hub_api_grpc_endpoint,
+                        &config.cli.service_jwt_token_endpoint,
+                        &config.cli.service_jwt_sa_token_path,
+                        (!config.cli.hub_api_grpc_ca_file.is_empty())
+                            .then_some(config.cli.hub_api_grpc_ca_file.as_str()),
+                        config_probe_conn,
+                    )
+                    .await;
+                    if let Some(cache) = &live_cache {
+                        cache.set_gate(Arc::new(license::LiveBundleConfigGate(
+                            bundle_db_license_client.clone(),
+                        )));
+                    }
                     let deps = Arc::new(deps);
                     start_bundle_admin_consumer(&deps).await;
                     Some(

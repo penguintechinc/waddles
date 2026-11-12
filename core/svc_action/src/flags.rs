@@ -1169,3 +1169,23 @@ mod tests {
         assert!(!flag.enabled().await);
     }
 }
+
+
+/// Adapts the license/flag client to the hub_client cache's kill switch
+/// (`waddles.disable-bundle-community-config`): ON = live community config disabled, unseen/OFF/
+/// license-server-unreachable = enabled. Bypass-aware like [`DisableDbBundleConfigFlag`]: a
+/// bypassed client reads `true` for every key, which must NOT read as "kill switch ON".
+pub struct LiveBundleConfigGate(pub Option<Arc<penguin_licensing::LicenseClient>>);
+
+impl hub_client::bundle_config::LiveConfigGate for LiveBundleConfigGate {
+    fn live_enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            match &self.0 {
+                Some(c) if !c.bypass_active() => {
+                    !c.flag_enabled(hub_client::bundle_config::DISABLE_FLAG).await
+                }
+                _ => true,
+            }
+        })
+    }
+}
