@@ -71,7 +71,11 @@ from services.cookie_consent_service import (
 )
 from services.errors import ApiError, bad_request
 from services.global_identity import is_global_admin
-from services.platform_account import PLATFORM_ACCOUNT_MESSAGE, is_platform_account_sync
+from services.platform_account import (
+    PLATFORM_ACCOUNT_CODE,
+    PLATFORM_ACCOUNT_MESSAGE,
+    is_platform_account_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +111,7 @@ class DsarStatus(StrEnum):
     ALREADY_DONE = "already_done"
     NOT_FOUND = "not_found"
     CONFLICT = "conflict"
+    FORBIDDEN = "forbidden"
     FAILED = "failed"
     AUDIT_UNAVAILABLE = "audit_unavailable"
 
@@ -491,7 +496,9 @@ async def _process_user(
             reason="platform_account",
         )
         return DsarResult(
-            user_id=user_id, status=DsarStatus.CONFLICT, detail=PLATFORM_ACCOUNT_MESSAGE
+            user_id=user_id,
+            status=DsarStatus.FORBIDDEN,
+            detail=f"{PLATFORM_ACCOUNT_CODE}: {PLATFORM_ACCOUNT_MESSAGE}",
         )
 
     if action is DsarAction.ERASE:
