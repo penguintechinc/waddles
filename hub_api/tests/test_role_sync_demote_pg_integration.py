@@ -162,7 +162,7 @@ class _World:
             created.id,
             sync_scope="community_role",
             discord_role_id=ADMIN_DISCORD_ROLE,
-            community_role="community-admin",
+            community_role="vip",  # privileged inbound targets are refused since 0104
         )
         self.pairing_id = created.id
         if enable_demote:
@@ -178,7 +178,9 @@ class _World:
         active: bool = True,
         username: str | None = None,
         link: bool = True,
+        granted: bool = True,
     ) -> int:
+        """Linked member; `granted` seeds a ledger row (role-sync granted a managed role)."""
         hub_id = int(
             pg.scalar(
                 self.dal,
@@ -199,6 +201,14 @@ class _World:
             "VALUES (%s, %s, %s, %s)",
             [community_id or self.community_id, str(hub_id), role, active],
         )
+        if granted and self.pairing_id and role in ("member", "vip"):
+            pg.q(
+                self.dal,
+                "INSERT INTO role_sync_community_grants "
+                "(pairing_id, community_id, hub_user_id, granted_role, prior_role) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                [self.pairing_id, community_id or self.community_id, hub_id, role, BASELINE],
+            )
         return hub_id
 
     def role_of(self, hub_id: int, community_id: int | None = None) -> str:
@@ -246,7 +256,7 @@ async def test_demote_end_to_end_with_pagination_and_pii_free_logs(
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
     keep = world.member("800001", "member")  # still holds the mapped role
     gone1 = world.member("800002", "member")  # lost it -> demote
-    gone2 = world.member("800003", "community-admin", username="alice_secret")  # lost it -> demote
+    gone2 = world.member("800003", "vip", username="alice_secret")  # lost it -> demote
     world.member("800004", "member", link=False)  # unlinked discord id -> untouched
     discord = _Discord(
         [

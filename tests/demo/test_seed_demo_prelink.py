@@ -147,7 +147,7 @@ def test_seed_creates_all_links(conn: psycopg2.extensions.connection) -> None:
         cur.execute(
             "SELECT sync_scope, community_role FROM community_role_sync_bindings"
         )
-        assert cur.fetchall() == [("community_role", "moderator")]
+        assert cur.fetchall() == [("community_role", "vip")]
     assert _count(conn, "hub_user_identities") == 1
 
 
@@ -326,10 +326,12 @@ def test_missing_community_and_baseline_fail_loud(
     "env",
     [
         {"DEMO_COMMUNITY_ROLE": "community-owner"},
+        {"DEMO_COMMUNITY_ROLE": "community-admin"},  # privileged inbound target (0104)
+        {"DEMO_COMMUNITY_ROLE": "moderator"},
         {"DEMO_DIRECTION": "sideways"},
         {"DEMO_GUILD_ID": "abc"},
         {"DEMO_COMMUNITY_ID": "0"},
-        {"DEMO_BASELINE_ROLE": "moderator"},
+        {"DEMO_BASELINE_ROLE": "vip"},
     ],
 )
 def test_invalid_config_rejected(env: dict[str, str]) -> None:

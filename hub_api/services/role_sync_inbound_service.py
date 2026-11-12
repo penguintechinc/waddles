@@ -523,7 +523,11 @@ async def apply_inbound_event(
     if desired is None:  # defensive: `mapped` is non-empty, so never expected
         return InboundOutcome("no_mapped_roles")
     result = _apply_community_role(
-        dal, community_id=event.community_id, hub_user_id=hub_user_id, desired_role=desired
+        dal,
+        community_id=event.community_id,
+        hub_user_id=hub_user_id,
+        desired_role=desired,
+        pairing_id=int(pairing.id),
     )
     if result == "applied":
         _applied_counter.add(1)

@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from services.admin_service import VALID_MEMBER_ROLES
-from services.errors import bad_request, conflict, not_found
+from services.errors import ApiError, bad_request, conflict, not_found
 from services.schema import bind_guild_pairing_tables
 
 #: `guild_tenant_pairings.direction` -- migration 0034's own CHECK constraint values.
@@ -58,6 +58,21 @@ VALID_SUBSCRIBER_TIERS: tuple[int, ...] = (1, 2, 3)
 #: `role_sync_service.py`'s owner-protection invariant).
 VALID_COMMUNITY_ROLES: tuple[str, ...] = VALID_MEMBER_ROLES
 
+#: The ONLY community roles an inbound (Discord -> Waddles) binding may target. Privileged
+#: roles (`community-admin`, `moderator`) are refused: anyone with Manage Roles in a paired
+#: guild could otherwise self-promote. Migration 0104's CHECK constraint is the DB backstop
+#: (kept equal by `test_role_sync_privilege_hardening.py`).
+INBOUND_COMMUNITY_ROLES: tuple[str, ...] = ("vip", "member")
+PRIVILEGED_COMMUNITY_ROLES: frozenset[str] = frozenset(VALID_MEMBER_ROLES) - frozenset(
+    INBOUND_COMMUNITY_ROLES
+)
+
+
+def privileged_target_error(message: str) -> ApiError:
+    """422 `privileged_target_role` -- the one refusal code for every privileged-binding path."""
+    return ApiError(message, 422, "privileged_target_role")
+
+
 _MAX_ROLE_NAME_PREFIX_LEN = 50
 _MAX_EXTERNAL_ID_LEN = 255
 
@@ -80,6 +95,8 @@ class GuildPairing:
     #: migration 0039_event_sync_enabled -- independent opt-in from `sync_enabled`
     #: (role-sync); gates `event_discord_sync_service.py`'s push engine.
     event_sync_enabled: bool
+    #: migration 0104 -- opt-in Twitch moderator -> Discord moderator propagation (default off).
+    propagate_moderators: bool
     created_by_user_id: int | None
     created_at: str | None
     updated_at: str | None
@@ -155,6 +172,11 @@ def _validate_sync_scope_and_tier(
             raise bad_request("subscriber_tier must be omitted when sync_scope is 'community_role'")
         if community_role not in VALID_COMMUNITY_ROLES:
             raise bad_request(f"community_role must be one of {VALID_COMMUNITY_ROLES}")
+        if community_role not in INBOUND_COMMUNITY_ROLES:
+            raise privileged_target_error(
+                f"community_role '{community_role}' is privileged; inbound role-sync may only "
+                f"grant one of {INBOUND_COMMUNITY_ROLES}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +197,7 @@ def _pairing_from_row(row: Any) -> GuildPairing:
         sync_enabled=bool(row.sync_enabled),
         role_name_prefix=row.role_name_prefix,
         event_sync_enabled=bool(getattr(row, "event_sync_enabled", False)),
+        propagate_moderators=bool(getattr(row, "propagate_moderators", False)),
         created_by_user_id=row.created_by_user_id,
         created_at=_iso(row.created_at),
         updated_at=_iso(row.updated_at),
@@ -239,6 +262,8 @@ def create_pairing(
     role_name_prefix: str,
     sync_enabled: bool = False,
     event_sync_enabled: bool = False,
+    propagate_moderators: bool = False,
+    ownership_verified: bool = False,
     actor_user_id: int | None,
 ) -> GuildPairing:
     """Create a new N:M guild<->community pairing; opt-in by default (`sync_enabled=False`).
@@ -276,6 +301,8 @@ def create_pairing(
             direction=direction,
             sync_enabled=bool(sync_enabled),
             event_sync_enabled=bool(event_sync_enabled),
+            propagate_moderators=bool(propagate_moderators),
+            ownership_verified_at=now if ownership_verified else None,
             role_name_prefix=role_name_prefix,
             created_by_user_id=actor_user_id,
             created_at=now,
@@ -298,6 +325,7 @@ def update_pairing(
     event_sync_enabled: bool | None = None,
     direction: str | None = None,
     role_name_prefix: str | None = None,
+    propagate_moderators: bool | None = None,
 ) -> GuildPairing:
     """Partially update a pairing's opt-in toggle(s) / sync direction / role-name prefix.
 
@@ -325,6 +353,8 @@ def update_pairing(
             updates["event_sync_enabled"] = bool(event_sync_enabled)
         if direction is not None:
             updates["direction"] = direction
+        if propagate_moderators is not None:
+            updates["propagate_moderators"] = bool(propagate_moderators)
         if role_name_prefix is not None:
             updates["role_name_prefix"] = role_name_prefix
 
@@ -510,3 +540,48 @@ def delete_binding(dal: Any, community_id: int, pairing_id: int, binding_id: int
         dal.rollback()
         raise
     return True
+
+
+async def create_binding_checked(
+    dal: Any,
+    community_id: int,
+    pairing_id: int,
+    *,
+    sync_scope: str,
+    discord_role_id: str,
+    subscriber_tier: int | None = None,
+    community_role: str | None = None,
+    list_roles: Any = None,
+) -> RoleSyncBinding:
+    """`create_binding()` plus the outbound privileged-role refusal (the API entry point).
+
+    Outbound bindings (`subscriber_tier`/`moderator`) make Waddles ADD a Discord role, so the
+    target role is looked up live and refused when it is managed or carries a privileged
+    permission -- the same rule `discord_role_mirror.create_mapping()` applies. `list_roles` is a
+    test seam defaulting to `discord_guild_roles.list_guild_roles`.
+    """
+    _validate_sync_scope_and_tier(sync_scope, subscriber_tier, community_role)
+    role_id = _validate_discord_role_id(discord_role_id)
+    if sync_scope in ("subscriber_tier", "moderator"):
+        pairing = get_pairing(dal, community_id, pairing_id)
+        if pairing is None:
+            raise not_found(f"no pairing {pairing_id} for community {community_id}")
+        if list_roles is None:
+            from services.discord_guild_roles import list_guild_roles as list_roles
+        roles = await list_roles(dal, community_id, guild_id=pairing.discord_guild_id)
+        found = next((r for r in roles if r.id == role_id), None)
+        if found is None:
+            raise not_found("That role does not exist in the paired Discord server")
+        if found.privileged:
+            raise privileged_target_error(
+                "That Discord role is privileged or managed and cannot be granted by role-sync"
+            )
+    return create_binding(
+        dal,
+        community_id,
+        pairing_id,
+        sync_scope=sync_scope,
+        discord_role_id=role_id,
+        subscriber_tier=subscriber_tier,
+        community_role=community_role,
+    )

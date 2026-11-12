@@ -2977,6 +2977,10 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         #: role-sync `sync_enabled` column above; gates
         #: `event_discord_sync_service.py`'s push engine per pairing.
         Field("event_sync_enabled", "boolean", notnull=True, default=False),
+        #: migration 0104 -- opt-in Twitch moderator -> Discord moderator propagation.
+        Field("propagate_moderators", "boolean", notnull=True, default=False),
+        #: migration 0104 -- NULL = grandfathered pre-0104 pairing (never ownership-proven).
+        Field("ownership_verified_at", "datetime"),
         Field("created_by_user_id", "integer"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
@@ -3017,6 +3021,26 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
     dal.define_table(
         "discord_role_mirror_grants",
         Field("mapping_id", "integer", notnull=True),
+        Field("platform", "string", length=50, notnull=True, default="discord"),
+        Field("platform_user_id", "string", length=255, notnull=True),
+        Field("granted_at", "datetime"),
+        migrate=migrate,
+    )
+    # migration 0104_role_sync_priv_harden -- role-sync grant ledgers (remove only own grants).
+    dal.define_table(
+        "role_sync_community_grants",
+        Field("pairing_id", "integer", notnull=True),
+        Field("community_id", "integer", notnull=True),
+        Field("hub_user_id", "integer", notnull=True),
+        Field("granted_role", "string", length=20, notnull=True),
+        Field("prior_role", "string", length=20),
+        Field("granted_at", "datetime"),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "role_sync_discord_grants",
+        Field("pairing_id", "integer", notnull=True),
+        Field("discord_role_id", "string", length=255, notnull=True),
         Field("platform", "string", length=50, notnull=True, default="discord"),
         Field("platform_user_id", "string", length=255, notnull=True),
         Field("granted_at", "datetime"),

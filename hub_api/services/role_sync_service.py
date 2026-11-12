@@ -54,6 +54,15 @@ conservative by design, matching `community-owner`'s own existing
 never-touched protection (below) rather than requiring a second
 protection category.
 
+**Privilege hardening (migration 0104).** Inbound bindings may only target `vip`/`member`
+(service 422 + DB CHECK) so a Discord Manage-Roles holder cannot self-promote. Grants only ever
+RAISE a member (`_ROLE_RANK`) and never overwrite a role an admin set; every grant is recorded in
+`role_sync_community_grants` and the opt-in demote pass revokes only those (restoring
+`prior_role`). The Twitch -> Discord pass ledgers its Discord role adds in
+`role_sync_discord_grants` and removes only those. Twitch moderators propagate only when the
+pairing sets `propagate_moderators` (default off). The `waddles.role_sync` flag remains the
+kill switch for every path.
+
 **`community-owner` is sacrosanct.** Never assignable via a
 `community_role` binding (`services/guild_pairing.py`'s own
 `VALID_COMMUNITY_ROLES` excludes it) and never overwritten by this
@@ -128,7 +137,7 @@ from services.credential_resolver import (
     DefaultCredentialResolver,
     TransportUnavailable,
 )
-from services.guild_pairing import list_bindings
+from services.guild_pairing import INBOUND_COMMUNITY_ROLES, list_bindings
 from services.schema import bind_auth_tables, bind_guild_pairing_tables
 from services.sync_worker_dal import open_worker_dal
 
@@ -196,6 +205,10 @@ _community_roles_applied_counter = _meter.create_counter(
     "waddles_role_sync_community_roles_applied_total",
     description="hub-platform community_members.role changes applied by role-sync "
     "(Discord -> platform direction)",
+)
+_unverified_pairings_counter = _meter.create_counter(
+    "waddles_role_sync_unverified_pairings_total",
+    description="reconcile passes over grandfathered pre-0104 pairings with no ownership proof",
 )
 _sync_errors_counter = _meter.create_counter(
     "waddles_role_sync_errors_total", description="role-sync pairing failures, fail-closed"
@@ -723,34 +736,24 @@ def _community_role_priorities(dal: Any, community_id: int) -> dict[str, int]:
     return {row.name: int(row.priority or 0) for row in rows}
 
 
-def _apply_community_role(
-    dal: Any,
-    *,
-    community_id: int,
-    hub_user_id: int,
-    desired_role: str,
-    demote_only_from: frozenset[str] | None = None,
-) -> str:
-    """Idempotently set an existing active member's role, never touching `community-owner`.
+#: Grant-only ordering. A sync grant may only RAISE a member along this ladder; it never lowers
+#: or sideways-overwrites. Baseline roles (rank 0) are the only roles sync may replace without
+#: having granted them itself.
+_ROLE_RANK: dict[str, int] = {
+    "member": 0,
+    "community-member": 0,
+    "vip": 1,
+    "moderator": 2,
+    "community-admin": 3,
+    _OWNER_ROLE: 4,
+}
+_BASELINE_ROLES = frozenset({"member", "community-member"})
 
-    Revoke path: `demote_only_from` (the sync-managed role set) makes this a guarded
-    downgrade to `desired_role` (the baseline); a current role outside the set returns
-    `"unmanaged_untouched"`.
 
-    Returns one of `"applied"` / `"unchanged"` / `"not_a_member"` /
-    `"owner_protected"` / `"unmanaged_untouched"` -- this worker never creates `community_members`
-    rows (a Discord guild member who never joined this hub platform
-    community is skipped, not auto-enrolled) and never downgrades
-    `community-owner` (mirrors `admin_service.update_member_role()`'s own
-    invariant). Mirrors that function's own `community_role_id` lookup +
-    `claims_cache` reset tail, but via the sync `dal` this module already
-    uses throughout (see module docstring / `guild_pairing.py`'s own
-    "raw pydal, explicit commit" convention) rather than `admin_service`'s
-    `async_dal`/`TenantContext`-gated surface, which assumes a human actor
-    performing one promotion, not a system reconcile pass.
-    """
+def _active_member(dal: Any, community_id: int, hub_user_id: int) -> Any | None:
+    """The active `community_members` row for this hub user, or None."""
     bind_auth_tables(dal)
-    member = (
+    return (
         dal(
             (dal.community_members.community_id == community_id)
             & (dal.community_members.user_id == str(hub_user_id))
@@ -759,34 +762,123 @@ def _apply_community_role(
         .select()
         .first()
     )
-    if member is None:
-        return "not_a_member"
-    if member.role == _OWNER_ROLE:
-        return "owner_protected"
-    if member.role == desired_role:
-        return "unchanged"
-    if demote_only_from is not None and member.role not in demote_only_from:
-        # Revoke path: `desired_role` is the baseline; only a role sync itself could have
-        # granted may be downgraded -- manual/unmanaged roles are never touched.
-        return "unmanaged_untouched"
 
+
+def _community_grant(dal: Any, community_id: int, hub_user_id: int) -> Any | None:
+    """This member's `role_sync_community_grants` ledger row, or None."""
+    bind_guild_pairing_tables(dal)
+    g = dal.role_sync_community_grants
+    return dal((g.community_id == community_id) & (g.hub_user_id == hub_user_id)).select().first()
+
+
+def _set_member_role(dal: Any, member: Any, community_id: int, role: str) -> None:
+    """Write `role` (+ its `community_role_id`) and reset the claims cache; caller commits."""
     role_row = (
-        dal(
-            (dal.community_roles.community_id == community_id)
-            & (dal.community_roles.name == desired_role)
-        )
+        dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == role))
         .select()
         .first()
     )
-    community_role_id = int(role_row.id) if role_row is not None else None
-
     dal(dal.community_members.id == member.id).update(
-        role=desired_role,
-        community_role_id=community_role_id,
+        role=role,
+        community_role_id=int(role_row.id) if role_row is not None else None,
         claims_cache=None,
         updated_at=datetime.now(UTC),
     )
-    dal.commit()
+
+
+def _apply_community_role(
+    dal: Any,
+    *,
+    community_id: int,
+    hub_user_id: int,
+    desired_role: str,
+    pairing_id: int,
+) -> str:
+    """Grant-only: raise an active member to `desired_role` and record it in the grant ledger.
+
+    Never lowers a role and never overwrites one an admin set: a member whose current role is
+    above baseline is only touched when the ledger shows role-sync itself granted that role.
+    Privileged targets are refused even if a binding somehow names one (DB CHECK is the other
+    guard). Returns `"applied"` / `"unchanged"` / `"not_a_member"` / `"owner_protected"` /
+    `"privileged_refused"` / `"admin_set_untouched"` / `"no_downgrade"`.
+    """
+    member = _active_member(dal, community_id, hub_user_id)
+    if member is None:
+        return "not_a_member"
+    current = str(member.role)
+    if current == _OWNER_ROLE:
+        return "owner_protected"
+    if desired_role not in INBOUND_COMMUNITY_ROLES:
+        logger.error(
+            "role_sync.privileged_target_refused community_id=%s pairing_id=%s",
+            community_id,
+            pairing_id,
+        )
+        return "privileged_refused"
+    if current == desired_role:
+        return "unchanged"
+    grant = _community_grant(dal, community_id, hub_user_id)
+    sync_owned = grant is not None and grant.granted_role == current
+    if current not in _BASELINE_ROLES and not sync_owned:
+        return "admin_set_untouched"
+    if _ROLE_RANK.get(desired_role, 0) <= _ROLE_RANK.get(current, 0):
+        return "no_downgrade"
+
+    prior = grant.prior_role if sync_owned and grant is not None else current
+    g = dal.role_sync_community_grants
+    try:
+        _set_member_role(dal, member, community_id, desired_role)
+        if grant is not None:
+            dal(g.id == grant.id).update(
+                pairing_id=pairing_id,
+                granted_role=desired_role,
+                prior_role=prior,
+                granted_at=datetime.now(UTC),
+            )
+        else:
+            g.insert(
+                pairing_id=pairing_id,
+                community_id=community_id,
+                hub_user_id=hub_user_id,
+                granted_role=desired_role,
+                prior_role=prior,
+                granted_at=datetime.now(UTC),
+            )
+        dal.commit()
+    except Exception:
+        dal.rollback()
+        raise
+    return "applied"
+
+
+def _revoke_community_grant(
+    dal: Any, *, community_id: int, hub_user_id: int, pairing_id: int, baseline_role: str
+) -> str:
+    """Undo ONE role-sync grant: restore `prior_role` (else baseline) and drop the ledger row.
+
+    Only a grant this pairing recorded, still matching the member's current role, is undone; a
+    role an admin changed since is left alone (the stale ledger row is dropped).
+    Returns `"applied"` / `"not_owned"` / `"not_a_member"`.
+    """
+    grant = _community_grant(dal, community_id, hub_user_id)
+    if grant is None or int(grant.pairing_id) != pairing_id:
+        return "not_owned"
+    g = dal.role_sync_community_grants
+    member = _active_member(dal, community_id, hub_user_id)
+    try:
+        if member is None or str(member.role) != grant.granted_role:
+            dal(g.id == grant.id).delete()
+            dal.commit()
+            return "not_a_member" if member is None else "not_owned"
+        restore = grant.prior_role or baseline_role
+        if _ROLE_RANK.get(restore, 0) > _ROLE_RANK.get(grant.granted_role, 0):
+            restore = baseline_role  # defensive: a revoke never raises anyone
+        _set_member_role(dal, member, community_id, restore)
+        dal(g.id == grant.id).delete()
+        dal.commit()
+    except Exception:
+        dal.rollback()
+        raise
     return "applied"
 
 
@@ -802,11 +894,11 @@ def _run_demote_pass(
     member_read_complete: bool,
     linked_managed_holders: int,
 ) -> int:
-    """Guarded demote of confirmed-present, mapped-role-less members; returns the count.
+    """Guarded revoke of THIS pairing's own grants for members who lost every mapped role.
 
-    Aborts (demotes nobody) when the member read is empty or not provably complete, or
-    when the circuit breaker trips. Per-member guards (owner, unmanaged role) live in
-    `_apply_community_role`.
+    Aborts (revokes nothing) when the member read is empty or not provably complete, the baseline
+    role is missing, or the circuit breaker trips. Only ledger-recorded grants are revoked
+    (`_revoke_community_grant`); roles set by an admin are never touched.
     """
     if not candidates:
         return 0
@@ -818,7 +910,6 @@ def _run_demote_pass(
             member_read_complete,
         )
         return 0
-    # Baseline must itself be a real role of this community, else refuse (never null).
     bind_auth_tables(dal)
     has_baseline = (
         dal(
@@ -835,12 +926,16 @@ def _run_demote_pass(
             baseline_role,
         )
         return 0
-    # Circuit breaker: count only candidates that would really change (managed, non-owner).
-    would_demote = [
-        uid
-        for uid in candidates
-        if _current_role(dal, community_id, uid) in (managed_roles - {baseline_role})
-    ]
+    would_demote = []
+    for uid in candidates:
+        grant = _community_grant(dal, community_id, uid)
+        if (
+            grant is not None
+            and int(grant.pairing_id) == pairing_id
+            and grant.granted_role in managed_roles
+            and _current_role(dal, community_id, uid) == grant.granted_role
+        ):
+            would_demote.append(uid)
     population = len(would_demote) + linked_managed_holders
     if (
         len(would_demote) > _DEMOTE_ABS_FLOOR
@@ -855,14 +950,16 @@ def _run_demote_pass(
         return 0
     demoted = 0
     for uid in would_demote:
-        outcome = _apply_community_role(
-            dal,
-            community_id=community_id,
-            hub_user_id=uid,
-            desired_role=baseline_role,
-            demote_only_from=managed_roles - {baseline_role},
-        )
-        if outcome == "applied":
+        if (
+            _revoke_community_grant(
+                dal,
+                community_id=community_id,
+                hub_user_id=uid,
+                pairing_id=pairing_id,
+                baseline_role=baseline_role,
+            )
+            == "applied"
+        ):
             demoted += 1
     logger.info(
         "role_sync.demote_pass pairing_id=%s community_id=%s demoted=%d",
@@ -886,6 +983,64 @@ def _current_role(dal: Any, community_id: int, hub_user_id: int) -> str | None:
         .first()
     )
     return None if row is None else str(row.role)
+
+
+def _warn_if_grandfathered(pairing: Any) -> None:
+    """WARN + count a pre-0104 pairing that never passed the guild-ownership proof (still runs)."""
+    if getattr(pairing, "ownership_verified_at", None) is None:
+        logger.warning(
+            "role_sync.pairing_ownership_unverified pairing_id=%s -- grandfathered",
+            pairing.id,
+        )
+        _unverified_pairings_counter.add(1)
+
+
+def _discord_grants(dal: Any, pairing_id: int) -> dict[str, set[str]]:
+    """`{discord_user_id: {role_id}}` this pairing's Twitch -> Discord pass has granted."""
+    bind_guild_pairing_tables(dal)
+    g = dal.role_sync_discord_grants
+    out: dict[str, set[str]] = {}
+    for row in dal(g.pairing_id == pairing_id).select():
+        out.setdefault(str(row.platform_user_id), set()).add(str(row.discord_role_id))
+    return out
+
+
+def _record_discord_grant(dal: Any, pairing_id: int, role_id: str, user_id: str) -> None:
+    """Ledger a Discord role this pass added (idempotent)."""
+    g = dal.role_sync_discord_grants
+    q = (
+        (g.pairing_id == pairing_id)
+        & (g.discord_role_id == role_id)
+        & (g.platform_user_id == user_id)
+    )
+    try:
+        if dal(q).count() == 0:
+            g.insert(
+                pairing_id=pairing_id,
+                discord_role_id=role_id,
+                platform="discord",
+                platform_user_id=user_id,
+                granted_at=datetime.now(UTC),
+            )
+        dal.commit()
+    except Exception:
+        dal.rollback()
+        raise
+
+
+def _drop_discord_grant(dal: Any, pairing_id: int, role_id: str, user_id: str) -> None:
+    """Forget a ledgered Discord grant once removed (or already gone)."""
+    g = dal.role_sync_discord_grants
+    try:
+        dal(
+            (g.pairing_id == pairing_id)
+            & (g.discord_role_id == role_id)
+            & (g.platform_user_id == user_id)
+        ).delete()
+        dal.commit()
+    except Exception:
+        dal.rollback()
+        raise
 
 
 async def _flag_enabled(tenant_slug: str) -> bool:
@@ -964,8 +1119,15 @@ async def reconcile_pairing(
         tiers = await twitch_client.list_subscriber_tiers(
             broadcaster_id=broadcaster_id, user_token=user_token, client_id=client_id
         )
-        mods = await twitch_client.list_moderators(
-            broadcaster_id=broadcaster_id, user_token=user_token, client_id=client_id
+        # Moderator propagation is OPT-IN per pairing (one platform's moderator must not affect
+        # the community by default); Twitch mods are not even fetched unless enabled.
+        propagate_mods = bool(getattr(pairing, "propagate_moderators", False))
+        mods: set[str] = (
+            await twitch_client.list_moderators(
+                broadcaster_id=broadcaster_id, user_token=user_token, client_id=client_id
+            )
+            if propagate_mods
+            else set()
         )
 
         bindings = list_bindings(dal, community_id, pairing_id)
@@ -974,13 +1136,38 @@ async def reconcile_pairing(
             for b in bindings
             if b.sync_scope == "subscriber_tier" and b.subscriber_tier is not None
         }
-        mod_role = next((b.discord_role_id for b in bindings if b.sync_scope == "moderator"), None)
+        mod_role = (
+            next((b.discord_role_id for b in bindings if b.sync_scope == "moderator"), None)
+            if propagate_mods
+            else None
+        )
         managed_role_ids = set(tier_role.values()) | ({mod_role} if mod_role else set())
 
         if not managed_role_ids:
             return PairingSyncResult(pairing_id, community_id, 0, 0, 0, None)
 
         discord_client = make_discord_client(bot_token)
+        # Re-check privilege at run time: a bound role may have gained admin perms since binding.
+        get_roles = getattr(discord_client, "get_guild_roles", None)
+        if get_roles is not None:
+            from services.discord_guild_roles import is_privileged_role  # noqa: PLC0415 - cycle
+
+            privileged_ids = {
+                r.role_id
+                for r in await get_roles(guild_id=guild_id)
+                if is_privileged_role(r.permissions, r.managed)
+            }
+            refused = managed_role_ids & privileged_ids
+            if refused:
+                logger.error(
+                    "role_sync.privileged_binding_skipped pairing_id=%s count=%d",
+                    pairing_id,
+                    len(refused),
+                )
+                managed_role_ids -= refused
+                tier_role = {t: r for t, r in tier_role.items() if r not in refused}
+                if mod_role in refused:
+                    mod_role = None
 
         desired_by_discord_user: dict[str, set[str]] = {}
         skipped_unlinked = 0
@@ -996,24 +1183,31 @@ async def reconcile_pairing(
             if twitch_user_id in mods and mod_role:
                 desired.add(mod_role)
 
+        # Removal is ledger-only: a role is removed solely when THIS pairing granted it, so a
+        # role an admin assigned by hand in Discord is never taken away.
+        ledger = _discord_grants(dal, pairing_id)
         roles_added = 0
         roles_removed = 0
-        for discord_user_id, desired_roles in desired_by_discord_user.items():
+        for discord_user_id in set(desired_by_discord_user) | set(ledger):
+            desired_roles = desired_by_discord_user.get(discord_user_id, set())
             current = await discord_client.get_member_role_ids(
                 guild_id=guild_id, user_id=discord_user_id
             )
             if current is None:
                 continue  # not a guild member -- nothing to sync for them this pass
+            owned = ledger.get(discord_user_id, set())
             for role_id in desired_roles - current:
                 if await discord_client.add_role(
                     guild_id=guild_id, user_id=discord_user_id, role_id=role_id
                 ):
                     roles_added += 1
-            for role_id in (current & managed_role_ids) - desired_roles:
-                if await discord_client.remove_role(
+                    _record_discord_grant(dal, pairing_id, role_id, discord_user_id)
+            for role_id in owned - desired_roles:
+                if role_id in current and await discord_client.remove_role(
                     guild_id=guild_id, user_id=discord_user_id, role_id=role_id
                 ):
                     roles_removed += 1
+                _drop_discord_grant(dal, pairing_id, role_id, discord_user_id)
 
         logger.info(
             "role_sync.pairing_synced pairing_id=%s community_id=%s guild_id=%s "
@@ -1153,7 +1347,11 @@ async def reconcile_pairing_discord_to_platform(
 
             linked_managed_holders += 1
             outcome = _apply_community_role(
-                dal, community_id=community_id, hub_user_id=hub_user_id, desired_role=desired_role
+                dal,
+                community_id=community_id,
+                hub_user_id=hub_user_id,
+                desired_role=desired_role,
+                pairing_id=pairing_id,
             )
             if outcome == "applied":
                 applied += 1
@@ -1257,6 +1455,7 @@ async def run_role_sync_reconcile_batch(
         pairings = _list_enabled_pairings(dal)
         summary.pairings_examined = len(pairings)
         for pairing in pairings:
+            _warn_if_grandfathered(pairing)
             direction = pairing.direction
             if (
                 direction not in _TWITCH_TO_DISCORD_DIRECTIONS

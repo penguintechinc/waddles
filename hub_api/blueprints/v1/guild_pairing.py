@@ -40,6 +40,7 @@ from quart_schema import validate_response
 
 from services import discord_guild_roles as roles_svc
 from services import discord_role_mirror as mirror_svc
+from services import guild_ownership as ownership_svc
 from services import guild_pairing as pairing_svc
 from services.community_common import community_in_tenant
 from services.current_user import get_current_user_id
@@ -181,14 +182,23 @@ async def create_pairing(
         return _err(bad_request("Request body must be a JSON object"))
 
     actor_user_id = get_current_user_id(request)
+    guild_id = str(body.get("discord_guild_id", "")).strip()
     try:
+        if not guild_id.isdigit():
+            raise bad_request("discord_guild_id must be a non-empty numeric Discord snowflake")
+        # S3: the tenant's own bot must be in the guild and the actor must administer it.
+        await ownership_svc.verify_guild_control(
+            _dal(), community_id, guild_id, actor_user_id=actor_user_id
+        )
         pairing = pairing_svc.create_pairing(
             _dal(),
             community_id,
-            discord_guild_id=str(body.get("discord_guild_id", "")),
+            discord_guild_id=guild_id,
             direction=str(body.get("direction", "")),
             role_name_prefix=str(body.get("role_name_prefix", "")),
             sync_enabled=bool(body.get("sync_enabled", False)),
+            propagate_moderators=bool(body.get("propagate_moderators", False)),
+            ownership_verified=True,
             actor_user_id=actor_user_id,
         )
     except ApiError as exc:
@@ -230,6 +240,9 @@ async def update_pairing(
             sync_enabled=body["sync_enabled"] if "sync_enabled" in body else None,
             direction=body.get("direction"),
             role_name_prefix=body.get("role_name_prefix"),
+            propagate_moderators=(
+                bool(body["propagate_moderators"]) if "propagate_moderators" in body else None
+            ),
         )
     except ApiError as exc:
         return _err(exc)
@@ -300,7 +313,7 @@ async def create_binding(
         return _err(bad_request("Request body must be a JSON object"))
 
     try:
-        binding = pairing_svc.create_binding(
+        binding = await pairing_svc.create_binding_checked(
             _dal(),
             community_id,
             pairing_id,

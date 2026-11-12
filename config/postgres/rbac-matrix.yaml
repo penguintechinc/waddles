@@ -57,6 +57,8 @@ tables:
   - user_active_context
   - discord_role_mirror_mappings
   - discord_role_mirror_grants
+  - role_sync_community_grants
+  - role_sync_discord_grants
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -991,4 +993,54 @@ grants:
     privileges: []
   - role: migration_runner
     table: discord_role_mirror_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # 0104_role_sync_priv_harden: role-sync grant ledgers. Hub-api only.
+  - role: hub_api
+    table: role_sync_community_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: role_sync_community_grants
+    privileges: []
+  - role: svc_ingest
+    table: role_sync_community_grants
+    privileges: []
+  - role: svc_process
+    table: role_sync_community_grants
+    privileges: []
+  - role: svc_action
+    table: role_sync_community_grants
+    privileges: []
+  - role: svc_streaming
+    table: role_sync_community_grants
+    privileges: []
+  - role: webui
+    table: role_sync_community_grants
+    privileges: []
+  - role: migration_runner
+    table: role_sync_community_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api
+    table: role_sync_discord_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: role_sync_discord_grants
+    privileges: []
+  - role: svc_ingest
+    table: role_sync_discord_grants
+    privileges: []
+  - role: svc_process
+    table: role_sync_discord_grants
+    privileges: []
+  - role: svc_action
+    table: role_sync_discord_grants
+    privileges: []
+  - role: svc_streaming
+    table: role_sync_discord_grants
+    privileges: []
+  - role: webui
+    table: role_sync_discord_grants
+    privileges: []
+  - role: migration_runner
+    table: role_sync_discord_grants
     privileges: [SELECT, INSERT, UPDATE, DELETE]
