@@ -69,6 +69,7 @@ pub mod connector;
 pub mod connector_runtime;
 pub mod crypto;
 pub mod discord_rest;
+pub mod egress;
 pub mod error;
 pub mod http;
 pub mod identity_crypto;
@@ -82,7 +83,6 @@ pub mod outbound_boot;
 pub mod outbound_creds;
 pub mod outbound_creds_discord;
 pub mod outbound_creds_kick;
-pub mod egress;
 pub mod outbound_creds_youtube;
 pub mod outbound_ops;
 pub mod outbound_pin;
@@ -91,6 +91,7 @@ pub mod platform_users;
 pub mod publish;
 pub mod scope_resolver;
 pub mod telemetry;
+pub mod tenant_discord;
 pub mod twitch_sessions;
 
 use std::net::SocketAddr;
@@ -328,6 +329,8 @@ where
         "starting {SERVICE_NAME}"
     );
 
+    // The env Discord application serves only this tenant (tenant_discord).
+    tenant_discord::set_default_tenant_id(config.cli.default_tenant_id);
     let ingest_metrics = Arc::new(telemetry::register_ingest_metrics(&prom_registry));
     let mut state = http::AppState::new(config.clone(), prom_registry);
     let receiver_readiness = Arc::clone(&state.receiver_readiness);
@@ -342,6 +345,7 @@ where
     // A contradictory Twitch config (dynamic flag ON + a static identity, or
     // bad timing) fails loudly even when the data plane below is OFF.
     config::validate_twitch_mode(&config)?;
+    config::validate_default_tenant(&config)?;
     // Host selector (spec 2026-11-05 s5): env baselines only, never the flag
     // client. Validated BEFORE any receiver starts; fatal and loud.
     let env_lookup = |k: &str| std::env::var(k).ok();

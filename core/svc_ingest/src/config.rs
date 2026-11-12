@@ -86,6 +86,12 @@ pub struct CliConfig {
     #[arg(long, env = "RUNNER_TENANT_SLUG", default_value = "default")]
     pub runner_tenant_slug: String,
 
+    /// Numeric id of the default tenant -- the ONLY tenant the process-wide
+    /// `DISCORD_BOT_TOKEN` application may serve (`crate::tenant_discord`).
+    /// `0` (unset) makes every positive tenant non-default (fail closed).
+    #[arg(long, env = "DEFAULT_TENANT_ID", default_value_t = 0)]
+    pub default_tenant_id: i64,
+
     /// This runner instance's community scope, empty meaning tenant-wide
     /// (`penguin_spine::Scope`'s `_tenant` segment) -- see
     /// `Config::ingest_scope`.
@@ -270,6 +276,21 @@ pub enum TwitchMode {
     StaticDev,
     /// Nothing configured: no Twitch inbound receiver.
     Off,
+}
+
+/// Refuses to start with the env Discord application (`DISCORD_BOT_TOKEN`) and no
+/// default-tenant id: that app serves ONLY the default tenant, and an unset/`0`
+/// id would make the gateway refuse every event (or worse, guess). No silent default.
+pub fn validate_default_tenant(cfg: &Config) -> Result<(), ConfigError> {
+    if cfg.discord_bot_token.is_some() && cfg.cli.default_tenant_id <= 0 {
+        return Err(ConfigError::InvalidValue {
+            field: "DEFAULT_TENANT_ID",
+            reason: "must be the default tenant's numeric id (>= 1) when DISCORD_BOT_TOKEN \
+                     is set: the env Discord app serves only the default tenant"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Decides the Twitch inbound mode from configuration. Flag ON plus a static
@@ -779,6 +800,37 @@ mod tests {
         assert!(!rendered.contains("super-secret-bot-token"));
         assert!(!rendered.contains("aabbcc"));
         clear_secret_env();
+    }
+
+    #[test]
+    fn env_discord_app_requires_a_default_tenant_id() {
+        let mk = |args: &[&str], tok: Option<&str>| Config {
+            cli: CliConfig::parse_from(args),
+            twitch_irc_oauth_token: None,
+            discord_bot_token: tok.map(Secret::new),
+            envelope_binding_keys: None,
+            twitch_eventsub_secret: None,
+            ingest_dev_kek: None,
+            waddles_env: "production".to_string(),
+        };
+        let cases = [
+            (mk(&["svc-ingest"], Some("t")), false),
+            (
+                mk(&["svc-ingest", "--default-tenant-id", "0"], Some("t")),
+                false,
+            ),
+            (
+                mk(&["svc-ingest", "--default-tenant-id", "1"], Some("t")),
+                true,
+            ),
+            (mk(&["svc-ingest"], None), true),
+        ];
+        let mut examined = 0;
+        for (cfg, ok) in cases {
+            examined += 1;
+            assert_eq!(validate_default_tenant(&cfg).is_ok(), ok);
+        }
+        assert_eq!(examined, 4);
     }
 
     #[test]

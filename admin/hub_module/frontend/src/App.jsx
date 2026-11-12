@@ -68,6 +68,7 @@ const AdminCommunityProfile = lazy(() => import('./pages/admin/AdminCommunityPro
 const CommunityReputationPolicy = lazy(() => import('./pages/admin/CommunityReputationPolicy'));
 const CommunityReputationBans = lazy(() => import('./pages/admin/CommunityReputationBans'));
 const CommunityReputationHistory = lazy(() => import('./pages/admin/CommunityReputationHistory'));
+const TenantDiscordApp = lazy(() => import('./pages/tenant/TenantDiscordApp'));
 const TenantReputationSettings = lazy(() => import('./pages/tenant/TenantReputationSettings'));
 const AdminAIInsights = lazy(() => import('./pages/admin/AdminAIInsights'));
 const AdminAIResearcherConfig = lazy(() => import('./pages/admin/AdminAIResearcherConfig'));
@@ -458,6 +459,7 @@ function App() {
         <Route path="/tenant/:tenantSlug/modules" element={<TenantBundlesRedirect />} />
         <Route path="/tenant/:tenantSlug/admins" element={<TenantAdmins />} />
         <Route path="/tenant/:tenantSlug/reputation" element={<TenantReputationSettings />} />
+        <Route path="/tenant/:tenantSlug/discord-app" element={<TenantDiscordApp />} />
         <Route path="/tenant/:tenantSlug/communities" element={<TenantCommunities />} />
         {/* Wave-1 stub: tenant bundle catalog slice */}
         <Route path="/tenant/:tenantSlug/bundles" element={<TenantBundleCatalog />} />

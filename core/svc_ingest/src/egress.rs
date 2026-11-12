@@ -412,9 +412,8 @@ mod tests {
             tokens: Vec<String>,
         ) -> std::pin::Pin<
             Box<
-                dyn std::future::Future<
-                        Output = Result<HashMap<String, String>, DetokenizeError>,
-                    > + Send
+                dyn std::future::Future<Output = Result<HashMap<String, String>, DetokenizeError>>
+                    + Send
                     + 'a,
             >,
         > {
@@ -494,7 +493,9 @@ mod tests {
         assert_eq!(*d, del);
         assert!(d.text().is_none());
         // No resolver configured at all.
-        let d = Egress::disabled().prepare("discord", chat(tokens, Some(7))).await;
+        let d = Egress::disabled()
+            .prepare("discord", chat(tokens, Some(7)))
+            .await;
         assert_eq!(text_of(&d), tokens);
 
         assert_eq!(r.calls(), 0, "none of these paths may touch the resolver");
@@ -526,7 +527,11 @@ mod tests {
     #[tokio::test]
     async fn env_override_false_builds_a_disabled_pass() {
         use clap::Parser;
-        let cli = CliConfig::parse_from(["svc-ingest", "--pii-detokenization-enabled-override", "false"]);
+        let cli = CliConfig::parse_from([
+            "svc-ingest",
+            "--pii-detokenization-enabled-override",
+            "false",
+        ]);
         let e = Egress::from_cli(&cli, None);
         assert!(e.resolver.is_none());
         let d = e.prepare("discord", chat("hi {user:u1}", Some(7))).await;

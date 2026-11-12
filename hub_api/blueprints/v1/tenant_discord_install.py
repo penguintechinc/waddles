@@ -50,6 +50,7 @@ from services.discord_install_service import (
     complete_install,
 )
 from services.errors import ApiError, bad_request, unauthorized
+from services.tenant_discord_app import get_install_status
 from services.tenant_discord_install_state import DEFAULT_TTL_SECONDS
 
 logger = logging.getLogger(__name__)
@@ -134,8 +135,8 @@ async def start_install() -> AuthorizeUrlResponse | tuple[dict[str, object], int
     bot_token = body.get("bot_token")
     if not isinstance(application_id, str) or not isinstance(client_secret, str):
         return _err(bad_request("application_id and client_secret are required strings"))
-    if bot_token is not None and not isinstance(bot_token, str):
-        return _err(bad_request("bot_token, if given, must be a string"))
+    if not isinstance(bot_token, str) or not bot_token.strip():
+        return _err(bad_request("bot_token is required: a private tenant brings its own bot"))
 
     actor_id = get_current_user_id(request)
     nonce = binding.new_nonce()
@@ -186,7 +187,11 @@ async def install_callback() -> InstallCallbackResponse | tuple[dict[str, object
 
     try:
         result = await complete_install(
-            _dal(), code=code, state=state, binding_nonce=request.cookies.get(BINDING_COOKIE)
+            _dal(),
+            code=code,
+            state=state,
+            binding_nonce=request.cookies.get(BINDING_COOKIE),
+            guild_id=request.args.get("guild_id"),
         )
     except DiscordInstallError as exc:
         logger.warning("discord install callback failed: %s", type(exc).__name__)
@@ -197,6 +202,42 @@ async def install_callback() -> InstallCallbackResponse | tuple[dict[str, object
 
     return InstallCallbackResponse(
         success=True, tenant_id=result.tenant_id, platform=result.platform
+    )
+
+
+@dataclass(slots=True, frozen=True)
+class InstallStatusResponse:
+    """Install-status envelope for the webui -- never carries a secret, token or ciphertext."""
+
+    success: bool
+    installed: bool
+    application_id: str | None
+    connection_status: str
+    guild_id: str | None
+    updated_at: str | None
+    redirect_uri: str
+
+
+@tenant_discord_install_bp.route("/tenants/discord/install/status", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant.discord_install:read")  # type: ignore[misc]
+@validate_response(InstallStatusResponse)
+async def install_status() -> InstallStatusResponse | tuple[dict[str, object], int]:
+    """`GET /api/v1/tenants/discord/install/status` -- the CALLER's tenant only (from the JWT)."""
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        return _err(unauthorized("tenant context missing"))
+    if ctx.is_default:
+        return _err(bad_request("the default tenant uses the platform Discord app"))
+    status = get_install_status(_dal(), tenant_id=ctx.tenant_id)
+    return InstallStatusResponse(
+        success=True,
+        installed=status.installed,
+        application_id=status.application_id,
+        connection_status=status.connection_status,
+        guild_id=status.guild_id,
+        updated_at=status.updated_at,
+        redirect_uri=_redirect_uri(),
     )
 
 

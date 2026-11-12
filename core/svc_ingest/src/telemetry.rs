@@ -234,6 +234,8 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         .expect("register svc_ingest_outbound_pin_refused_total");
     crate::outbound_creds::register_metrics(registry)
         .expect("register svc_ingest_outbound_credential_resolve_total");
+    crate::tenant_discord::register_metrics(registry)
+        .expect("register waddles_tenant_discord_app_missing_total");
     crate::connector::sender_exec::register_metrics(registry)
         .expect("register svc_ingest_sender_exec_total / _seconds");
     crate::connector::sender_exec::youtube_duties::register_metrics(registry)

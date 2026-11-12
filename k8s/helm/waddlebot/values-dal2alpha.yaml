@@ -168,6 +168,8 @@ infrastructure:
 # skeleton) and svcRtc is additionally gated on modules.social.enabled; neither
 # is part of this fix's scope.
 pipeline:
+  # Default tenant id (slug `default`, is_global) -- see values.yaml pipeline.defaultTenantId.
+  defaultTenantId: 1
   # Monday-demo (881ac8dd): role-sync reconcile CronJob ON, 1-min cadence.
   # demotePairingIds left empty (grant-only); demoteBaselineRole = member fallback.
   roleSync:

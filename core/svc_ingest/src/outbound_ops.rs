@@ -57,8 +57,8 @@ use crate::connector::sender_exec::{
 use crate::discord_rest::{DiscordRestClient, DiscordRestError};
 use crate::egress::DetokenizedAction;
 use crate::outbound::{IrcOutbound, IrcSendError};
-use egress_detokenizer::DetokenizedText;
 use crate::outbound_creds::CredError;
+use egress_detokenizer::DetokenizedText;
 
 /// Highest queue-envelope schema version this consumer understands.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -314,6 +314,10 @@ pub struct OutboundEntry {
     /// the producer from the binding-verified scope. `None` when absent or
     /// not a positive id (never defaulted; a per-community drain refuses it).
     pub community_id: Option<i64>,
+    /// The MAC-bound numeric tenant stamp exactly as sent (`None` when absent).
+    /// Unlike the per-action filtered copy, `0` is preserved; the env-token
+    /// Discord drain serves only the default tenant ([`crate::tenant_discord`]).
+    pub tenant_id: Option<i64>,
 }
 
 /// `true` for a safe `op_id`: 1..=[`MAX_OP_ID_LEN`] ASCII alphanumerics or
@@ -539,6 +543,7 @@ pub fn parse_outbound_entry(
     }
     let (op_id, exp_ms) = (wire.op_id.clone(), wire.exp_ms);
     let community_id = wire.community_id.filter(|c| *c > 0);
+    let tenant_id = wire.tenant_id;
     if let Some(v) = wire.v {
         if v > SCHEMA_VERSION {
             return Err(OutboundParseError::UnsupportedVersion(v));
@@ -600,6 +605,7 @@ pub fn parse_outbound_entry(
         op_id,
         exp_ms,
         community_id,
+        tenant_id,
     })
 }
 
@@ -1007,12 +1013,14 @@ impl<S: IrcOutbound, X: ActionExecutor> PlatformSender for TwitchSender<'_, S, X
         origin_channel: &str,
     ) -> Result<(), SenderError> {
         // `text` already went through the egress pass; re-wrapping it as-is keeps it that way.
-        self.via_executor(&DetokenizedAction::tokens_unchanged(OutboundAction::DmSend {
-            user_id: user_id.to_string(),
-            text: text.as_str().to_string(),
-            origin_channel: origin_channel.to_string(),
-            tenant_id: None,
-        }))
+        self.via_executor(&DetokenizedAction::tokens_unchanged(
+            OutboundAction::DmSend {
+                user_id: user_id.to_string(),
+                text: text.as_str().to_string(),
+                origin_channel: origin_channel.to_string(),
+                tenant_id: None,
+            },
+        ))
         .await
     }
 }
@@ -1337,9 +1345,14 @@ mod tests {
             origin_channel: Some("#c".into()),
             tenant_id: None,
         };
-        route("twitch", &da(&action), &twitch, &DiscordSender::unconfigured())
-            .await
-            .unwrap();
+        route(
+            "twitch",
+            &da(&action),
+            &twitch,
+            &DiscordSender::unconfigured(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             irc.calls.lock().unwrap().as_slice(),
             &[("#c".to_string(), "hi".to_string())]
@@ -1366,9 +1379,14 @@ mod tests {
                 origin_channel: origin.map(Into::into),
                 tenant_id: None,
             };
-            let err = route("twitch", &da(&action), &twitch, &DiscordSender::unconfigured())
-                .await
-                .unwrap_err();
+            let err = route(
+                "twitch",
+                &da(&action),
+                &twitch,
+                &DiscordSender::unconfigured(),
+            )
+            .await
+            .unwrap_err();
             assert!(
                 matches!(err, SenderError::Rejected { reason: r, .. } if r == reason),
                 "{channel}: {err}"
@@ -1390,9 +1408,14 @@ mod tests {
             message_id: "9".into(),
             origin_channel: Some("1".into()),
         };
-        let err = route("discord", &da(&action), &twitch, &DiscordSender::unconfigured())
-            .await
-            .unwrap_err();
+        let err = route(
+            "discord",
+            &da(&action),
+            &twitch,
+            &DiscordSender::unconfigured(),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(
             err,
             SenderError::Rejected {
@@ -1446,9 +1469,14 @@ mod tests {
             ("discord", &del, "chat.delete"),
             ("discord", &dm, "dm.send"),
         ] {
-            let err = route(platform, &da(action), &twitch, &DiscordSender::unconfigured())
-                .await
-                .unwrap_err();
+            let err = route(
+                platform,
+                &da(action),
+                &twitch,
+                &DiscordSender::unconfigured(),
+            )
+            .await
+            .unwrap_err();
             match err {
                 SenderError::Unsupported { platform: p, op: o } => {
                     assert_eq!((p.as_str(), o), (platform, op));
@@ -1472,9 +1500,14 @@ mod tests {
             origin_channel: None,
             tenant_id: None,
         };
-        let err = route("myspace", &da(&action), &twitch, &DiscordSender::unconfigured())
-            .await
-            .unwrap_err();
+        let err = route(
+            "myspace",
+            &da(&action),
+            &twitch,
+            &DiscordSender::unconfigured(),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, SenderError::Unsupported { .. }));
     }
 
@@ -1566,7 +1599,9 @@ mod tests {
                 tenant_id: None,
             },
         ] {
-            route("discord", &da(&action), &twitch, &discord).await.unwrap();
+            route("discord", &da(&action), &twitch, &discord)
+                .await
+                .unwrap();
         }
     }
 
