@@ -138,6 +138,11 @@ def _run(tmp_path: Path, jwt_fields: dict[str, str]) -> tuple[subprocess.Complet
     bs = stub_dir / env["BUNDLE_SIGNING_SECRET"]
     _write(bs / "BUNDLE_SIGNING_PRIVATE_KEY", _b64(_b64(seed).encode()))
     _write(bs / "BUNDLE_SIGNING_KEY_ID", _b64(env["BUNDLE_SIGNING_KEY_ID"].encode()))
+    # The dedicated .cwasm precompile-signing key (executor-scale task 4) -- pre-existing too, so
+    # these tests isolate the service-jwt path.
+    ps = stub_dir / env["PRECOMPILE_SIGNING_SECRET"]
+    _write(ps / "PRECOMPILE_SIGNING_PRIVATE_KEY", _b64(_b64(seed).encode()))
+    _write(ps / "PRECOMPILE_SIGNING_KEY_ID", _b64(env["PRECOMPILE_SIGNING_KEY_ID"].encode()))
     for field, value in jwt_fields.items():
         _write(stub_dir / env["SERVICE_JWT_SECRET"] / field, value)
 

@@ -1,0 +1,31 @@
+# executor-scale task 4 -- AOT precompile queue consumer. hub-api enqueues an approved+signed
+# digest into bundle_precompile_requests (services/bundle_precompile_service.py); this CronJob
+# leases a batch, runs `bundle-executor --precompile` (same image as svc-bundles-executor), and
+# acks. Pod spec: executor-precompile-pod.tpl.
+{{- if .Values.pipeline.hubApi.executorPrecompile.enabled }}
+{{- $cfg := .Values.pipeline.hubApi.executorPrecompile }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-executor-precompile
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor-precompile
+spec:
+  schedule: {{ $cfg.schedule | quote }}
+  concurrencyPolicy: {{ $cfg.concurrencyPolicy }}
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $cfg.backoffLimit }}
+      activeDeadlineSeconds: {{ $cfg.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: executor-precompile
+        spec:
+          {{- include "waddlebot.executorPrecompile.podSpec" (dict "root" . "mode" "queue") | nindent 10 }}
+{{- end }}

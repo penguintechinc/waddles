@@ -108,7 +108,7 @@ fn validate_id_charset(field_name: &'static str, value: &str) -> Result<(), Exec
     }
 }
 
-fn write_length_prefixed(buf: &mut Vec<u8>, field: &[u8]) {
+pub(crate) fn write_length_prefixed(buf: &mut Vec<u8>, field: &[u8]) {
     buf.extend_from_slice(&(field.len() as u32).to_be_bytes());
     buf.extend_from_slice(field);
 }
@@ -216,7 +216,14 @@ impl PlatformPublicKeys {
         self.keys.is_empty()
     }
 
-    fn get(&self, key_id: &str) -> Option<&VerifyingKey> {
+    /// Builds a key set from already-decoded keys -- used by
+    /// `crate::precompile` to check existing artifacts against the
+    /// precompiler's own verifying key.
+    pub fn from_keys(keys: HashMap<String, VerifyingKey>) -> Self {
+        Self { keys }
+    }
+
+    pub(crate) fn get(&self, key_id: &str) -> Option<&VerifyingKey> {
         self.keys.get(key_id)
     }
 }
