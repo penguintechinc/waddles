@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0101_stream_dek_issuances (GetStreamDek audit trail).
+"""Real-Postgres tests for 0100_stream_dek_issuances (GetStreamDek audit trail).
 
 Head replay creates the table with its constraints; downgrade to the previous revision drops it
 and leaves the 0054 key store intact; upgrade re-applies cleanly. A SKIP means docker is absent
@@ -17,15 +17,15 @@ requires_docker = pytest.mark.skipif(
     not DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
 )
 
-REVISION = "0101_stream_dek_issuances"
+REVISION = "0100_stream_dek_issuances"
 
 
 @pytest.fixture(scope="module")
 def db() -> Iterator[PgTestDatabase]:
-    """One real Postgres container migrated to head (includes 0101)."""
+    """One real Postgres container migrated to head (includes 0100)."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0101-stream-dek") as database:
+    with migrated_postgres("0100-stream-dek") as database:
         yield database
 
 
@@ -69,7 +69,7 @@ def _down_revision() -> str:
     from pathlib import Path
 
     path = Path(__file__).resolve().parents[1] / "versions" / f"{REVISION}.py"
-    spec = importlib.util.spec_from_file_location("m0101", path)
+    spec = importlib.util.spec_from_file_location("m0100", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

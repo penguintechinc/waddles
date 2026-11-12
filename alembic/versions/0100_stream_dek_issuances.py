@@ -14,7 +14,7 @@ non-existent tenant) is still recorded, and audit rows must outlive tenant delet
 The stream DEKs themselves live in `keystore.tenant_encryption_keys` (purpose='ingest-stream',
 created by 0054) -- no schema change needed there.
 
-Revision ID: 0101_stream_dek_issuances
+Revision ID: 0100_stream_dek_issuances
 Revises: 0099_discord_role_mirror
 Create Date: 2026-11-11
 """
@@ -28,7 +28,7 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0101_stream_dek_issuances"
+revision = "0100_stream_dek_issuances"
 down_revision = "0099_discord_role_mirror"
 branch_labels = None
 depends_on = None
@@ -39,9 +39,9 @@ _MATRIX_TABLES = frozenset({"keystore.stream_dek_issuances"})
 
 def _load_matrix_module():  # type: ignore[no-untyped-def]
     """Load `scripts/db/rbac_matrix.py` by path (it is not an importable package)."""
-    spec = importlib.util.spec_from_file_location("waddles_rbac_matrix_0101", _MATRIX_MODULE_PATH)
+    spec = importlib.util.spec_from_file_location("waddles_rbac_matrix_0100", _MATRIX_MODULE_PATH)
     module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-    sys.modules["waddles_rbac_matrix_0101"] = module
+    sys.modules["waddles_rbac_matrix_0100"] = module
     spec.loader.exec_module(module)  # type: ignore[union-attr]
     return module
 
