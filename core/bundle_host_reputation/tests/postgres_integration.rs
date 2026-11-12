@@ -20,9 +20,9 @@ use bundle_capability_gate::{
     HostInvokeScopeBuilder, MembershipCheck, ScopeKind, SnapshotMembership, TenantTier,
 };
 use bundle_host_reputation::{
-    connect, load_membership, ConnectConfig, IdempotencyKey, PostgresReputationStore,
-    ReputationCaps, ReputationError, ReputationScope, ReputationStore, ScoreEntry, MAX_BATCH,
-    MAX_LEADERBOARD_LIMIT, MAX_SCORE, MIN_SCORE,
+    connect, load_membership, ApplyOutcome, ConnectConfig, IdempotencyKey, PostgresReputationStore,
+    ReasonClass, ReputationCaps, ReputationError, ReputationScope, ReputationStore, ScoreEntry,
+    TenantPolicy, TenantScore, MAX_BATCH, MAX_LEADERBOARD_LIMIT, MAX_SCORE, MIN_SCORE,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use uuid::Uuid;
@@ -1708,4 +1708,397 @@ async fn leaderboard_query_uses_an_index_not_a_seq_scan_on_the_scores_table() {
         !plan.contains("Seq Scan on bundle_reputation_scores"),
         "leaderboard seq-scans the scores table:\n{plan}"
     );
+}
+
+/// Stand-in for the hub-api-owned `reputation_apply()` (created by the
+/// hub-api alembic migration, `feature/reputation-hub-api`): same signature
+/// and result shape, minimal body (upsert row at 600, clamp to 300..=850,
+/// ledger row, idempotent on the key). The REAL function replaces it in
+/// deployment; this only lets the store's call contract be exercised.
+const REPUTATION_APPLY_STUB: &str = r#"
+CREATE OR REPLACE FUNCTION reputation_apply(
+    p_tenant bigint, p_community bigint, p_user_uuid uuid, p_delta int,
+    p_reason_code smallint, p_actor text, p_source_event text, p_idempotency_key text)
+RETURNS TABLE (new_score int, applied bool) LANGUAGE plpgsql AS $$
+DECLARE v_old int; v_new int;
+BEGIN
+  IF EXISTS (SELECT 1 FROM bundle_reputation_adjustments
+             WHERE idempotency_key = p_idempotency_key AND community_id = p_community) THEN
+    RETURN QUERY SELECT s.balance::int, false FROM bundle_reputation_scores s
+      WHERE s.community_id = p_community AND s.user_uuid = p_user_uuid;
+    RETURN;
+  END IF;
+  INSERT INTO bundle_reputation_scores (tenant_id, community_id, user_uuid, balance)
+    VALUES (p_tenant, p_community, p_user_uuid, 600) ON CONFLICT DO NOTHING;
+  SELECT balance INTO v_old FROM bundle_reputation_scores
+    WHERE community_id = p_community AND user_uuid = p_user_uuid FOR UPDATE;
+  v_new := LEAST(850, GREATEST(300, v_old + p_delta));
+  UPDATE bundle_reputation_scores SET balance = v_new
+    WHERE community_id = p_community AND user_uuid = p_user_uuid;
+  INSERT INTO bundle_reputation_adjustments
+    (app_id, tenant_id, community_id, target_user_uuid, scope, delta, reason_code, kind,
+     requested_value, balance_after, idempotency_key)
+    VALUES (p_actor, p_tenant, p_community, p_user_uuid::text, 'community', v_new - v_old,
+            'apply:' || p_reason_code, 'adjust', p_delta, v_new, p_idempotency_key);
+  RETURN QUERY SELECT v_new, true;
+END $$;
+GRANT EXECUTE ON FUNCTION reputation_apply(bigint,bigint,uuid,int,smallint,text,text,text)
+  TO waddles_bundle_reputation;
+CREATE TABLE reputation_tenant_policy (
+  tenant_id integer PRIMARY KEY, tenant_auto_ban_enabled boolean NOT NULL DEFAULT false,
+  tenant_auto_ban_floor integer NOT NULL, tenant_at_risk_threshold integer NOT NULL);
+GRANT SELECT ON reputation_tenant_policy TO waddles_bundle_reputation;
+"#;
+
+fn ekey(n: &str) -> IdempotencyKey {
+    IdempotencyKey::for_event(n, "reputation_apply", 0).unwrap()
+}
+
+#[tokio::test]
+async fn apply_goes_through_reputation_apply_is_idempotent_clamped_and_class_bounded() {
+    let f = fixture().await;
+    exec(&f.su, REPUTATION_APPLY_STUB).await;
+    let key = ekey("evt-1");
+    let first = f
+        .store
+        .apply(
+            &scope(),
+            f.member,
+            5,
+            ReasonClass::Activity,
+            "activity.follow",
+            "evt-1",
+            &key,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        first,
+        ApplyOutcome {
+            new_score: 605,
+            applied: true
+        }
+    );
+    // Same event id replayed: nothing moves.
+    let replay = f
+        .store
+        .apply(
+            &scope(),
+            f.member,
+            5,
+            ReasonClass::Activity,
+            "activity.follow",
+            "evt-1",
+            &key,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replay,
+        ApplyOutcome {
+            new_score: 605,
+            applied: false
+        }
+    );
+    // Moderation bound (-200) is allowed, activity bound (5) is not.
+    let k2 = ekey("evt-2");
+    assert!(matches!(
+        f.store
+            .apply(
+                &scope(),
+                f.member,
+                -200,
+                ReasonClass::Activity,
+                "r",
+                "evt-2",
+                &k2
+            )
+            .await,
+        Err(ReputationError::Invalid(_))
+    ));
+    let out = f
+        .store
+        .apply(
+            &scope(),
+            f.member,
+            -200,
+            ReasonClass::Moderation,
+            "moderation.ban",
+            "evt-2",
+            &k2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.new_score, 405);
+    // Floor clamp at 300.
+    let k3 = ekey("evt-3");
+    let low = f
+        .store
+        .apply(
+            &scope(),
+            f.member,
+            -200,
+            ReasonClass::Moderation,
+            "moderation.ban",
+            "evt-3",
+            &k3,
+        )
+        .await
+        .unwrap();
+    assert_eq!(low.new_score, 300);
+    assert_eq!(ledger_count(&f).await, 3);
+    // Non-member refused before the function runs.
+    let k4 = ekey("evt-4");
+    assert_eq!(
+        f.store
+            .apply(
+                &scope(),
+                Uuid::new_v4(),
+                1,
+                ReasonClass::Activity,
+                "r",
+                "evt-4",
+                &k4
+            )
+            .await,
+        Err(ReputationError::NotAMember)
+    );
+}
+
+#[tokio::test]
+async fn history_pages_newest_first_and_is_scoped_to_the_community() {
+    let f = fixture().await;
+    exec(&f.su, REPUTATION_APPLY_STUB).await;
+    for i in 0..4 {
+        let ev = format!("h{i}");
+        f.store
+            .apply(
+                &scope(),
+                f.member,
+                1,
+                ReasonClass::Activity,
+                "activity.x",
+                &ev,
+                &ekey(&ev),
+            )
+            .await
+            .unwrap();
+    }
+    let page1 = f.store.history(&scope(), f.member, 3, None).await.unwrap();
+    assert_eq!(page1.len(), 3);
+    assert!(page1[0].id > page1[1].id && page1[1].id > page1[2].id);
+    assert_eq!(page1[0].balance_after, Some(604));
+    let page2 = f
+        .store
+        .history(&scope(), f.member, 3, Some(page1[2].id))
+        .await
+        .unwrap();
+    assert_eq!(page2.len(), 1, "4 rows total: 3 + 1");
+    assert!(page2[0].occurred_at.ends_with('Z'));
+    let other = ReputationScope {
+        tenant_id: OTHER_TENANT,
+        community_id: OTHER_COMMUNITY,
+        app_id: APP_ID.to_string(),
+    };
+    assert!(f
+        .store
+        .history(&other, f.member, 10, None)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(matches!(
+        f.store.history(&scope(), f.member, 0, None).await,
+        Err(ReputationError::Invalid(_))
+    ));
+    assert!(matches!(
+        f.store.history(&scope(), f.member, 101, None).await,
+        Err(ReputationError::Invalid(_))
+    ));
+}
+
+#[tokio::test]
+async fn tenant_aggregate_averages_own_communities_never_another_tenants() {
+    let f = fixture().await;
+    exec(&f.su, REPUTATION_APPLY_STUB).await;
+    exec(
+        &f.su,
+        "INSERT INTO communities (id, tenant_id) VALUES (11, 1)",
+    )
+    .await;
+    exec(
+        &f.su,
+        &format!(
+            "INSERT INTO community_members (community_id, user_uuid) VALUES (11, '{m}'), (20, '{m}')",
+            m = f.member
+        ),
+    )
+    .await;
+    let s10 = scope();
+    let s11 = ReputationScope {
+        community_id: 11,
+        ..scope()
+    };
+    let s20 = ReputationScope {
+        tenant_id: OTHER_TENANT,
+        community_id: OTHER_COMMUNITY,
+        app_id: APP_ID.to_string(),
+    };
+    assert_eq!(
+        f.store.get_tenant(&s10, f.member).await.unwrap(),
+        TenantScore {
+            score: 600,
+            communities: 0
+        }
+    );
+    f.store
+        .apply(
+            &s10,
+            f.member,
+            -200,
+            ReasonClass::Moderation,
+            "m",
+            "a",
+            &ekey("a"),
+        )
+        .await
+        .unwrap(); // 400
+    f.store
+        .apply(
+            &s11,
+            f.member,
+            5,
+            ReasonClass::Activity,
+            "a",
+            "b",
+            &ekey("b"),
+        )
+        .await
+        .unwrap(); // 605
+    f.store
+        .apply(
+            &s20,
+            f.member,
+            5,
+            ReasonClass::Activity,
+            "a",
+            "c",
+            &ekey("c"),
+        )
+        .await
+        .unwrap(); // other tenant, excluded
+    let t = f.store.get_tenant(&s10, f.member).await.unwrap();
+    assert_eq!(
+        t,
+        TenantScore {
+            score: 503,
+            communities: 2
+        },
+        "mean(400,605)=502.5 rounds to 503; tenant 2's row excluded"
+    );
+    assert_eq!(
+        f.store.get_tenant(&s10, Uuid::new_v4()).await,
+        Err(ReputationError::NotAMember)
+    );
+}
+
+#[tokio::test]
+async fn below_threshold_lists_lowest_first_active_members_only() {
+    let f = fixture().await;
+    exec(&f.su, REPUTATION_APPLY_STUB).await;
+    let low = add_member(&f, COMMUNITY).await;
+    let high = add_member(&f, COMMUNITY).await;
+    let gone = add_member(&f, COMMUNITY).await;
+    f.store
+        .apply(
+            &scope(),
+            low,
+            -200,
+            ReasonClass::Moderation,
+            "m",
+            "l",
+            &ekey("l"),
+        )
+        .await
+        .unwrap(); // 400
+    f.store
+        .apply(
+            &scope(),
+            high,
+            5,
+            ReasonClass::Activity,
+            "a",
+            "h",
+            &ekey("h"),
+        )
+        .await
+        .unwrap(); // 605
+    f.store
+        .apply(
+            &scope(),
+            gone,
+            -100,
+            ReasonClass::Moderation,
+            "m",
+            "g",
+            &ekey("g"),
+        )
+        .await
+        .unwrap(); // 500
+    exec(
+        &f.su,
+        &format!("UPDATE community_members SET left_at = NOW() WHERE user_uuid = '{gone}'"),
+    )
+    .await;
+    let rows = f.store.below_threshold(&scope(), 600, 10).await.unwrap();
+    assert_eq!(
+        rows,
+        vec![ScoreEntry {
+            user: low,
+            score: 400
+        }]
+    );
+    assert!(f
+        .store
+        .below_threshold(&scope(), 300, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(matches!(
+        f.store.below_threshold(&scope(), 600, 0).await,
+        Err(ReputationError::Invalid(_))
+    ));
+}
+
+#[tokio::test]
+async fn tenant_policy_is_read_from_the_hub_api_table_and_validated() {
+    let f = fixture().await;
+    exec(&f.su, REPUTATION_APPLY_STUB).await;
+    assert_eq!(f.store.tenant_policy(&scope()).await, Ok(None));
+    exec(
+        &f.su,
+        "INSERT INTO reputation_tenant_policy VALUES (1, true, 350, 450)",
+    )
+    .await;
+    assert_eq!(
+        f.store.tenant_policy(&scope()).await,
+        Ok(Some(TenantPolicy {
+            auto_ban_enabled: true,
+            auto_ban_floor: 350,
+            at_risk_threshold: 450
+        }))
+    );
+    let other = ReputationScope {
+        tenant_id: OTHER_TENANT,
+        ..scope()
+    };
+    assert_eq!(f.store.tenant_policy(&other).await, Ok(None));
+    exec(
+        &f.su,
+        "UPDATE reputation_tenant_policy SET tenant_at_risk_threshold = 300",
+    )
+    .await;
+    assert!(matches!(
+        f.store.tenant_policy(&scope()).await,
+        Err(ReputationError::Invalid(_))
+    ));
 }

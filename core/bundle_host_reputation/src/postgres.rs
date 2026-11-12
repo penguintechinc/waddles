@@ -14,8 +14,9 @@ use sea_orm::{
 use uuid::Uuid;
 
 use crate::{
-    clamp_score, metrics, validate_delta, validate_reason, BoxFuture, IdempotencyKey,
-    ReputationCaps, ReputationError, ReputationScope, ReputationStore, ScoreEntry, MAX_BATCH,
+    clamp_score, metrics, validate_delta, validate_reason, ApplyOutcome, BoxFuture, HistoryEntry,
+    IdempotencyKey, ReasonClass, ReputationCaps, ReputationError, ReputationScope, ReputationStore,
+    ScoreEntry, ScoreScale, TenantPolicy, TenantScore, MAX_BATCH, MAX_HISTORY_LIMIT,
     MAX_LEADERBOARD_LIMIT,
 };
 
@@ -573,6 +574,225 @@ impl PostgresReputationStore {
     }
 }
 
+impl PostgresReputationStore {
+    /// `reputation_apply()` call (owned by the hub-api migration): the SQL
+    /// function locks, clamps to the scale and writes the ledger row.
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_impl(
+        &self,
+        scope: &ReputationScope,
+        user: Uuid,
+        delta: i32,
+        class: ReasonClass,
+        reason: &str,
+        source_event: &str,
+        key: &IdempotencyKey,
+    ) -> Result<ApplyOutcome, ReputationError> {
+        validate_reason(reason)?;
+        ScoreScale::LEGACY.check_delta(class, delta)?;
+        let member_sql = format!(
+            "SELECT 1 AS ok FROM community_members cm \
+             JOIN communities c ON c.id = cm.community_id WHERE {MEMBER_PREDICATE}"
+        );
+        if self
+            .conn
+            .query_one_raw(stmt(&member_sql, scope_values(scope, user)))
+            .await
+            .map_err(backend_err)?
+            .is_none()
+        {
+            return Err(ReputationError::NotAMember);
+        }
+        let row = self
+            .conn
+            .query_one_raw(stmt(
+                "SELECT new_score::BIGINT AS new_score, applied \
+                 FROM reputation_apply($1::bigint, $2::bigint, $3::uuid, $4::int, \
+                                       $5::smallint, $6::text, $7::text, $8::text)",
+                vec![
+                    Value::BigInt(Some(i64::from(scope.tenant_id))),
+                    Value::BigInt(Some(i64::from(scope.community_id))),
+                    Value::Uuid(Some(user)),
+                    Value::Int(Some(delta)),
+                    Value::SmallInt(Some(class.code())),
+                    Value::String(Some(scope.app_id.clone())),
+                    Value::String(Some(source_event.to_string())),
+                    Value::String(Some(key.as_str().to_string())),
+                ],
+            ))
+            .await
+            .map_err(backend_err)?
+            .ok_or_else(|| ReputationError::Backend("reputation_apply returned no row".into()))?;
+        let outcome = ApplyOutcome {
+            new_score: row.try_get("", "new_score").map_err(backend_err)?,
+            applied: row.try_get("", "applied").map_err(backend_err)?,
+        };
+        if outcome.applied {
+            metrics::record_applied_delta(i64::from(delta).unsigned_abs());
+        }
+        Ok(outcome)
+    }
+
+    /// The user's own aggregate over this tenant's communities.
+    async fn get_tenant_impl(
+        &self,
+        scope: &ReputationScope,
+        user: Uuid,
+    ) -> Result<TenantScore, ReputationError> {
+        let row = self
+            .conn
+            .query_one_raw(stmt(
+                "SELECT COALESCE(ROUND(AVG(s.balance))::BIGINT, $3) AS score, \
+                        COUNT(s.user_uuid)::BIGINT AS n, \
+                        BOOL_OR(TRUE) AS member \
+                 FROM community_members cm \
+                 JOIN communities c ON c.id = cm.community_id \
+                 LEFT JOIN bundle_reputation_scores s \
+                   ON s.tenant_id = c.tenant_id AND s.community_id = cm.community_id \
+                  AND s.user_uuid = cm.user_uuid \
+                 WHERE c.tenant_id = $1 AND cm.user_uuid = $2 \
+                   AND cm.is_active IS TRUE AND cm.removed_at IS NULL AND cm.left_at IS NULL",
+                vec![
+                    Value::Int(Some(scope.tenant_id)),
+                    Value::Uuid(Some(user)),
+                    Value::BigInt(Some(crate::SCALE_DEFAULT)),
+                ],
+            ))
+            .await
+            .map_err(backend_err)?
+            .ok_or(ReputationError::NotAMember)?;
+        let member: Option<bool> = row.try_get("", "member").map_err(backend_err)?;
+        if member != Some(true) {
+            return Err(ReputationError::NotAMember);
+        }
+        let n: i64 = row.try_get("", "n").map_err(backend_err)?;
+        Ok(TenantScore {
+            score: row.try_get("", "score").map_err(backend_err)?,
+            communities: u32::try_from(n).map_err(backend_err)?,
+        })
+    }
+
+    /// Newest-first ledger page.
+    async fn history_impl(
+        &self,
+        scope: &ReputationScope,
+        user: Uuid,
+        limit: u32,
+        before: Option<i64>,
+    ) -> Result<Vec<HistoryEntry>, ReputationError> {
+        if limit == 0 || limit > MAX_HISTORY_LIMIT {
+            return Err(ReputationError::Invalid(format!(
+                "limit must be 1..={MAX_HISTORY_LIMIT}"
+            )));
+        }
+        let rows = self
+            .conn
+            .query_all_raw(stmt(
+                "SELECT id, delta, reason_code, COALESCE(kind, 'adjust') AS kind, balance_after, \
+                        to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS ts \
+                 FROM bundle_reputation_adjustments \
+                 WHERE tenant_id = $1 AND community_id = $2 AND target_user_uuid = $3 \
+                   AND ($4::bigint IS NULL OR id < $4) \
+                 ORDER BY id DESC LIMIT $5",
+                vec![
+                    Value::Int(Some(scope.tenant_id)),
+                    Value::Int(Some(scope.community_id)),
+                    Value::String(Some(user.to_string())),
+                    Value::BigInt(before),
+                    Value::BigInt(Some(i64::from(limit))),
+                ],
+            ))
+            .await
+            .map_err(backend_err)?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(HistoryEntry {
+                    id: r.try_get("", "id").map_err(backend_err)?,
+                    delta: r.try_get("", "delta").map_err(backend_err)?,
+                    reason_code: r.try_get("", "reason_code").map_err(backend_err)?,
+                    kind: r.try_get("", "kind").map_err(backend_err)?,
+                    balance_after: r.try_get("", "balance_after").map_err(backend_err)?,
+                    occurred_at: r.try_get("", "ts").map_err(backend_err)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Active members strictly below `threshold`, lowest first.
+    async fn below_threshold_impl(
+        &self,
+        scope: &ReputationScope,
+        threshold: i64,
+        limit: u32,
+    ) -> Result<Vec<ScoreEntry>, ReputationError> {
+        if limit == 0 || limit > MAX_LEADERBOARD_LIMIT {
+            return Err(ReputationError::Invalid(format!(
+                "limit must be 1..={MAX_LEADERBOARD_LIMIT}"
+            )));
+        }
+        let rows = self
+            .conn
+            .query_all_raw(stmt(
+                "SELECT s.user_uuid AS user_uuid, s.balance AS balance \
+                 FROM bundle_reputation_scores s \
+                 JOIN community_members cm \
+                   ON cm.community_id = s.community_id AND cm.user_uuid = s.user_uuid \
+                 JOIN communities c ON c.id = cm.community_id AND c.tenant_id = s.tenant_id \
+                 WHERE s.tenant_id = $1 AND s.community_id = $2 AND s.balance < $3 \
+                   AND cm.is_active IS TRUE AND cm.removed_at IS NULL AND cm.left_at IS NULL \
+                 ORDER BY s.balance ASC, s.user_uuid ASC LIMIT $4",
+                vec![
+                    Value::Int(Some(scope.tenant_id)),
+                    Value::Int(Some(scope.community_id)),
+                    Value::BigInt(Some(threshold)),
+                    Value::BigInt(Some(i64::from(limit))),
+                ],
+            ))
+            .await
+            .map_err(backend_err)?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(ScoreEntry {
+                    user: r.try_get("", "user_uuid").map_err(backend_err)?,
+                    score: r.try_get("", "balance").map_err(backend_err)?,
+                })
+            })
+            .collect()
+    }
+
+    /// The tenant's auto-ban policy from the hub-api-owned
+    /// `reputation_tenant_policy` table (read-only grant); `None` = no row.
+    async fn tenant_policy_impl(
+        &self,
+        scope: &ReputationScope,
+    ) -> Result<Option<TenantPolicy>, ReputationError> {
+        let row = self
+            .conn
+            .query_one_raw(stmt(
+                "SELECT tenant_auto_ban_enabled, tenant_auto_ban_floor::BIGINT AS tenant_auto_ban_floor, \
+                        tenant_at_risk_threshold::BIGINT AS tenant_at_risk_threshold \
+                 FROM reputation_tenant_policy WHERE tenant_id = $1",
+                vec![Value::Int(Some(scope.tenant_id))],
+            ))
+            .await
+            .map_err(backend_err)?;
+        let Some(r) = row else { return Ok(None) };
+        let policy = TenantPolicy {
+            auto_ban_enabled: r
+                .try_get("", "tenant_auto_ban_enabled")
+                .map_err(backend_err)?,
+            auto_ban_floor: r
+                .try_get("", "tenant_auto_ban_floor")
+                .map_err(backend_err)?,
+            at_risk_threshold: r
+                .try_get("", "tenant_at_risk_threshold")
+                .map_err(backend_err)?,
+        };
+        policy.validate()?;
+        Ok(Some(policy))
+    }
+}
+
 /// Active-member predicate for a SET of users (`$1 = tenant`, `$2 =
 /// community`; the caller appends `AND cm.user_uuid IN (...)`). Same NULL
 /// `is_active` fail-closed reading as [`MEMBER_PREDICATE`].
@@ -932,6 +1152,96 @@ impl ReputationStore for PostgresReputationStore {
             let result = self.leaderboard_impl(scope, limit).await;
             metrics::record_call(
                 "leaderboard",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn apply<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        delta: i32,
+        class: ReasonClass,
+        reason: &'a str,
+        source_event: &'a str,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<ApplyOutcome, ReputationError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self
+                .apply_impl(scope, user, delta, class, reason, source_event, key)
+                .await;
+            metrics::record_call("apply", outcome_of(&result), start.elapsed().as_secs_f64());
+            result
+        })
+    }
+
+    fn get_tenant<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+    ) -> BoxFuture<'a, Result<TenantScore, ReputationError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.get_tenant_impl(scope, user).await;
+            metrics::record_call(
+                "get_tenant",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn history<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        limit: u32,
+        before: Option<i64>,
+    ) -> BoxFuture<'a, Result<Vec<HistoryEntry>, ReputationError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.history_impl(scope, user, limit, before).await;
+            metrics::record_call(
+                "history",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn below_threshold<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        threshold: i64,
+        limit: u32,
+    ) -> BoxFuture<'a, Result<Vec<ScoreEntry>, ReputationError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.below_threshold_impl(scope, threshold, limit).await;
+            metrics::record_call(
+                "below_threshold",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn tenant_policy<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+    ) -> BoxFuture<'a, Result<Option<TenantPolicy>, ReputationError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.tenant_policy_impl(scope).await;
+            metrics::record_call(
+                "tenant_policy",
                 outcome_of(&result),
                 start.elapsed().as_secs_f64(),
             );

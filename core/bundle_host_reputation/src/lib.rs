@@ -54,12 +54,16 @@
 
 mod metrics;
 mod postgres;
+mod scale;
 
 use std::future::Future;
 use std::pin::Pin;
 
 pub use postgres::{
     connect, load_membership, run_membership_refresh, ConnectConfig, PostgresReputationStore,
+};
+pub use scale::{
+    ReasonClass, ScoreScale, ACTIVITY_CAP, MODERATION_CAP, SCALE_DEFAULT, SCALE_MAX, SCALE_MIN,
 };
 
 /// Boxed future, so [`ReputationStore`] is object-safe without `async_trait`.
@@ -80,6 +84,9 @@ pub const MAX_SCORE: i64 = 1_000_000;
 /// Largest batch `adjust_many` / `get_many` accept (bounds one transaction's
 /// lock set and one round-trip's size).
 pub const MAX_BATCH: usize = 100;
+
+/// Largest `history` page.
+pub const MAX_HISTORY_LIMIT: u32 = 100;
 
 /// Largest `leaderboard` page.
 pub const MAX_LEADERBOARD_LIMIT: u32 = 100;
@@ -137,6 +144,64 @@ impl IdempotencyKey {
 pub struct ScoreEntry {
     pub user: uuid::Uuid,
     pub score: i64,
+}
+
+/// Result of [`ReputationStore::apply`] (mirrors `reputation_apply()`'s
+/// `(new_score, applied)`): `applied = false` means the idempotency key had
+/// already been used with the same parameters, so nothing moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApplyOutcome {
+    pub new_score: i64,
+    pub applied: bool,
+}
+
+/// A user's own aggregate across the communities of one tenant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TenantScore {
+    /// Rounded mean of the user's per-community scores (the legacy default
+    /// when the user has no score rows yet).
+    pub score: i64,
+    /// How many communities contributed a score row.
+    pub communities: u32,
+}
+
+/// One audit-ledger row of a user's history (UUID/numeric only, no PII).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryEntry {
+    /// Ledger row id, usable as the `before` cursor of the next page.
+    pub id: i64,
+    pub delta: i32,
+    pub reason_code: String,
+    pub kind: String,
+    pub balance_after: Option<i64>,
+    /// RFC 3339 UTC.
+    pub occurred_at: String,
+}
+
+/// A tenant's auto-ban policy (set by tenant admins through hub-api, stored in
+/// the hub-api-owned `reputation_tenant_policy` table, read-only here).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TenantPolicy {
+    pub auto_ban_enabled: bool,
+    /// Ban when the user's tenant aggregate falls below this (300..=850).
+    pub auto_ban_floor: i64,
+    /// At-risk reporting line; must exceed the floor (<= 850).
+    pub at_risk_threshold: i64,
+}
+
+impl TenantPolicy {
+    /// Validates `300 <= floor < at_risk <= 850` (same rule hub-api enforces).
+    pub fn validate(&self) -> Result<(), ReputationError> {
+        if self.auto_ban_floor < SCALE_MIN
+            || self.at_risk_threshold > SCALE_MAX
+            || self.auto_ban_floor >= self.at_risk_threshold
+        {
+            return Err(ReputationError::Invalid(
+                "tenant policy must satisfy 300 <= floor < at_risk <= 850".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// The host-derived scope of one reputation call (never guest-supplied).
@@ -308,6 +373,72 @@ pub trait ReputationStore: Send + Sync {
         scope: &'a ReputationScope,
         limit: u32,
     ) -> BoxFuture<'a, Result<Vec<ScoreEntry>, ReputationError>>;
+
+    /// Applies one classed, idempotent delta through the shared SQL function
+    /// `reputation_apply(p_tenant, p_community, p_user_uuid, p_delta,
+    /// p_reason_code, p_actor, p_source_event, p_idempotency_key)`, which owns
+    /// the lock, the scale clamp and the ledger row. The class bound is
+    /// enforced host-side by the caller via [`ScoreScale::check_delta`].
+    #[allow(clippy::too_many_arguments)]
+    fn apply<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        _user: uuid::Uuid,
+        _delta: i32,
+        _class: ReasonClass,
+        _reason: &'a str,
+        _source_event: &'a str,
+        _key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<ApplyOutcome, ReputationError>> {
+        Box::pin(async { Err(unsupported("apply")) })
+    }
+
+    /// `user`'s OWN aggregate across this tenant's communities. The caller
+    /// (the host) must have verified `user` is the invoking actor.
+    fn get_tenant<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        _user: uuid::Uuid,
+    ) -> BoxFuture<'a, Result<TenantScore, ReputationError>> {
+        Box::pin(async { Err(unsupported("get_tenant")) })
+    }
+
+    /// Newest-first ledger page for `user` in this community: up to `limit`
+    /// (`1..=`[`MAX_HISTORY_LIMIT`]) rows with `id < before` when given.
+    fn history<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        _user: uuid::Uuid,
+        _limit: u32,
+        _before: Option<i64>,
+    ) -> BoxFuture<'a, Result<Vec<HistoryEntry>, ReputationError>> {
+        Box::pin(async { Err(unsupported("history")) })
+    }
+
+    /// Active members scored strictly below `threshold`, lowest first (ties
+    /// by user id), up to `limit` (`1..=`[`MAX_LEADERBOARD_LIMIT`]).
+    fn below_threshold<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        _threshold: i64,
+        _limit: u32,
+    ) -> BoxFuture<'a, Result<Vec<ScoreEntry>, ReputationError>> {
+        Box::pin(async { Err(unsupported("below_threshold")) })
+    }
+
+    /// The tenant's auto-ban policy, or `None` when the tenant has none.
+    fn tenant_policy<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+    ) -> BoxFuture<'a, Result<Option<TenantPolicy>, ReputationError>> {
+        Box::pin(async { Err(unsupported("tenant_policy")) })
+    }
+}
+
+/// Fail-loud error for a store that does not implement an op (never a silent
+/// empty result).
+fn unsupported(op: &str) -> ReputationError {
+    ReputationError::Backend(format!("reputation store does not implement {op}"))
 }
 
 #[cfg(test)]
@@ -404,5 +535,23 @@ mod tests {
             ReputationError::IdempotencyConflict.wire_code(),
             "idempotency_conflict"
         );
+    }
+
+    #[test]
+    fn tenant_policy_validates_floor_below_at_risk_within_scale() {
+        let ok = |f, a| {
+            TenantPolicy {
+                auto_ban_enabled: false,
+                auto_ban_floor: f,
+                at_risk_threshold: a,
+            }
+            .validate()
+        };
+        assert!(ok(300, 301).is_ok());
+        assert!(ok(350, 850).is_ok());
+        assert!(ok(299, 400).is_err());
+        assert!(ok(400, 400).is_err());
+        assert!(ok(500, 400).is_err());
+        assert!(ok(400, 851).is_err());
     }
 }
