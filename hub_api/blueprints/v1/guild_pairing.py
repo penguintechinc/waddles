@@ -191,6 +191,16 @@ async def create_pairing(
             p.discord_guild_id == guild_id for p in pairing_svc.list_pairings(_dal(), community_id)
         ):
             raise conflict("This Discord server is already paired with this community")
+        # Authority, not just presence: the guild must have been installed through the
+        # OAuth flow under this tenant with an approved grant for THIS community.
+        # Existing pairings are not re-validated (grandfathered); only new creates.
+        if not server_install_svc.community_has_install_grant(_dal(), community_id, guild_id):
+            raise ApiError(
+                "This Discord server has not been installed for this community. "
+                'Use "Add Discord server" to install the bot and pair it.',
+                403,
+                "DISCORD_INSTALL_REQUIRED",
+            )
         # Only pair a guild the tenant's bot is actually in (409 DISCORD_BOT_NOT_IN_GUILD).
         await roles_svc.verify_bot_in_guild(_dal(), community_id, guild_id)
         pairing = pairing_svc.create_pairing(

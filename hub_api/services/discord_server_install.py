@@ -52,6 +52,7 @@ from services.install_state_binding import (
     nonce_hash,
 )
 from services.role_sync_service import _resolve_tenant_for_community
+from services.schema import bind_guild_pairing_tables
 from services.tenant_discord_install_state import DEFAULT_TTL_SECONDS
 from services.tenant_discord_install_state import _redis_client as _install_redis_client
 from services.url_guard import validate_outbound_url
@@ -391,3 +392,36 @@ async def complete_server_install(
             connection_id=connection_id,
             created=created,
         )
+
+
+def community_has_install_grant(dal: Any, community_id: int, guild_id: str) -> bool:
+    """True only if this community holds an approved grant on a same-tenant OAuth install.
+
+    `guild_id` must have been installed via the OAuth flow under THIS community's tenant.
+    Gate for the manual "pair by ID" path: bot membership alone is not proof of authority
+    (the shared SaaS bot sits in many guilds), so every new pairing needs this install-flow
+    grant -- including on the global/default tenant. N:M stays valid: each community needs
+    its own approved grant on the guild's install record.
+    """
+    tenant = _resolve_tenant_for_community(dal, community_id)
+    if tenant is None:
+        return False
+    tenant_id = tenant[0]
+    bind_guild_pairing_tables(dal)
+    pc = dal.platform_connections
+    acc = dal.community_connection_access
+    row = (
+        dal(
+            (pc.tenant_id == tenant_id)
+            & (pc.platform == PLATFORM_DISCORD)
+            & (pc.resource_type == RESOURCE_TYPE_GUILD)
+            & (pc.resource_id == guild_id)
+            & (pc.status == "active")
+            & (acc.connection_id == pc.id)
+            & (acc.community_id == community_id)
+            & (acc.status == "approved")
+        )
+        .select(pc.id, limitby=(0, 1))
+        .first()
+    )
+    return row is not None

@@ -43,6 +43,12 @@ def _feature_enabled_default_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         guild_pairing_module.roles_svc, "verify_bot_in_guild", AsyncMock(return_value=None)
     )
+    # Install-grant authority gate is covered on real Postgres in the same PG suite.
+    monkeypatch.setattr(
+        guild_pairing_module.server_install_svc,
+        "community_has_install_grant",
+        lambda *_a, **_k: True,
+    )
 
 
 async def _create_pairing(

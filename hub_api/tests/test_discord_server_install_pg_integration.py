@@ -33,7 +33,11 @@ from blueprints.v1.tenant_discord_install import tenant_discord_install_bp
 from config import HubAPIConfig
 from services import discord_guild_roles as roles_svc
 from services import discord_server_install as svc
-from services.credential_resolver import PlatformCredentials
+from services.credential_resolver import (
+    PlatformCredentials,
+    grant_community_connection_access,
+    upsert_platform_connection,
+)
 from services.errors import ApiError
 from tests import demo_pg_support as pg
 
@@ -232,6 +236,26 @@ async def _callback(client: Any, state: str, nonce: str | None, **extra: str) ->
     return await client.get(f"/api/v1/discord/install/callback?{qs}", headers=headers)
 
 
+def _grant(
+    dal: Any, tenant_id: int, community_id: int, guild: str, status: str = "approved"
+) -> int:
+    """Seed an install record + access grant, exactly as the OAuth callback writes them."""
+    conn = upsert_platform_connection(
+        dal,
+        tenant_id=tenant_id,
+        platform="discord",
+        resource_type="discord_guild",
+        resource_id=guild,
+        access_token="seeded",  # gitleaks:allow - test value
+        refresh_token=None,
+        installed_by_user_id=1,
+    )
+    grant_community_connection_access(
+        dal, community_id=community_id, connection_id=conn, status=status
+    )
+    return conn
+
+
 def _pairings(dal: Any, community_id: int) -> list[tuple[Any, ...]]:
     return [
         tuple(r)
@@ -372,9 +396,69 @@ class TestManualPairById:
             data=json.dumps({"discord_guild_id": guild, "sync_enabled": True}),
         )
 
-    async def test_pairs_when_bot_present(
+    async def test_foreign_guild_bot_present_no_grant_is_403(
         self, client: Any, auth_headers: Any, adal: AsyncDAL, community_id: int
     ) -> None:
+        response = await self._post(client, auth_headers, community_id, OTHER_GUILD)
+        assert response.status_code == 403
+        assert (await response.get_json())["error"]["code"] == "DISCORD_INSTALL_REQUIRED"
+        assert _pairings(adal.dal, community_id) == []
+
+    async def test_other_tenants_install_is_403(
+        self, client: Any, auth_headers: Any, adal: AsyncDAL, community_id: int
+    ) -> None:
+        dal = adal.dal
+        other_tid = pg.scalar(
+            dal,
+            "INSERT INTO tenants (slug, display_name, is_global, is_active) "
+            "VALUES ('other-co', 'Other', false, true) RETURNING id",
+        )
+        other_cid = pg.scalar(
+            dal,
+            "INSERT INTO communities (name, tenant_id) VALUES ('c2', %s) RETURNING id",
+            [other_tid],
+        )
+        _grant(dal, int(other_tid), int(other_cid), OTHER_GUILD)
+        response = await self._post(client, auth_headers, community_id, OTHER_GUILD)
+        assert response.status_code == 403
+        assert _pairings(dal, community_id) == []
+
+    async def test_pending_grant_is_403(
+        self, client: Any, auth_headers: Any, adal: AsyncDAL, community_id: int
+    ) -> None:
+        tid = pg.scalar(adal.dal, "SELECT tenant_id FROM communities WHERE id=%s", [community_id])
+        _grant(adal.dal, int(tid), community_id, OTHER_GUILD, status="pending")
+        response = await self._post(client, auth_headers, community_id, OTHER_GUILD)
+        assert response.status_code == 403
+
+    async def test_second_community_with_own_grant_is_ok(
+        self, client: Any, auth_headers: Any, adal: AsyncDAL, community_id: int
+    ) -> None:
+        dal = adal.dal
+        tid = int(pg.scalar(dal, "SELECT tenant_id FROM communities WHERE id=%s", [community_id]))
+        second = int(
+            pg.scalar(
+                dal,
+                "INSERT INTO communities (name, tenant_id) VALUES ('c3', %s) RETURNING id",
+                [tid],
+            )
+        )
+        conn = _grant(dal, tid, community_id, OTHER_GUILD)
+        assert (
+            await self._post(client, auth_headers, community_id, OTHER_GUILD)
+        ).status_code == 201
+        # Same guild, second community, no grant yet -> 403; with its own grant -> 201 (N:M).
+        assert (await self._post(client, auth_headers, second, OTHER_GUILD)).status_code == 403
+        grant_community_connection_access(
+            dal, community_id=second, connection_id=conn, status="approved"
+        )
+        assert (await self._post(client, auth_headers, second, OTHER_GUILD)).status_code == 201
+
+    async def test_pairs_when_granted(
+        self, client: Any, auth_headers: Any, adal: AsyncDAL, community_id: int
+    ) -> None:
+        tid = pg.scalar(adal.dal, "SELECT tenant_id FROM communities WHERE id=%s", [community_id])
+        _grant(adal.dal, int(tid), community_id, OTHER_GUILD)
         response = await self._post(client, auth_headers, community_id, OTHER_GUILD)
         assert response.status_code == 201
         assert _pairings(adal.dal, community_id) == [(OTHER_GUILD, "discord_to_twitch", True, 1)]
@@ -383,6 +467,8 @@ class TestManualPairById:
         self, client: Any, auth_headers: Any, adal: AsyncDAL, community_id: int, discord_edge: Any
     ) -> None:
         discord_edge["member_of"] = set()
+        tid = pg.scalar(adal.dal, "SELECT tenant_id FROM communities WHERE id=%s", [community_id])
+        _grant(adal.dal, int(tid), community_id, OTHER_GUILD)
         response = await self._post(client, auth_headers, community_id, OTHER_GUILD)
         assert response.status_code == 409
         assert (await response.get_json())["error"]["code"] == "DISCORD_BOT_NOT_IN_GUILD"
