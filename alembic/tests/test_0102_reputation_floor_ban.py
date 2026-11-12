@@ -1,4 +1,4 @@
-"""Tests for 0100_reputation_floor_ban against a real Postgres (`pg_docker.py` harness).
+"""Tests for 0102_reputation_floor_ban against a real Postgres (`pg_docker.py` harness).
 
 Covers chain position / single head, `reputation_verify_floor_breach()` (community hard and tenant
 scopes, switch off, floor boundaries, unscored default, tenant pairing, fail-closed inputs), the
@@ -28,7 +28,7 @@ requires_docker = pytest.mark.skipif(
 )
 
 _ROOT = Path(__file__).resolve().parents[2]
-_PATH = _ROOT / "alembic" / "versions" / "0100_reputation_floor_ban.py"
+_PATH = _ROOT / "alembic" / "versions" / "0102_reputation_floor_ban.py"
 _BUNDLE_LOGIN = "rep_ban_bundle"
 _LOGIN_PW = "rep-ban-test-only-pw"
 _VERIFY = "SELECT reputation_verify_floor_breach(%s, %s, %s::uuid, %s::smallint)"
@@ -47,7 +47,7 @@ _COMPLETE = (
 
 
 def _load():  # type: ignore[no-untyped-def]
-    spec = importlib.util.spec_from_file_location("migration_0100", _PATH)
+    spec = importlib.util.spec_from_file_location("migration_0102", _PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -55,17 +55,17 @@ def _load():  # type: ignore[no-untyped-def]
 
 
 class TestMigrationMetadata:
-    def test_id_fits_varchar32_and_chains_after_0099(self) -> None:
+    def test_id_fits_varchar32_and_chains_after_0101(self) -> None:
         m = _load()
-        assert m.revision == "0100_reputation_floor_ban"
+        assert m.revision == "0102_reputation_floor_ban"
         assert len(m.revision) <= 32
-        assert m.down_revision == "0099_discord_role_mirror"
+        assert m.down_revision == "0101_bundle_precompile_requests"
 
     def test_single_head(self) -> None:
         cfg = Config(str(_ROOT / "alembic.ini"))
         cfg.set_main_option("script_location", str(_ROOT / "alembic"))
         assert ScriptDirectory.from_config(cfg).get_heads() == [
-            "0100_reputation_floor_ban"
+            "0102_reputation_floor_ban"
         ]
 
 
@@ -73,7 +73,7 @@ class TestMigrationMetadata:
 def pg_db() -> Iterator[PgTestDatabase]:
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0100-floor-ban") as db:
+    with migrated_postgres("0102-floor-ban") as db:
         with _connect(db) as conn, conn.cursor() as cur:
             cur.execute(
                 "ALTER TABLE community_members DISABLE TRIGGER trg_community_members_user_uuid"

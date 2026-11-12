@@ -227,6 +227,6 @@ map to `rate_limited`, non-members to `not_a_member`). Consequences for the bund
   `moderation.<platform>` grant, the protected-target check (owner/admin/mod) and drain readiness at dispatch.
   Limit: only Discord has an outbound floor-ban path today (other platforms are refused up front).
 - Migrations: `alembic/versions/0072_reputation_host_ops.py` (score clamp CHECK + ledger columns),
-  `alembic/versions/0100_reputation_floor_ban.py` + `scripts/db/bundle_reputation_floor_ban.sql`
-  (automated hard ban outbox; tests `alembic/tests/test_0100_reputation_floor_ban.py`),
+  `alembic/versions/0102_reputation_floor_ban.py` + `scripts/db/bundle_reputation_floor_ban.sql`
+  (automated hard ban outbox; tests `alembic/tests/test_0102_reputation_floor_ban.py`),
   `alembic/versions/0097_reputation_unify.py` + `scripts/db/bundle_reputation_unify.sql` (PR #1236, authoritative).

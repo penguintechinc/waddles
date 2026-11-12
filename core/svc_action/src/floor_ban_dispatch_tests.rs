@@ -1,7 +1,7 @@
 //! Dispatcher tests: the sweep state machine against a stateful fake outbox and a scripted
 //! sender -- the confirmed-result rule, lease discipline, retry/dead/refused handling and the
 //! metrics. The outbox SQL itself is proven on a real Postgres in
-//! `alembic/tests/test_0100_reputation_floor_ban.py`; the command the sender receives is proven
+//! `alembic/tests/test_0102_reputation_floor_ban.py`; the command the sender receives is proven
 //! in `capabilities::floor_ban_tests` and `core/connector_e2e/tests/floor_ban_outbound.rs`.
 
 use std::collections::{HashMap, VecDeque};
