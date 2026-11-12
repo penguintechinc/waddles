@@ -35,12 +35,19 @@
 //! NOT implemented -- [`ComponentSource`] is the seam a follow-up wires
 //! `object_store` into; production wiring
 //! ([`UnimplementedBucketSource`]) fails closed with `LOAD_FAILED` rather
-//! than pretending to fetch anything. Likewise, precompiled `.cwasm`
-//! caching under `EXECUTOR_PRECOMPILE_DIR` (spec SS7.2/SS7.6) is not
-//! wired -- every fresh digest's `load` calls `wasmtime::component::
-//! Component::new` (a real, from-source JIT compile) instead of loading a
-//! cached artifact; correctness holds, the ~3-4s cold-compile cost SS7.2
-//! measured for a large component does not yet get amortized away.
+//! than pretending to fetch anything.
+//!
+//! **Executor-scale phase 1 (T1/T5/T7):** every per-stage [`Executor`] in one
+//! process shares ONE [`SharedRuntime`]: one wasmtime `Engine`, one linker,
+//! one compile limiter and one digest-keyed compiled-module cache, so a digest
+//! loaded by svc-process AND svc-action compiles and stays resident once
+//! (previously twice). Per-stage registries (scopes, slots, limits) stay
+//! separate, so stage isolation is unchanged. Modules are made resident from
+//! a signed precompiled `.cwasm` when one verifies (`crate::aot`), else
+//! JIT-compiled with a LOUD fallback; residency is bounded by
+//! `EXECUTOR_MEMORY_BUDGET_MB` with LRU eviction of idle, unpinned modules,
+//! and an evicted (or over-budget, verify-only) module is made resident again
+//! on its first call.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -53,7 +60,7 @@ use penguin_bundle_host::wire::{
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Instrument};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
@@ -65,6 +72,7 @@ use crate::engine::{ticks_for_deadline, Stage, StagePre};
 use crate::error::ExecutorError;
 use crate::host::{ExecState, HostBridge};
 use crate::metrics::{self, ExecutorMetrics};
+use crate::module_cache::ModuleCache;
 use crate::signing::PlatformPublicKeys;
 use crate::wire::{Connection, RequestHandler};
 
@@ -82,6 +90,31 @@ pub trait ComponentSource: Send + Sync + 'static {
         component_key: &str,
         sidecar_key: &str,
     ) -> impl std::future::Future<Output = Result<(Vec<u8>, Vec<u8>), ExecutorError>> + Send;
+
+    /// Fetches one precompiled artifact object (`.cwasm` or its `.sig`) by
+    /// key. Default: unsupported -- the caller treats the error as an AOT
+    /// miss and falls back (loudly) to a JIT compile.
+    fn fetch_precompiled(
+        &self,
+        key: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, ExecutorError>> + Send {
+        let key = key.to_string();
+        async move {
+            Err(ExecutorError::Config(format!(
+                "this component source serves no precompiled artifacts (key {key:?})"
+            )))
+        }
+    }
+
+    /// Fetches one small object (the bundle's signed sidecar on the AOT path,
+    /// where the source component itself is not needed). Default: fetch the
+    /// pair through [`ComponentSource::fetch`] and return the sidecar half.
+    fn fetch_object(
+        &self,
+        key: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, ExecutorError>> + Send {
+        async move { self.fetch(key, key).await.map(|(_, sidecar)| sidecar) }
+    }
 }
 
 /// The seam production code plugs into once the bucket client lands
@@ -172,13 +205,14 @@ struct LoadedBundle {
     /// field, so a second scope loading the same digest under a different
     /// `app_id` string never causes a collision or a silent overwrite.
     app_id: String,
-    /// The component pre-linked against the executor's `Linker` once at
-    /// load time (`Linker::instantiate_pre`), so every invoke only pays for
-    /// instantiation, not import resolution/type-checking. A fresh `Store`
-    /// (and therefore fresh guest state) is still created per call -- the
-    /// digest is shared across tenants, so reusing a live instance would
-    /// leak guest state between them.
-    pre: GuestPre,
+    /// Where the compiled form comes from. The compiled, pre-linked
+    /// component itself lives in the process-wide [`SharedRuntime`] cache
+    /// (shared across stages, LRU-evictable when idle); this is everything
+    /// needed to make it resident again on the next call after an eviction.
+    /// A fresh `Store` (and therefore fresh guest state) is still created
+    /// per call -- the digest is shared across tenants, so reusing a live
+    /// instance would leak guest state between them.
+    request: ModuleRequest,
     /// `EXECUTOR_INSTANCES_PER_BUNDLE` permits: caps concurrent in-flight
     /// instances of THIS digest so one hot bundle can't consume every
     /// global call slot.
@@ -232,8 +266,8 @@ impl<S: ComponentSource> Executor<S> {
 impl LoadedBundle {
     /// Test seam: the shareable parts a hand-built second registry entry
     /// needs (`component`, pre-linked form, slot semaphore).
-    fn test_parts(&self) -> (GuestPre, Arc<Semaphore>) {
-        (self.pre.clone(), Arc::clone(&self.slots))
+    fn test_parts(&self) -> (ModuleRequest, Arc<Semaphore>) {
+        (self.request.clone(), Arc::clone(&self.slots))
     }
 }
 
@@ -242,7 +276,11 @@ impl LoadedBundle {
 /// read loop.
 pub struct Executor<S: ComponentSource> {
     engine: Engine,
-    linker: Arc<Linker<ExecState>>,
+    /// Process-wide engine + compiled-module cache shared by every stage.
+    runtime: Arc<SharedRuntime>,
+    /// Reported in `hello` (CONTRACT `HelloBody.executor_id`) when the
+    /// `hello-executor-id` feature is on; see [`Executor::executor_id`].
+    executor_id: Option<String>,
     source: S,
     max_call_timeout_ms: u64,
     /// `EXECUTOR_MEMORY_LIMIT_MB`: the per-instance memory cap a `load`
@@ -263,23 +301,14 @@ pub struct Executor<S: ComponentSource> {
     /// Per-component `Linker` cache for connector loads via
     /// [`Executor::pin_connector`].
     connector_linkers: crate::engine::LinkerCache,
-    /// Single-flight compile-in-progress tracker (gh security review item
-    /// 2): concurrent `load`s for the SAME cold digest share one `OnceCell`,
-    /// so N scopes activating an identical never-before-seen digest at once
-    /// trigger exactly one bucket fetch + one `Component::new` JIT compile
-    /// (spec SS7.2's ~3-4s cold-compile cost), not N redundant ones. Entries
-    /// are removed once their compile resolves (success or failure) --
-    /// never left to accumulate across the process's lifetime; a digest
-    /// already resident in `bundles` never touches this map at all (the
-    /// fast path in `on_load`).
-    compiling: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Compiled>>>>,
     /// `EXECUTOR_MAX_CONCURRENT_CALLS` permits: the process-wide ceiling on
     /// in-flight invocations across every bundle and tenant. Guest
     /// execution runs on the tokio blocking pool, so this also bounds how
     /// many blocking threads guests can occupy.
     call_limiter: Arc<Semaphore>,
     /// `EXECUTOR_MAX_CONCURRENT_COMPILES` permits: bounds concurrent WASM
-    /// JIT compiles (each on a blocking-pool thread).
+    /// JIT compiles (each on a blocking-pool thread). The SAME semaphore as
+    /// [`SharedRuntime::compile_limiter`] -- one compile budget per process.
     compile_limiter: Arc<Semaphore>,
     max_concurrent_calls: u32,
     max_concurrent_compiles: u32,
@@ -321,8 +350,9 @@ pub struct Executor<S: ComponentSource> {
     /// and any heartbeat task run on a different OS worker thread than the
     /// one blocked running guest code, so they are never starved by it.
     /// `heartbeat_task_is_never_blocked_by_a_slow_guest_invocation` (below)
-    /// is the regression test for this property.
-    epoch_ticker: tokio::task::JoinHandle<()>,
+    /// is the regression test for this property. The ticker now lives on
+    /// [`SharedRuntime`] (one per engine) and is aborted when the last
+    /// executor sharing it drops.
     /// Platform Ed25519 public key(s) `on_load` checks every fetched
     /// sidecar's signature against (spec SS5.6). Derived leniently from
     /// `cfg.bundle_signing_public_keys` -- unset/blank yields an empty set
@@ -338,11 +368,491 @@ pub struct Executor<S: ComponentSource> {
     metrics: Arc<ExecutorMetrics>,
 }
 
-/// What the single-flight compile produces: the pre-linked component
-/// (`StagePre` owns the compiled `Component`).
-#[derive(Clone)]
-struct Compiled {
+/// Everything needed to make one digest resident (or resident AGAIN after an
+/// LRU eviction): the identity the stage's `Load` named plus the bucket keys
+/// its source component and signed sidecar live at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleRequest {
+    pub app_id: String,
+    pub version: String,
+    /// `sha256:<64 hex>` -- the cache key.
+    pub digest: String,
+    pub component_key: String,
+    pub sidecar_key: String,
+}
+
+impl ModuleRequest {
+    fn from_load(body: &LoadBody) -> Self {
+        Self {
+            app_id: body.app_id.clone(),
+            version: body.version.clone(),
+            digest: body.digest.clone(),
+            component_key: body.component_key.clone(),
+            sidecar_key: body.sidecar_key.clone(),
+        }
+    }
+}
+
+/// Why the AOT path was not used (closed label vocabulary for
+/// `executor_precompile_fallback_total{reason}`).
+type AotMiss = (&'static str, ExecutorError);
+
+/// The process-wide half of the executor (executor-scale CONTRACT T1): ONE
+/// wasmtime `Engine` (+ its epoch ticker), ONE linker, ONE compile limiter and
+/// ONE digest-keyed compiled-module cache shared by every per-stage
+/// [`Executor`] in this process. Previously each stage built its own engine,
+/// so every digest both stages loaded was compiled and resident twice.
+pub struct SharedRuntime {
+    engine: Engine,
+    linker: Arc<Linker<ExecState>>,
+    engine_fingerprint: String,
+    compile_limiter: Arc<Semaphore>,
+    max_concurrent_compiles: u32,
+    /// `false` when the `waddles.disable-aot-precompile` kill switch is on.
+    aot_enabled: bool,
+    cache: std::sync::Mutex<ModuleCache<GuestPre>>,
+    /// Single-flight make-resident tracker (gh security review item 2,
+    /// now process-wide): concurrent requests for the SAME cold digest --
+    /// from any scope on any stage -- share one `OnceCell`, so they trigger
+    /// exactly one fetch + one deserialize/compile. Entries are removed once
+    /// their attempt resolves (success or failure).
+    resolving: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<(GuestPre, u64)>>>>,
+    /// Cache gauges, module-load histogram, fallback/eviction counters.
+    metrics: Arc<ExecutorMetrics>,
+    /// Lifetime count of JIT compiles performed (tests + diagnostics).
+    compiles_total: AtomicU64,
+    /// Lifetime count of verified `.cwasm` deserializations.
+    aot_loads_total: AtomicU64,
+    /// Lifetime count of AOT misses that fell back to a compile.
+    aot_fallbacks_total: AtomicU64,
+    /// Advances `engine`'s epoch every `EPOCH_TICK` so per-call deadlines
+    /// fire (see the `Executor` doc's heartbeat-safety note). Aborted on drop.
+    epoch_ticker: tokio::task::JoinHandle<()>,
+}
+
+impl SharedRuntime {
+    /// Builds the runtime from config: the engine comes from
+    /// [`crate::engine::build_engine`] -- the SAME builder the precompiler
+    /// uses, so [`crate::engine::engine_fingerprint`] matches its artifacts.
+    pub fn new(cfg: &CliConfig) -> Result<Arc<Self>, ExecutorError> {
+        Self::with_metrics(cfg, metrics::executor_metrics())
+    }
+
+    /// [`SharedRuntime::new`] recording into `metrics` (tests read it back).
+    pub fn with_metrics(
+        cfg: &CliConfig,
+        metrics: Arc<ExecutorMetrics>,
+    ) -> Result<Arc<Self>, ExecutorError> {
+        let engine = crate::engine::build_engine(cfg)?;
+        let linker = Arc::new(crate::engine::build_linker(&engine)?);
+        let engine_fingerprint = crate::engine::engine_fingerprint(&engine);
+        let epoch_ticker = crate::engine::spawn_epoch_ticker(&engine);
+        let max_compiles = cfg.effective_max_concurrent_compiles();
+        let aot_enabled = !cfg.flag_disable_aot_precompile;
+        info!(
+            engine_fingerprint,
+            aot_enabled,
+            memory_budget_mb = cfg.executor_memory_budget_mb,
+            max_concurrent_compiles = max_compiles,
+            "shared executor runtime built (one engine + module cache for all stages)"
+        );
+        Ok(Arc::new(Self {
+            engine,
+            linker,
+            engine_fingerprint,
+            compile_limiter: Arc::new(Semaphore::new(max_compiles as usize)),
+            max_concurrent_compiles: max_compiles,
+            aot_enabled,
+            cache: std::sync::Mutex::new(ModuleCache::new(cfg.memory_budget_bytes())),
+            resolving: tokio::sync::Mutex::new(HashMap::new()),
+            metrics,
+            compiles_total: AtomicU64::new(0),
+            aot_loads_total: AtomicU64::new(0),
+            aot_fallbacks_total: AtomicU64::new(0),
+            epoch_ticker,
+        }))
+    }
+
+    /// This runtime's engine fingerprint (precompiled artifact key).
+    #[must_use]
+    pub fn engine_fingerprint(&self) -> &str {
+        &self.engine_fingerprint
+    }
+
+    /// Lifetime JIT compiles performed.
+    #[must_use]
+    pub fn compiles_total(&self) -> u64 {
+        self.compiles_total.load(Ordering::SeqCst)
+    }
+
+    /// Lifetime verified `.cwasm` loads.
+    #[must_use]
+    pub fn aot_loads_total(&self) -> u64 {
+        self.aot_loads_total.load(Ordering::SeqCst)
+    }
+
+    /// Lifetime AOT misses that fell back to a compile.
+    #[must_use]
+    pub fn aot_fallbacks_total(&self) -> u64 {
+        self.aot_fallbacks_total.load(Ordering::SeqCst)
+    }
+
+    /// `(resident modules, resident bytes)`.
+    pub fn residency(&self) -> Result<(usize, u64), ExecutorError> {
+        let cache = self.lock_cache()?;
+        Ok((cache.len(), cache.total_bytes()))
+    }
+
+    /// `true` when `digest` is resident.
+    pub fn is_resident(&self, digest: &str) -> Result<bool, ExecutorError> {
+        Ok(self.lock_cache()?.contains(digest))
+    }
+
+    fn lock_cache(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, ModuleCache<GuestPre>>, ExecutorError> {
+        self.cache
+            .lock()
+            .map_err(|_| ExecutorError::Wasmtime("module cache mutex poisoned".to_string()))
+    }
+
+    fn publish_gauges(&self, cache: &ModuleCache<GuestPre>) {
+        self.metrics
+            .set_module_cache(cache.len(), cache.total_bytes());
+    }
+
+    /// `true` when a cold module may be made resident now without exceeding
+    /// the budget; `false` = verify only and load on first call (lazy).
+    fn has_headroom(&self) -> Result<bool, ExecutorError> {
+        Ok(self.lock_cache()?.has_headroom())
+    }
+
+    /// One more stage registry references `digest`.
+    fn add_ref(&self, digest: &str) -> Result<(), ExecutorError> {
+        self.lock_cache()?.add_ref(digest);
+        Ok(())
+    }
+
+    /// One stage registry stopped referencing `digest` (unload/disconnect).
+    /// Compiled code is NOT dropped here unless the budget is unlimited: an
+    /// idle module stays warm (LRU-evictable) so a reconnecting stage does not
+    /// trigger a full recompile.
+    fn release_ref(&self, digest: &str) {
+        match self.cache.lock() {
+            Ok(mut cache) => {
+                cache.release_ref(digest);
+                self.publish_gauges(&cache);
+            }
+            Err(_) => error!(digest, "module cache mutex poisoned; reference not released"),
+        }
+    }
+
+    fn unpin(&self, digest: &str) {
+        match self.cache.lock() {
+            Ok(mut cache) => {
+                cache.unpin(digest);
+                self.publish_gauges(&cache);
+            }
+            Err(_) => error!(digest, "module cache mutex poisoned; module left pinned"),
+        }
+    }
+
+    /// Returns `req`'s module pinned for the caller, making it resident first
+    /// if needed (verified `.cwasm` deserialize, else a JIT compile under the
+    /// compile limiter). The pin is released when the [`ModuleLease`] drops;
+    /// a pinned module is never evicted.
+    async fn acquire<S: ComponentSource>(
+        self: &Arc<Self>,
+        req: &ModuleRequest,
+        source: &S,
+        keys: &PlatformPublicKeys,
+        phase_metrics: &ExecutorMetrics,
+    ) -> Result<ModuleLease, ExecutorError> {
+        if let Some(pre) = self.lock_cache()?.get_pinned(&req.digest) {
+            return Ok(ModuleLease::new(Arc::clone(self), req.digest.clone(), pre));
+        }
+        let cell = {
+            let mut resolving = self.resolving.lock().await;
+            Arc::clone(
+                resolving
+                    .entry(req.digest.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+            )
+        };
+        let span = tracing::info_span!(
+            "executor.module_load",
+            app_id = %req.app_id,
+            digest = %req.digest,
+            engine_fingerprint = %self.engine_fingerprint,
+        );
+        let resolved = cell
+            .get_or_try_init(|| {
+                self.materialize(req, source, keys, phase_metrics)
+                    .instrument(span)
+            })
+            .await
+            .cloned();
+        self.resolving.lock().await.remove(&req.digest);
+        let (pre, bytes) = resolved?;
+        let mut cache = self.lock_cache()?;
+        let (pre, outcome) = cache.insert_pinned(&req.digest, pre, bytes);
+        self.metrics.record_module_evictions(outcome.evicted.len());
+        if !outcome.evicted.is_empty() {
+            info!(
+                evicted = outcome.evicted.len(),
+                resident_bytes = cache.total_bytes(),
+                "evicted idle modules (LRU) to honour EXECUTOR_MEMORY_BUDGET_MB; \
+                 they reload on their next call"
+            );
+        }
+        if outcome.over_budget {
+            warn!(
+                resident_bytes = cache.total_bytes(),
+                resident_modules = cache.len(),
+                "module cache above EXECUTOR_MEMORY_BUDGET_MB: every other resident module \
+                 is pinned by an in-flight invoke"
+            );
+        }
+        self.publish_gauges(&cache);
+        drop(cache);
+        Ok(ModuleLease::new(Arc::clone(self), req.digest.clone(), pre))
+    }
+
+    /// Makes `req` resident: AOT first (unless the kill switch is on), LOUD
+    /// fallback to a JIT compile on any AOT problem.
+    async fn materialize<S: ComponentSource>(
+        &self,
+        req: &ModuleRequest,
+        source: &S,
+        keys: &PlatformPublicKeys,
+        phase_metrics: &ExecutorMetrics,
+    ) -> Result<(GuestPre, u64), ExecutorError> {
+        let started = Instant::now();
+        if self.aot_enabled {
+            match self.try_aot(req, source, keys).await {
+                Ok(loaded) => {
+                    self.aot_loads_total.fetch_add(1, Ordering::SeqCst);
+                    self.metrics
+                        .record_module_load("aot", "ok", started.elapsed());
+                    info!(
+                        app_id = req.app_id,
+                        digest = req.digest,
+                        bytes = loaded.1,
+                        ms = started.elapsed().as_millis() as u64,
+                        "module resident from verified precompiled artifact"
+                    );
+                    return Ok(loaded);
+                }
+                Err((reason, err)) => {
+                    self.aot_fallbacks_total.fetch_add(1, Ordering::SeqCst);
+                    self.metrics.record_precompile_fallback(reason);
+                    error!(
+                        app_id = req.app_id,
+                        digest = req.digest,
+                        reason,
+                        error = %err,
+                        "precompiled artifact unusable; FALLING BACK to JIT compile \
+                         under the compile limiter"
+                    );
+                }
+            }
+        }
+        let compiled = self.compile_from_source(req, source, keys, phase_metrics).await;
+        self.metrics.record_module_load(
+            "compile",
+            if compiled.is_ok() { "ok" } else { "error" },
+            started.elapsed(),
+        );
+        compiled
+    }
+
+    /// The AOT path. Order matters: the bundle's own signed sidecar and the
+    /// artifact's detached signature are BOTH verified before a single byte
+    /// reaches the `unsafe` deserialize.
+    async fn try_aot<S: ComponentSource>(
+        &self,
+        req: &ModuleRequest,
+        source: &S,
+        keys: &PlatformPublicKeys,
+    ) -> Result<(GuestPre, u64), AotMiss> {
+        if keys.is_empty() {
+            return Err((
+                "signature",
+                ExecutorError::SignatureInvalid(
+                    "no BUNDLE_SIGNING_PUBLIC_KEYS configured; AOT requires signed artifacts"
+                        .to_string(),
+                ),
+            ));
+        }
+        let fp = &self.engine_fingerprint;
+        let cwasm = source
+            .fetch_precompiled(&crate::aot::cwasm_key(fp, &req.digest))
+            .await
+            .map_err(|e| ("fetch", e))?;
+        let sig = source
+            .fetch_precompiled(&crate::aot::cwasm_signature_key(fp, &req.digest))
+            .await
+            .map_err(|e| ("fetch", e))?;
+        let sidecar = source
+            .fetch_object(&req.sidecar_key)
+            .await
+            .map_err(|e| ("fetch", e))?;
+        crate::signing::verify_artifact_signature(
+            &sidecar,
+            keys,
+            &req.app_id,
+            &req.version,
+            &req.digest,
+        )
+        .map_err(|e| ("signature", e))?;
+        crate::aot::verify_cwasm(&cwasm, &sig, keys, &req.digest, fp)
+            .map_err(|e| ("signature", e))?;
+        let (engine, linker) = (self.engine.clone(), Arc::clone(&self.linker));
+        tokio::task::spawn_blocking(move || {
+            // SAFETY: `Component::deserialize` trusts its input as native
+            // code. `cwasm` reached here only after `verify_cwasm` proved it
+            // is byte-identical to an artifact the platform signing key
+            // signed for THIS digest and THIS engine fingerprint (and the
+            // bundle's own sidecar signature verified above); wasmtime still
+            // re-checks engine compatibility inside `deserialize`.
+            let component = unsafe { Component::deserialize(&engine, &cwasm) }?;
+            let bytes = component_resident_bytes(&component);
+            let pre = GuestPre::new(&component, linker.instantiate_pre(&component)?)?;
+            Ok::<_, wasmtime::Error>((pre, bytes))
+        })
+        .await
+        .map_err(|e| {
+            (
+                "deserialize",
+                ExecutorError::Wasmtime(format!("deserialize task failed: {e}")),
+            )
+        })?
+        .map_err(|e| ("deserialize", ExecutorError::from(e)))
+    }
+
+    /// The JIT path: fetch, verify digest + sidecar signature, compile on a
+    /// blocking thread under the shared compile limiter.
+    async fn compile_from_source<S: ComponentSource>(
+        &self,
+        req: &ModuleRequest,
+        source: &S,
+        keys: &PlatformPublicKeys,
+        phase_metrics: &ExecutorMetrics,
+    ) -> Result<(GuestPre, u64), ExecutorError> {
+        let bytes = fetch_and_verify(req, source, keys, phase_metrics).await?;
+        // Bounded + off-reactor: the JIT compile is seconds of pure CPU, so
+        // it queues on `compile_limiter` and runs on a blocking-pool thread.
+        let compile_permit = Arc::clone(&self.compile_limiter)
+            .acquire_owned()
+            .await
+            .map_err(|_| ExecutorError::Wasmtime("executor is shutting down".to_string()))?;
+        let compile_started = Instant::now();
+        let (engine, linker) = (self.engine.clone(), Arc::clone(&self.linker));
+        let compiled = tokio::task::spawn_blocking(move || {
+            let _permit = compile_permit;
+            let component = Component::new(&engine, &bytes)?;
+            let resident = component_resident_bytes(&component);
+            let pre = GuestPre::new(&component, linker.instantiate_pre(&component)?)?;
+            Ok::<_, wasmtime::Error>((pre, resident))
+        })
+        .await
+        .map_err(|e| ExecutorError::Wasmtime(format!("compile task failed: {e}")))
+        .and_then(|r| r.map_err(ExecutorError::from));
+        if compiled.is_ok() {
+            self.compiles_total.fetch_add(1, Ordering::SeqCst);
+        }
+        phase_metrics.record_load_phase(
+            &req.app_id,
+            "precompile",
+            if compiled.is_ok() { "ok" } else { "error" },
+            compile_started.elapsed(),
+        );
+        compiled
+    }
+}
+
+impl Drop for SharedRuntime {
+    fn drop(&mut self) {
+        self.epoch_ticker.abort();
+    }
+}
+
+/// Estimated resident cost of a compiled component: its compiled code image.
+fn component_resident_bytes(component: &Component) -> u64 {
+    let range = component.image_range();
+    u64::try_from(range.end.addr().saturating_sub(range.start.addr())).unwrap_or(u64::MAX)
+}
+
+/// Fetches `req`'s component + sidecar and verifies the digest and (when a
+/// platform key is configured) the sidecar's Ed25519 signature, recording the
+/// `fetch`/`verify` phases. Shared by the JIT path and the lazy (verify-only)
+/// `Load`, so a bad artifact fails the `Load` loudly even when compilation is
+/// deferred to the first call.
+async fn fetch_and_verify<S: ComponentSource>(
+    req: &ModuleRequest,
+    source: &S,
+    keys: &PlatformPublicKeys,
+    phase_metrics: &ExecutorMetrics,
+) -> Result<Vec<u8>, ExecutorError> {
+    let fetch_started = Instant::now();
+    let fetched = source.fetch(&req.component_key, &req.sidecar_key).await;
+    phase_metrics.record_load_phase(
+        &req.app_id,
+        "fetch",
+        if fetched.is_ok() { "ok" } else { "error" },
+        fetch_started.elapsed(),
+    );
+    let (bytes, sidecar_bytes) = fetched?;
+    let verify_started = Instant::now();
+    // Artifact integrity (spec SS5.6/Gemini review condition 9): refuse a
+    // component whose signed sidecar does not verify against a configured
+    // platform public key, BEFORE the (expensive, otherwise-trusting)
+    // compile. Skipped only when no platform key is configured at all --
+    // unreachable in production, see `crate::signing::PlatformPublicKeys`.
+    let verified = verify_digest(&bytes, &req.digest).and_then(|()| {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        crate::signing::verify_artifact_signature(
+            &sidecar_bytes,
+            keys,
+            &req.app_id,
+            &req.version,
+            &req.digest,
+        )
+    });
+    phase_metrics.record_load_phase(
+        &req.app_id,
+        "verify",
+        if verified.is_ok() { "ok" } else { "error" },
+        verify_started.elapsed(),
+    );
+    verified?;
+    Ok(bytes)
+}
+
+/// A pinned, resident module. While any lease exists the module cannot be
+/// evicted; dropping it unpins (and touches) the entry.
+pub(crate) struct ModuleLease {
+    runtime: Arc<SharedRuntime>,
+    digest: String,
     pre: GuestPre,
+}
+
+impl ModuleLease {
+    fn new(runtime: Arc<SharedRuntime>, digest: String, pre: GuestPre) -> Self {
+        Self {
+            runtime,
+            digest,
+            pre,
+        }
+    }
+}
+
+impl Drop for ModuleLease {
+    fn drop(&mut self) {
+        self.runtime.unpin(&self.digest);
+    }
 }
 
 /// How [`Executor::drain`] ended.
@@ -359,22 +869,28 @@ pub enum DrainOutcome {
 }
 
 impl<S: ComponentSource> Executor<S> {
+    /// An executor with its OWN [`SharedRuntime`] (tests, single-stage
+    /// processes). A multi-stage process builds one runtime and calls
+    /// [`Executor::with_runtime`] per stage so stages share compiled code.
     pub fn new(cfg: &CliConfig, source: S) -> Result<Self, ExecutorError> {
-        let engine = crate::engine::build_engine(cfg)?;
-        let linker = Arc::new(crate::engine::build_linker(&engine)?);
-        let ticker_engine = engine.clone();
-        let epoch_ticker = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(crate::engine::EPOCH_TICK).await;
-                ticker_engine.increment_epoch();
-            }
-        });
+        Self::with_runtime(cfg, source, SharedRuntime::new(cfg)?)
+    }
+
+    /// An executor serving one stage on top of a shared `runtime`.
+    pub fn with_runtime(
+        cfg: &CliConfig,
+        source: S,
+        runtime: Arc<SharedRuntime>,
+    ) -> Result<Self, ExecutorError> {
+        let engine = runtime.engine.clone();
         let signing_keys = PlatformPublicKeys::from_cli(cfg)?;
         let connector_linkers = crate::engine::LinkerCache::new(engine.clone());
-        let max_compiles = cfg.effective_max_concurrent_compiles();
+        let max_compiles = runtime.max_concurrent_compiles;
+        let compile_limiter = Arc::clone(&runtime.compile_limiter);
         Ok(Self {
             engine,
-            linker,
+            runtime,
+            executor_id: cfg.resolved_executor_id(),
             source,
             max_call_timeout_ms: cfg.executor_max_call_timeout_ms,
             default_memory_limit_mb: cfg.executor_memory_limit_mb,
@@ -384,16 +900,14 @@ impl<S: ComponentSource> Executor<S> {
             bundles: RwLock::new(HashMap::new()),
             connectors: crate::connector_wire::ConnectorRouter::new(),
             connector_linkers,
-            compiling: tokio::sync::Mutex::new(HashMap::new()),
             call_limiter: Arc::new(Semaphore::new(cfg.executor_max_concurrent_calls as usize)),
-            compile_limiter: Arc::new(Semaphore::new(max_compiles as usize)),
+            compile_limiter,
             max_concurrent_calls: cfg.executor_max_concurrent_calls,
             max_concurrent_compiles: max_compiles,
             instances_per_bundle: cfg.executor_instances_per_bundle as usize,
             pool_wait: Duration::from_millis(cfg.executor_pool_wait_ms),
             draining: AtomicBool::new(false),
             orphaned_unload_total: AtomicU64::new(0),
-            epoch_ticker,
             signing_keys,
             metrics: metrics::executor_metrics(),
         })
@@ -560,7 +1074,15 @@ impl<S: ComponentSource> Executor<S> {
     /// collector so the stage can refuse a mismatched connection instead
     /// of every bundle silently failing to load.
     pub fn hello(&self, sandbox_verified: bool, sandbox_runtime: &str) -> HelloBody {
+        // `hello-executor-id`: the penguin-libs `HelloBody.executor_id`
+        // (Option<String>, serde-default) wire bump. Off until the pinned
+        // penguin-libs rev carries the field -- the dependency bump PR must
+        // enable this feature in the same change.
+        #[cfg(not(feature = "hello-executor-id"))]
+        let _ = &self.executor_id;
         HelloBody {
+            #[cfg(feature = "hello-executor-id")]
+            executor_id: self.executor_id.clone(),
             protocol_version: 1,
             executor_version: env!("CARGO_PKG_VERSION").to_string(),
             wasmtime_version: crate::engine::WASMTIME_VERSION.to_string(),
@@ -572,11 +1094,18 @@ impl<S: ComponentSource> Executor<S> {
             },
         }
     }
-}
 
-impl<S: ComponentSource> Drop for Executor<S> {
-    fn drop(&mut self) {
-        self.epoch_ticker.abort();
+    /// The stable executor identity this process reports to stages
+    /// (`EXECUTOR_ID`, else `HOSTNAME`).
+    #[must_use]
+    pub fn executor_id(&self) -> Option<&str> {
+        self.executor_id.as_deref()
+    }
+
+    /// The process-wide runtime this executor shares with its sibling stages.
+    #[must_use]
+    pub fn runtime(&self) -> &Arc<SharedRuntime> {
+        &self.runtime
     }
 }
 
@@ -770,112 +1299,36 @@ impl<S: ComponentSource> Executor<S> {
             }
         }
 
-        // Single-flight fetch+verify+compile (gh security review item 2):
-        // get-or-create this digest's `OnceCell` under a short, map-only
-        // critical section, then await ITS `get_or_try_init` outside any
-        // lock -- a concurrent `load` for the identical digest (from a
-        // different scope, or a different connection entirely) awaits the
-        // SAME cell and gets the SAME compiled `Component` clone back,
-        // rather than redundantly re-fetching/re-compiling. `Component::new`
-        // (~3-4s for a large component, spec SS7.2) and the bucket fetch
-        // both run OUTSIDE `self.bundles`'s lock either way -- only the map
-        // insert further below (and the fast-path/re-check reads) ever hold
-        // it, so a slow compile never blocks other connections' `invoke`/
-        // `load`/`unload` calls against unrelated digests.
-        let cell = {
-            let mut compiling = self.compiling.lock().await;
-            Arc::clone(
-                compiling
-                    .entry(digest.clone())
-                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
-            )
-        };
-        let compiled: Result<&Compiled, ExecutorError> = cell
-            .get_or_try_init(|| async {
-                let fetch_started = Instant::now();
-                let fetched = self
-                    .source
-                    .fetch(&body.component_key, &body.sidecar_key)
-                    .await;
-                self.metrics.record_load_phase(
-                    &app_id,
-                    "fetch",
-                    if fetched.is_ok() { "ok" } else { "error" },
-                    fetch_started.elapsed(),
-                );
-                let (bytes, sidecar_bytes) = fetched?;
-                let verify_started = Instant::now();
-                let verified = verify_digest(&bytes, &body.digest);
-
-                // Artifact integrity (spec SS5.6/Gemini review condition 9):
-                // refuse to instantiate a component whose signed sidecar
-                // doesn't verify against a configured platform public key,
-                // BEFORE the (expensive, and otherwise-trusting)
-                // `Component::new` compile step below. Skipped only when no
-                // platform key is configured at all
-                // (`self.signing_keys.is_empty()`) -- unreachable in
-                // production, see `crate::signing::PlatformPublicKeys`'s
-                // own doc. Lives inside the single-flight closure so a
-                // concurrent `load` for the same digest never bypasses
-                // verification via the shared `OnceCell`.
-                let verified = verified.and_then(|()| {
-                    if self.signing_keys.is_empty() {
-                        return Ok(());
-                    }
-                    crate::signing::verify_artifact_signature(
-                        &sidecar_bytes,
-                        &self.signing_keys,
-                        &body.app_id,
-                        &body.version,
-                        &body.digest,
-                    )
-                });
-                self.metrics.record_load_phase(
-                    &app_id,
-                    "verify",
-                    if verified.is_ok() { "ok" } else { "error" },
-                    verify_started.elapsed(),
-                );
-                verified?;
-
-                // Bounded + off-reactor: the JIT compile is seconds of pure
-                // CPU, so it queues on `compile_limiter` and runs on a
-                // blocking-pool thread -- running it inline would stall the
-                // event loop (and every other tenant's frames) on this pod.
-                let compile_permit = Arc::clone(&self.compile_limiter)
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| {
-                        ExecutorError::Wasmtime("executor is shutting down".to_string())
-                    })?;
-                let compile_started = Instant::now();
-                let (engine, linker) = (self.engine.clone(), Arc::clone(&self.linker));
-                let compiled = tokio::task::spawn_blocking(move || {
-                    let _permit = compile_permit;
-                    let component = Component::new(&engine, &bytes)?;
-                    let pre = GuestPre::new(&component, linker.instantiate_pre(&component)?)?;
-                    Ok::<_, wasmtime::Error>(Compiled { pre })
-                })
+        // Not in this stage's registry. Make the module resident through the
+        // process-wide runtime (T1: a digest another stage already loaded is
+        // a cache hit -- no second fetch, no second compile), or, when the
+        // memory budget has no headroom, verify only and defer the
+        // compile/deserialize to the first call (T7 lazy load). Either way a
+        // bad digest or signature fails THIS `Load`, loudly.
+        let request = ModuleRequest::from_load(&body);
+        let already_resident = self.runtime.is_resident(&digest).unwrap_or(false);
+        let eager = already_resident || self.runtime.has_headroom().unwrap_or(true);
+        // The lease (eager path) is held until this stage's registry holds a
+        // reference, so an unlimited-budget cache never drops the module in
+        // between.
+        let made_ready: Result<Option<ModuleLease>, ExecutorError> = if eager {
+            self.runtime
+                .acquire(&request, &self.source, &self.signing_keys, &self.metrics)
                 .await
-                .map_err(|e| ExecutorError::Wasmtime(format!("compile task failed: {e}")))
-                .and_then(|r| r.map_err(ExecutorError::from));
-                self.metrics.record_load_phase(
-                    &app_id,
-                    "precompile",
-                    if compiled.is_ok() { "ok" } else { "error" },
-                    compile_started.elapsed(),
-                );
-                compiled
-            })
-            .await;
-        let Compiled { pre, .. } = match compiled {
-            Ok(c) => c.clone(),
+                .map(Some)
+        } else {
+            info!(
+                app_id,
+                digest,
+                "memory budget has no headroom; verifying only, module loads on first call"
+            );
+            fetch_and_verify(&request, &self.source, &self.signing_keys, &self.metrics)
+                .await
+                .map(|_| None)
+        };
+        let _lease = match made_ready {
+            Ok(lease) => lease,
             Err(err) => {
-                // Never leave a failed attempt's slot behind -- a future
-                // `load` for this same digest (a legitimate retry, e.g.
-                // after a transient bucket outage) must start fresh, never
-                // be told "already failed" indefinitely.
-                self.compiling.lock().await.remove(&digest);
                 let code = match err {
                     ExecutorError::DigestMismatch { .. } => ErrorCode::DigestMismatch,
                     _ => ErrorCode::LoadFailed,
@@ -884,11 +1337,6 @@ impl<S: ComponentSource> Executor<S> {
                 return Err(error_body(code, err.to_string()));
             }
         };
-        // The compile succeeded -- this digest will now live in `bundles`
-        // (below), so its `OnceCell` slot in `compiling` is no longer
-        // needed; removing it keeps this map bounded to genuinely in-flight
-        // compiles, never accumulating one entry per digest ever seen.
-        self.compiling.lock().await.remove(&digest);
 
         // spec SS7.3: a `load` may request its own `limits.memory_mb`; `0`
         // means "no preference" and falls back to `EXECUTOR_MEMORY_LIMIT_MB`.
@@ -921,11 +1369,16 @@ impl<S: ComponentSource> Executor<S> {
         } else {
             let mut scopes = HashSet::with_capacity(1);
             scopes.insert(scope.clone());
+            if let Err(e) = self.runtime.add_ref(&digest) {
+                error!(app_id, digest, error = %e, "failed to reference the shared module");
+                self.metrics.record_load("load_failed");
+                return Err(error_body(ErrorCode::LoadFailed, e.to_string()));
+            }
             bundles.insert(
                 digest.clone(),
                 LoadedBundle {
                     app_id: app_id.clone(),
-                    pre,
+                    request,
                     slots: Arc::new(Semaphore::new(self.instances_per_bundle)),
                     memory_limit_mb,
                     scopes,
@@ -976,6 +1429,7 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                 if loaded.scopes.remove(&scope) {
                     if loaded.scopes.is_empty() {
                         bundles.remove(&body.digest);
+                        self.runtime.release_ref(&body.digest);
                         self.metrics.record_unload("evicted");
                         self.metrics.set_bundles_loaded(bundles.len());
                         info!(
@@ -1055,11 +1509,17 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         let evicted = {
             let mut bundles = self.bundles.write().await;
             let evicted = bundles.len();
+            // Drops this stage's registry entries, NOT the shared compiled
+            // code (T1): an idle module stays warm in the runtime cache
+            // (LRU-evictable) so the reconnecting stage's re-`Load` is a
+            // cache hit instead of a full recompile.
+            for digest in bundles.keys() {
+                self.runtime.release_ref(digest);
+            }
             bundles.clear();
             evicted
         };
         self.metrics.set_bundles_loaded(0);
-        self.compiling.lock().await.clear();
         if evicted > 0 {
             info!(
                 evicted_digests = evicted,
@@ -1223,13 +1683,13 @@ impl<S: ComponentSource> Executor<S> {
             let _global = self.acquire_global_slot(&body.app_id).await?;
             return self.connectors.invoke_bound(body, binding).await;
         }
-        let (pre, slots, memory_limit_mb, allowed_scopes) = {
+        let (request, slots, memory_limit_mb, allowed_scopes) = {
             let bundles = self.bundles.read().await;
             let loaded = bundles
                 .get(&body.digest)
                 .ok_or_else(|| error_body(ErrorCode::UnknownBundle, body.digest.clone()))?;
             (
-                loaded.pre.clone(),
+                loaded.request.clone(),
                 Arc::clone(&loaded.slots),
                 loaded.memory_limit_mb,
                 // The `(tenant, community)` scopes THIS app_id was loaded
@@ -1244,6 +1704,27 @@ impl<S: ComponentSource> Executor<S> {
         };
 
         let (bundle_permit, global_permit) = self.acquire_call_slots(slots, &body.app_id).await?;
+        // Pin the shared compiled module for the whole call (never evicted
+        // while in flight); makes it resident first if it was evicted or
+        // deferred at `Load` (T7 load-on-first-call).
+        let lease = self
+            .runtime
+            .acquire(&request, &self.source, &self.signing_keys, &self.metrics)
+            .await
+            .map_err(|err| {
+                error!(
+                    app_id = body.app_id,
+                    digest = body.digest,
+                    error = %err,
+                    "module could not be made resident for invoke"
+                );
+                let code = match err {
+                    ExecutorError::DigestMismatch { .. } => ErrorCode::DigestMismatch,
+                    _ => ErrorCode::LoadFailed,
+                };
+                error_body(code, err.to_string())
+            })?;
+        let pre = lease.pre.clone();
 
         let deadline_ms = body.deadline_ms.min(self.max_call_timeout_ms).max(1);
         // Connector spec SS0 condition 4: fuel per invocation, budgeted by
@@ -1293,7 +1774,7 @@ impl<S: ComponentSource> Executor<S> {
         // genuinely finished, even if the caller's future is dropped.
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
-            let _slots = (bundle_permit, global_permit);
+            let _slots = (bundle_permit, global_permit, lease);
             handle.block_on(run_guest(job))
         })
         .await

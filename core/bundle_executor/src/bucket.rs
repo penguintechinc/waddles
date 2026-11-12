@@ -108,6 +108,8 @@ pub struct BucketConfig {
     pub ca_file: Option<PathBuf>,
     pub fetch_timeout: Duration,
     pub max_component_bytes: u64,
+    /// Cap for precompiled `.cwasm` objects (`BUNDLE_MAX_PRECOMPILED_BYTES`).
+    pub max_precompiled_bytes: u64,
 }
 
 impl BucketConfig {
@@ -159,6 +161,7 @@ impl BucketConfig {
             ca_file: cfg.bundle_bucket_ca_file.clone(),
             fetch_timeout: Duration::from_secs(cfg.bundle_fetch_timeout_s),
             max_component_bytes: cfg.bundle_max_component_bytes,
+            max_precompiled_bytes: cfg.bundle_max_precompiled_bytes,
         })
     }
 }
@@ -192,7 +195,17 @@ impl BucketComponentSource {
 /// `tokio::time::timeout` so both call sites in [`BucketComponentSource
 /// ::fetch`] report which key timed out.
 async fn timed_get_object(config: &BucketConfig, key: &str) -> Result<Vec<u8>, ExecutorError> {
-    tokio::time::timeout(config.fetch_timeout, get_object(config, key))
+    timed_get_object_capped(config, key, config.max_component_bytes).await
+}
+
+/// [`timed_get_object`] with an explicit body-size cap (precompiled
+/// artifacts use `max_precompiled_bytes`).
+async fn timed_get_object_capped(
+    config: &BucketConfig,
+    key: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ExecutorError> {
+    tokio::time::timeout(config.fetch_timeout, get_object_capped(config, key, max_bytes))
         .await
         .map_err(|_| {
             ExecutorError::BucketFetch(format!(
@@ -211,6 +224,14 @@ impl ComponentSource for BucketComponentSource {
         let component = timed_get_object(&self.config, component_key).await?;
         let sidecar = timed_get_object(&self.config, sidecar_key).await?;
         Ok((component, sidecar))
+    }
+
+    async fn fetch_precompiled(&self, key: &str) -> Result<Vec<u8>, ExecutorError> {
+        timed_get_object_capped(&self.config, key, self.config.max_precompiled_bytes).await
+    }
+
+    async fn fetch_object(&self, key: &str) -> Result<Vec<u8>, ExecutorError> {
+        timed_get_object(&self.config, key).await
     }
 }
 
@@ -391,7 +412,17 @@ fn build_bucket_tls_config(config: &BucketConfig) -> Result<ClientConfig, Execut
 }
 
 /// Issues the signed `GET` and returns the response body's bytes.
+#[cfg(test)]
 async fn get_object(config: &BucketConfig, key: &str) -> Result<Vec<u8>, ExecutorError> {
+    get_object_capped(config, key, config.max_component_bytes).await
+}
+
+/// One SigV4-signed path-style GET whose body may not exceed `max_bytes`.
+async fn get_object_capped(
+    config: &BucketConfig,
+    key: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ExecutorError> {
     let endpoint = parse_endpoint(&config.endpoint)?;
     let canonical_uri = format!("/{}/{}", uri_encode(&config.bucket), uri_encode(key));
     let host_header = format!("{}:{}", endpoint.host, endpoint.port);
@@ -417,10 +448,10 @@ async fn get_object(config: &BucketConfig, key: &str) -> Result<Vec<u8>, Executo
             .connect(server_name, tcp)
             .await
             .map_err(ExecutorError::Io)?;
-        send_and_read(&mut stream, request.as_bytes(), config.max_component_bytes).await
+        send_and_read(&mut stream, request.as_bytes(), max_bytes).await
     } else {
         let mut stream = tcp;
-        send_and_read(&mut stream, request.as_bytes(), config.max_component_bytes).await
+        send_and_read(&mut stream, request.as_bytes(), max_bytes).await
     }
 }
 
@@ -543,6 +574,7 @@ mod tests {
             ca_file: None,
             fetch_timeout: Duration::from_secs(5),
             max_component_bytes: 33_554_432,
+            max_precompiled_bytes: 268_435_456,
         }
     }
 
@@ -714,6 +746,7 @@ mod tests {
             ca_file: None,
             fetch_timeout: Duration::from_secs(5),
             max_component_bytes: 33_554_432,
+            max_precompiled_bytes: 268_435_456,
         };
         let authorization = build_authorization(
             &config,

@@ -357,6 +357,44 @@ pub fn build_engine(_cfg: &CliConfig) -> Result<Engine, ExecutorError> {
     Ok(Engine::new(&config)?)
 }
 
+/// Feeds `Hash` input into SHA-256 so wasmtime's
+/// `precompile_compatibility_hash` (an `impl Hash`) becomes a stable,
+/// process-independent digest rather than a `DefaultHasher` value (which is
+/// randomly seeded per process and so useless across the precompiler/executor
+/// boundary).
+struct Sha256Hasher(sha2::Sha256);
+
+impl std::hash::Hasher for Sha256Hasher {
+    fn finish(&self) -> u64 {
+        // Never read: the fingerprint finalizes the inner SHA-256 directly.
+        0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        sha2::Digest::update(&mut self.0, bytes);
+    }
+}
+
+/// The engine fingerprint a precompiled `.cwasm` is keyed and signed by
+/// (executor-scale CONTRACT: "hash of wasmtime version + Config"): lowercase
+/// hex SHA-256 over the pinned [`WASMTIME_VERSION`] and wasmtime's own
+/// `Engine::precompile_compatibility_hash` (target, tunables, features,
+/// collector -- everything `Component::deserialize` checks). The precompiler
+/// and the executor both obtain their `Engine` from [`build_engine`], so the
+/// two can never drift; an engine built any other way gets a different
+/// fingerprint and every artifact misses (loudly) instead of deserializing.
+#[must_use]
+pub fn engine_fingerprint(engine: &Engine) -> String {
+    use std::hash::Hash;
+    let mut hasher = Sha256Hasher(<sha2::Sha256 as sha2::Digest>::new());
+    sha2::Digest::update(&mut hasher.0, b"waddles-engine-fp-v1\0wasmtime=");
+    sha2::Digest::update(&mut hasher.0, WASMTIME_VERSION.as_bytes());
+    sha2::Digest::update(&mut hasher.0, b"\0");
+    engine.precompile_compatibility_hash().hash(&mut hasher);
+    let digest = sha2::Digest::finalize(hasher.0);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Wires every WIT import the `stage` world declares -- `context`, `http`,
 /// `kv`, `db`, `relay`, `%flags`, `log`, `clock` (via the generated
 /// `Stage::add_to_linker`, backed by `crate::host`'s `Host` trait impls on
@@ -644,6 +682,31 @@ mod tests {
         let b = cache.get_or_build(&m)?;
         assert_eq!(cache.len(), 1, "a cache hit must not insert a second entry");
         assert!(Arc::ptr_eq(&a, &b));
+        Ok(())
+    }
+
+    /// The precompiler and the executor build separate `Engine`s from the
+    /// same builder; their fingerprints must match, or every `.cwasm` misses.
+    #[test]
+    fn engine_fingerprint_is_stable_across_engines_from_the_shared_builder(
+    ) -> Result<(), ExecutorError> {
+        let a = engine_fingerprint(&build_engine(&test_config())?);
+        let b = engine_fingerprint(&build_engine(&test_config())?);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
+        Ok(())
+    }
+
+    /// A differently-configured engine (here: no fuel metering) must NOT
+    /// share the fingerprint, so its artifacts can never be deserialized.
+    #[test]
+    fn engine_fingerprint_changes_with_engine_config() -> Result<(), ExecutorError> {
+        let ours = engine_fingerprint(&build_engine(&test_config())?);
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        let other = engine_fingerprint(&Engine::new(&config)?);
+        assert_ne!(ours, other);
         Ok(())
     }
 
