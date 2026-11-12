@@ -50,6 +50,10 @@ mod component {
         fn resolve_actor(&self) -> Option<String> {
             identity::resolve_actor().ok()
         }
+        /// Host-verified resolution of a payload user token.
+        fn resolve_mention(&self, token: &str) -> Option<String> {
+            identity::resolve_mention(token).ok()
+        }
         /// Monotonic nanoseconds for duration measurement.
         fn monotonic_nanos(&self) -> u64 {
             clock::monotonic_nanos()

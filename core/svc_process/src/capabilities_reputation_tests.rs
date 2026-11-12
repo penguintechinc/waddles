@@ -2028,3 +2028,40 @@ async fn a_system_flag_stripped_by_an_untrusted_hop_makes_the_core_write_forbidd
     );
     assert_eq!(f.store.ext_count(), 0);
 }
+
+#[tokio::test]
+async fn a_positive_moderation_delta_needs_a_verified_admin_even_when_system_originated() {
+    let args = |f: &Fixture| serde_json::json!({"user": f.member.to_string(), "delta": 30, "reason": "moderation.restore"});
+    // System-originated (no human actor): still forbidden.
+    let f = sys_fixture(v2_grants());
+    assert_eq!(
+        code_of(&f, "reputation.apply_moderation", args(&f)).await,
+        "forbidden"
+    );
+    // A moderator (human): moderation write is allowed but positive is not.
+    let f = human_fixture(Some("moderator"));
+    assert_eq!(
+        code_of(&f, "reputation.apply_moderation", args(&f)).await,
+        "forbidden"
+    );
+    assert_eq!(f.store.ext_count(), 0);
+    // An admin may.
+    let f = human_fixture(Some("community-admin"));
+    f.store.answer(Ok(630));
+    assert!(f
+        .caps
+        .handle(rep_call("reputation.apply_moderation", args(&f)))
+        .await
+        .is_ok());
+    // Negative moderation is unaffected for a system-originated invocation.
+    let f = sys_fixture(v2_grants());
+    f.store.answer(Ok(550));
+    assert!(f
+        .caps
+        .handle(rep_call(
+            "reputation.apply_moderation",
+            serde_json::json!({"user": f.member.to_string(), "delta": -50, "reason": "moderation.ban"})
+        ))
+        .await
+        .is_ok());
+}

@@ -1187,3 +1187,41 @@ fn the_completion_marker_key_is_a_hash_never_the_raw_idempotency_key() {
     assert_ne!(marker_key("a"), marker_key("b"));
     assert_eq!(marker_key("a"), marker_key("a"));
 }
+
+#[test]
+fn a_positive_moderation_delta_needs_the_admin_scope() {
+    let r = plain(&[(U1, 600)]);
+    let args = json!({"user": U1, "delta": 50, "reason": "moderation.restore"});
+    let before = r.host.log().len();
+    assert!(matches!(
+        write(&r, "apply_moderation", args.clone()),
+        Err(ToolError::Forbidden)
+    ));
+    assert!(matches!(
+        run(
+            &r,
+            "apply_moderation",
+            args.clone(),
+            ctx(Some("k"), Some(U2), &["community:moderate"])
+        ),
+        Err(ToolError::Forbidden)
+    ));
+    assert_eq!(
+        r.host.log().len(),
+        before,
+        "no host call for a refused caller"
+    );
+    assert_eq!(
+        as_admin(&r, "apply_moderation", args).unwrap()["score"],
+        650
+    );
+    // Negative moderation stays open to the logic bundle.
+    assert!(
+        write(
+            &r,
+            "apply_moderation",
+            json!({"user": U1, "delta": -50, "reason": "moderation.ban"})
+        )
+        .is_ok()
+    );
+}

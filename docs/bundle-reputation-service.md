@@ -156,8 +156,11 @@ Legacy has NO decay and NO tier-change notification: neither is implemented.
   uncapped chat accrual and the +10/+20 sub tiers are bounded by the host caps (catalog quotas can be raised later).
 * Auto-ban ships OFF; floors act through the service (soft ban / platform ban), not the accrual bundle.
 * The per-community tenant-contribution cap (+/-100) is deferred to v3.1.x (#1235).
-* Platform moderation events (`moderation.ban|timeout|warn|kick`) are mapped but not yet delivered inbound by
-  svc-ingest (only outbound `mod.*` sender ops exist); EventSub `channel.ban` is not subscribed.
+* Only `moderation.ban|timeout` (the host's verified system allowlist) apply moderation deltas; `warn`/`kick` have no
+  verified source and are skipped (`unverified_moderation`). The moderated user resolves through the host-verified
+  mention bindings, never a raw payload id; moderation weights must be negative and the delta is forced negative;
+  a POSITIVE moderation delta needs a verified community admin (service tool and host). These events are not yet
+  delivered inbound by svc-ingest (only outbound `mod.*` sender ops exist); EventSub `channel.ban` is not subscribed.
 
 ## Observability
 

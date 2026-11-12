@@ -682,6 +682,11 @@ pub fn apply_moderation(env: &Env, ctx: &ToolContext, args: Value) -> Result<Val
     let key = require_key(ctx)?;
     let user = uuid_field(&args, "user")?;
     let delta = delta_field(&args, MODERATION_CAP)?;
+    // Moderation is a penalty channel: raising a score with the larger moderation
+    // cap is an admin act (use `override`-class authority), never a logic bundle's.
+    if delta > 0 {
+        require_admin(ctx)?;
+    }
     let reason = reason_field(&args, None)?;
     let platform = platform_field(&args)?;
     let tiers = load_tiers(env.cfg.as_ref())?;

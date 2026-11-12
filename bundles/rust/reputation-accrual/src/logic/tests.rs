@@ -21,6 +21,8 @@ struct Fake {
     reply: RefCell<Option<Result<Value, ToolErr>>>,
     logs: RefCell<Vec<(Level, Value)>>,
     metrics: RefCell<Vec<(String, String)>>,
+    /// Tokens the host-verified mention bindings resolve (token -> uuid).
+    mentions: RefCell<HashMap<String, String>>,
 }
 
 impl Fake {
@@ -29,6 +31,9 @@ impl Fake {
         let mut f = f;
         f.flags.insert(FLAG_ENABLE.to_string());
         *f.actor.borrow_mut() = Some(U1.to_string());
+        f.mentions
+            .borrow_mut()
+            .insert(U2.to_string(), U2.to_string());
         f
     }
     fn config(&self, json: &str) {
@@ -66,6 +71,9 @@ impl Host for Fake {
     }
     fn resolve_actor(&self) -> Option<String> {
         self.actor.borrow().clone()
+    }
+    fn resolve_mention(&self, token: &str) -> Option<String> {
+        self.mentions.borrow().get(token).cloned()
     }
     fn monotonic_nanos(&self) -> u64 {
         1
@@ -295,13 +303,8 @@ fn no_resolvable_user_is_skipped() {
 }
 
 #[test]
-fn moderation_uses_apply_moderation_on_the_moderated_user() {
-    for (et, want) in [
-        ("moderation.warn", -25),
-        ("moderation.timeout", -50),
-        ("moderation.kick", -75),
-        ("moderation.ban", -200),
-    ] {
+fn only_verified_moderation_outcomes_apply_moderation_on_the_moderated_user() {
+    for (et, want) in [("moderation.timeout", -50), ("moderation.ban", -200)] {
         let h = Fake::on();
         let p = format!(r#"{{"target_user_id":"{U2}"}}"#);
         assert_eq!(run_ev(&h, et, &p).outcome, "applied");
@@ -314,10 +317,63 @@ fn moderation_uses_apply_moderation_on_the_moderated_user() {
 }
 
 #[test]
+fn warn_and_kick_have_no_verified_source_so_they_are_skipped_and_counted() {
+    for et in ["moderation.warn", "moderation.kick"] {
+        let h = Fake::on();
+        let p = format!(r#"{{"target_user_id":"{U2}"}}"#);
+        assert_eq!(run_ev(&h, et, &p).outcome, "unverified_moderation", "{et}");
+        assert_eq!(h.n_calls(), 0, "{et}");
+        assert_eq!(h.metrics.borrow().len(), 1, "counted");
+    }
+}
+
+#[test]
+fn a_payload_token_is_never_trusted_it_must_resolve_through_the_host_bindings() {
+    // A well-formed UUID in the payload that the host did NOT bind to this event.
+    let h = Fake::on();
+    let forged = "99999999-9999-9999-9999-999999999999";
+    let p = format!(r#"{{"target_user_id":"{forged}"}}"#);
+    assert_eq!(run_ev(&h, "moderation.ban", &p).outcome, "no_user");
+    assert_eq!(h.n_calls(), 0);
+}
+
+#[test]
 fn moderation_without_target_is_no_user_never_the_actor() {
     let h = Fake::on();
     assert_eq!(run_ev(&h, "moderation.ban", "{}").outcome, "no_user");
     assert_eq!(h.n_calls(), 0);
+}
+
+#[test]
+fn a_positive_moderation_weight_is_a_loud_config_error_and_never_a_score_raise() {
+    for field in ["warn", "timeout", "kick", "ban"] {
+        let h = Fake::on();
+        h.config(&format!(r#"{{"weights":{{"{field}":50}}}}"#));
+        let p = format!(r#"{{"target_user_id":"{U2}"}}"#);
+        let out = run_ev(&h, "moderation.ban", &p);
+        assert_eq!(out.outcome, "config_invalid", "{field}");
+        assert_eq!(h.n_calls(), 0, "{field}");
+        let h = Fake::on();
+        h.config(&format!(r#"{{"weights":{{"{field}":0}}}}"#));
+        assert_eq!(
+            run_ev(&h, "moderation.ban", &p).outcome,
+            "config_invalid",
+            "{field}=0"
+        );
+    }
+}
+
+#[test]
+fn compute_delta_forces_moderation_deltas_negative_even_if_a_weight_slipped_through() {
+    let mut w = Weights {
+        ban: 90,
+        timeout: 7,
+        ..Weights::default()
+    };
+    assert_eq!(compute_delta(Class::Moderation(Mod::Ban), &w), -90);
+    assert_eq!(compute_delta(Class::Moderation(Mod::Timeout), &w), -7);
+    w.ban = 900;
+    assert_eq!(compute_delta(Class::Moderation(Mod::Ban), &w), -200);
 }
 
 #[test]

@@ -3305,6 +3305,26 @@ impl<K: KvBackend> StageCapabilities<K> {
                     ..
                 }
         );
+        // A POSITIVE moderation delta raises a score with the larger cap: only a
+        // verified community admin may make one, system-originated or not.
+        if matches!(
+            op,
+            Op::Apply {
+                class: ReasonClass::Moderation,
+                delta: d,
+                ..
+            } if d > 0
+        ) {
+            let actor = self.resolve_verified_actor().await;
+            if !actor.has_scope(REPUTATION_OVERRIDE_SCOPE) {
+                return Err(denied(
+                    "forbidden",
+                    format!(
+                        "a positive moderation delta requires the caller to hold {REPUTATION_OVERRIDE_SCOPE}"
+                    ),
+                ));
+            }
+        }
         if moderation_write {
             let system = self
                 .invocation_identity

@@ -78,6 +78,9 @@ pub trait Host {
     fn flag(&self, key: &str) -> bool;
     /// The verified actor's community user UUID, when linked.
     fn resolve_actor(&self) -> Option<String>;
+    /// Resolves a payload user token through the HOST-verified mention bindings
+    /// of this event (`identity::resolve-mention`); an unbound token is `None`.
+    fn resolve_mention(&self, token: &str) -> Option<String>;
     /// Monotonic nanoseconds for duration measurement.
     fn monotonic_nanos(&self) -> u64;
     /// Gated bundle-to-bundle tool call (JSON in, JSON out).
@@ -221,6 +224,11 @@ impl Accrual {
         ];
         if all.iter().any(|v| v.unsigned_abs() > 1000) {
             return Err("weight out of range".into());
+        }
+        // Moderation weights are penalties: a positive one would turn the larger
+        // moderation cap into a score-raising channel.
+        if [w.warn, w.timeout, w.kick, w.ban].iter().any(|v| *v >= 0) {
+            return Err("moderation weights must be negative".into());
         }
         let c = &self.cooldowns;
         if c.chat_message > MAX_COOLDOWN_S || c.command_usage > MAX_COOLDOWN_S {
@@ -404,9 +412,13 @@ fn classify(event_type: &str, p: &Value) -> Option<Class> {
 /// Rounds half away from zero exactly once and clamps to the class cap.
 fn compute_delta(class: Class, w: &Weights) -> i64 {
     let (weight, mult) = class.weight_and_mult(w);
-    let raw = (f64::from(weight) * mult).round();
+    let mut raw = (f64::from(weight) * mult).round();
     if !raw.is_finite() {
         return 0;
+    }
+    // Moderation deltas are ALWAYS penalties, whatever the configured sign.
+    if matches!(class, Class::Moderation(_)) {
+        raw = -raw.abs();
     }
     let cap = if matches!(class, Class::Moderation(_)) {
         MODERATION_CAP
@@ -426,13 +438,20 @@ fn is_uuid(s: &str) -> bool {
         })
 }
 
-/// The moderated user's UUID from the payload, if present and valid.
-fn moderated_user(p: &Value) -> Option<String> {
+/// The payload token naming the moderated user. It is NEVER trusted as a user
+/// id: it must resolve through the host-verified mention bindings.
+fn moderation_token(p: &Value) -> Option<&str> {
     ["target_user_id", "target_user", "moderated_user_id"]
         .iter()
         .filter_map(|k| p.get(*k).and_then(Value::as_str))
-        .find(|s| is_uuid(s))
-        .map(str::to_ascii_lowercase)
+        .find(|s| !s.is_empty() && s.len() <= 128)
+}
+
+/// Moderation outcomes the host treats as system-originated (the same
+/// allowlist as `svc_process::identity::is_system_event_type`); warn/kick have
+/// no verified moderation source today, so they are skipped, never applied.
+fn moderation_verified(m: Mod) -> bool {
+    matches!(m, Mod::Ban | Mod::Timeout)
 }
 
 /// FNV-1a 64-bit hash for the fallback idempotency key.
@@ -544,8 +563,16 @@ fn run<H: Host>(host: &H, input: &Input) -> Outcome {
         return done("zero_delta", label);
     }
     let moderation = matches!(class, Class::Moderation(_));
+    if let Class::Moderation(m) = class
+        && !moderation_verified(m)
+    {
+        return done("unverified_moderation", label);
+    }
     let subject = if moderation {
-        moderated_user(&payload)
+        moderation_token(&payload)
+            .and_then(|t| host.resolve_mention(t))
+            .filter(|u| is_uuid(u))
+            .map(|u| u.to_ascii_lowercase())
     } else {
         host.resolve_actor().filter(|u| is_uuid(u))
     };
