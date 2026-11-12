@@ -2170,6 +2170,7 @@ mod tests {
                 runtime: "runc".to_string(),
                 verified: false,
             },
+            executor_id: None,
         });
         write_frame(&mut exec_io, &Frame::new(1, hello))
             .await
