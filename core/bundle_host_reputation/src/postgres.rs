@@ -584,18 +584,33 @@ impl PostgresReputationStore {
         user: Uuid,
         delta: i32,
         class: ReasonClass,
-        reason: &str,
         source_event: &str,
+        caps: ReputationCaps,
         key: &IdempotencyKey,
     ) -> Result<ApplyOutcome, ReputationError> {
-        validate_reason(reason)?;
+        // `source_event` is stored by the function: bounded + machine-code
+        // charset only (never free text / PII).
+        validate_reason(source_event)?;
         ScoreScale::LEGACY.check_delta(class, delta)?;
+        if caps.per_user_daily_abs_max < 0 || caps.per_scope_daily_abs_max < 0 {
+            return Err(ReputationError::Invalid(
+                "daily caps must be >= 0".to_string(),
+            ));
+        }
+        let abs_delta = i64::from(delta).abs();
+        let prefix = format!("{}:%", class.as_str());
+
+        let txn = self.begin().await?;
+
+        // 1. Fast-fail membership + tenant check. The AUTHORITATIVE check is
+        // inside `reputation_apply()` (SECURITY DEFINER, member row `FOR
+        // SHARE`, raises `not_a_member`): this role has no UPDATE privilege on
+        // `community_members`, so the row lock can only be taken there.
         let member_sql = format!(
             "SELECT 1 AS ok FROM community_members cm \
              JOIN communities c ON c.id = cm.community_id WHERE {MEMBER_PREDICATE}"
         );
-        if self
-            .conn
+        if txn
             .query_one_raw(stmt(&member_sql, scope_values(scope, user)))
             .await
             .map_err(backend_err)?
@@ -603,8 +618,85 @@ impl PostgresReputationStore {
         {
             return Err(ReputationError::NotAMember);
         }
-        let row = self
-            .conn
+
+        // 2. Same per-scope advisory lock as `adjust` (uniform lock order);
+        // it serializes every apply in this scope, so both window SUMs below
+        // are race-free.
+        scope_lock(&txn, scope).await?;
+
+        // 3. A replay of an already-applied key skips the caps (it moves
+        // nothing) and lets the function report `applied = false`.
+        let replay = txn
+            .query_one_raw(stmt(
+                "SELECT 1 AS ok FROM bundle_reputation_adjustments \
+                 WHERE tenant_id = $1 AND community_id = $2 AND idempotency_key = $3",
+                vec![
+                    Value::Int(Some(scope.tenant_id)),
+                    Value::Int(Some(scope.community_id)),
+                    Value::String(Some(key.as_str().to_string())),
+                ],
+            ))
+            .await
+            .map_err(backend_err)?
+            .is_some();
+
+        if !replay {
+            // 4. Rolling-24h per-user and per-scope caps, per class (the
+            // function records `reason_code` as `<class>:<source_event>`).
+            let used_user: i64 = txn
+                .query_one_raw(stmt(
+                    &format!(
+                        "SELECT COALESCE(SUM(ABS(COALESCE(requested_value, delta))), 0)::BIGINT AS used \
+                         FROM bundle_reputation_adjustments \
+                         WHERE tenant_id = $1 AND community_id = $2 AND target_user_uuid = $3::text \
+                           AND scope = 'community' AND kind = 'apply' AND reason_code LIKE $4 {WINDOW}"
+                    ),
+                    vec![
+                        Value::Int(Some(scope.tenant_id)),
+                        Value::Int(Some(scope.community_id)),
+                        Value::String(Some(user.to_string())),
+                        Value::String(Some(prefix.clone())),
+                    ],
+                ))
+                .await
+                .map_err(backend_err)?
+                .ok_or_else(|| backend_err("window SUM returned no row"))?
+                .try_get("", "used")
+                .map_err(backend_err)?;
+            if used_user.saturating_add(abs_delta) > caps.per_user_daily_abs_max {
+                return Err(ReputationError::DailyCapExceeded {
+                    cap: caps.per_user_daily_abs_max,
+                });
+            }
+            let used_scope: i64 = txn
+                .query_one_raw(stmt(
+                    &format!(
+                        "SELECT COALESCE(SUM(ABS(COALESCE(requested_value, delta))), 0)::BIGINT AS used \
+                         FROM bundle_reputation_adjustments \
+                         WHERE tenant_id = $1 AND community_id = $2 AND app_id = $3 \
+                           AND scope = 'community' AND kind = 'apply' AND reason_code LIKE $4 {WINDOW}"
+                    ),
+                    vec![
+                        Value::Int(Some(scope.tenant_id)),
+                        Value::Int(Some(scope.community_id)),
+                        Value::String(Some(scope.app_id.clone())),
+                        Value::String(Some(prefix)),
+                    ],
+                ))
+                .await
+                .map_err(backend_err)?
+                .ok_or_else(|| backend_err("scope window SUM returned no row"))?
+                .try_get("", "used")
+                .map_err(backend_err)?;
+            if used_scope.saturating_add(abs_delta) > caps.per_scope_daily_abs_max {
+                return Err(ReputationError::ScopeQuotaExceeded {
+                    cap: caps.per_scope_daily_abs_max,
+                });
+            }
+        }
+
+        // 5. The shared function (lock, clamp, ledger) in the SAME transaction.
+        let row = txn
             .query_one_raw(stmt(
                 "SELECT new_score::BIGINT AS new_score, applied \
                  FROM reputation_apply($1::bigint, $2::bigint, $3::uuid, $4::int, \
@@ -621,12 +713,19 @@ impl PostgresReputationStore {
                 ],
             ))
             .await
-            .map_err(backend_err)?
+            .map_err(|e| {
+                if e.to_string().contains("not_a_member") {
+                    ReputationError::NotAMember
+                } else {
+                    backend_err(e)
+                }
+            })?
             .ok_or_else(|| ReputationError::Backend("reputation_apply returned no row".into()))?;
         let outcome = ApplyOutcome {
             new_score: row.try_get("", "new_score").map_err(backend_err)?,
             applied: row.try_get("", "applied").map_err(backend_err)?,
         };
+        txn.commit().await.map_err(backend_err)?;
         if outcome.applied {
             metrics::record_applied_delta(i64::from(delta).unsigned_abs());
         }
@@ -790,6 +889,93 @@ impl PostgresReputationStore {
         };
         policy.validate()?;
         Ok(Some(policy))
+    }
+}
+
+impl PostgresReputationStore {
+    /// Active soft-ban lookup (`lifted_at IS NULL`).
+    async fn is_soft_banned_impl(
+        &self,
+        scope: &ReputationScope,
+        user: Uuid,
+    ) -> Result<bool, ReputationError> {
+        let row = self
+            .conn
+            .query_one_raw(stmt(
+                "SELECT 1 AS ok FROM reputation_soft_bans \
+                 WHERE tenant_id = $1 AND community_id = $2 AND user_uuid = $3 \
+                   AND lifted_at IS NULL",
+                scope_values(scope, user),
+            ))
+            .await
+            .map_err(backend_err)?;
+        Ok(row.is_some())
+    }
+
+    /// Idempotent soft-ban insert for an active member.
+    async fn soft_ban_impl(
+        &self,
+        scope: &ReputationScope,
+        user: Uuid,
+        reason: &str,
+    ) -> Result<bool, ReputationError> {
+        validate_reason(reason)?;
+        let member_sql = format!(
+            "SELECT 1 AS ok FROM community_members cm \
+             JOIN communities c ON c.id = cm.community_id WHERE {MEMBER_PREDICATE}"
+        );
+        if self
+            .conn
+            .query_one_raw(stmt(&member_sql, scope_values(scope, user)))
+            .await
+            .map_err(backend_err)?
+            .is_none()
+        {
+            return Err(ReputationError::NotAMember);
+        }
+        let mut v = scope_values(scope, user);
+        v.push(Value::String(Some(reason.to_string())));
+        let n = self
+            .conn
+            .execute_raw(stmt(
+                "INSERT INTO reputation_soft_bans \
+                 (tenant_id, community_id, user_uuid, reason_code) \
+                 SELECT $1, $2, $3, $4 WHERE NOT EXISTS ( \
+                   SELECT 1 FROM reputation_soft_bans \
+                   WHERE tenant_id = $1 AND community_id = $2 AND user_uuid = $3 \
+                     AND lifted_at IS NULL)",
+                v,
+            ))
+            .await
+            .map_err(backend_err)?
+            .rows_affected();
+        Ok(n > 0)
+    }
+}
+
+impl PostgresReputationStore {
+    /// Lifts an active soft ban recorded with exactly `only_reason`.
+    async fn lift_soft_ban_impl(
+        &self,
+        scope: &ReputationScope,
+        user: Uuid,
+        only_reason: &str,
+    ) -> Result<bool, ReputationError> {
+        validate_reason(only_reason)?;
+        let mut v = scope_values(scope, user);
+        v.push(Value::String(Some(only_reason.to_string())));
+        let n = self
+            .conn
+            .execute_raw(stmt(
+                "UPDATE reputation_soft_bans SET lifted_at = NOW() \
+                 WHERE tenant_id = $1 AND community_id = $2 AND user_uuid = $3 \
+                   AND lifted_at IS NULL AND reason_code = $4",
+                v,
+            ))
+            .await
+            .map_err(backend_err)?
+            .rows_affected();
+        Ok(n > 0)
     }
 }
 
@@ -1165,14 +1351,14 @@ impl ReputationStore for PostgresReputationStore {
         user: Uuid,
         delta: i32,
         class: ReasonClass,
-        reason: &'a str,
         source_event: &'a str,
+        caps: ReputationCaps,
         key: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<ApplyOutcome, ReputationError>> {
         Box::pin(async move {
             let start = Instant::now();
             let result = self
-                .apply_impl(scope, user, delta, class, reason, source_event, key)
+                .apply_impl(scope, user, delta, class, source_event, caps, key)
                 .await;
             metrics::record_call("apply", outcome_of(&result), start.elapsed().as_secs_f64());
             result
@@ -1242,6 +1428,59 @@ impl ReputationStore for PostgresReputationStore {
             let result = self.tenant_policy_impl(scope).await;
             metrics::record_call(
                 "tenant_policy",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn is_soft_banned<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+    ) -> BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.is_soft_banned_impl(scope, user).await;
+            metrics::record_call(
+                "is_soft_banned",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn soft_ban<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        reason: &'a str,
+    ) -> BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.soft_ban_impl(scope, user, reason).await;
+            metrics::record_call(
+                "soft_ban",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn lift_soft_ban<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        only_reason: &'a str,
+    ) -> BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.lift_soft_ban_impl(scope, user, only_reason).await;
+            metrics::record_call(
+                "lift_soft_ban",
                 outcome_of(&result),
                 start.elapsed().as_secs_f64(),
             );

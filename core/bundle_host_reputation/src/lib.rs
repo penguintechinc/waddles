@@ -377,8 +377,12 @@ pub trait ReputationStore: Send + Sync {
     /// Applies one classed, idempotent delta through the shared SQL function
     /// `reputation_apply(p_tenant, p_community, p_user_uuid, p_delta,
     /// p_reason_code, p_actor, p_source_event, p_idempotency_key)`, which owns
-    /// the lock, the scale clamp and the ledger row. The class bound is
-    /// enforced host-side by the caller via [`ScoreScale::check_delta`].
+    /// the lock, the scale clamp and the ledger row, recording `reason_code`
+    /// as `<class>:<source_event>` and ledger `kind = 'apply'`. The store
+    /// enforces the class bound ([`ScoreScale::check_delta`]), the live
+    /// membership (row held `FOR SHARE`) and the per-class rolling-24h
+    /// per-user/per-scope `caps`, all in one transaction. `class` MUST be
+    /// derived by the host from the granted permission, never from guest input.
     #[allow(clippy::too_many_arguments)]
     fn apply<'a>(
         &'a self,
@@ -386,8 +390,8 @@ pub trait ReputationStore: Send + Sync {
         _user: uuid::Uuid,
         _delta: i32,
         _class: ReasonClass,
-        _reason: &'a str,
         _source_event: &'a str,
+        _caps: ReputationCaps,
         _key: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<ApplyOutcome, ReputationError>> {
         Box::pin(async { Err(unsupported("apply")) })
@@ -432,6 +436,41 @@ pub trait ReputationStore: Send + Sync {
         _scope: &'a ReputationScope,
     ) -> BoxFuture<'a, Result<Option<TenantPolicy>, ReputationError>> {
         Box::pin(async { Err(unsupported("tenant_policy")) })
+    }
+
+    /// Whether `user` is soft-banned in this community (cannot WIN anything:
+    /// games, raffles, giveaways, economy payouts). Reads the hub-api-owned
+    /// `reputation_soft_bans` table.
+    fn is_soft_banned<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        _user: uuid::Uuid,
+    ) -> BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async { Err(unsupported("is_soft_banned")) })
+    }
+
+    /// Records an active soft ban for `user` (idempotent: an already-active
+    /// ban returns `Ok(false)`, a new one `Ok(true)`).
+    fn soft_ban<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        _user: uuid::Uuid,
+        _reason: &'a str,
+    ) -> BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async { Err(unsupported("soft_ban")) })
+    }
+
+    /// Lifts the active soft ban of `user` ONLY when it was recorded with
+    /// exactly `only_reason` (so a floor-triggered ban can be cleared when the
+    /// score recovers while a manual one is never touched). `Ok(true)` when a
+    /// ban was lifted.
+    fn lift_soft_ban<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        _user: uuid::Uuid,
+        _only_reason: &'a str,
+    ) -> BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async { Err(unsupported("lift_soft_ban")) })
     }
 }
 

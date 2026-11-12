@@ -1716,12 +1716,21 @@ async fn leaderboard_query_uses_an_index_not_a_seq_scan_on_the_scores_table() {
 /// ledger row, idempotent on the key). The REAL function replaces it in
 /// deployment; this only lets the store's call contract be exercised.
 const REPUTATION_APPLY_STUB: &str = r#"
+CREATE TABLE rep_test_sleep (seconds float NOT NULL);
+ALTER TABLE bundle_reputation_adjustments DROP CONSTRAINT ck_bundle_reputation_adjustments_kind;
+ALTER TABLE bundle_reputation_adjustments ADD CONSTRAINT ck_bundle_reputation_adjustments_kind
+  CHECK (kind IN ('adjust', 'admin_override', 'apply'));
 CREATE OR REPLACE FUNCTION reputation_apply(
     p_tenant bigint, p_community bigint, p_user_uuid uuid, p_delta int,
     p_reason_code smallint, p_actor text, p_source_event text, p_idempotency_key text)
-RETURNS TABLE (new_score int, applied bool) LANGUAGE plpgsql AS $$
+RETURNS TABLE (new_score int, applied bool) LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE v_old int; v_new int;
 BEGIN
+  PERFORM 1 FROM community_members cm JOIN communities c ON c.id = cm.community_id
+    WHERE cm.community_id = p_community AND c.tenant_id = p_tenant AND cm.user_uuid = p_user_uuid
+      AND cm.is_active IS TRUE AND cm.removed_at IS NULL AND cm.left_at IS NULL FOR SHARE OF cm;
+  IF NOT FOUND THEN RAISE EXCEPTION 'not_a_member'; END IF;
+  PERFORM pg_sleep(COALESCE((SELECT seconds FROM rep_test_sleep LIMIT 1), 0));
   IF EXISTS (SELECT 1 FROM bundle_reputation_adjustments
              WHERE idempotency_key = p_idempotency_key AND community_id = p_community) THEN
     RETURN QUERY SELECT s.balance::int, false FROM bundle_reputation_scores s
@@ -1739,7 +1748,7 @@ BEGIN
     (app_id, tenant_id, community_id, target_user_uuid, scope, delta, reason_code, kind,
      requested_value, balance_after, idempotency_key)
     VALUES (p_actor, p_tenant, p_community, p_user_uuid::text, 'community', v_new - v_old,
-            'apply:' || p_reason_code, 'adjust', p_delta, v_new, p_idempotency_key);
+            (CASE p_reason_code WHEN 1 THEN 'activity' ELSE 'moderation' END) || ':' || p_source_event, 'apply', p_delta, v_new, p_idempotency_key);
   RETURN QUERY SELECT v_new, true;
 END $$;
 GRANT EXECUTE ON FUNCTION reputation_apply(bigint,bigint,uuid,int,smallint,text,text,text)
@@ -1748,30 +1757,48 @@ CREATE TABLE reputation_tenant_policy (
   tenant_id integer PRIMARY KEY, tenant_auto_ban_enabled boolean NOT NULL DEFAULT false,
   tenant_auto_ban_floor integer NOT NULL, tenant_at_risk_threshold integer NOT NULL);
 GRANT SELECT ON reputation_tenant_policy TO waddles_bundle_reputation;
+CREATE TABLE reputation_soft_bans (
+  id BIGSERIAL PRIMARY KEY, tenant_id integer NOT NULL, community_id integer NOT NULL,
+  user_uuid uuid NOT NULL, reason_code text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT NOW(), lifted_at timestamptz);
+GRANT SELECT, INSERT, UPDATE ON reputation_soft_bans TO waddles_bundle_reputation;
+GRANT USAGE ON SEQUENCE reputation_soft_bans_id_seq TO waddles_bundle_reputation;
 "#;
 
 fn ekey(n: &str) -> IdempotencyKey {
     IdempotencyKey::for_event(n, "reputation_apply", 0).unwrap()
 }
 
+/// `apply` with the event id as both source event and key seed.
+async fn ap(
+    f: &Fixture,
+    scope: &ReputationScope,
+    user: Uuid,
+    delta: i32,
+    class: ReasonClass,
+    ev: &str,
+    caps: ReputationCaps,
+) -> Result<ApplyOutcome, ReputationError> {
+    f.store
+        .apply(scope, user, delta, class, ev, caps, &ekey(ev))
+        .await
+}
+
 #[tokio::test]
 async fn apply_goes_through_reputation_apply_is_idempotent_clamped_and_class_bounded() {
     let f = fixture().await;
     exec(&f.su, REPUTATION_APPLY_STUB).await;
-    let key = ekey("evt-1");
-    let first = f
-        .store
-        .apply(
-            &scope(),
-            f.member,
-            5,
-            ReasonClass::Activity,
-            "activity.follow",
-            "evt-1",
-            &key,
-        )
-        .await
-        .unwrap();
+    let first = ap(
+        &f,
+        &scope(),
+        f.member,
+        5,
+        ReasonClass::Activity,
+        "evt-1",
+        acaps(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         first,
         ApplyOutcome {
@@ -1780,19 +1807,17 @@ async fn apply_goes_through_reputation_apply_is_idempotent_clamped_and_class_bou
         }
     );
     // Same event id replayed: nothing moves.
-    let replay = f
-        .store
-        .apply(
-            &scope(),
-            f.member,
-            5,
-            ReasonClass::Activity,
-            "activity.follow",
-            "evt-1",
-            &key,
-        )
-        .await
-        .unwrap();
+    let replay = ap(
+        &f,
+        &scope(),
+        f.member,
+        5,
+        ReasonClass::Activity,
+        "evt-1",
+        acaps(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         replay,
         ApplyOutcome {
@@ -1800,67 +1825,188 @@ async fn apply_goes_through_reputation_apply_is_idempotent_clamped_and_class_bou
             applied: false
         }
     );
-    // Moderation bound (-200) is allowed, activity bound (5) is not.
-    let k2 = ekey("evt-2");
+    // Moderation bound (-200) is allowed, the activity bound (5) is not.
     assert!(matches!(
-        f.store
-            .apply(
-                &scope(),
-                f.member,
-                -200,
-                ReasonClass::Activity,
-                "r",
-                "evt-2",
-                &k2
-            )
-            .await,
+        ap(
+            &f,
+            &scope(),
+            f.member,
+            -200,
+            ReasonClass::Activity,
+            "evt-2",
+            acaps()
+        )
+        .await,
         Err(ReputationError::Invalid(_))
     ));
-    let out = f
-        .store
-        .apply(
-            &scope(),
-            f.member,
-            -200,
-            ReasonClass::Moderation,
-            "moderation.ban",
-            "evt-2",
-            &k2,
-        )
-        .await
-        .unwrap();
+    let out = ap(
+        &f,
+        &scope(),
+        f.member,
+        -200,
+        ReasonClass::Moderation,
+        "evt-2",
+        acaps(),
+    )
+    .await
+    .unwrap();
     assert_eq!(out.new_score, 405);
     // Floor clamp at 300.
-    let k3 = ekey("evt-3");
-    let low = f
-        .store
-        .apply(
-            &scope(),
-            f.member,
-            -200,
-            ReasonClass::Moderation,
-            "moderation.ban",
-            "evt-3",
-            &k3,
-        )
-        .await
-        .unwrap();
+    let low = ap(
+        &f,
+        &scope(),
+        f.member,
+        -200,
+        ReasonClass::Moderation,
+        "evt-3",
+        acaps(),
+    )
+    .await
+    .unwrap();
     assert_eq!(low.new_score, 300);
     assert_eq!(ledger_count(&f).await, 3);
-    // Non-member refused before the function runs.
-    let k4 = ekey("evt-4");
     assert_eq!(
-        f.store
-            .apply(
-                &scope(),
-                Uuid::new_v4(),
-                1,
-                ReasonClass::Activity,
-                "r",
-                "evt-4",
-                &k4
-            )
-            .await,
+        ap(
+            &f,
+            &scope(),
+            Uuid::new_v4(),
+            1,
+            ReasonClass::Activity,
+            "evt-4",
+            acaps()
+        )
+        .await,
+        Err(ReputationError::NotAMember)
+    );
+}
+
+#[tokio::test]
+async fn apply_enforces_per_user_and_per_scope_daily_caps_per_class() {
+    let f = fixture().await;
+    exec(&f.su, REPUTATION_APPLY_STUB).await;
+    // Per-user cap 7: 5 + 2 fits, the next +1 does not.
+    let c = caps2(7, 1_000);
+    ap(&f, &scope(), f.member, 5, ReasonClass::Activity, "c1", c)
+        .await
+        .unwrap();
+    ap(&f, &scope(), f.member, 2, ReasonClass::Activity, "c2", c)
+        .await
+        .unwrap();
+    assert_eq!(
+        ap(&f, &scope(), f.member, 1, ReasonClass::Activity, "c3", c).await,
+        Err(ReputationError::DailyCapExceeded { cap: 7 })
+    );
+    // The activity window does not eat the moderation window.
+    ap(&f, &scope(), f.member, -6, ReasonClass::Moderation, "c4", c)
+        .await
+        .unwrap();
+    // A replay of an applied key is not re-counted against the cap.
+    let replay = ap(&f, &scope(), f.member, 5, ReasonClass::Activity, "c1", c)
+        .await
+        .unwrap();
+    assert!(!replay.applied);
+    // Per-scope cap across users: 7 already used + 5 = 12, next +1 refused.
+    let other = add_member(&f, COMMUNITY).await;
+    let sc = caps2(100, 12);
+    ap(&f, &scope(), other, 5, ReasonClass::Activity, "s1", sc)
+        .await
+        .unwrap();
+    // c1+c2 (7) used by `member` + 5 = 12: the scope window is now full.
+    assert_eq!(
+        ap(&f, &scope(), other, 1, ReasonClass::Activity, "s2", sc).await,
+        Err(ReputationError::ScopeQuotaExceeded { cap: 12 })
+    );
+    // Negative caps are rejected loudly.
+    assert!(matches!(
+        ap(
+            &f,
+            &scope(),
+            other,
+            1,
+            ReasonClass::Activity,
+            "s3",
+            caps2(-1, 5)
+        )
+        .await,
+        Err(ReputationError::Invalid(_))
+    ));
+}
+
+#[tokio::test]
+async fn apply_rejects_a_bad_source_event_and_writes_nothing() {
+    let f = fixture().await;
+    exec(&f.su, REPUTATION_APPLY_STUB).await;
+    for bad in ["", "Has Upper", "has space", "semi;colon", &"a".repeat(101)] {
+        let key = IdempotencyKey::new("kk-1").unwrap();
+        assert!(
+            matches!(
+                f.store
+                    .apply(
+                        &scope(),
+                        f.member,
+                        1,
+                        ReasonClass::Activity,
+                        bad,
+                        acaps(),
+                        &key
+                    )
+                    .await,
+                Err(ReputationError::Invalid(_))
+            ),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(ledger_count(&f).await, 0);
+}
+
+#[tokio::test]
+async fn apply_holds_the_member_row_so_a_concurrent_leave_cannot_slip_between_check_and_apply() {
+    let f = fixture().await;
+    exec(&f.su, REPUTATION_APPLY_STUB).await;
+    // Slow the function so the apply transaction stays open, then try to make
+    // the member leave concurrently: the UPDATE must block on the FOR SHARE
+    // row lock until the apply commits (so the apply saw a live member).
+    exec(&f.su, "INSERT INTO rep_test_sleep VALUES (1.5)").await;
+    let su = f.su.clone();
+    let member = f.member;
+    let leaver = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let started = std::time::Instant::now();
+        exec(
+            &su,
+            &format!("UPDATE community_members SET left_at = NOW() WHERE user_uuid = '{member}'"),
+        )
+        .await;
+        started.elapsed()
+    });
+    let out = ap(
+        &f,
+        &scope(),
+        f.member,
+        1,
+        ReasonClass::Activity,
+        "race-1",
+        acaps(),
+    )
+    .await;
+    assert!(out.unwrap().applied, "the apply saw a live member");
+    let waited = leaver.await.unwrap();
+    assert!(
+        waited >= Duration::from_millis(700),
+        "the leave must have blocked on the FOR SHARE row lock (waited {waited:?})"
+    );
+    // After the leave, a fresh apply is refused.
+    assert_eq!(
+        ap(
+            &f,
+            &scope(),
+            f.member,
+            1,
+            ReasonClass::Activity,
+            "race-2",
+            acaps()
+        )
+        .await,
         Err(ReputationError::NotAMember)
     );
 }
@@ -1870,19 +2016,17 @@ async fn history_pages_newest_first_and_is_scoped_to_the_community() {
     let f = fixture().await;
     exec(&f.su, REPUTATION_APPLY_STUB).await;
     for i in 0..4 {
-        let ev = format!("h{i}");
-        f.store
-            .apply(
-                &scope(),
-                f.member,
-                1,
-                ReasonClass::Activity,
-                "activity.x",
-                &ev,
-                &ekey(&ev),
-            )
-            .await
-            .unwrap();
+        ap(
+            &f,
+            &scope(),
+            f.member,
+            1,
+            ReasonClass::Activity,
+            &format!("h{i}"),
+            acaps(),
+        )
+        .await
+        .unwrap();
     }
     let page1 = f.store.history(&scope(), f.member, 3, None).await.unwrap();
     assert_eq!(page1.len(), 3);
@@ -1950,42 +2094,23 @@ async fn tenant_aggregate_averages_own_communities_never_another_tenants() {
             communities: 0
         }
     );
-    f.store
-        .apply(
-            &s10,
-            f.member,
-            -200,
-            ReasonClass::Moderation,
-            "m",
-            "a",
-            &ekey("a"),
-        )
-        .await
-        .unwrap(); // 400
-    f.store
-        .apply(
-            &s11,
-            f.member,
-            5,
-            ReasonClass::Activity,
-            "a",
-            "b",
-            &ekey("b"),
-        )
+    ap(
+        &f,
+        &s10,
+        f.member,
+        -200,
+        ReasonClass::Moderation,
+        "a",
+        acaps(),
+    )
+    .await
+    .unwrap(); // 400
+    ap(&f, &s11, f.member, 5, ReasonClass::Activity, "b", acaps())
         .await
         .unwrap(); // 605
-    f.store
-        .apply(
-            &s20,
-            f.member,
-            5,
-            ReasonClass::Activity,
-            "a",
-            "c",
-            &ekey("c"),
-        )
+    ap(&f, &s20, f.member, 5, ReasonClass::Activity, "c", acaps())
         .await
-        .unwrap(); // other tenant, excluded
+        .unwrap(); // other tenant
     let t = f.store.get_tenant(&s10, f.member).await.unwrap();
     assert_eq!(
         t,
@@ -2008,42 +2133,31 @@ async fn below_threshold_lists_lowest_first_active_members_only() {
     let low = add_member(&f, COMMUNITY).await;
     let high = add_member(&f, COMMUNITY).await;
     let gone = add_member(&f, COMMUNITY).await;
-    f.store
-        .apply(
-            &scope(),
-            low,
-            -200,
-            ReasonClass::Moderation,
-            "m",
-            "l",
-            &ekey("l"),
-        )
-        .await
-        .unwrap(); // 400
-    f.store
-        .apply(
-            &scope(),
-            high,
-            5,
-            ReasonClass::Activity,
-            "a",
-            "h",
-            &ekey("h"),
-        )
+    ap(
+        &f,
+        &scope(),
+        low,
+        -200,
+        ReasonClass::Moderation,
+        "l",
+        acaps(),
+    )
+    .await
+    .unwrap(); // 400
+    ap(&f, &scope(), high, 5, ReasonClass::Activity, "h", acaps())
         .await
         .unwrap(); // 605
-    f.store
-        .apply(
-            &scope(),
-            gone,
-            -100,
-            ReasonClass::Moderation,
-            "m",
-            "g",
-            &ekey("g"),
-        )
-        .await
-        .unwrap(); // 500
+    ap(
+        &f,
+        &scope(),
+        gone,
+        -100,
+        ReasonClass::Moderation,
+        "g",
+        acaps(),
+    )
+    .await
+    .unwrap(); // 500
     exec(
         &f.su,
         &format!("UPDATE community_members SET left_at = NOW() WHERE user_uuid = '{gone}'"),
@@ -2101,4 +2215,66 @@ async fn tenant_policy_is_read_from_the_hub_api_table_and_validated() {
         f.store.tenant_policy(&scope()).await,
         Err(ReputationError::Invalid(_))
     ));
+}
+
+#[tokio::test]
+async fn soft_ban_is_idempotent_community_scoped_and_liftable() {
+    let f = fixture().await;
+    exec(&f.su, REPUTATION_APPLY_STUB).await;
+    assert_eq!(f.store.is_soft_banned(&scope(), f.member).await, Ok(false));
+    assert_eq!(
+        f.store
+            .soft_ban(&scope(), f.member, "community_floor")
+            .await,
+        Ok(true)
+    );
+    assert_eq!(
+        f.store
+            .soft_ban(&scope(), f.member, "community_floor")
+            .await,
+        Ok(false),
+        "second call is a no-op"
+    );
+    assert_eq!(f.store.is_soft_banned(&scope(), f.member).await, Ok(true));
+    let other = ReputationScope {
+        tenant_id: OTHER_TENANT,
+        community_id: OTHER_COMMUNITY,
+        app_id: APP_ID.to_string(),
+    };
+    assert_eq!(f.store.is_soft_banned(&other, f.member).await, Ok(false));
+    assert_eq!(
+        f.store
+            .soft_ban(&scope(), Uuid::new_v4(), "community_floor")
+            .await,
+        Err(ReputationError::NotAMember)
+    );
+    assert!(matches!(
+        f.store.soft_ban(&scope(), f.member, "Bad Reason").await,
+        Err(ReputationError::Invalid(_))
+    ));
+    // Only a ban with the exact reason is lifted: a manual one is never cleared.
+    assert_eq!(
+        f.store.lift_soft_ban(&scope(), f.member, "manual").await,
+        Ok(false)
+    );
+    assert_eq!(f.store.is_soft_banned(&scope(), f.member).await, Ok(true));
+    assert_eq!(
+        f.store
+            .lift_soft_ban(&scope(), f.member, "community_floor")
+            .await,
+        Ok(true)
+    );
+    assert_eq!(f.store.is_soft_banned(&scope(), f.member).await, Ok(false));
+    // A fresh ban can be recorded again after a lift.
+    assert_eq!(
+        f.store
+            .soft_ban(&scope(), f.member, "community_floor")
+            .await,
+        Ok(true)
+    );
+}
+
+/// Generous caps for tests that are not about the caps.
+fn acaps() -> ReputationCaps {
+    caps2(100_000, 1_000_000)
 }
