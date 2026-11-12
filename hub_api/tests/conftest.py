@@ -583,7 +583,7 @@ def admin_db(tmp_path: Any) -> Any:
     bind_admin_tables(dal, migrate=True)
     bind_marketplace_module_tables(dal, migrate=True)
     bind_superadmin_tenant_fields(dal, migrate=True)
-    # Bundle-store reputation (alembic 0050/0096): admin reads/overrides go through these.
+    # Bundle-store reputation (alembic 0050/0097): admin reads/overrides go through these.
     bind_erasure_reputation_tables(dal, migrate=True)
     bind_reputation_policy_tables(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)

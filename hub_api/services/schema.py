@@ -1186,7 +1186,7 @@ def bind_suppression_tables(dal: Any, *, migrate: bool = False) -> None:
 
 
 def bind_reputation_policy_tables(dal: Any, *, migrate: bool = False) -> None:
-    """Bind the per-community / per-tenant reputation policy tables (alembic 0096).
+    """Bind the per-community / per-tenant reputation policy tables (alembic 0097).
 
     Keyed by their natural primary key (`community_id` / `tenant_id`) -- no `id` column exists,
     so reads select explicit fields. Schema: `scripts/db/bundle_reputation_unify.sql`.
@@ -1285,7 +1285,7 @@ def bind_erasure_reputation_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("reason_code", "string", length=100, notnull=True),
             Field("occurred_at", "datetime"),
             Field("reversal_of", "bigint"),
-            # alembic 0072 / 0096 ledger columns
+            # alembic 0072 / 0097 ledger columns
             Field("kind", "string", length=20, default="adjust"),
             Field("requested_value", "bigint"),
             Field("balance_after", "bigint"),

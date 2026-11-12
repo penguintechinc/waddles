@@ -7,7 +7,7 @@
 -- migrations image (`migrations/Dockerfile`).
 --
 -- NOTE: the unified `reputation_apply()` write path, the policy/tenant-aggregate tables and
--- their grants (incl. hub_api) live in `bundle_reputation_unify.sql` (alembic 0096): they depend
+-- their grants (incl. hub_api) live in `bundle_reputation_unify.sql` (alembic 0097): they depend
 -- on columns added by 0072, which do not exist yet when this file runs at 0050.
 --
 -- Prerequisites (created by earlier migrations / the test harness BEFORE this

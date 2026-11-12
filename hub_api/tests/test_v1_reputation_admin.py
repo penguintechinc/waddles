@@ -4,11 +4,12 @@ Auth model under test: COMMUNITY routes require a DB-backed admin role in THAT c
 flat `community:admin` JWT scope is never granted to community admins), tenant routes require the
 `tenant:admin` scope plus a URL slug equal to the JWT tenant. The Postgres-only soft-ban functions
 are faked with a table-writing stand-in here; their real behaviour is covered against Postgres in
-`alembic/tests/test_0096_reputation_unify.py`.
+`alembic/tests/test_0097_reputation_unify.py`.
 """
 
 from __future__ import annotations
 
+import uuid as uuid_mod
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -31,6 +32,15 @@ from services.schema import (
 from tests.conftest import TENANT_SLUG, make_user_token
 
 OTHER_TENANT = "other-tenant"
+
+
+def _is_uuid(value: str) -> bool:
+    """Whether `value` parses as a UUID (the only human-actor form the SQL accepts)."""
+    try:
+        uuid_mod.UUID(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _uuid(n: int) -> str:
@@ -67,6 +77,7 @@ def rep_db(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
         bans = dal.bundle_reputation_soft_bans
         if "reputation_set_soft_ban" in sql:
             tenant_id, community_id, user_uuid, reason, set_by, expires = args
+            assert _is_uuid(set_by), "manual set must carry the admin's UUID, never a numeric id"
             dal((bans.community_id == community_id) & (bans.user_uuid == user_uuid)).delete()
             bans.insert(
                 tenant_id=tenant_id,
@@ -80,7 +91,9 @@ def rep_db(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
             dal.commit()
             return [[None]]
         if "reputation_clear_soft_ban" in sql:
-            _tenant_id, community_id, user_uuid = args
+            _tenant_id, community_id, user_uuid, set_by, only_floor = args
+            assert only_floor is False
+            assert _is_uuid(set_by), "manual clear must carry the admin's UUID, never a numeric id"
             n = dal((bans.community_id == community_id) & (bans.user_uuid == user_uuid)).delete()
             dal.commit()
             return [[bool(n)]]
@@ -311,14 +324,14 @@ class TestSoftBans:
             community_id=seeded["c1"],
             user_uuid=_uuid(2),
             reason_code=1,
-            set_by="bundle:accrual",
+            set_by="system:floor",
             set_at=datetime.now(UTC),
         )
         dal.commit()
         base = f"/api/v1/admin/{seeded['c1']}/reputation/soft-bans"
         listed = await (await client.get(base, headers=_h(1))).get_json()
         assert listed["softBans"][0]["reason"] == "floor"
-        assert listed["softBans"][0]["setByType"] == "bundle"
+        assert listed["softBans"][0]["setByType"] == "system"
         assert (await client.delete(f"{base}/2", headers=_h(1))).status_code == 200
 
     async def test_expired_bans_are_not_listed_and_past_expiry_is_400(
@@ -373,7 +386,8 @@ class TestAtRiskAndHistory:
         self, client: Any, rep_db: Any, seeded: dict[str, int]
     ) -> None:
         dal = rep_db.dal
-        for i, (actor, delta) in enumerate((("bundle:accrual", 5), ("admin:1", -20))):
+        admin_uuid = _uuid(900)
+        for i, (actor, delta) in enumerate((("system:accrual", 5), (admin_uuid, -20))):
             dal.bundle_reputation_adjustments.insert(
                 app_id=None,
                 tenant_id=dal.communities[seeded["c1"]].tenant_id,
@@ -393,7 +407,8 @@ class TestAtRiskAndHistory:
         url = f"/api/v1/admin/{seeded['c1']}/reputation/history"
         entries = (await (await client.get(url, headers=_h(1))).get_json())["entries"]
         assert [e["delta"] for e in entries] == [-20, 5]
-        assert entries[0]["actorType"] == "admin" and "admin:1" not in str(entries)
+        assert entries[0]["actorType"] == "admin" and admin_uuid not in str(entries)
+        assert entries[1]["actorType"] == "system"
         assert set(entries[0]) == {
             "id",
             "userUuid",
@@ -503,11 +518,61 @@ class TestApplyBoundary:
             user_uuid=_uuid(5),
             delta=12,
             reason_code=reputation_svc.ReasonCode.ADMIN_ADJUST,
-            actor="admin:9",
+            actor=_uuid(9),
             source_event="admin.reputation.adjust",
             idempotency_key="k",
+            reason_class=reputation_svc.ReasonClass.ADMIN_OVERRIDE,
+            app_id="some-app",
         )
         assert (result.new_score, result.applied) == (612, True)
         sql, args = seen[0]
         assert "reputation_apply(" in sql
-        assert args == [1, 2, _uuid(5), 12, 100, "admin:9", "admin.reputation.adjust", "k"]
+        assert args == [
+            1,
+            2,
+            _uuid(5),
+            12,
+            3,
+            100,
+            "some-app",
+            _uuid(9),
+            "admin.reputation.adjust",
+            "k",
+        ]
+
+    @pytest.mark.parametrize(
+        ("message", "status"),
+        [
+            ("not_a_member", 404),
+            ("daily_cap_exceeded", 429),
+            ("quota_exceeded", 429),
+            ("invalid_input", 400),
+        ],
+    )
+    async def test_sql_errors_map_to_typed_api_errors(
+        self, rep_db: Any, message: str, status: int
+    ) -> None:
+        async def boom(sql: str, placeholders: list[Any] | None = None) -> list[list[Any]]:
+            raise RuntimeError(message)
+
+        rep_db.executesql_async = boom  # type: ignore[method-assign]
+        with pytest.raises(reputation_svc.ApiError) as err:
+            await reputation_svc.apply_reputation(
+                rep_db,
+                tenant_id=1,
+                community_id=2,
+                user_uuid=_uuid(5),
+                delta=1,
+                reason_code=reputation_svc.ReasonCode.ADMIN_ADJUST,
+                actor="system:bundle",
+                source_event="e",
+                idempotency_key="k",
+            )
+        assert err.value.status_code == status
+
+    async def test_admin_actor_must_resolve_to_a_uuid(self, rep_db: Any) -> None:
+        with pytest.raises(reputation_svc.ApiError) as err:
+            await reputation_svc._admin_actor(rep_db, rep_db.dal, None)  # noqa: SLF001
+        assert err.value.status_code == 403
+        with pytest.raises(reputation_svc.ApiError):
+            await reputation_svc._admin_actor(rep_db, rep_db.dal, 424242)  # noqa: SLF001

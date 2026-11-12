@@ -699,7 +699,12 @@ async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[A
     try:
         ctx = await _authorize_reputation_admin(community_id)
         cleared = await reputation_svc.clear_soft_ban(
-            async_dal, dal, tenant_id=ctx.tenant_id, community_id=community_id, user_id=user_id
+            async_dal,
+            dal,
+            tenant_id=ctx.tenant_id,
+            community_id=community_id,
+            user_id=user_id,
+            actor_user_id=get_optional_current_user_id(request),
         )
     except ApiError as exc:
         return _err(exc)

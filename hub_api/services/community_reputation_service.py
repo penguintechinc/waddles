@@ -10,7 +10,7 @@ reputation-config / at-risk / history routes and the admin score override. Every
   each with its own auto-ban floor / at-risk threshold -- independent of each other;
 - writes: only through the Postgres `reputation_apply()` function (row lock, clamp 300-850,
   idempotent ledger insert) -- never an UPDATE from here, so the ledger cannot drift from the
-  score. Admin overrides call it with an `admin:<hub_user_id>` actor.
+  score. Admin overrides call it with the admin's `hub_users.uuid` as actor (never the numeric id).
 
 Auto-ban enforcement is NOT here: this module stores the policy (default OFF); the accrual
 bundle reads it and enforces behind the `waddles.reputation-auto-ban` flag.
@@ -22,6 +22,7 @@ nonexistent `id`).
 
 from __future__ import annotations
 
+import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import IntEnum
@@ -29,7 +30,7 @@ from typing import Any
 
 from flask_core.reputation_tiers import REPUTATION_TIERS, reputation_tier
 
-from services.errors import bad_request, conflict, not_found
+from services.errors import ApiError, bad_request, conflict, forbidden, not_found
 from services.schema import (
     bind_auth_tables,
     bind_erasure_reputation_tables,
@@ -48,6 +49,7 @@ __all__ = [
     "HistoryEntryDTO",
     "LeaderboardEntryDTO",
     "MyReputationDTO",
+    "ReasonClass",
     "ReasonCode",
     "apply_reputation",
     "get_at_risk",
@@ -82,6 +84,18 @@ class SoftBanReason(IntEnum):
 
     FLOOR = 1
     MANUAL = 2
+
+
+class ReasonClass(IntEnum):
+    """`reputation_apply(p_reason_class)` values.
+
+    1 activity (capped), 2 moderation (capped, negative-only), 3 admin_override (uncapped;
+    hub-api / superuser sessions only).
+    """
+
+    ACTIVITY = 1
+    MODERATION = 2
+    ADMIN_OVERRIDE = 3
 
 
 class ReasonCode(IntEnum):
@@ -161,6 +175,57 @@ class ApplyResult:
 
 def _iso(value: Any) -> str | None:
     return value.isoformat() if isinstance(value, datetime) else None
+
+
+async def _admin_actor(async_dal: Any, dal: Any, actor_user_id: int | None) -> str:
+    """The acting admin's `hub_users.uuid` string (the only human actor form SQL accepts).
+
+    Never the numeric id; fails closed (403) when it cannot be resolved.
+    """
+    if actor_user_id is None:
+        raise forbidden("A signed-in admin is required for this action")
+    users = dal.hub_users
+    rows = await async_dal.select_async(dal(users.id == actor_user_id), users.uuid)
+    row = rows.first() if rows else None
+    if row is None or not row.uuid:
+        raise forbidden("Acting admin has no identity UUID")
+    return str(row.uuid)
+
+
+def _int_literal(dal: Any, value: int) -> Any:
+    """A typed integer SQL literal (`int()`-coerced, so injection-safe) for COALESCE/compare.
+
+    pydal renders a plain Python int next to a `bigint` field as a quoted string, which sqlite
+    then orders as text; an integer-typed expression keeps the comparison numeric everywhere.
+    """
+    from pydal.objects import Expression
+
+    return Expression(dal, str(int(value)), None, None, "integer")
+
+
+def _actor_type(actor: str | None) -> str:
+    """Category of a stored actor for admin views: `system` (`system:*`), `admin` (a UUID)."""
+    if not actor:
+        return "unknown"
+    if actor.startswith("system:"):
+        return "system"
+    try:
+        uuid_mod.UUID(actor)
+    except ValueError:
+        return "unknown"
+    return "admin"
+
+
+def _translate_db_error(exc: Exception) -> Exception:
+    """Map the SQL functions' typed RAISEs onto API errors; anything else is returned unchanged."""
+    text = str(exc)
+    if "not_a_member" in text:
+        return not_found("Member not found")
+    if "daily_cap_exceeded" in text or "quota_exceeded" in text:
+        return ApiError("Reputation rate limit reached; try again later", 429, "RATE_LIMITED")
+    if "invalid_input" in text or "floor_not_breached" in text:
+        return bad_request("Invalid reputation request")
+    return exc
 
 
 def _ensure_reputation_tables(dal: Any, *, migrate: bool = False) -> None:
@@ -284,27 +349,28 @@ async def get_leaderboard(
 ) -> list[LeaderboardEntryDTO]:
     """Top `limit` ACTIVE members of THIS community by score, highest first (community-only).
 
-    Display-name + score + tier only -- never `user_id`/`user_uuid`/platform ids.
+    Unscored members count at the policy default (COALESCE, 600 unless the policy says
+    otherwise). Display-name + score + tier only -- never `user_id`/`user_uuid`/platform ids.
     """
     _ensure_reputation_tables(dal)
     clamped = max(1, min(int(limit), _MAX_LIMIT))
+    policy = await _policy(async_dal, dal, community_id=community_id)
     scores = dal.bundle_reputation_scores
     members = dal.community_members
+    balance = scores.balance.coalesce(_int_literal(dal, policy["score_default"]))
     rows = await async_dal.select_async(
-        dal(
-            (scores.community_id == community_id)
-            & (members.community_id == community_id)
-            & (members.user_uuid == scores.user_uuid)
-            & (members.is_active == True)  # noqa: E712 - pydal idiom
-        ),
-        scores.balance,
+        dal((members.community_id == community_id) & (members.is_active == True)),  # noqa: E712 - pydal idiom
+        balance,
         members.display_name,
-        orderby=~scores.balance,
+        left=scores.on(
+            (scores.community_id == members.community_id) & (scores.user_uuid == members.user_uuid)
+        ),
+        orderby=~balance,
         limitby=(0, clamped),
     )
     entries = []
     for row in rows:
-        score = int(row.bundle_reputation_scores.balance)
+        score = int(row[balance])
         entries.append(
             LeaderboardEntryDTO(
                 display_name=row.community_members.display_name or "unknown",
@@ -325,23 +391,37 @@ async def apply_reputation(
     reason_code: ReasonCode,
     actor: str,
     source_event: str,
-    idempotency_key: str | None = None,
+    idempotency_key: str,
+    reason_class: ReasonClass = ReasonClass.ACTIVITY,
+    app_id: str | None = None,
 ) -> ApplyResult:
-    """Apply a delta through the DB `reputation_apply()` function -- the only score write path."""
-    rows = await async_dal.executesql_async(
-        "SELECT new_score, applied FROM reputation_apply(%s, %s, %s::uuid, %s, %s::smallint, "
-        "%s, %s, %s)",
-        [
-            tenant_id,
-            community_id,
-            user_uuid,
-            delta,
-            int(reason_code),
-            actor,
-            source_event,
-            idempotency_key,
-        ],
-    )
+    """Apply a delta through the DB `reputation_apply()` function -- the only score write path.
+
+    All validation, membership, caps, idempotency and clamping happen inside the function;
+    `actor` must be a human admin's UUID string or `system:<name>`.
+    """
+    try:
+        rows = await async_dal.executesql_async(
+            "SELECT new_score, applied FROM reputation_apply(%s, %s, %s::uuid, %s, %s::smallint, "
+            "%s::smallint, %s, %s, %s, %s)",
+            [
+                tenant_id,
+                community_id,
+                user_uuid,
+                delta,
+                int(reason_class),
+                int(reason_code),
+                app_id,
+                actor,
+                source_event,
+                idempotency_key,
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised after typed translation
+        translated = _translate_db_error(exc)
+        if translated is exc:
+            raise
+        raise translated from exc
     if not rows:
         raise RuntimeError("reputation_apply returned no row")
     return ApplyResult(new_score=int(rows[0][0]), applied=bool(rows[0][1]))
@@ -361,7 +441,8 @@ async def override_member_reputation(
     """Admin adjust (`amount`) or set (`set_to`) of a member's score. Returns (new, change|None).
 
     Resolves the member's `user_uuid`, computes the delta against the current stored score
-    (policy default when none) and applies it via `reputation_apply()` with an `admin:` actor.
+    (policy default when none) and applies it via `reputation_apply()` (class admin_override)
+    with the admin's UUID as actor.
     """
     _ensure_reputation_tables(dal)
     uuid = await _member_uuid(async_dal, dal, community_id=community_id, hub_user_id=user_id)
@@ -374,7 +455,7 @@ async def override_member_reputation(
     )
     cur_row = cur_rows.first() if cur_rows else None
     current = int(cur_row.balance) if cur_row is not None else int(policy["score_default"])
-    actor = f"admin:{actor_user_id}" if actor_user_id is not None else "admin:unknown"
+    actor = await _admin_actor(async_dal, dal, actor_user_id)
     if set_to is not None:
         target = int(max(policy["score_min"], min(policy["score_max"], set_to)))
         result = await apply_reputation(
@@ -386,6 +467,8 @@ async def override_member_reputation(
             reason_code=ReasonCode.ADMIN_OVERRIDE,
             actor=actor,
             source_event="admin.reputation.set",
+            idempotency_key=f"admin.{uuid_mod.uuid4().hex}",
+            reason_class=ReasonClass.ADMIN_OVERRIDE,
         )
         return result.new_score, None
     if amount is None or amount == 0:
@@ -399,6 +482,8 @@ async def override_member_reputation(
         reason_code=ReasonCode.ADMIN_ADJUST,
         actor=actor,
         source_event="admin.reputation.adjust",
+        idempotency_key=f"admin.{uuid_mod.uuid4().hex}",
+        reason_class=ReasonClass.ADMIN_OVERRIDE,
     )
     return result.new_score, result.new_score - current
 
@@ -561,33 +646,39 @@ async def set_tenant_config(
 async def get_at_risk(
     async_dal: Any, dal: Any, *, community_id: int, limit: int = 50
 ) -> list[AtRiskEntryDTO]:
-    """Active members scoring below the community's at-risk threshold, lowest first."""
+    """Active members scoring below the community's at-risk threshold, lowest first.
+
+    Unscored members count at the policy default (COALESCE), so they are listed only if that
+    default itself sits below the threshold.
+    """
     _ensure_reputation_tables(dal)
     policy = await _policy(async_dal, dal, community_id=community_id)
     scores = dal.bundle_reputation_scores
     members = dal.community_members
+    balance = scores.balance.coalesce(_int_literal(dal, policy["score_default"]))
     rows = await async_dal.select_async(
         dal(
-            (scores.community_id == community_id)
-            & (scores.balance < policy["at_risk_threshold"])
-            & (members.community_id == community_id)
-            & (members.user_uuid == scores.user_uuid)
+            (members.community_id == community_id)
             & (members.is_active == True)  # noqa: E712 - pydal idiom
+            & (balance < _int_literal(dal, policy["at_risk_threshold"]))
         ),
-        scores.balance,
+        balance,
         members.display_name,
         members.user_id,
-        orderby=scores.balance,
+        left=scores.on(
+            (scores.community_id == members.community_id) & (scores.user_uuid == members.user_uuid)
+        ),
+        orderby=balance,
         limitby=(0, max(1, min(int(limit), _MAX_LIMIT))),
     )
     return [
         AtRiskEntryDTO(
             userId=row.community_members.user_id,
             displayName=row.community_members.display_name or "unknown",
-            score=int(row.bundle_reputation_scores.balance),
-            tier=reputation_tier(int(row.bundle_reputation_scores.balance)),
-            belowSoftBanFloor=int(row.bundle_reputation_scores.balance) < policy["soft_ban_floor"],
-            belowHardBanFloor=int(row.bundle_reputation_scores.balance) < policy["hard_ban_floor"],
+            score=int(row[balance]),
+            tier=reputation_tier(int(row[balance])),
+            belowSoftBanFloor=int(row[balance]) < policy["soft_ban_floor"],
+            belowHardBanFloor=int(row[balance]) < policy["hard_ban_floor"],
         )
         for row in rows
     ]
@@ -634,7 +725,7 @@ async def get_history(
             balanceAfter=None if r.balance_after is None else int(r.balance_after),
             kind=r.kind or "adjust",
             reasonCode=None if r.reason_code_id is None else int(r.reason_code_id),
-            actorType=(r.actor or "unknown").split(":", 1)[0],
+            actorType=_actor_type(r.actor),
             sourceEvent=r.source_event,
             occurredAt=_iso(r.occurred_at),
         )
@@ -671,7 +762,7 @@ async def list_soft_bans(
             userId=r.community_members.user_id,
             displayName=r.community_members.display_name or "unknown",
             reason=SoftBanReason(int(r.bundle_reputation_soft_bans.reason_code)).name.lower(),
-            setByType=(r.bundle_reputation_soft_bans.set_by or "unknown").split(":", 1)[0],
+            setByType=_actor_type(r.bundle_reputation_soft_bans.set_by),
             setAt=_iso(r.bundle_reputation_soft_bans.set_at),
             expiresAt=_iso(r.bundle_reputation_soft_bans.expires_at),
         )
@@ -696,28 +787,42 @@ async def set_soft_ban(
     uuid = await _member_uuid(async_dal, dal, community_id=community_id, hub_user_id=user_id)
     if uuid is None:
         raise not_found("Member not found")
-    await async_dal.executesql_async(
-        "SELECT reputation_set_soft_ban(%s, %s, %s::uuid, %s::smallint, %s, %s)",
-        [
-            tenant_id,
-            community_id,
-            uuid,
-            int(SoftBanReason.MANUAL),
-            f"admin:{actor_user_id}" if actor_user_id is not None else "admin:unknown",
-            expires_at,
-        ],
-    )
+    actor = await _admin_actor(async_dal, dal, actor_user_id)
+    try:
+        await async_dal.executesql_async(
+            "SELECT reputation_set_soft_ban(%s, %s, %s::uuid, %s::smallint, %s, %s)",
+            [tenant_id, community_id, uuid, int(SoftBanReason.MANUAL), actor, expires_at],
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised after typed translation
+        translated = _translate_db_error(exc)
+        if translated is exc:
+            raise
+        raise translated from exc
 
 
 async def clear_soft_ban(
-    async_dal: Any, dal: Any, *, tenant_id: int, community_id: int, user_id: int
+    async_dal: Any,
+    dal: Any,
+    *,
+    tenant_id: int,
+    community_id: int,
+    user_id: int,
+    actor_user_id: int | None,
 ) -> bool:
     """Clear a member's soft ban (floor- or manually-set). Returns whether one existed."""
     _ensure_reputation_tables(dal)
     uuid = await _member_uuid(async_dal, dal, community_id=community_id, hub_user_id=user_id)
     if uuid is None:
         raise not_found("Member not found")
-    rows = await async_dal.executesql_async(
-        "SELECT reputation_clear_soft_ban(%s, %s, %s::uuid)", [tenant_id, community_id, uuid]
-    )
+    actor = await _admin_actor(async_dal, dal, actor_user_id)
+    try:
+        rows = await async_dal.executesql_async(
+            "SELECT reputation_clear_soft_ban(%s, %s, %s::uuid, %s, %s)",
+            [tenant_id, community_id, uuid, actor, False],
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised after typed translation
+        translated = _translate_db_error(exc)
+        if translated is exc:
+            raise
+        raise translated from exc
     return bool(rows and rows[0][0])

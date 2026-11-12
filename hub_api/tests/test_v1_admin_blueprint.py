@@ -78,6 +78,19 @@ def _seed_community(admin_db: Any, *, tenant_slug: str = TENANT_SLUG, **override
     return community_id
 
 
+def _seed_admin_actor(admin_db: Any, user_id: int = 1) -> None:
+    """The acting admin's `hub_users` row (its UUID is the ledger actor for reputation writes)."""
+    dal = admin_db.dal
+    if not dal(dal.hub_users.id == user_id).select().first():
+        dal.hub_users.insert(
+            id=user_id,
+            email=f"user{user_id}@example.com",
+            username=f"user{user_id}",
+            is_active=True,
+        )
+        dal.commit()
+
+
 def _seed_member(
     admin_db: Any, *, community_id: int, user_id: int, role: str = "member", **overrides: Any
 ) -> int:
@@ -106,7 +119,7 @@ def _fake_reputation_apply(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, An
 
     Mirrors its clamp (300-850, start 600). The real function -- row lock, clamp, idempotency,
     concurrency, tenant isolation -- is exercised against real Postgres in
-    `alembic/tests/test_0096_reputation_unify.py`.
+    `alembic/tests/test_0097_reputation_unify.py`.
     """
     balances: dict[tuple[int, str], int] = {}
     calls: list[dict[str, Any]] = []
@@ -253,6 +266,7 @@ class TestMembers:
     async def test_adjust_reputation_relative(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         _seed_member(admin_db, community_id=community_id, user_id=42, reputation=600)
+        _seed_admin_actor(admin_db)
         response = await client.put(
             f"/api/v1/admin/{community_id}/members/42/reputation",
             headers=_headers(),
@@ -276,6 +290,7 @@ class TestMembers:
     async def test_adjust_reputation_set_to(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         _seed_member(admin_db, community_id=community_id, user_id=42, reputation=600)
+        _seed_admin_actor(admin_db)
         response = await client.put(
             f"/api/v1/admin/{community_id}/members/42/reputation",
             headers=_headers(),
@@ -290,6 +305,7 @@ class TestMembers:
     ) -> None:
         community_id = _seed_community(admin_db)
         _seed_member(admin_db, community_id=community_id, user_id=42, reputation=600)
+        _seed_admin_actor(admin_db)
         response = await client.put(
             f"/api/v1/admin/{community_id}/members/42/reputation",
             headers=_headers(),

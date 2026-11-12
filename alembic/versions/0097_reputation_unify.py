@@ -2,8 +2,10 @@
 
 Adds the per-community policy table, the tenant-score aggregate, ledger columns
 (actor / source_event / numeric reason code, nullable app_id) and the atomic
-`reputation_apply()` write function (clamp 300-850, default 600, idempotent ledger insert,
-row lock), granted to the bundle reputation role and hub-api. DDL lives in
+`reputation_apply()` write function (membership + input validation, SQL-enforced caps per kind
+and per app, clamp 300-850, default 600, idempotent ledger insert, row lock, floor soft-ban
+auto-clear), the soft-ban functions (manual set/clear hub_api-only; floor wrappers for the bundle
+role) and `reputation_active_logic_app()`. Contract: REPUTATION_CONTRACT.md (PR #1236/#1238). DDL lives in
 `scripts/db/bundle_reputation_unify.sql` (shared with the Rust crate's integration test).
 
 Data steps (run exactly once, here -- not in the shared SQL):
@@ -14,8 +16,11 @@ Data steps (run exactly once, here -- not in the shared SQL):
    the user's `user_uuid` resolves; skipped when the legacy tables/columns are absent or empty.
    Legacy tables are NOT dropped here (separate, post-e2e step).
 
-Revision ID: 0096_reputation_unify
+Revision ID: 0097_reputation_unify
 Revises: 0095_bundle_disabled_apps_view
+
+Chain note: numbered 0097 because #1234 owns 0096_system_tenant_global_admin. Until #1234
+merges this chains after 0095; if #1234 merges first, re-chain `down_revision` onto 0096.
 Create Date: 2026-11-11
 """
 
@@ -25,12 +30,17 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0096_reputation_unify"
+revision = "0097_reputation_unify"
 down_revision = "0095_bundle_disabled_apps_view"
 branch_labels = None
 depends_on = None
 
-_SQL_PATH = Path(__file__).resolve().parents[2] / "scripts" / "db" / "bundle_reputation_unify.sql"
+_SQL_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "scripts"
+    / "db"
+    / "bundle_reputation_unify.sql"
+)
 
 _REBASE_SQL = """
 UPDATE bundle_reputation_scores
@@ -90,23 +100,39 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the function, new tables and ledger columns (the 0-based rebase is not reversed)."""
-    op.execute(
-        "DROP FUNCTION IF EXISTS "
-        "reputation_apply(bigint, bigint, uuid, int, smallint, text, text, text)"
-    )
-    op.execute("DROP FUNCTION IF EXISTS reputation_is_soft_banned(bigint, bigint, uuid)")
-    op.execute(
-        "DROP FUNCTION IF EXISTS "
-        "reputation_set_soft_ban(bigint, bigint, uuid, smallint, text, timestamptz)"
-    )
-    op.execute("DROP FUNCTION IF EXISTS reputation_clear_soft_ban(bigint, bigint, uuid)")
+    """Drop the functions, new tables and ledger columns (the 0-based rebase is not reversed)."""
+    for sig in (
+        "reputation_apply(bigint, bigint, uuid, int, smallint, smallint, text, text, text, text)",
+        "reputation_is_soft_banned(bigint, bigint, uuid)",
+        "reputation_set_soft_ban(bigint, bigint, uuid, smallint, text, timestamptz)",
+        "reputation_clear_soft_ban(bigint, bigint, uuid, text, bool)",
+        "reputation_set_floor_soft_ban(bigint, bigint, uuid)",
+        "reputation_clear_floor_soft_ban(bigint, bigint, uuid)",
+        "reputation_active_logic_app(bigint)",
+    ):
+        op.execute(f"DROP FUNCTION IF EXISTS {sig}")
     op.execute("DROP TABLE IF EXISTS bundle_reputation_soft_bans")
     op.execute("DROP TABLE IF EXISTS bundle_reputation_tenant_scores")
     op.execute("DROP TABLE IF EXISTS bundle_reputation_policy")
     op.execute("DROP TABLE IF EXISTS bundle_reputation_tenant_policy")
+    op.execute("DROP INDEX IF EXISTS idx_bundle_reputation_adjustments_kind_window")
     op.execute("DROP INDEX IF EXISTS uq_bundle_reputation_adjustments_idem_noapp")
+    op.execute(
+        "DELETE FROM bundle_reputation_adjustments WHERE kind IN ('soft_ban', 'soft_ban_clear', 'moderation')"
+    )
+    op.execute(
+        "ALTER TABLE bundle_reputation_adjustments "
+        "DROP CONSTRAINT IF EXISTS ck_bundle_reputation_adjustments_kind"
+    )
+    op.execute(
+        "ALTER TABLE bundle_reputation_adjustments ADD CONSTRAINT "
+        "ck_bundle_reputation_adjustments_kind CHECK (kind IN ('adjust', 'admin_override'))"
+    )
     for col in ("reason_code_id", "source_event", "actor"):
-        op.execute(f"ALTER TABLE bundle_reputation_adjustments DROP COLUMN IF EXISTS {col}")
+        op.execute(
+            f"ALTER TABLE bundle_reputation_adjustments DROP COLUMN IF EXISTS {col}"
+        )
     op.execute("DELETE FROM bundle_reputation_adjustments WHERE app_id IS NULL")
-    op.execute("ALTER TABLE bundle_reputation_adjustments ALTER COLUMN app_id SET NOT NULL")
+    op.execute(
+        "ALTER TABLE bundle_reputation_adjustments ALTER COLUMN app_id SET NOT NULL"
+    )

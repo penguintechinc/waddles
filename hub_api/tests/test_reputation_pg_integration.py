@@ -1,4 +1,4 @@
-"""hub-api reputation writes against a REAL, fully-migrated Postgres (alembic head incl. 0096).
+"""hub-api reputation writes against a REAL, fully-migrated Postgres (alembic head incl. 0097).
 
 The sqlite suites fake the Postgres-only SQL functions; this file proves the hub-api service layer
 actually drives them: `%s` binding of uuid / smallint / NULL / timestamptz parameters through
@@ -35,6 +35,9 @@ from services import data_privacy_service as privacy  # noqa: E402
 pg_only = pytest.mark.skipif(not DOCKER_AVAILABLE, reason="docker CLI not available")
 
 USER_UUID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+UNSCORED_UUID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+ADMIN_ID = 7
+_ADMIN: dict[str, str] = {}
 _IDS: dict[str, tuple[int, int]] = {}
 
 
@@ -70,9 +73,14 @@ def pg_db() -> Iterator[PgTestDatabase]:
             cid = cur.fetchone()[0]
             cur.execute(
                 "INSERT INTO community_members (community_id, user_id, user_uuid, display_name) "
-                "VALUES (%s, '42', %s, 'u42')",
-                (cid, USER_UUID),
+                "VALUES (%s, '42', %s, 'u42'), (%s, '43', %s, 'u43')",
+                (cid, USER_UUID, cid, UNSCORED_UUID),
             )
+            cur.execute(
+                "INSERT INTO hub_users (id, username) VALUES (%s, 'a7') RETURNING uuid::text",
+                (ADMIN_ID,),
+            )
+            _ADMIN["uuid"] = cur.fetchone()[0]
         raw.close()
         _IDS[db.dsn] = (tid, cid)
         yield db
@@ -139,9 +147,10 @@ class TestOverrideAndApplyOnPostgres:
             user_uuid=USER_UUID,
             delta=25,
             reason_code=svc.ReasonCode.ADMIN_ADJUST,
-            actor="admin:7",
+            actor=_ADMIN["uuid"],
             source_event="t",
             idempotency_key="k1",
+            reason_class=svc.ReasonClass.ADMIN_OVERRIDE,
         )
         assert (r.new_score, r.applied) == (625, True)
         replay = await svc.apply_reputation(
@@ -151,9 +160,10 @@ class TestOverrideAndApplyOnPostgres:
             user_uuid=USER_UUID,
             delta=25,
             reason_code=svc.ReasonCode.ADMIN_ADJUST,
-            actor="admin:7",
+            actor=_ADMIN["uuid"],
             source_event="t",
             idempotency_key="k1",
+            reason_class=svc.ReasonClass.ADMIN_OVERRIDE,
         )
         assert (replay.new_score, replay.applied) == (625, False)
 
@@ -165,7 +175,7 @@ class TestOverrideAndApplyOnPostgres:
             user_id=42,
             amount=None,
             set_to=900,
-            actor_user_id=7,
+            actor_user_id=ADMIN_ID,
         )
         assert (new, change) == (850, None)  # clamped to the policy max
         new, change = await svc.override_member_reputation(
@@ -176,16 +186,24 @@ class TestOverrideAndApplyOnPostgres:
             user_id=42,
             amount=-50,
             set_to=None,
-            actor_user_id=7,
+            actor_user_id=ADMIN_ID,
         )
         assert (new, change) == (800, -50)
 
         me = await svc.get_my_reputation(adal, dal, community_id=cid, hub_user_id=42, tenant_id=tid)
         assert me.community_score == 800 and me.total_events == 3
         board = await svc.get_leaderboard(adal, dal, community_id=cid)
-        assert [(e.display_name, e.score) for e in board] == [("u42", 800)]
+        # the never-scored member reads as the 600 default (COALESCE), not absent / not 0
+        assert [(e.display_name, e.score) for e in board] == [("u42", 800), ("u43", 600)]
+        assert await svc.get_at_risk(adal, dal, community_id=cid) == []
         history = await svc.get_history(adal, dal, community_id=cid, user_id=42)
         assert [h.actorType for h in history] == ["admin", "admin", "admin"]
+        stored = _q(
+            pg_db,
+            "SELECT DISTINCT actor FROM bundle_reputation_adjustments WHERE community_id=%s",
+            (cid,),
+        )
+        assert stored == [(_ADMIN["uuid"],)]  # the admin's UUID, never the numeric id
 
     async def test_policy_upsert_and_soft_ban_round_trip(
         self, adal: AsyncDAL, pg_db: PgTestDatabase
@@ -237,7 +255,7 @@ class TestOverrideAndApplyOnPostgres:
             community_id=cid,
             user_id=42,
             expires_at=datetime.now(UTC) + timedelta(days=1),
-            actor_user_id=7,
+            actor_user_id=ADMIN_ID,
         )
         listed = await svc.list_soft_bans(adal, dal, community_id=cid)
         assert [(b.userId, b.reason, b.setByType) for b in listed] == [("42", "manual", "admin")]
@@ -245,10 +263,15 @@ class TestOverrideAndApplyOnPostgres:
             (True,)
         ]
         assert (
-            await svc.clear_soft_ban(adal, dal, tenant_id=tid, community_id=cid, user_id=42) is True
+            await svc.clear_soft_ban(
+                adal, dal, tenant_id=tid, community_id=cid, user_id=42, actor_user_id=ADMIN_ID
+            )
+            is True
         )
         assert (
-            await svc.clear_soft_ban(adal, dal, tenant_id=tid, community_id=cid, user_id=42)
+            await svc.clear_soft_ban(
+                adal, dal, tenant_id=tid, community_id=cid, user_id=42, actor_user_id=ADMIN_ID
+            )
             is False
         )
 
@@ -266,11 +289,19 @@ class TestOverrideAndApplyOnPostgres:
             user_uuid=USER_UUID,
             delta=1,
             reason_code=svc.ReasonCode.ADMIN_ADJUST,
-            actor="admin:7",
+            actor=_ADMIN["uuid"],
             source_event="t",
+            idempotency_key="k-erase",
+            reason_class=svc.ReasonClass.ADMIN_OVERRIDE,
         )
         await svc.set_soft_ban(
-            adal, dal, tenant_id=tid, community_id=cid, user_id=42, expires_at=None, actor_user_id=7
+            adal,
+            dal,
+            tenant_id=tid,
+            community_id=cid,
+            user_id=42,
+            expires_at=None,
+            actor_user_id=ADMIN_ID,
         )
         for table in (
             "bundle_reputation_scores",
