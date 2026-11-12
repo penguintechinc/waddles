@@ -49,8 +49,11 @@ function renderSection(canManage = true, pairings = PAIRINGS) {
 function stubRoles() {
   vi.spyOn(roleSyncApi, 'listGuildRoles').mockImplementation(async (_c, guildId) =>
     guildId === '111'
-      ? [{ id: '10', name: 'Crew-A', color: 0, position: 2 }]
-      : [{ id: '20', name: 'Crew-B', color: 0, position: 2 }],
+      ? [{ id: '10', name: 'Crew-A', color: 0, position: 2, permissions: 0, managed: false, privileged: false }]
+      : [
+          { id: '20', name: 'Crew-B', color: 0, position: 2, permissions: 0, managed: false, privileged: false },
+          { id: '21', name: 'Admins', color: 0, position: 3, permissions: 8, managed: false, privileged: true },
+        ],
   );
 }
 
@@ -129,6 +132,18 @@ describe('MirrorRolesSection', () => {
     fireEvent.change(screen.getByLabelText('Target role'), { target: { value: '20' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add mirror' }));
     expect((await screen.findByRole('alert')).textContent).toContain('mirror cycle');
+  });
+
+  it('disables privileged roles in the target dropdown with a tooltip', async () => {
+    stubRoles();
+    vi.spyOn(roleSyncApi, 'listMirrors').mockResolvedValue([]);
+    renderSection();
+    await screen.findByRole('button', { name: 'Add mirror' });
+    fireEvent.change(screen.getByLabelText('Target server'), { target: { value: '222' } });
+    const opt = (await screen.findByRole('option', { name: 'Admins (privileged)' })) as HTMLOptionElement;
+    expect(opt.disabled).toBe(true);
+    expect(opt.title).toContain('cannot be a mirror target');
+    expect((screen.getByRole('option', { name: 'Crew-B' }) as HTMLOptionElement).disabled).toBe(false);
   });
 
   it('deletes a mapping', async () => {

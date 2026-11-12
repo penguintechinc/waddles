@@ -30,7 +30,7 @@ from typing import Any
 from services import guild_pairing as pairing_svc
 from services.bundle_telemetry import bundle_span, get_meter
 from services.credential_resolver import CredentialResolver, TransportUnavailable
-from services.discord_guild_roles import DiscordRole
+from services.discord_guild_roles import DiscordRole, is_privileged_role
 from services.errors import ApiError, bad_request, conflict, not_found
 from services.role_sync_service import (
     DiscordRoleTargetClient,
@@ -60,6 +60,30 @@ _mirror_skipped_counter = _meter.create_counter(
 _mirror_errors_counter = _meter.create_counter(
     "waddles_role_mirror_errors_total", description="Role-mirror mapping failures, fail-closed"
 )
+
+
+class MirrorRefusedError(Exception):
+    """A mapping the pass refuses to act on; `code` is the enum stored in `last_error`."""
+
+    code = "refused"
+
+
+class PrivilegedTargetRoleError(MirrorRefusedError):
+    """The target role is privileged, managed or @everyone -- never granted."""
+
+    code = "privileged_target_role"
+
+
+class NotPairedError(MirrorRefusedError):
+    """A mapped guild is no longer paired with (or enabled for) the community -- fail closed."""
+
+    code = "not_paired"
+
+
+class TargetRoleMissingError(MirrorRefusedError):
+    """The target role no longer exists in the target guild."""
+
+    code = "target_role_missing"
 
 
 @dataclass(slots=True, frozen=True)
@@ -154,6 +178,26 @@ def would_create_cycle(
     return False
 
 
+def _reject_roles_used_by_bindings(
+    dal: Any, community_id: int, nodes: list[tuple[str, str]]
+) -> None:
+    """409 if any `(guild, role)` is already bound in `community_role_sync_bindings`.
+
+    Keeps the mirror and the Twitch/community-role bindings from controlling the same Discord
+    role (cross-control loop).
+    """
+    pairing_by_guild = {
+        p.discord_guild_id: p.id for p in pairing_svc.list_pairings(dal, community_id)
+    }
+    b = dal.community_role_sync_bindings
+    for guild, role in nodes:
+        pairing_id = pairing_by_guild.get(guild)
+        if pairing_id is None:
+            continue
+        if dal((b.pairing_id == pairing_id) & (b.discord_role_id == role)).count():
+            raise conflict("That role is already used by a role-sync binding")
+
+
 def list_mappings(dal: Any, community_id: int) -> list[RoleMirrorMapping]:
     """Every mirror mapping for `community_id`, oldest first."""
     _ensure_tables(dal)
@@ -183,16 +227,27 @@ async def create_mapping(
     dst_role = _snowflake(target_role_id, "target_role_id")
     if src_guild == dst_guild:
         raise bad_request("source and target must be different Discord servers")
+    if src_role == src_guild or dst_role == dst_guild:
+        raise bad_request("@everyone cannot be a mirror source or target")
 
     _ensure_tables(dal)
-    paired = {p.discord_guild_id for p in pairing_svc.list_pairings(dal, community_id)}
+    pairings = {p.discord_guild_id: p for p in pairing_svc.list_pairings(dal, community_id)}
     for guild in (src_guild, dst_guild):
-        if guild not in paired:
+        if guild not in pairings:
             raise ApiError(
                 "Both Discord servers must be paired with this community",
                 404,
                 "DISCORD_PAIRING_NOT_FOUND",
             )
+        if not pairings[guild].sync_enabled:
+            raise ApiError(
+                "Role sync must be enabled on both paired Discord servers",
+                409,
+                "pairing_not_enabled",
+            )
+    _reject_roles_used_by_bindings(
+        dal, community_id, [(src_guild, src_role), (dst_guild, dst_role)]
+    )
 
     t = dal.discord_role_mirror_mappings
     existing = list_mappings(dal, community_id)
@@ -211,8 +266,15 @@ async def create_mapping(
 
     for guild, role in ((src_guild, src_role), (dst_guild, dst_role)):
         roles = await list_roles(dal, community_id, guild)
-        if role not in {r.id for r in roles}:
+        found = next((r for r in roles if r.id == role), None)
+        if found is None:
             raise not_found("That role does not exist in the selected Discord server")
+        if guild == dst_guild and is_privileged_role(found.permissions, found.managed):
+            raise ApiError(
+                "That target role is privileged or managed and cannot be mirrored",
+                422,
+                "privileged_target_role",
+            )
 
     try:
         row_id = t.insert(
@@ -312,6 +374,7 @@ async def _reconcile_mapping(
     client: DiscordRoleTargetClient,
     cache: dict[str, _GuildState],
     summary: MirrorSummary,
+    paired_guilds: set[str],
 ) -> None:
     """Reconcile ONE mapping; counters are credited to `summary` as work happens."""
     mapping_id = int(mapping.id)
@@ -321,6 +384,21 @@ async def _reconcile_mapping(
     added = removed = skipped = 0
     error: str | None = None
     try:
+        # Fail closed if either guild was unpaired / disabled since the mapping was created.
+        if src_guild not in paired_guilds or dst_guild not in paired_guilds:
+            raise NotPairedError
+        # Re-check every pass: a target role that became privileged/managed (or is @everyone, or
+        # vanished) is never granted -- the mapping is errored instead.
+        target_info = next(
+            (r for r in await client.get_guild_roles(guild_id=dst_guild) if r.role_id == dst_role),
+            None,
+        )
+        if dst_role == dst_guild or src_role == src_guild:
+            raise PrivilegedTargetRoleError
+        if target_info is None:
+            raise TargetRoleMissingError
+        if is_privileged_role(target_info.permissions, target_info.managed):
+            raise PrivilegedTargetRoleError
         source = await _snapshot(client, cache, src_guild)
         target = await _snapshot(client, cache, dst_guild)
         holders = {u for u, roles in source.roles.items() if src_role in roles}
@@ -369,6 +447,8 @@ async def _reconcile_mapping(
                     (grants_t.mapping_id == mapping_id) & (grants_t.platform_user_id == uid)
                 ).delete()
                 dal.commit()
+    except MirrorRefusedError as exc:
+        error = exc.code
     except (DiscordSyncError, TransportUnavailable) as exc:
         error = type(exc).__name__
     except Exception as exc:  # noqa: BLE001 - fail-closed: one mapping's bug never crashes the worker
@@ -477,7 +557,12 @@ async def reconcile_role_mirrors(
 
         client = make_discord_client(bot_token)
         cache: dict[str, _GuildState] = {}
+        paired_guilds = {
+            p.discord_guild_id
+            for p in pairing_svc.list_pairings(dal, community_id)
+            if p.sync_enabled
+        }
         for row in rows:
             async with bundle_span("role_sync.mirror", mapping_id=int(row.id)):
-                await _reconcile_mapping(dal, row, client, cache, summary)
+                await _reconcile_mapping(dal, row, client, cache, summary, paired_guilds)
     return summary

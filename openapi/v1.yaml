@@ -1903,8 +1903,12 @@ components:
       title: DeletionRequestDTO
       type: object
     DiscordRole:
-      description: One Discord role -- `id` is a string snowflake (never a JS-lossy
+      description: 'One Discord role -- `id` is a string snowflake (never a JS-lossy
         int).
+
+
+        `privileged` is computed server-side (see `is_privileged_role`) so the webui
+        stays thin.'
       properties:
         color:
           title: Color
@@ -1912,12 +1916,24 @@ components:
         id:
           title: Id
           type: string
+        managed:
+          default: false
+          title: Managed
+          type: boolean
         name:
           title: Name
           type: string
+        permissions:
+          default: 0
+          title: Permissions
+          type: integer
         position:
           title: Position
           type: integer
+        privileged:
+          default: false
+          title: Privileged
+          type: boolean
       required:
       - id
       - name

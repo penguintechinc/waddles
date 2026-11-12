@@ -31,14 +31,33 @@ _DISCORD_MISSING_ACCESS = 50001
 _REQUEST_TIMEOUT_SECONDS = 10.0
 
 
+#: Permission bits that make a role privileged: a mirror must never grant one of these.
+#: ADMINISTRATOR, MANAGE_GUILD, MANAGE_ROLES, MANAGE_CHANNELS, MANAGE_WEBHOOKS, BAN_MEMBERS,
+#: KICK_MEMBERS, MODERATE_MEMBERS, MENTION_EVERYONE.
+PRIVILEGED_PERMISSION_MASK = (
+    0x8 | 0x20 | 0x10000000 | 0x10 | 0x20000000 | 0x4 | 0x2 | 0x10000000000 | 0x20000
+)
+
+
+def is_privileged_role(permissions: int, managed: bool) -> bool:
+    """True for a managed (bot/integration) role or one carrying any privileged permission."""
+    return bool(managed) or bool(int(permissions) & PRIVILEGED_PERMISSION_MASK)
+
+
 @dataclass(slots=True, frozen=True)
 class DiscordRole:
-    """One Discord role -- `id` is a string snowflake (never a JS-lossy int)."""
+    """One Discord role -- `id` is a string snowflake (never a JS-lossy int).
+
+    `privileged` is computed server-side (see `is_privileged_role`) so the webui stays thin.
+    """
 
     id: str
     name: str
     color: int
     position: int
+    permissions: int = 0
+    managed: bool = False
+    privileged: bool = False
 
 
 def _select_guild_id(dal: Any, community_id: int, guild_id: str | None) -> str:
@@ -157,6 +176,11 @@ async def list_guild_roles(
                 name=str(r["name"]),
                 color=int(r.get("color", 0)),
                 position=int(r.get("position", 0)),
+                permissions=int(r.get("permissions", 0) or 0),
+                managed=bool(r.get("managed", False)),
+                privileged=is_privileged_role(
+                    int(r.get("permissions", 0) or 0), bool(r.get("managed", False))
+                ),
             )
             for r in raw
             if str(r["id"]) != target_guild  # @everyone shares the guild's snowflake

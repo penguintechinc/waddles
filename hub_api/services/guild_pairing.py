@@ -356,6 +356,21 @@ def delete_pairing(dal: Any, community_id: int, pairing_id: int) -> bool:
         # behavior is identical in both the test fixture and production.
         if "community_role_sync_bindings" in dal.tables:
             dal(dal.community_role_sync_bindings.pairing_id == pairing_id).delete()
+        # Cross-guild role-mirror mappings referencing this guild die with the pairing. The
+        # now-unpaired guild is NOT touched (no role removals); the ledger rows are dropped.
+        if "discord_role_mirror_mappings" in dal.tables:
+            m = dal.discord_role_mirror_mappings
+            guild_id = existing.discord_guild_id
+            doomed = [
+                int(r.id)
+                for r in dal(
+                    (m.community_id == community_id)
+                    & ((m.source_guild_id == guild_id) | (m.target_guild_id == guild_id))
+                ).select()
+            ]
+            for mapping_id in doomed:
+                dal(dal.discord_role_mirror_grants.mapping_id == mapping_id).delete()
+                dal(m.id == mapping_id).delete()
         dal(t.id == pairing_id).delete()
         dal.commit()
     except Exception:
@@ -412,6 +427,24 @@ def create_binding(
         raise not_found(f"no pairing {pairing_id} for community {community_id}")
 
     b = dal.community_role_sync_bindings
+    pairing = get_pairing(dal, community_id, pairing_id)
+    if pairing is not None:
+        m = dal.discord_role_mirror_mappings
+        used_by_mirror = dal(
+            (m.community_id == community_id)
+            & (
+                (
+                    (m.source_guild_id == pairing.discord_guild_id)
+                    & (m.source_role_id == discord_role_id)
+                )
+                | (
+                    (m.target_guild_id == pairing.discord_guild_id)
+                    & (m.target_role_id == discord_role_id)
+                )
+            )
+        ).count()
+        if used_by_mirror:
+            raise conflict(f"discord role {discord_role_id} is used by a Discord role mirror")
     try:
         cross_direction = dal(
             (b.pairing_id == pairing_id) & (b.discord_role_id == discord_role_id)

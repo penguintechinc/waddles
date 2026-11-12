@@ -19,9 +19,15 @@ from blueprints.v1.guild_pairing import guild_pairing_bp
 from services import discord_role_mirror as mirror
 from services import role_sync_service as svc
 from services.credential_resolver import PlatformCredentials, TransportUnavailable
-from services.discord_guild_roles import DiscordRole
+from services.discord_guild_roles import DiscordRole, is_privileged_role
 from services.errors import ApiError
-from services.guild_pairing import create_pairing
+from services.guild_pairing import (
+    create_binding,
+    create_pairing,
+    delete_pairing,
+    list_pairings,
+    update_pairing,
+)
 
 G_A = "111111111111111111"  # gitleaks:allow - fake snowflakes
 G_B = "222222222222222222"
@@ -46,8 +52,23 @@ class _FakeGuilds:
     def __init__(self, guilds: dict[str, dict[str, set[str]]], *, complete: bool = True) -> None:
         self.guilds = guilds
         self.complete = complete
+        #: guild -> role -> (permissions, managed) overrides for the privilege re-check
+        self.role_info: dict[str, dict[str, tuple[int, bool]]] = {}
         self.adds: list[tuple[str, str, str]] = []
         self.removes: list[tuple[str, str, str]] = []
+
+    async def get_guild_roles(self, *, guild_id: str) -> list[svc.DiscordGuildRoleInfo]:
+        overrides = self.role_info.get(guild_id, {})
+        out = [
+            svc.DiscordGuildRoleInfo(role_id=r, permissions=p, managed=m)
+            for r, (p, m) in overrides.items()
+        ]
+        out += [
+            svc.DiscordGuildRoleInfo(role_id=r, permissions=0, managed=False)
+            for r in _ALL_ROLES.get(guild_id, [])
+            if r not in overrides
+        ]
+        return out
 
     async def get_member_role_ids(self, *, guild_id: str, user_id: str) -> set[str] | None:
         return self.guilds[guild_id].get(user_id)
@@ -104,9 +125,9 @@ _ALL_ROLES = {
 }
 
 
-def _pair(dal: Any, community_id: int, *guilds: str) -> None:
+def _pair(dal: Any, community_id: int, *guilds: str, enabled: bool = True) -> None:
     for g in guilds:
-        create_pairing(
+        p = create_pairing(
             dal,
             community_id,
             discord_guild_id=g,
@@ -114,6 +135,8 @@ def _pair(dal: Any, community_id: int, *guilds: str) -> None:
             role_name_prefix="[T]",
             actor_user_id=None,
         )
+        if enabled:
+            update_pairing(dal, community_id, p.id, sync_enabled=True)
 
 
 async def _map(dal: Any, community_id: int, sg: str, sr: str, tg: str, tr: str) -> Any:
@@ -240,6 +263,210 @@ class TestMappingValidation:
         assert mirror.delete_mapping(dal, cid, m.id) is True
         assert mirror.list_mappings(dal, cid) == []
         assert mirror.delete_mapping(dal, cid, m.id) is False
+
+
+def _lister_priv(perm_by_role: dict[str, tuple[int, bool]]) -> Any:
+    async def _list(dal: Any, community_id: int, guild_id: str) -> list[DiscordRole]:
+        out = []
+        for r in _ALL_ROLES[guild_id]:
+            perms, managed = perm_by_role.get(r, (0, False))
+            out.append(
+                DiscordRole(
+                    id=r,
+                    name=r,
+                    color=0,
+                    position=1,
+                    permissions=perms,
+                    managed=managed,
+                    privileged=is_privileged_role(perms, managed),
+                )
+            )
+        return out
+
+    return _list
+
+
+class TestPrivilegedAndEveryone:
+    @pytest.mark.parametrize(
+        ("perms", "managed"),
+        [
+            (0x8, False),
+            (0x20, False),
+            (0x10000000, False),
+            (0x10, False),
+            (0x20000000, False),
+            (0x4, False),
+            (0x2, False),
+            (0x10000000000, False),
+            (0x20000, False),
+            (0, True),
+        ],
+    )
+    async def test_privileged_or_managed_target_rejected_422(
+        self, guild_pairing_db: Any, perms: int, managed: bool
+    ) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        with pytest.raises(ApiError) as exc:
+            await mirror.create_mapping(
+                dal,
+                cid,
+                source_guild_id=G_A,
+                source_role_id=R_SRC,
+                target_guild_id=G_B,
+                target_role_id=R_DST,
+                list_roles=_lister_priv({R_DST: (perms, managed)}),
+            )
+        assert exc.value.status_code == 422 and exc.value.code == "privileged_target_role"
+        assert mirror.list_mappings(dal, cid) == []
+
+    async def test_privileged_source_role_is_allowed(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        m = await mirror.create_mapping(
+            dal,
+            cid,
+            source_guild_id=G_A,
+            source_role_id=R_SRC,
+            target_guild_id=G_B,
+            target_role_id=R_DST,
+            list_roles=_lister_priv({R_SRC: (0x8, False)}),
+        )
+        assert m.id
+
+    @pytest.mark.parametrize("which", ["source", "target"])
+    async def test_everyone_rejected(self, guild_pairing_db: Any, which: str) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        args = (G_A, G_A, G_B, R_DST) if which == "source" else (G_A, R_SRC, G_B, G_B)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid, *args)
+        assert exc.value.status_code == 400
+
+    async def test_role_becomes_privileged_after_mapping_sync_refuses(
+        self, guild_pairing_db: Any
+    ) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        fake = _FakeGuilds({G_A: {U1: {R_SRC}}, G_B: {U1: set()}})
+        fake.role_info[G_B] = {R_DST: (0x8, False)}  # became ADMINISTRATOR after mapping
+        summary = await _run(dal, fake)
+        assert fake.adds == [] and fake.removes == []
+        assert summary.mappings_failed == 1
+        assert mirror.list_mappings(dal, cid)[0].last_error == "privileged_target_role"
+
+    async def test_managed_target_refused_at_sync(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        fake = _FakeGuilds({G_A: {U1: {R_SRC}}, G_B: {U1: set()}})
+        fake.role_info[G_B] = {R_DST: (0, True)}
+        await _run(dal, fake)
+        assert fake.adds == []
+
+    async def test_deleted_target_role_marked_missing(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        fake = _FakeGuilds({G_A: {U1: {R_SRC}}, G_B: {U1: set()}})
+        _ALL_ROLES[G_B].remove(R_DST)
+        try:
+            await _run(dal, fake)
+        finally:
+            _ALL_ROLES[G_B].insert(1, R_DST)
+        assert fake.adds == []
+        assert mirror.list_mappings(dal, cid)[0].last_error == "target_role_missing"
+
+    async def test_route_returns_422_for_privileged_target(
+        self, app: Quart, auth_headers: Any, guild_pairing_db: Any, monkeypatch: Any
+    ) -> None:
+        import blueprints.v1.guild_pairing as bp
+
+        dal, cid, *_ = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        monkeypatch.setattr(bp, "_list_roles_for_mirror", _lister_priv({R_DST: (0x8, False)}))
+        r = await app.test_client().post(
+            f"/api/v1/communities/{cid}/discord/role-mirrors",
+            headers={
+                **auth_headers(scope="community.guild_pairing:write"),
+                "Content-Type": "application/json",
+            },
+            data=json_module.dumps(
+                {
+                    "source_guild_id": G_A,
+                    "source_role_id": R_SRC,
+                    "target_guild_id": G_B,
+                    "target_role_id": R_DST,
+                }
+            ),
+        )
+        assert r.status_code == 422
+        assert (await r.get_json())["error"]["code"] == "privileged_target_role"
+
+
+class TestPairingLifecycleAndBindings:
+    async def test_disabled_pairing_rejected_at_create(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, enabled=True)
+        _pair(dal, cid, G_B, enabled=False)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        assert exc.value.status_code == 409 and exc.value.code == "pairing_not_enabled"
+
+    async def test_unpaired_guild_mapping_skipped_fail_closed(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        pairing_b = next(p for p in list_pairings(dal, cid) if p.discord_guild_id == G_B)
+        update_pairing(dal, cid, pairing_b.id, sync_enabled=False)  # disabled since mapping
+        fake = _FakeGuilds({G_A: {U1: {R_SRC}}, G_B: {U1: set()}})
+        summary = await _run(dal, fake)
+        assert fake.adds == [] and fake.removes == [] and summary.mappings_failed == 1
+        assert mirror.list_mappings(dal, cid)[0].last_error == "not_paired"
+
+    async def test_unpair_deletes_mappings_and_grants_without_touching_roles(
+        self, guild_pairing_db: Any
+    ) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        fake = _FakeGuilds({G_A: {U1: {R_SRC}}, G_B: {U1: set()}})
+        await _run(dal, fake)
+        assert dal(dal.discord_role_mirror_grants.id > 0).count() == 1
+        pairing_b = next(p for p in list_pairings(dal, cid) if p.discord_guild_id == G_B)
+        assert delete_pairing(dal, cid, pairing_b.id) is True
+        assert mirror.list_mappings(dal, cid) == []
+        assert dal(dal.discord_role_mirror_grants.id > 0).count() == 0
+        assert fake.removes == [] and R_DST in fake.guilds[G_B][U1]
+
+    async def test_mapping_rejects_role_used_by_binding(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        pa = next(p for p in list_pairings(dal, cid) if p.discord_guild_id == G_A)
+        create_binding(dal, cid, pa.id, sync_scope="moderator", discord_role_id=R_SRC)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        assert exc.value.status_code == 409
+        pb = next(p for p in list_pairings(dal, cid) if p.discord_guild_id == G_B)
+        create_binding(dal, cid, pb.id, sync_scope="moderator", discord_role_id=R_DST)
+        with pytest.raises(ApiError):
+            await _map(dal, cid, G_A, R_OTHER, G_B, R_DST)
+
+    @pytest.mark.parametrize("side", ["source", "target"])
+    async def test_binding_rejects_role_used_by_mirror(
+        self, guild_pairing_db: Any, side: str
+    ) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        guild, role = (G_A, R_SRC) if side == "source" else (G_B, R_DST)
+        p = next(x for x in list_pairings(dal, cid) if x.discord_guild_id == guild)
+        with pytest.raises(ApiError) as exc:
+            create_binding(dal, cid, p.id, sync_scope="moderator", discord_role_id=role)
+        assert exc.value.status_code == 409
+        # an unrelated role in the same guild is still bindable
+        create_binding(dal, cid, p.id, sync_scope="moderator", discord_role_id=R_OTHER)
 
 
 class TestReconcile:

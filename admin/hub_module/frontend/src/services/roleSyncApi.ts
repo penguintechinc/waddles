@@ -107,6 +107,10 @@ export interface DiscordRole {
   name: string;
   color: number;
   position: number;
+  permissions: number;
+  managed: boolean;
+  /** Server-computed: carries a privileged permission or is a managed role -- never a mirror target. */
+  privileged: boolean;
 }
 
 /** One cross-guild role mirror mapping (`discord_role_mirror_mappings`) + last sync counters. */

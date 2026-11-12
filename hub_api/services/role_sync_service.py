@@ -246,6 +246,15 @@ class GuildMemberSnapshot:
     complete: bool
 
 
+@dataclass(slots=True, frozen=True)
+class DiscordGuildRoleInfo:
+    """One `GET /guilds/{id}/roles` row reduced to what the mirror's privilege re-check needs."""
+
+    role_id: str
+    permissions: int
+    managed: bool
+
+
 class DiscordRoleTargetClient(Protocol):
     """Discord-side role read/write this engine needs. Real impl: `HttpDiscordRoleTargetClient`."""
 
@@ -477,6 +486,30 @@ class HttpDiscordRoleTargetClient:
         return await self._manage_role(
             guild_id=guild_id, user_id=user_id, role_id=role_id, add=False
         )
+
+    async def get_guild_roles(self, *, guild_id: str) -> list[DiscordGuildRoleInfo]:
+        """`GET /guilds/{guild_id}/roles` -- id/permissions/managed per role."""
+        try:
+            response = await self._send(
+                "GET",
+                f"{self._api_base}/guilds/{guild_id}/roles",
+                headers=self._headers(),
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
+            raise DiscordSyncError(f"discord guild role list failed: {exc}") from exc
+        _classify_discord(response, action="guild role list")
+        try:
+            return [
+                DiscordGuildRoleInfo(
+                    role_id=str(r["id"]),
+                    permissions=int(r.get("permissions", 0) or 0),
+                    managed=bool(r.get("managed", False)),
+                )
+                for r in response.json() or []
+            ]
+        except (ValueError, TypeError, KeyError) as exc:
+            raise DiscordSyncError("discord returned a malformed roles payload") from exc
 
     async def list_guild_members(self, *, guild_id: str) -> list[DiscordGuildMember]:
         """Members only -- grant-only callers; see `list_guild_members_checked` for completeness."""

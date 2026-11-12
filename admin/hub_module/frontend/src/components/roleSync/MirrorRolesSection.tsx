@@ -188,8 +188,17 @@ export default function MirrorRolesSection({
             >
               <option value="">Select role…</option>
               {(rolesByGuild[targetGuild] ?? []).map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.name}
+                <option
+                  key={r.id}
+                  value={r.id}
+                  disabled={r.privileged}
+                  title={
+                    r.privileged
+                      ? 'Privileged or managed roles cannot be a mirror target'
+                      : undefined
+                  }
+                >
+                  {r.privileged ? `${r.name} (privileged)` : r.name}
                 </option>
               ))}
             </select>
