@@ -1,4 +1,4 @@
-.PHONY: backfill-bundle-author seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: webui-api-coverage backfill-bundle-author seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit check-docs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -100,6 +100,13 @@ check-bundle-hygiene:
 	@python3 -m pytest scripts/ci/tests/test_bundle_stage_gate.py -q -p no:cacheprovider
 	@python3 -m pytest scripts/ci/tests/test_bundle_rng_gate.py -q -p no:cacheprovider
 	@python3 -m pytest scripts/ci/tests/test_bundle_command_collisions.py -q -p no:cacheprovider
+
+# webui <-> hub-api REST coverage report (A uncovered, B webui->nonexistent,
+# C spec<->code drift, B-proxy calls proxy->svc-streaming). Report-only;
+# STRICT=1 exits non-zero on any gap. OUT=path writes markdown.
+webui-api-coverage:
+	@python3 -m pytest scripts/ci/tests/test_webui_api_coverage.py -q -p no:cacheprovider
+	@python3 scripts/ci/webui_api_coverage.py $(if $(OUT),--out $(OUT)) $(if $(STRICT),--strict)
 
 # Data-plane golden-vector parity harness (gh #840 PR4): Rust normalize.rs oracle vs committed
 # goldens (svc_ingest), every corpus event through svc_process's closed-schema pii_tokenize
