@@ -218,6 +218,65 @@ pub struct ConsumerState {
     /// regression: multi-tenant consumers invoked with empty legacy digest,
     /// UnknownBundle (alpha 2026-10-03).
     active_digests: Arc<ActiveDigests>,
+    /// Executor id each live session reported in its handshake (sessions
+    /// of executors predating the field are absent -> broadcast). Refreshed
+    /// by [`run`] every iteration from the host-API registry.
+    executor_of: HashMap<bundle_active_set::SessionId, String>,
+    /// Already-negated `waddles.disable-executor-sharding` (true = shard;
+    /// the default -- unseen flag = sharding ON). Refreshed by [`run`].
+    sharding_enabled: bool,
+    /// In-flight / backoff state per `(session, scope)` Load (T2).
+    load_tracker: bundle_active_set::LoadTracker<AppScope>,
+    /// Last computed slot -> owner table (sharded mode only), diffed on
+    /// membership change for `executor_slot_owner_changes_total`.
+    owner_table: Vec<Vec<String>>,
+    /// Last routing decision + the sessions lacking an executor id, so the
+    /// broadcast-fallback WARN fires on change, not on every tick.
+    last_routing: Option<(bundle_active_set::RoutingMode, Vec<bundle_active_set::SessionId>)>,
+}
+
+/// Logs a routing-mode change (WARN for the missing-executor-id broadcast
+/// fallback) and counts slot-owner moves when the executor membership
+/// changes -- once per change, never per tick.
+fn note_routing(state: &mut ConsumerState, router: &bundle_active_set::SessionRouter) {
+    let mode = router.mode();
+    let missing = router.sessions_missing_executor_id().to_vec();
+    let current = Some((mode, missing.clone()));
+    if state.last_routing != current {
+        match mode {
+            bundle_active_set::RoutingMode::BroadcastMissingExecutorId => tracing::warn!(
+                sessions_without_executor_id = ?missing,
+                "executor sharding: a live executor sent no executor_id in its handshake \
+                 (older executor); falling back to broadcast Load to every session"
+            ),
+            bundle_active_set::RoutingMode::BroadcastDisabled => tracing::warn!(
+                "executor sharding disabled by kill switch waddles.disable-executor-sharding; \
+                 broadcasting every bundle to every executor"
+            ),
+            bundle_active_set::RoutingMode::Sharded => tracing::info!(
+                executors = router.executors().len(),
+                replicas = bundle_active_set::DEFAULT_REPLICAS,
+                "executor sharding active: each app loads only on its owner executors"
+            ),
+        }
+        state.last_routing = current;
+    }
+    if mode == bundle_active_set::RoutingMode::Sharded {
+        let table =
+            bundle_active_set::slot_owner_table(router.executors(), bundle_active_set::DEFAULT_REPLICAS);
+        if table != state.owner_table {
+            if !state.owner_table.is_empty() {
+                let changed = bundle_active_set::count_owner_changes(&state.owner_table, &table);
+                tracing::info!(
+                    changed_slots = changed,
+                    executors = router.executors().len(),
+                    "executor sharding: membership changed, slot owners moved"
+                );
+                crate::stage_metrics::stage_metrics().record_slot_owner_changes(changed);
+            }
+            state.owner_table = table;
+        }
+    }
 }
 
 impl ConsumerState {
@@ -247,7 +306,31 @@ impl ConsumerState {
             pending_full_sync: None,
             last_full_send: None,
             active_digests: Arc::new(ActiveDigests::new()),
+            executor_of: HashMap::new(),
+            sharding_enabled: true,
+            load_tracker: bundle_active_set::LoadTracker::default(),
+            owner_table: Vec::new(),
+            last_routing: None,
         }
+    }
+
+    /// Updates the executor membership + kill-switch view [`apply_active_set`]
+    /// routes against (called by [`run`] every iteration; tests call it to
+    /// simulate sharded executors).
+    pub fn set_routing(
+        &mut self,
+        executor_of: HashMap<bundle_active_set::SessionId, String>,
+        sharding_enabled: bool,
+    ) {
+        self.executor_of = executor_of;
+        self.sharding_enabled = sharding_enabled;
+    }
+
+    /// A session left the registry: drop its loaded-state AND any of its
+    /// in-flight Load marks (they can never be answered now).
+    fn on_session_removed(&mut self, session: bundle_active_set::SessionId) -> HashMap<AppScope, String> {
+        self.load_tracker.on_session_removed(session);
+        self.loaded.on_session_removed(session)
     }
 
     #[cfg(test)]
@@ -333,6 +416,11 @@ pub async fn initial_state(
         pending_full_sync: Some(FullSyncReason::Startup),
         last_full_send: None,
         active_digests: Arc::new(ActiveDigests::new()),
+        executor_of: HashMap::new(),
+        sharding_enabled: true,
+        load_tracker: bundle_active_set::LoadTracker::default(),
+        owner_table: Vec::new(),
+        last_routing: None,
     })
 }
 
@@ -523,9 +611,51 @@ async fn apply_active_set(
         );
     }
 
-    let plan = bundle_active_set::plan_sessions(&state.loaded, &active, live_sessions, |row| {
-        row.digest.as_str()
+    // Executor sharding (T6): each app goes only to its owner executors'
+    // sessions -- broadcast when the kill switch is on or any live executor
+    // predates the handshake's executor_id (WARN, see `note_routing`).
+    let router = bundle_active_set::SessionRouter::new(
+        live_sessions,
+        &state.executor_of,
+        state.sharding_enabled,
+        bundle_active_set::DEFAULT_REPLICAS,
+    );
+    note_routing(state, &router);
+    let mut plan = bundle_active_set::plan_sessions_routed(
+        &state.loaded,
+        &active,
+        live_sessions,
+        |scope, _| router.target_sessions(&scope.2),
+        |row| row.digest.as_str(),
+    );
+    // T2: never resend a Load that is still in flight, and hold a failed /
+    // timed-out one back for its jittered backoff -- the 2026-11-11 retry
+    // storm re-sent every 120 s timeout on the next tick while the executor
+    // was still compiling the first copy.
+    state.load_tracker.retain_keys(|scope| active.contains_key(scope));
+    let now = Instant::now();
+    let planned = plan.to_load.len();
+    plan.to_load.retain(|(session, scope, row)| {
+        match state.load_tracker.admit(*session, scope, &row.digest, now) {
+            bundle_active_set::LoadAdmission::Send => true,
+            held => {
+                tracing::debug!(
+                    session = *session,
+                    tenant_id = scope.0, community_id = scope.1, app_id = %scope.2,
+                    ?held,
+                    "changelog consumer: load held back (in flight or backing off); not resending"
+                );
+                false
+            }
+        }
     });
+    if planned != plan.to_load.len() {
+        tracing::debug!(
+            planned,
+            sending = plan.to_load.len(),
+            "changelog consumer: some loads held back by in-flight/backoff tracking"
+        );
+    }
 
     if let Some(reason) = full_sync_reason {
         // Over-log by design (user rule: never silent) -- one INFO line per
@@ -554,8 +684,14 @@ async fn apply_active_set(
                 "changelog consumer: active set changed but no executor connection yet; deferring"
             );
         }
+        // Nothing was sent: release the in-flight marks `admit` just set.
+        for (session, scope, _) in &plan.to_load {
+            state.load_tracker.succeeded(*session, scope);
+        }
         return;
     };
+    let stage = crate::stage_metrics::stage_metrics();
+    stage.set_load_inflight(state.load_tracker.in_flight_count());
 
     // Every (session, bundle) Load this tick is independent -- run them
     // CONCURRENTLY (never sequentially) so one session's stuck/slow call can
@@ -571,8 +707,15 @@ async fn apply_active_set(
     // executor when a stray session died (alpha 2026-10-03). Direct port of
     // `core/svc_action/src/changelog_consumer.rs`'s identical fix
     // (fix/action-per-session-load-reliability #554).
-    let load_outcomes =
-        futures_util::future::join_all(plan.to_load.iter().map(|(session, scope, row)| {
+    //
+    // Per-bundle readiness (T2): outcomes are applied AS EACH LOAD SETTLES
+    // (`FuturesUnordered`), not after the whole batch -- a bundle that
+    // finished loading is published to `active_digests` (and so becomes
+    // dispatchable) while slower bundles are still compiling.
+    let mut load_outcomes: futures_util::stream::FuturesUnordered<_> = plan
+        .to_load
+        .iter()
+        .map(|(session, scope, row)| {
             let load_start = Instant::now();
             async move {
                 let outcome = tokio::time::timeout(
@@ -582,10 +725,30 @@ async fn apply_active_set(
                 .await;
                 (session, scope, row, outcome, load_start.elapsed())
             }
-        }))
-        .await;
+        })
+        .collect();
 
-    for (session, scope, row, outcome, elapsed) in load_outcomes {
+    while let Some((session, scope, row, outcome, elapsed)) =
+        futures_util::StreamExt::next(&mut load_outcomes).await
+    {
+        if matches!(outcome, Ok(Ok(()))) {
+            state.load_tracker.succeeded(*session, scope);
+        } else {
+            let retry_in = state.load_tracker.failed(
+                *session,
+                scope,
+                Instant::now(),
+                bundle_active_set::jitter_unit(),
+            );
+            tracing::warn!(
+                session = *session,
+                tenant_id = scope.0, community_id = scope.1, app_id = %row.app_id,
+                attempt = state.load_tracker.attempts(*session, scope),
+                retry_in_ms = retry_in.as_millis() as u64,
+                "changelog consumer: load not confirmed; backing off (full jitter) before resending"
+            );
+        }
+        stage.set_load_inflight(state.load_tracker.in_flight_count());
         match outcome {
             Ok(Ok(())) => {
                 tracing::info!(
@@ -623,7 +786,7 @@ async fn apply_active_set(
                     digest_prefix = %bundle_active_set::digest_prefix(&row.digest),
                     duration_ms = elapsed.as_millis() as u64,
                     error = %err,
-                    "changelog consumer: load failed for this session, will retry next tick"
+                    "changelog consumer: load failed for this session, will retry after backoff"
                 );
                 metrics
                     .bundle_loads_total
@@ -645,7 +808,7 @@ async fn apply_active_set(
                     duration_ms = elapsed.as_millis() as u64,
                     timeout_secs,
                     "changelog consumer: load timed out after {timeout_secs}s for this \
-                     session with no reply, will retry next tick"
+                     session with no reply, will retry after backoff"
                 );
                 metrics
                     .bundle_loads_total
@@ -1237,6 +1400,10 @@ pub async fn run(
     full_reconcile_interval: std::time::Duration,
     call_timeout_ms: u64,
     gate: Arc<dyn FeatureGate>,
+    // `license::ExecutorShardingGate` in production: `enabled()` = "is
+    // executor sharding on" (kill switch `waddles.disable-executor-sharding`
+    // negated, unseen = ON). Re-read every loop iteration.
+    sharding_gate: Arc<dyn FeatureGate>,
     connections: Arc<crate::host_api::ConnectionRegistry>,
     spawner: Option<Arc<dyn ConsumerSupervisor>>,
     excluded_metric: prometheus::IntCounterVec,
@@ -1346,6 +1513,9 @@ pub async fn run(
     {
         let live_sessions = connections.live_session_ids();
         known_sessions = live_sessions.iter().copied().collect();
+        let sharding_enabled = sharding_gate.enabled().await;
+        connections.set_sharding_enabled(sharding_enabled);
+        state.set_routing(connections.live_executor_ids(), sharding_enabled);
         let sink = (!live_sessions.is_empty()).then(|| crate::bundle_loader::RegistrySink {
             registry: Arc::clone(&connections),
             call_timeout_ms,
@@ -1380,8 +1550,14 @@ pub async fn run(
         // 2026-10-03: nothing used to react to a session disappearing at
         // all, so a dead session's now-meaningless entries suppressed a
         // resend onto the survivor forever).
+        // Executor membership + kill switch for this iteration's routing
+        // (`apply_active_set` -> `SessionRouter`); the registry copy drives
+        // dispatch-side owner routing (`pick_dispatch_for_app`).
+        let sharding_enabled = sharding_gate.enabled().await;
+        connections.set_sharding_enabled(sharding_enabled);
+        state.set_routing(connections.live_executor_ids(), sharding_enabled);
         for session in &diff.removed {
-            let dropped = state.loaded.on_session_removed(*session);
+            let dropped = state.on_session_removed(*session);
             if !dropped.is_empty() {
                 tracing::warn!(
                     session = *session,

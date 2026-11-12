@@ -429,6 +429,9 @@ fn record_executor_call(
                 if let Some(limit) = stage_metrics::sandbox_limit_for(e.code, e.detail.as_deref()) {
                     metrics.record_sandbox_trip(app_id, limit);
                 }
+                if e.detail.as_deref() == Some("pool_exhausted") {
+                    metrics.record_pool_exhausted(app_id);
+                }
                 "executor_error"
             }
             _ => "malformed",
@@ -1075,11 +1078,30 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
     }
 }
 
+/// Records `queue_wait_seconds` for one delivered entry: how long it sat in
+/// the stream (its id's millisecond timestamp) before this stage picked it
+/// up -- the KEDA scale signal. A malformed id is logged, never fatal.
+fn record_queue_wait(app_id: &str, entry_id: &str) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    match bundle_active_set::stream_entry_age(entry_id, now_ms) {
+        Some(wait) => stage_metrics::stage_metrics().record_queue_wait(app_id, wait),
+        None => tracing::debug!(
+            app_id,
+            entry_id,
+            "stream entry id has no millisecond prefix; queue wait not recorded"
+        ),
+    }
+}
+
 async fn handle_delivered<S: SpineOps>(
     d: &Delivered,
     deps: &ProcessDeps<S>,
 ) -> Result<(), SpineError> {
     let started = std::time::Instant::now();
+    record_queue_wait(&deps.app_id, &d.entry_id);
     let outcome = handle_delivered_inner(d, deps).await;
     let result = match &outcome {
         Ok(result) => result.as_str(),
@@ -1298,7 +1320,11 @@ async fn handle_delivered_inner<S: SpineOps>(
             0
         });
 
-    let Some(connection) = deps.connections.pick_dispatch() else {
+    // Executor sharding (T6): route to one of this app's owner executors
+    // (legacy round-robin when sharding is off or an executor has no id);
+    // a non-owner pick is still served via the on-demand `ensure_loaded`
+    // below.
+    let Some(connection) = deps.connections.pick_dispatch_for_app(&deps.app_id) else {
         // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
         // 2026-10-02 incident: svc-process/svc-action were rolled and each
         // bundle-executor stayed bound to its old, terminated pod; the new

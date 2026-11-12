@@ -278,6 +278,10 @@ pub struct StageMetrics {
     group_pending: Histogram<u64>,
     insecure_transport: Gauge<u64>,
     boundary_violations: Counter<u64>,
+    load_inflight: Gauge<u64>,
+    queue_wait: Histogram<f64>,
+    pool_exhausted: Counter<u64>,
+    slot_owner_changes: Counter<u64>,
 }
 
 impl StageMetrics {
@@ -385,6 +389,61 @@ impl StageMetrics {
                 "waddles_tenant_boundary_violations_total",
                 "Hop-verification (tenant boundary) failures, by stage and reason",
             ),
+            load_inflight: meter
+                .u64_gauge(instrument_name("stage_load_inflight"))
+                .with_description("Bundle Loads this stage has sent and not yet seen answered")
+                .build(),
+            queue_wait: latency(
+                "queue_wait_seconds",
+                "Time a stream entry waited before the stage dispatched it, by hash slot",
+            ),
+            pool_exhausted: counter(
+                "pool_exhausted_total",
+                "Executor invokes refused with pool_exhausted back-pressure, by hash slot",
+            ),
+            slot_owner_changes: counter(
+                "executor_slot_owner_changes_total",
+                "Hash slots whose owner executor set changed after a membership change",
+            ),
+        }
+    }
+
+    /// Sets `stage_load_inflight` to the current in-flight Load count.
+    pub fn set_load_inflight(&self, inflight: usize) {
+        self.load_inflight.record(
+            u64::try_from(inflight).unwrap_or(u64::MAX),
+            &[KeyValue::new("stage", STAGE)],
+        );
+    }
+
+    /// Records one entry's queue wait (`queue_wait_seconds`) against the
+    /// app's hash slot (bounded: 1024 values; app_id is NOT a label here).
+    pub fn record_queue_wait(&self, app_id: &str, wait: Duration) {
+        self.queue_wait.record(
+            wait.as_secs_f64(),
+            &[
+                KeyValue::new("stage", STAGE),
+                KeyValue::new("slot", i64::from(bundle_active_set::slot(app_id))),
+            ],
+        );
+    }
+
+    /// Counts one `pool_exhausted` executor refusal (`pool_exhausted_total`).
+    pub fn record_pool_exhausted(&self, app_id: &str) {
+        self.pool_exhausted.add(
+            1,
+            &[
+                KeyValue::new("stage", STAGE),
+                KeyValue::new("slot", i64::from(bundle_active_set::slot(app_id))),
+            ],
+        );
+    }
+
+    /// Adds `changed` slot-owner changes (`executor_slot_owner_changes_total`).
+    pub fn record_slot_owner_changes(&self, changed: u64) {
+        if changed > 0 {
+            self.slot_owner_changes
+                .add(changed, &[KeyValue::new("stage", STAGE)]);
         }
     }
 

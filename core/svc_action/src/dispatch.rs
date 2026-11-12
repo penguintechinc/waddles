@@ -457,6 +457,9 @@ fn record_executor_call(
                 if let Some(limit) = stage_metrics::sandbox_limit_for(e.code, e.detail.as_deref()) {
                     metrics.record_sandbox_trip(app_id, limit);
                 }
+                if e.detail.as_deref() == Some("pool_exhausted") {
+                    metrics.record_pool_exhausted(app_id);
+                }
                 "executor_error"
             }
             _ => "malformed",
@@ -886,12 +889,31 @@ pub struct DispatchDeps<A: AuditSink, T: TenantResolver, S: SpineOps> {
 /// dead-lettered) -- only a `SpineError` from the ack/DLQ write itself
 /// propagates, matching `core/svc_process/src/spine.rs`'s error-handling
 /// shape.
+/// Records `queue_wait_seconds` for one delivered entry: how long it sat in
+/// the stream (its id's millisecond timestamp) before this stage picked it
+/// up -- the KEDA scale signal. A malformed id is logged, never fatal.
+fn record_queue_wait(app_id: &str, entry_id: &str) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    match bundle_active_set::stream_entry_age(entry_id, now_ms) {
+        Some(wait) => stage_metrics::stage_metrics().record_queue_wait(app_id, wait),
+        None => tracing::debug!(
+            app_id,
+            entry_id,
+            "stream entry id has no millisecond prefix; queue wait not recorded"
+        ),
+    }
+}
+
 async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
     d: &Delivered,
     stream_key: &str,
     deps: &DispatchDeps<A, T, S>,
 ) -> Result<(), SpineError> {
     let started = std::time::Instant::now();
+    record_queue_wait(&deps.app_id, &d.entry_id);
     let outcome = handle_delivered_inner(d, stream_key, deps).await;
     let result = match &outcome {
         Ok(result) => result.as_str(),

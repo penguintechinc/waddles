@@ -68,7 +68,9 @@ pub mod multi_tenant;
 pub mod query;
 pub mod reader;
 pub mod scope;
+pub mod load_tracker;
 pub mod session_sync;
+pub mod sharding;
 pub mod snapshot;
 pub mod tools;
 
@@ -94,7 +96,13 @@ pub use query::{
 pub use reader::ReaderConfig;
 pub use scope::{resolve_scope, ResolvedScope};
 pub use session_sync::{
-    pick_session_with_digest, plan_sessions, SessionId, SessionLoaded, SessionSyncPlan,
+    pick_session_with_digest, plan_sessions, plan_sessions_routed, SessionId, SessionLoaded,
+    SessionSyncPlan,
+};
+pub use load_tracker::{full_jitter_delay, jitter_unit, LoadAdmission, LoadBackoff, LoadTracker};
+pub use sharding::{
+    count_owner_changes, hello_executor_id, owners, slot, slot_owner_table, stream_entry_age, RoutingMode,
+    SessionRouter, DEFAULT_REPLICAS, SLOT_COUNT,
 };
 pub use snapshot::{ActiveVersionSnapshot, ToolTargetEntry};
 pub use tools::{
