@@ -611,6 +611,69 @@ impl DekBroker for LocalDevDekProvider {
     }
 }
 
+/// The SPIFFE trust-domain prefix every PenguinTech workload id carries.
+const SPIFFE_PREFIX: &str = "spiffe://penguintech.io/";
+/// Max length of the env segment (mirrors hub-api `_SPIFFE_RE`).
+const SPIFFE_ENV_MAX: usize = 32;
+/// Max length of the service segment (mirrors hub-api `_SPIFFE_RE`).
+const SPIFFE_SERVICE_MAX: usize = 63;
+
+/// A configured SPIFFE id that is missing or does not have the
+/// `spiffe://penguintech.io/<env>/<service>` shape hub-api parses the seal-context service from.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid SPIFFE id for the stream-DEK seal context: {reason}")]
+pub struct SpiffeIdError {
+    /// Why the id was refused (never echoes the id itself).
+    pub reason: &'static str,
+}
+
+/// True when `seg` is a non-empty `[a-z0-9-]{1,max}` SPIFFE path segment.
+fn valid_spiffe_segment(seg: &str, max: usize) -> bool {
+    !seg.is_empty()
+        && seg.len() <= max
+        && seg
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Returns the service name (last path segment) of `spiffe_id`, exactly as hub-api's key broker
+/// derives `<svc>` for the seal context `<svc>|<tenant_id>|<purpose>|<version>`.
+///
+/// Deriving it from the workload's own SPIFFE id (not a compile-time constant) keeps the two
+/// sides in lock-step across a service rename; a mismatch would make every unseal fail.
+///
+/// # Errors
+/// [`SpiffeIdError`] when the id is empty or not `spiffe://penguintech.io/<env>/<service>` with
+/// `[a-z0-9-]` segments (env <= 32, service <= 63 chars).
+pub fn service_name_from_spiffe_id(spiffe_id: &str) -> Result<&str, SpiffeIdError> {
+    let id = spiffe_id.trim();
+    if id.is_empty() {
+        return Err(SpiffeIdError {
+            reason: "SPIFFE id is empty",
+        });
+    }
+    let rest = id.strip_prefix(SPIFFE_PREFIX).ok_or(SpiffeIdError {
+        reason: "SPIFFE id is not in the spiffe://penguintech.io trust domain",
+    })?;
+    let mut parts = rest.split('/');
+    let (Some(env), Some(service), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(SpiffeIdError {
+            reason: "SPIFFE id path must be exactly /<env>/<service>",
+        });
+    };
+    if !valid_spiffe_segment(env, SPIFFE_ENV_MAX) {
+        return Err(SpiffeIdError {
+            reason: "SPIFFE id env segment is malformed",
+        });
+    }
+    if !valid_spiffe_segment(service, SPIFFE_SERVICE_MAX) {
+        return Err(SpiffeIdError {
+            reason: "SPIFFE id service segment is malformed",
+        });
+    }
+    Ok(service)
+}
+
 /// Runtime-selected provider: the hub-api broker (production) or the dev/alpha local KEK
 /// ([`LocalDevDekProvider`]'s hard environment gate). An enum, not a `dyn` object, so it stays
 /// `Clone` and `Send` across `tokio::spawn`ed receiver tasks without boxing futures.
@@ -631,6 +694,18 @@ impl ConfiguredDekProvider {
             HubDekBroker::new(client, service),
             BROKER_TTL_CEILING,
         ))
+    }
+
+    /// Production provider whose seal-context service name is the last segment of this
+    /// workload's own `spiffe_id` (see [`service_name_from_spiffe_id`]).
+    ///
+    /// # Errors
+    /// [`SpiffeIdError`] when `spiffe_id` is missing or malformed -- callers must fail boot.
+    pub fn hub_for_spiffe_id(
+        client: Arc<HubClient>,
+        spiffe_id: &str,
+    ) -> Result<Self, SpiffeIdError> {
+        Ok(Self::hub(client, service_name_from_spiffe_id(spiffe_id)?))
     }
 
     /// Dev/alpha provider.
@@ -1218,6 +1293,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(*ok.dek, test_key(1, 1));
+    }
+
+    #[tokio::test]
+    async fn ctx_service_comes_from_the_spiffe_id_segment() {
+        // hub-api seals for the SVID's last segment; the client must open with the same name,
+        // so a renamed workload (svc-gateway) still unseals without a code change.
+        let fake = FakeKeyService::for_service("svc-gateway");
+        let (client, _m) = hub_client(&fake.serve().await, "spiffe-ctx").await;
+        let provider = ConfiguredDekProvider::hub_for_spiffe_id(
+            client,
+            "spiffe://penguintech.io/alpha/svc-gateway",
+        )
+        .unwrap();
+        let (dek, version) = provider.get_dek(1).await.unwrap();
+        assert_eq!(version, 1);
+        assert_eq!(*dek, test_key(1, 1));
+
+        // The old compile-time name against the same seal fails closed (ctx mismatch).
+        let fake = FakeKeyService::for_service("svc-gateway");
+        let (client, _m) = hub_client(&fake.serve().await, "spiffe-ctx2").await;
+        let provider = ConfiguredDekProvider::hub_for_spiffe_id(
+            client,
+            "spiffe://penguintech.io/alpha/svc-ingest",
+        )
+        .unwrap();
+        assert!(provider.get_dek(1).await.is_err());
+    }
+
+    #[test]
+    fn service_name_is_the_last_spiffe_segment() {
+        for (id, svc) in [
+            ("spiffe://penguintech.io/alpha/svc-ingest", "svc-ingest"),
+            ("spiffe://penguintech.io/prod/svc-gateway", "svc-gateway"),
+            (" spiffe://penguintech.io/beta/svc-process\n", "svc-process"),
+        ] {
+            assert_eq!(service_name_from_spiffe_id(id).unwrap(), svc, "{id}");
+        }
+    }
+
+    #[test]
+    fn malformed_spiffe_ids_are_refused() {
+        let long_env = format!("spiffe://penguintech.io/{}/svc-ingest", "a".repeat(33));
+        let long_svc = format!("spiffe://penguintech.io/alpha/{}", "s".repeat(64));
+        for id in [
+            "",
+            "   ",
+            "svc-ingest",
+            "spiffe://evil.example/alpha/svc-ingest",
+            "spiffe://penguintech.io/svc-ingest",
+            "spiffe://penguintech.io/alpha/svc-ingest/extra",
+            "spiffe://penguintech.io/alpha/",
+            "spiffe://penguintech.io//svc-ingest",
+            "spiffe://penguintech.io/alpha/Svc-Ingest",
+            "spiffe://penguintech.io/alpha/svc_ingest",
+            "https://penguintech.io/alpha/svc-ingest",
+            long_env.as_str(),
+            long_svc.as_str(),
+        ] {
+            assert!(service_name_from_spiffe_id(id).is_err(), "accepted {id:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn hub_for_spiffe_id_refuses_a_malformed_id() {
+        let fake = FakeKeyService::new();
+        let (client, _m) = hub_client(&fake.serve().await, "spiffe-bad").await;
+        let err = ConfiguredDekProvider::hub_for_spiffe_id(client, "")
+            .err()
+            .unwrap();
+        assert_eq!(err.reason, "SPIFFE id is empty");
     }
 
     /// Cross-language vector: `tests/fixtures/stream_dek_python_vector.json` was generated by

@@ -1218,7 +1218,8 @@ async fn try_build_eventsub_state(
 /// accepted dev KEK outside alpha/local.
 ///
 /// # Errors
-/// The broker path needs `HUB_API_GRPC_ENDPOINT` (https) and `SERVICE_JWT_TOKEN_ENDPOINT`;
+/// The broker path needs `HUB_API_GRPC_ENDPOINT` (https), `SERVICE_JWT_TOKEN_ENDPOINT` and a
+/// well-formed `SPIFFE_ID` (its service segment is the seal-context name);
 /// missing/plaintext values are fatal at boot -- a pod that could only ever hold events must
 /// not start looking healthy.
 fn build_dek_provider(
@@ -1268,7 +1269,13 @@ fn build_dek_provider(
         scope = STREAM_DEK_SCOPE,
         "identity-field DEKs are fetched from hub-api's KeyService"
     );
-    Ok(ConfiguredDekProvider::hub(Arc::new(client), SERVICE_NAME))
+    ConfiguredDekProvider::hub_for_spiffe_id(Arc::new(client), &cli.spiffe_id).map_err(|e| {
+        anyhow::anyhow!(
+            "{e}: SPIFFE_ID must be this pod's spiffe://penguintech.io/<env>/<service> id \
+             (the stream-DEK seal context uses its service segment; a mismatch with hub-api \
+             would fail every unseal)"
+        )
+    })
 }
 
 /// Shared keyring-resolution step for [`try_start_twitch_irc`]/
@@ -1487,6 +1494,38 @@ mod tests {
         }
     }
 
+    /// A production-posture config whose broker prerequisites are satisfied except `SPIFFE_ID`.
+    fn broker_config(spiffe_id: &str) -> config::Config {
+        let mut config = base_config();
+        config.cli.hub_api_grpc_endpoint = "https://hub-api:50204".to_string();
+        config.cli.service_jwt_token_endpoint = "https://hub-api:50204".to_string();
+        config.cli.hub_api_grpc_ca_file = String::new();
+        config.cli.spiffe_id = spiffe_id.to_string();
+        config
+    }
+
+    #[tokio::test]
+    async fn dek_provider_boot_fails_loud_without_a_valid_spiffe_id() {
+        for bad in [
+            "",
+            "svc-ingest",
+            "spiffe://penguintech.io/svc-ingest",
+            "spiffe://evil.example/alpha/svc-ingest",
+        ] {
+            let err = build_dek_provider(&broker_config(bad))
+                .err()
+                .unwrap_or_else(|| panic!("booted with SPIFFE_ID {bad:?}"));
+            assert!(err.to_string().contains("SPIFFE_ID"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dek_provider_boots_with_a_valid_spiffe_id() {
+        assert!(
+            build_dek_provider(&broker_config("spiffe://penguintech.io/alpha/svc-gateway")).is_ok()
+        );
+    }
+
     fn test_readiness() -> Arc<ReceiverReadiness> {
         Arc::new(ReceiverReadiness::new())
     }
@@ -1603,7 +1642,11 @@ mod tests {
             None,
         )
         .expect("lazy client never dials");
-        identity_crypto::ConfiguredDekProvider::hub(Arc::new(client), SERVICE_NAME)
+        identity_crypto::ConfiguredDekProvider::hub_for_spiffe_id(
+            Arc::new(client),
+            "spiffe://penguintech.io/alpha/svc-ingest",
+        )
+        .expect("well-formed test SPIFFE id")
     }
 
     #[tokio::test]

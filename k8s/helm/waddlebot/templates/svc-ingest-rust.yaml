@@ -140,6 +140,11 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: SERVICE_JWT_SA_TOKEN_PATH
           value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        # This pod's own SPIFFE id (the same one hub-api authenticates it as). svc-ingest derives
+        # the stream-DEK seal-context service name from its last segment, so a rename stays in
+        # lock-step with hub-api; boot fails loud if it is missing or malformed.
+        - name: SPIFFE_ID
+          value: {{ tpl (index .Values.serviceJwt.identities "svc-ingest").spiffeId . | quote }}
         - name: HUB_API_GRPC_ENDPOINT
           value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}

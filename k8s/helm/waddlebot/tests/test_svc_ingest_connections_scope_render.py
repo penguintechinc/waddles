@@ -226,6 +226,21 @@ def test_enabled_renders_grant_mount_and_env(docs: list[dict[str, Any]]) -> None
     assert {"SERVICE_JWT_TOKEN_ENDPOINT", "SERVICE_JWT_SA_TOKEN_PATH"} <= env_names
 
 
+def test_spiffe_id_env_matches_the_identity_hub_api_authenticates(
+    disabled_docs: list[dict[str, Any]],
+) -> None:
+    """svc-ingest seals/opens stream DEKs under its SPIFFE id's service segment (#1252).
+
+    SPIFFE_ID must be rendered in every environment and equal the svc-ingest service-JWT
+    identity, or every unseal fails (hub-api derives the seal ctx from that identity).
+    """
+    container = _svc_ingest_deployment(disabled_docs)["spec"]["template"]["spec"]["containers"][0]
+    spiffe = [e["value"] for e in container["env"] if e["name"] == "SPIFFE_ID"]
+    assert len(spiffe) == 1, f"expected exactly one SPIFFE_ID env, got {spiffe}"
+    assert spiffe[0] == _identities(disabled_docs)["svc-ingest"]["service_id"]
+    assert spiffe[0] == "spiffe://penguintech.io/alpha/svc-ingest"
+
+
 _RESOLVER_SCOPE = "dataplane:resolve-scope"
 
 
