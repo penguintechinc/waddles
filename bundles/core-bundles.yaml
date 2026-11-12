@@ -1678,6 +1678,21 @@ bundles:
       - tenant_slug: global
         community_id: null
 
+  # Reputation ACCRUAL app (Rust, `stage-next-tools`, `provides: reputation-logic`): default logic
+  # turning platform events into reputation deltas via the reputation service's adjust /
+  # apply_moderation tools. Flag waddles.reputation-accrual defaults OFF.
+  - app_id: waddles.core.app.reputation-accrual
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-next-tools
+    kind: app
+    source_dir: rust/reputation-accrual
+    manifest_path: reputation-accrual.manifest.yaml
+    artifact_path: reputation-accrual.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
   # SoundCloud music SERVICE (Rust `kind: service`, world stage-tools): music.soundcloud.{search,
   # track,playlist.get,resolve}. Metadata + license flags only; OAuth token is a host-side secret ref.
   - app_id: waddles.core.service.music-soundcloud
