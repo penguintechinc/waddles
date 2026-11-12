@@ -26,6 +26,7 @@ spec:
     metadata:
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        waddlebot.io/workload: executor-precompile
         app.kubernetes.io/component: executor-precompile-backfill
     spec:
       {{- include "waddlebot.executorPrecompile.podSpec" (dict "root" . "mode" "backfill") | nindent 6 }}

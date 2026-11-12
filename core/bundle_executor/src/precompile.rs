@@ -431,33 +431,9 @@ impl<S: ArtifactStore> Precompiler<'_, S> {
             }
         }
 
-        let (component, sidecar) = self
-            .store
-            .fetch_bundle(&item.component_key, &item.sidecar_key)
-            .await?;
-        let prefixed = format!("sha256:{digest_hex}");
-        verify_digest(&component, &prefixed)?;
-        verify_artifact_signature(
-            &sidecar,
-            self.bundle_keys,
-            &item.app_id,
-            &item.version,
-            &prefixed,
-        )?;
-
-        let engine = self.engine.clone();
-        let started = Instant::now();
-        let cwasm = tokio::task::spawn_blocking(move || engine.precompile_component(&component))
-            .await
-            .map_err(|e| ExecutorError::Wasmtime(format!("precompile task panicked: {e}")))?
-            .map_err(|e| ExecutorError::Wasmtime(format!("precompile failed: {e}")))?;
-        tracing::info!(
-            app_id = %item.app_id,
-            digest = %digest_hex,
-            bytes = cwasm.len(),
-            ms = started.elapsed().as_millis() as u64,
-            "bundle precompiled"
-        );
+        let cwasm =
+            fetch_verify_compile(self.engine, self.store, self.bundle_keys, item, &digest_hex)
+                .await?;
 
         let sig = self.signer.sign(&digest_hex, self.engine_fp, &cwasm)?;
         self.store.put(&artifact_key, &cwasm).await?;
@@ -526,6 +502,312 @@ impl<S: ArtifactStore> Precompiler<'_, S> {
     }
 }
 
+/// Fetches one bundle, runs the SAME digest + platform-signature checks the
+/// runtime `load` path runs, then compiles it with Cranelift. Shared by the
+/// combined `--precompile` mode and the key-less compile-only stage so both
+/// apply identical admission checks before any untrusted bytes are compiled.
+async fn fetch_verify_compile<S: ArtifactStore>(
+    engine: &Engine,
+    store: &S,
+    bundle_keys: &PlatformPublicKeys,
+    item: &PrecompileItem,
+    digest_hex: &str,
+) -> Result<Vec<u8>, ExecutorError> {
+    let (component, sidecar) = store
+        .fetch_bundle(&item.component_key, &item.sidecar_key)
+        .await?;
+    let prefixed = format!("sha256:{digest_hex}");
+    verify_digest(&component, &prefixed)?;
+    verify_artifact_signature(
+        &sidecar,
+        bundle_keys,
+        &item.app_id,
+        &item.version,
+        &prefixed,
+    )?;
+
+    let engine = engine.clone();
+    let started = Instant::now();
+    let cwasm = tokio::task::spawn_blocking(move || engine.precompile_component(&component))
+        .await
+        .map_err(|e| ExecutorError::Wasmtime(format!("precompile task panicked: {e}")))?
+        .map_err(|e| ExecutorError::Wasmtime(format!("precompile failed: {e}")))?;
+    tracing::info!(
+        app_id = %item.app_id,
+        digest = %digest_hex,
+        bytes = cwasm.len(),
+        ms = started.elapsed().as_millis() as u64,
+        "bundle precompiled"
+    );
+    Ok(cwasm)
+}
+
+/// Name of the compile-stage result document inside the shared work dir.
+pub const COMPILED_INDEX_FILE: &str = "compiled.json";
+
+/// Hard cap on a `.cwasm` the sign stage will read from the (untrusted)
+/// compile stage's output directory.
+pub const MAX_STAGED_CWASM_BYTES: u64 = 512 * 1024 * 1024;
+
+/// One compile-stage outcome, staged for the sign stage.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompiledEntry {
+    pub item: PrecompileItem,
+    pub status: ItemStatus,
+    /// Error text for `Failed`.
+    pub error: Option<String>,
+    /// Lowercase hex sha256 of `<out-dir>/<digest>.cwasm` (`Compiled` only).
+    pub cwasm_sha256: Option<String>,
+}
+
+/// The index the compile stage writes next to the staged `.cwasm` files.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompiledIndex {
+    pub engine_fingerprint: String,
+    pub entries: Vec<CompiledEntry>,
+}
+
+/// File name of a staged artifact: derived ONLY from the validated digest so
+/// a hostile index can never steer the sign stage to another path.
+fn staged_name(digest_hex: &str) -> String {
+    format!("{digest_hex}.cwasm")
+}
+
+fn status_label(s: ItemStatus) -> &'static str {
+    match s {
+        ItemStatus::Compiled => "compiled",
+        ItemStatus::Skipped => "skipped",
+        ItemStatus::Failed => "failed",
+    }
+}
+
+/// Compile stage: holds NO signing key. Admits each item exactly as the
+/// combined mode does, compiles it, and stages `<digest>.cwasm` plus an
+/// index for the sign stage. Item failures are recorded, never fatal.
+pub struct CompileStage<'a, S: ArtifactStore> {
+    pub engine: &'a Engine,
+    pub engine_fp: &'a str,
+    pub store: &'a S,
+    pub bundle_keys: &'a PlatformPublicKeys,
+    /// Public keys of the precompile signer (NOT secret). When present an
+    /// existing valid artifact short-circuits the compile (idempotency).
+    pub existing_keys: Option<&'a PlatformPublicKeys>,
+}
+
+impl<S: ArtifactStore> CompileStage<'_, S> {
+    async fn compile_item(
+        &self,
+        item: &PrecompileItem,
+        out_dir: &Path,
+    ) -> Result<CompiledEntry, ExecutorError> {
+        if self.bundle_keys.is_empty() {
+            return Err(ExecutorError::Config(
+                "BUNDLE_SIGNING_PUBLIC_KEYS must be set: the precompiler never compiles an \
+                 unverified bundle"
+                    .to_string(),
+            ));
+        }
+        let digest_hex = normalize_digest_hex(&item.digest)?;
+        let (artifact_key, sig_key) = object_keys(self.engine_fp, &digest_hex)?;
+        if let Some(keys) = self.existing_keys {
+            if let (Some(sig), Some(art)) = (
+                self.store.get_optional(&sig_key).await?,
+                self.store.get_optional(&artifact_key).await?,
+            ) {
+                if verify_precompiled(&art, &sig, keys, &digest_hex, self.engine_fp).is_ok() {
+                    return Ok(CompiledEntry {
+                        item: item.clone(),
+                        status: ItemStatus::Skipped,
+                        error: None,
+                        cwasm_sha256: None,
+                    });
+                }
+            }
+        }
+        let cwasm =
+            fetch_verify_compile(self.engine, self.store, self.bundle_keys, item, &digest_hex)
+                .await?;
+        std::fs::write(out_dir.join(staged_name(&digest_hex)), &cwasm)?;
+        Ok(CompiledEntry {
+            item: item.clone(),
+            status: ItemStatus::Compiled,
+            error: None,
+            cwasm_sha256: Some(sha256_hex(&cwasm)),
+        })
+    }
+
+    /// Compiles every item sequentially and writes the index.
+    pub async fn run(
+        &self,
+        items: &[PrecompileItem],
+        out_dir: &Path,
+    ) -> Result<CompiledIndex, ExecutorError> {
+        std::fs::create_dir_all(out_dir)?;
+        let meter = opentelemetry::global::meter(crate::metrics::SCOPE);
+        let counter = meter
+            .u64_counter("executor_precompile_compile_items_total")
+            .with_description("Compile-stage outcomes by status")
+            .build();
+        let mut entries = Vec::with_capacity(items.len());
+        for item in items {
+            let entry = match self.compile_item(item, out_dir).await {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::error!(
+                        app_id = %item.app_id,
+                        version = %item.version,
+                        error = %e,
+                        "bundle compile failed"
+                    );
+                    CompiledEntry {
+                        item: item.clone(),
+                        status: ItemStatus::Failed,
+                        error: Some(e.to_string()),
+                        cwasm_sha256: None,
+                    }
+                }
+            };
+            counter.add(
+                1,
+                &[opentelemetry::KeyValue::new(
+                    "status",
+                    status_label(entry.status),
+                )],
+            );
+            entries.push(entry);
+        }
+        let index = CompiledIndex {
+            engine_fingerprint: self.engine_fp.to_string(),
+            entries,
+        };
+        let body = serde_json::to_vec_pretty(&index)
+            .map_err(|e| ExecutorError::Config(format!("cannot serialize compiled index: {e}")))?;
+        std::fs::write(out_dir.join(COMPILED_INDEX_FILE), body)?;
+        Ok(index)
+    }
+}
+
+/// Sign stage: holds the signing key but NEVER compiles or loads a module --
+/// it only hashes staged bytes, signs and uploads. The trusted export
+/// manifest is the denominator; the (untrusted) compile index may only
+/// answer for items the export listed.
+pub struct SignStage<'a, S: ArtifactStore> {
+    pub engine_fp: &'a str,
+    pub store: &'a S,
+    pub signer: &'a PrecompileSigner,
+}
+
+impl<S: ArtifactStore> SignStage<'_, S> {
+    async fn sign_item(
+        &self,
+        item: &PrecompileItem,
+        entry: Option<&CompiledEntry>,
+        in_dir: &Path,
+    ) -> Result<ItemStatus, ExecutorError> {
+        let entry = entry.ok_or_else(|| {
+            ExecutorError::Config("compile stage produced no result for this item".into())
+        })?;
+        match entry.status {
+            ItemStatus::Skipped => return Ok(ItemStatus::Skipped),
+            ItemStatus::Failed => {
+                return Err(ExecutorError::Wasmtime(
+                    entry
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "compile stage reported failure".into()),
+                ))
+            }
+            ItemStatus::Compiled => {}
+        }
+        let digest_hex = normalize_digest_hex(&item.digest)?;
+        let want = entry.cwasm_sha256.as_deref().ok_or_else(|| {
+            ExecutorError::SignatureInvalid("compiled entry has no cwasm_sha256".into())
+        })?;
+        let path = in_dir.join(staged_name(&digest_hex));
+        let len = std::fs::metadata(&path)?.len();
+        if len > MAX_STAGED_CWASM_BYTES {
+            return Err(ExecutorError::Config(format!(
+                "staged artifact is {len} bytes, over the {MAX_STAGED_CWASM_BYTES} cap"
+            )));
+        }
+        let cwasm = std::fs::read(&path)?;
+        if sha256_hex(&cwasm) != want {
+            return Err(ExecutorError::SignatureInvalid(
+                "staged artifact does not match the hash the compile stage recorded".into(),
+            ));
+        }
+        let (artifact_key, sig_key) = object_keys(self.engine_fp, &digest_hex)?;
+        let sig = self.signer.sign(&digest_hex, self.engine_fp, &cwasm)?;
+        self.store.put(&artifact_key, &cwasm).await?;
+        // Signature last: it is the commit marker.
+        self.store.put(&sig_key, &sig).await?;
+        Ok(ItemStatus::Compiled)
+    }
+
+    /// Signs and uploads every manifest item the compile stage produced.
+    pub async fn run(
+        &self,
+        items: &[PrecompileItem],
+        index: &CompiledIndex,
+        in_dir: &Path,
+    ) -> PrecompileReport {
+        let meter = opentelemetry::global::meter(crate::metrics::SCOPE);
+        let counter = meter
+            .u64_counter("executor_precompile_sign_items_total")
+            .with_description("Sign-stage outcomes by status")
+            .build();
+        let fp_ok = index.engine_fingerprint == self.engine_fp;
+        let mut results = Vec::with_capacity(items.len());
+        for item in items {
+            let entry = index.entries.iter().find(|e| {
+                e.item.digest == item.digest
+                    && e.item.app_id == item.app_id
+                    && e.item.version == item.version
+            });
+            let outcome = if fp_ok {
+                self.sign_item(item, entry, in_dir).await
+            } else {
+                Err(ExecutorError::SignatureInvalid(format!(
+                    "compile index fingerprint {:?} differs from this engine's {:?}",
+                    index.engine_fingerprint, self.engine_fp
+                )))
+            };
+            let (status, error) = match outcome {
+                Ok(s) => (s, None),
+                Err(e) => {
+                    tracing::error!(
+                        app_id = %item.app_id,
+                        version = %item.version,
+                        error = %e,
+                        "bundle sign/upload failed"
+                    );
+                    (ItemStatus::Failed, Some(e.to_string()))
+                }
+            };
+            counter.add(
+                1,
+                &[opentelemetry::KeyValue::new("status", status_label(status))],
+            );
+            results.push(ItemResult {
+                app_id: item.app_id.clone(),
+                version: item.version.clone(),
+                digest: item.digest.clone(),
+                status,
+                error,
+            });
+        }
+        let count = |s: ItemStatus| results.iter().filter(|r| r.status == s).count();
+        PrecompileReport {
+            engine_fingerprint: self.engine_fp.to_string(),
+            examined: results.len(),
+            compiled: count(ItemStatus::Compiled),
+            skipped: count(ItemStatus::Skipped),
+            failed: count(ItemStatus::Failed),
+            results,
+        }
+    }
+}
+
 /// CLI for `bundle-executor --precompile ...`. Bucket credentials here are
 /// the PRECOMPILER's (write-scoped to `precompiled/`), not the runtime
 /// executor's read-only ones.
@@ -535,6 +817,30 @@ pub struct PrecompileArgs {
     /// Marker flag selecting this mode.
     #[arg(long)]
     pub precompile: bool,
+
+    /// Key-less compile stage: admit + compile each manifest item and stage
+    /// `<digest>.cwasm` + `compiled.json` into `--out-dir`. Refuses to run
+    /// when a signing key is configured.
+    #[arg(long = "precompile-compile-only", default_value_t = false)]
+    pub compile_only: bool,
+
+    /// Sign stage: hash + sign + upload what `--in-dir` holds. Never compiles
+    /// or loads a module.
+    #[arg(long = "precompile-sign", default_value_t = false)]
+    pub sign_only: bool,
+
+    /// Compile stage output directory (shared emptyDir).
+    #[arg(long, env = "PRECOMPILE_OUT_DIR")]
+    pub out_dir: Option<PathBuf>,
+
+    /// Sign stage input directory (the compile stage's `--out-dir`).
+    #[arg(long, env = "PRECOMPILE_IN_DIR")]
+    pub in_dir: Option<PathBuf>,
+
+    /// Public half of the precompile signing key(s) (JSON key map). Optional
+    /// in the compile stage: enables skipping already-built artifacts.
+    #[arg(long, env = "PRECOMPILE_SIGNING_PUBLIC_KEYS")]
+    pub precompile_signing_public_keys: Option<String>,
 
     /// JSON array of [`PrecompileItem`] (written by hub-api's
     /// `precompile_queue export`).
@@ -644,6 +950,17 @@ pub async fn run_cli(args: PrecompileArgs) -> Result<i32, ExecutorError> {
             "precompile manifest {manifest_path:?} is invalid: {e}"
         ))
     })?;
+    if args.compile_only && args.sign_only {
+        return Err(ExecutorError::Config(
+            "--precompile-compile-only and --precompile-sign are mutually exclusive".into(),
+        ));
+    }
+    if args.compile_only {
+        return run_compile_only(&args, &engine, &engine_fp, &items).await;
+    }
+    if args.sign_only {
+        return run_sign_only(&args, &engine_fp, &items).await;
+    }
 
     let key_file = args
         .signing_key_file
@@ -684,6 +1001,110 @@ pub async fn run_cli(args: PrecompileArgs) -> Result<i32, ExecutorError> {
         skipped = report.skipped,
         failed = report.failed,
         "precompile run finished"
+    );
+    if let Some(path) = &args.report {
+        let body = serde_json::to_vec_pretty(&report)
+            .map_err(|e| ExecutorError::Config(format!("cannot serialize report: {e}")))?;
+        std::fs::write(path, body).map_err(ExecutorError::Io)?;
+    }
+    if report.failed > 0 && !args.report_failures_only {
+        return Ok(1);
+    }
+    Ok(0)
+}
+
+/// Parses the platform bundle-approval keys, refusing an empty set.
+fn parse_bundle_keys(args: &PrecompileArgs) -> Result<PlatformPublicKeys, ExecutorError> {
+    match args.bundle_signing_public_keys.as_deref().map(str::trim) {
+        None | Some("") => Err(ExecutorError::Config(
+            "BUNDLE_SIGNING_PUBLIC_KEYS must be set: the precompiler never compiles an \
+             unverified bundle"
+                .into(),
+        )),
+        Some(raw) => PlatformPublicKeys::from_json(raw),
+    }
+}
+
+/// `--precompile-compile-only`: Cranelift runs here, in a process that must
+/// not hold the signing key (a compiler escape would otherwise reach it).
+async fn run_compile_only(
+    args: &PrecompileArgs,
+    engine: &Engine,
+    engine_fp: &str,
+    items: &[PrecompileItem],
+) -> Result<i32, ExecutorError> {
+    if args.signing_key_file.is_some() || args.signing_key_id.is_some() {
+        return Err(ExecutorError::Config(
+            "the compile stage must not be given a signing key (PRECOMPILE_SIGNING_KEY_*)".into(),
+        ));
+    }
+    let out_dir = args.out_dir.clone().ok_or_else(|| {
+        ExecutorError::Config("--out-dir (PRECOMPILE_OUT_DIR) must be set".into())
+    })?;
+    let bundle_keys = parse_bundle_keys(args)?;
+    let existing = match args
+        .precompile_signing_public_keys
+        .as_deref()
+        .map(str::trim)
+    {
+        None | Some("") => None,
+        Some(raw) => Some(PlatformPublicKeys::from_json(raw)?),
+    };
+    let store = BucketStore::new(args.bucket_config()?, args.max_artifact_bytes);
+    let stage = CompileStage {
+        engine,
+        engine_fp,
+        store: &store,
+        bundle_keys: &bundle_keys,
+        existing_keys: existing.as_ref(),
+    };
+    let index = stage.run(items, &out_dir).await?;
+    let count = |s: ItemStatus| index.entries.iter().filter(|e| e.status == s).count();
+    tracing::info!(
+        engine_fingerprint = %engine_fp,
+        examined = index.entries.len(),
+        compiled = count(ItemStatus::Compiled),
+        skipped = count(ItemStatus::Skipped),
+        failed = count(ItemStatus::Failed),
+        "compile stage finished"
+    );
+    // Item failures travel in the index; the sign stage turns them into the report.
+    Ok(0)
+}
+
+/// `--precompile-sign`: holds the key, never compiles or loads a module.
+async fn run_sign_only(
+    args: &PrecompileArgs,
+    engine_fp: &str,
+    items: &[PrecompileItem],
+) -> Result<i32, ExecutorError> {
+    let in_dir = args
+        .in_dir
+        .clone()
+        .ok_or_else(|| ExecutorError::Config("--in-dir (PRECOMPILE_IN_DIR) must be set".into()))?;
+    let key_file = args
+        .signing_key_file
+        .clone()
+        .ok_or_else(|| ExecutorError::Config("PRECOMPILE_SIGNING_KEY_FILE must be set".into()))?;
+    let key_id = required("PRECOMPILE_SIGNING_KEY_ID", &args.signing_key_id)?;
+    let signer = PrecompileSigner::from_file(&key_id, &key_file)?;
+    let raw = std::fs::read(in_dir.join(COMPILED_INDEX_FILE)).map_err(ExecutorError::Io)?;
+    let index: CompiledIndex = serde_json::from_slice(&raw)
+        .map_err(|e| ExecutorError::Config(format!("compiled index is invalid: {e}")))?;
+    let store = BucketStore::new(args.bucket_config()?, args.max_artifact_bytes);
+    let stage = SignStage {
+        engine_fp,
+        store: &store,
+        signer: &signer,
+    };
+    let report = stage.run(items, &index, &in_dir).await;
+    tracing::info!(
+        engine_fingerprint = %engine_fp,
+        examined = report.examined,
+        compiled = report.compiled,
+        skipped = report.skipped,
+        failed = report.failed,
+        "sign stage finished"
     );
     if let Some(path) = &args.report {
         let body = serde_json::to_vec_pretty(&report)
@@ -897,6 +1318,146 @@ mod tests {
             assert!(pc.precompile_one(&f.item).await.is_err());
         }
         assert_eq!(*f.store.puts.lock().unwrap(), 0);
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("pc-{tag}-{}-{:p}", std::process::id(), &tag));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn compile_stage(f: &Fixture) -> CompileStage<'_, MemStore> {
+        CompileStage {
+            engine: &f.engine,
+            engine_fp: &f.fp,
+            store: &f.store,
+            bundle_keys: &f.bundle_keys,
+            existing_keys: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn split_stages_compile_then_sign_matches_combined_mode() {
+        let f = fixture();
+        let dir = temp_dir("split");
+        let items = std::slice::from_ref(&f.item);
+        let index = compile_stage(&f).run(items, &dir).await.unwrap();
+        assert_eq!(
+            (index.entries.len(), index.entries[0].status),
+            (1, ItemStatus::Compiled)
+        );
+        // Compile stage uploaded nothing and never saw a signer.
+        assert_eq!(*f.store.puts.lock().unwrap(), 0);
+        let sign = SignStage {
+            engine_fp: &f.fp,
+            store: &f.store,
+            signer: &f.signer,
+        };
+        let report = sign.run(items, &index, &dir).await;
+        assert_eq!((report.examined, report.compiled, report.failed), (1, 1, 0));
+        let (ak, sk) = object_keys(&f.fp, &f.item.digest).unwrap();
+        let objects = f.store.objects.lock().unwrap();
+        verify_precompiled(
+            objects.get(&ak).unwrap(),
+            objects.get(&sk).unwrap(),
+            &f.signer.own_key_set(),
+            &f.item.digest,
+            &f.fp,
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn compile_stage_skips_existing_valid_artifact_and_records_failures() {
+        let f = fixture();
+        let dir = temp_dir("skip");
+        precompiler(&f).precompile_one(&f.item).await.unwrap();
+        let keys = f.signer.own_key_set();
+        let stage = CompileStage {
+            existing_keys: Some(&keys),
+            ..compile_stage(&f)
+        };
+        let mut bad = f.item.clone();
+        bad.digest = "b".repeat(64);
+        let index = stage.run(&[f.item.clone(), bad], &dir).await.unwrap();
+        assert_eq!(index.entries[0].status, ItemStatus::Skipped);
+        assert_eq!(index.entries[1].status, ItemStatus::Failed);
+        assert!(index.entries[1].error.is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sign_stage_rejects_tampered_missing_and_foreign_inputs() {
+        let f = fixture();
+        let dir = temp_dir("tamper");
+        let items = std::slice::from_ref(&f.item);
+        let index = compile_stage(&f).run(items, &dir).await.unwrap();
+        let sign = SignStage {
+            engine_fp: &f.fp,
+            store: &f.store,
+            signer: &f.signer,
+        };
+        // Tampered staged bytes: hash no longer matches the index.
+        let staged = dir.join(staged_name(&f.item.digest));
+        let mut bytes = std::fs::read(&staged).unwrap();
+        bytes[0] ^= 1;
+        std::fs::write(&staged, &bytes).unwrap();
+        let r = sign.run(items, &index, &dir).await;
+        assert_eq!((r.examined, r.failed), (1, 1));
+        // Manifest item the index never answered for.
+        let mut other = f.item.clone();
+        other.digest = "c".repeat(64);
+        let r = sign.run(&[other], &index, &dir).await;
+        assert_eq!(r.failed, 1);
+        // Index claiming a different engine fingerprint.
+        let mut stale = index.clone();
+        stale.engine_fingerprint = "f".repeat(64);
+        let r = sign.run(items, &stale, &dir).await;
+        assert_eq!(r.failed, 1);
+        assert_eq!(*f.store.puts.lock().unwrap(), 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sign_stage_carries_compile_failures_into_the_report() {
+        let f = fixture();
+        let dir = temp_dir("carry");
+        let mut bad = f.item.clone();
+        bad.digest = "d".repeat(64);
+        let items = [bad];
+        let index = compile_stage(&f).run(&items, &dir).await.unwrap();
+        let sign = SignStage {
+            engine_fp: &f.fp,
+            store: &f.store,
+            signer: &f.signer,
+        };
+        let r = sign.run(&items, &index, &dir).await;
+        assert_eq!((r.examined, r.failed, r.compiled), (1, 1, 0));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn compile_only_cli_refuses_a_signing_key() {
+        let engine = Engine::new(&engine_config()).unwrap();
+        let args = PrecompileArgs::parse_from([
+            "x",
+            "--precompile-compile-only",
+            "--signing-key-file",
+            "/nope",
+        ]);
+        let err = run_compile_only(&args, &engine, "0", &[])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("must not be given a signing key"));
+    }
+
+    #[test]
+    fn stage_flags_parse_and_default_off() {
+        let a = PrecompileArgs::parse_from(["x", "--precompile"]);
+        assert!(a.precompile && !a.compile_only && !a.sign_only);
+        let a = PrecompileArgs::parse_from(["x", "--precompile-sign", "--in-dir", "/w"]);
+        assert!(a.sign_only && !a.precompile && a.in_dir == Some(PathBuf::from("/w")));
     }
 
     #[test]
