@@ -173,6 +173,13 @@ check, and vice versa (`critical-rules.md` Feature Flags & License Tiers).
   and must be denied. `scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness`
   (CI: `bundle-hygiene`) fails the build on the pattern, and
   `scripts/ci/tests/test_bundle_badge_gate.py` proves every bundle's gate behaviourally.
+- **`is_mod` / `is_broadcaster` are DISPLAY-ONLY, never authorization.** They are platform chat
+  badges a connector copies into the payload; never gate a ban, timeout, config change or any
+  privileged action on them. Use `await waddle_sdk.caller_can(SCOPE_BAN)` (also `SCOPE_TIMEOUT`,
+  `SCOPE_MODERATE`, `SCOPE_ADMIN`, `SCOPE_OWNER`, `SCOPE_MEMBER`): the host resolves the actor's
+  community role itself and answers from it. `stage-next` only; fails closed (`False`) on a bad
+  scope or any host error. Test with `waddle_sdk.testing.install_fake_authz_host(monkeypatch,
+  role="moderator")` (or an explicit `scopes={...}`; `unavailable=True` simulates an outage).
 - **One table per bundle means `kv` carries the rest.** The structured `db` interface gives a
   bundle exactly one app-owned table with no column-equality filter; model anything relational
   as one row-per-entity table plus `community_kv` for the id counter, the `id -> row_id` index

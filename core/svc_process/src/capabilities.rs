@@ -1164,6 +1164,82 @@ impl<K: KvBackend> StageCapabilities<K> {
         Ok(serde_json::json!({ "user": user.to_string() }))
     }
 
+    /// `authz.caller_can` (`wit/waddle-bundle/stage.wit` `interface authz`),
+    /// carried as `capability = db`, `op = "authz.caller_can"`, args
+    /// `{"scope": s}`, result `{"allowed": bool}`. No gate grant is needed: it
+    /// reveals one boolean about the caller to the caller's own bundle.
+    ///
+    /// Order: (1) op + scope shape (`invalid_args`); (2) wiring/flag state
+    /// (`not_implemented` / `feature_disabled` -> the executor's
+    /// `unavailable`, fail-loud); (3) the verdict:
+    /// [`identity::resolve_actor_scopes`] + `ActorContext::has_scope`. A
+    /// non-community activation, no actor, an unlinked/inactive member or an
+    /// unknown role all answer `allowed: false`; only a directory that cannot
+    /// answer is an error. Nothing in `args` can name whose role is checked.
+    async fn handle_authz(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        if call.op != "authz.caller_can" {
+            return Err(denied(
+                "unknown_op",
+                format!("authz op {:?} not supported", call.op),
+            ));
+        }
+        let scope_arg = call
+            .args
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .filter(|s| bundle_tool_call::is_valid_authz_scope(s))
+            .ok_or_else(|| {
+                denied(
+                    "invalid_args",
+                    "scope must be 1..=64 bytes matching ^[a-z][a-z0-9_.]*:[a-z][a-z0-9_.]*$",
+                )
+            })?;
+        let Some(wiring) = &self.identity else {
+            return Err(denied(
+                "not_implemented",
+                "authz capability is not provisioned in this deployment \
+                 (no membership directory configured for the stage)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "authz capability is disabled (waddles.bundle-identity-capability is OFF)",
+            ));
+        }
+        let allowed = self.authz_verdict(wiring, scope_arg).await?;
+        Ok(serde_json::json!({ "allowed": allowed }))
+    }
+
+    /// The verdict half of [`Self::handle_authz`]: `Ok(false)` for every
+    /// "no such authority" state (non-community activation, no actor,
+    /// unlinked/inactive member, unknown role/scope); `Err` only when the
+    /// directory cannot answer.
+    async fn authz_verdict(
+        &self,
+        wiring: &IdentityWiring,
+        scope_arg: &str,
+    ) -> Result<bool, HostResultError> {
+        if self.tenant_id == 0 || self.community_id == 0 || self.community.is_none() {
+            return Ok(false);
+        }
+        let Some(invocation) = &self.invocation_identity else {
+            return Ok(false);
+        };
+        let scope = IdentityScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+        };
+        match identity::resolve_actor_scopes(wiring, invocation, scope).await {
+            Ok(actor) => Ok(actor.has_scope(scope_arg)),
+            Err(IdentityError::NotLinked | IdentityError::NotAMember) => Ok(false),
+            Err(e) => Err(identity_error_to_host(e)),
+        }
+    }
+
     /// `ai.generate` (`wit/waddle-bundle/stage.wit` `interface ai`), carried as
     /// `capability = db`, `op = "ai.generate"` (`penguin-bundle-host`'s closed
     /// `CapabilityKind` has no ai member; see the WIT doc).
@@ -4495,6 +4571,11 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             CapabilityKind::Db if call.op.starts_with("identity.") => {
                 self.handle_identity(&call).await
             }
+            // `authz.caller_can`: always granted (no gate permission), own
+            // handler, never the `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("authz.") => {
+                self.handle_authz(&call).await
+            }
             // `ai.*` ops likewise: own gate permission (`ai.generate`), own
             // handler, never the `storage.tables` path.
             CapabilityKind::Db if call.op.starts_with("ai.") => self.handle_ai(&call).await,
@@ -6345,6 +6426,10 @@ mod economy_tests;
 #[cfg(test)]
 #[path = "capabilities_identity_tests.rs"]
 mod identity_tests;
+
+#[cfg(test)]
+#[path = "capabilities_authz_tests.rs"]
+mod authz_tests;
 
 #[cfg(test)]
 #[path = "capabilities_ai_tests.rs"]

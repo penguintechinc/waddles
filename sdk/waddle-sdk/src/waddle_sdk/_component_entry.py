@@ -136,6 +136,7 @@ for _wit_capability in (
     "reputation",  # stage-next only (issue #726); absent from a stage-1.0.0 world, hence the guard
     "economy",  # stage-next only (issue #714); same guard
     "identity",  # stage-next only (actor/mention -> community user_uuid); same guard
+    "authz",  # stage-next only (caller_can scope check); same guard
     "ai",  # stage-next only (ai.generate, host-mediated model call); same guard
     "platform_table",  # stage-next only (allowlisted platform-table access); same guard
     "tool",  # stage-tools only (bundle-to-bundle tool invoke); same guard

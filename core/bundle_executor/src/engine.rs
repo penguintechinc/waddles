@@ -98,6 +98,7 @@ pub mod stage_v2_world {
             "waddle:bundle/reputation@1.0.0": super::stage_next_world::waddle::bundle::reputation,
             "waddle:bundle/economy@1.0.0": super::stage_next_world::waddle::bundle::economy,
             "waddle:bundle/identity@1.0.0": super::stage_next_world::waddle::bundle::identity,
+            "waddle:bundle/authz@1.0.0": super::stage_next_world::waddle::bundle::authz,
             "waddle:bundle/platform-table@1.0.0":
                 super::stage_next_world::waddle::bundle::platform_table,
             "waddle:bundle/object-storage@1.0.0":
@@ -150,6 +151,7 @@ pub mod stage_tools_world {
             "waddle:bundle/reputation@1.0.0": super::stage_next_world::waddle::bundle::reputation,
             "waddle:bundle/economy@1.0.0": super::stage_next_world::waddle::bundle::economy,
             "waddle:bundle/identity@1.0.0": super::stage_next_world::waddle::bundle::identity,
+            "waddle:bundle/authz@1.0.0": super::stage_next_world::waddle::bundle::authz,
             "waddle:bundle/platform-table@1.0.0":
                 super::stage_next_world::waddle::bundle::platform_table,
             "waddle:bundle/object-storage@1.0.0":
@@ -194,13 +196,14 @@ impl HasData for HasStageNextState {
 /// capability gate -- linking is reachability, never authority.
 fn link_stage_next_imports(linker: &mut Linker<ExecState>) -> Result<(), ExecutorError> {
     use stage_next_world::waddle::bundle::{
-        ai, db_v2, economy, identity, kv_v2, media, metrics, object_storage, overlay,
+        ai, authz, db_v2, economy, identity, kv_v2, media, metrics, object_storage, overlay,
         platform_table, reputation,
     };
     overlay::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     reputation::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     economy::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     identity::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
+    authz::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     ai::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     media::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     platform_table::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;

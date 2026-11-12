@@ -54,9 +54,9 @@ update). Keys use `.`, never `:` (gh-631). Running a command costs 2 kv ops (get
 unknown `!token` costs 1 get (command_prefix is not an enforced routing filter, so every `!`
 message reaches `transform`); text with no leading `!` costs 0.
 
-Permission model: `add`/`edit`/`del` are broadcaster/moderator only and FAIL CLOSED -- strictly
-`is_mod is True or is_broadcaster is True` (a string `"false"` badge is not a moderator; neither
-badge present, as on Discord today, is a denial). `list` and running a command are open to anyone.
+Permission model: `add`/`edit`/`del` require `await caller_can(SCOPE_ADMIN)` (host-resolved community role) and
+FAIL CLOSED (host unavailable = denied). The `is_mod`/`is_broadcaster` platform badges are
+display-only and never consulted. `list` and running a command are open to anyone.
 
 PII-free: no actor identity is read into state or logs. `event.actor` is used transiently to
 render `$(user)` and is never stored; kv keys hold only mod-chosen command names; logs carry only
@@ -78,7 +78,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
-from waddle_sdk import identity, kv, log, relay
+from waddle_sdk import SCOPE_ADMIN, caller_can, identity, kv, log, relay
 from waddle_sdk.command import (
     CommandSpec,
     CommandUsageError,
@@ -165,7 +165,7 @@ _INT_RE = re.compile(r"^-?[0-9]{1,10}$")
 _USAGE = "Usage: !cc add <name> <response> | !cc edit <name> <response> | !cc del <name> | !cc list"
 _VARIABLES_HELP = "Variables: $(user) $(target) $(count) $(random <min> <max>)"
 _VARIABLES_REJECTED = f"That response uses an unsupported variable. {_VARIABLES_HELP}"
-_PERMISSION_DENIED = "Only the broadcaster or a moderator can change custom commands."
+_PERMISSION_DENIED = "Only a community admin can change custom commands."
 _BUSY = "Another change is in progress - please try again."
 _UNAVAILABLE = "Custom command storage is unavailable right now - please try again."
 
@@ -253,14 +253,6 @@ async def _load_names() -> list[str]:
 async def _save_names(names: list[str]) -> None:
     """Persist the command-name index as a sorted, de-duplicated JSON array."""
     await _kv_set(NAMES_KEY, json.dumps(sorted(set(names))).encode("utf-8"))
-
-
-def _is_privileged(event: PlatformEvent) -> bool:
-    """Broadcaster/moderator check -- strict `is True`, fails CLOSED when no badge is present."""
-    return (
-        event.payload.get("is_mod") is True
-        or event.payload.get("is_broadcaster") is True
-    )
 
 
 def _normalize_name(raw: str) -> str:
@@ -546,7 +538,7 @@ async def _handle_management(rest: str, event: PlatformEvent) -> str:
     if option == "list":
         return await _handle_list()
     if option in ("add", "set", "delete", "remove"):
-        if not _is_privileged(event):
+        if not await caller_can(SCOPE_ADMIN):
             log.info("customcommand.permission_denied", op=option)
             return _PERMISSION_DENIED
         if option == "add":

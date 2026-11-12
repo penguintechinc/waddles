@@ -5,7 +5,7 @@
         build-superpenguin-roll-bundle test-superpenguin-roll-e2e test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
+        check-no-stubs check-bundle-hygiene check-platform-flag-authz generate-bundle-signing-key test-ollama-realpath \
         test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
@@ -90,11 +90,18 @@ check-no-stubs:
 # (componentize-py freezes its seed into the snapshot; use `random.SystemRandom()`).
 # Each prints the count it examined and exits non-zero on a hit (or on zero
 # examined). Needs PyYAML for the manifest check and pytest for the AI-lead gate.
+# Bundles must authorize via host-resolved `caller_can(scope)`, never per-message platform
+# badge flags (is_mod/is_broadcaster). Fails on non-allowlisted reads, stale/unreferenced
+# allowlist entries, or zero files scanned. Self-test: scripts/ci/tests/test_check_platform_flag_authz.py.
+check-platform-flag-authz:
+	@python3 scripts/ci/check_platform_flag_authz.py
+
 check-bundle-hygiene:
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check log-pii
 	@python3 scripts/ci/check-bundle-manifest-permissions.py
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check silent-except
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness
+	@$(MAKE) --no-print-directory check-platform-flag-authz
 	@python3 -m pytest scripts/ci/tests/test_ai_output_lead_gate.py -q -p no:cacheprovider
 	@python3 -m pytest scripts/ci/tests/test_bundle_wit_world.py -q -p no:cacheprovider
 	@python3 -m pytest scripts/ci/tests/test_bundle_stage_gate.py -q -p no:cacheprovider

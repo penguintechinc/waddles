@@ -1017,6 +1017,49 @@ interface %flags {
   tier: func() -> string;
 }
 
+/// Host-resolved authorization of the TRIGGERING actor (issue #1279 lineage;
+/// v3.0 foundation). Additive, `stage-next`/`stage-v2`-only: `world stage`
+/// (1.0.0) never imports this.
+///
+/// `caller-can(scope)` answers "does the member whose event triggered this
+/// invocation hold OIDC scope `scope` in THIS invocation's community?". The
+/// host resolves the actor from the MAC-verified envelope's platform account,
+/// reads the member's WADDLES community role from the membership directory
+/// (seeded + lazy-loaded per invocation, never invalidate-only) and expands it
+/// through the FIXED host-side role -> scope map
+/// (`bundle_tool_call::scopes_for_role`). The bundle never names whose role is
+/// checked and never sees the role itself.
+///
+/// **Platform badges are NOT authorization.** The per-message `is_mod` /
+/// `is_broadcaster` payload flags describe one channel on one platform; a
+/// community spans N:M channels/servers, so a single platform moderator must
+/// never be able to change community-wide state. Those flags are DISPLAY-ONLY.
+///
+/// **Fail closed.** No actor, an unlinked/inactive member, an unknown role or
+/// an unknown scope all answer `ok(false)`. Only a host that cannot answer at
+/// all (not wired, hub-api unreachable) returns `err`; SDK wrappers map that
+/// to `false` too.
+///
+/// Scopes (community layer): `community:member`, `community:vip`,
+/// `community:moderate`, `community:ban`, `community:timeout`,
+/// `community:admin`, `community:owner`. Default map: moderator -> member,
+/// moderate, ban, timeout; admin/owner -> all; member -> member only.
+///
+/// Wire note: carried as `capability = db`, `op = "authz.caller_can"`,
+/// args `{"scope": ..}`, result `{"allowed": bool}`. Capability: always
+/// granted (it reveals one boolean about the caller to the caller's bundle).
+interface authz {
+  variant error {
+    /// The host cannot answer (capability not wired, directory unreachable).
+    unavailable(string),
+    /// Malformed scope argument (empty / oversized / bad charset).
+    invalid(string),
+    backend(string),
+  }
+
+  caller-can: func(scope: string) -> result<bool, error>;
+}
+
 /// Sanitized, levelled logging into the stage's OTel pipeline.
 /// Capability: always granted.
 interface log {
@@ -1152,6 +1195,7 @@ world stage-next {
   import object-storage;
   import kv-v2;
   import db-v2;
+  import authz;
 
   export process-stage;
   export action-stage;
@@ -1264,6 +1308,7 @@ world stage-v2 {
   import object-storage;
   import kv-v2;
   import db-v2;
+  import authz;
 
   export process-stage;
   export action-stage-v2;

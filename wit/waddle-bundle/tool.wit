@@ -62,6 +62,7 @@ world stage-tools {
   import db-v2;
   import tool;
   import gameserver-net;
+  import authz;
 
   export tool-provider;
 }
