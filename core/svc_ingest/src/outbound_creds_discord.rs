@@ -519,8 +519,7 @@ mod tests {
         use connection_resolver::{
             ConnectionKind, ConnectionResolver, ResolverConfig, ResolverMetrics,
         };
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::MockServer;
 
         use super::super::*;
         use super::TOKEN;

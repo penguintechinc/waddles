@@ -451,9 +451,6 @@ pub async fn publish_event_scoped<A: EventAppender, M: SpineMetrics + ?Sized, D:
     .await
 }
 
-/// The shared stamping/encryption/append body. `resolved: Some` publishes a
-/// schema-v3 envelope under the resolved scope; `None` the v2 static-`scope` one.
-#[allow(clippy::too_many_arguments)]
 /// `true` for event types reserved to the platform's own internal emitters
 /// (`reputation.*`, `internal.*`): ingest, which only carries external /
 /// connector input, must never publish one -- a system-originated event type
@@ -463,6 +460,11 @@ pub fn is_reserved_event_type(event_type: &str) -> bool {
     event_type.starts_with("reputation.") || event_type.starts_with("internal.")
 }
 
+/// The shared stamping/encryption/append body. `resolved: Some` publishes a
+/// schema-v3 envelope under the resolved scope; `None` the v2 static-`scope` one.
+// Justified: private shared core of the two public publish entry points; every argument is a
+// distinct injected dependency, and bundling them would only re-split at both call sites.
+#[allow(clippy::too_many_arguments)]
 async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProvider>(
     resolved: Option<ResolvedScope>,
     appender: &A,
