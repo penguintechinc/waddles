@@ -219,6 +219,8 @@ RULES: tuple[Rule, ...] = (
     core("reputation_events"),
     core("reputation_tenant"),
     core("bundle_reputation_scores"),
+    core("bundle_reputation_tenant_scores"),
+    core("bundle_reputation_soft_bans"),
     core("bundle_reputation_adjustments"),
     core("ephemeral_pseudonyms"),
     # --- retained: Art. 5(2) / 17(3)(e) evidence -------------------------------------------------

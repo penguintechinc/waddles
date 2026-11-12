@@ -4,15 +4,8 @@ on:
   push:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
     paths:
-      - 'processing/router_module/**'
-      - 'trigger/receiver/**'
-      - 'action/interactive/**'
-      - 'action/pushing/**'
-      - 'action/security/**'
-      - 'core/**'
       - 'admin/hub_module/**'
-      - 'admin/marketplace_module/**'
-      - 'services/**'
+      - 'hub_api/**'
       - 'libs/flask_core/**'
       - 'migrations/**'
       - 'docker-compose.yml'
@@ -125,20 +118,7 @@ jobs:
     name: Detect Changed Modules
     runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
     outputs:
-      router: ${{ steps.changes.outputs.router }}
-      marketplace: ${{ steps.changes.outputs.marketplace }}
       hub: ${{ steps.changes.outputs.hub }}
-      trigger-streaming: ${{ steps.changes.outputs.trigger-streaming }}
-      trigger-webhooks: ${{ steps.changes.outputs.trigger-webhooks }}
-      interactive-social: ${{ steps.changes.outputs.interactive-social }}
-      interactive-gaming: ${{ steps.changes.outputs.interactive-gaming }}
-      interactive-media: ${{ steps.changes.outputs.interactive-media }}
-      interactive-productivity: ${{ steps.changes.outputs.interactive-productivity }}
-      core-data: ${{ steps.changes.outputs.core-data }}
-      core-identity: ${{ steps.changes.outputs.core-identity }}
-      core-community: ${{ steps.changes.outputs.core-community }}
-      action-platforms: ${{ steps.changes.outputs.action-platforms }}
-      action-serverless: ${{ steps.changes.outputs.action-serverless }}
       libs: ${{ steps.changes.outputs.libs }}
       migrations: ${{ steps.changes.outputs.migrations }}
       # Shared by build-platform and build-pr (their include lists are
@@ -158,89 +138,9 @@ jobs:
         id: changes
         with:
           filters: |
-            router:
-              - 'processing/router_module/**'
-              - 'libs/**'
-            marketplace:
-              - 'admin/marketplace_module/**'
-              - 'libs/**'
             hub:
               - 'admin/hub_module/**'
-              - 'libs/**'
-            trigger-streaming:
-              - 'services/trigger-streaming/**'
-              - 'trigger/receiver/twitch_module/**'
-              - 'trigger/receiver/youtube_live_module/**'
-              - 'trigger/receiver/kick_module_flask/**'
-              - 'libs/**'
-            trigger-webhooks:
-              - 'services/trigger-webhooks/**'
-              - 'trigger/receiver/slack_module/**'
-              - 'trigger/receiver/teams_module/**'
-              - 'trigger/receiver/mattermost_module/**'
-              - 'trigger/receiver/googlechat_module/**'
-              - 'libs/**'
-            interactive-social:
-              - 'services/interactive-social/**'
-              - 'action/interactive/alias_interaction_module/**'
-              - 'action/interactive/shoutout_interaction_module/**'
-              - 'action/interactive/presence_module/**'
-              - 'action/interactive/quote_interaction_module/**'
-              - 'libs/**'
-            interactive-gaming:
-              - 'services/interactive-gaming/**'
-              - 'action/interactive/lfg_interaction_module/**'
-              - 'action/interactive/inventory_interaction_module/**'
-              - 'action/interactive/server_manager_interaction_module/**'
-              - 'action/interactive/server_status_interaction_module/**'
-              - 'libs/**'
-            interactive-media:
-              - 'services/interactive-media/**'
-              - 'action/interactive/clip_interaction_module/**'
-              - 'action/interactive/spotify_interaction_module/**'
-              - 'action/interactive/youtube_music_interaction_module/**'
-              - 'libs/**'
-            interactive-productivity:
-              - 'services/interactive-productivity/**'
-              - 'action/interactive/calendar_interaction_module/**'
-              - 'action/interactive/memories_interaction_module/**'
-              - 'action/interactive/translate_interaction_module/**'
-              - 'libs/**'
-            core-data:
-              - 'services/core-data/**'
-              - 'core/analytics_core_module/**'
-              - 'core/engagement_module/**'
-              - 'core/reputation_module/**'
-              - 'core/labels_core_module/**'
-              - 'libs/**'
-            core-identity:
-              - 'services/core-identity/**'
-              - 'core/identity_core_module/**'
-              - 'core/security_core_module/**'
-              - 'core/credential_manager_module/**'
-              - 'libs/**'
-            core-community:
-              - 'services/core-community/**'
-              - 'core/community_module/**'
-              - 'core/workflow_core_module/**'
-              - 'core/browser_source_core_module/**'
-              - 'core/video_proxy_module/**'
-              - 'core/module_rtc/**'
-              - 'libs/**'
-            action-platforms:
-              - 'services/action-platforms/**'
-              - 'action/pushing/slack_action_module/**'
-              - 'action/pushing/teams_action_module/**'
-              - 'action/pushing/mattermost_action_module/**'
-              - 'action/pushing/googlechat_action_module/**'
-              - 'action/pushing/twitch_action_module/**'
-              - 'action/pushing/youtube_action_module/**'
-              - 'libs/**'
-            action-serverless:
-              - 'services/action-serverless/**'
-              - 'action/pushing/lambda_action_module/**'
-              - 'action/pushing/openwhisk_action_module/**'
-              - 'action/pushing/gcp_functions_action_module/**'
+              - 'hub_api/**'
               - 'libs/**'
             libs:
               - 'libs/**'
@@ -260,21 +160,8 @@ jobs:
         # (env, top of file) exactly like the single-module build-*.yml
         # workflows. Docs: https://docs.github.com/actions/how-tos/write-workflows/choose-what-workflows-do/run-variations-of-jobs-in-a-workflow#defining-a-matrix-dynamically
         env:
-          ROUTER: ${{ steps.changes.outputs.router }}
-          MARKETPLACE: ${{ steps.changes.outputs.marketplace }}
           MIGRATIONS: ${{ steps.changes.outputs.migrations }}
-          CORE_DATA: ${{ steps.changes.outputs.core-data }}
-          CORE_IDENTITY: ${{ steps.changes.outputs.core-identity }}
-          CORE_COMMUNITY: ${{ steps.changes.outputs.core-community }}
-          TRIGGER_STREAMING: ${{ steps.changes.outputs.trigger-streaming }}
-          TRIGGER_WEBHOOKS: ${{ steps.changes.outputs.trigger-webhooks }}
-          INTERACTIVE_SOCIAL: ${{ steps.changes.outputs.interactive-social }}
-          INTERACTIVE_GAMING: ${{ steps.changes.outputs.interactive-gaming }}
-          INTERACTIVE_MEDIA: ${{ steps.changes.outputs.interactive-media }}
-          INTERACTIVE_PRODUCTIVITY: ${{ steps.changes.outputs.interactive-productivity }}
           HUB: ${{ steps.changes.outputs.hub }}
-          ACTION_PLATFORMS: ${{ steps.changes.outputs.action-platforms }}
-          ACTION_SERVERLESS: ${{ steps.changes.outputs.action-serverless }}
           LIBS: ${{ steps.changes.outputs.libs }}
           # workflow_dispatch and release (gamma/prod) must still force-build every module -- the
           # unconditional-emit filter below (gh#ci-mergegroup-optimization)
@@ -293,22 +180,9 @@ jobs:
 
           # name|changed-flag-var|dockerfile|port
           MODULES=(
-            "router|$ROUTER|./processing/router_module/Dockerfile|0"
-            "marketplace|$MARKETPLACE|./admin/marketplace_module/Dockerfile|0"
             "migrations|$MIGRATIONS|./migrations/Dockerfile|0"
-            "core-data|$CORE_DATA|./services/core-data/Dockerfile|0"
-            "core-identity|$CORE_IDENTITY|./services/core-identity/Dockerfile|0"
-            "core-community|$CORE_COMMUNITY|./services/core-community/Dockerfile|0"
-            "trigger-streaming|$TRIGGER_STREAMING|./services/trigger-streaming/Dockerfile|0"
-            "trigger-webhooks|$TRIGGER_WEBHOOKS|./services/trigger-webhooks/Dockerfile|0"
-            "interactive-social|$INTERACTIVE_SOCIAL|./services/interactive-social/Dockerfile|0"
-            "interactive-gaming|$INTERACTIVE_GAMING|./services/interactive-gaming/Dockerfile|0"
-            "interactive-media|$INTERACTIVE_MEDIA|./services/interactive-media/Dockerfile|0"
-            "interactive-productivity|$INTERACTIVE_PRODUCTIVITY|./services/interactive-productivity/Dockerfile|0"
-            "hub-api|$HUB|./admin/hub_module/Dockerfile|8060"
+            "hub-api|$HUB|./hub_api/Dockerfile|8060"
             "hub-webui|$HUB|./admin/hub_module/Dockerfile.webui|8080"
-            "action-platforms|$ACTION_PLATFORMS|./services/action-platforms/Dockerfile|0"
-            "action-serverless|$ACTION_SERVERLESS|./services/action-serverless/Dockerfile|0"
           )
 
           ENTRIES="[]"
@@ -370,21 +244,8 @@ jobs:
       (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
       github.event_name != 'pull_request' &&
       github.event_name != 'merge_group' &&
-      (needs.detect-changes.outputs.router == 'true' ||
-      needs.detect-changes.outputs.marketplace == 'true' ||
-      needs.detect-changes.outputs.migrations == 'true' ||
-      needs.detect-changes.outputs.core-data == 'true' ||
-      needs.detect-changes.outputs.core-identity == 'true' ||
-      needs.detect-changes.outputs.core-community == 'true' ||
-      needs.detect-changes.outputs.trigger-streaming == 'true' ||
-      needs.detect-changes.outputs.trigger-webhooks == 'true' ||
-      needs.detect-changes.outputs.interactive-social == 'true' ||
-      needs.detect-changes.outputs.interactive-gaming == 'true' ||
-      needs.detect-changes.outputs.interactive-media == 'true' ||
-      needs.detect-changes.outputs.interactive-productivity == 'true' ||
+      (needs.detect-changes.outputs.migrations == 'true' ||
       needs.detect-changes.outputs.hub == 'true' ||
-      needs.detect-changes.outputs.action-platforms == 'true' ||
-      needs.detect-changes.outputs.action-serverless == 'true' ||
       needs.detect-changes.outputs.libs == 'true' ||
       (github.event_name == 'workflow_dispatch' || github.event_name == 'release'))
     strategy:
@@ -518,21 +379,8 @@ jobs:
       (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
       (github.event_name == 'pull_request' ||
       github.event_name == 'merge_group') &&
-      (needs.detect-changes.outputs.router == 'true' ||
-      needs.detect-changes.outputs.marketplace == 'true' ||
-      needs.detect-changes.outputs.migrations == 'true' ||
-      needs.detect-changes.outputs.core-data == 'true' ||
-      needs.detect-changes.outputs.core-identity == 'true' ||
-      needs.detect-changes.outputs.core-community == 'true' ||
-      needs.detect-changes.outputs.trigger-streaming == 'true' ||
-      needs.detect-changes.outputs.trigger-webhooks == 'true' ||
-      needs.detect-changes.outputs.interactive-social == 'true' ||
-      needs.detect-changes.outputs.interactive-gaming == 'true' ||
-      needs.detect-changes.outputs.interactive-media == 'true' ||
-      needs.detect-changes.outputs.interactive-productivity == 'true' ||
+      (needs.detect-changes.outputs.migrations == 'true' ||
       needs.detect-changes.outputs.hub == 'true' ||
-      needs.detect-changes.outputs.action-platforms == 'true' ||
-      needs.detect-changes.outputs.action-serverless == 'true' ||
       needs.detect-changes.outputs.libs == 'true' ||
       (github.event_name == 'workflow_dispatch' || github.event_name == 'release'))
     strategy:
@@ -671,59 +519,20 @@ jobs:
       github.event_name != 'pull_request' &&
       github.event_name != 'merge_group' &&
       needs.determine-version.outputs.multi_arch == 'true' &&
-      (needs.detect-changes.outputs.router == 'true' ||
-      needs.detect-changes.outputs.marketplace == 'true' ||
-      needs.detect-changes.outputs.migrations == 'true' ||
-      needs.detect-changes.outputs.core-data == 'true' ||
-      needs.detect-changes.outputs.core-identity == 'true' ||
-      needs.detect-changes.outputs.core-community == 'true' ||
-      needs.detect-changes.outputs.trigger-streaming == 'true' ||
-      needs.detect-changes.outputs.trigger-webhooks == 'true' ||
-      needs.detect-changes.outputs.interactive-social == 'true' ||
-      needs.detect-changes.outputs.interactive-gaming == 'true' ||
-      needs.detect-changes.outputs.interactive-media == 'true' ||
-      needs.detect-changes.outputs.interactive-productivity == 'true' ||
+      (needs.detect-changes.outputs.migrations == 'true' ||
       needs.detect-changes.outputs.hub == 'true' ||
-      needs.detect-changes.outputs.action-platforms == 'true' ||
-      needs.detect-changes.outputs.action-serverless == 'true' ||
       needs.detect-changes.outputs.libs == 'true' ||
       (github.event_name == 'workflow_dispatch' || github.event_name == 'release'))
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: router
-            condition: ${{ needs.detect-changes.outputs.router == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - name: marketplace
-            condition: ${{ needs.detect-changes.outputs.marketplace == 'true' || needs.detect-changes.outputs.libs == 'true' }}
           - name: migrations
             condition: ${{ needs.detect-changes.outputs.migrations == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - name: core-data
-            condition: ${{ needs.detect-changes.outputs.core-data == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - name: core-identity
-            condition: ${{ needs.detect-changes.outputs.core-identity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - name: core-community
-            condition: ${{ needs.detect-changes.outputs.core-community == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - name: trigger-streaming
-            condition: ${{ needs.detect-changes.outputs.trigger-streaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - name: trigger-webhooks
-            condition: ${{ needs.detect-changes.outputs.trigger-webhooks == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - name: interactive-social
-            condition: ${{ needs.detect-changes.outputs.interactive-social == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - name: interactive-gaming
-            condition: ${{ needs.detect-changes.outputs.interactive-gaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - name: interactive-media
-            condition: ${{ needs.detect-changes.outputs.interactive-media == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - name: interactive-productivity
-            condition: ${{ needs.detect-changes.outputs.interactive-productivity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
           - name: hub-api
             condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
           - name: hub-webui
             condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - name: action-platforms
-            condition: ${{ needs.detect-changes.outputs.action-platforms == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - name: action-serverless
-            condition: ${{ needs.detect-changes.outputs.action-serverless == 'true' || needs.detect-changes.outputs.libs == 'true' }}
     steps:
       - name: Log in to Container Registry
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
@@ -808,36 +617,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - image: router
-            condition: ${{ needs.detect-changes.outputs.router == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: marketplace
-            condition: ${{ needs.detect-changes.outputs.marketplace == 'true' || needs.detect-changes.outputs.libs == 'true' }}
           - image: hub-api
             condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
           - image: hub-webui
             condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: trigger-streaming
-            condition: ${{ needs.detect-changes.outputs.trigger-streaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: trigger-webhooks
-            condition: ${{ needs.detect-changes.outputs.trigger-webhooks == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: interactive-social
-            condition: ${{ needs.detect-changes.outputs.interactive-social == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: interactive-gaming
-            condition: ${{ needs.detect-changes.outputs.interactive-gaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: interactive-media
-            condition: ${{ needs.detect-changes.outputs.interactive-media == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: interactive-productivity
-            condition: ${{ needs.detect-changes.outputs.interactive-productivity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: core-data
-            condition: ${{ needs.detect-changes.outputs.core-data == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: core-identity
-            condition: ${{ needs.detect-changes.outputs.core-identity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: core-community
-            condition: ${{ needs.detect-changes.outputs.core-community == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: action-platforms
-            condition: ${{ needs.detect-changes.outputs.action-platforms == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: action-serverless
-            condition: ${{ needs.detect-changes.outputs.action-serverless == 'true' || needs.detect-changes.outputs.libs == 'true' }}
           - image: migrations
             condition: ${{ needs.detect-changes.outputs.migrations == 'true' || needs.detect-changes.outputs.libs == 'true' }}
     steps:
@@ -944,36 +727,10 @@ jobs:
         # built and merged this run. Unchanged modules have no merged manifest,
         # so scanning them would fail with MANIFEST_UNKNOWN.
         include:
-          - image: router
-            condition: ${{ needs.detect-changes.outputs.router == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: marketplace
-            condition: ${{ needs.detect-changes.outputs.marketplace == 'true' || needs.detect-changes.outputs.libs == 'true' }}
           - image: hub-api
             condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
           - image: hub-webui
             condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: trigger-streaming
-            condition: ${{ needs.detect-changes.outputs.trigger-streaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: trigger-webhooks
-            condition: ${{ needs.detect-changes.outputs.trigger-webhooks == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: interactive-social
-            condition: ${{ needs.detect-changes.outputs.interactive-social == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: interactive-gaming
-            condition: ${{ needs.detect-changes.outputs.interactive-gaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: interactive-media
-            condition: ${{ needs.detect-changes.outputs.interactive-media == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: interactive-productivity
-            condition: ${{ needs.detect-changes.outputs.interactive-productivity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: core-data
-            condition: ${{ needs.detect-changes.outputs.core-data == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: core-identity
-            condition: ${{ needs.detect-changes.outputs.core-identity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: core-community
-            condition: ${{ needs.detect-changes.outputs.core-community == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: action-platforms
-            condition: ${{ needs.detect-changes.outputs.action-platforms == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-          - image: action-serverless
-            condition: ${{ needs.detect-changes.outputs.action-serverless == 'true' || needs.detect-changes.outputs.libs == 'true' }}
           - image: migrations
             condition: ${{ needs.detect-changes.outputs.migrations == 'true' || needs.detect-changes.outputs.libs == 'true' }}
     steps:

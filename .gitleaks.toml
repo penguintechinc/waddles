@@ -7,8 +7,7 @@ useDefault = true
 [allowlist]
 # Kick's PUBLIC Pusher application key (not a credential).
 # Every Kick chat viewer's browser connects with this exact key.
-# See trigger/receiver/kick_module_flask/services/chat_client.py:26-27
-# for the original commit where this was established as public, not secret.
+# (Established as public, not secret, in the retired Python kick collector.)
 description = "Kick's public Pusher app key allowlist"
 regexes = [
   "eb1d5f283081a78b932c",
@@ -31,5 +30,4 @@ paths = [
   "hub_api/tests/test_v1_discord_bot_install_blueprint\\.py",
   "hub_api/tests/test_discord_bot_install_service\\.py",
   "libs/flask_core/tests/test_ai_guard\\.py",
-  "core/credential_manager_module/services/test_log_redaction\\.py",
 ]

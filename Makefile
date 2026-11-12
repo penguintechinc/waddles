@@ -1,6 +1,6 @@
 .PHONY: backfill-bundle-author seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
-        seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
+        seed-mock-data seed-ui-mock-data screenshots cleanpre-commit check-docs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
         build-superpenguin-roll-bundle test-superpenguin-roll-e2e test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
@@ -9,19 +9,13 @@
         test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
-        test-data-plane-parity test-connector-parity gen-connector-parity-expected check-builtin-handler-inventory
+        test-data-plane-parity test-connector-parity gen-connector-parity-expected
 
-# Dev-only self-signed CA + server/client cert pair for the gRPC transport
-# TLS required by every service in docker-compose.yml (security audit A02).
-# Idempotent -- skips regeneration if certs/grpc-dev is already populated.
-grpc-dev-certs:
-	@bash scripts/setup/generate_dev_grpc_certs.sh
-
-dev: grpc-dev-certs
-	docker-compose up
+dev:
+	$(error dev: docker-compose is deprecated -- deploy to Kubernetes via scripts/deploy-alpha.sh)
 
 build:
-	docker-compose build
+	$(error build: images are built by CI (see .github/workflows) or scripts/alpha-deploy.sh)
 
 docker-build: build
 
@@ -52,8 +46,6 @@ check-docs:
 # zero flask_core.database/pydal occurrences under the App Bundle directories.
 # Expected to fail until the parallel svc_action/svc_process DAL migration
 # branches land -- a gate that cannot fail is not a gate.
-check-bundle-dal:
-	@bash scripts/check-bundle-dal-imports.sh
 
 # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- regression gates for the
 # fresh-install hook-ordering bug (migrate ran pre-install before postgres
@@ -109,19 +101,10 @@ check-bundle-hygiene:
 	@python3 -m pytest scripts/ci/tests/test_bundle_rng_gate.py -q -p no:cacheprovider
 	@python3 -m pytest scripts/ci/tests/test_bundle_command_collisions.py -q -p no:cacheprovider
 
-# builtin_handlers -> Rust-path/bundle inventory gate (gh #840 PR4): FAILS if a live Python
-# ingest/process/action handler has no mapping in .ci/builtin-handler-map.yaml, a covered
-# mapping's evidence is stale, a pending handler was removed, or a stage entrypoint dangles.
-# `make check-builtin-handler-inventory STRICT=1` also fails on any pending (Python-removal mode).
-check-builtin-handler-inventory:
-	@python3 -m pytest scripts/ci/tests/test_check_builtin_handler_inventory.py -q -p no:cacheprovider
-	@python3 scripts/ci/check-builtin-handler-inventory.py $(if $(STRICT),--strict,)
-
 # Data-plane golden-vector parity harness (gh #840 PR4): Rust normalize.rs oracle vs committed
-# goldens (svc_ingest), legacy Python normalize path vs the same goldens (tests/data_plane_parity),
-# every corpus event through svc_process's closed-schema pii_tokenize classifier, then the
-# inventory gate. Real paths, no mocked capability boundaries. Needs the repo .venv/py deps
-# (scripts/ci/install-unit-test-deps.sh) + the pinned Rust toolchain; see tests/data_plane_parity/README.md.
+# goldens (svc_ingest), every corpus event through svc_process's closed-schema pii_tokenize
+# classifier, then the connector-overlay expected/ freshness check. Real paths, no mocked
+# capability boundaries. Needs python3 (stdlib) + the pinned Rust toolchain; see tests/data_plane_parity/README.md.
 test-data-plane-parity:
 	@bash scripts/ci/data-plane-parity.sh
 
@@ -159,16 +142,13 @@ test-unit:
 	@echo "Running unit tests..."
 	@bash tests/k8s/alpha/05-unit-tests.sh
 
-# Env-gated REAL-endpoint Ollama tests (hub-api router, AI Researcher, AI Interaction) --
+# Env-gated REAL-endpoint Ollama tests (hub-api AI routing) --
 # LAN-only lab endpoint, never run in CI. The lab GPU is shared with the live WaddleAI, so the
-# three suites run strictly one after another (and each serializes its own requests). Needs each
-# module's test deps installed -- see docs/testing/ollama-realpath.md.
+# suite serializes its own requests. Needs hub_api's test deps installed -- see docs/testing/ollama-realpath.md.
 #   make test-ollama-realpath WADDLE_TEST_OLLAMA_URL=http://192.168.2.105:11434/
 test-ollama-realpath:
 	@test -n "$(WADDLE_TEST_OLLAMA_URL)" || { echo "WADDLE_TEST_OLLAMA_URL is required (e.g. http://192.168.2.105:11434/)" >&2; exit 1; }
 	cd hub_api && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_routing_ollama_realpath.py -v -rs
-	cd core/ai_researcher_module && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_researcher_ollama_realpath.py -v -rs
-	cd action/interactive/ai_interaction_module && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_interaction_ollama_realpath.py -v -rs
 
 test-integration:
 	@echo "Running integration tests..."
@@ -243,7 +223,6 @@ webui-audit:
 	@cd admin/hub_module/frontend && node scripts/ui-audit.mjs && node scripts/api-gap-check.mjs --pages
 
 clean:
-	docker-compose down -v
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -name "*.pyc" -delete 2>/dev/null || true
 
@@ -264,16 +243,6 @@ generate-bundle-signing-key:
 	@test -n "$(KUBE_CONTEXT)" || { echo "KUBE_CONTEXT is required" >&2; exit 1; }
 	@test -n "$(NAMESPACE)" || { echo "NAMESPACE is required" >&2; exit 1; }
 	@bash scripts/generate-bundle-signing-key.sh "$(KEY_ID)" "$(KUBE_CONTEXT)" "$(NAMESPACE)" $(SECRET_NAME)
-
-run-ai-local: ## Run ai_interaction_module container locally (standalone, 1 worker)
-	docker build -f action/interactive/ai_interaction_module/Dockerfile -t waddlebot/ai-interaction:local . && \
-	docker run --rm \
-	  --name ai-interaction-local \
-	  --add-host=host.docker.internal:host-gateway \
-	  --env-file action/interactive/ai_interaction_module/.env.local \
-	  -e HYPERCORN_WORKERS=1 \
-	  -p 8005:8005 \
-	  waddlebot/ai-interaction:local
 
 # C#-toolchain spike (spec S18 R13), now ported onto waddle-sdk-cs: rebuilds
 # bundles/csharp/csping from source in its pinned, checksum-verified,

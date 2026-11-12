@@ -691,6 +691,14 @@ def _delete_reputation_and_identity(
     counts["bundle_reputation_scores"] = (
         (dal(scores.user_uuid.belongs(uuids)).delete() or 0) if uuids else 0
     )
+    soft_bans = dal.bundle_reputation_soft_bans
+    counts["bundle_reputation_soft_bans"] = (
+        (dal(soft_bans.user_uuid.belongs(uuids)).delete() or 0) if uuids else 0
+    )
+    tenant_scores = dal.bundle_reputation_tenant_scores
+    counts["bundle_reputation_tenant_scores"] = (
+        (dal(tenant_scores.user_uuid.belongs(uuids)).delete() or 0) if uuids else 0
+    )
     counts["bundle_reputation_adjustments"] = (
         (dal(ledger.target_user_uuid.belongs(uuids)).delete() or 0) if uuids else 0
     )

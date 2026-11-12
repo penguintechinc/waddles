@@ -331,6 +331,13 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DB_READER_PASSWORD
+        # `reputation` host capability (waddles_bundle_reputation): same generated value the
+        # db-migrate hook provisions the role with (secrets.yaml $reputationPassword).
+        - name: BUNDLE_REPUTATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: DB_REPUTATION_PASSWORD
         {{- /* Bundle platform-table capability (spec 2026-11-06-bundle-table-access-grants):
         EXPLICIT OPT-IN (infrastructure.postgresql.platformTable.enabled, default false -> no env
         at all, capability fail-closed). Its OWN least-privilege Postgres role

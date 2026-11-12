@@ -201,7 +201,6 @@ async def create_community(
             community_id=cid,
             user_id=str(caller_id),
             role="owner",
-            reputation=600,
             is_active=True,
             joined_at=datetime.now(UTC),
         ),

@@ -37,8 +37,9 @@ END
 $$;
 
 -- 2. Ledger extensions (the 0041 audit table). `kind` separates a capped
--- bundle `adjust` from an uncapped admin `override` (overrides are excluded
--- from the rolling-24h caps); `requested_value` is what the caller asked for
+-- bundle `adjust` / capped `moderation` from an uncapped admin `override` (plus the
+-- `soft_ban` / `soft_ban_clear` history rows written by the 0097 soft-ban functions);
+-- overrides are excluded from the rolling-24h caps; `requested_value` is what the caller asked for
 -- (delta for an adjust, absolute score for an override) while `delta` stays
 -- the APPLIED change after clamping; `balance_after` lets an idempotent
 -- replay answer with the original result; `idempotency_key` is the
@@ -60,7 +61,7 @@ BEGIN
     ) THEN
         ALTER TABLE bundle_reputation_adjustments
             ADD CONSTRAINT ck_bundle_reputation_adjustments_kind
-            CHECK (kind IN ('adjust', 'admin_override'));
+            CHECK (kind IN ('adjust', 'moderation', 'admin_override', 'soft_ban', 'soft_ban_clear'));
     END IF;
 END
 $$;

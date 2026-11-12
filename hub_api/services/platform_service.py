@@ -23,6 +23,7 @@ import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from services import community_reputation_service as reputation_svc
 from services import session_service
 from services.audit_events import AuditAction, AuditCategory
 from services.errors import bad_request, not_found
@@ -94,6 +95,20 @@ async def get_user(async_dal: Any, dal: Any, *, user_id: int) -> dict[str, Any]:
         raise not_found("User not found")
 
     first = memberships[0].community_members
+    reputation_svc._ensure_reputation_tables(dal)  # noqa: SLF001 - same-package binder
+    scores = dal.bundle_reputation_scores
+    uuids = [m.community_members.user_uuid for m in memberships if m.community_members.user_uuid]
+    score_rows = (
+        await async_dal.select_async(
+            dal(scores.user_uuid.belongs(uuids)),
+            scores.community_id,
+            scores.user_uuid,
+            scores.balance,
+        )
+        if uuids
+        else []
+    )
+    score_by_member = {(r.community_id, r.user_uuid): int(r.balance) for r in score_rows}
     admin_rows = await async_dal.select_async(
         dal(
             (dal.platform_admins.user_id == user_id) & (dal.platform_admins.is_active == True)  # noqa: E712
@@ -111,7 +126,10 @@ async def get_user(async_dal: Any, dal: Any, *, user_id: int) -> dict[str, Any]:
                 "community_id": row.community_members.community_id,
                 "community_name": row.communities.name if row.communities else None,
                 "role": row.community_members.role,
-                "reputation_score": row.community_members.reputation or 0,
+                "reputation_score": score_by_member.get(
+                    (row.community_members.community_id, row.community_members.user_uuid),
+                    reputation_svc.DEFAULT_SCORE,
+                ),
                 "joined_at": row.community_members.joined_at,
                 "last_activity": row.community_members.last_activity,
             }

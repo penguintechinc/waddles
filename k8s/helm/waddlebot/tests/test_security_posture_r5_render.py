@@ -283,7 +283,7 @@ class TestSecurityContextRestricted:
             assert sc["runAsNonRoot"] is True and sc["runAsUser"] != 0, key
             assert (_pod_spec(w)["securityContext"]).get("fsGroup"), key
         print(f"{values}: read-only-rootfs asserted on {checked} workloads")
-        assert checked >= 4, "expected at least collectors/postgres/redis to be present"
+        assert checked >= 2, "expected at least postgres/redis to be present"
 
 
 class TestRedisRootlessUpgrade:

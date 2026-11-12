@@ -8,7 +8,7 @@ Findings covered (each with a regression that fails against the pre-fix code):
      `tenant_members` row on grant, revokes sessions on revoke and audits both directions.
 2.   Deactivating / deleting the last global admin is refused (409); acting on a global admin
      needs a DB-verified global-admin caller (403); deactivated users lose their sessions.
-4.   (migration) see `alembic/tests/test_0096_system_tenant_global_admin.py`.
+4.   (migration) see `alembic/tests/test_0098_system_tenant_global_admin.py`.
 5.   An inactive `system` tenant makes nobody global.
 6.   The last-admin count + mutation run under one `pg_advisory_xact_lock` transaction; the
      concurrent-revoke race is exercised against REAL Postgres (skipped without docker).
