@@ -145,25 +145,6 @@ pub struct ApplyOutcome {
     pub applied: bool,
 }
 
-/// Rolling-24h ceilings on soft-ban LIFTS (recording a ban is never
-/// throttled, so a floor-triggered ban always applies): a count-based quota,
-/// so a loop of ban/lift calls cannot flap a member's state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SoftBanLimits {
-    /// Max lifts for one user in one community per day.
-    pub per_user_daily: i64,
-    /// Max lifts across the whole community per day.
-    pub per_community_daily: i64,
-}
-
-impl SoftBanLimits {
-    /// Defaults: 5 toggles per user per day, 50 per community per day.
-    pub const DEFAULT: SoftBanLimits = SoftBanLimits {
-        per_user_daily: 5,
-        per_community_daily: 50,
-    };
-}
-
 /// A user's own aggregate across the communities of one tenant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TenantScore {
@@ -331,7 +312,9 @@ pub trait ReputationStore: Send + Sync {
     /// Atomically applies a non-zero `delta` and returns the NEW score.
     /// `caps` are the durable per-user and per-scope rolling-24h ceilings
     /// (see [`ReputationCaps`]); both are enforced inside the write
-    /// transaction. [`ReputationError::Invalid`] for a zero `delta`.
+    /// transaction. `key` is REQUIRED (host-derived from the event id) so a
+    /// retried call is never double-counted. [`ReputationError::Invalid`] for
+    /// a zero `delta`.
     fn adjust<'a>(
         &'a self,
         scope: &'a ReputationScope,
@@ -339,6 +322,7 @@ pub trait ReputationStore: Send + Sync {
         delta: i32,
         reason: &'a str,
         caps: ReputationCaps,
+        key: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<i64, ReputationError>>;
 
     /// ADMIN override. NOT available to the bundle role: the SQL contract
@@ -495,7 +479,6 @@ pub trait ReputationStore: Send + Sync {
         _scope: &'a ReputationScope,
         _user: uuid::Uuid,
         _only_reason: &'a str,
-        _limits: SoftBanLimits,
     ) -> BoxFuture<'a, Result<bool, ReputationError>> {
         Box::pin(async { Err(unsupported("lift_soft_ban")) })
     }

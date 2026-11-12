@@ -19,8 +19,6 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
-use crate::SoftBanLimits;
-
 use crate::{
     metrics, validate_delta, validate_reason, ApplyOutcome, BoxFuture, HistoryEntry,
     IdempotencyKey, ReasonClass, ReputationCaps, ReputationError, ReputationScope, ReputationStore,
@@ -239,8 +237,8 @@ impl PostgresReputationStore {
 
     /// Activity-class delta through `reputation_apply()`. Caps and membership
     /// are enforced inside the SQL function (authoritative); `_caps` is the
-    /// gate's in-memory quota and is deliberately not re-computed here. A
-    /// fresh key per call (no replay protection, as before this contract).
+    /// gate's in-memory quota and is deliberately not re-computed here. The
+    /// idempotency `key` is required, so a retried call is never double-counted.
     async fn adjust_impl(
         &self,
         scope: &ReputationScope,
@@ -248,10 +246,11 @@ impl PostgresReputationStore {
         delta: i32,
         reason: &str,
         _caps: ReputationCaps,
+        key: &IdempotencyKey,
     ) -> Result<i64, ReputationError> {
         validate_reason(reason)?;
         validate_delta(delta)?;
-        let key = format!("adjust:{}", Uuid::new_v4());
+        let key = sql_key(key.as_str())?;
         let txn = self.begin().await?;
         let out = call_apply(
             &txn,
@@ -694,13 +693,14 @@ impl PostgresReputationStore {
 
     /// Clears the FLOOR soft ban only (`reputation_clear_floor_soft_ban()`;
     /// a manual ban is untouched). `Ok(true)` when a ban existed before and is
-    /// gone after. `_limits` is unused: the quota (if any) lives in SQL.
+    /// gone after. The lift quota and the "score recovered" check live in SQL:
+    /// `floor_still_breached` -> `Ok(false)` (not recovered, never aborts
+    /// accrual), `quota_exceeded` -> `RateLimited`.
     async fn lift_soft_ban_impl(
         &self,
         scope: &ReputationScope,
         user: Uuid,
         only_reason: &str,
-        _limits: SoftBanLimits,
     ) -> Result<bool, ReputationError> {
         validate_reason(only_reason)?;
         if only_reason != FLOOR_SOFT_BAN_REASON {
@@ -709,7 +709,7 @@ impl PostgresReputationStore {
             ));
         }
         let txn = self.begin().await?;
-        let row = txn
+        let res = txn
             .query_one_raw(stmt(
                 "SELECT reputation_clear_floor_soft_ban($1::bigint, $2::bigint, $3::uuid) AS cleared",
                 vec![
@@ -718,9 +718,14 @@ impl PostgresReputationStore {
                     Value::Uuid(Some(user)),
                 ],
             ))
-            .await
-            .map_err(map_sql_err)?
-            .ok_or_else(|| backend_err("reputation_clear_floor_soft_ban returned no row"))?;
+            .await;
+        let row = match res {
+            Ok(r) => {
+                r.ok_or_else(|| backend_err("reputation_clear_floor_soft_ban returned no row"))?
+            }
+            Err(e) if e.to_string().contains("floor_still_breached") => return Ok(false),
+            Err(e) => return Err(map_sql_err(e)),
+        };
         let cleared: bool = row.try_get("", "cleared").map_err(backend_err)?;
         txn.commit().await.map_err(backend_err)?;
         Ok(cleared)
@@ -764,10 +769,13 @@ impl ReputationStore for PostgresReputationStore {
         delta: i32,
         reason: &'a str,
         caps: ReputationCaps,
+        key: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<i64, ReputationError>> {
         Box::pin(async move {
             let start = Instant::now();
-            let result = self.adjust_impl(scope, user, delta, reason, caps).await;
+            let result = self
+                .adjust_impl(scope, user, delta, reason, caps, key)
+                .await;
             metrics::record_call("adjust", outcome_of(&result), start.elapsed().as_secs_f64());
             result
         })
@@ -973,13 +981,10 @@ impl ReputationStore for PostgresReputationStore {
         scope: &'a ReputationScope,
         user: Uuid,
         only_reason: &'a str,
-        limits: SoftBanLimits,
     ) -> BoxFuture<'a, Result<bool, ReputationError>> {
         Box::pin(async move {
             let start = Instant::now();
-            let result = self
-                .lift_soft_ban_impl(scope, user, only_reason, limits)
-                .await;
+            let result = self.lift_soft_ban_impl(scope, user, only_reason).await;
             metrics::record_call(
                 "lift_soft_ban",
                 outcome_of(&result),

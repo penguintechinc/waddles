@@ -76,6 +76,8 @@ struct RecordingStore {
     /// What `active_logic_app` answers: `None` = the test app itself (so
     /// pre-exclusivity tests keep passing), `Some(x)` = exactly `x`.
     active_logic: Mutex<Option<Option<String>>>,
+    /// Idempotency keys `adjust` was called with.
+    adjust_keys: Mutex<Vec<String>>,
 }
 
 impl RecordingStore {
@@ -133,8 +135,13 @@ impl ReputationStore for RecordingStore {
         delta: i32,
         reason: &'a str,
         caps: ReputationCaps,
+        key: &'a bundle_host_reputation::IdempotencyKey,
     ) -> bundle_host_reputation::BoxFuture<'a, Result<i64, ReputationError>> {
         Box::pin(async move {
+            self.adjust_keys
+                .lock()
+                .unwrap()
+                .push(key.as_str().to_string());
             self.calls.lock().unwrap().push((
                 "adjust".into(),
                 scope.clone(),
@@ -367,10 +374,8 @@ impl ReputationStore for RecordingStore {
         scope: &'a ReputationScope,
         user: Uuid,
         only_reason: &'a str,
-        limits: SoftBanLimits,
     ) -> bundle_host_reputation::BoxFuture<'a, Result<bool, ReputationError>> {
         Box::pin(async move {
-            assert_eq!(limits, SoftBanLimits::DEFAULT, "host-chosen limits");
             self.ext.lock().unwrap().push(ExtCall::LiftSoftBan(
                 scope.clone(),
                 user,
@@ -478,6 +483,10 @@ fn fixture_app(
         egress,
         gate,
     );
+    // Every write needs a replay-stable event id (the idempotency key's anchor).
+    caps.invocation_identity = Some(Arc::new(
+        InvocationIdentity::new("twitch", None, vec![]).with_event_id(EVENT_ID),
+    ));
     let store = Arc::new(RecordingStore::default());
     if wired {
         caps = caps.with_reputation(ReputationWiring {
@@ -1610,15 +1619,30 @@ async fn soft_ban_ops_and_below_threshold_validate_and_route() {
 }
 
 #[tokio::test]
-async fn apply_needs_a_replay_stable_event_id() {
-    // No event id on the invocation -> not_implemented, nothing applied.
-    let f = fixture_with(v2_grants(), true, true, Some(("main", COMMUNITY_ID)));
-    let args = serde_json::json!({"user": f.member.to_string(), "delta": 1, "reason": "r.x"});
-    assert_eq!(
-        code_of(&f, "reputation.apply", args).await,
-        "not_implemented"
-    );
+async fn every_write_requires_an_idempotency_key_typed_invalid_args() {
+    // No event id on the invocation -> invalid_args (never a random/unkeyed
+    // write that a retry would double-count), nothing reaches the store.
+    let mut f = fixture_with(v2_grants(), true, true, Some(("main", COMMUNITY_ID)));
+    f.caps.invocation_identity = None;
+    let u = f.member.to_string();
+    for (op, args) in [
+        (
+            "reputation.apply",
+            serde_json::json!({"user": u, "delta": 1, "reason": "r.x"}),
+        ),
+        (
+            "reputation.adjust",
+            serde_json::json!({"user": u, "delta": 1, "reason": "r.x"}),
+        ),
+        (
+            "reputation.adjust_many",
+            serde_json::json!({"adjustments": [{"user": u, "delta": 1}], "reason": "r.x"}),
+        ),
+    ] {
+        assert_eq!(code_of(&f, op, args).await, "invalid_args", "{op}");
+    }
     assert_eq!(f.store.ext_count(), 0);
+    assert!(f.store.calls.lock().unwrap().is_empty());
 }
 
 fn human_fixture(role: Option<&'static str>) -> Fixture {
@@ -1943,4 +1967,29 @@ async fn override_is_hub_api_only_even_for_a_verified_admin_with_the_admin_grant
         "forbidden"
     );
     assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn adjust_keys_are_event_derived_distinct_per_call_and_reused_on_a_backend_retry() {
+    let f = fixture();
+    let args = serde_json::json!({"user": f.member.to_string(), "delta": 1, "reason": "r.x"});
+    f.store.answer(Err(ReputationError::Backend("boom".into())));
+    assert_eq!(
+        code_of(&f, "reputation.adjust", args.clone()).await,
+        "backend"
+    );
+    f.store.answer(Ok(601));
+    f.caps
+        .handle(rep_call("reputation.adjust", args.clone()))
+        .await
+        .unwrap();
+    f.store.answer(Ok(602));
+    f.caps
+        .handle(rep_call("reputation.adjust", args))
+        .await
+        .unwrap();
+    let keys = f.store.adjust_keys.lock().unwrap().clone();
+    assert_eq!(keys[0], format!("{EVENT_ID}:reputation_adjust:0"));
+    assert_eq!(keys[1], keys[0], "a failed attempt's retry reuses the key");
+    assert_eq!(keys[2], format!("{EVENT_ID}:reputation_adjust:1"));
 }

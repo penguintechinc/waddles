@@ -22,7 +22,7 @@ use bundle_capability_gate::{
 use bundle_host_reputation::{
     connect, load_membership, ApplyOutcome, ConnectConfig, IdempotencyKey, PostgresReputationStore,
     ReasonClass, ReputationCaps, ReputationError, ReputationScope, ReputationStore, ScoreEntry,
-    SoftBanLimits, TenantPolicy, TenantScore, FLOOR_SOFT_BAN_REASON, MAX_LEADERBOARD_LIMIT,
+    TenantPolicy, TenantScore, FLOOR_SOFT_BAN_REASON, MAX_LEADERBOARD_LIMIT,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use uuid::Uuid;
@@ -262,6 +262,11 @@ async fn add_member(f: &Fixture, community: i32) -> Uuid {
     u
 }
 
+/// A fresh, never-repeated idempotency key (tests that do not exercise replay).
+fn fresh() -> IdempotencyKey {
+    IdempotencyKey::new(format!("t:{}", Uuid::new_v4())).unwrap()
+}
+
 fn key(k: &str) -> IdempotencyKey {
     IdempotencyKey::new(k).unwrap()
 }
@@ -301,7 +306,7 @@ async fn adjust_goes_through_reputation_apply_with_app_actor_and_the_unscored_de
     assert_eq!(f.store.get(&scope(), f.member).await, Ok(600));
     assert_eq!(
         f.store
-            .adjust(&scope(), f.member, 5, "game.win", caps())
+            .adjust(&scope(), f.member, 5, "game.win", caps(), &fresh())
             .await,
         Ok(605)
     );
@@ -347,7 +352,9 @@ async fn non_members_are_rejected_by_the_sql_for_every_flavor_of_non_membership(
         other_community,
     ] {
         assert_eq!(
-            f.store.adjust(&scope(), who, 1, "r", caps()).await,
+            f.store
+                .adjust(&scope(), who, 1, "r", caps(), &fresh())
+                .await,
             Err(ReputationError::NotAMember),
             "adjust {who}"
         );
@@ -369,7 +376,7 @@ async fn non_members_are_rejected_by_the_sql_for_every_flavor_of_non_membership(
     };
     assert_eq!(
         f.store
-            .adjust(&wrong_tenant, f.member, 1, "r", caps())
+            .adjust(&wrong_tenant, f.member, 1, "r", caps(), &fresh())
             .await,
         Err(ReputationError::NotAMember)
     );
@@ -450,7 +457,7 @@ async fn reads_report_unscored_members_at_the_policy_default_everywhere() {
     let b = add_member(&f, COMMUNITY).await;
     let c = add_member(&f, COMMUNITY).await;
     f.store
-        .adjust(&scope(), b, 4, "game.win", caps())
+        .adjust(&scope(), b, 4, "game.win", caps(), &fresh())
         .await
         .unwrap(); // 604
                    // get_many / leaderboard / below_threshold all agree on the default (600).
@@ -502,7 +509,7 @@ async fn reads_report_unscored_members_at_the_policy_default_everywhere() {
 async fn history_is_newest_first_scoped_and_reports_the_contract_kinds() {
     let f = fixture().await;
     f.store
-        .adjust(&scope(), f.member, 2, "game.win", caps())
+        .adjust(&scope(), f.member, 2, "game.win", caps(), &fresh())
         .await
         .unwrap();
     apply(&f, f.member, -10, ReasonClass::Moderation, "m1")
@@ -537,7 +544,7 @@ async fn history_is_newest_first_scoped_and_reports_the_contract_kinds() {
 async fn tenant_aggregate_reads_own_communities_only() {
     let f = fixture().await;
     f.store
-        .adjust(&scope(), f.member, 4, "game.win", caps())
+        .adjust(&scope(), f.member, 4, "game.win", caps(), &fresh())
         .await
         .unwrap();
     assert_eq!(
@@ -612,13 +619,13 @@ async fn caps_are_enforced_inside_the_sql_not_by_the_host_caps_argument() {
     // cap (policy default 100 / 24h) still binds -> RateLimited.
     for _ in 0..2 {
         f.store
-            .adjust(&scope(), f.member, 50, "game.win", caps())
+            .adjust(&scope(), f.member, 50, "game.win", caps(), &fresh())
             .await
             .unwrap();
     }
     assert!(matches!(
         f.store
-            .adjust(&scope(), f.member, 1, "game.win", caps())
+            .adjust(&scope(), f.member, 1, "game.win", caps(), &fresh())
             .await,
         Err(ReputationError::RateLimited { .. })
     ));
@@ -641,7 +648,7 @@ async fn concurrent_adjusts_never_exceed_the_sql_cap() {
         let f = Arc::clone(&f);
         tasks.push(tokio::spawn(async move {
             f.store
-                .adjust(&scope(), f.member, 20, "game.win", caps())
+                .adjust(&scope(), f.member, 20, "game.win", caps(), &fresh())
                 .await
         }));
     }
@@ -833,7 +840,7 @@ async fn soft_bans_route_only_through_the_floor_wrappers_and_manual_bans_are_unt
     );
     assert_eq!(
         f.store
-            .lift_soft_ban(&scope(), u, FLOOR_SOFT_BAN_REASON, SoftBanLimits::DEFAULT)
+            .lift_soft_ban(&scope(), u, FLOOR_SOFT_BAN_REASON)
             .await,
         Ok(true)
     );
@@ -844,9 +851,7 @@ async fn soft_bans_route_only_through_the_floor_wrappers_and_manual_bans_are_unt
         Err(ReputationError::Invalid(_))
     ));
     assert!(matches!(
-        f.store
-            .lift_soft_ban(&scope(), u, "manual.admin", SoftBanLimits::DEFAULT)
-            .await,
+        f.store.lift_soft_ban(&scope(), u, "manual.admin").await,
         Err(ReputationError::Invalid(_))
     ));
     // A MANUAL ban (hub-api, reason 2, UUID admin) survives: a floor set never
@@ -866,7 +871,7 @@ async fn soft_bans_route_only_through_the_floor_wrappers_and_manual_bans_are_unt
     );
     assert_eq!(
         f.store
-            .lift_soft_ban(&scope(), u, FLOOR_SOFT_BAN_REASON, SoftBanLimits::DEFAULT)
+            .lift_soft_ban(&scope(), u, FLOOR_SOFT_BAN_REASON)
             .await,
         Ok(false)
     );
@@ -963,4 +968,25 @@ async fn tenant_policy_and_active_logic_app_read_the_contract_objects() {
     // Two providers -> ambiguous -> NULL (host fails closed).
     exec(&f.su, &install("acme.second-logic")).await;
     assert_eq!(f.store.active_logic_app(&scope()).await, Ok(None));
+}
+
+#[tokio::test]
+async fn a_retried_adjust_with_the_same_key_is_counted_once() {
+    let f = fixture().await;
+    let k = key("evt-1:reputation_adjust:0");
+    assert_eq!(
+        f.store
+            .adjust(&scope(), f.member, 5, "game.win", caps(), &k)
+            .await,
+        Ok(605)
+    );
+    assert_eq!(
+        f.store
+            .adjust(&scope(), f.member, 5, "game.win", caps(), &k)
+            .await,
+        Ok(605),
+        "replay answers with the original result"
+    );
+    assert_eq!(f.store.get(&scope(), f.member).await, Ok(605));
+    assert_eq!(ledger_count(&f).await, 1);
 }

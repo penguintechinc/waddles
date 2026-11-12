@@ -157,6 +157,7 @@ impl ReputationStore for MemStore {
         delta: i32,
         _reason: &'a str,
         _caps: ReputationCaps,
+        _key: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<i64, ReputationError>> {
         Box::pin(async move {
             let mut s = self.scores.lock().unwrap();

@@ -76,9 +76,7 @@ use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use bundle_host_platform_table::{
     Change as PlatformTableChange, PlatformTableError, PlatformTableScope, PlatformTableStore,
 };
-use bundle_host_reputation::{
-    ReputationCaps, ReputationError, ReputationScope, ReputationStore, SoftBanLimits,
-};
+use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
 use bundle_host_storage::{GrantSet as StorageGrantSet, StorageError, StorageHost, StorageScope};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
@@ -2823,12 +2821,52 @@ impl<K: KvBackend> StageCapabilities<K> {
         }
 
         let scope = self.reputation_scope();
+        // The idempotency key is REQUIRED for a write (host-derived from the
+        // replay-stable event id, never guest input): without one a retried
+        // call would double-count, so the call is refused as invalid.
+        let mut adjust_key: Option<bundle_host_reputation::IdempotencyKey> = None;
+        let mut adjust_reservation: Option<(&InvocationIdentity, u32)> = None;
+        if is_adjust {
+            let slot = self.invocation_identity.as_deref().and_then(|inv| {
+                inv.reserve_mutation("reputation_adjust")
+                    .map(|(e, o)| (inv, e.to_string(), o))
+            });
+            let Some((inv, event_id, ordinal)) = slot else {
+                return Err(denied(
+                    "invalid_args",
+                    "idempotency key required: this invocation carries no replay-stable event id",
+                ));
+            };
+            adjust_key = Some(
+                bundle_host_reputation::IdempotencyKey::for_event(
+                    &event_id,
+                    "reputation_adjust",
+                    ordinal,
+                )
+                .map_err(reputation_error_to_host)?,
+            );
+            adjust_reservation = Some((inv, ordinal));
+        }
         let balance = match (delta, reason) {
             (Some(delta), Some(reason)) => {
-                wiring
-                    .store
-                    .adjust(&scope, user, delta, reason, reputation_caps())
-                    .await
+                let result = match (&adjust_key, &adjust_reservation) {
+                    (Some(k), _) => {
+                        wiring
+                            .store
+                            .adjust(&scope, user, delta, reason, reputation_caps(), k)
+                            .await
+                    }
+                    _ => Err(ReputationError::Backend(
+                        "reputation adjust has no idempotency key".to_string(),
+                    )),
+                };
+                if let (Some((inv, ordinal)), Err(ReputationError::Backend(_))) =
+                    (adjust_reservation, &result)
+                {
+                    // A failed attempt hands its ordinal back so a retry reuses the key.
+                    inv.release_mutation("reputation_adjust", ordinal);
+                }
+                result
             }
             _ => wiring.store.get(&scope, user).await,
         }
@@ -3108,8 +3146,8 @@ impl<K: KvBackend> StageCapabilities<K> {
                 (self.invocation_identity.as_deref(), slot)
             else {
                 return Err(denied(
-                    "not_implemented",
-                    "this invocation carries no replay-stable event id; reputation mutations cannot be made idempotent",
+                    "invalid_args",
+                    "idempotency key required: this invocation carries no replay-stable event id",
                 ));
             };
             key = Some(
@@ -3489,8 +3527,8 @@ impl<K: KvBackend> StageCapabilities<K> {
                 (self.invocation_identity.as_deref(), slot)
             else {
                 return Err(denied(
-                    "not_implemented",
-                    "this invocation carries no replay-stable event id; reputation mutations cannot be made idempotent",
+                    "invalid_args",
+                    "idempotency key required: this invocation carries no replay-stable event id",
                 ));
             };
             key = Some(
@@ -3581,7 +3619,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                 .map(|b| serde_json::json!({ "flag": b })),
             Op::LiftSoftBan { user, only_reason } => wiring
                 .store
-                .lift_soft_ban(&scope, *user, only_reason, SoftBanLimits::DEFAULT)
+                .lift_soft_ban(&scope, *user, only_reason)
                 .await
                 .map(|b| serde_json::json!({ "flag": b })),
         };
