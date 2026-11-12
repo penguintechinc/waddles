@@ -144,7 +144,8 @@ def test_identities_absent_when_feature_disabled(
     disabled: list[dict[str, Any]],
 ) -> None:
     identities = _identities(disabled)
-    assert "svc-ingest" not in identities
+    # svc-ingest keeps ONLY the tenant stream-DEK scope (it cannot publish without it).
+    assert identities["svc-ingest"]["allowed_scopes"] == ["key:stream-dek:read"]
     assert len(identities) >= 3, identities.keys()
     for name, entry in identities.items():
         assert not [
@@ -158,7 +159,7 @@ def test_each_flag_gates_only_its_own_grant() -> None:
     only_action = _identities(
         _render("pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false")
     )
-    assert "svc-ingest" not in only_action
+    assert only_action["svc-ingest"]["allowed_scopes"] == ["key:stream-dek:read"]
     assert "connections:resolve:static" in only_action["svc-action"]["allowed_scopes"]
     only_ingest = _identities(
         _render("pipeline.rustDataPlane.svcAction.dynamicConnections.enabled=false")

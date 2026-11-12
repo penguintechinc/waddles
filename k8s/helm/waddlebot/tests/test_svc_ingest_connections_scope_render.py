@@ -110,11 +110,15 @@ def test_svc_ingest_is_allow_listed_for_exactly_connections_resolve_on_the_syste
     # static-kind scope (that is svc-action's alone).
     assert entry["allowed_scopes"] == [
         "connections:resolve",
+        # tenant stream-DEK fetch (KeyService.GetStreamDek): rendered with or without dynamic
+        # connections -- svc-ingest cannot encrypt, hence cannot publish, an event without it.
+        "key:stream-dek:read",
         "connections:list",
         "dataplane:resolve-scope",
         "dataplane:app-commands",
         "dataplane:active-context",
         "identity:platform-user:resolve",
+        "bundle-schedules:read",
     ]
     assert entry["tenant"] == "system"
     assert entry["k8s_service_account"] == "svc-ingest"
@@ -185,11 +189,13 @@ def test_dynamic_connections_defaults_off_in_base_values_and_on_only_in_alpha() 
     )
 
 
-def test_disabled_renders_no_svc_ingest_grant(
+def test_disabled_renders_only_the_stream_dek_grant_for_svc_ingest(
     disabled_docs: list[dict[str, Any]],
 ) -> None:
     identities = _identities(disabled_docs)
-    assert "svc-ingest" not in identities
+    # The identity itself is always rendered (no DEK, no events) but least-privilege: with
+    # dynamic connections off it holds the stream-DEK scope and nothing else.
+    assert identities["svc-ingest"]["allowed_scopes"] == ["key:stream-dek:read"]
     assert len(identities) >= 3, identities.keys()  # other identities still rendered
     for name, entry in identities.items():
         assert (
@@ -197,17 +203,18 @@ def test_disabled_renders_no_svc_ingest_grant(
         ), name
 
 
-def test_disabled_renders_no_service_jwt_mount_or_env_on_svc_ingest(
+def test_disabled_still_renders_the_service_jwt_mount_and_env_on_svc_ingest(
     disabled_docs: list[dict[str, Any]],
 ) -> None:
+    # The stream-DEK fetch needs the machine-JWT bootstrap in every environment.
     pod = _svc_ingest_deployment(disabled_docs)["spec"]["template"]["spec"]
-    assert "service-jwt-bootstrap-token" not in [v["name"] for v in pod["volumes"]]
+    assert "service-jwt-bootstrap-token" in [v["name"] for v in pod["volumes"]]
     container = pod["containers"][0]
-    assert "service-jwt-bootstrap-token" not in [
+    assert "service-jwt-bootstrap-token" in [
         m["name"] for m in container["volumeMounts"]
     ]
     env_names = {e["name"] for e in container["env"]}
-    assert not {n for n in env_names if n.startswith("SERVICE_JWT_")}
+    assert {"SERVICE_JWT_TOKEN_ENDPOINT", "SERVICE_JWT_SA_TOKEN_PATH"} <= env_names
 
 
 def test_enabled_renders_grant_mount_and_env(docs: list[dict[str, Any]]) -> None:
@@ -292,10 +299,32 @@ def test_dynamic_connections_alone_wires_the_hub_api_grpc_endpoint_and_ca(
     assert any(v["name"] == "hub-api-grpc-ca" for v in spec["volumes"])
 
 
-def test_disabled_dynamic_connections_renders_no_hub_api_grpc_env(
+def test_disabled_dynamic_connections_still_renders_the_hub_api_grpc_env_and_ca(
     disabled_docs: list[dict[str, Any]],
 ) -> None:
+    # svc-ingest fetches tenant DEKs over hub-api's internal gRPC (TLS, pinned CA) always.
     deployment = _svc_ingest_deployment(disabled_docs)
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
-    names = {e["name"] for e in container["env"]}
-    assert "HUB_API_GRPC_ENDPOINT" not in names
+    spec = deployment["spec"]["template"]["spec"]
+    container = spec["containers"][0]
+    env = {e["name"]: e.get("value") for e in container["env"]}
+    assert env["HUB_API_GRPC_ENDPOINT"].startswith("https://")
+    assert env["HUB_API_GRPC_CA_FILE"].endswith("ca.crt")
+    assert any(v["name"] == "hub-api-grpc-ca" for v in spec["volumes"])
+    assert any(m["name"] == "hub-api-grpc-ca" for m in container["volumeMounts"])
+
+
+_STREAM_DEK_SCOPE = "key:stream-dek:read"
+
+
+def test_stream_dek_scope_is_granted_to_svc_ingest_and_svc_process_only(
+    docs: list[dict[str, Any]], disabled_docs: list[dict[str, Any]]
+) -> None:
+    for render in (docs, disabled_docs):
+        identities = _identities(render)
+        assert len(identities) >= 3, identities.keys()
+        granted = {
+            name
+            for name, entry in identities.items()
+            if _STREAM_DEK_SCOPE in entry["allowed_scopes"]
+        }
+        assert granted == {"svc-ingest", "svc-process"}, granted

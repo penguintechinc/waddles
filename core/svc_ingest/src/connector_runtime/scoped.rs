@@ -395,7 +395,7 @@ mod tests {
     impl DekProvider for Dek {
         async fn get_dek(
             &self,
-            _tenant_id: &str,
+            _tenant_id: i64,
         ) -> Result<(crate::identity_crypto::Dek, u32), DekUnavailableError> {
             Ok((zeroize::Zeroizing::new([9u8; 32]), 1))
         }

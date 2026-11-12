@@ -519,14 +519,24 @@ async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProv
             )
         });
     if event.actor.is_some() || has_identity_payload_field {
-        match dek_provider.get_dek(&scope.tenant).await {
+        // The DEK is requested by NUMERIC tenant id, never the slug (a slug is a mutable display
+        // alias). The legacy string-scope path (resolver off) has no numeric id: `0` is never a
+        // valid tenant, so the hub broker refuses it client-side and the event is held -- only
+        // the dev/alpha local provider (which keys on whatever id it is given) serves it.
+        let dek_tenant_id: i64 = resolved.as_ref().map_or(0, |r| r.tenant_id);
+        // The AAD binds the numeric id too (immutable across a slug rename); the legacy path
+        // has nothing but the slug to bind.
+        let aad_tenant: String = resolved
+            .as_ref()
+            .map_or_else(|| scope.tenant.clone(), |r| r.tenant_id.to_string());
+        match dek_provider.get_dek(dek_tenant_id).await {
             Ok((dek, dek_version)) => {
                 let encrypt_field = |value: &str, field: &str| -> String {
                     let envelope = identity_crypto::encrypt_identity_value(
                         value,
                         &dek,
                         dek_version,
-                        &scope.tenant,
+                        &aad_tenant,
                         &stream,
                         field,
                         &event_id,
@@ -714,7 +724,7 @@ mod tests {
     impl DekProvider for FakeDekProvider {
         async fn get_dek(
             &self,
-            _tenant_id: &str,
+            _tenant_id: i64,
         ) -> Result<(crate::identity_crypto::Dek, u32), DekUnavailableError> {
             Ok((zeroize::Zeroizing::new([9u8; 32]), 3))
         }
@@ -730,10 +740,10 @@ mod tests {
     impl DekProvider for FailingDekProvider {
         async fn get_dek(
             &self,
-            tenant_id: &str,
+            tenant_id: i64,
         ) -> Result<(crate::identity_crypto::Dek, u32), DekUnavailableError> {
             Err(DekUnavailableError {
-                tenant_id: tenant_id.to_string(),
+                tenant_id,
                 dek_version: None,
                 reason: "no broker configured in this test".to_string(),
             })
