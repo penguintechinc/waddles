@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.integration.wix
 name: Wix Integration (Python)
-version: 1.1.0
+version: 1.1.1
 feature: waddles.core.integration
 module: core
 provider: builtin
