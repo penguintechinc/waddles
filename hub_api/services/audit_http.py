@@ -324,7 +324,7 @@ async def record_session_revoked(
 
 async def record_privileged_user_change(
     *,
-    actor_user_id: int,
+    actor_user_id: int | None,
     target_user_uuid: str | None,
     category: AuditCategory,
     action: str,
@@ -352,7 +352,7 @@ async def record_privileged_user_change(
                 category=category,
                 action=action,
                 outcome=outcome,
-                actor_kind=ActorKind.USER,
+                actor_kind=ActorKind.USER if actor_user_id is not None else ActorKind.SYSTEM,
                 actor_user_id=actor_user_id,
                 target_type="user",
                 target_id=target_user_uuid,

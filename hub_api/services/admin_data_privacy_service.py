@@ -54,6 +54,7 @@ Uses the pydal query builder throughout (never raw `%s` SQL) -- Gotcha
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -70,6 +71,7 @@ from services.cookie_consent_service import (
 )
 from services.errors import ApiError, bad_request
 from services.global_identity import is_global_admin
+from services.platform_account import PLATFORM_ACCOUNT_MESSAGE, is_platform_account_sync
 
 logger = logging.getLogger(__name__)
 
@@ -475,6 +477,22 @@ async def _process_user(
             reason="not_in_tenant",
         )
         return DsarResult(user_id=user_id, status=DsarStatus.NOT_FOUND, detail="User not found")
+
+    if action is DsarAction.ERASE and await asyncio.get_running_loop().run_in_executor(
+        async_dal.executor, is_platform_account_sync, dal, user_id
+    ):
+        await _audit_denied(
+            async_dal,
+            dal,
+            actor,
+            action=action,
+            target_user_id=user_id,
+            bulk_id=bulk_id,
+            reason="platform_account",
+        )
+        return DsarResult(
+            user_id=user_id, status=DsarStatus.CONFLICT, detail=PLATFORM_ACCOUNT_MESSAGE
+        )
 
     if action is DsarAction.ERASE:
         refusal = _erase_refusal(actor, user_id, scope)

@@ -53,6 +53,7 @@ from services.global_identity import (
     revoke_global_admin_sync,
     take_global_admin_lock,
 )
+from services.platform_account import guard_platform_account
 
 SALT_ROUNDS = (
     10  # matches userManagementController.js's own SALT_ROUNDS (distinct from auth_service's 12)
@@ -363,6 +364,16 @@ async def update_user(
 
     update_fields["updated_at"] = datetime.now(UTC)
     deactivating = is_active is False
+    if deactivating:
+        await guard_platform_account(
+            async_dal,
+            dal,
+            user_id=user_id,
+            actor_user_id=caller_id,
+            category=AuditCategory.USER,
+            action=AuditAction.USER_UPDATED,
+            operation="deactivate",
+        )
     operation = "deactivate" if deactivating else ("reactivate" if is_active else "update")
     target_was_admin = await asyncio.get_running_loop().run_in_executor(
         async_dal.executor, has_system_admin_row_sync, dal, user_id
@@ -411,9 +422,18 @@ async def update_user(
 
 async def delete_user(async_dal: Any, dal: Any, *, user_id: int, caller_id: int) -> None:
     """Delete (soft) a user; refuses the last global admin and revokes the user's sessions."""
+    await get_user(async_dal, dal, user_id=user_id)  # 404 if missing
+    await guard_platform_account(
+        async_dal,
+        dal,
+        user_id=user_id,
+        actor_user_id=caller_id,
+        category=AuditCategory.USER,
+        action=AuditAction.USER_DELETED,
+        operation="delete",
+    )
     if user_id == caller_id:
         raise forbidden("Cannot delete your own account")
-    await get_user(async_dal, dal, user_id=user_id)  # 404 if missing
     target_was_admin = await asyncio.get_running_loop().run_in_executor(
         async_dal.executor, has_system_admin_row_sync, dal, user_id
     )
@@ -476,6 +496,16 @@ async def assign_super_admin_role(
     if already == grant:
         return False
     operation = "grant" if grant else "revoke"
+    if not grant:
+        await guard_platform_account(
+            async_dal,
+            dal,
+            user_id=user_id,
+            actor_user_id=caller_id,
+            category=AuditCategory.ROLE,
+            action=AuditAction.ROLE_SUPER_ADMIN_CHANGED,
+            operation="demote",
+        )
     if grant:
         await grant_super_admin_capped(
             async_dal, dal, caller_tenant_slug=tenant_slug, user_id=user_id

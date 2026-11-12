@@ -39,6 +39,28 @@ helm `hub-admin-seed` job) create the initial admin as a member + `tenant-owner`
 Alembic `0096` moves every pre-existing `is_super_admin` user (and the `is_bootstrap` user) into
 `system`, then drops the column; downgrade restores the column from `system` admins.
 
+### The bootstrap admin is a platform account (non-person)
+
+The seeded admin carries `hub_users.is_bootstrap` (migration 0065; a partial unique index allows at
+most one). It is **not meant to be a real human's account**: do not register a person's e-mail or
+PII on it and do not use it for day-to-day administration. Operators should create named global
+admins for people (`POST /api/v1/superadmin/users`, `type: global_admin`) and keep the platform
+account as break-glass only.
+
+Enforced in the service layer (every API path), each refusal a typed 403
+`PLATFORM_ACCOUNT_PROTECTED` and an audit record (actor, target uuid, action, `denied`, reason
+`platform_account`):
+
+| Attempt | Operation |
+|---|---|
+| `DELETE /superadmin/users/<id>` | `delete` |
+| `PUT /superadmin/users/<id>` with `isActive: false`, `DELETE /platform/users/<id>` | `deactivate` |
+| `POST /superadmin/users/<id>/super-admin-role` with `grant: false` | `demote` |
+| self-service erasure, tenant DSAR erasure, the shared erasure core | `erase` |
+
+The last-admin (409) guards stay in force for person accounts. The API exposes
+`isPlatformAccount` on the user DTO; the Users page badges it and disables delete/demote.
+
 ## Operational notes
 
 - Sessions issued before `0096` carry tenant `global` in their refresh token; that tenant no longer

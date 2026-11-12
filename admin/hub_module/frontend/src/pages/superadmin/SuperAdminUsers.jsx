@@ -417,6 +417,14 @@ function SuperAdminUsers() {
                     </span>
                   </td>
                   <td className="px-6 py-4 text-sm space-y-1">
+                    {user.isPlatformAccount && (
+                      <div
+                        className="inline-block mr-2 px-2 py-1 bg-violet-500/20 text-violet-300 rounded text-xs border border-violet-500/30"
+                        title="Non-person bootstrap account: cannot be deleted, deactivated, demoted or erased"
+                      >
+                        Platform account
+                      </div>
+                    )}
                     {user.isSuperAdmin && (
                       <div className="inline-block mr-2 px-2 py-1 bg-gold-500/20 text-gold-300 rounded text-xs border border-gold-500/30">
                         Super Admin
@@ -446,13 +454,18 @@ function SuperAdminUsers() {
                     </button>
                     <button
                       onClick={() => openRoleModal(user, 'super_admin')}
+                      disabled={user.isPlatformAccount}
                       className={`inline-flex items-center px-2 py-1 rounded transition-colors ${
                         user.isSuperAdmin
                           ? 'text-gold-400 hover:text-gold-300 hover:bg-navy-700'
                           : 'text-navy-400 hover:text-navy-300 hover:bg-navy-700'
                       }`}
                       title={
-                        user.isSuperAdmin ? 'Revoke super admin' : 'Grant super admin'
+                        user.isPlatformAccount
+                          ? 'Platform account cannot be demoted'
+                          : user.isSuperAdmin
+                            ? 'Revoke super admin'
+                            : 'Grant super admin'
                       }
                     >
                       <ShieldCheckIcon className="w-4 h-4" />
@@ -492,8 +505,13 @@ function SuperAdminUsers() {
                     </button>
                     <button
                       onClick={() => openDeleteModal(user)}
-                      className="inline-flex items-center px-2 py-1 text-red-400 hover:text-red-300 hover:bg-navy-700 rounded transition-colors"
-                      title="Delete user"
+                      disabled={user.isPlatformAccount}
+                      className="inline-flex items-center px-2 py-1 text-red-400 hover:text-red-300 hover:bg-navy-700 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={
+                        user.isPlatformAccount
+                          ? 'Platform account cannot be deleted'
+                          : 'Delete user'
+                      }
                     >
                       <TrashIcon className="w-4 h-4" />
                     </button>

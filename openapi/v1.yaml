@@ -5801,6 +5801,10 @@ components:
           - type: 'null'
           default: null
           title: Isanalyticsconsumer
+        isPlatformAccount:
+          default: false
+          title: Isplatformaccount
+          type: boolean
         isSuperAdmin:
           default: false
           title: Issuperadmin

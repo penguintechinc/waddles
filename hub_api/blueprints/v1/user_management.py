@@ -54,6 +54,7 @@ class UserDTO:
     avatarUrl: str | None = None
     isActive: bool = True
     isSuperAdmin: bool = False
+    isPlatformAccount: bool = False
     isVendor: bool = False
     emailVerified: bool | None = None
     isAnalyticsConsumer: bool | None = None
@@ -240,6 +241,7 @@ def _row_dto(row: Any, *, is_super_admin: bool) -> UserDTO:
         avatarUrl=getattr(row, "avatar_url", None),
         isActive=bool(row.is_active),
         isSuperAdmin=is_super_admin,
+        isPlatformAccount=bool(getattr(row, "is_bootstrap", False)),
         isVendor=bool(row.is_vendor),
         emailVerified=bool(getattr(row, "email_verified", False))
         if hasattr(row, "email_verified")
