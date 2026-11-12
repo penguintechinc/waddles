@@ -67,8 +67,10 @@ _latency = _meter.create_histogram(
 STREAM_DEK_SCOPE: Final = "key:stream-dek:read"
 #: The only key lineages a caller may request (DB CHECK on `purpose` agrees).
 ALLOWED_PURPOSES: Final = frozenset({PURPOSE_INGEST_STREAM})
-#: Service names (last SPIFFE path segment) allowed to hold stream DEKs.
-ALLOWED_SERVICES: Final = frozenset({"svc-ingest", "svc-process"})
+#: Service names (last SPIFFE path segment) allowed to hold stream DEKs. ``svc-gateway`` is the
+#: v3.0 rename of ``svc-ingest`` (same role, same tenant semantics, same SPIFFE_ENV pin); both are
+#: accepted during the rename so the caller's sealed ctx always matches its own SVID segment.
+ALLOWED_SERVICES: Final = frozenset({"svc-ingest", "svc-gateway", "svc-process"})
 #: Default cache TTL for the unsealed DEK on the caller (matches svc-ingest's 10 min ceiling).
 DEFAULT_TTL_SECONDS: Final = 600
 _TTL_BOUNDS: Final = (60, 3600)

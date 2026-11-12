@@ -248,6 +248,44 @@ class TestServiceAllowList:
         assert service_name("spiffe://penguintech.io/beta/svc-ingest", {"SPIFFE_ENV": "beta"})
 
 
+class TestSvcGatewayRename:
+    """svc-gateway (the v3.0 svc-ingest rename) gets the same allow-list and env pin."""
+
+    GATEWAY = "spiffe://penguintech.io/alpha/svc-gateway"
+
+    def test_gateway_accepted(self) -> None:
+        assert service_name(self.GATEWAY) == "svc-gateway"
+
+    def test_gateway_seal_context_uses_its_own_name(self) -> None:
+        assert seal_context(service_name(self.GATEWAY), 7, "ingest-stream", 1) == (
+            b"svc-gateway|7|ingest-stream|1"
+        )
+
+    @pytest.mark.parametrize(
+        "sub",
+        [
+            "spiffe://penguintech.io/alpha/svc-gateway-evil",
+            "spiffe://penguintech.io/alpha/svc-gatewayx",
+            "spiffe://penguintech.io/alpha/evil-svc-gateway",
+            "spiffe://penguintech.io/beta/svc-gateway",
+            "spiffe://penguintech.io/prod/svc-gateway",
+            "spiffe://evil.example/alpha/svc-gateway",
+            "spiffe://penguintech.io/alpha/svc-gateway/extra",
+            "spiffe://penguintech.io/alpha/svc-unknown",
+            "spiffe://penguintech.io/alpha/gateway",
+            "svc-gateway",
+        ],
+    )
+    def test_gateway_lookalikes_other_envs_and_unknown_denied(self, sub: str) -> None:
+        with pytest.raises(StreamDekServiceDeniedError):
+            service_name(sub)
+
+    def test_gateway_denied_when_spiffe_env_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("SPIFFE_ENV", raising=False)
+        with pytest.raises(StreamDekServiceDeniedError):
+            service_name(self.GATEWAY)
+
+
 class TestRejectedSubAudit:
     """Regression: denial rows for unknown subs carry a salted hash, never NULL or the raw sub."""
 
