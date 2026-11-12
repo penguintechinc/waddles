@@ -445,6 +445,8 @@ pub fn tier_for(tiers: &[Tier], score: i64) -> &Tier {
 pub enum FloorAction {
     /// Floors not evaluated (flag OFF).
     Disabled,
+    /// An idempotent replay: nothing was applied, so no floor side effect re-fires.
+    ReplaySkipped,
     /// Nothing to do.
     None,
     /// Banned on the platform (hard floor / tenant floor).
@@ -461,6 +463,7 @@ impl FloorAction {
     fn label(&self) -> String {
         match self {
             Self::Disabled => "disabled".into(),
+            Self::ReplaySkipped => "replay_skipped".into(),
             Self::None => "none".into(),
             Self::Ban => "ban".into(),
             Self::SoftBan => "soft_ban".into(),
@@ -595,7 +598,13 @@ fn apply_result(
     platform: Option<&str>,
     key: &str,
 ) -> Result<Value, ToolError> {
-    let (community, tenant) = enforce_floors(env, user, out.new_score, platform, key)?;
+    // A replay (`applied == false`) moved nothing: never re-run floor side effects
+    // (a redelivered event must not re-ban or re-soft-ban, e.g. after a manual clear).
+    let (community, tenant) = if out.applied {
+        enforce_floors(env, user, out.new_score, platform, key)?
+    } else {
+        (FloorAction::ReplaySkipped, FloorAction::ReplaySkipped)
+    };
     let mut v = entry_json(
         tiers,
         &Entry {

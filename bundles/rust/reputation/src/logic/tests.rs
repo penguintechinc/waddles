@@ -17,6 +17,8 @@ struct FakeHost {
     soft: Mutex<HashMap<String, String>>,
     tenant: Mutex<Option<TenantPolicy>>,
     tenant_scores: Mutex<HashMap<String, i64>>,
+    /// When set, the next apply reports `applied = false` (an idempotent replay).
+    replay: Mutex<bool>,
 }
 
 impl FakeHost {
@@ -38,6 +40,13 @@ impl FakeHost {
         self.fail.lock().unwrap().clone().map_or(Ok(()), Err)
     }
     fn bump(&self, user: &str, delta: i32) -> Result<Applied, HostError> {
+        if std::mem::take(&mut *self.replay.lock().unwrap()) {
+            let s = self.scores.lock().unwrap();
+            return Ok(Applied {
+                new_score: *s.get(user).ok_or(HostError::NotAMember)?,
+                applied: false,
+            });
+        }
         let mut s = self.scores.lock().unwrap();
         let v = s.get_mut(user).ok_or(HostError::NotAMember)?;
         *v = (*v + i64::from(delta)).clamp(SCALE_MIN, SCALE_MAX);
@@ -1004,4 +1013,56 @@ fn host_failures_map_to_stable_tool_errors_without_leaking_detail() {
 fn unknown_tool_names_are_never_logged_verbatim() {
     assert_eq!(tool_log_label("adjust"), "adjust");
     assert_eq!(tool_log_label("someone@example.com"), "unknown_tool");
+}
+
+#[test]
+fn a_replayed_event_never_re_fires_a_floor_side_effect() {
+    let r = rig(
+        FakeHost::with(&[(U1, 399)]),
+        FakeCfg::with(&[("floors", FLOORS_ON)]),
+        FakePlatform::new(true),
+    );
+    // First delivery crosses the hard floor: banned once.
+    let first = write(
+        &r,
+        "adjust",
+        json!({"user": U1, "delta": -1, "reason": "a.x", "platform": "twitch"}),
+    )
+    .unwrap();
+    assert_eq!(first["floors"]["community"], "ban");
+    assert_eq!(r.platform.bans.lock().unwrap().len(), 1);
+    // The platform ban is then manually cleared and a soft ban removed; the SAME
+    // event is redelivered (host answers applied = false): no new ban, no soft ban.
+    r.platform.bans.lock().unwrap().clear();
+    r.host.soft.lock().unwrap().clear();
+    *r.host.replay.lock().unwrap() = true;
+    let calls_before = r.host.log().len();
+    let again = write(
+        &r,
+        "adjust",
+        json!({"user": U1, "delta": -1, "reason": "a.x", "platform": "twitch"}),
+    )
+    .unwrap();
+    assert_eq!(again["applied"], false);
+    assert_eq!(
+        again["floors"],
+        json!({"community": "replay_skipped", "tenant": "replay_skipped"})
+    );
+    assert!(r.platform.bans.lock().unwrap().is_empty(), "no re-ban");
+    assert!(r.host.soft.lock().unwrap().is_empty(), "no re-soft-ban");
+    let new_calls: Vec<String> = r.host.log()[calls_before..].to_vec();
+    assert!(
+        new_calls.iter().all(|c| c.starts_with("apply:")),
+        "only the idempotent apply ran, no floor reads/writes: {new_calls:?}"
+    );
+    // Same for the moderation class.
+    *r.host.replay.lock().unwrap() = true;
+    let m = write(
+        &r,
+        "apply_moderation",
+        json!({"user": U1, "delta": -50, "reason": "m.x", "platform": "twitch"}),
+    )
+    .unwrap();
+    assert_eq!(m["floors"]["community"], "replay_skipped");
+    assert!(r.platform.bans.lock().unwrap().is_empty());
 }

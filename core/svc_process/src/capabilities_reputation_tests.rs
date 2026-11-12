@@ -1698,8 +1698,7 @@ async fn core_read_ops_need_their_grants_and_reach_the_store_with_host_scope() {
 
     let f = sys_fixture(v2_grants());
     let u = f.member.to_string();
-    let t = f.store.answer(Ok(512));
-    let _ = t;
+    f.store.answer(Ok(512));
     let out = f
         .caps
         .handle(rep_call(
