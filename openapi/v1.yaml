@@ -305,6 +305,38 @@ components:
       - site_id
       title: ApiCredentialBody
       type: object
+    AtRiskEntryDTO:
+      description: One at-risk member (score below the community's at-risk threshold).
+      properties:
+        belowHardBanFloor:
+          title: Belowhardbanfloor
+          type: boolean
+        belowSoftBanFloor:
+          title: Belowsoftbanfloor
+          type: boolean
+        displayName:
+          title: Displayname
+          type: string
+        score:
+          title: Score
+          type: integer
+        tier:
+          title: Tier
+          type: string
+        userId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Userid
+      required:
+      - userId
+      - displayName
+      - score
+      - tier
+      - belowSoftBanFloor
+      - belowHardBanFloor
+      title: AtRiskEntryDTO
+      type: object
     AuditEntryDTO:
       description: Audit log entry DTO.
       properties:
@@ -2173,6 +2205,57 @@ components:
       - database
       - timestamp
       title: HealthChecksDTO
+      type: object
+    HistoryEntryDTO:
+      description: 'One ledger row, safe for an admin view: actor is a category, never
+        an internal id.'
+      properties:
+        actorType:
+          title: Actortype
+          type: string
+        balanceAfter:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Balanceafter
+        delta:
+          title: Delta
+          type: integer
+        id:
+          title: Id
+          type: integer
+        kind:
+          title: Kind
+          type: string
+        occurredAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Occurredat
+        reasonCode:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Reasoncode
+        sourceEvent:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Sourceevent
+        userUuid:
+          title: Useruuid
+          type: string
+      required:
+      - id
+      - userUuid
+      - delta
+      - balanceAfter
+      - kind
+      - reasonCode
+      - actorType
+      - sourceEvent
+      - occurredAt
+      title: HistoryEntryDTO
       type: object
     IdentityDTO:
       description: Identity DTO.
@@ -4657,6 +4740,43 @@ components:
       - description
       - builtin
       title: SlashCommandDTO
+      type: object
+    SoftBanEntryDTO:
+      description: 'One active soft ban: the member cannot WIN anything in this community
+        (not removed).'
+      properties:
+        displayName:
+          title: Displayname
+          type: string
+        expiresAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Expiresat
+        reason:
+          title: Reason
+          type: string
+        setAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Setat
+        setByType:
+          title: Setbytype
+          type: string
+        userId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Userid
+      required:
+      - userId
+      - displayName
+      - reason
+      - setByType
+      - setAt
+      - expiresAt
+      title: SoftBanEntryDTO
       type: object
     SpotlightedCommunityDTO:
       description: Spotlighted community DTO.
@@ -10912,6 +11032,372 @@ paths:
           description: Undocumented response
       summary: '`api.js` `rconApi.testConnection` -- proxy passthrough, see module
         docstring.'
+  /api/v1/admin/{community_id}/reputation/at-risk:
+    get:
+      description: ''
+      operationId: get_get_reputation_at_risk
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Members below the community's at-risk threshold, lowest
+                  first.
+                properties:
+                  members:
+                    items:
+                      $ref: '#/components/schemas/AtRiskEntryDTO'
+                    title: Members
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - members
+                title: AtRiskResponse
+                type: object
+          description: Members below the community's at-risk threshold, lowest first.
+      summary: Members below the community's at-risk threshold (`?limit=`, default
+        50).
+  /api/v1/admin/{community_id}/reputation/config:
+    get:
+      description: ''
+      operationId: get_get_reputation_config
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Community reputation policy (the 300-850 scale is read-only
+                  product policy).
+                properties:
+                  atRiskThreshold:
+                    title: Atriskthreshold
+                    type: integer
+                  hardBanEnabled:
+                    title: Hardbanenabled
+                    type: boolean
+                  hardBanFloor:
+                    title: Hardbanfloor
+                    type: integer
+                  scoreDefault:
+                    title: Scoredefault
+                    type: integer
+                  scoreMax:
+                    title: Scoremax
+                    type: integer
+                  scoreMin:
+                    title: Scoremin
+                    type: integer
+                  softBanEnabled:
+                    title: Softbanenabled
+                    type: boolean
+                  softBanFloor:
+                    title: Softbanfloor
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  updatedAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Updatedat
+                required:
+                - success
+                - softBanEnabled
+                - softBanFloor
+                - hardBanEnabled
+                - hardBanFloor
+                - atRiskThreshold
+                - scoreMin
+                - scoreMax
+                - scoreDefault
+                - updatedAt
+                title: ReputationConfigResponse
+                type: object
+          description: Community reputation policy (the 300-850 scale is read-only
+            product policy).
+      summary: Community reputation policy -- community admins of THIS community only.
+    put:
+      description: ''
+      operationId: put_put_reputation_config
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Request DTO for PUT reputation config -- only supplied
+                fields change.
+
+
+                Floors are independent, each with its own flag (both default OFF):
+                score < `softBanFloor`
+
+                -> soft ban (cannot WIN), score < `hardBanFloor` -> ban in this community.
+                Must satisfy
+
+                300 <= hardBanFloor < softBanFloor < atRiskThreshold <= 850. Enforcement
+                is the accrual
+
+                bundle''s, behind the `waddles.reputation-auto-ban` flag.'
+              properties:
+                atRiskThreshold:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  default: null
+                  title: Atriskthreshold
+                hardBanEnabled:
+                  anyOf:
+                  - type: boolean
+                  - type: 'null'
+                  default: null
+                  title: Hardbanenabled
+                hardBanFloor:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  default: null
+                  title: Hardbanfloor
+                softBanEnabled:
+                  anyOf:
+                  - type: boolean
+                  - type: 'null'
+                  default: null
+                  title: Softbanenabled
+                softBanFloor:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  default: null
+                  title: Softbanfloor
+              title: ReputationConfigRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Community reputation policy (the 300-850 scale is read-only
+                  product policy).
+                properties:
+                  atRiskThreshold:
+                    title: Atriskthreshold
+                    type: integer
+                  hardBanEnabled:
+                    title: Hardbanenabled
+                    type: boolean
+                  hardBanFloor:
+                    title: Hardbanfloor
+                    type: integer
+                  scoreDefault:
+                    title: Scoredefault
+                    type: integer
+                  scoreMax:
+                    title: Scoremax
+                    type: integer
+                  scoreMin:
+                    title: Scoremin
+                    type: integer
+                  softBanEnabled:
+                    title: Softbanenabled
+                    type: boolean
+                  softBanFloor:
+                    title: Softbanfloor
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  updatedAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Updatedat
+                required:
+                - success
+                - softBanEnabled
+                - softBanFloor
+                - hardBanEnabled
+                - hardBanFloor
+                - atRiskThreshold
+                - scoreMin
+                - scoreMax
+                - scoreDefault
+                - updatedAt
+                title: ReputationConfigResponse
+                type: object
+          description: Community reputation policy (the 300-850 scale is read-only
+            product policy).
+      summary: Set the community's soft/hard ban floors + flags and at-risk threshold
+        (400 if invalid).
+  /api/v1/admin/{community_id}/reputation/history:
+    get:
+      description: ''
+      operationId: get_get_reputation_history
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Reputation ledger entries, newest first.
+                properties:
+                  entries:
+                    items:
+                      $ref: '#/components/schemas/HistoryEntryDTO'
+                    title: Entries
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - entries
+                title: HistoryResponse
+                type: object
+          description: Reputation ledger entries, newest first.
+      summary: Reputation ledger, newest first (`?userId=` hub user id, `?limit=`,
+        `?offset=`).
+  /api/v1/admin/{community_id}/reputation/soft-bans:
+    get:
+      description: ''
+      operationId: get_list_reputation_soft_bans
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Active soft bans in the community.
+                properties:
+                  softBans:
+                    items:
+                      $ref: '#/components/schemas/SoftBanEntryDTO'
+                    title: Softbans
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - softBans
+                title: SoftBansResponse
+                type: object
+          description: Active soft bans in the community.
+      summary: Active soft bans (members who cannot WIN in this community).
+  /api/v1/admin/{community_id}/reputation/soft-bans/{user_id}:
+    delete:
+      description: ''
+      operationId: delete_delete_reputation_soft_ban
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for message endpoints.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - message
+                title: MessageResponse
+                type: object
+          description: Response DTO for message endpoints.
+      summary: Clear a member's soft ban (audited).
+    put:
+      description: ''
+      operationId: put_put_reputation_soft_ban
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for a manual soft ban; `expiresAt` (ISO-8601,
+                future) omitted = until cleared.
+              properties:
+                expiresAt:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Expiresat
+              title: SoftBanRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for message endpoints.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - message
+                title: MessageResponse
+                type: object
+          description: Response DTO for message endpoints.
+      summary: Manually soft-ban a member of this community (audited).
   /api/v1/admin/{community_id}/settings:
     get:
       description: ''
@@ -23694,6 +24180,121 @@ paths:
           description: Response DTO for the single-user routes.
       summary: Export `user_id`'s personal data held within the admin's own tenant
         (GDPR Art. 15/20).
+  /api/v1/tenant/{tenant_slug}/reputation/config:
+    get:
+      description: ''
+      operationId: get_get_tenant_reputation_config
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Tenant reputation policy.
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantAtRiskThreshold:
+                    title: Tenantatriskthreshold
+                    type: integer
+                  tenantAutoBanEnabled:
+                    title: Tenantautobanenabled
+                    type: boolean
+                  tenantAutoBanFloor:
+                    title: Tenantautobanfloor
+                    type: integer
+                  updatedAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Updatedat
+                required:
+                - success
+                - tenantAutoBanEnabled
+                - tenantAutoBanFloor
+                - tenantAtRiskThreshold
+                - updatedAt
+                title: TenantReputationConfigResponse
+                type: object
+          description: Tenant reputation policy.
+      summary: The caller's own tenant's reputation policy.
+    put:
+      description: ''
+      operationId: put_put_tenant_reputation_config
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: PUT body -- only supplied fields change; 300 <= floor <
+                atRiskThreshold <= 850.
+              properties:
+                tenantAtRiskThreshold:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  default: null
+                  title: Tenantatriskthreshold
+                tenantAutoBanEnabled:
+                  anyOf:
+                  - type: boolean
+                  - type: 'null'
+                  default: null
+                  title: Tenantautobanenabled
+                tenantAutoBanFloor:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  default: null
+                  title: Tenantautobanfloor
+              title: TenantReputationConfigRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Tenant reputation policy.
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantAtRiskThreshold:
+                    title: Tenantatriskthreshold
+                    type: integer
+                  tenantAutoBanEnabled:
+                    title: Tenantautobanenabled
+                    type: boolean
+                  tenantAutoBanFloor:
+                    title: Tenantautobanfloor
+                    type: integer
+                  updatedAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Updatedat
+                required:
+                - success
+                - tenantAutoBanEnabled
+                - tenantAutoBanFloor
+                - tenantAtRiskThreshold
+                - updatedAt
+                title: TenantReputationConfigResponse
+                type: object
+          description: Tenant reputation policy.
+      summary: Set the tenant auto-ban toggle / floor / at-risk threshold (400 if
+        out of range).
   /api/v1/tenant/{tenant_slug}/settings:
     get:
       description: ''

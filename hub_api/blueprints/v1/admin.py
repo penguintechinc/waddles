@@ -25,15 +25,17 @@ already taken by the Bot module port (M5, per this PR's task brief).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
-from quart_schema import validate_request, validate_response
+from quart_schema import document_response, validate_request, validate_response
 
 from services import admin_service as svc
+from services import community_reputation_service as reputation_svc
 from services.current_user import get_optional_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
@@ -195,6 +197,70 @@ class ReputationResponse:
     success: bool
     reputation: ReputationDTO
     change: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ReputationConfigRequest:
+    """Request DTO for PUT reputation config -- only supplied fields change.
+
+    Floors are independent, each with its own flag (both default OFF): score < `softBanFloor`
+    -> soft ban (cannot WIN), score < `hardBanFloor` -> ban in this community. Must satisfy
+    300 <= hardBanFloor < softBanFloor < atRiskThreshold <= 850. Enforcement is the accrual
+    bundle's, behind the `waddles.reputation-auto-ban` flag.
+    """
+
+    softBanEnabled: bool | None = None
+    softBanFloor: int | None = None
+    hardBanEnabled: bool | None = None
+    hardBanFloor: int | None = None
+    atRiskThreshold: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ReputationConfigResponse:
+    """Community reputation policy (the 300-850 scale is read-only product policy)."""
+
+    success: bool
+    softBanEnabled: bool
+    softBanFloor: int
+    hardBanEnabled: bool
+    hardBanFloor: int
+    atRiskThreshold: int
+    scoreMin: int
+    scoreMax: int
+    scoreDefault: int
+    updatedAt: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class AtRiskResponse:
+    """Members below the community's at-risk threshold, lowest first."""
+
+    success: bool
+    members: list[reputation_svc.AtRiskEntryDTO]
+
+
+@dataclass(slots=True, frozen=True)
+class HistoryResponse:
+    """Reputation ledger entries, newest first."""
+
+    success: bool
+    entries: list[reputation_svc.HistoryEntryDTO]
+
+
+@dataclass(slots=True, frozen=True)
+class SoftBanRequest:
+    """Request DTO for a manual soft ban; `expiresAt` (ISO-8601, future) omitted = until cleared."""
+
+    expiresAt: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SoftBansResponse:
+    """Active soft bans in the community."""
+
+    success: bool
+    softBans: list[reputation_svc.SoftBanEntryDTO]
 
 
 @dataclass(slots=True, frozen=True)
@@ -452,12 +518,199 @@ async def adjust_reputation(
             ctx=ctx,
             amount=data.amount,
             set_to=data.setTo,
+            actor_user_id=get_optional_current_user_id(request),
         )
     except ApiError as exc:
         return _err(exc)
     return jsonify_dto(
         ReputationResponse(success=True, reputation=_reputation_dto(new_score), change=change)
     )
+
+
+def _config_response(cfg: dict[str, Any]) -> ReputationConfigResponse:
+    return ReputationConfigResponse(
+        success=True,
+        softBanEnabled=cfg["soft_ban_enabled"],
+        softBanFloor=cfg["soft_ban_floor"],
+        hardBanEnabled=cfg["hard_ban_enabled"],
+        hardBanFloor=cfg["hard_ban_floor"],
+        atRiskThreshold=cfg["at_risk_threshold"],
+        scoreMin=cfg["score_min"],
+        scoreMax=cfg["score_max"],
+        scoreDefault=cfg["score_default"],
+        updatedAt=cfg["updated_at"],
+    )
+
+
+async def _authorize_reputation_admin(community_id: int) -> Any:
+    """Tenant-scope + community-admin gate shared by every reputation-admin route."""
+    async_dal, dal = _dal()
+    ctx = get_tenant_context(request)
+    assert ctx is not None
+    await svc.authorize_reputation_admin(
+        async_dal, dal, request, community_id=community_id, ctx=ctx
+    )
+    return ctx
+
+
+@admin_bp.route("/<int:community_id>/reputation/config", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@document_response(ReputationConfigResponse)
+async def get_reputation_config(community_id: int) -> tuple[Any, int]:
+    """Community reputation policy -- community admins of THIS community only."""
+    async_dal, dal = _dal()
+    try:
+        await _authorize_reputation_admin(community_id)
+        cfg = await reputation_svc.get_community_config(async_dal, dal, community_id=community_id)
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify_dto(_config_response(cfg))
+
+
+@admin_bp.route("/<int:community_id>/reputation/config", methods=["PUT"])
+@tenant_middleware  # type: ignore[misc]
+@validate_request(ReputationConfigRequest)
+@document_response(ReputationConfigResponse)
+async def put_reputation_config(
+    data: ReputationConfigRequest, community_id: int
+) -> tuple[Any, int]:
+    """Set the community's soft/hard ban floors + flags and at-risk threshold (400 if invalid)."""
+    async_dal, dal = _dal()
+    try:
+        ctx = await _authorize_reputation_admin(community_id)
+        cfg = await reputation_svc.set_community_config(
+            async_dal,
+            dal,
+            tenant_id=ctx.tenant_id,
+            community_id=community_id,
+            soft_ban_enabled=data.softBanEnabled,
+            soft_ban_floor=data.softBanFloor,
+            hard_ban_enabled=data.hardBanEnabled,
+            hard_ban_floor=data.hardBanFloor,
+            at_risk_threshold=data.atRiskThreshold,
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify_dto(_config_response(cfg))
+
+
+@admin_bp.route("/<int:community_id>/reputation/at-risk", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@document_response(AtRiskResponse)
+async def get_reputation_at_risk(community_id: int) -> tuple[Any, int]:
+    """Members below the community's at-risk threshold (`?limit=`, default 50)."""
+    async_dal, dal = _dal()
+    try:
+        await _authorize_reputation_admin(community_id)
+        members = await reputation_svc.get_at_risk(
+            async_dal,
+            dal,
+            community_id=community_id,
+            limit=parse_limit(request.args.get("limit"), default=50),
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify_dto(AtRiskResponse(success=True, members=members))
+
+
+@admin_bp.route("/<int:community_id>/reputation/history", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@document_response(HistoryResponse)
+async def get_reputation_history(community_id: int) -> tuple[Any, int]:
+    """Reputation ledger, newest first (`?userId=` hub user id, `?limit=`, `?offset=`)."""
+    async_dal, dal = _dal()
+    raw_user = request.args.get("userId")
+    if raw_user is not None and not raw_user.isdigit():
+        return _err(ApiError("Invalid userId", 400, "BAD_REQUEST"))
+    raw_offset = request.args.get("offset", "0")
+    if not raw_offset.isdigit():
+        return _err(ApiError("Invalid offset", 400, "BAD_REQUEST"))
+    try:
+        await _authorize_reputation_admin(community_id)
+        entries = await reputation_svc.get_history(
+            async_dal,
+            dal,
+            community_id=community_id,
+            user_id=int(raw_user) if raw_user is not None else None,
+            limit=parse_limit(request.args.get("limit"), default=50),
+            offset=int(raw_offset),
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify_dto(HistoryResponse(success=True, entries=entries))
+
+
+@admin_bp.route("/<int:community_id>/reputation/soft-bans", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@document_response(SoftBansResponse)
+async def list_reputation_soft_bans(community_id: int) -> tuple[Any, int]:
+    """Active soft bans (members who cannot WIN in this community)."""
+    async_dal, dal = _dal()
+    try:
+        await _authorize_reputation_admin(community_id)
+        bans = await reputation_svc.list_soft_bans(
+            async_dal,
+            dal,
+            community_id=community_id,
+            limit=parse_limit(request.args.get("limit"), default=50),
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify_dto(SoftBansResponse(success=True, softBans=bans))
+
+
+@admin_bp.route("/<int:community_id>/reputation/soft-bans/<int:user_id>", methods=["PUT"])
+@tenant_middleware  # type: ignore[misc]
+@validate_request(SoftBanRequest)
+@document_response(MessageResponse)
+async def put_reputation_soft_ban(
+    data: SoftBanRequest, community_id: int, user_id: int
+) -> tuple[Any, int]:
+    """Manually soft-ban a member of this community (audited)."""
+    async_dal, dal = _dal()
+    try:
+        expires = datetime.fromisoformat(data.expiresAt) if data.expiresAt else None
+    except ValueError:
+        return _err(ApiError("Invalid expiresAt", 400, "BAD_REQUEST"))
+    if expires is not None and expires.tzinfo is None:
+        expires = expires.replace(tzinfo=UTC)
+    try:
+        ctx = await _authorize_reputation_admin(community_id)
+        await reputation_svc.set_soft_ban(
+            async_dal,
+            dal,
+            tenant_id=ctx.tenant_id,
+            community_id=community_id,
+            user_id=user_id,
+            expires_at=expires,
+            actor_user_id=get_optional_current_user_id(request),
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify_dto(MessageResponse(success=True, message="Soft ban set"))
+
+
+@admin_bp.route("/<int:community_id>/reputation/soft-bans/<int:user_id>", methods=["DELETE"])
+@tenant_middleware  # type: ignore[misc]
+@document_response(MessageResponse)
+async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[Any, int]:
+    """Clear a member's soft ban (audited)."""
+    async_dal, dal = _dal()
+    try:
+        ctx = await _authorize_reputation_admin(community_id)
+        cleared = await reputation_svc.clear_soft_ban(
+            async_dal,
+            dal,
+            tenant_id=ctx.tenant_id,
+            community_id=community_id,
+            user_id=user_id,
+            actor_user_id=get_optional_current_user_id(request),
+        )
+    except ApiError as exc:
+        return _err(exc)
+    if not cleared:
+        return _err(ApiError("Member is not soft-banned", 404, "NOT_FOUND"))
+    return jsonify_dto(MessageResponse(success=True, message="Soft ban cleared"))
 
 
 @admin_bp.route("/<int:community_id>/members/<int:user_id>", methods=["DELETE"])

@@ -88,7 +88,46 @@ def _relay(result: ProxyResult) -> tuple[dict[str, Any], int]:
     return {"success": True, **_unwrap(result.body)}, 200
 
 
-async def platform_overview(client: AnalyticsCoreProxyClient) -> tuple[dict[str, Any], int]:
+async def reputation_stats(async_dal: Any) -> dict[str, Any]:
+    """Platform reputation stats + 50-point-bucket histogram, straight from the bundle store.
+
+    Replaces the analytics-core proxy for reputation (single store = `bundle_reputation_scores`).
+    Portable aggregate SQL only (no PERCENTILE_CONT) so it runs on Postgres and the sqlite
+    test backend; the median is read with an ordered `OFFSET`.
+    """
+    stats_rows = await async_dal.executesql_async(
+        "SELECT COUNT(*), AVG(balance), MIN(balance), MAX(balance) FROM bundle_reputation_scores"
+    )
+    total, avg, lo, hi = stats_rows[0] if stats_rows else (0, 0, 0, 0)
+    total = int(total or 0)
+    median = 0.0
+    if total:
+        mid = await async_dal.executesql_async(
+            "SELECT balance FROM bundle_reputation_scores ORDER BY balance LIMIT 1 OFFSET "  # noqa: S608
+            f"{int(total) // 2}"
+        )
+        median = float(mid[0][0]) if mid else 0.0
+    bucket_rows = await async_dal.executesql_async(
+        "SELECT (balance / 50) * 50 AS bucket_min, COUNT(*) FROM bundle_reputation_scores "
+        "GROUP BY (balance / 50) * 50 ORDER BY bucket_min"
+    )
+    return {
+        "stats": {
+            "total": total,
+            "avg": round(float(avg or 0), 1),
+            "median": median,
+            "min": int(lo or 0),
+            "max": int(hi or 0),
+        },
+        "histogram": [
+            {"range": f"{int(r[0])}-{int(r[0]) + 49}", "count": int(r[1])} for r in bucket_rows
+        ],
+    }
+
+
+async def platform_overview(
+    client: AnalyticsCoreProxyClient, async_dal: Any
+) -> tuple[dict[str, Any], int]:
     """Port of `getPlatformOverview` -- 3 concurrent analytics-core calls, reshaped.
 
     Faithful port including Node's own dead-code quirk: `activity` is
@@ -99,17 +138,16 @@ async def platform_overview(client: AnalyticsCoreProxyClient) -> tuple[dict[str,
     verbatim (migration plan: "no behavior changes"), not silently
     "fixed" to use the fetched data.
     """
-    summary_result, reputation_result, activity_result = await asyncio.gather(
+    summary_result, activity_result = await asyncio.gather(
         client.get("/api/v1/analytics/platform/summary"),
-        client.get("/api/v1/analytics/platform/reputation"),
         client.get("/api/v1/analytics/platform/activity"),
     )
-    for failed in (summary_result, reputation_result, activity_result):
+    for failed in (summary_result, activity_result):
         if not failed.ok:
             return _upstream_error(failed)
 
     summary = _unwrap(summary_result.body)
-    reputation = _unwrap(reputation_result.body)
+    reputation = await reputation_stats(async_dal)
     return {
         "success": True,
         "summary": summary.get("summary", summary),
@@ -119,9 +157,9 @@ async def platform_overview(client: AnalyticsCoreProxyClient) -> tuple[dict[str,
     }, 200
 
 
-async def reputation_distribution(client: AnalyticsCoreProxyClient) -> tuple[dict[str, Any], int]:
-    """Port of `getReputationDistribution`."""
-    return _relay(await client.get("/api/v1/analytics/platform/reputation"))
+async def reputation_distribution(async_dal: Any) -> tuple[dict[str, Any], int]:
+    """Port of `getReputationDistribution` -- now SQL over the bundle store, no proxy hop."""
+    return {"success": True, **(await reputation_stats(async_dal))}, 200
 
 
 async def growth_trends(
