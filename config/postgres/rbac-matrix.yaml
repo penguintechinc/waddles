@@ -994,7 +994,7 @@ grants:
     table: discord_role_mirror_grants
     privileges: [SELECT, INSERT, UPDATE, DELETE]
 
-  # 0100_bundle_precompile_requests: AOT precompile queue. Hub-api only (enqueue, claim, ack).
+  # 0101_bundle_precompile_requests: AOT precompile queue. Hub-api only (enqueue, claim, ack).
   - role: hub_api
     table: bundle_precompile_requests
     privileges: [SELECT, INSERT, UPDATE, DELETE]

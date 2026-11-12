@@ -8,8 +8,8 @@ CONFLICT (artifact_digest) DO NOTHING, so a digest is enqueued at most once whil
 Per-engine-fingerprint idempotency lives in object storage (`precompiled/<engine_fp>/...`), not
 here. Rows that hit the attempt cap stay with `last_error` set for operators (dead letter).
 
-Revision ID: 0100_bundle_precompile_requests
-Revises: 0099_discord_role_mirror
+Revision ID: 0101_bundle_precompile_requests
+Revises: 0100_stream_dek_issuances
 Create Date: 2026-11-11
 """
 
@@ -22,8 +22,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0100_bundle_precompile_requests"
-down_revision = "0099_discord_role_mirror"
+revision = "0101_bundle_precompile_requests"
+down_revision = "0100_stream_dek_issuances"
 branch_labels = None
 depends_on = None
 
@@ -36,10 +36,10 @@ _MATRIX_TABLES = frozenset({"bundle_precompile_requests"})
 def _load_matrix_module():  # type: ignore[no-untyped-def]
     """Load `scripts/db/rbac_matrix.py` by path (it is not an importable package)."""
     spec = importlib.util.spec_from_file_location(
-        "waddles_rbac_matrix_0100", _MATRIX_MODULE_PATH
+        "waddles_rbac_matrix_0101", _MATRIX_MODULE_PATH
     )
     module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-    sys.modules["waddles_rbac_matrix_0100"] = module
+    sys.modules["waddles_rbac_matrix_0101"] = module
     spec.loader.exec_module(module)  # type: ignore[union-attr]
     return module
 

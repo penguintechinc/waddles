@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0100_bundle_precompile_requests (AOT precompile queue).
+"""Real-Postgres tests for 0101_bundle_precompile_requests (AOT precompile queue).
 
 Proves the table lands, the UNIQUE(artifact_digest) makes enqueue idempotent, and that the
 service's OWN lease SQL (read verbatim from hub_api/services/bundle_precompile_service.py) claims
@@ -20,7 +20,7 @@ requires_docker = pytest.mark.skipif(
     not DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
 )
 
-PREVIOUS_REVISION = "0099_discord_role_mirror"
+PREVIOUS_REVISION = "0100_stream_dek_issuances"
 _SERVICE = (
     Path(__file__).resolve().parents[2]
     / "hub_api"
@@ -48,10 +48,10 @@ def _service_sql() -> dict[str, str]:
 
 @pytest.fixture(scope="module")
 def db() -> Iterator[PgTestDatabase]:
-    """One real Postgres container migrated to head (includes 0100)."""
+    """One real Postgres container migrated to head (includes 0101)."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0100-precompile") as database:
+    with migrated_postgres("0101-precompile") as database:
         yield database
 
 
@@ -129,7 +129,7 @@ def test_attempts_check_constraint(db: PgTestDatabase) -> None:
 def test_downgrade_drops_table_and_reupgrade_restores() -> None:
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0100-roundtrip") as database:
+    with migrated_postgres("0101-roundtrip") as database:
         alembic_cli("downgrade", PREVIOUS_REVISION, dsn=database.dsn)
         engine = _engine(database)
         with engine.connect() as conn:
