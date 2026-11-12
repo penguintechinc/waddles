@@ -170,9 +170,8 @@ class TestAnalyticsFailLoud:
         monkeypatch.setattr(httpx.AsyncClient, "__init__", patched)
         client = AnalyticsCoreProxyClient(_CFG)
         for call in (
-            svc.reputation_distribution(client),
             svc.activity_breakdown(client),
-            svc.platform_overview(client),
+            svc.platform_overview(client, None),
         ):
             body, status = await call
             assert status == 502

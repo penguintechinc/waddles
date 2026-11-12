@@ -1185,6 +1185,42 @@ def bind_suppression_tables(dal: Any, *, migrate: bool = False) -> None:
     )
 
 
+def bind_reputation_policy_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Bind the per-community / per-tenant reputation policy tables (alembic 0096).
+
+    Keyed by their natural primary key (`community_id` / `tenant_id`) -- no `id` column exists,
+    so reads select explicit fields. Schema: `scripts/db/bundle_reputation_unify.sql`.
+    """
+    if "bundle_reputation_policy" not in dal.tables:
+        dal.define_table(
+            "bundle_reputation_policy",
+            Field("tenant_id", "integer", notnull=True),
+            Field("community_id", "integer", notnull=True),
+            Field("score_min", "integer", default=300),
+            Field("score_max", "integer", default=850),
+            Field("score_default", "integer", default=600),
+            Field("soft_ban_enabled", "boolean", default=False),
+            Field("soft_ban_floor", "integer", default=550),
+            Field("hard_ban_enabled", "boolean", default=False),
+            Field("hard_ban_floor", "integer", default=400),
+            Field("at_risk_threshold", "integer", default=600),
+            Field("updated_at", "datetime"),
+            primarykey=["community_id"],
+            migrate=migrate,
+        )
+    if "bundle_reputation_tenant_policy" not in dal.tables:
+        dal.define_table(
+            "bundle_reputation_tenant_policy",
+            Field("tenant_id", "integer", notnull=True),
+            Field("tenant_auto_ban_enabled", "boolean", default=False),
+            Field("tenant_auto_ban_floor", "integer", default=350),
+            Field("tenant_at_risk_threshold", "integer", default=450),
+            Field("updated_at", "datetime"),
+            primarykey=["tenant_id"],
+            migrate=migrate,
+        )
+
+
 def bind_erasure_reputation_tables(dal: Any, *, migrate: bool = False) -> None:
     """Bind the reputation / pseudonym stores Art. 17 erasure deletes from.
 
@@ -1240,7 +1276,7 @@ def bind_erasure_reputation_tables(dal: Any, *, migrate: bool = False) -> None:
     if "bundle_reputation_adjustments" not in dal.tables:
         dal.define_table(
             "bundle_reputation_adjustments",
-            Field("app_id", "string", length=255, notnull=True),
+            Field("app_id", "string", length=255),
             Field("tenant_id", "integer", notnull=True),
             Field("community_id", "integer"),
             Field("target_user_uuid", "string", length=36, notnull=True),
@@ -1249,6 +1285,38 @@ def bind_erasure_reputation_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("reason_code", "string", length=100, notnull=True),
             Field("occurred_at", "datetime"),
             Field("reversal_of", "bigint"),
+            # alembic 0072 / 0096 ledger columns
+            Field("kind", "string", length=20, default="adjust"),
+            Field("requested_value", "bigint"),
+            Field("balance_after", "bigint"),
+            Field("idempotency_key", "string", length=128),
+            Field("actor", "text"),
+            Field("source_event", "text"),
+            Field("reason_code_id", "integer"),
+            migrate=migrate,
+        )
+    if "bundle_reputation_soft_bans" not in dal.tables:
+        dal.define_table(
+            "bundle_reputation_soft_bans",
+            Field("tenant_id", "integer", notnull=True),
+            Field("community_id", "integer", notnull=True),
+            Field("user_uuid", "string", length=36, notnull=True),
+            Field("reason_code", "integer", notnull=True),
+            Field("set_by", "text", notnull=True),
+            Field("set_at", "datetime"),
+            Field("expires_at", "datetime"),
+            migrate=migrate,
+        )
+    if "bundle_reputation_tenant_scores" not in dal.tables:
+        dal.define_table(
+            "bundle_reputation_tenant_scores",
+            Field("tenant_id", "integer", notnull=True),
+            Field("user_uuid", "string", length=36, notnull=True),
+            Field("score", "integer", default=600),
+            Field("event_count", "bigint", default=0),
+            Field("last_event_at", "datetime"),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
             migrate=migrate,
         )
     if "ephemeral_pseudonyms" not in dal.tables:

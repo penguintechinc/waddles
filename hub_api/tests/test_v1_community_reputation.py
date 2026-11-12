@@ -83,23 +83,34 @@ def _headers(*, scope: str = "community.reputation:read", user_id: str = "7") ->
     return {"Authorization": f"Bearer {make_token(scope=scope, user_id=user_id)}"}
 
 
+def _uuid_for(hub_user_id: int) -> str:
+    return f"00000000-0000-4000-8000-{hub_user_id:012d}"
+
+
 def _seed_member(
     dal: Any, *, community_id: int, hub_user_id: int, display_name: str, reputation: int
 ) -> None:
+    """A member with a `user_uuid` token plus its bundle-store community score row."""
     dal.community_members.insert(
         community_id=community_id,
         user_id=str(hub_user_id),
+        user_uuid=_uuid_for(hub_user_id),
         display_name=display_name,
-        reputation=reputation,
         is_active=True,
         joined_at=datetime.now(UTC),
+    )
+    dal.bundle_reputation_scores.insert(
+        tenant_id=dal.communities[community_id].tenant_id,
+        community_id=community_id,
+        user_uuid=_uuid_for(hub_user_id),
+        balance=reputation,
     )
     dal.commit()
 
 
 def _seed_tenant(dal: Any, *, tenant_id: int, hub_user_id: int, score: int) -> None:
-    dal.reputation_tenant.insert(
-        tenant_id=tenant_id, hub_user_id=hub_user_id, score=score, total_events=3
+    dal.bundle_reputation_tenant_scores.insert(
+        tenant_id=tenant_id, user_uuid=_uuid_for(hub_user_id), score=score, event_count=3
     )
     dal.commit()
 
@@ -182,13 +193,16 @@ class TestGetMyReputation:
     async def test_tenant_score_never_leaks_from_another_tenant(
         self, client: Any, reputation_db: Any
     ) -> None:
-        """A `reputation_tenant` row seeded under a DIFFERENT tenant_id must never surface here."""
+        """A tenant-aggregate row seeded under a DIFFERENT tenant_id must never surface here."""
         async_dal, community_id, _tenant_id = reputation_db
         dal = async_dal.dal
         other_tenant_id = dal.tenants.insert(
             slug="other-tenant-v1", display_name="Other Tenant", is_active=True
         )
         dal.commit()
+        _seed_member(
+            dal, community_id=community_id, hub_user_id=7, display_name="me", reputation=600
+        )
         _seed_tenant(dal, tenant_id=other_tenant_id, hub_user_id=7, score=850)
 
         response = await client.get(

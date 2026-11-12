@@ -19,7 +19,7 @@ from typing import Any
 
 from penguin_dal import AsyncDB
 
-from services import bundle_audit
+from services import bundle_audit, reputation_logic_exclusivity
 from services.bundle_catalog_guard import assert_bundle_globally_enabled
 from services.bundle_install_dal import raw_sql_write
 from services.errors import ApiError, conflict, not_found
@@ -67,6 +67,10 @@ async def set_available(
             409,
             "pinned_version_not_installed",
         )
+
+    await reputation_logic_exclusivity.require_single_logic_available(
+        install_dal, tenant_id=tenant_id, app_id=app_id
+    )
 
     now = datetime.now(UTC)
     existing = await install_dal(

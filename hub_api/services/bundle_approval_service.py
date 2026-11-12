@@ -112,6 +112,7 @@ from services import (
     app_source_binding_service,
     bundle_audit,
     bundle_signing_service,
+    reputation_logic_exclusivity,
     valkey_admin_client,
 )
 from services.bundle_access_grants import access_grant_diff_atoms, is_access_grant_id
@@ -1342,6 +1343,12 @@ async def activate_tenant_wide_with_warnings(
     if upload is None:  # pragma: no cover - defensive, a global install always has a matching row
         raise not_found(f"version {version} of {app_id} not found")
 
+    await reputation_logic_exclusivity.require_single_logic_active(
+        install_dal,
+        tenant_id=tenant_id,
+        app_id=app_id,
+        manifest_json=upload.manifest_json,
+    )
     manifest = _reparse_trusted(upload.manifest_json)
     await _validate_manifest_activation(
         install_dal,
@@ -1587,6 +1594,12 @@ async def activate_for_community_with_warnings(
     if upload is None:  # pragma: no cover - defensive, a global install always has a matching row
         raise not_found(f"version {version} of {app_id} not found")
 
+    await reputation_logic_exclusivity.require_single_logic_active(
+        install_dal,
+        tenant_id=tenant_id,
+        app_id=app_id,
+        manifest_json=upload.manifest_json,
+    )
     manifest = _reparse_trusted(upload.manifest_json)
     await _validate_manifest_activation(
         install_dal,
