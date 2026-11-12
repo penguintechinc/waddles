@@ -98,6 +98,10 @@ pub use tool::ToolContext;
 /// The community scope the verified caller must hold for `reputation.override`
 /// (mirrors the reputation bundle's manifest `required_scope`).
 const REPUTATION_OVERRIDE_SCOPE: &str = "community:admin";
+/// The first-party reputation SERVICE bundle: when it is the origin of the
+/// call chain (chain length 1) its activity writes are core internals and are
+/// exempt from the logic-bundle exclusivity check.
+const REPUTATION_SERVICE_APP_ID: &str = "waddles.core.service.reputation";
 /// Scope a HUMAN-originated moderation-class reputation call must hold (admins
 /// hold it too: the role mapping is cumulative).
 const REPUTATION_MODERATE_SCOPE: &str = "community:moderate";
@@ -2649,6 +2653,60 @@ impl<K: KvBackend> StageCapabilities<K> {
         }
     }
 
+    /// Reputation-logic exclusivity (contract): an ACTIVITY-class write
+    /// (`reputation.adjust` / `adjust_many` / `apply`) is allowed only when the
+    /// invocation's ORIGIN (first app of the tool-call chain -- the accrual
+    /// logic bundle reaches the host through the core reputation service) is
+    /// the tenant's ACTIVE reputation-logic app, as reported by the SQL
+    /// function `reputation_active_logic_app(tenant)` (which is where the
+    /// manifest's `provides: reputation-logic` and the 409 exclusivity are
+    /// enforced), or a core reputation-service internal (the service invoked
+    /// directly, chain length 1). Everything else -- including a bundle that
+    /// does not provide reputation-logic, or a tenant with no active logic app
+    /// -- is `forbidden`; a lookup failure fails closed. No wiring or flag off
+    /// is left to the caller's `not_implemented` / `feature_disabled`.
+    async fn enforce_logic_exclusivity(&self) -> Result<(), HostResultError> {
+        let Some(wiring) = &self.reputation else {
+            return Ok(());
+        };
+        if !wiring.flag.enabled().await {
+            return Ok(());
+        }
+        let chain: &[String] = match &self.tool {
+            Some(t) if !t.chain.is_empty() => &t.chain,
+            _ => std::slice::from_ref(&self.app_id),
+        };
+        let origin = chain[0].as_str();
+        if chain.len() == 1 && origin == REPUTATION_SERVICE_APP_ID {
+            return Ok(());
+        }
+        let scope = self.reputation_scope();
+        match wiring.store.active_logic_app(&scope).await {
+            Ok(Some(active)) if active == origin => Ok(()),
+            Ok(_) => {
+                tracing::info!(
+                    app_id = %self.app_id, community_id = self.community_id,
+                    "reputation activity write refused: caller is not the active reputation-logic bundle"
+                );
+                Err(denied(
+                    "forbidden",
+                    "activity-class reputation writes are restricted to the tenant's active reputation-logic bundle",
+                ))
+            }
+            Err(e) => Err(reputation_error_to_host(e)),
+        }
+    }
+
+    /// The host-derived [`ReputationScope`] of this invocation (tenant,
+    /// community and app are never guest input).
+    fn reputation_scope(&self) -> ReputationScope {
+        ReputationScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+        }
+    }
+
     /// `reputation.get` / `reputation.adjust` (`wit/waddle-bundle/stage.wit`
     /// `interface reputation`), carried as `capability = db`,
     /// `op = "reputation.*"` (`penguin-bundle-host`'s closed `CapabilityKind`
@@ -2730,6 +2788,9 @@ impl<K: KvBackend> StageCapabilities<K> {
             ));
         }
 
+        if is_adjust {
+            self.enforce_logic_exclusivity().await?;
+        }
         let permission = if is_adjust {
             PermissionId::ReputationCommunityWrite
         } else {
@@ -2761,11 +2822,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             ));
         }
 
-        let scope = ReputationScope {
-            tenant_id: self.tenant_id,
-            community_id: self.community_id,
-            app_id: self.app_id.clone(),
-        };
+        let scope = self.reputation_scope();
         let balance = match (delta, reason) {
             (Some(delta), Some(reason)) => {
                 wiring
@@ -2980,18 +3037,17 @@ impl<K: KvBackend> StageCapabilities<K> {
         // other tool in the component, nor a direct WIT call, can override on
         // behalf of a non-admin. Checked BEFORE the gate so a refused caller
         // never burns the admin quota (10/min) a real admin needs.
+        if matches!(op, Op::AdjustMany { .. }) {
+            self.enforce_logic_exclusivity().await?;
+        }
+
         if matches!(op, Op::Override { .. }) {
-            let actor = self.resolve_verified_actor().await;
-            if !actor.has_scope(REPUTATION_OVERRIDE_SCOPE) {
-                tracing::info!(
-                    app_id = %self.app_id, community_id = self.community_id,
-                    "reputation.override refused: caller lacks community:admin"
-                );
-                return Err(denied(
-                    "forbidden",
-                    format!("reputation.override requires the caller to hold {REPUTATION_OVERRIDE_SCOPE}"),
-                ));
-            }
+            // Admin override is `admin_override` (class 3): the SQL denies it to the
+            // bundle role, so it is hub-api only and never served by the host.
+            return Err(denied(
+                "forbidden",
+                "reputation.override is hub-api only (admin_override is denied to the bundle role)",
+            ));
         }
 
         match &op {
@@ -3063,11 +3119,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             reservation = Some((invocation, kind, ordinal));
         }
 
-        let scope = ReputationScope {
-            tenant_id: self.tenant_id,
-            community_id: self.community_id,
-            app_id: self.app_id.clone(),
-        };
+        let scope = self.reputation_scope();
         let no_key = || denied("backend", "reputation mutation has no idempotency key");
         let entries_json = |rows: Vec<bundle_host_reputation::ScoreEntry>| {
             serde_json::json!({
@@ -3267,6 +3319,34 @@ impl<K: KvBackend> StageCapabilities<K> {
             ));
         }
 
+        // Activity-class apply: only the tenant's ACTIVE reputation-logic bundle
+        // (or a core service internal) may write -- see `enforce_logic_exclusivity`.
+        if matches!(
+            op,
+            Op::Apply {
+                class: ReasonClass::Activity,
+                ..
+            }
+        ) {
+            self.enforce_logic_exclusivity().await?;
+        }
+
+        // Manual soft bans are hub-api-only (contract): a bundle may set/clear
+        // ONLY the score-floor soft ban, identified by its fixed reason.
+        if let Op::SoftBan { reason, .. }
+        | Op::LiftSoftBan {
+            only_reason: reason,
+            ..
+        } = &op
+        {
+            if reason != bundle_host_reputation::FLOOR_SOFT_BAN_REASON {
+                return Err(denied(
+                    "forbidden",
+                    "manual soft bans are managed through hub-api only; a bundle may only set or clear the score-floor soft ban",
+                ));
+            }
+        }
+
         // Core-only ops: the permission is first-party-only by policy.
         let core_only = matches!(
             op,
@@ -3305,8 +3385,9 @@ impl<K: KvBackend> StageCapabilities<K> {
                     ..
                 }
         );
-        // A POSITIVE moderation delta raises a score with the larger cap: only a
-        // verified community admin may make one, system-originated or not.
+        // A POSITIVE moderation delta raises a score with the larger cap: that is
+        // an `admin_override` (class 3), which the SQL denies the bundle role, so
+        // it is hub-api only -- forbidden for everyone here, admin scope or not.
         if matches!(
             op,
             Op::Apply {
@@ -3315,15 +3396,10 @@ impl<K: KvBackend> StageCapabilities<K> {
                 ..
             } if d > 0
         ) {
-            let actor = self.resolve_verified_actor().await;
-            if !actor.has_scope(REPUTATION_OVERRIDE_SCOPE) {
-                return Err(denied(
-                    "forbidden",
-                    format!(
-                        "a positive moderation delta requires the caller to hold {REPUTATION_OVERRIDE_SCOPE}"
-                    ),
-                ));
-            }
+            return Err(denied(
+                "forbidden",
+                "a positive moderation delta is an admin override (hub-api only)",
+            ));
         }
         if moderation_write {
             let system = self
@@ -3428,11 +3504,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             reservation = Some((invocation, "reputation_apply", ordinal));
         }
 
-        let scope = ReputationScope {
-            tenant_id: self.tenant_id,
-            community_id: self.community_id,
-            app_id: self.app_id.clone(),
-        };
+        let scope = self.reputation_scope();
         let result: Result<serde_json::Value, ReputationError> = match &op {
             Op::Apply {
                 user,

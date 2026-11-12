@@ -177,3 +177,20 @@ Host store + SQL contract (stub `reputation_apply`) `core/bundle_host_reputation
 `core/tool_invoke_e2e/tests/reputation_service_e2e.rs` (real wasm + executor + `tool.invoke` + gate). The e2e
 fixture `core/tool_invoke_e2e/tests/fixtures/reputation_service.wasm` must be rebuilt when the bundle changes (see
 the README beside it).
+
+## SQL contract (v3.0.X, PR #1236)
+
+The host never writes reputation tables: every write is the SECURITY DEFINER SQL function
+`reputation_apply` (membership, caps, idempotency, clamp, ledger all enforced in SQL; breaches
+map to `rate_limited`, non-members to `not_a_member`). Consequences for the bundle role:
+
+- `override` (admin_override, class 3) and any **positive** moderation delta are denied by the
+  SQL to this role, so the host answers `forbidden` for everyone, admin scope or not -- admin
+  override and score restores are hub-api only.
+- Soft bans: only the score-floor ban (`community_soft_floor`) can be set or cleared, via
+  `reputation_set_floor_soft_ban` / `reputation_clear_floor_soft_ban`. Manual soft bans are
+  hub-api only (a bundle gets `forbidden`).
+- Activity-class writes (`adjust`, `adjust_many`, `apply`) are allowed only when the call
+  chain's origin is the tenant's single active reputation-logic app
+  (`reputation_active_logic_app`; none or ambiguous fails closed) or the core service itself.
+- Unscored members read as `COALESCE(balance, community policy score_default, 600)` everywhere.

@@ -11,29 +11,18 @@
 //!          grant + declared delta bounds + per-call cap + in-memory quotas
 //!          + MembershipCheck (SnapshotMembership, fast pre-filter)
 //!     2. flag gate / wiring check (fail-loud `not_implemented` / `feature_disabled`)
-//!     3. ReputationStore::adjust   <-- THIS CRATE: the authoritative, durable part
-//!          one transaction: live membership re-check -> per-scope advisory
-//!          lock -> score-row lock -> rolling-24h per-user cap -> rolling-24h
-//!          per-scope cap -> balance update -> audit-ledger insert
+//!     3. ReputationStore::adjust   <-- THIS CRATE: a thin caller of the
+//!          SECURITY DEFINER SQL function `reputation_apply()`, which is the
+//!          authoritative part (membership, caps, idempotency, clamp, ledger)
 //! ```
 //!
 //! The gate's quota ledger is in-memory (per process, resets on restart, not
-//! shared across replicas); the store's caps are the durable ones, both
-//! derived from the audit ledger inside the write transaction:
-//!
-//! * **per-user** (`per_user_daily_abs_max`): the SUM of the user's applied
-//!   `|delta|` over the rolling 24h, read under the score row's lock;
-//! * **per-scope** (`per_scope_daily_abs_max`, the Dangerous-grant blast-radius
-//!   cap): the SUM of every applied `|delta|` by this app in this
-//!   (tenant, community) over the rolling 24h, read under a transaction-scoped
-//!   advisory lock keyed on that scope (adjusts for DIFFERENT users share no
-//!   row, so the score-row lock alone cannot serialize them).
-//!
-//! Concurrent adjusts therefore serialize on the lock that guards the cap they
-//! are checked against, and neither cap can be exceeded by a race, a restart
-//! or a second replica. A zero `delta` is rejected up front
-//! ([`validate_delta`]): it would otherwise consume no quota yet still append
-//! a ledger row and bump `adjustment_count`, an unbounded-growth vector.
+//! shared across replicas) and is only a fast pre-filter. The durable per-user
+//! / per-app / per-class rolling-24h caps, the membership check, idempotency
+//! and clamping all live INSIDE the SQL function (`reputation_apply`), so no
+//! race, restart or second replica can exceed them and this crate never
+//! computes a cap itself. A zero `delta` is rejected up front
+//! ([`validate_delta`]).
 //!
 //! # Scope derivation
 //!
@@ -61,6 +50,7 @@ use std::pin::Pin;
 
 pub use postgres::{
     connect, load_membership, run_membership_refresh, ConnectConfig, PostgresReputationStore,
+    FLOOR_SOFT_BAN_REASON,
 };
 pub use scale::{
     ReasonClass, ScoreScale, ACTIVITY_CAP, MODERATION_CAP, SCALE_DEFAULT, SCALE_MAX, SCALE_MIN,
@@ -253,9 +243,9 @@ pub enum ReputationError {
     /// same one with different parameters): nothing was applied.
     #[error("idempotency key was already used by a different reputation operation")]
     IdempotencyConflict,
-    /// The soft-ban lift quota (per user or per community, rolling 24h) is
-    /// exhausted: nothing was changed.
-    #[error("soft-ban lift quota ({cap}/day) exhausted")]
+    /// A rolling-24h cap or quota enforced by the SQL functions was hit
+    /// (`cap` is 0 when the function does not report it): nothing changed.
+    #[error("reputation rate limit exceeded (cap {cap})")]
     RateLimited { cap: i64 },
     /// Malformed argument (bad `reason`, zero `delta`, ...).
     #[error("invalid argument: {0}")]
@@ -328,8 +318,9 @@ pub struct ReputationCaps {
 
 /// The durable, community-scoped reputation store.
 pub trait ReputationStore: Send + Sync {
-    /// Current score of `user` in `scope`'s community (0 for an active member
-    /// with no adjustments). [`ReputationError::NotAMember`] if `user` is not
+    /// Current score of `user` in `scope`'s community
+    /// (`COALESCE(balance, policy score_default, 600)` for an unscored active
+    /// member). [`ReputationError::NotAMember`] if `user` is not
     /// an active member right now.
     fn get<'a>(
         &'a self,
@@ -350,21 +341,20 @@ pub trait ReputationStore: Send + Sync {
         caps: ReputationCaps,
     ) -> BoxFuture<'a, Result<i64, ReputationError>>;
 
-    /// ADMIN override: sets `user`'s score to `absolute_score` (clamped into
-    /// [`MIN_SCORE`]..=[`MAX_SCORE`]) and returns the NEW score. NOT a capped
-    /// delta -- the rolling-24h caps neither bind nor are consumed by it --
-    /// so the caller (the host) MUST have authorized the dedicated admin
-    /// permission first. Ledgered as kind `admin_override`; idempotent on
-    /// `key` (a replay with the same parameters returns the original result,
-    /// different parameters are [`ReputationError::IdempotencyConflict`]).
+    /// ADMIN override. NOT available to the bundle role: the SQL contract
+    /// denies `admin_override` (class 3) to it, so admin overrides are
+    /// hub-api only. Kept on the trait so stores/doubles stay source
+    /// compatible; the default fails loudly.
     fn override_score<'a>(
         &'a self,
-        scope: &'a ReputationScope,
-        user: uuid::Uuid,
-        absolute_score: i64,
-        reason: &'a str,
-        key: &'a IdempotencyKey,
-    ) -> BoxFuture<'a, Result<i64, ReputationError>>;
+        _scope: &'a ReputationScope,
+        _user: uuid::Uuid,
+        _absolute_score: i64,
+        _reason: &'a str,
+        _key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<i64, ReputationError>> {
+        Box::pin(async { Err(unsupported("override_score")) })
+    }
 
     /// Atomically applies every `(user, delta)` in ONE transaction: either
     /// all land or none do. Per-user and per-scope rolling-24h caps apply
@@ -390,8 +380,8 @@ pub trait ReputationStore: Send + Sync {
     ) -> BoxFuture<'a, Result<Vec<ScoreEntry>, ReputationError>>;
 
     /// Top `limit` (`1..=`[`MAX_LEADERBOARD_LIMIT`]) ACTIVE members by score,
-    /// highest first, ties broken by user UUID. Members with no score row
-    /// (never adjusted, implicitly 0) are not listed.
+    /// highest first, ties broken by user UUID. Unscored members count at
+    /// `COALESCE(balance, policy score_default, 600)`.
     fn leaderboard<'a>(
         &'a self,
         scope: &'a ReputationScope,
@@ -400,13 +390,14 @@ pub trait ReputationStore: Send + Sync {
 
     /// Applies one classed, idempotent delta through the shared SQL function
     /// `reputation_apply(p_tenant, p_community, p_user_uuid, p_delta,
-    /// p_reason_code, p_actor, p_source_event, p_idempotency_key)`, which owns
-    /// the lock, the scale clamp and the ledger row, recording `reason_code`
-    /// as `<class>:<source_event>` and ledger `kind = 'apply'`. The store
-    /// enforces the class bound ([`ScoreScale::check_delta`]), the live
-    /// membership (row held `FOR SHARE`) and the per-class rolling-24h
-    /// per-user/per-scope `caps`, all in one transaction. `class` MUST be
-    /// derived by the host from the granted permission, never from guest input.
+    /// p_reason_class, p_reason_code, p_app_id, p_actor, p_source_event,
+    /// p_idempotency_key)`, which AUTHORITATIVELY owns membership, the
+    /// rolling-24h caps, idempotency, the scale clamp and the ledger row
+    /// (kinds `adjust` / `moderation` / `admin_override`). The store only
+    /// enforces the host-side class bound ([`ScoreScale::check_delta`]);
+    /// `caps` is the gate's own quota and is NOT recomputed against the
+    /// ledger. `class` MUST be derived by the host from the granted
+    /// permission, never from guest input.
     #[allow(clippy::too_many_arguments)]
     fn apply<'a>(
         &'a self,
@@ -462,9 +453,19 @@ pub trait ReputationStore: Send + Sync {
         Box::pin(async { Err(unsupported("tenant_policy")) })
     }
 
+    /// The app id of the tenant's ACTIVE reputation-logic bundle (via
+    /// `reputation_active_logic_app(tenant)`, which applies the manifest
+    /// `provides: reputation-logic` + exclusivity rules), or `None`.
+    fn active_logic_app<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+    ) -> BoxFuture<'a, Result<Option<String>, ReputationError>> {
+        Box::pin(async { Err(unsupported("active_logic_app")) })
+    }
+
     /// Whether `user` is soft-banned in this community (cannot WIN anything:
-    /// games, raffles, giveaways, economy payouts). Reads the hub-api-owned
-    /// `reputation_soft_bans` table.
+    /// games, raffles, giveaways, economy payouts). Reads through
+    /// `reputation_is_soft_banned()`.
     fn is_soft_banned<'a>(
         &'a self,
         _scope: &'a ReputationScope,
@@ -473,8 +474,10 @@ pub trait ReputationStore: Send + Sync {
         Box::pin(async { Err(unsupported("is_soft_banned")) })
     }
 
-    /// Records an active soft ban for `user` (idempotent: an already-active
-    /// ban returns `Ok(false)`, a new one `Ok(true)`). Never quota-blocked.
+    /// Records the FLOOR soft ban (reason code 1) for `user` via
+    /// `reputation_set_floor_soft_ban()`; `reason` must be the floor reason.
+    /// Manual soft bans are hub-api-only. Idempotent: already-banned returns
+    /// `Ok(false)`, a new one `Ok(true)`.
     fn soft_ban<'a>(
         &'a self,
         _scope: &'a ReputationScope,
@@ -484,10 +487,9 @@ pub trait ReputationStore: Send + Sync {
         Box::pin(async { Err(unsupported("soft_ban")) })
     }
 
-    /// Lifts the active soft ban of `user` ONLY when it was recorded with
-    /// exactly `only_reason` (so a floor-triggered ban can be cleared when the
-    /// score recovers while a manual one is never touched). `Ok(true)` when a
-    /// ban was lifted.
+    /// Clears the FLOOR soft ban of `user` only (`only_reason` must be the
+    /// floor reason; a manual ban is never touched). `Ok(true)` when a ban
+    /// was lifted.
     fn lift_soft_ban<'a>(
         &'a self,
         _scope: &'a ReputationScope,

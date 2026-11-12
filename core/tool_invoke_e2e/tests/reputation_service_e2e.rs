@@ -109,6 +109,9 @@ struct MemStore {
     ledger: Mutex<Vec<Ledger>>,
     /// Applied idempotency keys.
     keys: Mutex<std::collections::HashSet<String>>,
+    /// What `reputation_active_logic_app` answers: `None` = the e2e logic
+    /// caller ([`CALLER`]), `Some(x)` = exactly `x` (inner `None` = no logic).
+    active_logic: Mutex<Option<Option<String>>>,
 }
 
 impl MemStore {
@@ -126,6 +129,19 @@ impl MemStore {
 }
 
 impl ReputationStore for MemStore {
+    fn active_logic_app<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+    ) -> BoxFuture<'a, Result<Option<String>, ReputationError>> {
+        Box::pin(async move {
+            Ok(self
+                .active_logic
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| Some(CALLER.to_string())))
+        })
+    }
     fn get<'a>(
         &'a self,
         scope: &'a ReputationScope,
@@ -855,7 +871,7 @@ async fn a_draw_filter_fetches_scores_in_one_get_many_through_tool_invoke() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn b_admin_override_lands_and_is_ledgered_for_a_verified_admin() {
+async fn b_admin_override_is_hub_api_only_even_for_a_verified_admin() {
     let w = World::new(Some("community-admin"), Some("1001")).await;
     // A spoofed `actor` argument is refused outright -- never trusted.
     let spoof = w
@@ -881,18 +897,11 @@ async fn b_admin_override_lands_and_is_ledgered_for_a_verified_admin() {
             "k-b1",
         )
         .await;
-    assert_eq!(out["ok"]["score"], -50, "{out}");
-    assert_eq!(w.store.score(COMMUNITY_A, w.alice), -50);
-    assert_eq!(
-        w.store.ledger(),
-        vec![Ledger {
-            community: COMMUNITY_A,
-            user: w.alice,
-            kind: "admin_override",
-            value: -50,
-        }],
-        "the override is audit-ledgered as admin_override"
-    );
+    // Admin override is `admin_override` (class 3), denied to the bundle role in
+    // SQL: the host refuses it even for a verified admin -- hub-api only.
+    assert_eq!(out, json!({"tool_error": "Forbidden"}), "{out}");
+    assert!(w.store.ledger().is_empty(), "store untouched");
+    assert_eq!(w.store.score(COMMUNITY_A, w.alice), START);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1131,7 +1140,10 @@ async fn h_moderation_class_needs_a_moderator_actor_and_has_its_own_larger_cap()
             "k-h4",
         )
         .await;
-    assert_eq!(ok2["ok"]["score"], 300, "600-400 is clamped to the scale floor: {ok2}");
+    assert_eq!(
+        ok2["ok"]["score"], 300,
+        "600-400 is clamped to the scale floor: {ok2}"
+    );
     let third = m
         .go(
             "evt-h5",
@@ -1146,4 +1158,26 @@ async fn h_moderation_class_needs_a_moderator_actor_and_has_its_own_larger_cap()
         300,
         "the scale floor is 300"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn i_activity_writes_from_a_non_active_logic_origin_are_forbidden_end_to_end() {
+    // Another bundle is the tenant's active reputation-logic app (or none):
+    // the chain origin (CALLER) is refused before any write, whatever the
+    // service tool or its grants say.
+    for active in [Some("waddles.core.app.reputation-accrual"), None] {
+        let w = World::new(None, None).await;
+        *w.store.active_logic.lock().unwrap() = Some(active.map(str::to_string));
+        let out = w
+            .go(
+                "evt-i",
+                "adjust",
+                json!({"user": w.alice.to_string(), "delta": 1, "reason": "activity.win"}),
+                "k-i",
+            )
+            .await;
+        assert!(out.get("ok").is_none(), "{active:?}: {out}");
+        assert!(w.store.ledger().is_empty(), "{active:?}: store untouched");
+        assert_eq!(w.store.score(COMMUNITY_A, w.alice), START);
+    }
 }
