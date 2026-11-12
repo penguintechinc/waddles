@@ -325,3 +325,70 @@ async fn bindings_refused_for_the_identify_budget_are_skipped_loudly_not_run() {
     assert_eq!(keys(&got), vec![(2, 2)]);
     assert!(cap.text().contains("identify budget is not ready"));
 }
+
+fn gated(r: ScriptedResolver, on: bool) -> HubBindingFeed<ScriptedResolver, TestProfile> {
+    feed(r).with_unverified_gate(Arc::new(
+        crate::connector_runtime::unverified_gate::StaticGate(on),
+    ))
+}
+
+#[tokio::test]
+async fn kill_switch_off_keeps_legacy_sole_unverified_routing() {
+    let reg = prometheus::Registry::new();
+    let m = RuntimeMetrics::register(&reg).expect("metrics");
+    let f = gated(
+        ScriptedResolver::new(vec![page(
+            vec![
+                binding(1, 10, &[("channel", "legacy")]),
+                binding(2, 20, &[("channel", "owned"), V]),
+            ],
+            None,
+        )]),
+        false,
+    )
+    .with_metrics(m.clone());
+    let got = f.desired("twitch").await.expect("desired");
+    assert_eq!(
+        keys(&got),
+        vec![(1, 10), (2, 20)],
+        "legacy claimant still routes"
+    );
+    let skipped = |r: &str| m.feed_skipped_total.with_label_values(&["twitch", r]).get();
+    assert_eq!(skipped("unverified"), 0);
+}
+
+#[tokio::test]
+async fn kill_switch_on_never_routes_unverified_and_warns_per_binding() {
+    let cap = capture();
+    let reg = prometheus::Registry::new();
+    let m = RuntimeMetrics::register(&reg).expect("metrics");
+    let f = gated(
+        ScriptedResolver::new(vec![page(
+            vec![
+                binding(1, 10, &[("channel", "Legacy-Handle")]),
+                binding(1, 11, &[("channel", "Legacy-Handle")]),
+                binding(2, 20, &[("channel", "owned"), V]),
+                binding(5, 50, &[("channel", "other")]),
+            ],
+            None,
+        )]),
+        true,
+    )
+    .with_metrics(m.clone());
+    let got = f.desired("twitch").await.expect("desired");
+    assert_eq!(
+        keys(&got),
+        vec![(2, 20)],
+        "only the verified binding routes"
+    );
+    let skipped = |r: &str| m.feed_skipped_total.with_label_values(&["twitch", r]).get();
+    assert_eq!(skipped("unverified"), 3, "one per skipped binding");
+    assert_eq!(skipped("duplicate"), 0);
+    assert_eq!(skipped("conflict"), 0);
+    let logged = cap.text();
+    let warns = logged
+        .matches("unverified binding skipped; unverified-binding routing is disabled")
+        .count();
+    assert_eq!(warns, 3, "{logged}");
+    assert!(!logged.to_lowercase().contains("legacy-handle"), "{logged}");
+}

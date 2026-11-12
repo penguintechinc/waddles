@@ -366,6 +366,7 @@ where
     // With every connector OFF nothing is built, bound or spawned.
     let mut connector_ready: Option<Arc<dyn connector_runtime::RuntimeReady>> = None;
     let license_client = license::build_license_client();
+    license::set_shared_license_client(license_client.clone());
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
         // Schema-v3 producer: resolver is installed BEFORE any receiver can
         // publish. A flag that is ON but misconfigured fails the process

@@ -514,6 +514,8 @@ pub type BootedRuntime<A, D> = ConnectorRuntime<
     ConnectorValkeyLease,
 >;
 
+use super::unverified_gate::LicenseUnverifiedGate;
+
 /// Builds the profile-specific feed for `platform`.
 fn feed_for<R: ConnectionResolve + 'static>(
     platform: &'static str,
@@ -539,7 +541,8 @@ fn feed_for<R: ConnectionResolve + 'static>(
                 FEED_CALL_TIMEOUT,
             )
             .with_metrics(metrics.clone())
-            .with_self_echo(self_echo.clone()),
+            .with_self_echo(self_echo.clone())
+            .with_unverified_gate(Arc::new(LicenseUnverifiedGate)),
         )
     }
     match platform {
@@ -573,7 +576,8 @@ fn feed_for<R: ConnectionResolve + 'static>(
                 FEED_CALL_TIMEOUT,
             )
             .with_metrics(metrics.clone())
-            .with_self_echo(self_echo.clone());
+            .with_self_echo(self_echo.clone())
+            .with_unverified_gate(Arc::new(LicenseUnverifiedGate));
             if kick_route_keys.is_some() {
                 // The webhook lane's broadcaster comes from editable metadata: it is only
                 // planned once proven to be the owner of the community's own token.
@@ -945,13 +949,15 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
     // Same gate as the interaction tap: routing exists exactly when Discord is ON, and a
     // missing dependency is a boot error here (never a ContextSink-less Discord runtime).
     let interaction_routing = if settings.platforms.contains(&"discord") {
-        Some(InteractionRouting::from_config(
-            cli,
-            crate::interaction_store::InteractionStore::new(lease_conn.clone()),
-            &registry,
-            tokenizer,
+        Some(
+            InteractionRouting::from_config(
+                cli,
+                crate::interaction_store::InteractionStore::new(lease_conn.clone()),
+                &registry,
+                tokenizer,
+            )
+            .await?,
         )
-        .await?)
     } else {
         None
     };
@@ -1687,7 +1693,10 @@ mod tests {
             .await
             .err()
             .expect("duplicate registration must fail");
-        assert!(e.to_string().contains("metrics"), "duplicate metric registration is a boot error: {e}");
+        assert!(
+            e.to_string().contains("metrics"),
+            "duplicate metric registration is a boot error: {e}"
+        );
     }
 
     /// `assemble` builds a runtime that reconciles every enabled platform's feed

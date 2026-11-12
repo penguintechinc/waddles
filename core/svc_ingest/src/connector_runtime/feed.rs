@@ -242,7 +242,12 @@ fn lowest_per_community(
 ///   several communities are dropped for ALL of them (fail closed, alerts with a fingerprint).
 ///
 /// Output is sorted by key for determinism.
-fn dedup_verified(all: Vec<(DesiredConnection, bool)>) -> (Vec<DesiredConnection>, DedupReport) {
+/// With `strict` (`waddles.disable-unverified-binding-routing` ON) unverified bindings never
+/// route: each is dropped with its own WARN and counted under the `unverified` skip metric.
+fn dedup_verified(
+    all: Vec<(DesiredConnection, bool)>,
+    strict: bool,
+) -> (Vec<DesiredConnection>, DedupReport) {
     let mut by_claim: BTreeMap<Claim, Vec<(DesiredConnection, bool)>> = BTreeMap::new();
     for (d, v) in all {
         by_claim.entry(claim_of(&d)).or_default().push((d, v));
@@ -267,6 +272,20 @@ fn dedup_verified(all: Vec<(DesiredConnection, bool)>) -> (Vec<DesiredConnection
                 report.unverified += saturating_u32(unverified.len());
             }
             lowest_per_community(verified, &mut report, &mut out);
+            continue;
+        }
+        if strict {
+            for g in &unverified {
+                tracing::warn!(
+                    platform = g.key.platform,
+                    community_id = g.key.community_id,
+                    connection_id = g.key.connection_id,
+                    claim_hash = %claim_fingerprint(&claim),
+                    flag = super::unverified_gate::DISABLE_UNVERIFIED_BINDING_ROUTING_FLAG,
+                    "unverified binding skipped; unverified-binding routing is disabled"
+                );
+            }
+            report.unverified += saturating_u32(unverified.len());
             continue;
         }
         let mut communities: Vec<i64> = unverified.iter().map(|g| g.key.community_id).collect();
@@ -297,6 +316,7 @@ pub struct HubBindingFeed<R: ConnectionResolve, P: ConnectorProfile> {
     metrics: Option<RuntimeMetrics>,
     self_echo: Option<SelfEchoRegistry>,
     lane_verifier: Option<Arc<dyn WebhookLaneVerifier>>,
+    unverified_gate: Option<Arc<dyn super::unverified_gate::UnverifiedRoutingGate>>,
 }
 
 impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
@@ -310,7 +330,19 @@ impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
             metrics: None,
             self_echo: None,
             lane_verifier: None,
+            unverified_gate: None,
         }
+    }
+
+    /// Consults `gate` on every discovery: ON means unverified bindings never route.
+    /// Without a gate the legacy behaviour holds (a sole unverified claimant routes).
+    #[must_use]
+    pub fn with_unverified_gate(
+        mut self,
+        gate: Arc<dyn super::unverified_gate::UnverifiedRoutingGate>,
+    ) -> Self {
+        self.unverified_gate = Some(gate);
+        self
     }
 
     /// Gates every Kick webhook lane on `verifier` (see [`WebhookLaneVerifier`]). Without one a
@@ -456,12 +488,20 @@ impl<R: ConnectionResolve, P: ConnectorProfile> BindingFeed for HubBindingFeed<R
             return Err(FeedError::UnknownPlatform(platform.to_owned()));
         }
         let (planned, malformed) = self.collect().await?;
-        let (out, report) = dedup_verified(planned);
+        let strict = match &self.unverified_gate {
+            Some(g) => g.disabled().await,
+            None => false,
+        };
+        let (out, report) = dedup_verified(planned, strict);
         if let Some(m) = &self.metrics {
             m.skipped(platform, SkipReason::Malformed, u64::from(malformed));
             m.skipped(platform, SkipReason::Duplicate, u64::from(report.duplicate));
             m.skipped(platform, SkipReason::Conflict, u64::from(report.conflict));
-            m.skipped(platform, SkipReason::Unverified, u64::from(report.unverified));
+            m.skipped(
+                platform,
+                SkipReason::Unverified,
+                u64::from(report.unverified),
+            );
         }
         Ok(out)
     }

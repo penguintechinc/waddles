@@ -198,6 +198,14 @@ signup in another tenant could bind a victim's channel and svc-ingest's dedup th
 - **N:M is allowed.** One channel may be bound to many communities, across tenants (users pick context with `!community set context`). There is no global unique constraint; uniqueness stays `(tenant, platform, resource)` + one grant per community, so a duplicate in the same tenant/community is a 409.
 - **svc-ingest dedup** (`connector_runtime/feed.rs`): when any binding of a channel is verified, every verified community keeps it (lowest connection id per community) and unverified duplicates are dropped with a WARN and `feed_skipped_total{reason="unverified"}`. With no verified binding (legacy rows) the old rule holds: one community keeps it, several are all dropped (`reason="conflict"`).
 - **Legacy rows** stay `false` and keep routing (unless a verified binding of the same channel exists) until an owner edits the link, which re-proves and flags it. Alpha is disposable: no backfill.
+- **Kill-switch `waddles.disable-unverified-binding-routing`** (svc-ingest, `connector_runtime/unverified_gate.rs`; user decision 2026-11-12). Unverified bindings keep routing through the demo; afterwards flip this flag, no code change needed.
+
+  | Flag state | Unverified binding |
+  |---|---|
+  | unseen / OFF (default) | legacy rule above (a sole unverified claimant routes) |
+  | ON | never routes: one WARN per skipped binding (ids + claim hash, never the handle) and `feed_skipped_total{reason="unverified"}` +1 per binding |
+
+  Resolution: PostHog (when a snapshot exists) -> env baseline `FLAG_WADDLES_DISABLE_UNVERIFIED_BINDING_ROUTING=true|false` -> OFF. The `*.waddles.app` license bypass is ignored for this flag (bypass reads every flag ON, which would flip every environment at once). Re-read on every binding discovery, so a flip applies on the next reconcile.
 - Telemetry: `waddles_provider_connection_ownership_total{provider,outcome}` (`token_owner`, `linked_account`, `rejected`, `live_chat_rejected`) and a WARN `provider_connections.ownership_rejected` (no handles, no tokens).
 
 ## Token lifecycle and failure semantics
