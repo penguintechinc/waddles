@@ -56,6 +56,7 @@ CONNECTION_FIELDS = {
     "createdAt",
     "enabled",
     "hasApiCredential",
+    "ownershipVerified",
     "expiresAt",
     "hasRefreshToken",
     "id",

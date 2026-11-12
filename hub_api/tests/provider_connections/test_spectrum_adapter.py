@@ -46,6 +46,7 @@ CONNECTION_FIELDS = {
     "expiresAt",
     "hasRefreshToken",
     "hasApiCredential",
+    "ownershipVerified",
     "id",
     "kind",
     "metadata",

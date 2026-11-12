@@ -27,6 +27,7 @@ from tests.provider_connections.fake_google import (
     APP_CLIENT_SECRET,
     FakeChannel,
     FakeGoogle,
+    broadcast,
 )
 from tests.provider_connections.fake_twitch import FakeTwitch
 from tests.provider_connections.grpc_internal_client import GrpcRoutingClient
@@ -75,8 +76,15 @@ class FakeRedis:
 
 @pytest.fixture
 def fake_google() -> FakeGoogle:
-    """A fake Google (no broadcasts until a test adds some)."""
-    return FakeGoogle()
+    """A fake Google whose channel owns :data:`YT_CHAT` (bind-time ownership check).
+
+    The broadcast is COMPLETED, so discovery still finds nothing live until a test adds one.
+    """
+    google = FakeGoogle()
+    google.broadcasts[YT_CHANNEL.channel_id] = [
+        broadcast(YT_CHAT, channel_id=YT_CHANNEL.channel_id, status="complete")
+    ]
+    return google
 
 
 @pytest.fixture

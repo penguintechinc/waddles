@@ -156,6 +156,7 @@ class ProviderConnectionDTO:
     shared: bool
     hasRefreshToken: bool
     hasApiCredential: bool
+    ownershipVerified: bool
     expiresAt: str | None
     capabilities: list[str]
     metadata: dict[str, Any]
@@ -320,6 +321,7 @@ def _connection_dto(view: ConnectionView) -> ProviderConnectionDTO:
         shared=binding.shared_with > 0,
         hasRefreshToken=binding.connection.has_refresh_token,
         hasApiCredential=binding.connection.has_api_credential,
+        ownershipVerified=binding.connection.ownership_verified,
         expiresAt=_iso(binding.connection.expires_at),
         capabilities=view.capabilities,
         metadata=view.public_metadata,
@@ -379,12 +381,18 @@ _STATUS_BY_ERROR: dict[type[pc_errors.ProviderConnectionError], tuple[int, str]]
     pc_errors.ProviderQuotaExceeded: (429, "PROVIDER_QUOTA_EXCEEDED"),
     pc_errors.ConnectionNotFound: (404, "NOT_FOUND"),
     pc_errors.ConnectionConflict: (409, "CONFLICT"),
+    pc_errors.OwnershipNotProven: (403, "OWNERSHIP_NOT_PROVEN"),
     pc_errors.ConnectionNotUsable: (409, "CONNECTION_NOT_USABLE"),
     pc_errors.RefreshRejected: (409, "REFRESH_REJECTED"),
     pc_errors.RefreshNotConfigured: (409, "REFRESH_NOT_CONFIGURED"),
     pc_errors.VaultUnavailable: (503, "CONNECTIONS_UNAVAILABLE"),
     pc_errors.VaultCorrupt: (500, "CONNECTIONS_UNAVAILABLE"),
     pc_errors.SchemaMissing: (503, "CONNECTIONS_UNAVAILABLE"),
+}
+
+#: Finer API codes for a framework ``code`` that is more specific than its class (same status).
+_API_CODE_BY_FRAMEWORK_CODE: dict[str, str] = {
+    "live_chat_not_owned": "LIVE_CHAT_NOT_OWNED",
 }
 
 
@@ -403,6 +411,7 @@ def _connection_err(
         )
         return {"error": "forbidden"}, 403
     status, code = _STATUS_BY_ERROR.get(type(exc), (500, "INTERNAL_ERROR"))
+    code = _API_CODE_BY_FRAMEWORK_CODE.get(exc.code, code)
     level = logging.ERROR if status >= 500 else logging.INFO
     # The event name is a static literal (LiteralString); the route name is a bounded label.
     log_failure(logger, "provider_connections.request_failed", exc, level=level, route=event)

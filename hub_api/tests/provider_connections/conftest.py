@@ -47,6 +47,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    false,
     func,
 )
 
@@ -174,6 +175,8 @@ def build_pc_metadata() -> MetaData:
         Column("secret_version", Integer, nullable=False, server_default="1"),
         # migration 0082: sealed outbound API credential (Wix), kind-1 rows only.
         Column("sealed_api_credential", Text),
+        # migration 0103: proof of ownership at bind time; legacy rows default to unverified.
+        Column("ownership_verified", Boolean, nullable=False, server_default=false()),
         Column(
             "created_at",
             DateTime(timezone=True),
@@ -285,6 +288,25 @@ async def pc_db(tmp_path: Any) -> Any:
     admin_id = int(dal.hub_users.insert(username="tenant-owner"))
     dal.tenant_admins.insert(tenant_id=seed.tenant_id, user_id=admin_id, role="tenant-owner")
     seed.admin_user_id = admin_id
+    # The tenant owner OAuth-linked the Twitch accounts that own both test channels (proof of
+    # ownership at bind time); a test that needs a non-owner uses a fresh, unlinked hub user.
+    for channel_id, login in ((CHANNEL_ID, CHANNEL_LOGIN), (OTHER_CHANNEL_ID, OTHER_CHANNEL_LOGIN)):
+        dal.hub_user_identities.insert(
+            hub_user_id=admin_id,
+            platform="twitch",
+            platform_user_id=channel_id,
+            platform_username=login,
+        )
+    # ... plus the extra channel ids the data-plane pagination tests create on the fly.
+    for extra in ("7003", "7004", "7005", *(f"80{n}" for n in range(10))):
+        dal.hub_user_identities.insert(
+            hub_user_id=admin_id, platform="twitch", platform_user_id=extra
+        )
+    # ... and the Kick broadcaster accounts of the fake Kick channels (fake_kick.CHANNELS).
+    for kick_broadcaster in ("7001", "7002"):
+        dal.hub_user_identities.insert(
+            hub_user_id=admin_id, platform="kick", platform_user_id=kick_broadcaster
+        )
     dal.commit()
     for table_name in dal.tables:
         dal(dal[table_name]).count()
