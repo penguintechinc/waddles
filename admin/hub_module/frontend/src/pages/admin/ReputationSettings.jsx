@@ -49,8 +49,8 @@ function ReputationSettings() {
 
   // hub-api serves neither the reputation config nor the at-risk list yet (only the
   // leaderboard), so those are gated rather than called: see UNSERVED_FEATURES.
-  const configServed = isFeatureServed('reputation-config');
-  const atRiskServed = isFeatureServed('reputation-at-risk');
+  const configServed = isFeatureServed('reputation-weights');
+  const atRiskServed = isFeatureServed('reputation-weights');
 
   useEffect(() => {
     if (!configServed) {
@@ -234,7 +234,7 @@ function ReputationSettings() {
 
       {/* Settings Tab */}
       {activeTab === 'settings' && !configServed && (
-        <NotAvailableYet feature="reputation-config" />
+        <NotAvailableYet feature="reputation-weights" />
       )}
       {activeTab === 'settings' && configServed && (
         <>

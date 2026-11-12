@@ -78,17 +78,11 @@
       "PUT /api/v1/admin/:communityId/translation/config"
     ]
   },
-  "reputation-config": {
-    "label": "Reputation settings",
+  "reputation-weights": {
+    "label": "Reputation scoring weights",
     "endpoints": [
-      "GET /api/v1/admin/:communityId/reputation/config",
-      "PUT /api/v1/admin/:communityId/reputation/config"
-    ]
-  },
-  "reputation-at-risk": {
-    "label": "At-risk members",
-    "endpoints": [
-      "GET /api/v1/admin/:communityId/reputation/at-risk"
+      "GET /api/v1/admin/:communityId/reputation/weights",
+      "PUT /api/v1/admin/:communityId/reputation/weights"
     ]
   },
   "software-discovery": {

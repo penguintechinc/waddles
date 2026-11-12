@@ -189,6 +189,12 @@ export const adminApi = {
     api.get(`/api/v1/admin/${communityId}/reputation/config`),
   updateReputationConfig: (communityId, data) =>
     api.put(`/api/v1/admin/${communityId}/reputation/config`, data),
+  getReputationSoftBans: (communityId) =>
+    api.get(`/api/v1/admin/${communityId}/reputation/soft-bans`),
+  setReputationSoftBan: (communityId, userId, expiresAt) =>
+    api.put(`/api/v1/admin/${communityId}/reputation/soft-bans/${userId}`, expiresAt ? { expiresAt } : {}),
+  clearReputationSoftBan: (communityId, userId) =>
+    api.delete(`/api/v1/admin/${communityId}/reputation/soft-bans/${userId}`),
   getAtRiskUsers: (communityId, params) =>
     api.get(`/api/v1/admin/${communityId}/reputation/at-risk`, { params }),
   // AI Insights
@@ -1005,6 +1011,8 @@ export const tenantApi = {
   getAdmins: (slug) => api.get(`/api/v1/tenant/${slug}/admins`),
   addAdmin: (slug, userId, role) => api.post(`/api/v1/tenant/${slug}/admins`, { userId, role }),
   removeAdmin: (slug, userId) => api.delete(`/api/v1/tenant/${slug}/admins/${userId}`),
+  getReputationConfig: (slug) => api.get(`/api/v1/tenant/${slug}/reputation/config`),
+  updateReputationConfig: (slug, data) => api.put(`/api/v1/tenant/${slug}/reputation/config`, data),
 };
 
 // ── Community Roles API ────────────────────────────────────────────

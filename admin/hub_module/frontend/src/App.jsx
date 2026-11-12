@@ -66,6 +66,9 @@ const AdminMirrorGroups = lazy(() => import('./pages/admin/AdminMirrorGroups'));
 const AdminLeaderboardConfig = lazy(() => import('./pages/admin/AdminLeaderboardConfig'));
 const AdminCommunityProfile = lazy(() => import('./pages/admin/AdminCommunityProfile'));
 const ReputationSettings = lazy(() => import('./pages/admin/ReputationSettings'));
+const CommunityReputationPolicy = lazy(() => import('./pages/admin/CommunityReputationPolicy'));
+const CommunityReputationBans = lazy(() => import('./pages/admin/CommunityReputationBans'));
+const TenantReputationSettings = lazy(() => import('./pages/tenant/TenantReputationSettings'));
 const AdminAIInsights = lazy(() => import('./pages/admin/AdminAIInsights'));
 const AdminAIResearcherConfig = lazy(() => import('./pages/admin/AdminAIResearcherConfig'));
 const AdminAIChatterConfig = lazy(() => import('./pages/admin/AdminAIChatterConfig'));
@@ -333,6 +336,8 @@ function App() {
         <Route path="/admin/:communityId/leaderboard" element={<AdminLeaderboardConfig />} />
         <Route path="/admin/:communityId/profile" element={<AdminCommunityProfile />} />
         <Route path="/admin/:communityId/reputation" element={<ReputationSettings />} />
+        <Route path="/admin/:communityId/reputation/policy" element={<CommunityReputationPolicy />} />
+        <Route path="/admin/:communityId/reputation/bans" element={<CommunityReputationBans />} />
         <Route path="/admin/:communityId/ai-insights" element={<ServedFeature feature="ai-insights"><AdminAIInsights /></ServedFeature>} />
         <Route path="/admin/:communityId/ai-config" element={<ServedFeature feature="ai-researcher"><AdminAIResearcherConfig /></ServedFeature>} />
         <Route path="/admin/:communityId/ai-chatter" element={<AdminAIChatterConfig />} />
@@ -445,6 +450,7 @@ function App() {
         <Route path="/tenant/:tenantSlug" element={<TenantDashboard />} />
         <Route path="/tenant/:tenantSlug/modules" element={<TenantBundlesRedirect />} />
         <Route path="/tenant/:tenantSlug/admins" element={<TenantAdmins />} />
+        <Route path="/tenant/:tenantSlug/reputation" element={<TenantReputationSettings />} />
         <Route path="/tenant/:tenantSlug/communities" element={<TenantCommunities />} />
         {/* Wave-1 stub: tenant bundle catalog slice */}
         <Route path="/tenant/:tenantSlug/bundles" element={<TenantBundleCatalog />} />

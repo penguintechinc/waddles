@@ -216,14 +216,14 @@ describe('ReputationSettings', () => {
 
   describe('while hub-api does not serve the config or at-risk routes', () => {
     beforeEach(() => {
-      isFeatureServed.mockImplementation((key) => !['reputation-config', 'reputation-at-risk'].includes(key));
+      isFeatureServed.mockImplementation((key) => !['reputation-weights'].includes(key));
     });
 
     it('flags settings as not available yet and makes no dead calls', async () => {
       renderPage();
       const state = await screen.findByTestId('not-available-yet');
-      expect(state).toHaveAttribute('data-feature', 'reputation-config');
-      expect(screen.getByText("Reputation settings isn't available yet")).toBeInTheDocument();
+      expect(state).toHaveAttribute('data-feature', 'reputation-weights');
+      expect(screen.getByText("Reputation scoring weights isn't available yet")).toBeInTheDocument();
       expect(screen.queryByText('Save Changes')).not.toBeInTheDocument();
       expect(screen.queryByText('View At-Risk Users')).not.toBeInTheDocument();
       expect(screen.queryByText('Failed to load configuration')).not.toBeInTheDocument();
