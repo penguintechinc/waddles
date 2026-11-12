@@ -78,6 +78,7 @@ guess.
 */}}
 {{- $bsepCmName := .Values.autoProvisionedKeys.bundleSigning.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" (include "waddlebot.fullname" .)) }}
 {{- $be := .Values.pipeline.rustDataPlane.bundleExecutor }}
+{{- $psCmName := ((.Values.autoProvisionedKeys).precompileSigning | default dict).publicKeyConfigMapName | default (printf "%s-executor-precompile-signing-public" (include "waddlebot.fullname" .)) }}
 {{- range $pool := (include "waddlebot.executorPools" . | fromJsonArray) }}
 {{- with $ }}
 {{- $name := printf "%s-svc-bundles-executor%s" (include "waddlebot.fullname" .) $pool.suffix }}
@@ -199,6 +200,10 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
+        # StatefulSet mode: the crate refuses to start (fail-loud) if neither EXECUTOR_ID nor
+        # POD_NAME resolves, instead of joining slot sharding with an anonymous identity.
+        - name: EXECUTOR_REQUIRE_ID
+          value: "true"
         - name: EXECUTOR_POOL
           value: {{ $pool.name | quote }}
         # LRU ceiling for resident compiled modules (MiB); render fails unless below the limit.
@@ -208,6 +213,20 @@ spec:
         # written by the precompile Jobs (part D); read here via the read-only data-plane identity.
         - name: EXECUTOR_PRECOMPILED_PREFIX
           value: {{ $be.precompiledPrefix | quote }}
+        {{- if $be.maxPrecompiledBytes }}
+        - name: BUNDLE_MAX_PRECOMPILED_BYTES
+          value: {{ $be.maxPrecompiledBytes | toString | quote }}
+        {{- end }}
+        # PRECOMPILE_SIGNING_PUBLIC_KEYS: the DEDICATED .cwasm verify key set (never the bundle
+        # approval keys). Published by the always-rendered auto-provision-keys hook (PR #1249,
+        # same name/key/override as its templates) -> optional: false, so a missing ConfigMap
+        # fails the pod loudly (CreateContainerConfigError) instead of silently JIT-compiling.
+        - name: PRECOMPILE_SIGNING_PUBLIC_KEYS
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $psCmName }}
+              key: PRECOMPILE_SIGNING_PUBLIC_KEYS
+              optional: false
         {{- include "waddlebot.rustOtelEnv" (dict "root" $ "service" "svc-bundles-executor") | nindent 8 }}
         - name: EXECUTOR_STAGE_CONNECTIONS
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.stageConnections | quote }}

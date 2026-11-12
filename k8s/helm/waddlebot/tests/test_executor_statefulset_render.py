@@ -244,3 +244,34 @@ def test_pools_must_cover_each_stage_exactly_once() -> None:
         "pipeline.rustDataPlane.bundleExecutor.pools[1].name=b",
         "pipeline.rustDataPlane.bundleExecutor.pools[1].stages[0]=svc-action-rust",
     ], "assigned to more than one pool")
+
+
+def test_executor_env_contract_pr1253() -> None:
+    """PR #1253 env contract: require-id, downward-API POD_NAME, precompile verify keys."""
+    env = _env(_executors(_render())[0], "svc-bundles-executor")
+    assert env["EXECUTOR_REQUIRE_ID"]["value"] == "true"
+    assert env["POD_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.name"
+    ref = env["PRECOMPILE_SIGNING_PUBLIC_KEYS"]["valueFrom"]["configMapKeyRef"]
+    assert ref == {"name": "waddlebot-executor-precompile-signing-public",
+                   "key": "PRECOMPILE_SIGNING_PUBLIC_KEYS", "optional": False}
+    assert "BUNDLE_MAX_PRECOMPILED_BYTES" not in env, "unset value must not render the env"
+
+
+def test_max_precompiled_bytes_optional_value() -> None:
+    """Setting maxPrecompiledBytes renders BUNDLE_MAX_PRECOMPILED_BYTES verbatim."""
+    env = _env(_executors(_render(
+        ["pipeline.rustDataPlane.bundleExecutor.maxPrecompiledBytes=536870912"]))[0], "svc-bundles-executor")
+    assert env["BUNDLE_MAX_PRECOMPILED_BYTES"]["value"] == "536870912"
+
+
+def test_default_values_budget_below_limit() -> None:
+    """Base values.yaml: budget 8192 (crate default) with headroom under a 12Gi limit.
+
+    Parsed directly: base values alone are not renderable outside alpha (seaweedfs/valkey
+    fail-loud guards), and the render-time budget<limit guard is covered by dal2alpha tests.
+    """
+    be = yaml.safe_load((_CHART_DIR / "values.yaml").read_text())["pipeline"]["rustDataPlane"]["bundleExecutor"]
+    assert be["memoryBudgetMb"] == 8192
+    assert be["resources"]["limits"]["memory"] == "12Gi"
+    assert be["memoryBudgetMb"] < 12 * 1024 * 0.75, "budget must leave >=25% headroom under the limit"
+    assert be["maxPrecompiledBytes"] == ""

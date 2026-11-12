@@ -1979,8 +1979,12 @@ pipeline:
       pools: []
       # EXECUTOR_MEMORY_BUDGET_MB: LRU ceiling for resident compiled modules; must be below
       # resources.limits.memory (render fails otherwise). ~2/3 of the limit leaves headroom for
-      # live instances + JIT transients on an AOT miss.
-      memoryBudgetMb: 4096
+      # live instances + JIT transients on an AOT miss. 8192 = the executor crate default
+      # (config.rs) paired with a 12Gi limit below (budget ~2/3 of the limit).
+      memoryBudgetMb: 8192
+      # BUNDLE_MAX_PRECOMPILED_BYTES: optional cap on one signed .cwasm object fetched from the
+      # bucket. Empty = unset (crate default 256 MiB); oversized objects fall back (loudly) to JIT.
+      maxPrecompiledBytes: ""
       # Signed AOT artifact prefix in the bundle bucket (precompiled/<engine_fp>/<digest>.cwasm),
       # produced by the precompile Jobs (part D, executor-precompile*.yaml).
       precompiledPrefix: "precompiled"
@@ -2058,14 +2062,14 @@ pipeline:
       # bundle on first invoke and LRU-evict under a memory budget -- so peak RSS no longer
       # scales with the number of activated bundles. Then this limit can shrink again.
       # executor Phase 1 (PLAN.md s3): CPU limit 4 (JIT-miss compiles + ~100 rps/core);
-      # memory sized for the ~3.7GiB/pod hot set under memoryBudgetMb's LRU, + headroom.
+      # memory: 12Gi limit = memoryBudgetMb (8192) LRU ceiling + ~4Gi headroom for instances/JIT.
       resources:
         requests:
           cpu: "1000m"
           memory: "2Gi"
         limits:
           cpu: "4000m"
-          memory: "6Gi"
+          memory: "12Gi"
 
   # fix/pii-tokenization-env-override -- plain env/values off-switch for PII
   # tokenization/detokenization, independent of PostHog
