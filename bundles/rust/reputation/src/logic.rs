@@ -56,6 +56,8 @@ pub const KEY_TIERS: &str = "tiers";
 pub const ADMIN_SCOPE: &str = "community:admin";
 /// PostHog flag gating every floor action (default OFF).
 pub const FLAG_AUTO_BAN: &str = "waddles.reputation-auto-ban";
+/// How long a floor-completion marker lives (covers any realistic redelivery window).
+pub const MARKER_TTL_SECONDS: u32 = 7 * 24 * 3600;
 /// Audit reason of a community soft-floor soft ban.
 pub const REASON_SOFT: &str = "community_soft_floor";
 /// Audit reason of a community hard-floor ban.
@@ -155,8 +157,8 @@ pub trait RepHost: Send + Sync {
 pub trait ConfigStore: Send + Sync {
     /// Raw bytes at `key`, `None` if unset; `Err` carries a PII-free reason.
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
-    /// Writes `value` at `key` (no TTL).
-    fn set(&self, key: &str, value: &[u8]) -> Result<(), String>;
+    /// Writes `value` at `key`; `ttl_seconds == 0` means no expiry.
+    fn set(&self, key: &str, value: &[u8], ttl_seconds: u32) -> Result<(), String>;
 }
 
 /// Ambient platform I/O: the feature flag and the platform ban tool.
@@ -589,6 +591,25 @@ pub fn get_many(env: &Env, _ctx: &ToolContext, args: Value) -> Result<Value, Too
     Ok(json!({ "entries": rows.iter().map(|e| entry_json(&tiers, e)).collect::<Vec<_>>() }))
 }
 
+/// kv key of the floor-completion marker for an idempotency key: an FNV-1a hash
+/// (kv keys cannot hold ':' and the raw key is caller-derived), never the key text.
+fn marker_key(key: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in key.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("fd.{h:016x}")
+}
+
+/// Whether the completion marker exists; an unreadable kv is `unavailable`
+/// (never assumed present, which would skip floors).
+fn marker_exists(cfg: &dyn ConfigStore, marker: &str) -> Result<bool, ToolError> {
+    cfg.get(marker)
+        .map(|v| v.is_some())
+        .map_err(|_| ToolError::TargetUnavailable)
+}
+
 fn apply_result(
     env: &Env,
     tiers: &[Tier],
@@ -598,12 +619,27 @@ fn apply_result(
     platform: Option<&str>,
     key: &str,
 ) -> Result<Value, ToolError> {
-    // A replay (`applied == false`) moved nothing: never re-run floor side effects
-    // (a redelivered event must not re-ban or re-soft-ban, e.g. after a manual clear).
-    let (community, tenant) = if out.applied {
-        enforce_floors(env, user, out.new_score, platform, key)?
-    } else {
+    // Floor enforcement is tracked by a completion marker per idempotency key,
+    // written only after enforcement fully succeeded. A replay (`applied ==
+    // false`) re-runs enforcement ONLY when no marker exists (the first delivery
+    // saved the score but enforcement failed, so the retry must finish it -- ban
+    // calls are idempotent via their derived keys and a soft ban dedupes by
+    // reason). With a marker the replay is a pure no-op, so a manually cleared
+    // soft ban or ban is never re-applied by a redelivered event.
+    let marker = marker_key(key);
+    let done = !out.applied && marker_exists(env.cfg.as_ref(), &marker)?;
+    let (community, tenant) = if done {
         (FloorAction::ReplaySkipped, FloorAction::ReplaySkipped)
+    } else {
+        let r = enforce_floors(env, user, out.new_score, platform, key)?;
+        let clean =
+            !matches!(r.0, FloorAction::BanFailed(_)) && !matches!(r.1, FloorAction::BanFailed(_));
+        if clean {
+            // Best effort: a lost marker only means a replay re-enforces
+            // (idempotent), never that a floor is skipped.
+            let _ = env.cfg.set(&marker, b"1", MARKER_TTL_SECONDS);
+        }
+        r
     };
     let mut v = entry_json(
         tiers,
@@ -876,7 +912,7 @@ pub fn set_policy(env: &Env, ctx: &ToolContext, args: Value) -> Result<Value, To
     merged.validate()?;
     let bytes = serde_json::to_vec(&merged.to_json()).map_err(|_| invalid("invalid policy"))?;
     env.cfg
-        .set(KEY_FLOORS, &bytes)
+        .set(KEY_FLOORS, &bytes, 0)
         .map_err(|_| ToolError::TargetUnavailable)?;
     Ok(merged.to_json())
 }

@@ -203,7 +203,7 @@ impl ConfigStore for FakeCfg {
         }
         Ok(self.0.lock().unwrap().get(key).cloned())
     }
-    fn set(&self, key: &str, value: &[u8]) -> Result<(), String> {
+    fn set(&self, key: &str, value: &[u8], _ttl_seconds: u32) -> Result<(), String> {
         if self.1 {
             return Err("kv down".into());
         }
@@ -1065,4 +1065,125 @@ fn a_replayed_event_never_re_fires_a_floor_side_effect() {
     .unwrap();
     assert_eq!(m["floors"]["community"], "replay_skipped");
     assert!(r.platform.bans.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_failed_first_enforcement_is_finished_by_the_retry_not_skipped_forever() {
+    // First delivery: the score applies but enforcement fails (corrupt floors
+    // config -> the tool errors AFTER the host applied the delta).
+    let r = rig(
+        FakeHost::with(&[(U1, 545)]),
+        FakeCfg::with(&[("floors", "corrupt")]),
+        FakePlatform::new(true),
+    );
+    assert!(
+        write(
+            &r,
+            "adjust",
+            json!({"user": U1, "delta": -1, "reason": "a.x"})
+        )
+        .is_err()
+    );
+    assert_eq!(
+        *r.host.scores.lock().unwrap().get(U1).unwrap(),
+        544,
+        "score applied once"
+    );
+    assert!(r.host.soft.lock().unwrap().is_empty());
+    // Config repaired; the retry of the SAME key replays the host apply
+    // (applied = false) but no marker exists, so enforcement runs now.
+    r.cfg
+        .0
+        .lock()
+        .unwrap()
+        .insert("floors".into(), FLOORS_ON.as_bytes().to_vec());
+    *r.host.replay.lock().unwrap() = true;
+    let out = write(
+        &r,
+        "adjust",
+        json!({"user": U1, "delta": -1, "reason": "a.x"}),
+    )
+    .unwrap();
+    assert_eq!(out["applied"], false);
+    assert_eq!(out["floors"]["community"], "soft_ban");
+    assert_eq!(r.host.soft.lock().unwrap().get(U1).unwrap(), REASON_SOFT);
+    // Now complete: a further replay is a pure no-op.
+    *r.host.replay.lock().unwrap() = true;
+    let again = write(
+        &r,
+        "adjust",
+        json!({"user": U1, "delta": -1, "reason": "a.x"}),
+    )
+    .unwrap();
+    assert_eq!(again["floors"]["community"], "replay_skipped");
+}
+
+#[test]
+fn a_ban_that_failed_is_retried_on_replay_until_it_completes() {
+    let r = rig(
+        FakeHost::with(&[(U1, 399)]),
+        FakeCfg::with(&[("floors", FLOORS_ON)]),
+        FakePlatform::failing_ban("timeout"),
+    );
+    let first = write(
+        &r,
+        "adjust",
+        json!({"user": U1, "delta": -1, "reason": "a.x", "platform": "twitch"}),
+    )
+    .unwrap();
+    assert_eq!(first["floors"]["community"], "ban_failed:timeout");
+    // No marker was written (enforcement incomplete): the replay retries the ban
+    // under the same derived ban key (idempotent at the platform bundle).
+    *r.host.replay.lock().unwrap() = true;
+    let _ = write(
+        &r,
+        "adjust",
+        json!({"user": U1, "delta": -1, "reason": "a.x", "platform": "twitch"}),
+    )
+    .unwrap();
+    let bans = r.platform.bans.lock().unwrap().clone();
+    assert_eq!(bans.len(), 2);
+    assert_eq!(bans[0], bans[1], "identical ban key both times");
+}
+
+#[test]
+fn a_manually_cleared_soft_ban_stays_cleared_when_a_completed_event_replays() {
+    let r = rig(
+        FakeHost::with(&[(U1, 549)]),
+        FakeCfg::with(&[("floors", FLOORS_ON)]),
+        FakePlatform::new(true),
+    );
+    let first = write(
+        &r,
+        "adjust",
+        json!({"user": U1, "delta": -1, "reason": "a.x"}),
+    )
+    .unwrap();
+    assert_eq!(first["floors"]["community"], "soft_ban");
+    // A moderator manually clears the soft ban.
+    r.host.soft.lock().unwrap().clear();
+    *r.host.replay.lock().unwrap() = true;
+    let again = write(
+        &r,
+        "adjust",
+        json!({"user": U1, "delta": -1, "reason": "a.x"}),
+    )
+    .unwrap();
+    assert_eq!(again["floors"]["community"], "replay_skipped");
+    assert!(r.host.soft.lock().unwrap().is_empty(), "stays cleared");
+    // A DIFFERENT event (different key) is evaluated normally again.
+    let reg_key = write_with_key(&r, "k2", json!({"user": U1, "delta": -1, "reason": "a.x"}));
+    assert_eq!(reg_key["floors"]["community"], "soft_ban");
+}
+
+fn write_with_key(r: &Rig, key: &str, args: Value) -> Value {
+    run(r, "adjust", args, ctx(Some(key), None, &[])).unwrap()
+}
+
+#[test]
+fn the_completion_marker_key_is_a_hash_never_the_raw_idempotency_key() {
+    let m = marker_key("tool:abc:def");
+    assert!(m.starts_with("fd.") && !m.contains(':') && m.len() == 19);
+    assert_ne!(marker_key("a"), marker_key("b"));
+    assert_eq!(marker_key("a"), marker_key("a"));
 }

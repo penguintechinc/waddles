@@ -164,9 +164,9 @@ impl ConfigStore for WasmKv {
         kv::get(key).map_err(|_| "kv unavailable".to_string())
     }
 
-    /// Raw kv write (no TTL); the error never carries host detail.
-    fn set(&self, key: &str, value: &[u8]) -> Result<(), String> {
-        kv::set(key, value, 0).map_err(|_| "kv unavailable".to_string())
+    /// Raw kv write; the error never carries host detail.
+    fn set(&self, key: &str, value: &[u8], ttl_seconds: u32) -> Result<(), String> {
+        kv::set(key, value, ttl_seconds).map_err(|_| "kv unavailable".to_string())
     }
 }
 
