@@ -1967,7 +1967,46 @@ pipeline:
     # Deployment; `autoscaling.services.bundleExecutor` (below) turns the HPA + PDB on.
     bundleExecutor:
       enabled: true
-      replicas: 1
+      # StatefulSet replicas per pool when autoscaling.mode=none. 2 = every slot keeps both
+      # owners (rendezvous R=2) -> a lost executor fails over to a warm replica.
+      replicas: 2
+      # Executor pools (one StatefulSet each). Empty = one "default" pool serving every stage
+      # (shared compiled cache across stages -- the Phase 1 default). Per-stage pools, e.g.:
+      #   - { name: process, stages: [svc-process-rust] }
+      #   - { name: action,  stages: [svc-action-rust], replicas: 3 }
+      # Each stage must belong to exactly one pool; optional per-pool replicas/resources/
+      # memoryBudgetMb/autoscaling override the values below. Render fails loudly otherwise.
+      pools: []
+      # EXECUTOR_MEMORY_BUDGET_MB: LRU ceiling for resident compiled modules; must be below
+      # resources.limits.memory (render fails otherwise). ~2/3 of the limit leaves headroom for
+      # live instances + JIT transients on an AOT miss.
+      memoryBudgetMb: 4096
+      # Signed AOT artifact prefix in the bundle bucket (precompiled/<engine_fp>/<digest>.cwasm),
+      # produced by the precompile Jobs (part D, executor-precompile*.yaml).
+      precompiledPrefix: "precompiled"
+      # Node-disk bound for the local .cwasm staging emptyDir (EXECUTOR_PRECOMPILE_DIR).
+      precompileCacheSizeLimit: "4Gi"
+      # svc-bundles-executor-autoscaling.yaml. mode: none | keda | hpa-external (see that
+      # template's header for prerequisites; both scaled modes fail the render loudly when
+      # the cluster lacks the API). Signals: stage queue-wait p95 + pool_exhausted rate.
+      autoscaling:
+        mode: none
+        minReplicas: 2
+        maxReplicas: 13          # PLAN.md s3: ~5k rps / (4 CPU x ~100 rps/core)
+        pollingIntervalSeconds: 15
+        cooldownSeconds: 600     # >= warm time; scale-down moves ~1/N slots
+        prometheus:
+          serverAddress: ""
+          # `{{ .pool }}` = pool name. Metric names per CONTRACT.md (OTLP -> Prometheus).
+          queueWaitP95Query: 'histogram_quantile(0.95, sum by (le) (rate(queue_wait_seconds_bucket{executor_pool="{{ .pool }}"}[2m])))'
+          queueWaitP95Seconds: "0.5"
+          poolExhaustedRateQuery: 'sum(rate(pool_exhausted_total{executor_pool="{{ .pool }}"}[2m]))'
+          poolExhaustedPerSecond: "1"
+        hpaExternal:
+          queueWaitP95Metric: "executor_queue_wait_seconds_p95"
+          queueWaitP95Target: "500m"
+          poolExhaustedRateMetric: "executor_pool_exhausted_per_second"
+          poolExhaustedRateTarget: "1"
       # Stage host-API listeners every replica dials -- `target` is the short Service-name
       # suffix (prefixed with the release fullname by the template), `port` its host-API
       # port (spec SS6.6/SS7.1). One independent dial loop, bundle registry and metrics
@@ -2018,13 +2057,15 @@ pipeline:
       # TODO(core/bundle_executor): the real healthy fix is lazy/bounded loading -- compile a
       # bundle on first invoke and LRU-evict under a memory budget -- so peak RSS no longer
       # scales with the number of activated bundles. Then this limit can shrink again.
+      # executor Phase 1 (PLAN.md s3): CPU limit 4 (JIT-miss compiles + ~100 rps/core);
+      # memory sized for the ~3.7GiB/pod hot set under memoryBudgetMb's LRU, + headroom.
       resources:
         requests:
-          cpu: "250m"
-          memory: "512Mi"
-        limits:
           cpu: "1000m"
-          memory: "2560Mi"
+          memory: "2Gi"
+        limits:
+          cpu: "4000m"
+          memory: "6Gi"
 
   # fix/pii-tokenization-env-override -- plain env/values off-switch for PII
   # tokenization/detokenization, independent of PostHog
@@ -2555,6 +2596,14 @@ networkPolicy:
 otel:
   collector:
     enabled: false
+  # OTLP exporter for the Rust data plane (svc-bundles-executor, svc-process-rust,
+  # svc-action-rust) -- waddlebot.rustOtelEnv. `endpoint` wins when set (must be reachable
+  # under the egress CNPs: in-namespace otel-collector is pre-allowed); else the in-chart
+  # collector Service when collector.enabled; else no OTEL_EXPORTER_OTLP_ENDPOINT is rendered.
+  exporter:
+    endpoint: ""
+    protocol: "grpc"
+    metricExportIntervalMs: 15000
 
 # Egress lockdown (CiliumNetworkPolicy) — feature/bundle-egress-gateway.
 # All bundle network access (app bundles' net.http via the in-process guard

@@ -213,7 +213,7 @@ class TestAlphaRenderAnnotationsAndChecksum:
         suffixes = ("-svc-process-rust", "-svc-action-rust", "-svc-bundles-executor")
         checksums: dict[str, str] = {}
         for doc in rendered_docs:
-            if doc.get("kind") != "Deployment":
+            if doc.get("kind") not in ("Deployment", "StatefulSet"):
                 continue
             name = doc.get("metadata", {}).get("name", "")
             matched = next((s for s in suffixes if name.endswith(s)), None)

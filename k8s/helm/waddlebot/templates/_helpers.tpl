@@ -1205,17 +1205,17 @@ Off by default; password only ever from an operator-managed existingSecret (requ
 
 {{/*
 svc-bundles-executor stage dial list -- the comma-separated `host:port` value of
-STAGE_HOST_API_ADDR: one entry per `pipeline.rustDataPlane.bundleExecutor.stages` item
+STAGE_HOST_API_ADDR: one entry per stage of ONE executor pool (waddlebot.executorPools)
 (`<fullname>-<target>:<port>`), in order. The executor runs one independent dial loop per
 entry (core/bundle_executor/src/config.rs). Fails the render on an empty list -- an executor
-that dials no stage would serve nothing.
+that dials no stage would serve nothing. Call with (dict "root" $ "stages" $pool.stages).
 */}}
 {{- define "waddlebot.bundleExecutorStageAddrs" -}}
-{{- $stages := .Values.pipeline.rustDataPlane.bundleExecutor.stages | default list -}}
+{{- $stages := .stages | default list -}}
 {{- if not $stages -}}
 {{- fail "pipeline.rustDataPlane.bundleExecutor.stages must list at least one stage ({target, port}) for svc-bundles-executor to dial" -}}
 {{- end -}}
-{{- $fullname := include "waddlebot.fullname" . -}}
+{{- $fullname := include "waddlebot.fullname" .root -}}
 {{- $addrs := list -}}
 {{- range $stage := $stages -}}
 {{- $addrs = append $addrs (printf "%s-%s:%v" $fullname $stage.target $stage.port) -}}

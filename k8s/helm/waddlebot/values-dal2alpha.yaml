@@ -423,15 +423,22 @@ pipeline:
     # values.yaml already lists both, so no stage override is needed here. Resources are the
     # larger of the two former Deployments (each replica holds a bundle registry per stage and
     # compiles the active set via Cranelift: the OOM finding that sized these still applies).
+    # executor Phase 1: StatefulSet x2 (pod name = executor_id; each slot owned by both),
+    # one pool serving every stage. dal2alpha has NO KEDA, NO metrics API and NO OTel
+    # collector (checked 2026-11-11) -> autoscaling.mode none, fixed 2 replicas.
     bundleExecutor:
-      replicas: 1
-      # 2-CPU limit on alpha: compile 2 at a time (connectors + apps share it).
+      replicas: 2
+      # 4-CPU limit: compile 2 at a time (connectors + apps share it); AOT makes compiles rare.
       maxConcurrentCompiles: 2
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
+      # 2 x 8Gi = the previous single pod's 16Gi ceiling; LRU budget ~5/8 of the limit.
+      memoryBudgetMb: 5120
       resources:
-        requests: { cpu: "500m", memory: "1Gi" }
-        limits: { cpu: "2000m", memory: "16Gi" }
+        requests: { cpu: "500m", memory: "2Gi" }
+        limits: { cpu: "4000m", memory: "8Gi" }
+      autoscaling:
+        mode: none
 
 presentation:
   # Rust svc-presentation (overlay + image surface). Overlay view/SSE port reachable on-host at
@@ -464,18 +471,9 @@ bundleExecutor:
     repository: "ghcr.io/penguintechinc/waddles/svc-bundles-executor"
     tag: ""
 
-# svc-bundles-executor scales horizontally: every replica dials every stage + the connector
-# link and each listener round-robins work across the replicas (see values.yaml
-# pipeline.rustDataPlane.bundleExecutor). HPA on CPU + memory; the PDB (minAvailable 1) renders
-# automatically once the effective replica floor is >1.
-autoscaling:
-  services:
-    bundleExecutor:
-      enabled: true
-      minReplicas: 1
-      maxReplicas: 3
-      targetCPUUtilizationPercentage: 70
-      targetMemoryUtilizationPercentage: 80
+# svc-bundles-executor: the old CPU/memory HPA (targets <unknown>, no metrics API here) is
+# removed; the executor is a StatefulSet with its own PDB (maxUnavailable 1) and optional
+# KEDA autoscaling (pipeline.rustDataPlane.bundleExecutor.autoscaling) once KEDA lands.
 
 # Ingress via Gateway API: Waddles does NOT own a gateway. It attaches an HTTPRoute to the
 # cluster-wide Cilium Gateway `shared` (ns gateway-system, class cilium-shared). TLS terminates

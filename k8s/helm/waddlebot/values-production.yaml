@@ -61,14 +61,17 @@ pipeline:
       - "10.244.0.0/16"
       - "10.96.0.0/12"
       - "10.0.0.0/8"
-    # ONE svc-bundles-executor Deployment serves BOTH stages (the `stages` default in values.yaml
+    # ONE svc-bundles-executor pool (StatefulSet) serves BOTH stages (the `stages` default in values.yaml
     # lists svc-process-rust:8301 + svc-action-rust:8302). Resources are sized for the two
     # stages in one pod (the larger of the two former Deployments).
+    # executor Phase 1: StatefulSet (pod name = executor_id), R=2 slot owners -> >=2 pods.
+    # autoscaling.mode stays none until KEDA + Prometheus exist on this cluster (fails loud).
     bundleExecutor:
-      # Compiling large Python/.NET components via Cranelift OOMs below this (alpha finding).
+      replicas: 3
+      memoryBudgetMb: 5120
       resources:
-        requests: { cpu: "500m", memory: "1Gi" }
-        limits: { cpu: "2000m", memory: "16Gi" }
+        requests: { cpu: "1000m", memory: "2Gi" }
+        limits: { cpu: "4000m", memory: "8Gi" }
     bundleSigningPublicKeys: {}
 
 # Resilience (templates/autoscaling.yaml). Production runs multi-replica: HPA on the stateless
@@ -84,13 +87,6 @@ autoscaling:
     hubWebui: { enabled: true }
     svcActionRust: { enabled: true }
     svcProcessRust: { enabled: true }
-    # svc-bundles-executor: one Deployment for every stage; floor of 2 (PDB renders), CPU + memory.
-    bundleExecutor:
-      enabled: true
-      minReplicas: 2
-      maxReplicas: 10
-      targetCPUUtilizationPercentage: 70
-      targetMemoryUtilizationPercentage: 80
     reputation: { enabled: true }
 
 # Egress lockdown — MANDATORY (fail guard blocks a render with this off).
