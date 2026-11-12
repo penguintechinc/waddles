@@ -24,6 +24,7 @@ audit row commits. No key material, sealed bytes or caller public key is ever lo
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -77,7 +78,15 @@ DEK_LENGTH: Final = 32
 X25519_KEY_LENGTH: Final = 32
 NONCE_LENGTH: Final = 12
 
-_SPIFFE_RE: Final = re.compile(r"^spiffe://penguintech\.io/[a-z0-9-]{1,32}/([a-z0-9-]{1,63})$")
+_SPIFFE_RE: Final = re.compile(r"^spiffe://penguintech\.io/([a-z0-9-]{1,32})/([a-z0-9-]{1,63})$")
+#: This deployment's SPIFFE env segment (``spiffe://penguintech.io/<env>/<service>``). Unset
+#: or malformed -> every caller is denied (fail closed); another env's SVID never matches.
+_SPIFFE_ENV_VAR: Final = "SPIFFE_ENV"
+_SPIFFE_ENV_RE: Final = re.compile(r"^[a-z0-9-]{1,32}$")
+#: Domain-separation salt for hashing rejected subs into the audit table (never stored raw).
+_AUDIT_SUB_SALT: Final = b"waddles.stream-dek.rejected-sub.v1|"
+_AUDIT_SUB_PREFIX: Final = "rejected:"
+_AUDIT_SUB_HEX: Final = 32
 _TENANT_ID_RE: Final = re.compile(r"^[1-9][0-9]{0,9}$")
 _MAX_TENANT_ID: Final = 2_147_483_647  # tenants.id is INTEGER
 
@@ -182,12 +191,34 @@ def ttl_seconds_from_env(environ: Mapping[str, str] | None = None) -> int:
     return value
 
 
-def service_name(sub: str) -> str:
-    """Return the service name (last SPIFFE path segment) of an allowed caller, else deny."""
-    match = _SPIFFE_RE.fullmatch(sub or "")
-    if match is None or match.group(1) not in ALLOWED_SERVICES:
+def deployment_spiffe_env(environ: Mapping[str, str] | None = None) -> str | None:
+    """Return this deployment's SPIFFE env segment from ``SPIFFE_ENV``, or None if unset/bad."""
+    raw = (environ if environ is not None else os.environ).get(_SPIFFE_ENV_VAR, "").strip()
+    return raw if _SPIFFE_ENV_RE.fullmatch(raw) else None
+
+
+def service_name(sub: str, environ: Mapping[str, str] | None = None) -> str:
+    """Return the service name of an allowed caller in THIS deployment's env, else deny.
+
+    The env segment is pinned to ``SPIFFE_ENV`` so an SVID minted for another env in the same
+    trust domain is refused; with ``SPIFFE_ENV`` unset every caller is refused (fail closed).
+    """
+    env = deployment_spiffe_env(environ)
+    if env is None:
+        logger.error("stream_dek.spiffe_env_unset", extra={"var": _SPIFFE_ENV_VAR})
         raise StreamDekServiceDeniedError("caller is not permitted stream DEKs")
-    return match.group(1)
+    match = _SPIFFE_RE.fullmatch(sub or "")
+    if match is None or match.group(1) != env or match.group(2) not in ALLOWED_SERVICES:
+        raise StreamDekServiceDeniedError("caller is not permitted stream DEKs")
+    return match.group(2)
+
+
+def audit_caller_ref(sub: str) -> str:
+    """Salted, truncated SHA-256 of a rejected caller sub for the audit row (never the raw sub)."""
+    if not sub:
+        return ""
+    digest = hashlib.sha256(_AUDIT_SUB_SALT + sub.encode("utf-8", "replace")).hexdigest()
+    return _AUDIT_SUB_PREFIX + digest[:_AUDIT_SUB_HEX]
 
 
 def seal_context(service: str, tenant_id: int, purpose: str, version: int) -> bytes:
@@ -335,7 +366,8 @@ class StreamDekBroker:
             except StreamDekError as exc:
                 outcome = exc.outcome
                 if not audit_attempted:  # the store just failed once; don't hammer it again
-                    await self._audit_denial(tenant, request.purpose, version, caller, outcome)
+                    audited = caller or audit_caller_ref(request.caller_sub)
+                    await self._audit_denial(tenant, request.purpose, version, audited, outcome)
                 logger.warning(
                     "stream_dek.refused",
                     extra={
@@ -354,7 +386,8 @@ class StreamDekBroker:
                     exc_info=True,
                 )
                 if not audit_attempted:
-                    await self._audit_denial(tenant, request.purpose, version, caller, outcome)
+                    audited = caller or audit_caller_ref(request.caller_sub)
+                    await self._audit_denial(tenant, request.purpose, version, audited, outcome)
                 raise StreamDekUnavailableError("stream DEK unavailable") from exc
             finally:
                 label = _OUTCOME_LABEL.get(outcome, "unavailable")

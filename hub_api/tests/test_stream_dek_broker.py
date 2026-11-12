@@ -83,6 +83,12 @@ def pub(client: X25519PrivateKey) -> bytes:
     )
 
 
+@pytest.fixture(autouse=True)
+def spiffe_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin this test deployment's SPIFFE env segment to `alpha` (production reads SPIFFE_ENV)."""
+    monkeypatch.setenv("SPIFFE_ENV", "alpha")
+
+
 @dataclass(slots=True)
 class FakeDb:
     """The tenants table + audit table the broker touches, in memory."""
@@ -216,6 +222,56 @@ class TestServiceAllowList:
     def test_denied(self, sub: str) -> None:
         with pytest.raises(StreamDekServiceDeniedError):
             service_name(sub)
+
+    @pytest.mark.parametrize(
+        "sub",
+        ["spiffe://penguintech.io/beta/svc-ingest", "spiffe://penguintech.io/prod/svc-process"],
+    )
+    def test_other_env_svid_denied(self, sub: str) -> None:
+        """Regression: env segment is pinned to SPIFFE_ENV, not any env in the trust domain."""
+        with pytest.raises(StreamDekServiceDeniedError):
+            service_name(sub)
+
+    @pytest.mark.parametrize("value", [None, "", "Alpha!", "a" * 33])
+    def test_unset_or_bad_spiffe_env_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch, value: str | None
+    ) -> None:
+        """Regression: no deployment env configured -> even a well-formed caller is refused."""
+        if value is None:
+            monkeypatch.delenv("SPIFFE_ENV", raising=False)
+        else:
+            monkeypatch.setenv("SPIFFE_ENV", value)
+        with pytest.raises(StreamDekServiceDeniedError):
+            service_name(INGEST)
+
+    def test_explicit_environ_overrides(self) -> None:
+        assert service_name("spiffe://penguintech.io/beta/svc-ingest", {"SPIFFE_ENV": "beta"})
+
+
+class TestRejectedSubAudit:
+    """Regression: denial rows for unknown subs carry a salted hash, never NULL or the raw sub."""
+
+    async def test_unknown_sub_audited_as_hash(self, broker: StreamDekBroker, db: FakeDb) -> None:
+        raw = "spiffe://evil.example/alpha/svc-ingest"
+        with pytest.raises(StreamDekServiceDeniedError):
+            await broker.issue(req(X25519PrivateKey.generate(), sub=raw))
+        assert len(db.audit) == 1
+        stored = db.audit[0]["caller_service"]
+        assert stored is not None and stored.startswith("rejected:")
+        assert raw not in stored and "evil" not in stored
+        assert len(stored) == len("rejected:") + 32 <= 64
+        assert stored == broker_mod.audit_caller_ref(raw)
+        assert db.audit[0]["outcome"] == OUTCOME_DENIED_SERVICE
+
+    def test_hash_is_stable_salted_and_distinct(self) -> None:
+        import hashlib
+
+        a = broker_mod.audit_caller_ref("spiffe://penguintech.io/beta/svc-ingest")
+        assert a == broker_mod.audit_caller_ref("spiffe://penguintech.io/beta/svc-ingest")
+        assert a != broker_mod.audit_caller_ref("spiffe://penguintech.io/beta/svc-process")
+        unsalted = hashlib.sha256(b"spiffe://penguintech.io/beta/svc-ingest").hexdigest()[:32]
+        assert a != "rejected:" + unsalted
+        assert broker_mod.audit_caller_ref("") == ""
 
 
 class TestTtl:
