@@ -2661,14 +2661,23 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// enforced), or a core reputation-service internal (the service invoked
     /// directly, chain length 1). Everything else -- including a bundle that
     /// does not provide reputation-logic, or a tenant with no active logic app
-    /// -- is `forbidden`; a lookup failure fails closed. No wiring or flag off
-    /// is left to the caller's `not_implemented` / `feature_disabled`.
+    /// -- is `forbidden`; a lookup failure fails closed, and so do absent wiring
+    /// (`not_implemented`) and the flag OFF (`feature_disabled`).
     async fn enforce_logic_exclusivity(&self) -> Result<(), HostResultError> {
+        // Fail CLOSED here, not only downstream: no wiring or the capability flag
+        // OFF means no activity write is allowed, whatever the caller is.
         let Some(wiring) = &self.reputation else {
-            return Ok(());
+            return Err(denied(
+                "not_implemented",
+                "reputation capability is not provisioned in this deployment \
+                 (BUNDLE_REPUTATION_PASSWORD unset or connection failed)",
+            ));
         };
         if !wiring.flag.enabled().await {
-            return Ok(());
+            return Err(denied(
+                "feature_disabled",
+                "reputation capability is disabled (waddles.bundle-reputation-capability is OFF)",
+            ));
         }
         let chain: &[String] = match &self.tool {
             Some(t) if !t.chain.is_empty() => &t.chain,

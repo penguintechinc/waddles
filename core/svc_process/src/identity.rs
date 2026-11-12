@@ -310,8 +310,12 @@ pub(crate) fn is_first_party(app_id: &str) -> bool {
 }
 
 /// The ALLOWLIST of event types that are genuinely system-originated (no human
-/// typed a command): platform engagement notifications, platform moderation
-/// outcomes and the internal floor-evaluation event. Everything else --
+/// typed a command): platform engagement notifications and platform moderation
+/// outcomes. Internal event types (e.g. `reputation.floor_check`) are
+/// deliberately NOT here: nothing in-cluster emits them yet, svc-ingest drops
+/// any reserved `reputation.*`/`internal.*` type, and an internal emitter must
+/// bring its own host-only provenance marker before it can be system-origin.
+/// Everything else --
 /// `message`, `chat.*`, `interaction.command`, any unknown or connector-supplied
 /// type -- is human-originated, so the actor-scope check applies (fail-closed).
 /// Matched EXACTLY against the MAC-verified envelope's event type.
@@ -328,7 +332,6 @@ pub fn is_system_event_type(event_type: &str) -> bool {
             | "channel.moderate"
             | "moderation.ban"
             | "moderation.timeout"
-            | "reputation.floor_check"
     ) || event_type
         .strip_prefix("channel.subscription.")
         .is_some_and(|rest| matches!(rest, "gift" | "gifts" | "new" | "renewal"))
@@ -1662,12 +1665,15 @@ mod system_event_tests {
             "channel.raid",
             "moderation.ban",
             "moderation.timeout",
-            "reputation.floor_check",
         ] {
             assert!(is_system_event_type(yes), "{yes}");
         }
-        // Human-typed, malformed or unknown: fail CLOSED.
+        // Human-typed, malformed or unknown: fail CLOSED. An ingested envelope
+        // claiming an internal type is treated as human-originated.
         for no in [
+            "reputation.floor_check",
+            "reputation.x",
+            "internal.x",
             "message",
             "chat.message",
             "interaction.command",

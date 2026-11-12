@@ -1993,3 +1993,37 @@ async fn adjust_keys_are_event_derived_distinct_per_call_and_reused_on_a_backend
     assert_eq!(keys[1], keys[0], "a failed attempt's retry reuses the key");
     assert_eq!(keys[2], format!("{EVENT_ID}:reputation_adjust:1"));
 }
+
+#[tokio::test]
+async fn activity_writes_fail_closed_on_flag_off_and_absent_wiring_before_exclusivity_is_consulted()
+{
+    for (flag_on, wired, want) in [
+        (false, true, "feature_disabled"),
+        (true, false, "not_implemented"),
+    ] {
+        let f = fixture_with(v2_grants(), flag_on, wired, Some(("main", COMMUNITY_ID)));
+        let u = f.member.to_string();
+        for (op, args) in [
+            (
+                "reputation.adjust",
+                serde_json::json!({"user": u, "delta": 1, "reason": "r.x"}),
+            ),
+            (
+                "reputation.adjust_many",
+                serde_json::json!({"adjustments": [{"user": u, "delta": 1}], "reason": "r.x"}),
+            ),
+            (
+                "reputation.apply",
+                serde_json::json!({"user": u, "delta": 1, "reason": "r.x"}),
+            ),
+        ] {
+            assert_eq!(
+                code_of(&f, op, args).await,
+                want,
+                "{op} flag_on={flag_on} wired={wired}"
+            );
+        }
+        assert_eq!(f.store.ext_count(), 0);
+        assert!(f.store.calls.lock().unwrap().is_empty());
+    }
+}

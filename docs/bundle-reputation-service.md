@@ -36,7 +36,7 @@ The two windows are independent (the ledger records `reason_code` as `<class>:<s
 a human-originated invocation additionally needs the verified actor to hold `community:moderate` (or admin);
 only a SYSTEM-originated invocation is exempt (host-derived from an allowlist of platform event types:
 `channel.follow|followed|subscribe|cheer|raid|ban|unban|moderate`, `channel.subscription.{gift,gifts,new,renewal}`,
-`moderation.ban|timeout`, `reputation.floor_check`; `message`, `interaction.command`, `chat.*` and every unknown
+`moderation.ban|timeout` (internal types such as `reputation.floor_check` are never system-origin; svc-ingest drops reserved `reputation.*`/`internal.*` types); `message`, `interaction.command`, `chat.*` and every unknown
 type are human; the flag never survives a hop through a non-`waddles.core.` bundle).
 
 ## Service tools
