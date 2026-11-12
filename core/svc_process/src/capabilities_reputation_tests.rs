@@ -336,19 +336,14 @@ impl ReputationStore for RecordingStore {
         scope: &'a ReputationScope,
         user: Uuid,
         reason: &'a str,
-        limits: SoftBanLimits,
     ) -> bundle_host_reputation::BoxFuture<'a, Result<bool, ReputationError>> {
         Box::pin(async move {
-            assert_eq!(limits, SoftBanLimits::DEFAULT, "host-chosen limits");
             self.ext.lock().unwrap().push(ExtCall::SoftBan(
                 scope.clone(),
                 user,
                 reason.to_string(),
             ));
-            match self.toggle_cap.lock().unwrap().take() {
-                Some(cap) => Err(ReputationError::RateLimited { cap }),
-                None => Ok(true),
-            }
+            Ok(true)
         })
     }
     fn lift_soft_ban<'a>(
@@ -365,7 +360,10 @@ impl ReputationStore for RecordingStore {
                 user,
                 only_reason.to_string(),
             ));
-            Ok(true)
+            match self.toggle_cap.lock().unwrap().take() {
+                Some(cap) => Err(ReputationError::RateLimited { cap }),
+                None => Ok(true),
+            }
         })
     }
 }
@@ -1931,22 +1929,103 @@ async fn a_guest_supplied_system_flag_cannot_bypass_the_scope_check() {
 }
 
 #[tokio::test]
-async fn soft_ban_toggle_quota_exhaustion_is_a_typed_rate_limit_and_never_refunded() {
+async fn soft_ban_lift_quota_exhaustion_is_a_typed_rate_limit_and_a_ban_still_applies() {
     let f = sys_fixture(v2_grants());
     let u = f.member.to_string();
-    // The store reports the durable count quota exhausted: typed, not generic.
+    // The store reports the durable LIFT quota exhausted: typed, not generic.
     *f.store.toggle_cap.lock().unwrap() = Some(5);
     assert_eq!(
         code_of(
             &f,
-            "reputation.soft_ban",
-            serde_json::json!({"user": u, "reason": "community_soft_floor"})
+            "reputation.lift_soft_ban",
+            serde_json::json!({"user": u, "only_reason": "community_soft_floor"})
         )
         .await,
         "rate_limited"
     );
+    // Recording a (floor-triggered) soft ban is never quota-blocked.
+    f.caps
+        .handle(rep_call(
+            "reputation.soft_ban",
+            serde_json::json!({"user": u, "reason": "community_soft_floor"}),
+        ))
+        .await
+        .unwrap();
     // The bound is the store's DURABLE count quota (proven against Postgres in
     // `soft_ban_toggles_are_quota_limited_per_user_and_per_community_and_typed`);
     // there is no gate-side refund that could hand a toggle back.
-    assert_eq!(f.store.ext_count(), 1);
+    assert_eq!(f.store.ext_count(), 2);
+}
+
+#[tokio::test]
+async fn real_human_event_types_are_never_system_originated_so_the_scope_check_applies() {
+    for et in [
+        "message",
+        "interaction.command",
+        "chat.message",
+        "weird.unknown",
+    ] {
+        let mut f = ext_fixture_as(v2_grants(), Some("member"));
+        f.caps.invocation_identity = Some(Arc::new(
+            InvocationIdentity::new("discord", Some("1001".to_string()), vec![])
+                .with_event_id(EVENT_ID)
+                .with_system_originated(crate::identity::is_system_event_type(et)),
+        ));
+        let u = f.member.to_string();
+        assert_eq!(
+            code_of(
+                &f,
+                "reputation.soft_ban",
+                serde_json::json!({"user": u, "reason": "community_soft_floor"})
+            )
+            .await,
+            "forbidden",
+            "{et}"
+        );
+    }
+    // The allowlisted platform event passes without a human actor scope.
+    let mut f = ext_fixture_as(v2_grants(), Some("member"));
+    f.caps.invocation_identity = Some(Arc::new(
+        InvocationIdentity::new("twitch", Some("1001".to_string()), vec![])
+            .with_event_id(EVENT_ID)
+            .with_system_originated(crate::identity::is_system_event_type("channel.follow")),
+    ));
+    let u = f.member.to_string();
+    assert!(f
+        .caps
+        .handle(rep_call(
+            "reputation.soft_ban",
+            serde_json::json!({"user": u, "reason": "community_soft_floor"})
+        ))
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn a_system_flag_stripped_by_an_untrusted_hop_makes_the_core_write_forbidden() {
+    // A third-party logic bundle tool.invokes a core service: the host strips the
+    // flag (`for_tool_call`), so the core bundle's moderation write needs a real
+    // moderator actor scope.
+    let base = InvocationIdentity::new("twitch", Some("1001".to_string()), vec![])
+        .with_event_id(EVENT_ID)
+        .with_system_originated(true);
+    let hop = base.for_tool_call(
+        Some("tool:k".into()),
+        "acme.third-party-logic",
+        "waddles.core.service.reputation",
+    );
+    assert!(!hop.is_system_originated());
+    let mut f = ext_fixture_as(v2_grants(), Some("member"));
+    f.caps.invocation_identity = Some(Arc::new(hop));
+    let u = f.member.to_string();
+    assert_eq!(
+        code_of(
+            &f,
+            "reputation.apply_moderation",
+            serde_json::json!({"user": u, "delta": -50, "reason": "moderation.ban"})
+        )
+        .await,
+        "forbidden"
+    );
+    assert_eq!(f.store.ext_count(), 0);
 }

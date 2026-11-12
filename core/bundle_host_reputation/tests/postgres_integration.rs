@@ -2225,23 +2225,13 @@ async fn soft_ban_is_idempotent_community_scoped_and_liftable() {
     assert_eq!(f.store.is_soft_banned(&scope(), f.member).await, Ok(false));
     assert_eq!(
         f.store
-            .soft_ban(
-                &scope(),
-                f.member,
-                "community_floor",
-                SoftBanLimits::DEFAULT
-            )
+            .soft_ban(&scope(), f.member, "community_floor")
             .await,
         Ok(true)
     );
     assert_eq!(
         f.store
-            .soft_ban(
-                &scope(),
-                f.member,
-                "community_floor",
-                SoftBanLimits::DEFAULT
-            )
+            .soft_ban(&scope(), f.member, "community_floor")
             .await,
         Ok(false),
         "second call is a no-op"
@@ -2255,19 +2245,12 @@ async fn soft_ban_is_idempotent_community_scoped_and_liftable() {
     assert_eq!(f.store.is_soft_banned(&other, f.member).await, Ok(false));
     assert_eq!(
         f.store
-            .soft_ban(
-                &scope(),
-                Uuid::new_v4(),
-                "community_floor",
-                SoftBanLimits::DEFAULT
-            )
+            .soft_ban(&scope(), Uuid::new_v4(), "community_floor")
             .await,
         Err(ReputationError::NotAMember)
     );
     assert!(matches!(
-        f.store
-            .soft_ban(&scope(), f.member, "Bad Reason", SoftBanLimits::DEFAULT)
-            .await,
+        f.store.soft_ban(&scope(), f.member, "Bad Reason").await,
         Err(ReputationError::Invalid(_))
     ));
     // Only a ban with the exact reason is lifted: a manual one is never cleared.
@@ -2293,12 +2276,7 @@ async fn soft_ban_is_idempotent_community_scoped_and_liftable() {
     // A fresh ban can be recorded again after a lift.
     assert_eq!(
         f.store
-            .soft_ban(
-                &scope(),
-                f.member,
-                "community_floor",
-                SoftBanLimits::DEFAULT
-            )
+            .soft_ban(&scope(), f.member, "community_floor")
             .await,
         Ok(true)
     );
@@ -2310,19 +2288,19 @@ fn acaps() -> ReputationCaps {
 }
 
 #[tokio::test]
-async fn soft_ban_toggles_are_quota_limited_per_user_and_per_community_and_typed() {
+async fn soft_ban_always_applies_and_only_lifts_are_quota_limited() {
     let f = fixture().await;
     exec(&f.su, REPUTATION_APPLY_STUB).await;
     let lim = SoftBanLimits {
-        per_user_daily: 4,
-        per_community_daily: 5,
+        per_user_daily: 2,
+        per_community_daily: 3,
     };
     let sc = scope();
-    // 2 full cycles = 4 toggles for `member`.
+    // Two full cycles use the per-user lift budget (2).
     for _ in 0..2 {
         assert_eq!(
             f.store
-                .soft_ban(&sc, f.member, "community_soft_floor", lim)
+                .soft_ban(&sc, f.member, "community_soft_floor")
                 .await,
             Ok(true)
         );
@@ -2333,46 +2311,64 @@ async fn soft_ban_toggles_are_quota_limited_per_user_and_per_community_and_typed
             Ok(true)
         );
     }
-    // The 5th toggle for the same user is rate limited, state unchanged.
+    // The floor-triggered ban STILL applies with the lift budget burned...
     assert_eq!(
         f.store
-            .soft_ban(&sc, f.member, "community_soft_floor", lim)
+            .soft_ban(&sc, f.member, "community_soft_floor")
             .await,
-        Err(ReputationError::RateLimited { cap: 4 })
+        Ok(true)
     );
-    assert_eq!(f.store.is_soft_banned(&sc, f.member).await, Ok(false));
-    // A no-op (nothing to lift) is free and never rate limited.
+    assert_eq!(f.store.is_soft_banned(&sc, f.member).await, Ok(true));
+    // ...but flapping it off again is rate limited, typed, state unchanged.
     assert_eq!(
         f.store
             .lift_soft_ban(&sc, f.member, "community_soft_floor", lim)
             .await,
+        Err(ReputationError::RateLimited { cap: 2 })
+    );
+    assert_eq!(f.store.is_soft_banned(&sc, f.member).await, Ok(true));
+    // A no-op lift (different reason) is free.
+    assert_eq!(
+        f.store.lift_soft_ban(&sc, f.member, "manual", lim).await,
         Ok(false)
     );
-    // Another user: 1 toggle left in the community budget (4 used of 5).
+    // Community budget (3): one more lift by another user is the 3rd, the next is refused;
+    // yet a NEW floor soft ban for a third member still applies with the budget exhausted.
     let other = add_member(&f, COMMUNITY).await;
     assert_eq!(
+        f.store.soft_ban(&sc, other, "community_soft_floor").await,
+        Ok(true)
+    );
+    assert_eq!(
         f.store
-            .soft_ban(&sc, other, "community_soft_floor", lim)
+            .lift_soft_ban(&sc, other, "community_soft_floor", lim)
             .await,
         Ok(true)
     );
-    let third = add_member(&f, COMMUNITY).await;
+    assert_eq!(
+        f.store.soft_ban(&sc, other, "community_soft_floor").await,
+        Ok(true)
+    );
     assert_eq!(
         f.store
-            .soft_ban(&sc, third, "community_soft_floor", lim)
+            .lift_soft_ban(&sc, other, "community_soft_floor", lim)
             .await,
-        Err(ReputationError::RateLimited { cap: 5 })
+        Err(ReputationError::RateLimited { cap: 3 })
     );
-    // Old toggles roll out of the window.
+    let third = add_member(&f, COMMUNITY).await;
+    assert_eq!(
+        f.store.soft_ban(&sc, third, "community_soft_floor").await,
+        Ok(true)
+    );
+    // Old lifts roll out of the window.
     exec(
         &f.su,
-        "UPDATE reputation_soft_bans SET created_at = NOW() - INTERVAL '25 hours', \
-         lifted_at = CASE WHEN lifted_at IS NULL THEN NULL ELSE NOW() - INTERVAL '25 hours' END",
+        "UPDATE reputation_soft_bans SET lifted_at = NOW() - INTERVAL '25 hours' WHERE lifted_at IS NOT NULL",
     )
     .await;
     assert_eq!(
         f.store
-            .soft_ban(&sc, third, "community_soft_floor", lim)
+            .lift_soft_ban(&sc, f.member, "community_soft_floor", lim)
             .await,
         Ok(true)
     );

@@ -894,9 +894,11 @@ impl PostgresReputationStore {
     }
 }
 
-/// Enforces the rolling-24h soft-ban TOGGLE quota (a record or a lift each
-/// count once) per user and per community, inside the caller's transaction
-/// with the scope advisory lock held, so concurrent toggles cannot overshoot.
+/// Enforces the rolling-24h soft-ban LIFT quota per user and per community,
+/// inside the caller's transaction with the scope advisory lock held. Only
+/// LIFTS are throttled: recording a ban must never be blocked (a floor-triggered
+/// soft ban has to apply even when an abuser has burned the budget), and since
+/// each flap needs a lift, throttling lifts bounds ban/lift churn too.
 async fn check_soft_ban_quota(
     txn: &DatabaseTransaction,
     scope: &ReputationScope,
@@ -912,14 +914,14 @@ async fn check_soft_ban_quota(
         txn.query_one_raw(stmt(sql, v))
             .await
             .map_err(backend_err)?
-            .ok_or_else(|| backend_err("toggle count returned no row"))?
+            .ok_or_else(|| backend_err("lift count returned no row"))?
             .try_get::<i64>("", "n")
             .map_err(backend_err)
     };
     let per_user = count(
-        "SELECT (COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') + \
-                 COUNT(*) FILTER (WHERE lifted_at > NOW() - INTERVAL '24 hours'))::BIGINT AS n \
-         FROM reputation_soft_bans WHERE tenant_id = $1 AND community_id = $2 AND user_uuid = $3",
+        "SELECT COUNT(*)::BIGINT AS n FROM reputation_soft_bans \
+         WHERE tenant_id = $1 AND community_id = $2 AND user_uuid = $3 \
+           AND lifted_at > NOW() - INTERVAL '24 hours'",
         scope_values(scope, user),
     )
     .await?;
@@ -929,9 +931,9 @@ async fn check_soft_ban_quota(
         });
     }
     let per_community = count(
-        "SELECT (COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') + \
-                 COUNT(*) FILTER (WHERE lifted_at > NOW() - INTERVAL '24 hours'))::BIGINT AS n \
-         FROM reputation_soft_bans WHERE tenant_id = $1 AND community_id = $2",
+        "SELECT COUNT(*)::BIGINT AS n FROM reputation_soft_bans \
+         WHERE tenant_id = $1 AND community_id = $2 \
+           AND lifted_at > NOW() - INTERVAL '24 hours'",
         vec![
             Value::Int(Some(scope.tenant_id)),
             Value::Int(Some(scope.community_id)),
@@ -966,14 +968,14 @@ impl PostgresReputationStore {
         Ok(row.is_some())
     }
 
-    /// Idempotent soft-ban insert for an active member, charged against the
-    /// durable toggle quota. An already-active ban is a free no-op (`false`).
+    /// Idempotent soft-ban insert for an active member. NEVER quota-blocked
+    /// (a ban must always be able to apply); an already-active ban is a no-op
+    /// (`false`). Flapping is bounded by the lift quota instead.
     async fn soft_ban_impl(
         &self,
         scope: &ReputationScope,
         user: Uuid,
         reason: &str,
-        limits: SoftBanLimits,
     ) -> Result<bool, ReputationError> {
         validate_reason(reason)?;
         let txn = self.begin().await?;
@@ -1003,7 +1005,6 @@ impl PostgresReputationStore {
         if active {
             return Ok(false);
         }
-        check_soft_ban_quota(&txn, scope, user, limits).await?;
         let mut v = scope_values(scope, user);
         v.push(Value::String(Some(reason.to_string())));
         txn.execute_raw(stmt(
@@ -1020,7 +1021,7 @@ impl PostgresReputationStore {
 
 impl PostgresReputationStore {
     /// Lifts an active soft ban recorded with exactly `only_reason`, charged
-    /// against the durable toggle quota (a no-op lift is free).
+    /// against the durable LIFT quota (a no-op lift is free).
     async fn lift_soft_ban_impl(
         &self,
         scope: &ReputationScope,
@@ -1538,11 +1539,10 @@ impl ReputationStore for PostgresReputationStore {
         scope: &'a ReputationScope,
         user: Uuid,
         reason: &'a str,
-        limits: SoftBanLimits,
     ) -> BoxFuture<'a, Result<bool, ReputationError>> {
         Box::pin(async move {
             let start = Instant::now();
-            let result = self.soft_ban_impl(scope, user, reason, limits).await;
+            let result = self.soft_ban_impl(scope, user, reason).await;
             metrics::record_call(
                 "soft_ban",
                 outcome_of(&result),

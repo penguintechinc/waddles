@@ -1436,9 +1436,13 @@ async fn handle_delivered_inner<S: SpineOps>(
         // The hop-verified envelope id: identical across redeliveries of this event, the anchor
         // of the economy's idempotency keys.
         .with_event_id(d.env.event_id.clone())
-        // A platform/system event (follow, sub, moderation outcome, ...) is not a human command:
-        // only `chat.message` is typed by a person.
-        .with_system_originated(d.env.event.event_type != "chat.message");
+        // System-originated ONLY for an allowlisted platform event type (fail-closed: `message`,
+        // `interaction.command`, `chat.*` and every unknown type are human-originated) AND only
+        // when this stage serves a first-party core bundle.
+        .with_system_originated(
+            crate::identity::is_system_event_type(&d.env.event.event_type)
+                && crate::identity::is_first_party(&deps.app_id),
+        );
         Arc::new(inv)
     });
     let capabilities: Arc<dyn CapabilityHandler> = Arc::new(build_stage_capabilities(

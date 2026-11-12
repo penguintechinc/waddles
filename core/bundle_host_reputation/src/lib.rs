@@ -155,14 +155,14 @@ pub struct ApplyOutcome {
     pub applied: bool,
 }
 
-/// Rolling-24h ceilings on soft-ban TOGGLES (a record or a lift each count
-/// once): a count-based quota, so a loop of soft-ban/lift calls cannot churn
-/// the table or flap a member's state.
+/// Rolling-24h ceilings on soft-ban LIFTS (recording a ban is never
+/// throttled, so a floor-triggered ban always applies): a count-based quota,
+/// so a loop of ban/lift calls cannot flap a member's state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SoftBanLimits {
-    /// Max toggles for one user in one community per day.
+    /// Max lifts for one user in one community per day.
     pub per_user_daily: i64,
-    /// Max toggles across the whole community per day.
+    /// Max lifts across the whole community per day.
     pub per_community_daily: i64,
 }
 
@@ -253,9 +253,9 @@ pub enum ReputationError {
     /// same one with different parameters): nothing was applied.
     #[error("idempotency key was already used by a different reputation operation")]
     IdempotencyConflict,
-    /// The soft-ban toggle quota (per user or per community, rolling 24h) is
+    /// The soft-ban lift quota (per user or per community, rolling 24h) is
     /// exhausted: nothing was changed.
-    #[error("soft-ban toggle quota ({cap}/day) exhausted")]
+    #[error("soft-ban lift quota ({cap}/day) exhausted")]
     RateLimited { cap: i64 },
     /// Malformed argument (bad `reason`, zero `delta`, ...).
     #[error("invalid argument: {0}")]
@@ -474,13 +474,12 @@ pub trait ReputationStore: Send + Sync {
     }
 
     /// Records an active soft ban for `user` (idempotent: an already-active
-    /// ban returns `Ok(false)`, a new one `Ok(true)`).
+    /// ban returns `Ok(false)`, a new one `Ok(true)`). Never quota-blocked.
     fn soft_ban<'a>(
         &'a self,
         _scope: &'a ReputationScope,
         _user: uuid::Uuid,
         _reason: &'a str,
-        _limits: SoftBanLimits,
     ) -> BoxFuture<'a, Result<bool, ReputationError>> {
         Box::pin(async { Err(unsupported("soft_ban")) })
     }

@@ -3484,7 +3484,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                 .map(|b| serde_json::json!({ "flag": b })),
             Op::SoftBan { user, reason } => wiring
                 .store
-                .soft_ban(&scope, *user, reason, SoftBanLimits::DEFAULT)
+                .soft_ban(&scope, *user, reason)
                 .await
                 .map(|b| serde_json::json!({ "flag": b })),
             Op::LiftSoftBan { user, only_reason } => wiring
