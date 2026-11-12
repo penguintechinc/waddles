@@ -109,16 +109,17 @@ def test_svc_ingest_is_allow_listed_for_exactly_connections_resolve_on_the_syste
     # resolve (bound, twitch OAuth) + list (binding discovery) + scope resolver; NEVER the
     # static-kind scope (that is svc-action's alone).
     assert entry["allowed_scopes"] == [
-        "connections:resolve",
-        # tenant stream-DEK fetch (KeyService.GetStreamDek): rendered with or without dynamic
-        # connections -- svc-ingest cannot encrypt, hence cannot publish, an event without it.
-        "key:stream-dek:read",
-        "connections:list",
-        "dataplane:resolve-scope",
-        "dataplane:app-commands",
-        "dataplane:active-context",
+        "connections:resolve",  # bound/twitch OAuth credential resolution
+        "connections:list",  # binding discovery
+        "dataplane:resolve-scope",  # handle -> tenant/community scope resolver
+        "dataplane:app-commands",  # desired-state app commands (read-only)
+        "dataplane:active-context",  # router reads/writes user's active community
+        # outbound executor detokenizes user UUID (core/svc_ingest/src/platform_users.rs)
         "identity:platform-user:resolve",
+        # svc-ingest polls BundleScheduleService.ListBundleSchedules (core/hub_client/src/
+        # bundle_schedule.rs SCOPE); hub_api/grpc_internal/bundle_schedule_servicer.py requires it.
         "bundle-schedules:read",
+        "key:stream-dek:read",  # DEK broker GetStreamDek (#1246)
     ]
     assert entry["tenant"] == "system"
     assert entry["k8s_service_account"] == "svc-ingest"

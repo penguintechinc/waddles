@@ -65,7 +65,6 @@ hub-api's own Deployment env (the only consumer):
 least-privilege: it is ALWAYS rendered, but with ONLY `key:stream-dek:read` (the tenant stream-DEK
 fetch it cannot encrypt a single event without) unless
 pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled (default false), which adds the rest. */ -}}
-{{- if true }}
 {{- $scopes := list -}}
 {{- range $scope := $identity.allowedScopes }}
 {{- /* svc-action keeps its other scopes always, but its `connections:*` scopes (resolve +
@@ -78,7 +77,6 @@ resolve:static) render ONLY when pipeline.rustDataPlane.svcAction.dynamicConnect
 {{- end }}
 {{- $spiffeId := tpl $identity.spiffeId $root -}}
 {{- $identities = append $identities (dict "service_id" $spiffeId "k8s_namespace" $root.Values.namespace "k8s_service_account" $identity.serviceAccount "allowed_scopes" $scopes "tenant" ($identity.tenant | default "")) -}}
-{{- end }}
 {{- end }}
 {{- $identities | toJson -}}
 {{- end -}}
