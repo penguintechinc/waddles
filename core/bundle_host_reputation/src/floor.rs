@@ -1,6 +1,6 @@
 //! Automated hard-ban (reputation floor) types shared by the store trait, the Postgres store and
 //! the `svc_process` host gate. The SQL half is `scripts/db/bundle_reputation_floor_ban.sql`
-//! (alembic 0099): re-verification, the audit/idempotency/durable-retry table and the fan-out set.
+//! (alembic 0100): re-verification, the audit/idempotency/durable-retry table and the fan-out set.
 
 /// Largest tenant the tenant-floor ban fans out over (host-enumerated; more fails loudly).
 pub const MAX_TENANT_FANOUT: usize = 1000;

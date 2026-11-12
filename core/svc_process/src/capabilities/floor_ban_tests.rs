@@ -2,7 +2,7 @@
 //! against a stateful fake reputation store (the enqueue outbox: idempotency, quota, refusal).
 //! The gate never invokes the platform bundle (delivery is the action stage's outbox dispatch,
 //! tested in `svc_action`); the store's own SQL is proven against a real Postgres in
-//! `alembic/tests/test_0099_reputation_floor_ban.py`.
+//! `alembic/tests/test_0100_reputation_floor_ban.py`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};

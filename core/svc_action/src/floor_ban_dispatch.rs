@@ -1,7 +1,7 @@
 //! Action-stage dispatcher of the automated reputation floor-ban outbox.
 //!
 //! The process stage records every verified floor ban as a QUEUED row of
-//! `bundle_reputation_floor_bans` (`reputation_floor_ban_enqueue`, alembic 0099); this module is
+//! `bundle_reputation_floor_bans` (`reputation_floor_ban_enqueue`, alembic 0100); this module is
 //! the other half. Each sweep it
 //!
 //! 1. REAPs rows that exhausted their attempts (they become DEAD: ERROR log + metric alert);
