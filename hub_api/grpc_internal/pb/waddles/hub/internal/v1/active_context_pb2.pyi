@@ -14,12 +14,7 @@ class GetActiveContextRequest(_message.Message):
     platform: str
     source_id: str
     user: str
-    def __init__(
-        self,
-        platform: _Optional[str] = ...,
-        source_id: _Optional[str] = ...,
-        user: _Optional[str] = ...,
-    ) -> None: ...
+    def __init__(self, platform: _Optional[str] = ..., source_id: _Optional[str] = ..., user: _Optional[str] = ...) -> None: ...
 
 class SetActiveContextRequest(_message.Message):
     __slots__ = ("platform", "source_id", "user", "community")
@@ -31,13 +26,7 @@ class SetActiveContextRequest(_message.Message):
     source_id: str
     user: str
     community: str
-    def __init__(
-        self,
-        platform: _Optional[str] = ...,
-        source_id: _Optional[str] = ...,
-        user: _Optional[str] = ...,
-        community: _Optional[str] = ...,
-    ) -> None: ...
+    def __init__(self, platform: _Optional[str] = ..., source_id: _Optional[str] = ..., user: _Optional[str] = ..., community: _Optional[str] = ...) -> None: ...
 
 class SwitchableCommunity(_message.Message):
     __slots__ = ("public_id", "display_name", "position")
@@ -47,12 +36,7 @@ class SwitchableCommunity(_message.Message):
     public_id: str
     display_name: str
     position: int
-    def __init__(
-        self,
-        public_id: _Optional[str] = ...,
-        display_name: _Optional[str] = ...,
-        position: _Optional[int] = ...,
-    ) -> None: ...
+    def __init__(self, public_id: _Optional[str] = ..., display_name: _Optional[str] = ..., position: _Optional[int] = ...) -> None: ...
 
 class GetActiveContextResponse(_message.Message):
     __slots__ = ("context",)
@@ -78,11 +62,4 @@ class ActiveContext(_message.Message):
     community_name: str
     explicit: bool
     communities: _containers.RepeatedCompositeFieldContainer[SwitchableCommunity]
-    def __init__(
-        self,
-        community_public_id: _Optional[str] = ...,
-        community_id: _Optional[int] = ...,
-        community_name: _Optional[str] = ...,
-        explicit: _Optional[bool] = ...,
-        communities: _Optional[_Iterable[_Union[SwitchableCommunity, _Mapping]]] = ...,
-    ) -> None: ...
+    def __init__(self, community_public_id: _Optional[str] = ..., community_id: _Optional[int] = ..., community_name: _Optional[str] = ..., explicit: _Optional[bool] = ..., communities: _Optional[_Iterable[_Union[SwitchableCommunity, _Mapping]]] = ...) -> None: ...

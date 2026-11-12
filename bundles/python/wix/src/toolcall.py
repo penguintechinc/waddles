@@ -98,7 +98,8 @@ def parse_ts(raw: str) -> datetime | None:
     """Timezone-aware datetime for an RFC 3339 string, or `None` when unparseable/naive."""
     try:
         parsed = datetime.fromisoformat(raw)
-    except ValueError:
+    except ValueError as exc:
+        logger.warning("wix.invalid_timestamp", error=type(exc).__name__)
         return None
     return parsed if parsed.tzinfo is not None else None
 

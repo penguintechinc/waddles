@@ -44,7 +44,7 @@ SCAN_SPECS=(
 
 # Exclusion shape shared by both the stub-marker scan and the semgrep run --
 # generated/test code, never shipped-source-authored-by-us.
-EXCLUDE_REGEX='(^|/)(tests?|__tests__|node_modules|target|dist|build)(/|$)|_test\.(rs|py)$|^test_.*\.py$|\.test\.(ts|tsx|js|jsx)$|\.spec\.(ts|tsx|js|jsx)$|_pb2(_grpc)?\.py$'
+EXCLUDE_REGEX='(^|/)(tests?|__tests__|node_modules|target|dist|build|\.venv[^/]*)(/|$)|_test\.(rs|py)$|^test_.*\.py$|\.test\.(ts|tsx|js|jsx)$|\.spec\.(ts|tsx|js|jsx)$|_pb2(_grpc)?\.py$'
 
 STUB_PATTERN='TODO|FIXME|XXX|HACK|unimplemented!\(\)|todo!\(\)|NotImplementedError|not wired|not implemented|panic!\([^)]*not impl[^)]*\)'
 

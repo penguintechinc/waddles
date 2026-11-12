@@ -238,12 +238,12 @@ dependencies = [
 name = "connection_resolver"
 version = "0.1.0"
 dependencies = [
- "reqwest",
+ "hub_client",
  "serde",
- "serde_json",
  "service_auth",
  "thiserror 2.0.20",
  "tokio",
+ "tonic",
  "tracing",
  "zeroize",
 ]
@@ -568,6 +568,22 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
+name = "hub_client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "prost",
+ "service_auth",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+ "tracing",
+]
 
 [[package]]
 name = "hyper"

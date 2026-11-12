@@ -945,13 +945,15 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
     // Same gate as the interaction tap: routing exists exactly when Discord is ON, and a
     // missing dependency is a boot error here (never a ContextSink-less Discord runtime).
     let interaction_routing = if settings.platforms.contains(&"discord") {
-        Some(InteractionRouting::from_config(
-            cli,
-            crate::interaction_store::InteractionStore::new(lease_conn.clone()),
-            &registry,
-            tokenizer,
+        Some(
+            InteractionRouting::from_config(
+                cli,
+                crate::interaction_store::InteractionStore::new(lease_conn.clone()),
+                &registry,
+                tokenizer,
+            )
+            .await?,
         )
-        .await?)
     } else {
         None
     };
@@ -1687,7 +1689,10 @@ mod tests {
             .await
             .err()
             .expect("duplicate registration must fail");
-        assert!(e.to_string().contains("metrics"), "duplicate metric registration is a boot error: {e}");
+        assert!(
+            e.to_string().contains("metrics"),
+            "duplicate metric registration is a boot error: {e}"
+        );
     }
 
     /// `assemble` builds a runtime that reconciles every enabled platform's feed
