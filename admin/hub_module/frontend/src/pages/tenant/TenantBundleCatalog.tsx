@@ -175,7 +175,7 @@ export default function TenantBundleCatalog() {
               <tr className="border-b border-line text-fg-muted text-sm">
                 <th className="py-2 pr-4">App</th>
                 <th className="py-2 pr-4">Status</th>
-                <th className="py-2 pr-4">Pinned Version</th>
+                <th className="py-2 pr-4">Version</th>
                 <th className="py-2 pr-4">Updated</th>
                 {canManage && <th className="py-2 pr-4">Actions</th>}
               </tr>
@@ -195,7 +195,7 @@ export default function TenantBundleCatalog() {
                       {bundle.available ? 'Available' : 'Unavailable'}
                     </span>
                   </td>
-                  <td className="py-2 pr-4 text-fg-muted">{bundle.pinnedVersionId ?? '—'}</td>
+                  <td className="py-2 pr-4 text-fg-muted"><span data-testid={`bundle-version-${bundle.appId}`}>{bundle.version ?? '—'}</span></td>
                   <td className="py-2 pr-4 text-fg-muted">
                     {bundle.updatedAt ? new Date(bundle.updatedAt).toLocaleString() : '—'}
                   </td>

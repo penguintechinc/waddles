@@ -281,14 +281,6 @@ async def get_system_health(async_dal: Any, dal: Any) -> tuple[bool, bool]:
     return database_ok, database_ok
 
 
-async def get_module_registry(async_dal: Any, dal: Any) -> list[Any]:
-    """List every registered collector module."""
-    rows = await async_dal.select_async(
-        dal(dal.collector_modules.id > 0), orderby=dal.collector_modules.module_name
-    )
-    return list(rows)
-
-
 async def get_audit_log(
     async_dal: Any,
     dal: Any,

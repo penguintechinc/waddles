@@ -17,7 +17,6 @@ import {
   DocumentTextIcon,
   ShieldCheckIcon,
   Cog6ToothIcon,
-  BuildingStorefrontIcon,
   ServerStackIcon,
   RectangleGroupIcon,
   ArrowsRightLeftIcon,
@@ -101,14 +100,6 @@ function AdminLayout() {
             { to: `/admin/${communityId}/live-streaming`, icon: VideoCameraIcon, label: 'Live Streaming' },
             { to: `/admin/${communityId}/stream-overlays`, icon: WindowIcon, label: 'Stream Overlays' },
             { to: `/admin/${communityId}/calls`, icon: SpeakerWaveIcon, label: 'Community Calls' },
-          ],
-        },
-        {
-          key: 'modules',
-          label: 'Modules',
-          icon: PuzzlePieceIcon,
-          items: [
-            { to: `/admin/${communityId}/modules`, icon: PuzzlePieceIcon, label: 'Modules & Marketplace' },
           ],
         },
         {
@@ -201,7 +192,6 @@ function AdminLayout() {
   const superAdminNav = useMemo(() => [
     { to: '/superadmin', icon: ChartBarIcon, label: 'Dashboard', exact: true },
     { to: '/superadmin/communities', icon: HomeIcon, label: 'Communities' },
-    { to: '/superadmin/modules', icon: BuildingStorefrontIcon, label: 'Module Registry' },
     { to: '/superadmin/analytics', icon: ChartBarIcon, label: 'Analytics' },
     { to: '/superadmin/platform-config', icon: Cog6ToothIcon, label: 'Platform Config' },
     { to: '/superadmin/tenants', icon: ServerStackIcon, label: 'Tenants' },

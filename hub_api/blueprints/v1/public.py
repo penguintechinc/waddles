@@ -25,7 +25,7 @@ fix applied to the `communities`-backed routes.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -276,91 +276,6 @@ class SignupSettingsResponse:
 
 
 @dataclass(slots=True, frozen=True)
-class MarketplaceModuleDTO:
-    """Marketplace module DTO (list row)."""
-
-    id: int
-    name: str
-    displayName: str | None
-    description: str | None
-    version: str | None
-    author: str | None
-    category: str | None
-    iconUrl: str | None
-    isCore: bool
-    avgRating: str
-    reviewCount: int
-    installCount: int
-    createdAt: str | None
-
-
-@dataclass(slots=True, frozen=True)
-class MarketplaceModulesResponse:
-    """Response DTO for marketplace modules."""
-
-    success: bool
-    modules: list[MarketplaceModuleDTO]
-    pagination: PaginationDTO
-
-
-@dataclass(slots=True, frozen=True)
-class ReviewDTO:
-    """Review DTO."""
-
-    id: int
-    rating: int | None
-    reviewText: str | None
-    author: str
-    authorAvatar: str | None
-    createdAt: str | None
-
-
-@dataclass(slots=True, frozen=True)
-class MarketplaceModuleDetailDTO:
-    """Marketplace module detail DTO."""
-
-    id: int
-    name: str
-    displayName: str | None
-    description: str | None
-    version: str | None
-    author: str | None
-    category: str | None
-    iconUrl: str | None
-    isCore: bool
-    configSchema: dict[str, Any] | None
-    avgRating: str
-    reviewCount: int
-    installCount: int
-    createdAt: str | None
-    reviews: list[ReviewDTO] = field(default_factory=list)
-
-
-@dataclass(slots=True, frozen=True)
-class MarketplaceModuleResponse:
-    """Response DTO for marketplace module."""
-
-    success: bool
-    module: MarketplaceModuleDetailDTO
-
-
-@dataclass(slots=True, frozen=True)
-class CategoryDTO:
-    """Category DTO."""
-
-    name: str
-    moduleCount: int
-
-
-@dataclass(slots=True, frozen=True)
-class CategoriesResponse:
-    """Response DTO for categories."""
-
-    success: bool
-    categories: list[CategoryDTO]
-
-
-@dataclass(slots=True, frozen=True)
 class BannerResponse:
     """Response DTO for the banner -- Node's own shape has NO `success` envelope key."""
 
@@ -583,101 +498,6 @@ async def get_signup_settings() -> SignupSettingsResponse:
 async def get_signup_settings_alias() -> SignupSettingsResponse:
     """Get signup settings (top-level alias -- see this module's docstring)."""
     return await _build_signup_settings_response()
-
-
-@public_bp.route("/marketplace/modules", methods=["GET"])
-@validate_response(MarketplaceModulesResponse)
-async def get_marketplace_modules() -> MarketplaceModulesResponse:
-    """Get marketplace modules."""
-    async_dal, dal = _dal()
-    page = int(request.args.get("page", "1"))
-    limit = parse_limit(request.args.get("limit"), default=25)
-    search = request.args.get("search", "")
-    category = request.args.get("category")
-
-    stats_list, total, total_pages = await svc.get_marketplace_modules(
-        async_dal, dal, page=page, limit=limit, search=search, category=category
-    )
-    return MarketplaceModulesResponse(
-        success=True,
-        modules=[
-            MarketplaceModuleDTO(
-                id=s["module"].id,
-                name=s["module"].name,
-                displayName=s["module"].display_name or s["module"].name,
-                description=s["module"].description,
-                version=s["module"].version,
-                author=s["module"].author,
-                category=s["module"].category,
-                iconUrl=s["module"].icon_url,
-                isCore=bool(s["module"].is_core),
-                avgRating=f"{s['avg_rating']:.1f}",
-                reviewCount=s["review_count"],
-                installCount=s["install_count"],
-                createdAt=_iso(s["module"].created_at),
-            )
-            for s in stats_list
-        ],
-        pagination=PaginationDTO(
-            page=page, limit=min(100, max(1, limit)), total=total, totalPages=total_pages
-        ),
-    )
-
-
-@public_bp.route("/marketplace/modules/<int:module_id>", methods=["GET"])
-@validate_response(MarketplaceModuleResponse)
-async def get_marketplace_module(
-    module_id: int,
-) -> MarketplaceModuleResponse | tuple[dict[str, object], int]:
-    """Get marketplace module."""
-    async_dal, dal = _dal()
-    try:
-        stats = await svc.get_marketplace_module(async_dal, dal, module_id=module_id)
-    except ApiError as exc:
-        return _err(exc)
-    module = stats["module"]
-    return MarketplaceModuleResponse(
-        success=True,
-        module=MarketplaceModuleDetailDTO(
-            id=module.id,
-            name=module.name,
-            displayName=module.display_name or module.name,
-            description=module.description,
-            version=module.version,
-            author=module.author,
-            category=module.category,
-            iconUrl=module.icon_url,
-            isCore=bool(module.is_core),
-            configSchema=module.config_schema,
-            avgRating=f"{stats['avg_rating']:.1f}",
-            reviewCount=stats["review_count"],
-            installCount=stats["install_count"],
-            createdAt=_iso(module.created_at),
-            reviews=[
-                ReviewDTO(
-                    id=r["id"],
-                    rating=r["rating"],
-                    reviewText=r["review_text"],
-                    author=r["author"],
-                    authorAvatar=r["author_avatar"],
-                    createdAt=_iso(r["created_at"]),
-                )
-                for r in stats["reviews"]
-            ],
-        ),
-    )
-
-
-@public_bp.route("/marketplace/categories", methods=["GET"])
-@validate_response(CategoriesResponse)
-async def get_marketplace_categories() -> CategoriesResponse:
-    """Get marketplace categories."""
-    async_dal, dal = _dal()
-    pairs = await svc.get_marketplace_categories(async_dal, dal)
-    return CategoriesResponse(
-        success=True,
-        categories=[CategoryDTO(name=name, moduleCount=count) for name, count in pairs],
-    )
 
 
 @public_bp.route("/banner", methods=["GET"])

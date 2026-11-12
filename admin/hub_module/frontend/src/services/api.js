@@ -563,7 +563,6 @@ export const platformApi = {
   deactivateCommunity: (id, reason) =>
     api.delete(`/api/v1/platform/communities/${id}`, { data: { reason } }),
   getHealth: () => api.get('/api/v1/platform/health'),
-  getModules: () => api.get('/api/v1/platform/modules'),
   getAuditLog: (params) => api.get('/api/v1/platform/audit-log', { params }),
   getStats: () => api.get('/api/v1/platform/stats'),
 };
@@ -576,12 +575,6 @@ export const superAdminApi = {
   updateCommunity: (id, data) => api.put(`/api/v1/superadmin/communities/${id}`, data),
   deleteCommunity: (id) => api.delete(`/api/v1/superadmin/communities/${id}`),
   reassignOwner: (id, data) => api.post(`/api/v1/superadmin/communities/${id}/reassign`, data),
-  // Module registry
-  getAllModules: (params) => api.get('/api/v1/superadmin/marketplace/modules', { params }),
-  createModule: (data) => api.post('/api/v1/superadmin/marketplace/modules', data),
-  updateModule: (id, data) => api.put(`/api/v1/superadmin/marketplace/modules/${id}`, data),
-  publishModule: (id, isPublished) => api.put(`/api/v1/superadmin/marketplace/modules/${id}/publish`, { isPublished }),
-  deleteModule: (id) => api.delete(`/api/v1/superadmin/marketplace/modules/${id}`),
   // Platform configuration
   getPlatformConfigs: () => api.get('/api/v1/superadmin/platform-config'),
   updatePlatformConfig: (platform, data) => api.put(`/api/v1/superadmin/platform-config/${platform}`, data),
@@ -624,16 +617,6 @@ export const superAdminApi = {
     api.post(`/api/v1/superadmin/users/${userId}/password-reset`),
 };
 
-// Marketplace API
-export const marketplaceApi = {
-  browseModules: (communityId, params) => api.get(`/api/v1/admin/${communityId}/marketplace/modules`, { params }),
-  getModuleDetails: (communityId, moduleId) => api.get(`/api/v1/admin/${communityId}/marketplace/modules/${moduleId}`),
-  installModule: (communityId, moduleId) => api.post(`/api/v1/admin/${communityId}/marketplace/modules/${moduleId}/install`),
-  uninstallModule: (communityId, moduleId) => api.delete(`/api/v1/admin/${communityId}/marketplace/modules/${moduleId}`),
-  configureModule: (communityId, moduleId, data) => api.put(`/api/v1/admin/${communityId}/marketplace/modules/${moduleId}/config`, data),
-  addReview: (communityId, moduleId, data) => api.post(`/api/v1/admin/${communityId}/marketplace/modules/${moduleId}/review`, data),
-};
-
 // New unified marketplace API (routes through marketplace module)
 export const unifiedMarketplaceApi = {
   // Catalog
@@ -641,12 +624,6 @@ export const unifiedMarketplaceApi = {
   getCatalogEntry: (source, id, params) => api.get(`/api/v1/marketplace/catalog/${source}/${id}`, { params }),
   getCategories: () => api.get('/api/v1/marketplace/catalog/categories'),
   getFeatured: (params) => api.get('/api/v1/marketplace/catalog/featured', { params }),
-
-  // Community installations
-  getInstalled: (communityId) => api.get(`/api/v1/marketplace/communities/${communityId}/installed`),
-  installModule: (communityId, data) => api.post(`/api/v1/marketplace/communities/${communityId}/install`, data),
-  uninstallModule: (communityId, moduleId, source) => api.delete(`/api/v1/marketplace/communities/${communityId}/install/${moduleId}`, { params: { source } }),
-  toggleModule: (communityId, moduleId, data) => api.put(`/api/v1/marketplace/communities/${communityId}/install/${moduleId}`, data),
 
   // Premium
   getPricing: (params) => api.get('/api/v1/marketplace/premium/pricing', { params }),
@@ -1025,8 +1002,6 @@ export const tenantApi = {
   getSettings: (slug) => api.get(`/api/v1/tenant/${slug}/settings`),
   updateSettings: (slug, settings) => api.put(`/api/v1/tenant/${slug}/settings`, { settings }),
   getCommunities: (slug, params) => api.get(`/api/v1/tenant/${slug}/communities`, { params }),
-  getModules: (slug) => api.get(`/api/v1/tenant/${slug}/modules`),
-  updateModules: (slug, allowedModuleIds) => api.put(`/api/v1/tenant/${slug}/modules`, { allowedModuleIds }),
   getAdmins: (slug) => api.get(`/api/v1/tenant/${slug}/admins`),
   addAdmin: (slug, userId, role) => api.post(`/api/v1/tenant/${slug}/admins`, { userId, role }),
   removeAdmin: (slug, userId) => api.delete(`/api/v1/tenant/${slug}/admins/${userId}`),
@@ -1104,4 +1079,15 @@ export const bundleApi = {
 // ── Global-Admin Bundle Approval Queue (hub_api/blueprints/v1/bundle_admin.py) ──
 export const bundleAdminApi = {
   listPendingVersions: (params) => api.get('/api/v1/admin/bundle-versions', { params }),
+  // Installed bundles (global current installs) -- params: { kind: 'app' | 'service' }.
+  listInstalled: (params) => api.get('/api/v1/superadmin/bundles', { params }),
+  // Service-bundle global disable (409 has_dependents unless force) / enable.
+  disableService: (appId, force = false) =>
+    api.post(
+      `/api/v1/superadmin/bundles/${encodeURIComponent(appId)}/disable`,
+      null,
+      force ? { params: { force: 'true' } } : undefined,
+    ),
+  enableService: (appId) =>
+    api.post(`/api/v1/superadmin/bundles/${encodeURIComponent(appId)}/enable`),
 };
