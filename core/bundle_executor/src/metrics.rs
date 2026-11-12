@@ -386,7 +386,12 @@ impl ExecutorMetrics {
 
     /// One module made resident (`executor_load_duration_seconds`): `source`
     /// is `aot` or `compile`, `result` `ok` or `error`.
-    pub fn record_module_load(&self, source: &'static str, result: &'static str, elapsed: Duration) {
+    pub fn record_module_load(
+        &self,
+        source: &'static str,
+        result: &'static str,
+        elapsed: Duration,
+    ) {
         self.load_duration_seconds.record(
             elapsed.as_secs_f64(),
             &[

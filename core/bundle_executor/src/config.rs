@@ -240,7 +240,11 @@ pub struct CliConfig {
     /// several times larger than the source component, hence its own cap
     /// (default 256 MiB); an oversized object fails the AOT path and falls
     /// back (loudly) to a local compile.
-    #[arg(long, env = "BUNDLE_MAX_PRECOMPILED_BYTES", default_value_t = 268_435_456)]
+    #[arg(
+        long,
+        env = "BUNDLE_MAX_PRECOMPILED_BYTES",
+        default_value_t = 268_435_456
+    )]
     pub bundle_max_precompiled_bytes: u64,
 
     /// Resident compiled-module budget for the whole process, in MiB, shared

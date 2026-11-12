@@ -94,7 +94,11 @@ pub struct CwasmSignature {
 /// The exact bytes the precompiler signs: domain separator, then the
 /// length-prefixed artifact id, digest hex, engine fingerprint and cwasm hash.
 #[must_use]
-pub fn cwasm_signing_payload(digest: &str, engine_fingerprint: &str, cwasm_sha256: &str) -> Vec<u8> {
+pub fn cwasm_signing_payload(
+    digest: &str,
+    engine_fingerprint: &str,
+    cwasm_sha256: &str,
+) -> Vec<u8> {
     let digest = digest_hex(digest);
     let id = artifact_id(&digest, engine_fingerprint);
     let mut buf = Vec::with_capacity(CWASM_DOMAIN_SEPARATOR.len() + 16 + 64 * 4);
@@ -163,7 +167,9 @@ pub fn verify_cwasm(
     })?;
     let payload = cwasm_signing_payload(&sig.digest, &sig.engine_fingerprint, &sig.cwasm_sha256);
     key.verify_strict(&payload, &Signature::from_bytes(&arr))
-        .map_err(|e| ExecutorError::SignatureInvalid(format!("cwasm signature verification failed: {e}")))
+        .map_err(|e| {
+            ExecutorError::SignatureInvalid(format!("cwasm signature verification failed: {e}"))
+        })
 }
 
 /// Test/precompiler helper: builds a signed [`CwasmSignature`] document.
@@ -218,7 +224,10 @@ mod tests {
             cwasm_key(FP, DIGEST),
             format!("precompiled/{FP}/{}.cwasm", &DIGEST[7..])
         );
-        assert_eq!(cwasm_signature_key(FP, DIGEST), format!("{}.sig", cwasm_key(FP, DIGEST)));
+        assert_eq!(
+            cwasm_signature_key(FP, DIGEST),
+            format!("{}.sig", cwasm_key(FP, DIGEST))
+        );
     }
 
     #[test]
@@ -259,10 +268,18 @@ mod tests {
     fn unknown_key_and_no_keys_are_refused() {
         let doc = serde_json::to_vec(&sign_cwasm(&key(), "k2", DIGEST, FP, b"code")).unwrap();
         assert!(verify_cwasm(b"code", &doc, &keys(), DIGEST, FP).is_err());
-        let err =
-            verify_cwasm(b"code", &signed(b"code"), &PlatformPublicKeys::default(), DIGEST, FP)
-                .unwrap_err();
-        assert!(err.to_string().contains("no BUNDLE_SIGNING_PUBLIC_KEYS"), "{err}");
+        let err = verify_cwasm(
+            b"code",
+            &signed(b"code"),
+            &PlatformPublicKeys::default(),
+            DIGEST,
+            FP,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("no BUNDLE_SIGNING_PUBLIC_KEYS"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -63,6 +63,12 @@ impl<T: Clone> ModuleCache<T> {
         }
     }
 
+    /// Test seam: overrides the byte budget.
+    #[cfg(test)]
+    pub(crate) fn set_budget_bytes(&mut self, budget_bytes: u64) {
+        self.budget_bytes = budget_bytes;
+    }
+
     fn tick(&mut self) -> u64 {
         self.clock += 1;
         self.clock
@@ -197,7 +203,12 @@ impl<T: Clone> ModuleCache<T> {
                 .entries
                 .iter()
                 .filter(|(d, e)| e.pins == 0 && d.as_str() != keep)
-                .min_by_key(|(d, e)| (self.refs.get(d.as_str()).copied().unwrap_or(0) > 0, e.last_used))
+                .min_by_key(|(d, e)| {
+                    (
+                        self.refs.get(d.as_str()).copied().unwrap_or(0) > 0,
+                        e.last_used,
+                    )
+                })
                 .map(|(d, _)| d.clone());
             match victim {
                 Some(d) => {

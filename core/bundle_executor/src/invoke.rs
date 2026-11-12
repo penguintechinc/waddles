@@ -278,8 +278,8 @@ pub struct Executor<S: ComponentSource> {
     engine: Engine,
     /// Process-wide engine + compiled-module cache shared by every stage.
     runtime: Arc<SharedRuntime>,
-    /// Reported in `hello` (CONTRACT `HelloBody.executor_id`) when the
-    /// `hello-executor-id` feature is on; see [`Executor::executor_id`].
+    /// Reported in `hello` (CONTRACT `HelloBody.executor_id`): `EXECUTOR_ID`,
+    /// else `POD_NAME`; see [`Executor::executor_id`].
     executor_id: Option<String>,
     source: S,
     max_call_timeout_ms: u64,
@@ -397,6 +397,9 @@ impl ModuleRequest {
 /// `executor_precompile_fallback_total{reason}`).
 type AotMiss = (&'static str, ExecutorError);
 
+/// One in-flight make-resident attempt: the pre-linked module + its size.
+type ResolvingCell = Arc<tokio::sync::OnceCell<(GuestPre, u64)>>;
+
 /// The process-wide half of the executor (executor-scale CONTRACT T1): ONE
 /// wasmtime `Engine` (+ its epoch ticker), ONE linker, ONE compile limiter and
 /// ONE digest-keyed compiled-module cache shared by every per-stage
@@ -416,7 +419,7 @@ pub struct SharedRuntime {
     /// from any scope on any stage -- share one `OnceCell`, so they trigger
     /// exactly one fetch + one deserialize/compile. Entries are removed once
     /// their attempt resolves (success or failure).
-    resolving: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<(GuestPre, u64)>>>>,
+    resolving: tokio::sync::Mutex<HashMap<String, ResolvingCell>>,
     /// Cache gauges, module-load histogram, fallback/eviction counters.
     metrics: Arc<ExecutorMetrics>,
     /// Lifetime count of JIT compiles performed (tests + diagnostics).
@@ -503,6 +506,13 @@ impl SharedRuntime {
         Ok((cache.len(), cache.total_bytes()))
     }
 
+    /// Test seam: overrides the memory budget in BYTES (config is in MiB).
+    #[cfg(test)]
+    pub(crate) fn set_budget_bytes(&self, budget_bytes: u64) {
+        #[allow(clippy::unwrap_used)]
+        self.cache.lock().unwrap().set_budget_bytes(budget_bytes);
+    }
+
     /// `true` when `digest` is resident.
     pub fn is_resident(&self, digest: &str) -> Result<bool, ExecutorError> {
         Ok(self.lock_cache()?.contains(digest))
@@ -543,7 +553,10 @@ impl SharedRuntime {
                 cache.release_ref(digest);
                 self.publish_gauges(&cache);
             }
-            Err(_) => error!(digest, "module cache mutex poisoned; reference not released"),
+            Err(_) => error!(
+                digest,
+                "module cache mutex poisoned; reference not released"
+            ),
         }
     }
 
@@ -657,7 +670,9 @@ impl SharedRuntime {
                 }
             }
         }
-        let compiled = self.compile_from_source(req, source, keys, phase_metrics).await;
+        let compiled = self
+            .compile_from_source(req, source, keys, phase_metrics)
+            .await;
         self.metrics.record_module_load(
             "compile",
             if compiled.is_ok() { "ok" } else { "error" },
@@ -1074,15 +1089,7 @@ impl<S: ComponentSource> Executor<S> {
     /// collector so the stage can refuse a mismatched connection instead
     /// of every bundle silently failing to load.
     pub fn hello(&self, sandbox_verified: bool, sandbox_runtime: &str) -> HelloBody {
-        // `hello-executor-id`: the penguin-libs `HelloBody.executor_id`
-        // (Option<String>, serde-default) wire bump. Off until the pinned
-        // penguin-libs rev carries the field -- the dependency bump PR must
-        // enable this feature in the same change.
-        #[cfg(not(feature = "hello-executor-id"))]
-        let _ = &self.executor_id;
         HelloBody {
-            #[cfg(feature = "hello-executor-id")]
-            executor_id: self.executor_id.clone(),
             protocol_version: 1,
             executor_version: env!("CARGO_PKG_VERSION").to_string(),
             wasmtime_version: crate::engine::WASMTIME_VERSION.to_string(),
@@ -1092,12 +1099,14 @@ impl<S: ComponentSource> Executor<S> {
                 runtime: sandbox_runtime.to_string(),
                 verified: sandbox_verified,
             },
-            executor_id: None,
+            // Stable StatefulSet identity for slot ownership (CONTRACT;
+            // penguin-bundle-host 0.6.0). `None` = stage falls back to broadcast.
+            executor_id: self.executor_id.clone(),
         }
     }
 
     /// The stable executor identity this process reports to stages
-    /// (`EXECUTOR_ID`, else `HOSTNAME`).
+    /// (`EXECUTOR_ID`, else `POD_NAME`).
     #[must_use]
     pub fn executor_id(&self) -> Option<&str> {
         self.executor_id.as_deref()
@@ -1320,8 +1329,7 @@ impl<S: ComponentSource> Executor<S> {
         } else {
             info!(
                 app_id,
-                digest,
-                "memory budget has no headroom; verifying only, module loads on first call"
+                digest, "memory budget has no headroom; verifying only, module loads on first call"
             );
             fetch_and_verify(&request, &self.source, &self.signing_keys, &self.metrics)
                 .await
@@ -2626,7 +2634,7 @@ mod tests {
                 other_digest.clone(),
                 LoadedBundle {
                     app_id: "waddles.test.app".to_string(),
-                    pre: first.0,
+                    request: first.0,
                     slots: first.1,
                     memory_limit_mb: 64,
                     scopes,
@@ -4604,6 +4612,328 @@ mod tests {
         fn export_labels_are_stable() {
             assert_eq!(export_label(&ExportKind::Transform), "transform");
             assert_eq!(export_label(&ExportKind::Dispatch), "dispatch");
+        }
+    }
+
+    /// Executor-scale phase 1 (T1/T5/T7/T9): shared runtime across stages,
+    /// signed `.cwasm` load with loud fallback, budget + LRU + lazy load, and
+    /// the new metrics actually emitting.
+    mod phase1_runtime {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine as _;
+        use ed25519_dalek::{Signer, SigningKey};
+        use serde_json::json;
+
+        use super::*;
+        use crate::metrics::test_support::Harness;
+        use crate::signing::signing_payload;
+
+        const APP_ID: &str = "waddles.test.aot-app";
+        const VERSION: &str = "1";
+        const KEY_ID: &str = "k1";
+        const V2_WASM: &[u8] = include_bytes!("../tests/fixtures/stage_v2_fixture.wasm");
+
+        fn key() -> SigningKey {
+            SigningKey::from_bytes(&[21u8; 32])
+        }
+
+        fn keyed_config() -> CliConfig {
+            let mut cfg = test_config();
+            cfg.bundle_signing_public_keys = Some(
+                json!({ KEY_ID: BASE64.encode(key().verifying_key().to_bytes()) }).to_string(),
+            );
+            cfg
+        }
+
+        fn digest_of(bytes: &[u8]) -> String {
+            format!("sha256:{:x}", Sha256::digest(bytes))
+        }
+
+        fn sidecar(digest: &str) -> Vec<u8> {
+            let payload = signing_payload(APP_ID, VERSION, digest, 1).expect("payload");
+            serde_json::to_vec(&json!({
+                "app_id": APP_ID, "version": VERSION, "digest": digest, "approval_id": 1,
+                "key_id": KEY_ID, "algorithm": "ed25519",
+                "signature": BASE64.encode(key().sign(&payload).to_bytes()),
+            }))
+            .expect("json")
+        }
+
+        /// Serves a component by key (`a`/`b`), its signed sidecar, and
+        /// optionally a precompiled artifact + signature.
+        struct AotSource {
+            wasm: Vec<u8>,
+            cwasm: Option<(Vec<u8>, Vec<u8>)>,
+        }
+
+        impl ComponentSource for AotSource {
+            async fn fetch(&self, _c: &str, _s: &str) -> Result<(Vec<u8>, Vec<u8>), ExecutorError> {
+                Ok((self.wasm.clone(), sidecar(&digest_of(&self.wasm))))
+            }
+            async fn fetch_precompiled(&self, key: &str) -> Result<Vec<u8>, ExecutorError> {
+                let (cwasm, sig) = self
+                    .cwasm
+                    .clone()
+                    .ok_or_else(|| ExecutorError::BucketFetch("404".to_string()))?;
+                Ok(if key.ends_with(".sig") { sig } else { cwasm })
+            }
+            async fn fetch_object(&self, _key: &str) -> Result<Vec<u8>, ExecutorError> {
+                Ok(sidecar(&digest_of(&self.wasm)))
+            }
+        }
+
+        /// Two digests served from one source, selected by component key.
+        struct TwoSource;
+
+        impl ComponentSource for TwoSource {
+            async fn fetch(&self, c: &str, _s: &str) -> Result<(Vec<u8>, Vec<u8>), ExecutorError> {
+                let wasm = if c == "b" { V2_WASM } else { FIXTURE_WASM };
+                Ok((wasm.to_vec(), b"{}".to_vec()))
+            }
+        }
+
+        fn load_body(wasm: &[u8], key: &str) -> LoadBody {
+            let mut b = fixture_load_body(APP_ID);
+            b.digest = digest_of(wasm);
+            b.component_key = key.to_string();
+            b
+        }
+
+        fn precompiled(runtime: &SharedRuntime, wasm: &[u8]) -> Vec<u8> {
+            Component::new(&runtime.engine, wasm)
+                .expect("compile")
+                .serialize()
+                .expect("serialize")
+        }
+
+        fn signed(runtime: &SharedRuntime, wasm: &[u8], cwasm: &[u8]) -> Vec<u8> {
+            serde_json::to_vec(&crate::aot::sign_cwasm(
+                &key(),
+                KEY_ID,
+                &digest_of(wasm),
+                runtime.engine_fingerprint(),
+                cwasm,
+            ))
+            .expect("json")
+        }
+
+        /// T1: two stages on one runtime compile a shared digest exactly once
+        /// and hold ONE resident copy.
+        #[tokio::test]
+        async fn shared_runtime_compiles_once_per_digest_across_stages() -> Result<(), ExecutorError>
+        {
+            let cfg = test_config();
+            let runtime = SharedRuntime::new(&cfg)?;
+            let process = Executor::with_runtime(&cfg, FixtureSource, Arc::clone(&runtime))?;
+            let action = Executor::with_runtime(&cfg, FixtureSource, Arc::clone(&runtime))?;
+            process
+                .on_load(fixture_load_body(APP_ID))
+                .await
+                .expect("process load");
+            action
+                .on_load(fixture_load_body(APP_ID))
+                .await
+                .expect("action load");
+            assert_eq!(runtime.compiles_total(), 1, "one compile for both stages");
+            assert_eq!(runtime.residency()?.0, 1, "one resident copy");
+            assert!(invoke_noop(&process, APP_ID, &fixture_digest())
+                .await
+                .is_ok());
+            assert!(invoke_noop(&action, APP_ID, &fixture_digest())
+                .await
+                .is_ok());
+            // Disconnect drops the registry, not the compiled code.
+            process.on_disconnect().await;
+            action.on_disconnect().await;
+            assert!(runtime.is_resident(&fixture_digest())?);
+            process
+                .on_load(fixture_load_body(APP_ID))
+                .await
+                .expect("reload");
+            assert_eq!(
+                runtime.compiles_total(),
+                1,
+                "reconnect re-load is a cache hit"
+            );
+            Ok(())
+        }
+
+        /// T5: a genuine signed `.cwasm` is deserialized (no JIT compile) and
+        /// the module is invokable.
+        #[tokio::test]
+        async fn verified_cwasm_loads_without_compiling() -> Result<(), ExecutorError> {
+            let cfg = keyed_config();
+            let runtime = SharedRuntime::new(&cfg)?;
+            let cwasm = precompiled(&runtime, FIXTURE_WASM);
+            let sig = signed(&runtime, FIXTURE_WASM, &cwasm);
+            let source = AotSource {
+                wasm: FIXTURE_WASM.to_vec(),
+                cwasm: Some((cwasm, sig)),
+            };
+            let exec = Executor::with_runtime(&cfg, source, Arc::clone(&runtime))?;
+            exec.on_load(load_body(FIXTURE_WASM, "a"))
+                .await
+                .expect("aot load");
+            assert_eq!(runtime.aot_loads_total(), 1);
+            assert_eq!(runtime.compiles_total(), 0);
+            assert_eq!(runtime.aot_fallbacks_total(), 0);
+            assert!(invoke_noop(&exec, APP_ID, &fixture_digest()).await.is_ok());
+            Ok(())
+        }
+
+        /// T5: a tampered artifact is REFUSED before deserialize, counted as a
+        /// fallback, and the module still loads via a JIT compile.
+        #[tokio::test]
+        async fn tampered_cwasm_is_refused_and_falls_back_to_compile() -> Result<(), ExecutorError>
+        {
+            let cfg = keyed_config();
+            let harness = Harness::new();
+            let metrics = Arc::new(ExecutorMetrics::new(&harness.meter()));
+            let runtime = SharedRuntime::with_metrics(&cfg, Arc::clone(&metrics))?;
+            let cwasm = precompiled(&runtime, FIXTURE_WASM);
+            let sig = signed(&runtime, FIXTURE_WASM, &cwasm);
+            let mut tampered = cwasm;
+            let last = tampered.len() - 1;
+            tampered[last] ^= 0xff;
+            let source = AotSource {
+                wasm: FIXTURE_WASM.to_vec(),
+                cwasm: Some((tampered, sig)),
+            };
+            let exec = Executor::with_runtime(&cfg, source, Arc::clone(&runtime))?;
+            exec.on_load(load_body(FIXTURE_WASM, "a"))
+                .await
+                .expect("fallback load");
+            assert_eq!(
+                runtime.aot_loads_total(),
+                0,
+                "tampered bytes never deserialized"
+            );
+            assert_eq!(runtime.aot_fallbacks_total(), 1);
+            assert_eq!(runtime.compiles_total(), 1);
+            assert!(
+                harness.count(
+                    "executor_precompile_fallback_total",
+                    &[("reason", "signature")]
+                ) >= 1.0
+            );
+            Ok(())
+        }
+
+        /// T5: an artifact signed for another engine fingerprint is refused.
+        #[tokio::test]
+        async fn foreign_engine_fingerprint_falls_back() -> Result<(), ExecutorError> {
+            let cfg = keyed_config();
+            let runtime = SharedRuntime::new(&cfg)?;
+            let cwasm = precompiled(&runtime, FIXTURE_WASM);
+            let sig = serde_json::to_vec(&crate::aot::sign_cwasm(
+                &key(),
+                KEY_ID,
+                &fixture_digest(),
+                &"0".repeat(64),
+                &cwasm,
+            ))
+            .expect("json");
+            let source = AotSource {
+                wasm: FIXTURE_WASM.to_vec(),
+                cwasm: Some((cwasm, sig)),
+            };
+            let exec = Executor::with_runtime(&cfg, source, Arc::clone(&runtime))?;
+            exec.on_load(load_body(FIXTURE_WASM, "a"))
+                .await
+                .expect("load");
+            assert_eq!(runtime.aot_loads_total(), 0);
+            assert_eq!(runtime.aot_fallbacks_total(), 1);
+            Ok(())
+        }
+
+        /// T5 kill switch: `waddles.disable-aot-precompile` ON never touches
+        /// the artifact path and never counts a fallback.
+        #[tokio::test]
+        async fn kill_switch_skips_aot_entirely() -> Result<(), ExecutorError> {
+            let mut cfg = keyed_config();
+            cfg.flag_disable_aot_precompile = true;
+            let runtime = SharedRuntime::new(&cfg)?;
+            let cwasm = precompiled(&runtime, FIXTURE_WASM);
+            let sig = signed(&runtime, FIXTURE_WASM, &cwasm);
+            let source = AotSource {
+                wasm: FIXTURE_WASM.to_vec(),
+                cwasm: Some((cwasm, sig)),
+            };
+            let exec = Executor::with_runtime(&cfg, source, Arc::clone(&runtime))?;
+            exec.on_load(load_body(FIXTURE_WASM, "a"))
+                .await
+                .expect("load");
+            assert_eq!(runtime.aot_loads_total(), 0);
+            assert_eq!(runtime.aot_fallbacks_total(), 0);
+            assert_eq!(runtime.compiles_total(), 1);
+            Ok(())
+        }
+
+        /// T7: over budget, a new `Load` only verifies (lazy); its first call
+        /// makes it resident and evicts the idle LRU module, which in turn is
+        /// rebuilt on ITS next call. T9: the cache metrics emit.
+        #[tokio::test]
+        async fn budget_lazy_load_and_lru_eviction() -> Result<(), ExecutorError> {
+            let cfg = test_config();
+            let harness = Harness::new();
+            let metrics = Arc::new(ExecutorMetrics::new(&harness.meter()));
+            let runtime = SharedRuntime::with_metrics(&cfg, Arc::clone(&metrics))?;
+            runtime.set_budget_bytes(1);
+            let exec = Executor::with_runtime(&cfg, TwoSource, Arc::clone(&runtime))?;
+            let (da, db) = (digest_of(FIXTURE_WASM), digest_of(V2_WASM));
+
+            exec.on_load(load_body(FIXTURE_WASM, "a"))
+                .await
+                .expect("load a");
+            assert!(
+                runtime.is_resident(&da)?,
+                "first load is eager (headroom at 0)"
+            );
+            exec.on_load(load_body(V2_WASM, "b")).await.expect("load b");
+            assert!(
+                !runtime.is_resident(&db)?,
+                "no headroom: verified, not compiled"
+            );
+            assert_eq!(runtime.compiles_total(), 1);
+
+            let _ = invoke_noop(&exec, APP_ID, &db).await;
+            assert!(runtime.is_resident(&db)?, "first call loads it");
+            assert!(!runtime.is_resident(&da)?, "idle LRU module evicted");
+            assert_eq!(runtime.compiles_total(), 2);
+
+            assert!(
+                invoke_noop(&exec, APP_ID, &da).await.is_ok(),
+                "evicted module reloads"
+            );
+            assert_eq!(runtime.compiles_total(), 3);
+            assert!(harness.count("executor_module_evictions_total", &[]) >= 2.0);
+            assert!(
+                harness.count("executor_load_duration_seconds", &[("source", "compile")]) >= 3.0
+            );
+            assert!(harness.last("executor_loaded_modules", &[]).is_some());
+            assert!(harness.last("executor_memory_bytes", &[]).is_some());
+            Ok(())
+        }
+
+        /// `executor_id` resolves from `EXECUTOR_ID` and is sent in `hello`;
+        /// StatefulSet mode without an identity fails loudly.
+        #[tokio::test]
+        async fn executor_id_is_sent_in_hello_and_required_in_statefulset_mode(
+        ) -> Result<(), ExecutorError> {
+            let mut cfg = test_config();
+            cfg.executor_id = Some("waddlebot-svc-bundles-executor-0".to_string());
+            let exec = Executor::new(&cfg, UnimplementedBucketSource)?;
+            assert_eq!(
+                exec.hello(true, "gvisor").executor_id.as_deref(),
+                Some("waddlebot-svc-bundles-executor-0")
+            );
+            cfg.validate_executor_id()?;
+            if std::env::var("POD_NAME").is_err() {
+                let mut strict = test_config();
+                strict.executor_require_id = true;
+                assert!(strict.validate_executor_id().is_err());
+            }
+            Ok(())
         }
     }
 }

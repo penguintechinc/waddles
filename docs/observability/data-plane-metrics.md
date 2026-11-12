@@ -110,7 +110,12 @@ Notes:
 | `waddles_executor_host_call_seconds` | histogram | `capability, op, result` | host-call round trip executor→stage→executor; `result`: `ok`, `denied`, `error`, `connection_lost`, `backpressure`, `malformed` |
 | `waddles_executor_sandbox_trip_total` | counter | `app_id, limit` | `timeout`, `memory`, `trap` |
 | `waddles_executor_invocations_active` | gauge (up/down) | — | guests currently executing (decrements on every exit path) |
-| `waddles_executor_bundles_loaded` | gauge | — | resident compiled components (distinct digests); explicit `0` after a disconnect wipe |
+| `waddles_executor_bundles_loaded` | gauge | — | digests in one stage's registry; explicit `0` after a disconnect wipe |
+| `executor_loaded_modules` | gauge | — | compiled modules resident in the process-wide shared cache (all stages, executor-scale T1) |
+| `executor_memory_bytes` | gauge | — | estimated resident compiled-code bytes in the shared cache (budget `EXECUTOR_MEMORY_BUDGET_MB`) |
+| `executor_load_duration_seconds` | histogram | `source, result` | time to make one module resident; `source`: `aot` (verified `.cwasm` deserialize), `compile` (JIT) |
+| `executor_precompile_fallback_total` | counter | `reason` | AOT misses that fell back to JIT (logged at ERROR); `reason`: `fetch`, `signature`, `deserialize` |
+| `executor_module_evictions_total` | counter | — | idle unpinned modules evicted (LRU) to honour the memory budget; they reload on their next call |
 | `waddles_executor_connection_attempts_total` | counter | `result`, `stage` | `connected`, `failed` |
 | `waddles_executor_connection_up` | gauge | `stage` | `1` while that stage's host-API session is established, explicit `0` otherwise (one series per configured stage) |
 | `waddles_executor_session_seconds` | histogram | `stage` | length of each established session |

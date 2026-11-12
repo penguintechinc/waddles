@@ -182,11 +182,6 @@ rcgen = "=0.14.10"
 # release-PR coverage job stays fast; run by .github/workflows/rust-bundle-executor-e2e.yml
 # (PRs into main + push to main) and `make test-bundle-flag-on-command-e2e`.
 e2e-main-tier = []
-# Sends `HelloBody.executor_id` (executor-scale CONTRACT). Requires the
-# penguin-libs rev that adds the optional `executor_id` field; the PR that bumps
-# `penguin-bundle-host` enables this feature (adds it to `default`) in the same
-# change. Off, the hello frame is unchanged and stages fall back to broadcast.
-hello-executor-id = []
 
 [[test]]
 name = "connector_publish_pin_e2e"

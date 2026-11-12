@@ -205,14 +205,17 @@ async fn timed_get_object_capped(
     key: &str,
     max_bytes: u64,
 ) -> Result<Vec<u8>, ExecutorError> {
-    tokio::time::timeout(config.fetch_timeout, get_object_capped(config, key, max_bytes))
-        .await
-        .map_err(|_| {
-            ExecutorError::BucketFetch(format!(
-                "bucket GET for {key:?} timed out after {:?}",
-                config.fetch_timeout
-            ))
-        })?
+    tokio::time::timeout(
+        config.fetch_timeout,
+        get_object_capped(config, key, max_bytes),
+    )
+    .await
+    .map_err(|_| {
+        ExecutorError::BucketFetch(format!(
+            "bucket GET for {key:?} timed out after {:?}",
+            config.fetch_timeout
+        ))
+    })?
 }
 
 impl ComponentSource for BucketComponentSource {
