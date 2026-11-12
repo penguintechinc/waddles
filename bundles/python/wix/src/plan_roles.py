@@ -1,11 +1,11 @@
-"""Feature module: Wix pricing plan -> Discord role (`!wix enable roles`), default OFF.
+"""Feature module: Wix pricing plan -> Discord role (event-only, runs on bundle activation).
 
 The trigger is the Wix webhook connector's normalized `subscription.{started,changed,ended}` events
-(actor = host-resolved community UUID, payload `{order_id, plan_id, status}`). A moderator maps a Wix
-plan id to a Discord role KEY (`!wix plan map <plan-uuid> <role_key>`; the role key is resolved to a
-real role host-side). An active subscription adds the role, an ended/canceled/paused one removes it,
+(actor = host-resolved community UUID, payload `{order_id, plan_id, status}`). The admin config path maps a
+Wix plan id to a Discord role KEY via `set_mapping` (kv `wix.plan.<plan_uuid>`; the role key is
+resolved to a real role host-side). An active subscription adds the role, an ended/canceled/paused one removes it,
 via the Discord service tools `discord.member.roles.{add,remove}` under approved `tool.call:` grants
--- never direct Discord HTTP. Failures are loud (`toolcall.record_fault`, shown by `!wix modules`).
+-- never direct Discord HTTP. Failures are loud (`toolcall.record_fault`, kv `wix.fault.roles`).
 """
 
 from __future__ import annotations

@@ -2,7 +2,7 @@
 schema_version: 2
 app_id: waddles.core.integration.wix
 name: Wix Integration (Python)
-version: 1.1.0
+version: 1.1.1
 feature: waddles.core.integration
 module: core
 provider: builtin
@@ -15,17 +15,11 @@ stages:
   process:
     entry: "waddle:bundle/process-stage#transform"
     consumes:
-      - platform: discord
-        event_types: ["chat.message"]
-        filters:
-          command_prefix: ["!wix"]
       - platform: wix
         event_types: ["subscription.started", "subscription.changed", "subscription.ended", "event.created", "event.updated", "event.canceled"]
   action:
     entry: "waddle:bundle/action-stage#dispatch"
-egress:
-  - host: www.wixapis.com
-    methods: ["GET"]
+egress: []
 data:
   tables: []
 limits:
@@ -34,13 +28,7 @@ limits:
   egress_rps: 5
 permissions:
   - id: storage.kv
-    justification: "per-community Wix member links (keyed by community user UUID, opaque Wix UUID value), a 5-minute status cache and the module flags"
-  - id: identity.resolve
-    justification: "resolves the verified caller and host-issued @mentions to community UUIDs so no raw handle is ever stored or logged"
-  - id: net.http.fqdn:www.wixapis.com
-    justification: "Wix REST Members API (GET /members/v1/members/<id>) for membership status; GET only, API key and site id via secret-refs"
-    params:
-      methods: ["GET"]
+    justification: "per-community Wix plan->role mappings, subscription/event ordering state, the Wix->Discord event id map and the last tool-failure code per module"
   - id: "tool.call:waddles.core.service.discord:discord.member.roles.add"
     justification: "plan -> role: grant the mapped Discord role on an active Wix subscription (default-OFF module, approved grant required)"
     params:
@@ -61,8 +49,6 @@ permissions:
     justification: "event sync: cancel the Discord scheduled event when the Wix event is canceled (default-OFF module, approved grant required)"
     params:
       write: true
-  - id: "chat.send:discord"
-    justification: "replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
 routes_to: []
 requested_tools:
   - tool: discord.member.roles.add

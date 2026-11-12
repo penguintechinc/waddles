@@ -2,8 +2,8 @@
 
 Platform SERVICE bundles own the Discord tool definitions; this APP bundle only calls them through
 `waddle_sdk.tool.invoke` under approved manifest `tool.call:` grants. Every failure here is LOUD:
-it is logged with its typed code AND recorded under `wix.fault.<module>` so `!wix modules` shows it
-to a moderator -- a missing tool or a refused grant is never a silent no-op.
+it is logged with its typed code AND recorded under `wix.fault.<module>` so an operator can read it
+from kv -- a missing tool or a refused grant is never a silent no-op.
 """
 
 from __future__ import annotations
