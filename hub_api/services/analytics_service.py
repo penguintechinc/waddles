@@ -59,6 +59,12 @@ def _upstream_error(result: ProxyResult) -> tuple[dict[str, Any], int]:
     -- notably 401/403, which mean hub-api's OWN service-key auth failed, not
     the end-client's token -- map to 502 naming `analytics-core`.
     """
+    if (
+        result.status_code == 503
+        and isinstance(result.body, dict)
+        and result.body.get("error") == "service_unavailable"
+    ):
+        return {"error": "service_unavailable", "service": str(result.body.get("service", ""))}, 503
     if not result.transport_error and result.status_code in _CLIENT_4XX_PASSTHROUGH:
         return api_error(
             _sanitized_upstream_message(result.body, result.status_code), result.status_code
