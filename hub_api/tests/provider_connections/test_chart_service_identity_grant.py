@@ -135,6 +135,8 @@ def test_chart_grants_svc_ingest_exactly_connections_resolve_on_the_system_tenan
             "dataplane:active-context",
             "bundle-schedules:read",
             "identity:platform-user:resolve",
+            # egress detokenization (svc-ingest's outbound drain is the sole platform egress)
+            "identity:displayname:read",
         }
     )
     assert "connections:resolve:static" not in identity.allowed_scopes
@@ -299,18 +301,31 @@ async def test_an_admin_disabled_binding_is_hidden_until_re_enabled(
     assert [i["connectionId"] for i in items] == [body["id"]]
 
 
-def test_svc_ingest_grant_is_absent_when_dynamic_connections_is_disabled(
+def test_svc_ingest_keeps_only_detokenize_scope_when_dynamic_connections_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F4: with svcIngest.dynamicConnections.enabled=false (beta/prod default) no svc-ingest identity exists."""
+    """F4: dynamicConnections off leaves svc-ingest only its detokenize scope.
+
+    With svcIngest.dynamicConnections.enabled=false (beta/prod default) svc-ingest keeps ONLY
+    its egress-detokenize scope (identity:displayname:read) -- detokenization is independent of the
+    dynamic-connections toggle -- and no identity at all once pipeline.piiTokenization is off too.
+    """
     env = _render_identities_env(
         "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false"
     )
     monkeypatch.setenv("SERVICE_JWT_IDENTITIES", env)
     identities = load_identities_from_env(env="alpha")
     assert len(identities) >= 3, "other identities must still render"  # denominator
-    ids = {identity.service_id for identity in identities}
-    assert _SVC_INGEST not in ids
+    by_id = {identity.service_id: identity for identity in identities}
+    assert by_id[_SVC_INGEST].allowed_scopes == frozenset({"identity:displayname:read"})
+    env_no_pii = _render_identities_env(
+        "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false",
+        "pipeline.piiTokenization.enabled=false",
+    )
+    monkeypatch.setenv("SERVICE_JWT_IDENTITIES", env_no_pii)
+    no_pii = load_identities_from_env(env="alpha")
+    assert len(no_pii) >= 3
+    assert _SVC_INGEST not in {identity.service_id for identity in no_pii}
     # Both flags off: no identity carries any connections:* scope at all.
     env_off = _render_identities_env(
         "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false",

@@ -4,6 +4,7 @@ This document provides a comprehensive reference for environment variables used 
 
 ## Table of Contents
 
+- [svc-ingest (Rust data plane)](#svc-ingest-rust-data-plane)
 - [Twitch Module](#twitch-module)
 - [Discord Module](#discord-module)
 - [Slack Module](#slack-module)
@@ -19,6 +20,17 @@ This document provides a comprehensive reference for environment variables used 
 - [Browser Source Core Module](#browser-source-core-module)
 - [Identity Core Module](#identity-core-module)
 - [Common Environment Variables](#common-environment-variables)
+
+---
+
+## svc-ingest (Rust data plane)
+
+`core/svc_ingest` — the outbound drain is the **only** platform egress, so it alone holds the platform bot token and detokenizes `{user:<token>}` placeholders immediately before each send. svc-action holds no platform token.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DISCORD_BOT_TOKEN` | — (required for Discord) | Discord bot token for the gateway receiver and outbound REST sends. Injected from the chart Secret (`secretKeyRef`), never a CLI arg or values literal. |
+| `PII_DETOKENIZATION_ENABLED` | unset (= enabled) | Plain env off-switch for egress detokenization, independent of the `waddles.core.disable-pii-detokenization` PostHog kill-switch. `false` sends `{user:<token>}` placeholders unchanged (dev/air-gapped escape hatch; never in a production tenant). The chart renders `false` only when `pipeline.piiTokenization.enabled=false`. Detokenization needs `HUB_API_GRPC_ENDPOINT` + `SERVICE_JWT_TOKEN_ENDPOINT`, which the chart renders regardless of `svcIngest.dynamicConnections.enabled`. |
 
 ---
 

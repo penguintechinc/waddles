@@ -188,11 +188,14 @@ def test_dynamic_connections_defaults_off_in_base_values_and_on_only_in_alpha() 
     )
 
 
-def test_disabled_renders_no_svc_ingest_grant(
+def test_disabled_renders_only_the_detokenize_scope_for_svc_ingest(
     disabled_docs: list[dict[str, Any]],
 ) -> None:
+    """dynamicConnections OFF: the egress-detokenize identity still renders, but ONLY with
+    identity:displayname:read -- never the connections/dataplane scopes."""
     identities = _identities(disabled_docs)
-    assert "svc-ingest" not in identities
+    assert identities["svc-ingest"]["allowed_scopes"] == ["identity:displayname:read"]
+    assert identities["svc-ingest"]["tenant"] == "system"
     assert len(identities) >= 3, identities.keys()  # other identities still rendered
     for name, entry in identities.items():
         assert (
@@ -200,17 +203,43 @@ def test_disabled_renders_no_svc_ingest_grant(
         ), name
 
 
-def test_disabled_renders_no_service_jwt_mount_or_env_on_svc_ingest(
+def test_disabled_dynamic_connections_still_wires_egress_detokenization(
     disabled_docs: list[dict[str, Any]],
 ) -> None:
+    """Regression: detokenization was coupled to dynamicConnections, so a deploy with it off had
+    no hub identity and silently sent `{user:<token>}` to users."""
     pod = _svc_ingest_deployment(disabled_docs)["spec"]["template"]["spec"]
-    assert "service-jwt-bootstrap-token" not in [v["name"] for v in pod["volumes"]]
     container = pod["containers"][0]
-    assert "service-jwt-bootstrap-token" not in [
-        m["name"] for m in container["volumeMounts"]
-    ]
-    env_names = {e["name"] for e in container["env"]}
-    assert not {n for n in env_names if n.startswith("SERVICE_JWT_")}
+    env = {e["name"]: e for e in container["env"]}
+    assert {"SERVICE_JWT_TOKEN_ENDPOINT", "SERVICE_JWT_SA_TOKEN_PATH"} <= set(env)
+    assert env["HUB_API_GRPC_ENDPOINT"]["value"].startswith("https://")
+    assert "PII_DETOKENIZATION_ENABLED" not in env
+    assert "INGEST_DYNAMIC_CONNECTIONS" not in env
+    assert "service-jwt-bootstrap-token" in [v["name"] for v in pod["volumes"]]
+    assert "service-jwt-bootstrap-token" in [m["name"] for m in container["volumeMounts"]]
+
+
+@pytest.mark.parametrize("dynamic", ["true", "false"])
+def test_pii_tokenization_off_drops_detokenize_identity_only_when_dynamic_off(
+    dynamic: str,
+) -> None:
+    """Both toggle states with pipeline.piiTokenization.enabled=false: dynamic ON keeps the full
+    grant; dynamic OFF renders no svc-ingest identity, no SERVICE_JWT_* env, and the explicit
+    PII_DETOKENIZATION_ENABLED=false off-switch."""
+    rendered = _render(
+        f"pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled={dynamic}",
+        "pipeline.piiTokenization.enabled=false",
+    )
+    identities = _identities(rendered)
+    container = _svc_ingest_deployment(rendered)["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e for e in container["env"]}
+    assert env["PII_DETOKENIZATION_ENABLED"]["value"] == "false"
+    if dynamic == "true":
+        assert "connections:resolve" in identities["svc-ingest"]["allowed_scopes"]
+        assert "SERVICE_JWT_TOKEN_ENDPOINT" in env
+    else:
+        assert "svc-ingest" not in identities
+        assert not {n for n in env if n.startswith("SERVICE_JWT_")}
 
 
 def test_enabled_renders_grant_mount_and_env(docs: list[dict[str, Any]]) -> None:
@@ -295,10 +324,10 @@ def test_dynamic_connections_alone_wires_the_hub_api_grpc_endpoint_and_ca(
     assert any(v["name"] == "hub-api-grpc-ca" for v in spec["volumes"])
 
 
-def test_disabled_dynamic_connections_renders_no_hub_api_grpc_env(
+def test_disabled_dynamic_connections_renders_no_dynamic_connection_env(
     disabled_docs: list[dict[str, Any]],
 ) -> None:
     deployment = _svc_ingest_deployment(disabled_docs)
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     names = {e["name"] for e in container["env"]}
-    assert "HUB_API_GRPC_ENDPOINT" not in names
+    assert not {"INGEST_DYNAMIC_CONNECTIONS", "TWITCH_RECONCILE_INTERVAL_SECS"} & names
