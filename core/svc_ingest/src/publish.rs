@@ -463,6 +463,7 @@ pub fn is_reserved_event_type(event_type: &str) -> bool {
     event_type.starts_with("reputation.") || event_type.starts_with("internal.")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProvider>(
     resolved: Option<ResolvedScope>,
     appender: &A,

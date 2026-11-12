@@ -69,6 +69,8 @@ pub mod connector;
 pub mod connector_runtime;
 pub mod crypto;
 pub mod discord_rest;
+pub mod display_names;
+pub mod egress;
 pub mod error;
 pub mod http;
 pub mod identity_crypto;
@@ -82,7 +84,6 @@ pub mod outbound_boot;
 pub mod outbound_creds;
 pub mod outbound_creds_discord;
 pub mod outbound_creds_kick;
-pub mod egress;
 pub mod outbound_creds_youtube;
 pub mod outbound_ops;
 pub mod outbound_pin;
@@ -372,6 +373,7 @@ where
     egress::install(egress::Egress::from_cli(
         &config.cli,
         license_client.clone(),
+        std::env::var("DATABASE_URL").ok(),
     ));
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
         // Schema-v3 producer: resolver is installed BEFORE any receiver can

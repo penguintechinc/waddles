@@ -142,9 +142,21 @@ roles:
 
   # ------------------------------------------------------------ data plane (strict)
   waddles_svc_ingest:
-    description: svc-ingest (no table access; owns no relational state)
+    description: svc-ingest (owns no relational state; read-only display names for egress detokenization)
     workloads: [svc-ingest-rust, svc-ingest]
     member_of: [svc_ingest]
+    # Egress detokenizer (core/svc_ingest/src/display_names.rs, alembic 0100): one batched
+    # SELECT per outbound message; tenant-gated via communities.tenant_id membership, erased
+    # users have no membership rows -> "Unknown User". Column-scoped SELECT only.
+    columns:
+      hub_users:
+        SELECT: [id, uuid, display_name]
+      community_members:
+        SELECT: [id, community_id, user_uuid, user_id, display_name]
+      communities:
+        SELECT: [id, tenant_id]
+      ephemeral_pseudonyms:
+        SELECT: [tenant_id, pseudonym, handle]
 
   waddles_svc_process:
     description: svc-process (reads active-bundle state only via waddles_bundle_reader)

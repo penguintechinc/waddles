@@ -914,7 +914,10 @@ mod tests {
             .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0.01"))
             .mount(&server)
             .await;
-        let err = client(&server).send_message("111", &t("hi")).await.unwrap_err();
+        let err = client(&server)
+            .send_message("111", &t("hi"))
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             DiscordRestError::RateLimited { attempts: 3, .. }
@@ -929,7 +932,10 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let err = client(&server).send_message("111", &t("hi")).await.unwrap_err();
+        let err = client(&server)
+            .send_message("111", &t("hi"))
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             DiscordRestError::RateLimited {
@@ -986,7 +992,10 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let err = client(&server).send_message("111", &t("hi")).await.unwrap_err();
+        let err = client(&server)
+            .send_message("111", &t("hi"))
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             DiscordRestError::Status {

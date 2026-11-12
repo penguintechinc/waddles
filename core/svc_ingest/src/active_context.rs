@@ -562,6 +562,7 @@ impl<S: EventSink> EventSink for ContextSink<S> {
         let is_context = event.event_type == "interaction.command"
             && payload.get("command").and_then(Value::as_str) == Some("context");
         if is_context {
+            // nosemgrep: rust-silent-unwrap-or-default -- Option<&str> when /context is invoked with no argument (shows current context)
             let args = payload
                 .get("args")
                 .and_then(Value::as_str)

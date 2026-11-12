@@ -2888,10 +2888,6 @@ serviceJwt:
         # user UUID to the raw platform user id through IdentityService.ResolvePlatformUser
         # (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES). Granted to this identity alone.
         - "identity:platform-user:resolve"
-        # PII boundary: svc-ingest's outbound drain is the ONLY platform egress and detokenizes
-        # `{user:<token>}` immediately before each send (IdentityService.ResolveDisplayNames,
-        # per-send lookup, nothing cached). Moved here from svc-action.
-        - "identity:displayname:read"
         # feature/bundle-host-scheduling -- scheduled bundle reconcile: svc-ingest polls
         # BundleScheduleService.ListBundleSchedules over internal gRPC (hub_api/grpc_internal/bundle_schedule_servicer.py) for the
         # active (tenant, community, app) scopes to tick. Granted to this identity alone; hub-api

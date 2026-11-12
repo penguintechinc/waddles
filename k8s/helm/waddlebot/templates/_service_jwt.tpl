@@ -60,21 +60,16 @@ hub-api's own Deployment env (the only consumer):
 {{- $actionOverlayPush := include "waddlebot.svcActionOverlayPush" $root -}}
 {{- $processGameserver := $root.Values.pipeline.rustDataPlane.svcProcess.gameserverNet.enabled -}}
 {{- range $key, $identity := .Values.serviceJwt.identities }}
-{{- /* svc-ingest's grant is a cross-tenant `system` credential on an internet-facing pod. The
-identity renders when dynamic connections are on (full scope set) OR when egress detokenization is
-on (waddlebot.svcIngestEgressDetokenize) -- the latter is INDEPENDENT of dynamicConnections so a
-deploy with dynamic connections off never silently sends `{user:<token>}` placeholders to users.
-With dynamic connections off, only the detokenize scope (identity:displayname:read) renders. */ -}}
-{{- $ingestDynamic := $root.Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled -}}
-{{- $ingestDetok := include "waddlebot.svcIngestEgressDetokenize" $root -}}
-{{- if or (ne $key "svc-ingest") $ingestDynamic $ingestDetok }}
+{{- /* svc-ingest's grant is a cross-tenant `system` credential on an
+internet-facing pod: render the WHOLE identity ONLY when pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled (default false). */ -}}
+{{- if or (ne $key "svc-ingest") $root.Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
 {{- $scopes := list -}}
 {{- range $scope := $identity.allowedScopes }}
 {{- /* svc-action keeps its other scopes always, but its `connections:*` scopes (resolve +
 resolve:static) render ONLY when pipeline.rustDataPlane.svcAction.dynamicConnections.enabled. */ -}}
 {{- /* `presentation.overlay:push` (svc-action -> Rust svc-presentation PUSH JWT) renders ONLY while the Rust svc-presentation is the deployed runtime (waddlebot.svcActionOverlayPush). */ -}}
 {{- /* svc-process's `connections:*:gameserver` scopes render ONLY when pipeline.rustDataPlane.svcProcess.gameserverNet.enabled (default false). */ -}}
-{{- if and (or (ne $key "svc-action") $actionConnections (not (hasPrefix "connections:" $scope))) (or (ne $key "svc-process") $processGameserver (not (hasPrefix "connections:" $scope))) (or (ne $scope "presentation.overlay:push") $actionOverlayPush) (or (ne $key "svc-ingest") $ingestDynamic (eq $scope "identity:displayname:read")) }}
+{{- if and (or (ne $key "svc-action") $actionConnections (not (hasPrefix "connections:" $scope))) (or (ne $key "svc-process") $processGameserver (not (hasPrefix "connections:" $scope))) (or (ne $scope "presentation.overlay:push") $actionOverlayPush) }}
 {{- $scopes = append $scopes $scope -}}
 {{- end }}
 {{- end }}
@@ -106,16 +101,4 @@ none of it renders in base/beta/prod where the Python svc-presentation is still 
 {{- define "waddlebot.serviceJwtAcceptLegacyEnv" -}}
 - name: SERVICE_JWT_ACCEPT_LEGACY_EDDSA
   value: {{ .Values.serviceJwt.acceptLegacyEddsa | default false | quote }}
-{{- end -}}
-
-{{/*
-"waddlebot.svcIngestEgressDetokenize" -- renders "true" (else empty) when svc-ingest's outbound
-drain (the ONLY platform egress) must detokenize `{user:<token>}` before each send: the Rust
-svc-ingest is deployed and pipeline.piiTokenization.enabled is on (PII_DETOKENIZATION_ENABLED is
-not forced false). Deliberately independent of svcIngest.dynamicConnections.enabled; gates the
-svc-ingest hub identity (identity:displayname:read), its SERVICE_JWT_* env + bootstrap token
-mount and the hub-api gRPC endpoint/CA.
-*/}}
-{{- define "waddlebot.svcIngestEgressDetokenize" -}}
-{{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcIngest.enabled .Values.pipeline.piiTokenization.enabled -}}true{{- end -}}
 {{- end -}}

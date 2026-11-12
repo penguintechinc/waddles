@@ -5,8 +5,10 @@
 //! Every producer upstream (svc-process, svc-action, bundles) works with
 //! `{user:<token>}` placeholders only. The outbound drain calls
 //! [`Egress::prepare`] **immediately before each platform send**: one
-//! hub-api `ResolveDisplayNames` lookup per send (machine JWT, gRPC), the
-//! names substituted with per-sink escaping, and the result wrapped in a
+//! batched, read-only Postgres lookup per message under svc-ingest's own
+//! column-scoped role ([`crate::display_names`]; hub-api is the control-plane
+//! writer and stays out of the hot path), the names substituted with
+//! per-sink escaping, and the result wrapped in a
 //! [`DetokenizedAction`] -- the only action type an executor or platform
 //! sender accepts. Nothing is cached: the resolved names live in that one
 //! value and are dropped when the send returns.
@@ -22,10 +24,11 @@
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock, OnceLock};
 
-use egress_detokenizer::{
-    DetokenizeError, DetokenizedText, DisplayNameResolver, HubClientResolver, Sink,
-};
-use hub_client::HubClient;
+use std::time::Duration;
+
+use egress_detokenizer::{DetokenizedText, DisplayNameResolver, Sink};
+
+use crate::display_names::PgDisplayNameResolver;
 
 use crate::config::CliConfig;
 use crate::outbound_ops::OutboundAction;
@@ -35,8 +38,8 @@ use crate::outbound_ops::OutboundAction;
 /// tokens unchanged.
 pub const DISABLE_PII_DETOKENIZATION_FLAG: &str = "waddles.core.disable-pii-detokenization";
 
-/// Machine-JWT scope hub-api requires for `IdentityService.ResolveDisplayNames`.
-pub const DISPLAYNAME_SCOPE: &str = "identity:displayname:read";
+/// Per-query budget for the display-name lookup (connect, acquire, query).
+pub const DISPLAY_NAME_DB_TIMEOUT: Duration = Duration::from_secs(2);
 
 static DETOKENIZED: LazyLock<prometheus::IntCounterVec> = LazyLock::new(|| {
     // The definition is a compile-time constant; construction cannot fail.
@@ -85,74 +88,6 @@ impl KillSwitch {
                 !client.flag_enabled(DISABLE_PII_DETOKENIZATION_FLAG).await
             }
         }
-    }
-}
-
-/// hub-api connection settings for the lazily-connected resolver.
-#[derive(Clone)]
-pub struct HubSettings {
-    /// hub-api internal gRPC endpoint.
-    pub endpoint: String,
-    /// Machine-JWT bootstrap endpoint (same gRPC address).
-    pub token_endpoint: String,
-    /// Projected ServiceAccount token path.
-    pub sa_token_path: String,
-    /// Pinned CA bundle, if any.
-    pub ca_file: Option<String>,
-}
-
-/// [`DisplayNameResolver`] that connects its [`HubClient`] on first use and
-/// retries the connect on the next send after a failure, so a hub-api outage
-/// at startup never leaves the drain permanently without a resolver.
-pub struct LazyHubResolver {
-    settings: HubSettings,
-    inner: tokio::sync::Mutex<Option<Arc<HubClientResolver>>>,
-}
-
-impl LazyHubResolver {
-    /// A resolver that has not connected yet.
-    #[must_use]
-    pub fn new(settings: HubSettings) -> Self {
-        Self {
-            settings,
-            inner: tokio::sync::Mutex::new(None),
-        }
-    }
-
-    async fn resolver(&self) -> Result<Arc<HubClientResolver>, DetokenizeError> {
-        let mut slot = self.inner.lock().await;
-        if let Some(r) = slot.as_ref() {
-            return Ok(Arc::clone(r));
-        }
-        let client = HubClient::connect(
-            self.settings.endpoint.clone(),
-            self.settings.token_endpoint.clone(),
-            self.settings.sa_token_path.clone(),
-            DISPLAYNAME_SCOPE,
-            self.settings.ca_file.as_deref(),
-        )
-        .await
-        .map_err(|e| DetokenizeError::ResolutionUnavailable(format!("hub-api connect: {e}")))?;
-        let resolver = Arc::new(HubClientResolver(Arc::new(client)));
-        *slot = Some(Arc::clone(&resolver));
-        Ok(resolver)
-    }
-}
-
-impl DisplayNameResolver for LazyHubResolver {
-    fn resolve_many<'a>(
-        &'a self,
-        tenant_id: &'a str,
-        tokens: Vec<String>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<std::collections::HashMap<String, String>, DetokenizeError>,
-                > + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async move { self.resolver().await?.resolve_many(tenant_id, tokens).await })
     }
 }
 
@@ -224,13 +159,15 @@ impl Egress {
 
     /// Builds the production pass from the process config: the
     /// `PII_DETOKENIZATION_ENABLED=false` env override disables it (loudly);
-    /// unset hub-api endpoints leave it without a resolver (ERROR -- tokens
-    /// are sent); otherwise a lazily-connecting hub resolver under the
-    /// PostHog kill switch.
+    /// an unset `DATABASE_URL` leaves it without a resolver (ERROR -- tokens
+    /// are sent); otherwise a lazily-connecting Postgres resolver under the
+    /// PostHog kill switch. `database_url` comes from the environment only
+    /// (it carries the role's password) and is never logged.
     #[must_use]
     pub fn from_cli(
         cli: &CliConfig,
         license: Option<Arc<penguin_licensing::LicenseClient>>,
+        database_url: Option<String>,
     ) -> Self {
         if cli.pii_detokenization_enabled_override == Some(false) {
             tracing::warn!(
@@ -240,22 +177,14 @@ impl Egress {
             );
             return Self::disabled();
         }
-        if cli.hub_api_grpc_endpoint.trim().is_empty()
-            || cli.service_jwt_token_endpoint.trim().is_empty()
-        {
+        let Some(url) = database_url.filter(|u| !u.trim().is_empty()) else {
             tracing::error!(
-                "HUB_API_GRPC_ENDPOINT/SERVICE_JWT_TOKEN_ENDPOINT unset; no display-name \
-                 resolver, so outbound sends carry {{user:<token>}} placeholders"
+                "DATABASE_URL unset; no display-name resolver, so outbound sends carry \
+                 {{user:<token>}} placeholders"
             );
             return Self::disabled();
-        }
-        let resolver = Arc::new(LazyHubResolver::new(HubSettings {
-            endpoint: cli.hub_api_grpc_endpoint.clone(),
-            token_endpoint: cli.service_jwt_token_endpoint.clone(),
-            sa_token_path: cli.service_jwt_sa_token_path.clone(),
-            ca_file: (!cli.hub_api_grpc_ca_file.trim().is_empty())
-                .then(|| cli.hub_api_grpc_ca_file.clone()),
-        }));
+        };
+        let resolver = Arc::new(PgDisplayNameResolver::new(url, DISPLAY_NAME_DB_TIMEOUT));
         let kill_switch = match license {
             Some(client) => KillSwitch::License(client),
             None => KillSwitch::Fixed(true),
@@ -375,6 +304,7 @@ pub fn installed() -> Arc<Egress> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egress_detokenizer::DetokenizeError;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -412,9 +342,8 @@ mod tests {
             tokens: Vec<String>,
         ) -> std::pin::Pin<
             Box<
-                dyn std::future::Future<
-                        Output = Result<HashMap<String, String>, DetokenizeError>,
-                    > + Send
+                dyn std::future::Future<Output = Result<HashMap<String, String>, DetokenizeError>>
+                    + Send
                     + 'a,
             >,
         > {
@@ -494,7 +423,9 @@ mod tests {
         assert_eq!(*d, del);
         assert!(d.text().is_none());
         // No resolver configured at all.
-        let d = Egress::disabled().prepare("discord", chat(tokens, Some(7))).await;
+        let d = Egress::disabled()
+            .prepare("discord", chat(tokens, Some(7)))
+            .await;
         assert_eq!(text_of(&d), tokens);
 
         assert_eq!(r.calls(), 0, "none of these paths may touch the resolver");
@@ -526,10 +457,29 @@ mod tests {
     #[tokio::test]
     async fn env_override_false_builds_a_disabled_pass() {
         use clap::Parser;
-        let cli = CliConfig::parse_from(["svc-ingest", "--pii-detokenization-enabled-override", "false"]);
-        let e = Egress::from_cli(&cli, None);
+        let cli = CliConfig::parse_from([
+            "svc-ingest",
+            "--pii-detokenization-enabled-override",
+            "false",
+        ]);
+        let e = Egress::from_cli(&cli, None, Some("postgresql://x@127.0.0.1:1/db".into()));
         assert!(e.resolver.is_none());
         let d = e.prepare("discord", chat("hi {user:u1}", Some(7))).await;
         assert_eq!(text_of(&d), "hi {user:u1}");
+    }
+
+    #[tokio::test]
+    async fn unset_database_url_builds_a_disabled_pass() {
+        use clap::Parser;
+        let cli = CliConfig::parse_from(["svc-ingest"]);
+        assert!(Egress::from_cli(&cli, None, None).resolver.is_none());
+        assert!(Egress::from_cli(&cli, None, Some("  ".into()))
+            .resolver
+            .is_none());
+        assert!(
+            Egress::from_cli(&cli, None, Some("postgresql://x@h/db".into()))
+                .resolver
+                .is_some()
+        );
     }
 }

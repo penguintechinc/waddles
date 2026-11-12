@@ -128,10 +128,8 @@ spec:
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
         - name: HUB_API_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
-        {{- if or .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled (include "waddlebot.svcIngestEgressDetokenize" .) }}
-        # Machine-JWT bootstrap for hub-api's internal gRPC: provider-connections (dynamic
-        # connections) AND egress detokenization (ResolveDisplayNames) -- the latter renders
-        # independently of dynamicConnections so detokenization never silently turns off. The endpoint
+        {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+        # Machine-JWT bootstrap for hub-api's internal provider-connections routes. The endpoint
         # defaults to hub-api's own in-cluster Service (same default as svc-action/svc-process).
         # The audience-scoped projected token is mounted below -- NOT the generic k8s SA token
         # path (wrong audience; hub-api's TokenReview would reject it).
@@ -140,9 +138,7 @@ spec:
         - name: SERVICE_JWT_SA_TOKEN_PATH
           value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
         # The machine-JWT mint is gRPC (TLS 1.3, pinned CA): hub-api's gRPC CA env is declared once,
-        # with HUB_API_GRPC_ENDPOINT, in the block below.
-        {{- end }}
-        {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+        # with HUB_API_GRPC_ENDPOINT, in the dynamic-connections block below.
         # waddles.ingest-dynamic-connections env baseline: svc-ingest resolves each event's
         # guild/channel to a numeric scope via hub-api and stamps schema-v3 envelopes (an
         # unresolvable source is dropped, never defaulted). Rendered only with the grant above.
@@ -158,19 +154,21 @@ spec:
         - name: TWITCH_RESOLVE_TIMEOUT_SECS
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.twitchResolveTimeoutSecs | default 10 | quote }}
         {{- end }}
-        {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled (include "waddlebot.svcIngestEgressDetokenize" .) }}
+        {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         # hub-api internal gRPC (TLS, pinned to the internal CA): IdentityService.ResolvePlatformUser
         # (scope identity:platform-user:resolve) and the connection resolver's
         # ProviderConnectionService.ListBindings/ResolveConnection (connections:list /
-        # connections:resolve[:static]) and egress detokenization's IdentityService.ResolveDisplayNames
-        # (identity:displayname:read) -- intra-cluster calls are gRPC, never REST.
+        # connections:resolve[:static]) -- intra-cluster calls are gRPC, never REST.
         - name: HUB_API_GRPC_ENDPOINT
           value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
         {{- end }}
-        # Egress detokenization (svc-ingest's outbound drain is the only platform egress): plain env
-        # off-switch independent of the waddles.core.disable-pii-detokenization PostHog kill-switch.
-        # Rendered only when pipeline.piiTokenization.enabled is false; omitted otherwise.
+        # Egress detokenization (svc-ingest's outbound drain is the only platform egress) reads
+        # display names straight from Postgres under this pod's own read-only role
+        # (waddles_svc_ingest, column-scoped SELECT -- config/postgres/service-roles.yaml); no
+        # hub-api call in the send path. Plain env off-switch independent of the
+        # waddles.core.disable-pii-detokenization PostHog kill-switch; rendered only when
+        # pipeline.piiTokenization.enabled is false, omitted otherwise.
         {{- if not .Values.pipeline.piiTokenization.enabled }}
         - name: PII_DETOKENIZATION_ENABLED
           value: "false"
@@ -359,7 +357,7 @@ spec:
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
-        {{- if or .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled (include "waddlebot.svcIngestEgressDetokenize" .) }}
+        {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
         {{- end }}
         {{- if $ct.enabled }}
@@ -367,14 +365,14 @@ spec:
           mountPath: /etc/waddlebot/svc-ingest-host-api-tls
           readOnly: true
         {{- end }}
-        {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled (include "waddlebot.svcIngestEgressDetokenize" .) }}
+        {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
         {{- end }}
       volumes:
       {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
       - name: tmp
         emptyDir: {}
-      {{- if or .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled (include "waddlebot.svcIngestEgressDetokenize" .) }}
+      {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
       {{- end }}
       {{- if $ct.enabled }}
@@ -383,7 +381,7 @@ spec:
           secretName: {{ include "waddlebot.svcIngestHostApiTlsSecretName" . }}
           defaultMode: 0440
       {{- end }}
-      {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled (include "waddlebot.svcIngestEgressDetokenize" .) }}
+      {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
       {{- include "waddlebot.hubApiGrpcCaVolume" . | nindent 6 }}
       {{- end }}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
