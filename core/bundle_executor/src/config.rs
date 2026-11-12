@@ -300,7 +300,9 @@ pub struct CliConfig {
     /// of cold digests from many tenants queues instead of saturating every
     /// core. Compiles are CPU-heavy (~3-4s for a large component, spec
     /// SS7.2), hence the small default.
-    #[arg(long, env = "EXECUTOR_MAX_CONCURRENT_COMPILES", default_value_t = 2)]
+    /// `0` = auto: `min(4, available CPUs)`. Shared by app-bundle AND
+    /// connector compiles so boot never JIT-compiles every bundle at once.
+    #[arg(long, env = "EXECUTOR_MAX_CONCURRENT_COMPILES", default_value_t = 0)]
     pub executor_max_concurrent_compiles: u32,
 
     /// On SIGTERM/SIGINT: how long to wait for in-flight invokes/compiles to
@@ -366,6 +368,18 @@ pub struct CliConfig {
 }
 
 impl CliConfig {
+    /// Resolved compile-concurrency cap: the explicit value when >= 1,
+    /// else `min(4, available CPUs)`. Kept small because each in-flight
+    /// JIT compile holds hundreds of MiB of Cranelift state.
+    #[must_use]
+    pub fn effective_max_concurrent_compiles(&self) -> u32 {
+        if self.executor_max_concurrent_compiles >= 1 {
+            return self.executor_max_concurrent_compiles;
+        }
+        let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        u32::try_from(cpus.min(4)).unwrap_or(4).max(1)
+    }
+
     /// A config good enough to build the wasmtime `Engine`/`Linker` with
     /// but nothing else -- used only by `run_healthcheck`, which probes
     /// exactly that (this process has no HTTP surface to probe, spec
@@ -407,7 +421,7 @@ impl CliConfig {
             executor_self_ping_enabled: false,
             executor_probe_file: PathBuf::from("/tmp/executor-live"),
             executor_grace_secs: 60,
-            executor_max_concurrent_compiles: 2,
+            executor_max_concurrent_compiles: 0,
             executor_shutdown_drain_secs: 25,
             connector_host_api_addr: None,
             connector_host_api_identity: None,
@@ -465,16 +479,11 @@ impl CliConfig {
                 "EXECUTOR_CONNECTOR_POOL_SIZE must be > 0".to_string(),
             ));
         }
-        if self.executor_instances_per_bundle == 0
-            || self.executor_max_concurrent_calls == 0
-            || self.executor_max_concurrent_compiles == 0
-        {
+        if self.executor_instances_per_bundle == 0 || self.executor_max_concurrent_calls == 0 {
             return Err(ExecutorError::Config(format!(
-                "EXECUTOR_INSTANCES_PER_BUNDLE ({}), EXECUTOR_MAX_CONCURRENT_CALLS ({}) and \
-                 EXECUTOR_MAX_CONCURRENT_COMPILES ({}) must all be >= 1",
-                self.executor_instances_per_bundle,
-                self.executor_max_concurrent_calls,
-                self.executor_max_concurrent_compiles
+                "EXECUTOR_INSTANCES_PER_BUNDLE ({}) and \
+                 EXECUTOR_MAX_CONCURRENT_CALLS ({}) must both be >= 1",
+                self.executor_instances_per_bundle, self.executor_max_concurrent_calls,
             )));
         }
         if self.executor_wasm_collector != "drc" {
@@ -858,7 +867,6 @@ mod tests {
         for flag in [
             "--executor-instances-per-bundle",
             "--executor-max-concurrent-calls",
-            "--executor-max-concurrent-compiles",
         ] {
             let mut a = base_args();
             a.extend([flag, "0"]);
@@ -871,10 +879,29 @@ mod tests {
         Ok(())
     }
 
+    /// Compile cap: `0` = auto (1..=4), explicit values pass through.
+    #[test]
+    fn compile_cap_auto_and_explicit() -> Result<(), Box<dyn std::error::Error>> {
+        let mut a = base_args();
+        a.extend(["--executor-max-concurrent-compiles", "0"]);
+        let cfg = CliConfig::try_parse_from(a)?;
+        assert!(cfg.validate().is_ok(), "0 = auto must validate");
+        assert!((1..=4).contains(&cfg.effective_max_concurrent_compiles()));
+        let mut a = base_args();
+        a.extend(["--executor-max-concurrent-compiles", "7"]);
+        assert_eq!(
+            CliConfig::try_parse_from(a)?.effective_max_concurrent_compiles(),
+            7
+        );
+        Ok(())
+    }
+
     #[test]
     fn concurrency_and_drain_defaults() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = CliConfig::try_parse_from(base_args())?;
-        assert_eq!(cfg.executor_max_concurrent_compiles, 2);
+        assert_eq!(cfg.executor_max_concurrent_compiles, 0);
+        let eff = cfg.effective_max_concurrent_compiles();
+        assert!((1..=4).contains(&eff), "auto cap {eff} must be in 1..=4");
         assert_eq!(cfg.executor_shutdown_drain_secs, 25);
         Ok(())
     }
