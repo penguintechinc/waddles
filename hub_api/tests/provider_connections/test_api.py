@@ -9,7 +9,7 @@ import pytest
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer
 
 from services.provider_connections.store import SealedSecrets  # noqa: F401 - import smoke
-from tests.conftest import make_user_token
+from tests.conftest import insert_global_admin, make_user_token
 from tests.provider_connections.conftest import (
     BOT,
     CHANNEL_ID,
@@ -133,7 +133,7 @@ class TestAuthChain:
         assert response.status_code == 403
 
     async def test_global_admin_wildcard_satisfies_the_scope(self, client: Any, pc_db: Any) -> None:
-        pc_db.dal.hub_users.insert(username="root", is_super_admin=True)
+        insert_global_admin(pc_db.dal, username="root")
         pc_db.dal.commit()
         root_id = pc_db.dal(pc_db.dal.hub_users.username == "root").select().first().id
         headers = admin_headers(pc_db, scope="*:read *:admin", user_id=root_id)

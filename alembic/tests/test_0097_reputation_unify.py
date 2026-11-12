@@ -60,8 +60,8 @@ class TestMigrationMetadata:
         cfg = Config(str(_ROOT / "alembic.ini"))
         cfg.set_main_option("script_location", str(_ROOT / "alembic"))
         heads = ScriptDirectory.from_config(cfg).get_heads()
-        # 0097 is an ancestor of the single head (0098_reputation_floor_ban chains after it).
-        assert heads == ["0098_reputation_floor_ban"]
+        # 0097 is an ancestor of the single head (later migrations chain after it).
+        assert heads == ["0099_reputation_floor_ban"]
         script = ScriptDirectory.from_config(cfg)
         assert "0097_reputation_unify" in {
             r.revision for r in script.walk_revisions("base", heads[0])

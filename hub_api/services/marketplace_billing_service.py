@@ -38,6 +38,7 @@ from decimal import Decimal
 from typing import Any
 
 from services.errors import bad_request, conflict, forbidden, not_found
+from services.global_identity import is_global_admin_sync
 
 #: Community roles Node's `requireCommunityAdmin` treats as admin-equivalent.
 _COMMUNITY_ADMIN_ROLES = ("community-owner", "community-admin", "moderator")
@@ -53,8 +54,7 @@ def is_community_admin(dal: Any, community_id: int, user_id: int) -> bool:
     community with an admin-equivalent role. Returns `False` (never
     raises) on any lookup miss -- callers convert that into a 403.
     """
-    user_row = dal(dal.hub_users.id == user_id).select(dal.hub_users.is_super_admin).first()
-    if user_row is not None and bool(user_row.is_super_admin):
+    if is_global_admin_sync(dal, user_id):
         return True
 
     member = (

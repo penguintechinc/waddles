@@ -61,6 +61,7 @@ take any `AsyncDAL`-like fixture with a `.dal` attribute, not just
 from __future__ import annotations
 
 import base64
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -233,6 +234,7 @@ def auth_db(tmp_path: Any) -> Any:
         "tenants",
         Field("slug", unique=True),
         Field("display_name"),
+        Field("public_id", "string", length=36, default=lambda: str(uuid.uuid4())),
         Field("logo_url"),
         Field("is_global", "boolean", default=False),
         Field("is_active", "boolean", default=True),
@@ -464,32 +466,41 @@ def seed_membership(
     dal.commit()
 
 
+def insert_global_admin(dal: Any, **fields: Any) -> int:
+    """Insert a `hub_users` row and make it a global admin (admin of the `system` tenant)."""
+    from services.global_identity import ensure_tables, grant_global_admin_sync
+
+    ensure_tables(dal, migrate=True)
+    user_id = int(dal.hub_users.insert(**fields))
+    grant_global_admin_sync(dal, user_id)
+    dal.commit()
+    return user_id
+
+
 def seed_super_admin(
     overlay_db: Any, *, user_id: int, username: str = "root", bootstrap: bool = False
 ) -> None:
-    """Insert one `hub_users` row with `is_super_admin=True`, at `hub_users.id == user_id`.
+    """Insert one `hub_users` row that is a global admin (admin of the `system` tenant).
 
-    Needed by any test asserting `services.community_authz.is_super_admin()`'s
-    DB-backed bypass (`community_access.require_community_admin`/
-    `require_community_member`'s super-admin path) -- `make_super_admin_token`
-    only mints a JWT `roles=["super_admin"]` claim, which is no longer what
-    that bypass checks (security.md: `roles` is audit/display only). Callers
-    must insert this BEFORE minting the matching token so `hub_users`' own
-    autoincrement lands on the same id `user_id` expects (fixtures' `hub_users`
-    table starts empty, so the first insert lands on id 1).
+    There is no `is_super_admin` flag: global admin = `tenant_admins` row on the reserved
+    `system` tenant (`services.global_identity`). The row lands at `hub_users.id == user_id`;
+    callers must insert this BEFORE minting the matching token so `hub_users`' own autoincrement
+    lands on the same id `user_id` expects (fixtures' `hub_users` table starts empty, so the first
+    insert lands on id 1).
 
     ``bootstrap=True`` marks it as the migration-081 seeded initial admin
-    (``hub_users.is_bootstrap``), the one super admin the free-tier cap never counts.
+    (``hub_users.is_bootstrap``), the one global admin the free-tier cap never counts.
     """
+    from services.global_identity import grant_global_admin_sync
+
     dal = overlay_db.dal
-    inserted_id: int = dal.hub_users.insert(
-        username=username, is_super_admin=True, is_bootstrap=bootstrap
-    )
-    dal.commit()
+    inserted_id: int = dal.hub_users.insert(username=username, is_bootstrap=bootstrap)
     assert inserted_id == user_id, (
         f"hub_users autoincrement landed on {inserted_id}, expected {user_id} -- "
         "insert this before any other hub_users row in the same fixture"
     )
+    grant_global_admin_sync(dal, inserted_id)
+    dal.commit()
 
 
 @pytest.fixture
@@ -990,7 +1001,7 @@ def event_sync_db(tmp_path: Any) -> Any:
 
 
 #: Matches `flask_core.auth.DEFAULT_TENANT_SLUG` -- the always-visible global catalog tenant.
-GLOBAL_TENANT_SLUG = "global"
+GLOBAL_TENANT_SLUG = "default"
 #: A second, non-global tenant distinct from `TENANT_SLUG` -- proves the marketplace-catalog
 #: port's tenant-scoping never leaks a THIRD tenant's rows to `TENANT_SLUG`'s caller.
 OTHER_TENANT_SLUG = "other-corp"

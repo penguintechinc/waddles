@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import SuperAdminUsers from '../SuperAdminUsers';
-import { superAdminApi } from '../../../services/api';
+import { superAdminApi, superadminTenantApi } from '../../../services/api';
 
 vi.mock('../../../services/api', () => ({
   default: { post: vi.fn() },
@@ -20,6 +20,7 @@ vi.mock('../../../services/api', () => ({
     assignVendorRole: vi.fn(),
     setEmailVerification: vi.fn(),
   },
+  superadminTenantApi: { list: vi.fn() },
 }));
 
 /** Fire the full pointer sequence a real mouse click produces. */
@@ -34,8 +35,15 @@ function realClick(el) {
 const OK = { data: { success: true, users: [], pagination: { total: 0, totalPages: 1 } } };
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const TENANT_UUID = '3f1f6a52-1c1e-4a58-9c43-0d7a53f0a111';
+
 describe('SuperAdminUsers create modal', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    superadminTenantApi.list.mockResolvedValue({
+      data: { tenants: [{ id: 7, publicId: TENANT_UUID, slug: 'acme', displayName: 'Acme' }] },
+    });
+  });
 
   it('stays open after the opening click when the list loads', async () => {
     superAdminApi.listUsers.mockResolvedValue(OK);
@@ -68,7 +76,7 @@ describe('SuperAdminUsers create modal', () => {
     await waitFor(() => expect(screen.queryByRole('heading', { name: 'Create New User' })).toBeNull());
   });
 
-  it('submits email + password to createUser', async () => {
+  it('submits a global_admin (no tenant) to createUser', async () => {
     superAdminApi.listUsers.mockResolvedValue(OK);
     superAdminApi.createUser.mockResolvedValue({ data: { success: true } });
     render(<SuperAdminUsers />);
@@ -78,9 +86,42 @@ describe('SuperAdminUsers create modal', () => {
     fireEvent.change(screen.getByLabelText(/Password/), {
       target: { name: 'password', value: 'Passw0rd!long' },
     });
+    fireEvent.change(screen.getByLabelText(/User type/), {
+      target: { name: 'type', value: 'global_admin' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
     await waitFor(() =>
-      expect(superAdminApi.createUser).toHaveBeenCalledWith({ email: 'a@b.co', password: 'Passw0rd!long' }),
+      expect(superAdminApi.createUser).toHaveBeenCalledWith({
+        email: 'a@b.co',
+        password: 'Passw0rd!long',
+        type: 'global_admin',
+      }),
+    );
+  });
+
+  it('submits a tenant_admin with the picked tenant UUID', async () => {
+    superAdminApi.listUsers.mockResolvedValue(OK);
+    superAdminApi.createUser.mockResolvedValue({ data: { success: true } });
+    render(<SuperAdminUsers />);
+    await waitFor(() => expect(superAdminApi.listUsers).toHaveBeenCalled());
+    realClick(screen.getByRole('button', { name: /new user/i }));
+    await waitFor(() => expect(superadminTenantApi.list).toHaveBeenCalled());
+    await screen.findByRole('option', { name: 'Acme' });
+    fireEvent.change(screen.getByLabelText(/Email/), { target: { name: 'email', value: 'a@b.co' } });
+    fireEvent.change(screen.getByLabelText(/Password/), {
+      target: { name: 'password', value: 'Passw0rd!long' },
+    });
+    fireEvent.change(screen.getByLabelText(/Tenant \(tenant admin only\)/), {
+      target: { name: 'tenant', value: TENANT_UUID },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    await waitFor(() =>
+      expect(superAdminApi.createUser).toHaveBeenCalledWith({
+        email: 'a@b.co',
+        password: 'Passw0rd!long',
+        type: 'tenant_admin',
+        tenant: TENANT_UUID,
+      }),
     );
   });
 });

@@ -9,7 +9,7 @@ import {
   CheckBadgeIcon,
   ChartBarIcon,
 } from '@heroicons/react/24/outline';
-import api, { superAdminApi } from '../../services/api';
+import api, { superAdminApi, superadminTenantApi } from '../../services/api';
 import { FormModalBuilder } from '@penguintechinc/react-libs';
 import { WADDLES_GOLD_COLORS } from '../../theme/waddlebotTheme';
 
@@ -56,6 +56,7 @@ function SuperAdminUsers() {
   const [showRoleModal, setShowRoleModal] = useState(false);
   const [selectedUser, setSelectedUser] = useState(null);
   const [roleName, setRoleName] = useState('');
+  const [tenants, setTenants] = useState([]);
 
   // Form states (kept for role modal only)
   const [roleFormData, setRoleFormData] = useState({
@@ -98,9 +99,20 @@ function SuperAdminUsers() {
     }
   };
 
+  // Tenant picker options for the Create User modal (thin: the API owns the list + validation).
+  useEffect(() => {
+    if (!showCreateModal) return;
+    superadminTenantApi
+      .list({ page: 1, limit: 100 })
+      .then((res) => setTenants(res.data?.tenants || []))
+      .catch(() => setTenants([]));
+  }, [showCreateModal]);
+
   const handleCreateUser = async (formData) => {
     try {
-      await superAdminApi.createUser(formData);
+      const { tenant, ...rest } = formData;
+      const payload = formData.type === 'tenant_admin' ? { ...rest, tenant } : rest;
+      await superAdminApi.createUser(payload);
       await loadUsers();
     } catch (err) {
       const errorMsg = err.response?.data?.error?.message ||
@@ -232,7 +244,30 @@ function SuperAdminUsers() {
       required: true,
       defaultValue: '',
     },
-  ], []);
+    {
+      name: 'type',
+      type: 'select',
+      label: 'User type',
+      required: true,
+      defaultValue: 'tenant_admin',
+      options: [
+        { value: 'tenant_admin', label: 'Tenant admin (administers one tenant)' },
+        { value: 'global_admin', label: 'Global admin (super admin, system tenant)' },
+      ],
+    },
+    {
+      name: 'tenant',
+      type: 'select',
+      label: 'Tenant (tenant admin only)',
+      defaultValue: '',
+      options: [
+        { value: '', label: 'Select a tenant...' },
+        ...tenants
+          .filter((t) => t.publicId)
+          .map((t) => ({ value: t.publicId, label: t.displayName || t.slug })),
+      ],
+    },
+  ], [tenants]);
 
   const editUserFields = useMemo(() => [
     {
@@ -382,6 +417,14 @@ function SuperAdminUsers() {
                     </span>
                   </td>
                   <td className="px-6 py-4 text-sm space-y-1">
+                    {user.isPlatformAccount && (
+                      <div
+                        className="inline-block mr-2 px-2 py-1 bg-violet-500/20 text-violet-300 rounded text-xs border border-violet-500/30"
+                        title="Non-person bootstrap account: cannot be deleted, deactivated, demoted or erased"
+                      >
+                        Platform account
+                      </div>
+                    )}
                     {user.isSuperAdmin && (
                       <div className="inline-block mr-2 px-2 py-1 bg-gold-500/20 text-gold-300 rounded text-xs border border-gold-500/30">
                         Super Admin
@@ -411,13 +454,18 @@ function SuperAdminUsers() {
                     </button>
                     <button
                       onClick={() => openRoleModal(user, 'super_admin')}
+                      disabled={user.isPlatformAccount}
                       className={`inline-flex items-center px-2 py-1 rounded transition-colors ${
                         user.isSuperAdmin
                           ? 'text-gold-400 hover:text-gold-300 hover:bg-navy-700'
                           : 'text-navy-400 hover:text-navy-300 hover:bg-navy-700'
                       }`}
                       title={
-                        user.isSuperAdmin ? 'Revoke super admin' : 'Grant super admin'
+                        user.isPlatformAccount
+                          ? 'Platform account cannot be demoted'
+                          : user.isSuperAdmin
+                            ? 'Revoke super admin'
+                            : 'Grant super admin'
                       }
                     >
                       <ShieldCheckIcon className="w-4 h-4" />
@@ -457,8 +505,13 @@ function SuperAdminUsers() {
                     </button>
                     <button
                       onClick={() => openDeleteModal(user)}
-                      className="inline-flex items-center px-2 py-1 text-red-400 hover:text-red-300 hover:bg-navy-700 rounded transition-colors"
-                      title="Delete user"
+                      disabled={user.isPlatformAccount}
+                      className="inline-flex items-center px-2 py-1 text-red-400 hover:text-red-300 hover:bg-navy-700 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={
+                        user.isPlatformAccount
+                          ? 'Platform account cannot be deleted'
+                          : 'Delete user'
+                      }
                     >
                       <TrashIcon className="w-4 h-4" />
                     </button>

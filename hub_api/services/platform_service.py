@@ -25,7 +25,9 @@ from typing import Any
 
 from services import community_reputation_service as reputation_svc
 from services import session_service
+from services.audit_events import AuditAction, AuditCategory
 from services.errors import bad_request, not_found
+from services.platform_account import guard_platform_account
 
 _VALID_ROLES: tuple[str | None, ...] = ("platform-admin", "support", None)
 
@@ -172,6 +174,15 @@ async def deactivate_user(
     async_dal: Any, dal: Any, *, user_id: int, reason: str | None, actor_id: int
 ) -> None:
     """Deactivate a user across every community + revoke sessions + platform-admin role."""
+    await guard_platform_account(
+        async_dal,
+        dal,
+        user_id=user_id,
+        actor_user_id=actor_id,
+        category=AuditCategory.USER,
+        action=AuditAction.USER_UPDATED,
+        operation="deactivate",
+    )
     await async_dal.update_async(
         dal.community_members.user_id == str(user_id),
         is_active=False,

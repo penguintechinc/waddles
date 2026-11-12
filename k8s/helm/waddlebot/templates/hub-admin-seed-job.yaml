@@ -4,7 +4,7 @@
 # replay, and a fresh install no longer executes raw-SQL migration bodies at all (see the
 # KNOWN GAP note in _helpers.tpl). This Job re-applies that SAME file on every deploy. 081
 # is itself idempotent: it creates the super-admin only when INITIAL_ADMIN_EMAIL +
-# INITIAL_ADMIN_PASSWORD GUCs are set AND no super-admin exists yet (pgcrypto bcrypt hash,
+# INITIAL_ADMIN_PASSWORD GUCs are set AND no global admin (system-tenant admin) exists yet (pgcrypto bcrypt hash,
 # never reinvented here), so re-running is a no-op (exit 0) once an admin exists.
 #
 # Weight 0 > db-migrate (-5): on post-install the schema Job has completed; on post-upgrade
@@ -99,7 +99,7 @@ spec:
                   sys.exit("hub-admin-seed: database/schema not ready before deadline")
               time.sleep(delay)
               delay = min(delay * 2, 15)
-          # One-time: once bootstrapped, never re-seed (even if every super-admin was later deleted).
+          # One-time: once bootstrapped, never re-seed (even if every global admin was later deleted).
           cur.execute("SELECT 1 FROM hub_settings WHERE setting_key = 'initial_admin_bootstrapped' AND setting_value = 'true'")
           if cur.fetchone():
               print("initial admin already bootstrapped (marker set); skipping", flush=True)
@@ -111,11 +111,11 @@ spec:
           cur.execute(sql)
           for n in conn.notices:
               print(n.strip(), flush=True)
-          cur.execute("SELECT count(*) FROM hub_users WHERE is_super_admin = true")
+          cur.execute("SELECT count(*) FROM tenant_admins ta JOIN tenants t ON t.id = ta.tenant_id WHERE t.slug = 'system'")
           count = cur.fetchone()[0]
-          print("super-admin count: %d" % count, flush=True)
+          print("global-admin count: %d" % count, flush=True)
           if count < 1:
-              print("WARNING: no super-admin exists (INITIAL_ADMIN_EMAIL unset or email taken); marker NOT set", flush=True)
+              print("WARNING: no global admin (system-tenant admin) exists (INITIAL_ADMIN_EMAIL unset or email taken); marker NOT set", flush=True)
           else:
               cur.execute("INSERT INTO hub_settings (setting_key, setting_value, updated_at) "
                           "VALUES ('initial_admin_bootstrapped', 'true', NOW()) "

@@ -54,6 +54,7 @@ class UserDTO:
     avatarUrl: str | None = None
     isActive: bool = True
     isSuperAdmin: bool = False
+    isPlatformAccount: bool = False
     isVendor: bool = False
     emailVerified: bool | None = None
     isAnalyticsConsumer: bool | None = None
@@ -90,10 +91,36 @@ class UserResponse:
 
 @dataclass(slots=True, frozen=True)
 class CreateUserRequest:
-    """Request DTO for create user endpoints."""
+    """Request DTO for create user: `type` is `global_admin` or `tenant_admin`.
+
+    `tenant` (a tenant UUID / public id) is required for `tenant_admin` and forbidden for
+    `global_admin`. Both are validated in the service; `type` is optional here only so a missing
+    value is a 422 from the service, not an opaque schema error.
+    """
 
     email: str
     password: str
+    type: str | None = None
+    tenant: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class TenantRefDTO:
+    """Minimal tenant reference: public UUID + display alias (never the numeric id)."""
+
+    id: str | None
+    slug: str | None
+    displayName: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class CreateUserResponse:
+    """Response DTO for create user: the user, its admin `type`, and the tenant it administers."""
+
+    success: bool
+    user: UserDTO
+    type: str
+    tenant: TenantRefDTO
 
 
 @dataclass(slots=True, frozen=True)
@@ -205,14 +232,16 @@ def _iso(value: Any) -> str | None:
     return value.isoformat() if value else None
 
 
-def _row_dto(row: Any) -> UserDTO:
+def _row_dto(row: Any, *, is_super_admin: bool) -> UserDTO:
+    """Build the user DTO; `isSuperAdmin` is derived from system-tenant admin status."""
     return UserDTO(
         id=row.id,
         email=row.email,
         username=row.username,
         avatarUrl=getattr(row, "avatar_url", None),
         isActive=bool(row.is_active),
-        isSuperAdmin=bool(row.is_super_admin),
+        isSuperAdmin=is_super_admin,
+        isPlatformAccount=bool(getattr(row, "is_bootstrap", False)),
         isVendor=bool(row.is_vendor),
         emailVerified=bool(getattr(row, "email_verified", False))
         if hasattr(row, "email_verified")
@@ -242,9 +271,10 @@ async def list_users() -> ListUsersResponse:
     rows, total, total_pages = await svc.list_users(
         async_dal, dal, page=page, limit=limit, search=search, role=role, is_active=is_active
     )
+    admin_ids = await svc.global_admin_id_set(async_dal, dal)
     return ListUsersResponse(
         success=True,
-        users=[_row_dto(r) for r in rows],
+        users=[_row_dto(r, is_super_admin=int(r.id) in admin_ids) for r in rows],
         pagination=PaginationDTO(
             page=page, limit=min(100, max(1, limit)), total=total, totalPages=total_pages
         ),
@@ -262,7 +292,8 @@ async def get_user(user_id: int) -> UserResponse | tuple[dict[str, object], int]
         row = await svc.get_user(async_dal, dal, user_id=user_id)
     except ApiError as exc:
         return _err(exc)
-    return UserResponse(success=True, user=_row_dto(row))
+    admin_ids = await svc.global_admin_id_set(async_dal, dal)
+    return UserResponse(success=True, user=_row_dto(row, is_super_admin=int(row.id) in admin_ids))
 
 
 @user_management_bp.route("", methods=["POST"])
@@ -276,11 +307,43 @@ async def get_user(user_id: int) -> UserResponse | tuple[dict[str, object], int]
 async def create_user(data: CreateUserRequest) -> tuple[Any, int]:
     """Create user."""
     async_dal, dal = _dal()
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        return _err(ApiError("Tenant context required", 403, "FORBIDDEN"))
     try:
-        row = await svc.create_user(async_dal, dal, email=data.email, password=data.password)
+        caller_id = get_current_user_id(request)
+        row, user_type, tenant_row = await svc.create_user(
+            async_dal,
+            dal,
+            email=data.email,
+            password=data.password,
+            user_type=data.type,
+            tenant_public_id=data.tenant,
+            caller_id=caller_id,
+            caller_tenant_slug=ctx.tenant_slug,
+        )
     except ApiError as exc:
+        logger.info("create_user refused: status=%s code=%s", exc.status_code, exc.code)
         return _err(exc)
-    return jsonify_dto(UserResponse(success=True, user=_row_dto(row)), 201)
+    logger.info(
+        "superadmin_user_created type=%s tenant_id=%s user_id=%s",
+        user_type,
+        tenant_row.id,
+        row.id,
+    )
+    return jsonify_dto(
+        CreateUserResponse(
+            success=True,
+            user=_row_dto(row, is_super_admin=user_type == svc.USER_TYPE_GLOBAL_ADMIN),
+            type=user_type,
+            tenant=TenantRefDTO(
+                id=getattr(tenant_row, "public_id", None),
+                slug=tenant_row.slug,
+                displayName=tenant_row.display_name,
+            ),
+        ),
+        201,
+    )
 
 
 @user_management_bp.route("/<int:user_id>", methods=["PUT"])
@@ -294,11 +357,19 @@ async def update_user(data: UpdateUserRequest, user_id: int) -> tuple[Any, int]:
     async_dal, dal = _dal()
     try:
         row = await svc.update_user(
-            async_dal, dal, user_id=user_id, email=data.email, is_active=data.isActive
+            async_dal,
+            dal,
+            user_id=user_id,
+            email=data.email,
+            is_active=data.isActive,
+            caller_id=get_current_user_id(request),
         )
     except ApiError as exc:
         return _err(exc)
-    return jsonify_dto(UserResponse(success=True, user=_row_dto(row)))
+    admin_ids = await svc.global_admin_id_set(async_dal, dal)
+    return jsonify_dto(
+        UserResponse(success=True, user=_row_dto(row, is_super_admin=int(row.id) in admin_ids))
+    )
 
 
 @user_management_bp.route("/<int:user_id>", methods=["DELETE"])
@@ -512,7 +583,12 @@ async def assign_analytics_consumer_role(
         )
     except ApiError as exc:
         return _err(exc)
-    return jsonify_dto(AnalyticsConsumerResponse(success=True, user=_row_dto(row)))
+    admin_ids = await svc.global_admin_id_set(async_dal, dal)
+    return jsonify_dto(
+        AnalyticsConsumerResponse(
+            success=True, user=_row_dto(row, is_super_admin=int(row.id) in admin_ids)
+        )
+    )
 
 
 @user_management_bp.route("/<int:user_id>/deletion-request", methods=["GET"])

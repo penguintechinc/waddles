@@ -108,8 +108,10 @@ async fn the_emitted_envelope_matches_the_golden_fixture_the_sender_e2e_consumes
 #[tokio::test]
 async fn only_the_senders_confirmed_ack_is_success() {
     // No ack at all: the command was queued, but silence is NOT success.
-    let mut queue = FakeRelayQueue::default();
-    queue.ready = true;
+    let queue = FakeRelayQueue {
+        ready: true,
+        ..FakeRelayQueue::default()
+    };
     let c = caps_with(rig_for("discord"), queue);
     let f = c.emit_floor_ban(&cmd(UUID_B)).await.unwrap_err();
     assert_eq!(f.error, FloorSendError::Retry("relay_unconfirmed".into()));

@@ -1,7 +1,7 @@
 //! Dispatcher tests: the sweep state machine against a stateful fake outbox and a scripted
 //! sender -- the confirmed-result rule, lease discipline, retry/dead/refused handling and the
 //! metrics. The outbox SQL itself is proven on a real Postgres in
-//! `alembic/tests/test_0098_reputation_floor_ban.py`; the command the sender receives is proven
+//! `alembic/tests/test_0099_reputation_floor_ban.py`; the command the sender receives is proven
 //! in `capabilities::floor_ban_tests` and `core/connector_e2e/tests/floor_ban_outbound.rs`.
 
 use std::collections::{HashMap, VecDeque};
@@ -25,6 +25,9 @@ fn row(id: i64) -> ClaimedFloorBan {
     }
 }
 
+/// One recorded completion: `(id, lease, outcome, op id)`.
+type Completed4 = (i64, Uuid, Completion, Option<String>);
+
 /// A stateful fake outbox: the recorded completions and canned answers.
 #[derive(Default)]
 struct FakeStore {
@@ -33,7 +36,7 @@ struct FakeStore {
     recheck: Mutex<HashMap<i64, Recheck>>,
     /// What `complete` answers, per outcome kind.
     answer: Mutex<HashMap<&'static str, Completed>>,
-    completions: Mutex<Vec<(i64, Uuid, Completion, Option<String>)>>,
+    completions: Mutex<Vec<Completed4>>,
     rechecks: Mutex<Vec<i64>>,
     fail_claim: bool,
     fail_complete: bool,
@@ -46,7 +49,7 @@ impl FakeStore {
             ..Self::default()
         }
     }
-    fn completions(&self) -> Vec<(i64, Uuid, Completion, Option<String>)> {
+    fn completions(&self) -> Vec<Completed4> {
         let mut c = self.completions.lock().unwrap().clone();
         c.sort_by_key(|(id, ..)| *id);
         c

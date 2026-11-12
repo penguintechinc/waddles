@@ -74,6 +74,7 @@ _HTTP_STATUS_BY_RESULT = {
     svc.DsarStatus.ALREADY_DONE: 200,
     svc.DsarStatus.NOT_FOUND: 404,
     svc.DsarStatus.CONFLICT: 409,
+    svc.DsarStatus.FORBIDDEN: 403,
     svc.DsarStatus.FAILED: 500,
     svc.DsarStatus.AUDIT_UNAVAILABLE: 503,
 }

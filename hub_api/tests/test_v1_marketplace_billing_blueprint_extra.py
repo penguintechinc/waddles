@@ -28,6 +28,7 @@ from blueprints.v1.marketplace_billing import (
     subscriptions_bp,
 )
 from config import HubAPIConfig
+from tests.conftest import insert_global_admin
 
 
 def _cfg() -> HubAPIConfig:
@@ -79,7 +80,7 @@ def client(app: Quart) -> Any:
 
 
 def _admin(dal: Any) -> int:
-    return int(dal.hub_users.insert(username="admin", email="admin@x.com", is_super_admin=True))
+    return insert_global_admin(dal, username="admin", email="admin@x.com")
 
 
 class TestPremiumStatusAndCancel:

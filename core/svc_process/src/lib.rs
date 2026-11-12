@@ -1440,7 +1440,7 @@ fn try_start_process_loop(
         // TODO(M4+): tenant/community scope hardcoded to the tenant-wide
         // `global` activation until the distribution poll resolves the
         // real grant set -- see this function's doc.
-        let scope = penguin_spine::Scope::new("global", None);
+        let scope = penguin_spine::Scope::new("default", None);
         let grants: Vec<penguin_spine::Grant> = if !cli.process_ingest_platform.is_empty()
             && !cli.process_ingest_source_id.is_empty()
         {

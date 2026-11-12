@@ -131,7 +131,7 @@ class TestAppend:
     ) -> None:
         record = await audit_service.record(make_event(tenant_id=None))
         assert record is not None and record.chain_id == "platform"
-        assert gate.calls[-1] == "global"
+        assert gate.calls[-1] == "default"
 
     async def test_timeline_is_non_decreasing_even_if_the_clock_runs_backwards(
         self, audit_service: AuditService, audit_dal: Any

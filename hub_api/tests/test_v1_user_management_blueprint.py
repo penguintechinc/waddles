@@ -35,6 +35,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.user_management import user_management_bp
+from services.global_identity import is_global_admin_sync, is_global_user_sync
 from tests.conftest import OTHER_TENANT_SLUG, TENANT_SLUG, make_user_token, seed_super_admin
 
 
@@ -153,25 +154,207 @@ class TestScopeEnforcement:
         assert body["pagination"]["page"] == 1
 
 
+def _tenant_uuid(auth_db: Any, slug: str = TENANT_SLUG) -> str:
+    dal = auth_db.dal
+    return str(dal(dal.tenants.slug == slug).select().first().public_id)
+
+
+def _add_tenant(auth_db: Any, slug: str) -> str:
+    dal = auth_db.dal
+    dal.tenants.insert(slug=slug, display_name=slug.title(), is_active=True)
+    dal.commit()
+    return _tenant_uuid(auth_db, slug)
+
+
+async def _create(client: Any, headers: dict[str, str], **body: Any) -> Any:
+    payload = {"email": "new@example.com", "password": "hunter22", **body}
+    return await client.post("/api/v1/superadmin/users", headers=headers, json=payload)
+
+
+def _is_member(auth_db: Any, user_id: int, tenant_slug: str) -> bool:
+    dal = auth_db.dal
+    tid = dal(dal.tenants.slug == tenant_slug).select().first().id
+    return bool(
+        dal((dal.tenant_members.tenant_id == tid) & (dal.tenant_members.user_id == user_id)).count()
+    )
+
+
 class TestCreateUser:
-    async def test_create_user_success(self, client: Any) -> None:
-        response = await client.post(
-            "/api/v1/superadmin/users",
-            headers=_admin_headers(),
-            json={"email": "newadmin@example.com", "password": "hunter22"},
-        )
+    """POST /superadmin/users: `type` is mandatory; only global_admin / tenant_admin exist."""
+
+    async def test_create_global_admin(self, client: Any, auth_db: Any) -> None:
+        seed_super_admin(auth_db, user_id=1, bootstrap=True)
+        response = await _create(client, _admin_headers(), type="global_admin")
         assert response.status_code == 201
         body = await response.get_json()
-        assert body["user"]["email"] == "newadmin@example.com"
+        assert set(body) == {"success", "user", "type", "tenant"}
+        assert body["type"] == "global_admin"
+        assert body["tenant"]["slug"] == "system"
+        assert set(body["tenant"]) == {"id", "slug", "displayName"}
+        assert body["user"]["email"] == "new@example.com"
+        assert body["user"]["isSuperAdmin"] is True
+        assert "password" not in {k.lower() for k in body["user"]}
+        new_id = body["user"]["id"]
+        assert is_global_admin_sync(auth_db.dal, new_id) is True
+        assert is_global_user_sync(auth_db.dal, new_id) is True
+        assert _is_member(auth_db, new_id, "system")
+
+    async def test_create_tenant_admin(self, client: Any, auth_db: Any) -> None:
+        seed_super_admin(auth_db, user_id=1)
+        tenant_uuid = _tenant_uuid(auth_db)
+        response = await _create(client, _admin_headers(), type="tenant_admin", tenant=tenant_uuid)
+        assert response.status_code == 201
+        body = await response.get_json()
+        assert body["type"] == "tenant_admin"
+        assert body["tenant"] == {
+            "id": tenant_uuid,
+            "slug": TENANT_SLUG,
+            "displayName": "Acme Corp",
+        }
+        assert body["user"]["isSuperAdmin"] is False
+        new_id = body["user"]["id"]
+        assert _is_member(auth_db, new_id, TENANT_SLUG)
+        dal = auth_db.dal
+        row = dal(dal.tenant_admins.user_id == new_id).select().first()
+        assert row.role == "tenant-owner"
+        # a tenant admin is NOT a global user / admin
+        assert is_global_admin_sync(dal, new_id) is False
+        assert is_global_user_sync(dal, new_id) is False
+
+    async def test_missing_type_is_422(self, client: Any, auth_db: Any) -> None:
+        seed_super_admin(auth_db, user_id=1)
+        response = await _create(client, _admin_headers())
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize("bad_type", ["user", "super_admin", "", "GLOBAL_ADMIN", "vendor"])
+    async def test_plain_or_unknown_type_is_422(
+        self, client: Any, auth_db: Any, bad_type: str
+    ) -> None:
+        seed_super_admin(auth_db, user_id=1)
+        response = await _create(client, _admin_headers(), type=bad_type)
+        assert response.status_code == 422
+        assert auth_db.dal(auth_db.dal.hub_users.email == "new@example.com").count() == 0
+
+    async def test_tenant_admin_requires_tenant(self, client: Any, auth_db: Any) -> None:
+        seed_super_admin(auth_db, user_id=1)
+        response = await _create(client, _admin_headers(), type="tenant_admin")
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize(
+        "tenant", ["not-a-uuid", "00000000-0000-0000-0000-000000000000", "1", TENANT_SLUG]
+    )
+    async def test_invalid_or_unknown_tenant_is_422_and_creates_nothing(
+        self, client: Any, auth_db: Any, tenant: str
+    ) -> None:
+        seed_super_admin(auth_db, user_id=1)
+        response = await _create(client, _admin_headers(), type="tenant_admin", tenant=tenant)
+        assert response.status_code == 422
+        assert auth_db.dal(auth_db.dal.hub_users.email == "new@example.com").count() == 0
+
+    async def test_inactive_tenant_is_422(self, client: Any, auth_db: Any) -> None:
+        seed_super_admin(auth_db, user_id=1)
+        dal = auth_db.dal
+        dal.tenants.insert(slug="dead", display_name="Dead", is_active=False)
+        dal.commit()
+        response = await _create(
+            client, _admin_headers(), type="tenant_admin", tenant=_tenant_uuid(auth_db, "dead")
+        )
+        assert response.status_code == 422
+
+    async def test_global_admin_with_tenant_is_422(self, client: Any, auth_db: Any) -> None:
+        seed_super_admin(auth_db, user_id=1)
+        response = await _create(
+            client, _admin_headers(), type="global_admin", tenant=_tenant_uuid(auth_db)
+        )
+        assert response.status_code == 422
+
+    async def test_tenant_admin_of_system_tenant_is_422(self, client: Any, auth_db: Any) -> None:
+        """The system tenant cannot be reached through the tenant_admin back door."""
+        seed_super_admin(auth_db, user_id=1)
+        system_uuid = _tenant_uuid(auth_db, "system")
+        response = await _create(client, _admin_headers(), type="tenant_admin", tenant=system_uuid)
+        assert response.status_code == 422
 
     async def test_create_user_duplicate_email_is_409(self, client: Any, auth_db: Any) -> None:
+        seed_super_admin(auth_db, user_id=1)
         _seed_user(auth_db, email="dupe@example.com")
-        response = await client.post(
-            "/api/v1/superadmin/users",
-            headers=_admin_headers(),
-            json={"email": "dupe@example.com", "password": "hunter22"},
+        response = await _create(
+            client, _admin_headers(), email="dupe@example.com", type="global_admin"
         )
         assert response.status_code == 409
+
+    async def test_short_password_is_400(self, client: Any, auth_db: Any) -> None:
+        seed_super_admin(auth_db, user_id=1)
+        response = await _create(client, _admin_headers(), password="short", type="global_admin")
+        assert response.status_code == 400
+
+    async def test_tenant_owner_of_another_tenant_is_403(self, client: Any, auth_db: Any) -> None:
+        """A tenant owner's token has no users:admin -> 403 on every superadmin user endpoint."""
+        _seed_tenant_owner(auth_db, user_id=1)
+        other_uuid = _add_tenant(auth_db, "other-co")
+        response = await _create(
+            client, _tenant_owner_headers(user_id=1), type="tenant_admin", tenant=other_uuid
+        )
+        assert response.status_code == 403
+        listing = await client.get(
+            "/api/v1/superadmin/users", headers=_tenant_owner_headers(user_id=1)
+        )
+        assert listing.status_code == 403
+
+    async def test_forged_admin_scope_without_db_admin_is_403(
+        self, client: Any, auth_db: Any
+    ) -> None:
+        """Defense in depth: a token with users:admin whose subject is NOT a system admin."""
+        _seed_user(auth_db, email="notadmin@example.com")  # id 1, no system admin row
+        response = await _create(client, _admin_headers(user_id=1), type="global_admin")
+        assert response.status_code == 403
+        assert auth_db.dal(auth_db.dal.hub_users.email == "new@example.com").count() == 0
+
+    async def test_deactivated_global_admin_is_not_global(self, client: Any, auth_db: Any) -> None:
+        seed_super_admin(auth_db, user_id=1)
+        auth_db.dal(auth_db.dal.hub_users.id == 1).update(is_active=False)
+        auth_db.dal.commit()
+        response = await _create(client, _admin_headers(), type="global_admin")
+        assert response.status_code == 403
+
+
+class TestGlobalAdminRoleAssignment:
+    async def test_cannot_revoke_the_last_global_admin(self, client: Any, auth_db: Any) -> None:
+        seed_super_admin(auth_db, user_id=1)
+        response = await client.post(
+            "/api/v1/superadmin/users/1/super-admin-role",
+            headers=_admin_headers(),
+            json={"grant": False},
+        )
+        assert response.status_code == 409
+        assert is_global_admin_sync(auth_db.dal, 1) is True
+
+    async def test_grant_then_revoke_derives_from_system_tenant(
+        self, client: Any, auth_db: Any
+    ) -> None:
+        seed_super_admin(auth_db, user_id=1, bootstrap=True)
+        target = _seed_user(auth_db, email="t@example.com")
+        granted = await client.post(
+            f"/api/v1/superadmin/users/{target}/super-admin-role",
+            headers=_admin_headers(),
+            json={"grant": True},
+        )
+        assert granted.status_code == 200
+        assert is_global_admin_sync(auth_db.dal, target) is True
+        listing = await client.get(
+            "/api/v1/superadmin/users?role=super_admin", headers=_admin_headers()
+        )
+        ids = {u["id"] for u in (await listing.get_json())["users"]}
+        assert ids == {1, target}
+        revoked = await client.post(
+            f"/api/v1/superadmin/users/{target}/super-admin-role",
+            headers=_admin_headers(),
+            json={"grant": False},
+        )
+        assert revoked.status_code == 200
+        assert is_global_admin_sync(auth_db.dal, target) is False
+        # membership of `system` survives: still a global USER, no longer a global admin
+        assert is_global_user_sync(auth_db.dal, target) is True
 
 
 class TestGetUpdateDeleteUser:

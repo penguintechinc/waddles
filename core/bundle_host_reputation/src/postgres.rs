@@ -1056,7 +1056,7 @@ impl ReputationStore for PostgresReputationStore {
     }
 }
 
-/// The automated-floor-ban SQL calls (alembic 0098). Every call goes through a SECURITY DEFINER
+/// The automated-floor-ban SQL calls (alembic 0099). Every call goes through a SECURITY DEFINER
 /// function; this crate never reads or writes `bundle_reputation_floor_bans` itself.
 impl PostgresReputationStore {
     /// Validates an already-SQL-form floor-ban key (see [`floor_sql_key`]); never re-escapes, so a

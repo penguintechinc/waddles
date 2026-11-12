@@ -107,7 +107,7 @@ Needs a `bundles/core-bundles.yaml` row with **`wit_world: stage-next`** (it dec
     manifest_path: blackjack.manifest.yaml
     artifact_path: blackjack.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 ```
 

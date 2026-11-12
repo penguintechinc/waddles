@@ -15,8 +15,8 @@ This module provides the three load-bearing pieces:
   must go through, so 178+ hand-written filters don't have to each get it
   right independently.
 
-The default tenant (`DEFAULT_TENANT_SLUG`, matching migration 058's seeded
-`tenants.slug = 'global'` row) is a tenant like any other -- it runs through
+The default tenant (`DEFAULT_TENANT_SLUG`, matching the catch-all tenant row,
+slug `default`) is a tenant like any other -- it runs through
 this exact same code with N=1, never a `if tenant == "default": skip()`
 shortcut. See docs/plans/2026-08-26-v3-scbm-apps-design.md, Identity and
 data scoping.

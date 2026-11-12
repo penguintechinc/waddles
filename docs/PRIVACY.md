@@ -286,6 +286,16 @@ Bulk requests return `200` with a per-user `status` (`completed`, `already_done`
 
 ---
 
+### Platform (bootstrap) account is exempt from erasure
+
+The initial admin seeded from `INITIAL_ADMIN_*` is a **non-person platform account**
+(`hub_users.is_bootstrap`), not a data subject: it must not carry a real person's identity or PII,
+so there is nothing to erase and it can never be deleted or anonymized. Self-service erasure, the
+tenant DSAR console and the shared erasure core all refuse it with a typed 403
+`PLATFORM_ACCOUNT_PROTECTED` and an audit record. If a real person's data was ever placed on it,
+move that person to a named global admin account and treat the platform account's identity fields
+as an operator-owned alias. See `docs/GLOBAL_IDENTITY.md`.
+
 ## Analytics Data Access
 
 ### Who Can See What
