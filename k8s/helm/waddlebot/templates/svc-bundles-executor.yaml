@@ -1,10 +1,11 @@
 # svc-bundles-executor (crate core/bundle_executor, binary svc-bundles-executor): the
-# credential-less WASM bundle sandbox host. ONE Deployment serves EVERY stage: each pod
+# credential-less WASM bundle sandbox host. One StatefulSet PER POOL (default: one pool
+# serving every stage; waddlebot.executorPools in _autoscaling.tpl). Each pod
 # dials every listener in pipeline.rustDataPlane.bundleExecutor.stages (svc-process-rust
 # AND svc-action-rust) plus svc-ingest's connector link, with an independent dial loop,
 # reconnect/backoff, bundle registry and metrics `stage` label per link (so one stage
 # being down never blocks another), and services `load`/`invoke`/`unload` calls over them.
-# It scales HORIZONTALLY (HPA + PDB in templates/autoscaling.yaml, key bundleExecutor):
+# It scales HORIZONTALLY (PDB + KEDA/HPA-external in svc-bundles-executor-autoscaling.yaml):
 # every replica dials every stage, and each stage/svc-ingest spreads work round-robin
 # across the replicas connected to it (each item reaches exactly one executor). Replicas
 # are stateless -- the only local state is the emptyDir wasm precompile cache below, which
@@ -26,7 +27,7 @@
 #     same `appuser` convention core/svc_action/Dockerfile.rust already does;
 #     core/bundle_executor/Dockerfile.rust exists and is the image build source).
 #
-# No Service object: this process has no HTTP/gRPC listener of any kind (core/
+# Only a port-less headless Service (StatefulSet governing name): this process has no HTTP/gRPC listener of any kind (core/
 # bundle_executor/src/tls.rs's own doc comment -- "this process has no HTTP surface to
 # probe"), so every probe below execs this same binary instead of hitting a port.
 #
@@ -76,22 +77,63 @@ preserving the executor's fail-closed posture without a template-render-time
 guess.
 */}}
 {{- $bsepCmName := .Values.autoProvisionedKeys.bundleSigning.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" (include "waddlebot.fullname" .)) }}
+{{- $be := .Values.pipeline.rustDataPlane.bundleExecutor }}
+{{- $psCmName := ((.Values.autoProvisionedKeys).precompileSigning | default dict).publicKeyConfigMapName | default (printf "%s-executor-precompile-signing-public" (include "waddlebot.fullname" .)) }}
+{{- range $pool := (include "waddlebot.executorPools" . | fromJsonArray) }}
+{{- with $ }}
+{{- $name := printf "%s-svc-bundles-executor%s" (include "waddlebot.fullname" .) $pool.suffix }}
+{{- $scaled := ne (($pool.autoscaling).mode | default "none") "none" }}
+{{- $limitMi := int (include "waddlebot.memToMi" (($pool.resources).limits).memory) }}
+{{- if or (le (int $pool.memoryBudgetMb) 0) (ge (int $pool.memoryBudgetMb) $limitMi) }}
+{{- fail (printf "svc-bundles-executor pool %s: memoryBudgetMb (%v) must be >0 and below the memory limit (%vMi) -- the budget is the LRU ceiling for compiled modules; the rest is headroom for instances + compile transients" $pool.name $pool.memoryBudgetMb $limitMi) }}
+{{- end }}
 ---
-apiVersion: apps/v1
-kind: Deployment
+# Headless Service: required by the StatefulSet (stable network identity). The executor has NO
+# listener -- it only dials out -- so there are no ports; this exists for the governing
+# serviceName + per-pod DNS, never for traffic (CNP ingress stays deny-all).
+apiVersion: v1
+kind: Service
 metadata:
-  name: {{ include "waddlebot.fullname" . }}-svc-bundles-executor
+  name: {{ $name }}-headless
   labels:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-bundles-executor
+    waddles.io/executor-pool: {{ $pool.name | quote }}
 spec:
-  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "bundleExecutor")) }}
-  replicas: {{ .Values.pipeline.rustDataPlane.bundleExecutor.replicas }}
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "waddlebot.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-bundles-executor
+    waddles.io/executor-pool: {{ $pool.name | quote }}
+---
+# StatefulSet (executor Phase 1, PLAN.md task 8): pod name == executor_id. Stages shard apps
+# over LIVE executor ids by rendezvous hashing (slot = xxhash64(app_id) % 1024, 2 owners per
+# slot), so the id must be stable across restarts -- a Deployment's random suffix would
+# reshuffle slots on every restart. Parallel pod management: ordinals carry identity, not
+# ordering; serial start would multiply cold-start time by N. Upgrade from the old Deployment:
+# docs/operations/executor-statefulset-migration.md.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-bundles-executor
+    waddles.io/executor-pool: {{ $pool.name | quote }}
+spec:
+  serviceName: {{ $name }}-headless
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  {{- if not $scaled }}
+  replicas: {{ $pool.replicas }}
   {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: svc-bundles-executor
+      waddles.io/executor-pool: {{ $pool.name | quote }}
   template:
     metadata:
       annotations:
@@ -108,6 +150,7 @@ spec:
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-bundles-executor
+        waddles.io/executor-pool: {{ $pool.name | quote }}
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       automountServiceAccountToken: false
@@ -145,7 +188,46 @@ spec:
         # Comma-separated list: one dial loop per stage (core/bundle_executor/src/config.rs
         # stage_targets). Every stage shares the HOST_API_* mTLS material + identity below.
         - name: STAGE_HOST_API_ADDR
-          value: {{ include "waddlebot.bundleExecutorStageAddrs" . | quote }}
+          value: {{ include "waddlebot.bundleExecutorStageAddrs" (dict "root" $ "stages" $pool.stages) | quote }}
+        # Executor identity for slot sharding (CONTRACT.md): the StatefulSet pod name, sent as
+        # HelloBody.executor_id. The pool scopes the membership set the stages hash over.
+        - name: EXECUTOR_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        # POD_NAME: the name the executor crate reads for HelloBody.executor_id (downward API).
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        # StatefulSet mode: the crate refuses to start (fail-loud) if neither EXECUTOR_ID nor
+        # POD_NAME resolves, instead of joining slot sharding with an anonymous identity.
+        - name: EXECUTOR_REQUIRE_ID
+          value: "true"
+        - name: EXECUTOR_POOL
+          value: {{ $pool.name | quote }}
+        # LRU ceiling for resident compiled modules (MiB); render fails unless below the limit.
+        - name: EXECUTOR_MEMORY_BUDGET_MB
+          value: {{ $pool.memoryBudgetMb | quote }}
+        # Object-storage prefix of signed AOT artifacts (precompiled/<engine_fp>/<digest>.cwasm)
+        # written by the precompile Jobs (part D); read here via the read-only data-plane identity.
+        - name: EXECUTOR_PRECOMPILED_PREFIX
+          value: {{ $be.precompiledPrefix | quote }}
+        {{- if $be.maxPrecompiledBytes }}
+        - name: BUNDLE_MAX_PRECOMPILED_BYTES
+          value: {{ $be.maxPrecompiledBytes | toString | quote }}
+        {{- end }}
+        # PRECOMPILE_SIGNING_PUBLIC_KEYS: the DEDICATED .cwasm verify key set (never the bundle
+        # approval keys). Published by the always-rendered auto-provision-keys hook (PR #1249,
+        # same name/key/override as its templates) -> optional: false, so a missing ConfigMap
+        # fails the pod loudly (CreateContainerConfigError) instead of silently JIT-compiling.
+        - name: PRECOMPILE_SIGNING_PUBLIC_KEYS
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $psCmName }}
+              key: PRECOMPILE_SIGNING_PUBLIC_KEYS
+              optional: false
+        {{- include "waddlebot.rustOtelEnv" (dict "root" $ "service" "svc-bundles-executor") | nindent 8 }}
         - name: EXECUTOR_STAGE_CONNECTIONS
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.stageConnections | quote }}
         - name: EXECUTOR_CALL_TIMEOUT_MS
@@ -270,7 +352,7 @@ spec:
           timeoutSeconds: 5
           failureThreshold: 3
         resources:
-          {{- toYaml .Values.pipeline.rustDataPlane.bundleExecutor.resources | nindent 10 }}
+          {{- toYaml $pool.resources | nindent 10 }}
         volumeMounts:
         - name: tmp
           mountPath: /tmp
@@ -295,11 +377,12 @@ spec:
         emptyDir: {}
       {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
       # readOnlyRootFilesystem -- EXECUTOR_PRECOMPILE_DIR must be writable regardless.
-      # emptyDir (not persistent): every `load` JIT-compiles fresh in this pass anyway
-      # (core/bundle_executor/src/lib.rs's own "Scaffolded with a TODO" list -- precompiled
-      # .cwasm caching isn't wired yet), so there is no cache to lose on pod restart today.
+      # emptyDir (stateless, no PVC): local staging of signed .cwasm fetched from object
+      # storage for mmap deserialize. Object storage is the source of truth, so a restart
+      # re-fetches (ms per module) instead of re-JIT-compiling; sizeLimit bounds node disk.
       - name: precompile-cache
-        emptyDir: {}
+        emptyDir:
+          sizeLimit: {{ $be.precompileCacheSizeLimit | quote }}
       {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
       {{- end }}
@@ -313,6 +396,8 @@ spec:
           secretName: {{ include "waddlebot.executorCaBundleSecretName" . }}
           defaultMode: 0440
       {{- end }}
+{{- end }}
+{{- end }}
 # R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
 {{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-bundles-executor" "ports" (list ) "runtime" "rust" "binaries" (list "/app/bundle-executor") "cnp" false) }}
 {{- end }}

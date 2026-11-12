@@ -1,0 +1,154 @@
+# svc-bundles-executor per-pool PodDisruptionBudget + autoscaling (executor Phase 1, PLAN.md
+# task 8). The executor is a StatefulSet (stable executor_id), so it is NOT in the generic
+# waddlebot.scaleTargets registry (CPU/memory HPA there targets Deployments and was blind on
+# dal2alpha: no metrics API). `bundleExecutor.autoscaling.mode`:
+#   none         -- fixed `replicas` (default; any cluster).
+#   keda         -- KEDA ScaledObject on Prometheus: stage queue-wait p95 + pool_exhausted rate.
+#                   PREREQUISITE: KEDA installed (keda.sh/v1alpha1 CRDs) + a Prometheus that
+#                   receives the OTLP metrics. Render FAILS LOUD when the CRD is absent.
+#   hpa-external -- autoscaling/v2 HPA on External metrics (fallback when KEDA is not wanted).
+#                   PREREQUISITE: an external-metrics adapter (external.metrics.k8s.io, e.g.
+#                   prometheus-adapter) exposing the two metric names. Render FAILS LOUD without it.
+# Scale-down is deliberately slow (cooldown >= warm time): every removed executor moves ~1/N of
+# the slots and the new owners must deserialize them.
+{{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutor.enabled }}
+{{- range $pool := (include "waddlebot.executorPools" . | fromJsonArray) }}
+{{- with $ }}
+{{- $name := printf "%s-svc-bundles-executor%s" (include "waddlebot.fullname" .) $pool.suffix }}
+{{- $as := $pool.autoscaling | default dict }}
+{{- $mode := $as.mode | default "none" }}
+{{- if not (has $mode (list "none" "keda" "hpa-external")) }}
+{{- fail (printf "bundleExecutor.autoscaling.mode %q (pool %s) must be none, keda or hpa-external" $mode $pool.name) }}
+{{- end }}
+{{- $floor := int $pool.replicas }}
+{{- if ne $mode "none" }}
+{{- $floor = int $as.minReplicas }}
+{{- if lt $floor 2 }}
+{{- fail (printf "bundleExecutor.autoscaling.minReplicas (pool %s) must be >= 2 -- every slot has 2 owners" $pool.name) }}
+{{- end }}
+{{- if gt $floor (int $as.maxReplicas) }}
+{{- fail (printf "bundleExecutor.autoscaling (pool %s): minReplicas (%v) must be <= maxReplicas (%v)" $pool.name $as.minReplicas $as.maxReplicas) }}
+{{- end }}
+{{- end }}
+{{- if eq $mode "keda" }}
+{{- if not (.Capabilities.APIVersions.Has "keda.sh/v1alpha1/ScaledObject") }}
+{{- fail "bundleExecutor.autoscaling.mode=keda but the cluster has no keda.sh/v1alpha1 ScaledObject CRD -- install KEDA first (see docs/operations/executor-statefulset-migration.md) or use mode none/hpa-external" }}
+{{- end }}
+{{- $prom := $as.prometheus | default dict }}
+{{- if not $prom.serverAddress }}
+{{- fail "bundleExecutor.autoscaling.prometheus.serverAddress is required for mode=keda" }}
+{{- end }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-bundles-executor
+    waddles.io/executor-pool: {{ $pool.name | quote }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: {{ $name }}
+  minReplicaCount: {{ $as.minReplicas }}
+  maxReplicaCount: {{ $as.maxReplicas }}
+  pollingInterval: {{ $as.pollingIntervalSeconds }}
+  cooldownPeriod: {{ $as.cooldownSeconds }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: {{ $as.cooldownSeconds }}
+          policies:
+          - type: Pods
+            value: 1
+            periodSeconds: {{ $as.cooldownSeconds }}
+  triggers:
+  - type: prometheus
+    name: queue-wait-p95
+    metadata:
+      serverAddress: {{ $prom.serverAddress | quote }}
+      query: {{ tpl $prom.queueWaitP95Query (dict "pool" $pool.name "Template" $.Template) | quote }}
+      threshold: {{ $prom.queueWaitP95Seconds | quote }}
+  - type: prometheus
+    name: pool-exhausted-rate
+    metadata:
+      serverAddress: {{ $prom.serverAddress | quote }}
+      query: {{ tpl $prom.poolExhaustedRateQuery (dict "pool" $pool.name "Template" $.Template) | quote }}
+      threshold: {{ $prom.poolExhaustedPerSecond | quote }}
+{{- else if eq $mode "hpa-external" }}
+{{- if not (.Capabilities.APIVersions.Has "external.metrics.k8s.io/v1beta1") }}
+{{- fail "bundleExecutor.autoscaling.mode=hpa-external but the cluster serves no external.metrics.k8s.io/v1beta1 API -- install an external-metrics adapter (e.g. prometheus-adapter) first, or use mode none/keda" }}
+{{- end }}
+{{- $ext := $as.hpaExternal | default dict }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-bundles-executor
+    waddles.io/executor-pool: {{ $pool.name | quote }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: {{ $name }}
+  minReplicas: {{ $as.minReplicas }}
+  maxReplicas: {{ $as.maxReplicas }}
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: {{ $ext.queueWaitP95Metric | quote }}
+        selector:
+          matchLabels:
+            executor_pool: {{ $pool.name | quote }}
+      target:
+        type: Value
+        value: {{ $ext.queueWaitP95Target | quote }}
+  - type: External
+    external:
+      metric:
+        name: {{ $ext.poolExhaustedRateMetric | quote }}
+        selector:
+          matchLabels:
+            executor_pool: {{ $pool.name | quote }}
+      target:
+        type: Value
+        value: {{ $ext.poolExhaustedRateTarget | quote }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: {{ $as.cooldownSeconds }}
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: {{ $as.cooldownSeconds }}
+{{- end }}
+{{- $pdb := include "waddlebot.pdbCfg" (dict "root" $ "key" "bundleExecutor") | fromJson }}
+{{- if and $pdb.enabled (gt $floor 1) }}
+---
+# One executor down at a time: each slot has 2 owners, so a single voluntary eviction always
+# leaves a warm replica for every slot (minAvailable would allow N-1 at once on large pools).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-bundles-executor
+    waddles.io/executor-pool: {{ $pool.name | quote }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-bundles-executor
+      waddles.io/executor-pool: {{ $pool.name | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
