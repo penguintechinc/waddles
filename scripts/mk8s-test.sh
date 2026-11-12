@@ -138,10 +138,8 @@ build_images() {
 
     # Build images
     local images=(
-        "hub:admin/hub_module/Dockerfile:./admin/hub_module"
-        "openwhisk-action:action/pushing/openwhisk_action_module/Dockerfile:."
-        "lambda-action:action/pushing/lambda_action_module/Dockerfile:."
-        "gcp-functions-action:action/pushing/gcp_functions_action_module/Dockerfile:."
+        "hub-api:hub_api/Dockerfile:."
+        "hub-webui:admin/hub_module/Dockerfile.webui:."
     )
 
     for img_spec in "${images[@]}"; do
@@ -158,10 +156,8 @@ push_images() {
     log_info "Pushing images to local registry..."
 
     local images=(
-        "waddlebot/hub"
-        "waddlebot/openwhisk-action"
-        "waddlebot/lambda-action"
-        "waddlebot/gcp-functions-action"
+        "waddlebot/hub-api"
+        "waddlebot/hub-webui"
     )
 
     for img in "${images[@]}"; do
