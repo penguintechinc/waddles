@@ -103,82 +103,6 @@ use tokio::signal;
 /// unset.
 pub const SERVICE_NAME: &str = "svc-action";
 
-/// hub-api internal gRPC scope this service requests when bootstrapping its
-/// machine JWT (`hub_api/grpc_internal/servicers.py::REQUIRED_SCOPES`) --
-/// `ResolveDisplayNames` only; this service never calls
-/// `MintEphemeralPseudonyms`/`GetStreamDek`.
-const HUB_IDENTITY_RESOLVE_SCOPE: &str = "identity:displayname:read";
-
-/// Builds and connects the shared `hub_client::HubClient` the outbound
-/// PII-detokenization pass (`egress_detokenizer`) needs, or `Ok(None)` when
-/// `detokenization_enabled` is `false` (the opt-out kill-switch is ON) --
-/// no client is needed in that case; every relay send then falls back to
-/// showing the raw `{user:<token>}` placeholder
-/// (`capabilities::StageCapabilities::detokenize_text`'s doc).
-///
-/// **Fail loud, never silent degraded-UX (user requirement).** See
-/// [`run_with_shutdown`]'s call site for the full rationale: when
-/// `detokenization_enabled` is `true` but `HUB_API_GRPC_ENDPOINT`/
-/// `SERVICE_JWT_TOKEN_ENDPOINT` are unset, or the initial connect attempt
-/// fails, this returns `Err` so the caller can exit non-zero instead of
-/// starting a pod that silently shows `egress_detokenizer::NEUTRAL_LABEL`
-/// for every resolved name. This check is **startup-only** -- a transient
-/// gRPC failure after a successful connect here still degrades to
-/// `egress_detokenizer::detokenize_resolving`'s existing fail-safe-empty
-/// behavior (`hub_client::HubClient`'s own circuit breaker/retries already
-/// bound how long such a blip affects any one call), never a process exit.
-async fn build_hub_client(
-    cli: &config::CliConfig,
-    detokenization_enabled: bool,
-) -> anyhow::Result<Option<Arc<hub_client::HubClient>>> {
-    if !detokenization_enabled {
-        tracing::info!(
-            "waddles.core.disable-pii-detokenization kill-switch is ON; hub_client not \
-             connected (no resolver configured -- every relay send shows the raw \
-             {{user:<token>}} placeholder)"
-        );
-        return Ok(None);
-    }
-    if cli.hub_api_grpc_endpoint.is_empty() || cli.service_jwt_token_endpoint.is_empty() {
-        anyhow::bail!(
-            "PII detokenization is enabled (the default) but HUB_API_GRPC_ENDPOINT/\
-             SERVICE_JWT_TOKEN_ENDPOINT is unset; refusing to start and silently show \
-             {NEUTRAL_LABEL:?} for every resolved name -- set both env vars, or set the \
-             waddles.core.disable-pii-detokenization kill-switch for a deployment without a \
-             working hub_client connection yet",
-            NEUTRAL_LABEL = egress_detokenizer::NEUTRAL_LABEL
-        );
-    }
-    match hub_client::HubClient::connect(
-        cli.hub_api_grpc_endpoint.clone(),
-        cli.service_jwt_token_endpoint.clone(),
-        cli.service_jwt_sa_token_path.clone(),
-        HUB_IDENTITY_RESOLVE_SCOPE,
-        // fix/hub-grpc-tls-and-ca-trust (PR #570 review blocker 2) -- empty
-        // means "fall back to system/webpki roots", which this chart's
-        // self-signed internal CA is never part of; HUB_API_GRPC_CA_FILE
-        // is the real path in every deployed environment.
-        (!cli.hub_api_grpc_ca_file.is_empty()).then_some(cli.hub_api_grpc_ca_file.as_str()),
-    )
-    .await
-    {
-        Ok(client) => {
-            tracing::info!(
-                endpoint = %cli.hub_api_grpc_endpoint,
-                "hub_client connected; outbound PII detokenization is live"
-            );
-            Ok(Some(Arc::new(client)))
-        }
-        Err(err) => Err(anyhow::anyhow!(
-            "PII detokenization is enabled but connecting to hub-api's internal gRPC endpoint \
-             {:?} failed: {err}; refusing to start and silently show the neutral label for \
-             every resolved name -- fix the endpoint/credentials, or set the \
-             waddles.core.disable-pii-detokenization kill-switch",
-            cli.hub_api_grpc_endpoint
-        )),
-    }
-}
-
 /// Connects the hub client used to detokenize a host tool's target user
 /// (`IdentityService.ResolvePlatformUser`, scope [`platform_user::PLATFORM_USER_SCOPE`]).
 /// `None` (logged) when hub-api's endpoints are unset or the connect fails: host tools that
@@ -214,44 +138,6 @@ async fn build_platform_user_resolver(
             None
         }
     }
-}
-
-/// Resolves whether outbound PII detokenization is enabled for this startup.
-///
-/// [`config::CliConfig::pii_detokenization_enabled_override`]'s explicit
-/// `Some(false)` (`PII_DETOKENIZATION_ENABLED=false`) short-circuits to
-/// disabled *before* the `waddles.core.disable-pii-detokenization` PostHog
-/// kill-switch is ever consulted -- field-for-field mirror of
-/// `core/svc_process::resolve_pii_tokenization_enabled`'s identical
-/// rationale (plain env/values off-switch, independent of PostHog, for an
-/// environment with no in-cluster PostHog that would otherwise be stranded
-/// behind [`build_hub_client`]'s fail-loud gate). Any other override state
-/// (`Some(true)` or unset/`None`) falls through unchanged to the existing
-/// PostHog-gated, default-ENABLED behavior -- **this override only ever
-/// disables, never force-enables past the PostHog kill-switch**.
-///
-/// **SECURITY: an explicit, loudly-logged operator escape hatch, never a
-/// silent bypass.** Disabling detokenization means every relay send shows
-/// the raw `{user:<token>}` placeholder instead of a resolved display name
-/// -- a documented, deliberate degraded-UX tradeoff for dev/air-gapped
-/// deployments, never the default in a production tenant.
-async fn resolve_pii_detokenization_enabled(
-    cli: &config::CliConfig,
-    license: &Option<Arc<penguin_licensing::LicenseClient>>,
-) -> bool {
-    if cli.pii_detokenization_enabled_override == Some(false) {
-        tracing::warn!(
-            "PII_DETOKENIZATION_ENABLED=false env override set; outbound PII detokenization is \
-             DISABLED by explicit operator override, NOT the \
-             waddles.core.disable-pii-detokenization PostHog kill-switch -- hub-api's internal \
-             gRPC will not be contacted and startup will not fail loud. This is an operational \
-             escape hatch for dev/air-gapped deployments and must never be set in a production \
-             tenant: every relay send will show the raw {{user:<token>}} placeholder instead of \
-             a resolved display name."
-        );
-        return false;
-    }
-    flags::pii_detokenization_flag(license).enabled().await
 }
 
 /// Runs the service: loads config, bootstraps telemetry, builds the
@@ -380,41 +266,8 @@ where
     let circuit_breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics> =
         Arc::new(telemetry::register_circuit_breaker_metrics(&prom_registry));
 
-    // Outbound PII-detokenization's hub_client startup wiring (closes the
-    // TODO seam `capabilities::StageCapabilities::with_detokenize` used to
-    // leave unwired): resolved ONCE here, before the host-API listener
-    // starts below. See [`build_hub_client`]'s own doc for the fail-loud
-    // contract.
-    let pii_detokenization_enabled =
-        resolve_pii_detokenization_enabled(&config.cli, &license).await;
-    // Over-log the resolved state + source -- visibility fix paired with
-    // `core/svc_process`'s identical log line (`resolve_pii_tokenization_
-    // enabled`'s own doc there), added after that crate's env-override/
-    // kill-switch gate mismatch dead-lettered every inbound event on alpha
-    // (2026-10-04). svc_action does not have the symmetric bug (`with_
-    // detokenize` is only ever wired when `hub_client_conn` is `Some`, so
-    // there is no second gate to disagree with it -- see this function's
-    // own match arm below), but the same startup visibility is still
-    // owed. No secrets/PII in this line -- just booleans and a source
-    // label. Field name deliberately avoids the substring "token" (unlike
-    // the local variable/doc prose) -- `penguin_logging::sanitize`'s
-    // key-pattern redaction matches on it and would otherwise print
-    // `[REDACTED]` for this boolean, defeating the entire point of this
-    // log line (see `core/svc_process`'s identical fix).
-    tracing::info!(
-        pii_outbound_mode_enabled = pii_detokenization_enabled,
-        source = if config.cli.pii_detokenization_enabled_override == Some(false) {
-            "env-override(PII_DETOKENIZATION_ENABLED=false)"
-        } else {
-            "posthog-kill-switch-or-default"
-        },
-        "resolved outbound PII detokenization state"
-    );
-    let hub_client_conn = build_hub_client(&config.cli, pii_detokenization_enabled).await?;
-
     let connections = try_start_host_api(
         &config.cli,
-        config.discord_bot_token.clone(),
         Arc::clone(&usage),
         catalog,
         Arc::clone(&kv_capabilities),
@@ -423,7 +276,6 @@ where
         config.db_reader_password.clone(),
         config.bundle_db_password.clone(),
         host_api_metrics,
-        hub_client_conn,
         app_version_snapshot.clone(),
     );
 
@@ -822,7 +674,6 @@ fn bundle_credential_sources() -> bundle_host_http::credentials::CredentialSourc
 #[allow(clippy::too_many_arguments)]
 async fn build_stage_capabilities(
     cli: &config::CliConfig,
-    discord_bot_token: Option<config::Secret>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     catalog: Arc<distribution::BundleCatalog>,
     kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
@@ -830,7 +681,6 @@ async fn build_stage_capabilities(
     license: Option<Arc<penguin_licensing::LicenseClient>>,
     db_reader_password: Option<config::Secret>,
     bundle_db_password: Option<config::Secret>,
-    hub_client_conn: Option<Arc<hub_client::HubClient>>,
     connections: Arc<host_api::ConnectionRegistry>,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
 ) -> Option<Arc<dyn capabilities::CapabilityHandler>> {
@@ -953,37 +803,6 @@ async fn build_stage_capabilities(
     .await
     {
         Some(db) => caps.with_db(db),
-        None => caps,
-    };
-    // Discord relay send (spec: relay providers, `discord`) -- graceful
-    // degradation, not a startup requirement: a deployment that never sets
-    // `DISCORD_BOT_TOKEN` simply never enables this provider, and a bundle
-    // calling `relay.send("discord", ...)` sees `relay_unavailable` rather
-    // than this process failing to start (`config::Config::
-    // discord_bot_token`'s doc).
-    let caps = match discord_bot_token {
-        Some(token) => caps.with_discord(Arc::new(egress::ReqwestTransport::new()), token),
-        None => {
-            tracing::warn!(
-                "DISCORD_BOT_TOKEN not set; discord relay provider disabled \
-                 (relay_unavailable on every discord relay.send)"
-            );
-            caps
-        }
-    };
-    // Outbound PII-detokenization (`capabilities::StageCapabilities::
-    // with_detokenize`) -- graceful degradation, not a startup requirement
-    // *here*: `run_with_shutdown`'s `build_hub_client` call already fails
-    // loud at process startup when detokenization is enabled and no
-    // `HubClient` could be connected, so `hub_client_conn` is `None` here
-    // ONLY when the opt-out kill-switch is ON (the safe, documented
-    // degraded-UX tradeoff -- `flags::DISABLE_PII_DETOKENIZATION_FLAG`'s
-    // doc), never from an unconfigured-but-expected dependency.
-    let caps = match hub_client_conn {
-        Some(client) => caps.with_detokenize(
-            Arc::new(egress_detokenizer::HubClientResolver(client)),
-            flags::pii_detokenization_flag(&license),
-        ),
         None => caps,
     };
     // Dispatcher egress toggle (`flags::EGRESS_VIA_DISPATCHER_FLAG`) --
@@ -1210,7 +1029,6 @@ fn resolve_outbound_pin_keys() -> Option<pin_sig::PinKeys> {
 #[allow(clippy::too_many_arguments)]
 fn try_start_host_api(
     cli: &config::CliConfig,
-    discord_bot_token: Option<config::Secret>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     catalog: Arc<distribution::BundleCatalog>,
     kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
@@ -1219,7 +1037,6 @@ fn try_start_host_api(
     db_reader_password: Option<config::Secret>,
     bundle_db_password: Option<config::Secret>,
     metrics: telemetry::HostApiMetrics,
-    hub_client_conn: Option<Arc<hub_client::HubClient>>,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
 ) -> Arc<host_api::ConnectionRegistry> {
     let registry = Arc::new(host_api::ConnectionRegistry::new());
@@ -1234,7 +1051,6 @@ fn try_start_host_api(
         });
         let capabilities = build_stage_capabilities(
             &cli,
-            discord_bot_token,
             usage,
             catalog,
             kv_capabilities,
@@ -1242,7 +1058,6 @@ fn try_start_host_api(
             license,
             db_reader_password,
             bundle_db_password,
-            hub_client_conn,
             Arc::clone(&registry_for_task),
             app_version_snapshot,
         )
@@ -2140,7 +1955,6 @@ mod tests {
             cli,
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
-            discord_bot_token: None,
             db_reader_password: None,
             bundle_db_password: None,
         }
@@ -2294,24 +2108,6 @@ mod tests {
         let _guard = ENV_LOCK.lock().await;
         // SAFETY: serialized by ENV_LOCK; no other test reads OTEL env.
         unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT") };
-        // `build_license_client()`'s hardcoded self-domain bypass
-        // (`BYPASS_DOMAIN`'s doc) makes PII detokenization report ENABLED
-        // unconditionally for this service, test included -- so
-        // `run_with_shutdown`'s `build_hub_client` call needs a real,
-        // connectable `HUB_API_GRPC_ENDPOINT` or it fails loud (by design)
-        // before ever reaching the bind/serve logic this test exercises.
-        // `HubClient::connect` only needs a listening TCP peer (it doesn't
-        // perform the actual gRPC handshake until the first RPC) -- a bare
-        // accept-and-drop loop is enough.
-        let hub_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind an ephemeral port for the fake hub-api listener");
-        let hub_addr = hub_listener.local_addr().expect("local_addr");
-        tokio::spawn(async move {
-            while let Ok((sock, _)) = hub_listener.accept().await {
-                std::mem::forget(sock);
-            }
-        });
         let mut config = ephemeral_config();
         config.cli = CliConfig::parse_from([
             "svc-action",
@@ -2319,10 +2115,6 @@ mod tests {
             "0",
             "--metrics-port",
             "0",
-            "--hub-api-grpc-endpoint",
-            &format!("http://{hub_addr}"),
-            "--service-jwt-token-endpoint",
-            &format!("http://{hub_addr}"),
         ]);
         // Shutdown futures resolve immediately, so the servers bind, log,
         // and drain right away instead of blocking on a real OS signal.
@@ -2477,7 +2269,6 @@ mod tests {
             cli,
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
-            discord_bot_token: None,
             db_reader_password: None,
             bundle_db_password: None,
         };
@@ -2519,7 +2310,6 @@ mod tests {
             cli,
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
-            discord_bot_token: None,
             db_reader_password: None,
             bundle_db_password: None,
         };
@@ -2563,7 +2353,6 @@ mod tests {
             cli,
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
-            discord_bot_token: None,
             db_reader_password: None,
             bundle_db_password: None,
         };
@@ -2595,7 +2384,6 @@ mod tests {
             cli,
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
-            discord_bot_token: None,
             db_reader_password: Some(Secret::new("real-ro-password")),
             bundle_db_password: None,
         };
@@ -2897,91 +2685,5 @@ mod tests {
             .await
             .expect("env_bundle_loader_loop must return promptly once shutdown resolves")
             .expect("loader task must not panic");
-    }
-
-    /// `PII_DETOKENIZATION_ENABLED=false` env override: disabled before the
-    /// PostHog kill-switch is ever consulted -- no license client needed
-    /// (passed `&None` here), no network touched.
-    #[tokio::test]
-    async fn resolve_pii_detokenization_enabled_honors_explicit_env_disable() {
-        let cli = CliConfig::parse_from([
-            "svc-action",
-            "--pii-detokenization-enabled-override",
-            "false",
-        ]);
-        assert_eq!(cli.pii_detokenization_enabled_override, Some(false));
-        assert!(!resolve_pii_detokenization_enabled(&cli, &None).await);
-    }
-
-    /// Env override unset (`None`, `CliConfig::parse_from`'s default): falls
-    /// through unchanged to `flags::pii_detokenization_flag`'s existing
-    /// `None`-license-client fallback, which reports ENABLED (the safe
-    /// default -- `flags::pii_detokenization_flag_defaults_enabled_when_
-    /// no_license_client_is_available` in `flags.rs` covers that fallback
-    /// directly; this test is the integration point proving this crate's
-    /// gate actually reaches it).
-    #[tokio::test]
-    async fn resolve_pii_detokenization_enabled_defers_to_posthog_gate_when_override_unset() {
-        let cli = CliConfig::parse_from(["svc-action"]);
-        assert_eq!(cli.pii_detokenization_enabled_override, None);
-        assert!(resolve_pii_detokenization_enabled(&cli, &None).await);
-    }
-
-    /// Kill-switch ON (`detokenization_enabled: false`) -- no
-    /// `HUB_API_GRPC_ENDPOINT` needed at all, no client connected, and no
-    /// error: the opt-out path never touches the network.
-    #[tokio::test]
-    async fn build_hub_client_returns_none_when_detokenization_disabled() {
-        let cli = CliConfig::parse_from(["svc-action"]);
-        let result = build_hub_client(&cli, false).await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
-    }
-
-    /// Fail-loud regression test (user requirement): detokenization
-    /// enabled but `HUB_API_GRPC_ENDPOINT`/`SERVICE_JWT_TOKEN_ENDPOINT` are
-    /// unset (both default to `""`, `CliConfig::parse_from`'s default)
-    /// must return `Err` -- asserted via this testable startup path, never
-    /// a real `std::process::exit` in-test. `run_with_shutdown` propagates
-    /// this `Err` via `?`, which is what actually crashloops the pod.
-    #[tokio::test]
-    async fn build_hub_client_fails_loud_when_enabled_and_endpoint_unset() {
-        let cli = CliConfig::parse_from(["svc-action"]);
-        assert_eq!(cli.hub_api_grpc_endpoint, "");
-        assert_eq!(cli.service_jwt_token_endpoint, "");
-        let err = match build_hub_client(&cli, true).await {
-            Ok(_) => panic!("enabled detokenization with no endpoint configured must fail loud"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("HUB_API_GRPC_ENDPOINT"));
-    }
-
-    /// Fail-loud regression test: detokenization enabled, both endpoints
-    /// configured, but nothing is listening on the configured gRPC
-    /// endpoint (an ephemeral port bound then immediately dropped,
-    /// guaranteeing a prompt connection-refused rather than a hang) --
-    /// `HubClient::connect`'s initial connect attempt fails, and
-    /// `build_hub_client` must surface that as `Err`, never silently start
-    /// with no resolver configured.
-    #[tokio::test]
-    async fn build_hub_client_fails_loud_when_enabled_and_endpoint_unreachable() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind an ephemeral port");
-        let addr = listener.local_addr().expect("local_addr");
-        drop(listener); // nothing listening now -- connection refused
-
-        let cli = CliConfig::parse_from([
-            "svc-action",
-            "--hub-api-grpc-endpoint",
-            &format!("http://{addr}"),
-            "--service-jwt-token-endpoint",
-            &format!("http://{addr}"),
-        ]);
-        let err = match build_hub_client(&cli, true).await {
-            Ok(_) => panic!("an unreachable hub-api gRPC endpoint must fail loud at startup"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("hub-api"));
     }
 }

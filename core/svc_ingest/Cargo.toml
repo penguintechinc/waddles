@@ -240,6 +240,10 @@ connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
 # exact pin hub_client/svc_process use (status-code classification).
 hub_client = { path = "../hub_client", version = "=0.1.0" }
 tonic = { version = "=0.14.6", default-features = false }
+# Egress detokenizer (`src/egress.rs`): svc-ingest's outbound drain is the ONLY platform
+# egress, so it substitutes `{user:<token>}` with display names immediately before each
+# send (per-send hub-api lookup, nothing cached). Same-repo path dependency.
+egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
 
 # Discord `allowed_mentions` mass-mention backstop stamped onto every
 # create-message body `src/discord_rest.rs` sends -- one definition shared with

@@ -154,6 +154,7 @@ async fn logs_and_metrics_are_pii_free_secret_free_and_bounded() {
         channel: "#chan".into(),
         text: "private message body".into(),
         origin_channel: Some("#chan".into()),
+        tenant_id: None,
     };
     let req = ExecRequest {
         platform: "twitch",

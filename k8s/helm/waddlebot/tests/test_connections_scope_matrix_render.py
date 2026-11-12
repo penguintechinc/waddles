@@ -104,7 +104,9 @@ def test_svc_action_identity_has_resolve_and_static(
     assert "connections:resolve" in scopes
     assert "connections:resolve:static" in scopes
     assert "connections:list" not in scopes
-    assert {"identity:displayname:read", "egress:connect"} <= set(scopes)
+    assert "egress:connect" in scopes
+    # PII boundary: svc-action never detokenizes, so it holds no display-name scope.
+    assert "identity:displayname:read" not in scopes
 
 
 def test_svc_ingest_identity_gets_list_and_resolve_not_static(
@@ -113,6 +115,8 @@ def test_svc_ingest_identity_gets_list_and_resolve_not_static(
     scopes = _identities(enabled)["svc-ingest"]["allowed_scopes"]
     assert {"connections:resolve", "connections:list"} <= set(scopes)
     assert "connections:resolve:static" not in scopes
+    # svc-ingest's outbound drain is the sole platform egress and detokenizes there.
+    assert "identity:displayname:read" in scopes
 
 
 def test_no_other_identity_holds_any_connections_scope(

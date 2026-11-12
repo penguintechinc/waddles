@@ -2,8 +2,8 @@
 //! boundary whose inbound half is `core/svc_process/src/pii_tokenize.rs`.
 //! A single-pass, non-recursive `{user:<token>}` scanner that substitutes
 //! real display names back into chat/overlay text **only at the final
-//! send** (`core/svc_action`'s `relay.send`/Discord relay host calls),
-//! per-sink-escaped so a resolved display name can never break out of its
+//! send** (`core/svc_ingest`'s outbound drain, immediately before each
+//! platform request; `core/svc_presentation` for overlays), per-sink-escaped so a resolved display name can never break out of its
 //! position in the rendered message (Discord markdown/mention injection,
 //! Twitch-IRC CRLF injection).
 //!
@@ -131,6 +131,37 @@ fn escape_name(name: &str, sink: Sink) -> String {
             out
         }
     }
+}
+
+/// Text whose `{user:<token>}` placeholders have been through the egress
+/// pass: either substituted with sink-escaped display names, or left as the
+/// tokens (kill switch ON, resolver unavailable). Platform sink send
+/// functions accept ONLY this type, so a send path cannot be handed
+/// un-passed text by accident. The inner string is private; the only
+/// producers are [`detokenize_for_egress`] and [`tokens_unchanged`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetokenizedText(String);
+
+impl DetokenizedText {
+    /// The text to put on the wire.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consumes the wrapper, returning the text to put on the wire.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+/// Wraps `text` as-is: the tokens stay tokens (never a name). Used when no
+/// resolution is wanted or possible -- kill switch ON, no resolver, no
+/// tenant -- and for text that carries no PII by construction.
+#[must_use]
+pub fn tokens_unchanged(text: &str) -> DetokenizedText {
+    DetokenizedText(text.to_string())
 }
 
 /// Outcome of one [`detokenize`] call -- asserted on directly by this
@@ -285,6 +316,50 @@ pub async fn detokenize_resolving(
     outcome
 }
 
+/// Egress-time pass for a platform send: resolves the `{user:<token>}`
+/// placeholders in `text` through `resolver` (one batch, per call, nothing
+/// cached here) and returns the sink-escaped result.
+///
+/// **Never fails open.** `resolver = None` (kill switch ON / no hub client),
+/// a text with no placeholders, or a resolver error all return the text
+/// UNCHANGED -- tokens go out, never a guessed name and never a partial
+/// substitution. A token the (healthy) resolver does not know becomes
+/// [`NEUTRAL_LABEL`], as in [`detokenize`].
+pub async fn detokenize_for_egress(
+    text: &str,
+    tenant_id: &str,
+    resolver: Option<&dyn DisplayNameResolver>,
+    sink: Sink,
+) -> DetokenizedText {
+    let Some(resolver) = resolver else {
+        return tokens_unchanged(text);
+    };
+    let tokens = extract_tokens(text);
+    if tokens.is_empty() {
+        return tokens_unchanged(text);
+    }
+    match resolver.resolve_many(tenant_id, tokens.clone()).await {
+        Ok(names) => {
+            let outcome = detokenize(text, &names, sink);
+            if !outcome.unresolved_tokens.is_empty() {
+                tracing::error!(
+                    unresolved = outcome.unresolved_tokens.len(),
+                    "tokens did not resolve to a display name; substituted the neutral label"
+                );
+            }
+            DetokenizedText(outcome.text)
+        }
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                token_count = tokens.len(),
+                "display-name resolution unavailable; sending the tokens unchanged"
+            );
+            tokens_unchanged(text)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +509,62 @@ mod tests {
         // the message still sends, with the neutral label.
         assert_eq!(out.text, format!("hi {NEUTRAL_LABEL}"));
         assert!(!out.text.contains("{user:a}"));
+    }
+
+    /// Counts every `resolve_many` call, so a test can prove a path never asked.
+    struct CountingResolver(std::sync::atomic::AtomicUsize, HashMap<String, String>);
+
+    impl DisplayNameResolver for CountingResolver {
+        fn resolve_many<'a>(
+            &'a self,
+            _tenant_id: &'a str,
+            tokens: Vec<String>,
+        ) -> ResolveResult<'a> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let map = self.1.clone();
+            Box::pin(async move {
+                Ok(tokens
+                    .into_iter()
+                    .filter_map(|t| map.get(&t).cloned().map(|n| (t, n)))
+                    .collect())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn egress_substitutes_and_escapes_for_the_sink() {
+        let r = FakeResolver(names(&[("u1", "a_b")]));
+        let out = detokenize_for_egress("hi {user:u1}", "9", Some(&r), Sink::Discord).await;
+        assert_eq!(out.as_str(), "hi a\\_b");
+    }
+
+    #[tokio::test]
+    async fn egress_without_a_resolver_sends_the_tokens_and_asks_nobody() {
+        let out = detokenize_for_egress("hi {user:u1}", "9", None, Sink::Twitch).await;
+        assert_eq!(out.as_str(), "hi {user:u1}");
+    }
+
+    #[tokio::test]
+    async fn egress_resolver_error_sends_the_tokens_never_a_name() {
+        let out =
+            detokenize_for_egress("hi {user:u1}", "9", Some(&AlwaysFailResolver), Sink::Twitch)
+                .await;
+        assert_eq!(out.as_str(), "hi {user:u1}");
+    }
+
+    #[tokio::test]
+    async fn egress_unknown_token_becomes_the_neutral_label() {
+        let r = FakeResolver(HashMap::new());
+        let out = detokenize_for_egress("hi {user:u1}", "9", Some(&r), Sink::Twitch).await;
+        assert_eq!(out.as_str(), format!("hi {NEUTRAL_LABEL}"));
+    }
+
+    #[tokio::test]
+    async fn egress_text_without_tokens_makes_zero_resolver_calls() {
+        let r = CountingResolver(std::sync::atomic::AtomicUsize::new(0), HashMap::new());
+        let out = detokenize_for_egress("plain text", "9", Some(&r), Sink::Twitch).await;
+        assert_eq!(out.as_str(), "plain text");
+        assert_eq!(r.0.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

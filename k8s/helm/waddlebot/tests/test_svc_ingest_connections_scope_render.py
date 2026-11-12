@@ -115,6 +115,9 @@ def test_svc_ingest_is_allow_listed_for_exactly_connections_resolve_on_the_syste
         "dataplane:app-commands",
         "dataplane:active-context",
         "identity:platform-user:resolve",
+        # egress detokenization (outbound drain is the sole platform egress)
+        "identity:displayname:read",
+        "bundle-schedules:read",
     ]
     assert entry["tenant"] == "system"
     assert entry["k8s_service_account"] == "svc-ingest"

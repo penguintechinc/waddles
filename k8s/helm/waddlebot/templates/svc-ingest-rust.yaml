@@ -163,6 +163,13 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
         {{- end }}
+        # Egress detokenization (svc-ingest's outbound drain is the only platform egress): plain env
+        # off-switch independent of the waddles.core.disable-pii-detokenization PostHog kill-switch.
+        # Rendered only when pipeline.piiTokenization.enabled is false; omitted otherwise.
+        {{- if not .Values.pipeline.piiTokenization.enabled }}
+        - name: PII_DETOKENIZATION_ENABLED
+          value: "false"
+        {{- end }}
         # P6a T6: dedicated outbound pin key (NOT the shared envFrom Secret) -- templates/outbound-pin-secret.yaml.
         - name: OUTBOUND_PIN_KEYS
           valueFrom:

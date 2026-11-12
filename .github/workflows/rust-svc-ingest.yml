@@ -7,6 +7,7 @@ on:
       - 'core/svc_ingest/**'
       - 'core/discord_mentions/**'
       - 'core/hub_client/**'
+      - 'core/egress_detokenizer/**'
       - 'proto/**'
       - '.github/workflows/rust-svc-ingest.yml'
       - '.github/workflows/rust-crate-ci.yml'
@@ -52,6 +53,7 @@ jobs:
             core/svc_ingest/**
             core/discord_mentions/**
             core/hub_client/**
+            core/egress_detokenizer/**
             proto/**
 
   lint-test:

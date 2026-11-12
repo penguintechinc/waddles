@@ -239,6 +239,7 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
     crate::connector::sender_exec::youtube_duties::register_metrics(registry)
         .expect("register svc_ingest_youtube_duty_refused_total / _quota_units_total");
     crate::outbound_boot::register_metrics(registry).expect("register svc_ingest_outbound_path");
+    crate::egress::register_metrics(registry).expect("register svc_ingest_egress_detokenize_total");
 
     let eventsub_verifications_total = prometheus::IntCounterVec::new(
         prometheus::Opts::new(

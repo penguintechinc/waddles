@@ -49,6 +49,7 @@ use std::time::{Duration, Instant};
 use reqwest::{Method, StatusCode};
 
 use crate::config::Secret;
+use egress_detokenizer::DetokenizedText;
 
 /// Discord REST API base this client targets.
 pub const DEFAULT_API_BASE: &str = "https://discord.com/api/v10";
@@ -195,16 +196,20 @@ impl DiscordRestClient {
     /// # Errors
     /// [`DiscordRestError`] -- invalid id, empty content, rate limit
     /// exhaustion, non-2xx status, or transport failure.
-    pub async fn send_message(&self, channel_id: &str, text: &str) -> Result<(), DiscordRestError> {
+    pub async fn send_message(
+        &self,
+        channel_id: &str,
+        text: &DetokenizedText,
+    ) -> Result<(), DiscordRestError> {
         require_snowflake(channel_id, "channel_id")?;
-        require_content(text)?;
+        require_content(text.as_str())?;
         let resp = self
             .execute(
                 "chat.send",
                 Method::POST,
                 format!("/channels/{channel_id}/messages"),
                 format!("POST /channels/{channel_id}/messages"),
-                Some(discord_mentions::message_body(text)),
+                Some(discord_mentions::message_body(text.as_str())),
             )
             .await?;
         ensure_success(&resp, false)
@@ -240,9 +245,13 @@ impl DiscordRestClient {
     /// # Errors
     /// [`DiscordRestError::CannotDm`] when Discord refuses the DM (403 on
     /// either call); otherwise as for [`Self::send_message`].
-    pub async fn send_dm(&self, user_id: &str, text: &str) -> Result<(), DiscordRestError> {
+    pub async fn send_dm(
+        &self,
+        user_id: &str,
+        text: &DetokenizedText,
+    ) -> Result<(), DiscordRestError> {
         require_snowflake(user_id, "user_id")?;
-        require_content(text)?;
+        require_content(text.as_str())?;
         let open = self
             .execute(
                 "dm.send",
@@ -266,7 +275,7 @@ impl DiscordRestClient {
                 Method::POST,
                 format!("/channels/{dm_channel_id}/messages"),
                 format!("POST /channels/{dm_channel_id}/messages"),
-                Some(discord_mentions::message_body(text)),
+                Some(discord_mentions::message_body(text.as_str())),
             )
             .await?;
         ensure_success(&sent, true)
@@ -285,11 +294,11 @@ impl DiscordRestClient {
         &self,
         origin_channel_id: &str,
         user_id: &str,
-        text: &str,
+        text: &DetokenizedText,
     ) -> Result<(), DiscordRestError> {
         require_snowflake(origin_channel_id, "origin_channel_id")?;
         require_snowflake(user_id, "user_id")?;
-        require_content(text)?;
+        require_content(text.as_str())?;
         let Some(guild_id) = self.guild_of_channel(origin_channel_id).await? else {
             tracing::warn!(
                 platform = "discord",
@@ -586,6 +595,11 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap, body: &[u8]) -> Durat
 
 #[cfg(test)]
 mod tests {
+    /// Test text wrapper: tokens-only, never PII.
+    fn t(s: &str) -> DetokenizedText {
+        egress_detokenizer::tokens_unchanged(s)
+    }
+
     use super::*;
     use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -634,7 +648,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        client(&server).send_message("111", "hi").await.unwrap();
+        client(&server).send_message("111", &t("hi")).await.unwrap();
     }
 
     /// regression: no Discord REST body set `allowed_mentions`, so a bundle
@@ -657,7 +671,7 @@ mod tests {
                 .expect(1)
                 .mount(&server)
                 .await;
-            client(&server).send_message("111", text).await.unwrap();
+            client(&server).send_message("111", &t(text)).await.unwrap();
         }
     }
 
@@ -681,7 +695,7 @@ mod tests {
             .mount(&server)
             .await;
         client(&server)
-            .send_dm("777", "@everyone psst")
+            .send_dm("777", &t("@everyone psst"))
             .await
             .unwrap();
     }
@@ -801,7 +815,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        client(&server).send_dm("777", "psst").await.unwrap();
+        client(&server).send_dm("777", &t("psst")).await.unwrap();
     }
 
     #[tokio::test]
@@ -819,7 +833,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let err = client(&server).send_dm("777", "x").await.unwrap_err();
+        let err = client(&server).send_dm("777", &t("x")).await.unwrap_err();
         assert!(matches!(
             err,
             DiscordRestError::CannotDm {
@@ -837,7 +851,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(403))
             .mount(&server)
             .await;
-        let err = client(&server).send_dm("777", "x").await.unwrap_err();
+        let err = client(&server).send_dm("777", &t("x")).await.unwrap_err();
         assert!(matches!(
             err,
             DiscordRestError::CannotDm { status: 403, .. }
@@ -852,7 +866,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
             .mount(&server)
             .await;
-        let err = client(&server).send_dm("777", "x").await.unwrap_err();
+        let err = client(&server).send_dm("777", &t("x")).await.unwrap_err();
         assert!(matches!(err, DiscordRestError::BadResponse(_)));
     }
 
@@ -872,7 +886,7 @@ mod tests {
             .mount(&server)
             .await;
         let start = Instant::now();
-        client(&server).send_message("111", "hi").await.unwrap();
+        client(&server).send_message("111", &t("hi")).await.unwrap();
         assert!(start.elapsed() >= Duration::from_millis(40));
     }
 
@@ -900,7 +914,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0.01"))
             .mount(&server)
             .await;
-        let err = client(&server).send_message("111", "hi").await.unwrap_err();
+        let err = client(&server).send_message("111", &t("hi")).await.unwrap_err();
         assert!(matches!(
             err,
             DiscordRestError::RateLimited { attempts: 3, .. }
@@ -915,7 +929,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let err = client(&server).send_message("111", "hi").await.unwrap_err();
+        let err = client(&server).send_message("111", &t("hi")).await.unwrap_err();
         assert!(matches!(
             err,
             DiscordRestError::RateLimited {
@@ -937,9 +951,9 @@ mod tests {
             .mount(&server)
             .await;
         let c = client(&server);
-        c.send_message("111", "a").await.unwrap();
+        c.send_message("111", &t("a")).await.unwrap();
         let start = Instant::now();
-        c.send_message("111", "b").await.unwrap();
+        c.send_message("111", &t("b")).await.unwrap();
         assert!(start.elapsed() >= Duration::from_millis(100));
     }
 
@@ -956,8 +970,8 @@ mod tests {
             .mount(&server)
             .await;
         let c = client(&server);
-        c.send_message("111", "a").await.unwrap();
-        let err = c.send_message("111", "b").await.unwrap_err();
+        c.send_message("111", &t("a")).await.unwrap();
+        let err = c.send_message("111", &t("b")).await.unwrap_err();
         assert!(matches!(
             err,
             DiscordRestError::RateLimited { attempts: 0, .. }
@@ -972,7 +986,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let err = client(&server).send_message("111", "hi").await.unwrap_err();
+        let err = client(&server).send_message("111", &t("hi")).await.unwrap_err();
         assert!(matches!(
             err,
             DiscordRestError::Status {
@@ -987,13 +1001,13 @@ mod tests {
         let server = MockServer::start().await; // no mocks: any request would 404
         let c = client(&server);
         assert!(matches!(
-            c.send_message("../x", "hi").await,
+            c.send_message("../x", &t("hi")).await,
             Err(DiscordRestError::InvalidId {
                 field: "channel_id"
             })
         ));
         assert!(matches!(
-            c.send_message("111", "").await,
+            c.send_message("111", &t("")).await,
             Err(DiscordRestError::EmptyContent)
         ));
         assert!(matches!(
@@ -1003,11 +1017,11 @@ mod tests {
             })
         ));
         assert!(matches!(
-            c.send_dm("u", "hi").await,
+            c.send_dm("u", &t("hi")).await,
             Err(DiscordRestError::InvalidId { field: "user_id" })
         ));
         assert!(matches!(
-            c.send_dm("1", "").await,
+            c.send_dm("1", &t("")).await,
             Err(DiscordRestError::EmptyContent)
         ));
         assert!(server.received_requests().await.unwrap().is_empty());
@@ -1017,7 +1031,7 @@ mod tests {
     async fn transport_error_does_not_leak_token() {
         // Nothing listens on port 1.
         let c = DiscordRestClient::new(Secret::new(TOKEN), "http://127.0.0.1:1").unwrap();
-        let err = c.send_message("111", "hi").await.unwrap_err();
+        let err = c.send_message("111", &t("hi")).await.unwrap_err();
         assert!(matches!(err, DiscordRestError::Transport(_)));
         assert!(!err.to_string().contains(TOKEN));
     }
@@ -1078,7 +1092,7 @@ mod tests {
             .await;
         mount_dm_pair(&server, 1).await;
         client(&server)
-            .send_dm_in_community("100", "777", "psst")
+            .send_dm_in_community("100", "777", &t("psst"))
             .await
             .unwrap();
     }
@@ -1098,7 +1112,7 @@ mod tests {
             .await;
         mount_dm_pair(&server, 0).await;
         let err = client(&server)
-            .send_dm_in_community("100", "777", "psst")
+            .send_dm_in_community("100", "777", &t("psst"))
             .await
             .unwrap_err();
         assert!(matches!(err, DiscordRestError::NotInCommunity));
@@ -1116,7 +1130,7 @@ mod tests {
             .await;
         mount_dm_pair(&server, 0).await;
         let err = client(&server)
-            .send_dm_in_community("100", "777", "psst")
+            .send_dm_in_community("100", "777", &t("psst"))
             .await
             .unwrap_err();
         assert!(matches!(err, DiscordRestError::NotInCommunity));
@@ -1138,7 +1152,7 @@ mod tests {
             .await;
         mount_dm_pair(&server, 0).await;
         let err = client(&server)
-            .send_dm_in_community("100", "777", "psst")
+            .send_dm_in_community("100", "777", &t("psst"))
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1172,8 +1186,8 @@ mod tests {
             .await;
         mount_dm_pair(&server, 2).await;
         let c = client(&server);
-        c.send_dm_in_community("100", "777", "a").await.unwrap();
-        c.send_dm_in_community("100", "777", "b").await.unwrap();
+        c.send_dm_in_community("100", "777", &t("a")).await.unwrap();
+        c.send_dm_in_community("100", "777", &t("b")).await.unwrap();
     }
 
     #[tokio::test]
@@ -1181,17 +1195,17 @@ mod tests {
         let server = MockServer::start().await; // no mocks: any request would 404
         let c = client(&server);
         assert!(matches!(
-            c.send_dm_in_community("../x", "777", "hi").await,
+            c.send_dm_in_community("../x", "777", &t("hi")).await,
             Err(DiscordRestError::InvalidId {
                 field: "origin_channel_id"
             })
         ));
         assert!(matches!(
-            c.send_dm_in_community("100", "u", "hi").await,
+            c.send_dm_in_community("100", "u", &t("hi")).await,
             Err(DiscordRestError::InvalidId { field: "user_id" })
         ));
         assert!(matches!(
-            c.send_dm_in_community("100", "777", "").await,
+            c.send_dm_in_community("100", "777", &t("")).await,
             Err(DiscordRestError::EmptyContent)
         ));
         assert!(server.received_requests().await.unwrap().is_empty());

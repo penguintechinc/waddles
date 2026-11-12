@@ -169,6 +169,7 @@ fn chat_send(platform_channel: &str, origin: Option<&str>, text: &str) -> Outbou
         channel: platform_channel.to_string(),
         text: text.to_string(),
         origin_channel: origin.map(str::to_string),
+        tenant_id: None,
     }
 }
 

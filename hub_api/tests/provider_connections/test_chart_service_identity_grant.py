@@ -153,12 +153,20 @@ def test_svc_ingest_identity_can_mint_connections_resolve_with_system_tenant(
     assert verified["tenant"] == "system"
 
 
+def test_svc_ingest_identity_can_mint_displayname_read_for_egress_detokenization(
+    service_issuer: ServiceJwtIssuer,
+) -> None:
+    # svc-ingest's outbound drain is the sole platform egress; it resolves {user:<token>} there.
+    scope = "identity:displayname:read"
+    token, claims = service_issuer.issue_with_claims(_SVC_INGEST, scope)
+    assert (claims["scope"], claims["tenant"]) == (scope, "system")
+
+
 @pytest.mark.parametrize(
     "scope",
     [
         "identity:ephemeral:mint",
         "identity:handle:resolve",
-        "identity:displayname:read",
         "egress:connect",
         "connections:admin",
         "connections:resolve:*",

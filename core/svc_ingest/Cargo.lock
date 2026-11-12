@@ -728,6 +728,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "egress_detokenizer"
+version = "0.1.0"
+dependencies = [
+ "hub_client",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2890,6 +2899,7 @@ dependencies = [
  "clap",
  "connection_resolver",
  "discord-mentions",
+ "egress_detokenizer",
  "futures-util",
  "hkdf",
  "hmac",

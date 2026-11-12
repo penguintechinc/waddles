@@ -82,6 +82,7 @@ pub mod outbound_boot;
 pub mod outbound_creds;
 pub mod outbound_creds_discord;
 pub mod outbound_creds_kick;
+pub mod egress;
 pub mod outbound_creds_youtube;
 pub mod outbound_ops;
 pub mod outbound_pin;
@@ -366,6 +367,12 @@ where
     // With every connector OFF nothing is built, bound or spawned.
     let mut connector_ready: Option<Arc<dyn connector_runtime::RuntimeReady>> = None;
     let license_client = license::build_license_client();
+    // Egress detokenizer: installed BEFORE any outbound drain starts. The drain is the only
+    // platform egress; it substitutes `{user:<token>}` right before each send.
+    egress::install(egress::Egress::from_cli(
+        &config.cli,
+        license_client.clone(),
+    ));
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
         // Schema-v3 producer: resolver is installed BEFORE any receiver can
         // publish. A flag that is ON but misconfigured fails the process
