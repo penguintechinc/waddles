@@ -123,6 +123,10 @@ vi.mock('../../../services/roleSyncApi', async () => {
       createBinding: vi.fn(),
       deleteBinding: vi.fn(),
       updatePairing: vi.fn(),
+      listMirrors: vi.fn(),
+      listGuildRoles: vi.fn(),
+      createMirror: vi.fn(),
+      deleteMirror: vi.fn(),
     },
   };
 });
@@ -188,6 +192,8 @@ beforeEach(() => {
   mockedUseAuth.mockReturnValue({ isCommunityAdmin: () => true } as ReturnType<typeof useAuth>);
   mockedRoleSyncApi.listPairings.mockResolvedValue([PAIRING]);
   mockedRoleSyncApi.listBindings.mockResolvedValue([SUBSCRIBER_BINDING, COMMUNITY_ROLE_BINDING]);
+  mockedRoleSyncApi.listMirrors.mockResolvedValue([]);
+  mockedRoleSyncApi.listGuildRoles.mockResolvedValue([]);
 });
 
 afterEach(() => {

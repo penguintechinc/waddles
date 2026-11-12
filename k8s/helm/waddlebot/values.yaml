@@ -2269,6 +2269,9 @@ config:
   # ENV baseline for flag waddles.role_sync -> FLAG_WADDLES_ROLE_SYNC (default OFF;
   # PostHog overrides when connected). Also needs pipeline.roleSync.enabled for the reconcile CronJob.
   roleSyncEnabled: false
+  # ENV baselines for waddles.community.guild_pairing / waddles.webui.role_sync_mapping (default OFF).
+  guildPairingEnabled: false
+  webuiRoleSyncMappingEnabled: false
   spectrumOrgPollIntervalS: 300
   # A roster shrinking by more than this fraction in one poll is held back as an RSI glitch, not emitted
   spectrumRosterMaxDepartureRatio: 0.5

@@ -55,6 +55,8 @@ tables:
   - suppression_records
   - app_commands
   - user_active_context
+  - discord_role_mirror_mappings
+  - discord_role_mirror_grants
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -939,4 +941,54 @@ grants:
     privileges: []
   - role: migration_runner
     table: user_active_context
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # 0099_discord_role_mirror: cross-guild Discord role mirror mappings + grant ledger. Hub-api only.
+  - role: hub_api
+    table: discord_role_mirror_mappings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: discord_role_mirror_mappings
+    privileges: []
+  - role: svc_ingest
+    table: discord_role_mirror_mappings
+    privileges: []
+  - role: svc_process
+    table: discord_role_mirror_mappings
+    privileges: []
+  - role: svc_action
+    table: discord_role_mirror_mappings
+    privileges: []
+  - role: svc_streaming
+    table: discord_role_mirror_mappings
+    privileges: []
+  - role: webui
+    table: discord_role_mirror_mappings
+    privileges: []
+  - role: migration_runner
+    table: discord_role_mirror_mappings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api
+    table: discord_role_mirror_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: discord_role_mirror_grants
+    privileges: []
+  - role: svc_ingest
+    table: discord_role_mirror_grants
+    privileges: []
+  - role: svc_process
+    table: discord_role_mirror_grants
+    privileges: []
+  - role: svc_action
+    table: discord_role_mirror_grants
+    privileges: []
+  - role: svc_streaming
+    table: discord_role_mirror_grants
+    privileges: []
+  - role: webui
+    table: discord_role_mirror_grants
+    privileges: []
+  - role: migration_runner
+    table: discord_role_mirror_grants
     privileges: [SELECT, INSERT, UPDATE, DELETE]

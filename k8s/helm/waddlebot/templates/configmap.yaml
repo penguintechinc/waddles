@@ -98,6 +98,10 @@ data:
   # waddles.role_sync ENV baseline (default OFF; PostHog overrides when connected).
   # Read by hub-api AND the role-sync CronJob (hub_api/services/role_sync_service.py) via envFrom waddlebot-config.
   FLAG_WADDLES_ROLE_SYNC: {{ .Values.config.roleSyncEnabled | default false | quote }}
+  # waddles.community.guild_pairing (guild pairing + Discord role-mirror routes) and
+  # waddles.webui.role_sync_mapping (the admin role-sync page) ENV baselines (default OFF).
+  FLAG_WADDLES_COMMUNITY_GUILD_PAIRING: {{ .Values.config.guildPairingEnabled | default false | quote }}
+  FLAG_WADDLES_WEBUI_ROLE_SYNC_MAPPING: {{ .Values.config.webuiRoleSyncMappingEnabled | default false | quote }}
   # waddles.community.connections ENV baseline (default OFF; PostHog overrides when connected).
   # Gates the per-community Discord/Twitch connect authorize route (hub-api); also tier-gated
   # (Professional) -- tier is bypassed only on *.penguintech.cloud hosts.
