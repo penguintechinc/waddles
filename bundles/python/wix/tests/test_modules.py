@@ -25,10 +25,8 @@ from test_app import (  # noqa: F401 (fixture)
 from waddle_sdk.flask_core import bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent
 
-import plan_roles
 from app import transform as _app_transform
 
-PLAN = "aaaaaaaa-1111-2222-3333-444444444444"
 WIX_EVENT = "bbbbbbbb-1111-2222-3333-444444444444"
 SERVICE = "waddles.core.service.discord"
 
@@ -88,64 +86,10 @@ def _wix(
         assert _run(_app_transform(ev)) is None
 
 
-def _map(host: _Host) -> None:
-    """Seed the plan -> role mapping through the module's own writer (admin config path)."""
-    _run(plan_roles.set_mapping("c1", PLAN, "vip"))
-
-
 def _fault(host: _Host, module: str) -> str:
     """The last recorded tool-failure code for `module` (empty when none)."""
     hits = [v for k, v in host.kv.store.items() if f"wix.fault.{module}" in k]
     return hits[0].decode() if hits else ""
-
-
-def _sub(status: str = "ACTIVE", order: str = "order-0001") -> dict[str, Any]:
-    return {"event_id": "e1", "order_id": order, "plan_id": PLAN, "status": status}
-
-
-def test_roles_map_then_active_adds_and_ended_removes(
-    host: _Host, tools: _Tool
-) -> None:
-    _map(host)
-    _wix(host, "subscription.started", _sub())
-    _wix(host, "subscription.ended", _sub("CANCELED"))
-    assert [(c[0], c[1], c[2]) for c in tools.calls] == [
-        (SERVICE, "discord.member.roles.add", {"user": ALICE, "role_key": "vip"}),
-        (SERVICE, "discord.member.roles.remove", {"user": ALICE, "role_key": "vip"}),
-    ]
-    assert all(c[3] for c in tools.calls)  # idempotency keys present
-
-
-def test_roles_unmapped_pending_and_actorless_do_nothing(
-    host: _Host, tools: _Tool
-) -> None:
-    _wix(host, "subscription.started", _sub())  # plan not mapped yet
-    _map(host)
-    _wix(host, "subscription.changed", _sub("PENDING"))
-    _wix(host, "subscription.started", _sub(), actor=None)
-    _wix(host, "subscription.started", {**_sub(), "plan_id": WIX_B})  # unmapped plan
-    assert tools.calls == []
-
-
-def test_roles_tool_refusal_is_loud_and_recorded(host: _Host, tools: _Tool) -> None:
-    _map(host)
-    tools.fail = "discord.member.roles.add"
-    _wix(host, "subscription.started", _sub())
-    assert "wix.tool_failed" in host.logs_text()
-    assert _fault(host, "roles") == "not_granted"
-    tools.fail = None
-    _wix(host, "subscription.started", _sub())
-    assert _fault(host, "roles") == ""
-
-
-def test_missing_tool_import_is_loud(host: _Host, tools: _Tool) -> None:
-    _map(host)
-    del sys.modules["wit_world"].imports.__dict__["tool"]
-    _wix(host, "subscription.started", _sub())
-    assert tools.calls == []
-    assert _fault(host, "roles") == "capability_missing"
-    _wix(host, "event.created", {"wix_event_id": WIX_EVENT})
-    assert _fault(host, "events") == "capability_missing"
 
 
 def test_events_create_update_cancel_with_idempotent_redelivery(
@@ -223,77 +167,6 @@ def test_unknown_wix_event_and_bad_event_payload_make_no_call(
     assert tools.calls == []
 
 
-def test_plan_mapping_writer_validates_and_unmaps(host: _Host, tools: _Tool) -> None:
-    assert plan_roles.valid_role_key("vip") == "vip"
-    for bad in ("Bad!", "", "1vip", "x" * 33):
-        assert plan_roles.valid_role_key(bad) is None, bad
-    _map(host)
-    _run(plan_roles.remove_mapping("c1", PLAN))
-    _wix(host, "subscription.started", _sub())
-    assert tools.calls == []
-
-
-def test_roles_late_or_replayed_active_after_ended_never_regrants(
-    host: _Host, tools: _Tool
-) -> None:
-    _map(host)
-    _wix(host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z")
-    _wix(host, "subscription.ended", _sub("ENDED"), at="2026-11-07T11:00:00Z")
-    _wix(
-        host, "subscription.started", _sub(), at="2026-11-07T10:30:00Z"
-    )  # delayed, older
-    _wix(
-        host, "subscription.started", _sub(), at="2026-11-07T12:00:00Z"
-    )  # newer but terminal
-    _wix(host, "subscription.ended", _sub("ENDED"), at="2026-11-07T11:00:00Z")  # replay
-    assert [c[1] for c in tools.calls] == [
-        "discord.member.roles.add",
-        "discord.member.roles.remove",
-    ]
-    assert "wix.roles_terminal_order_ignored" in host.logs_text()
-
-
-def test_roles_replay_ignored_and_new_order_grants(host: _Host, tools: _Tool) -> None:
-    _map(host)
-    _wix(host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z")
-    _wix(
-        host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z"
-    )  # same ts: replay
-    _wix(host, "subscription.ended", _sub("CANCELED"), at="2026-11-07T11:00:00Z")
-    _wix(
-        host,
-        "subscription.started",
-        _sub(order="order-0002"),
-        at="2026-11-07T12:00:00Z",
-    )
-    assert [c[1] for c in tools.calls] == [
-        "discord.member.roles.add",
-        "discord.member.roles.remove",
-        "discord.member.roles.add",
-    ]
-
-
-def test_roles_failed_call_does_not_advance_order_state(
-    host: _Host, tools: _Tool
-) -> None:
-    _map(host)
-    tools.fail = "discord.member.roles.add"
-    _wix(host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z")
-    tools.fail = None
-    _wix(
-        host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z"
-    )  # retry still applies
-    assert [c[1] for c in tools.calls].count("discord.member.roles.add") == 2
-
-
-def test_roles_bad_order_or_timestamp_fail_loud(host: _Host, tools: _Tool) -> None:
-    _map(host)
-    _wix(host, "subscription.started", _sub(order="x:y"))
-    _wix(host, "subscription.started", _sub(), at="yesterday")
-    assert tools.calls == []
-    assert "bad_order_event" in _fault(host, "roles")
-
-
 def test_events_late_events_after_cancel_or_replay_are_ignored(
     host: _Host, tools: _Tool
 ) -> None:
@@ -329,47 +202,6 @@ def test_events_cancel_before_create_is_terminal(host: _Host, tools: _Tool) -> N
     _wix(host, "event.canceled", p, at="2026-11-07T11:00:00Z")
     _wix(host, "event.created", p, at="2026-11-07T10:00:00Z")
     assert tools.calls == []
-
-
-def test_roles_older_or_skewed_remove_still_removes(host: _Host, tools: _Tool) -> None:
-    _map(host)
-    _wix(host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z")
-    _wix(
-        host, "subscription.ended", _sub("ENDED"), at="2026-11-07T09:00:00Z"
-    )  # older clock
-    assert [c[1] for c in tools.calls] == [
-        "discord.member.roles.add",
-        "discord.member.roles.remove",
-    ]
-    # ...and the order is now terminal: a newer grant for it is refused.
-    _wix(host, "subscription.started", _sub(), at="2026-11-07T12:00:00Z")
-    assert len(tools.calls) == 2
-
-
-def test_roles_received_time_remove_executes_but_received_time_grant_is_refused(
-    host: _Host, tools: _Tool
-) -> None:
-    _map(host)
-    _wix(host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z")
-    _wix(host, "subscription.changed", _sub("PAUSED"), src="received")  # remove runs
-    assert [c[1] for c in tools.calls][-1] == "discord.member.roles.remove"
-    _wix(host, "subscription.started", _sub(), src="received")  # unorderable grant
-    assert [c[1] for c in tools.calls].count("discord.member.roles.add") == 1
-    assert "unorderable_grant" in _fault(host, "roles")
-    # A Wix-sourced newer resume still grants (received-time pause kept the Wix state).
-    _wix(host, "subscription.changed", _sub(), at="2026-11-07T11:00:00Z")
-    assert [c[1] for c in tools.calls].count("discord.member.roles.add") == 2
-
-
-def test_roles_received_time_end_is_terminal(host: _Host, tools: _Tool) -> None:
-    _map(host)
-    _wix(host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z")
-    _wix(host, "subscription.ended", _sub("ENDED"), src="received")
-    _wix(host, "subscription.started", _sub(), at="2030-01-01T00:00:00Z")
-    assert [c[1] for c in tools.calls] == [
-        "discord.member.roles.add",
-        "discord.member.roles.remove",
-    ]
 
 
 def test_events_cancel_with_skewed_clock_still_cancels(
@@ -408,3 +240,22 @@ def test_events_received_time_cancel_runs_and_received_time_create_is_refused(
         "discord.scheduled_event.create",
         "discord.scheduled_event.cancel",
     ]
+
+
+def test_missing_tool_import_is_loud(host: _Host, tools: _Tool) -> None:
+    del sys.modules["wit_world"].imports.__dict__["tool"]
+    _wix(host, "event.created", {"wix_event_id": WIX_EVENT})
+    assert tools.calls == []
+    assert _fault(host, "events") == "capability_missing"
+
+
+@pytest.mark.parametrize(
+    "kind", ["subscription.started", "subscription.changed", "subscription.ended"]
+)
+def test_subscription_records_are_ignored(host: _Host, tools: _Tool, kind: str) -> None:
+    """Subscriptions are the license server's job: a stray Wix subscription record does nothing."""
+    payload = {"event_id": "e1", "order_id": "order-0001", "plan_id": WIX_B, "status": "ACTIVE"}
+    _wix(host, kind, payload)
+    assert tools.calls == []
+    assert host.kv.store == {}
+    assert "wix.event_ignored" in host.logs_text()

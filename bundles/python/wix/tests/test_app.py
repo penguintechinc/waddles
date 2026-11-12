@@ -86,6 +86,16 @@ def test_manifest_declares_no_chat_command(manifest: dict[str, Any]) -> None:
     assert not any(p.startswith("chat.send") for p in perms)
     assert "identity.resolve" not in perms
     assert not manifest.get("egress")
+    assert {c["platform"]: set(c["event_types"]) for c in consumes} == {
+        "wix": {"event.created", "event.updated", "event.canceled"}
+    }
+    assert not any("roles" in p for p in perms)
+    tools = {r["tool"] for r in manifest["requested_tools"]}
+    assert tools == {
+        "discord.scheduled_event.create",
+        "discord.scheduled_event.update",
+        "discord.scheduled_event.cancel",
+    }
     assert manifest["version"] == VERSION
 
 
@@ -100,6 +110,19 @@ def test_core_bundles_entry_version_matches() -> None:
 
 def test_source_has_no_command_head() -> None:
     assert "!wix" not in (BUNDLE_DIR / "src" / "app.py").read_text(encoding="utf-8")
+
+
+def test_no_plan_or_subscription_handling_remains() -> None:
+    """Subscriptions/licensing belong to the license server: no plan-role code may come back."""
+    src = BUNDLE_DIR / "src"
+    assert not (src / "plan_roles.py").exists()
+    scanned = 0
+    for path in src.glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        scanned += 1
+        for needle in ("plan_roles", "wix.plan.", "member.roles", "wix.sub."):
+            assert needle not in text, (path.name, needle)
+    assert scanned >= 3
 
 
 @pytest.mark.parametrize("text", ["!wix", "!wix status", "!wix enable roles", "hello"])

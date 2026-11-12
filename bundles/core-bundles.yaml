@@ -702,8 +702,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  # Wix integration (#485): EVENT-ONLY (no chat command). Plan-role subscription sync + event sync
-  # driven by the Wix webhook connector, calling the Discord service tools (tool.call grants =>
+  # Wix integration (#485): EVENT-ONLY (no chat command). Wix events -> community events only (subscriptions/licensing
+  # = PenguinTech license server), driven by the Wix webhook connector, calling the Discord service tools (tool.call grants =>
   # stage-next-tools world).
   - app_id: waddles.core.integration.wix
     version: "1.1.1"

@@ -1,18 +1,15 @@
 """Wix event-only integration (`waddles.core.integration.wix`, #485).
 
 This bundle exposes NO chat command. It consumes only the Wix webhook connector's normalized
-records and routes them to its two feature modules:
+records and syncs EVENTS ONLY: `event.{created,updated,canceled}` -> `event_sync` (Wix events ->
+community/Discord scheduled events). Licensing and subscriptions are handled by the PenguinTech
+license server, never Wix, so any other Wix record (e.g. `subscription.*`) is ignored.
 
-- `subscription.{started,changed,ended}` -> `plan_roles` (Wix plan -> Discord role sync)
-- `event.{created,updated,canceled}`    -> `event_sync` (Wix events -> Discord scheduled events)
-
-Both modules call the Discord SERVICE bundle's tools under approved manifest `tool.call:` grants
+The module calls the Discord SERVICE bundle's tools under approved manifest `tool.call:` grants
 (never direct Discord HTTP). Activation of this bundle is the gate (first-party app bundle, no
 tier/licence gate). A runtime without the tool-invocation import is a LOUD failure: the fault is
 logged and recorded under `wix.fault.<module>` -- an event is never silently dropped.
 
-Plan -> role mappings live in community kv under `wix.plan.<plan_uuid>` (written by the admin
-configuration path through `plan_roles.set_mapping`); an unmapped plan is logged and ignored.
 Nothing is ever replied to chat, so the action stage refuses to run.
 """
 
@@ -25,11 +22,10 @@ from waddle_sdk.flask_core import get_bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 import event_sync
-import plan_roles
 import toolcall
 
 #: Event-type prefix -> feature module name (also the `wix.fault.<name>` suffix).
-_MODULES: dict[str, Any] = {"subscription.": plan_roles, "event.": event_sync}
+_MODULES: dict[str, Any] = {"event.": event_sync}
 
 
 async def _on_wix_event(event: PlatformEvent) -> None:
@@ -46,12 +42,7 @@ async def _on_wix_event(event: PlatformEvent) -> None:
         if not module.capability_available():
             await toolcall.record_fault(community, module.MODULE, "capability_missing")
             return
-        if module is plan_roles:
-            await plan_roles.handle(
-                kind, event.actor, event.payload, event.occurred_at, community
-            )
-        else:
-            await event_sync.handle(kind, event.payload, event.occurred_at, community)
+        await module.handle(kind, event.payload, event.occurred_at, community)
         return
     log.debug("wix.event_ignored", event_type=kind)
 

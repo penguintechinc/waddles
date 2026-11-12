@@ -17,7 +17,7 @@ stages:
     entry: "waddle:bundle/process-stage#transform"
     consumes:
       - platform: wix
-        event_types: ["subscription.started", "subscription.changed", "subscription.ended", "event.created", "event.updated", "event.canceled"]
+        event_types: ["event.created", "event.updated", "event.canceled"]
     produces: []
     config: {}
     spec:
@@ -36,15 +36,7 @@ limits:
   egress_rps: 5
 permissions:
   - id: storage.kv
-    justification: "per-community Wix plan->role mappings, subscription/event ordering state, the Wix->Discord event id map and the last tool-failure code per module"
-  - id: "tool.call:waddles.core.service.discord:discord.member.roles.add"
-    justification: "plan -> role: grant the mapped Discord role on an active Wix subscription (default-OFF module, approved grant required)"
-    params:
-      write: true
-  - id: "tool.call:waddles.core.service.discord:discord.member.roles.remove"
-    justification: "plan -> role: revoke the mapped Discord role when the subscription ends (default-OFF module, approved grant required)"
-    params:
-      write: true
+    justification: "Wix event ordering state, the Wix->Discord event id map and the last tool-failure code per module"
   - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.create"
     justification: "event sync: mirror a new Wix event as a Discord scheduled event (default-OFF module, approved grant required)"
     params:
@@ -65,12 +57,6 @@ platform_compatibility:
   min_version: "1.0.0"
   max_version: null
 requested_tools:
-  - tool: discord.member.roles.add
-    access: write
-    target_app_id: waddles.core.service.discord
-  - tool: discord.member.roles.remove
-    access: write
-    target_app_id: waddles.core.service.discord
   - tool: discord.scheduled_event.create
     access: write
     target_app_id: waddles.core.service.discord
