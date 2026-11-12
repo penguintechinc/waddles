@@ -56,6 +56,8 @@ CREATE INDEX IF NOT EXISTS idx_bundle_reputation_adjustments_user_window
     ON bundle_reputation_adjustments (tenant_id, community_id, target_user_uuid, occurred_at)
     WHERE scope = 'community';
 
+-- NOTE: the DML grants below are the 0050 baseline only; `bundle_reputation_unify.sql` (0097)
+-- REVOKEs every write from the bundle role (writes go through SECURITY DEFINER functions).
 -- 4. Least-privilege role grants (role itself is provisioned by the
 -- migration / test harness; skipped if absent so this file never depends on
 -- ordering). DML only on the two reputation tables, column-scoped SELECT on

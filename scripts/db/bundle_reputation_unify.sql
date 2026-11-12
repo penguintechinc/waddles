@@ -41,7 +41,11 @@ ALTER TABLE bundle_reputation_policy
     ADD COLUMN IF NOT EXISTS moderation_user_daily_cap INTEGER NOT NULL DEFAULT 200
         CHECK (moderation_user_daily_cap > 0),
     ADD COLUMN IF NOT EXISTS manual_soft_ban_daily_quota INTEGER NOT NULL DEFAULT 25
-        CHECK (manual_soft_ban_daily_quota > 0);
+        CHECK (manual_soft_ban_daily_quota > 0),
+    ADD COLUMN IF NOT EXISTS floor_lift_user_daily_quota INTEGER NOT NULL DEFAULT 3
+        CHECK (floor_lift_user_daily_quota > 0),
+    ADD COLUMN IF NOT EXISTS floor_lift_community_daily_quota INTEGER NOT NULL DEFAULT 100
+        CHECK (floor_lift_community_daily_quota > 0);
 
 -- 1b. Per-TENANT policy (tenant admins only): compared against the user's tenant aggregate
 -- score; effect (enforced by the accrual bundle, flag waddles.reputation-auto-ban) is a ban
@@ -489,12 +493,67 @@ BEGIN
 END
 $sf$;
 
+-- Floor lift (bundle role): clears ONLY reason-1 rows, and only once the score has really
+-- recovered (COALESCE(balance, default) >= floor) or an admin turned soft_ban_enabled off.
+-- Explicit lifts are quota'd per user and per community per rolling 24h (policy columns,
+-- defaults 3 / 100; SQLSTATE 54000 'quota_exceeded'); score-recovery auto-clear inside
+-- reputation_apply is not an explicit lift and is never counted.
 CREATE OR REPLACE FUNCTION reputation_clear_floor_soft_ban(
     p_tenant bigint, p_community bigint, p_user_uuid uuid
 ) RETURNS bool
-LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $cf$
-    SELECT reputation_clear_soft_ban(p_tenant, p_community, p_user_uuid, 'system:floor', true);
+DECLARE
+    v_enabled boolean := false;
+    v_floor int := 550;
+    v_default int := 600;
+    v_user_q int := 3;
+    v_comm_q int := 100;
+    v_balance int;
+    v_used bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM communities WHERE id = p_community AND tenant_id = p_tenant) THEN
+        RAISE EXCEPTION 'reputation_clear_floor_soft_ban: community is not in the named tenant'
+            USING ERRCODE = '42501';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('rep_floor:' || p_community, 0));
+    IF NOT EXISTS (SELECT 1 FROM bundle_reputation_soft_bans
+                    WHERE community_id = p_community AND user_uuid = p_user_uuid
+                      AND reason_code = 1) THEN
+        RETURN false;  -- nothing floor-set to lift (a manual ban is never touched here)
+    END IF;
+
+    SELECT soft_ban_enabled, soft_ban_floor, score_default, floor_lift_user_daily_quota,
+           floor_lift_community_daily_quota
+      INTO v_enabled, v_floor, v_default, v_user_q, v_comm_q
+      FROM bundle_reputation_policy WHERE community_id = p_community AND tenant_id = p_tenant;
+    IF NOT FOUND THEN
+        v_enabled := false; v_default := 600; v_user_q := 3; v_comm_q := 100;
+    END IF;
+    IF v_enabled THEN
+        SELECT balance INTO v_balance FROM bundle_reputation_scores
+         WHERE community_id = p_community AND user_uuid = p_user_uuid AND tenant_id = p_tenant;
+        IF COALESCE(v_balance, v_default) < v_floor THEN
+            RAISE EXCEPTION 'floor_still_breached' USING ERRCODE = '22023';
+        END IF;
+    END IF;
+
+    SELECT COUNT(*) INTO v_used FROM bundle_reputation_adjustments
+     WHERE community_id = p_community AND kind = 'soft_ban_clear'
+       AND source_event = 'soft_ban.floor_clear' AND target_user_uuid = p_user_uuid::text
+       AND occurred_at > NOW() - INTERVAL '24 hours';
+    IF v_used >= v_user_q THEN
+        RAISE EXCEPTION 'quota_exceeded' USING ERRCODE = '54000', DETAIL = 'per-user';
+    END IF;
+    SELECT COUNT(*) INTO v_used FROM bundle_reputation_adjustments
+     WHERE community_id = p_community AND kind = 'soft_ban_clear'
+       AND source_event = 'soft_ban.floor_clear' AND occurred_at > NOW() - INTERVAL '24 hours';
+    IF v_used >= v_comm_q THEN
+        RAISE EXCEPTION 'quota_exceeded' USING ERRCODE = '54000', DETAIL = 'per-community';
+    END IF;
+
+    RETURN reputation_clear_soft_ban(p_tenant, p_community, p_user_uuid, 'system:floor', true);
+END
 $cf$;
 
 -- Read path (bundles + host): expiry-aware, tenant-pairing verified.
@@ -561,7 +620,18 @@ BEGIN
             reputation_set_soft_ban(bigint, bigint, uuid, smallint, text, timestamptz),
             reputation_clear_soft_ban(bigint, bigint, uuid, text, bool)
             FROM waddles_bundle_reputation;
-        GRANT SELECT ON bundle_reputation_policy, bundle_reputation_tenant_policy,
+        -- The 0050 DML grants let the role bypass reputation_apply entirely: strip every write.
+        -- From here the bundle role is read-only on the tables; all writes go through the
+        -- SECURITY DEFINER functions above.
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON
+            bundle_reputation_scores, bundle_reputation_adjustments,
+            bundle_reputation_tenant_policy, bundle_reputation_soft_bans,
+            bundle_reputation_policy, bundle_reputation_tenant_scores
+            FROM waddles_bundle_reputation;
+        REVOKE USAGE ON SEQUENCE bundle_reputation_adjustments_id_seq
+            FROM waddles_bundle_reputation;
+        GRANT SELECT ON bundle_reputation_scores, bundle_reputation_adjustments,
+            bundle_reputation_policy, bundle_reputation_tenant_policy,
             bundle_reputation_tenant_scores, bundle_reputation_soft_bans
             TO waddles_bundle_reputation;
     END IF;

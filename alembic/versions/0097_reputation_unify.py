@@ -100,7 +100,18 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the functions, new tables and ledger columns (the 0-based rebase is not reversed)."""
+    """Drop the functions, new tables and ledger columns (the 0-based rebase is not reversed).
+
+    Also restores the 0050 DML grants the upgrade revoked from the bundle reputation role.
+    """
+    op.execute(
+        "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'waddles_bundle_reputation') "
+        "THEN "
+        "GRANT SELECT, INSERT, UPDATE ON bundle_reputation_scores TO waddles_bundle_reputation; "
+        "GRANT SELECT, INSERT ON bundle_reputation_adjustments TO waddles_bundle_reputation; "
+        "GRANT USAGE ON SEQUENCE bundle_reputation_adjustments_id_seq TO waddles_bundle_reputation; "
+        "END IF; END $$"
+    )
     for sig in (
         "reputation_apply(bigint, bigint, uuid, int, smallint, smallint, text, text, text, text)",
         "reputation_is_soft_banned(bigint, bigint, uuid)",

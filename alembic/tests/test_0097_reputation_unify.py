@@ -560,6 +560,95 @@ class TestRoleBoundaries:
             )
         assert _apply(pg_db, tid, cid, user, 5, login=_BUNDLE_LOGIN) == (605, True)
 
+    @pytest.mark.parametrize(
+        ("table", "dml"),
+        [
+            (
+                "bundle_reputation_scores",
+                "INSERT INTO bundle_reputation_scores "  # noqa: ISC004
+                "(tenant_id, community_id, user_uuid, balance) VALUES (1, 1, gen_random_uuid(), 9)",
+            ),
+            (
+                "bundle_reputation_scores",
+                "UPDATE bundle_reputation_scores SET balance = 850",
+            ),
+            ("bundle_reputation_scores", "DELETE FROM bundle_reputation_scores"),
+            (
+                "bundle_reputation_adjustments",
+                "INSERT INTO bundle_reputation_adjustments "  # noqa: ISC004
+                "(tenant_id, community_id, target_user_uuid, scope, delta, reason_code) "
+                "VALUES (1, 1, 'u', 'community', 1, '1')",
+            ),
+            (
+                "bundle_reputation_adjustments",
+                "UPDATE bundle_reputation_adjustments SET delta = 0",
+            ),
+            (
+                "bundle_reputation_tenant_policy",
+                "INSERT INTO bundle_reputation_tenant_policy (tenant_id) VALUES (1)",
+            ),
+            (
+                "bundle_reputation_tenant_policy",
+                "UPDATE bundle_reputation_tenant_policy SET tenant_auto_ban_floor = 301",
+            ),
+            (
+                "bundle_reputation_soft_bans",
+                "INSERT INTO bundle_reputation_soft_bans "  # noqa: ISC004
+                "(tenant_id, community_id, user_uuid, reason_code, set_by) "
+                "VALUES (1, 1, gen_random_uuid(), 1, 'system:floor')",
+            ),
+            ("bundle_reputation_soft_bans", "DELETE FROM bundle_reputation_soft_bans"),
+            (
+                "bundle_reputation_policy",
+                "INSERT INTO bundle_reputation_policy "  # noqa: ISC004
+                "(tenant_id, community_id) VALUES (1, 1)",
+            ),
+            (
+                "bundle_reputation_policy",
+                "UPDATE bundle_reputation_policy SET score_max = 850",
+            ),
+            (
+                "bundle_reputation_tenant_scores",
+                "UPDATE bundle_reputation_tenant_scores SET score = 850",
+            ),
+            (
+                "bundle_reputation_tenant_scores",
+                "INSERT INTO bundle_reputation_tenant_scores "  # noqa: ISC004
+                "(tenant_id, user_uuid) VALUES (1, gen_random_uuid())",
+            ),
+        ],
+    )
+    def test_bundle_role_has_no_direct_write_on_any_reputation_table(
+        self, pg_db: PgTestDatabase, table: str, dml: str
+    ) -> None:
+        with _connect(pg_db, _BUNDLE_LOGIN) as conn, conn.cursor() as cur:  # noqa: SIM117
+            with pytest.raises(
+                psycopg2.errors.InsufficientPrivilege, match="permission denied"
+            ):
+                cur.execute(dml)
+        for priv in ("INSERT", "UPDATE", "DELETE"):
+            assert _q(
+                pg_db,
+                "SELECT has_table_privilege(%s, %s, %s)",
+                (_BUNDLE_LOGIN, table, priv),
+            ) == [(False,)]
+
+    def test_bundle_role_keeps_select_and_apply_still_works(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid = _scope(pg_db, "t-bundle-ro")
+        user = _member(pg_db, cid)
+        assert _apply(pg_db, tid, cid, user, 7, login=_BUNDLE_LOGIN) == (607, True)
+        with _connect(pg_db, _BUNDLE_LOGIN) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT balance FROM bundle_reputation_scores WHERE community_id=%s",
+                (cid,),
+            )
+            assert cur.fetchall() == [(607,)]
+            cur.execute("SELECT count(*) FROM bundle_reputation_adjustments")
+            cur.execute("SELECT count(*) FROM bundle_reputation_policy")
+            cur.execute("SELECT count(*) FROM bundle_reputation_soft_bans")
+
     def test_hub_api_role_may_use_admin_override(self, pg_db: PgTestDatabase) -> None:
         tid, cid = _scope(pg_db, "t-hub-priv")
         assert _apply(
@@ -712,11 +801,104 @@ class TestSoftBans:
                 "SELECT reputation_set_floor_soft_ban(%s, %s, %s::uuid)",
                 (tid, cid, floor_user),
             )
+        assert _is_soft_banned(pg_db, tid, cid, floor_user) is True
+
+    def _floor_clear(self, db, tid, cid, user):  # type: ignore[no-untyped-def]
+        with _connect(db, _BUNDLE_LOGIN) as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT reputation_clear_floor_soft_ban(%s, %s, %s::uuid)",
-                (tid, cid, floor_user),
+                (tid, cid, user),
             )
-            assert cur.fetchone()[0] is True
+            return cur.fetchone()[0]
+
+    def _floor_ban(self, db, tid, cid, user):  # type: ignore[no-untyped-def]
+        """Put `user` under a floor ban (score 540 < 550), as the bundle role would."""
+        _apply(db, tid, cid, user, -60, cls=3, actor=str(uuid.uuid4()))
+        with _connect(db, _BUNDLE_LOGIN) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT reputation_set_floor_soft_ban(%s, %s, %s::uuid)",
+                (tid, cid, user),
+            )
+
+    def test_floor_clear_refused_while_still_breached(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid = _scope(pg_db, "t-fl-breached")
+        _policy(pg_db, tid, cid, soft_ban_enabled=True, soft_ban_floor=550)
+        user = _member(pg_db, cid)
+        self._floor_ban(pg_db, tid, cid, user)
+        with pytest.raises(
+            psycopg2.errors.InvalidParameterValue, match="floor_still_breached"
+        ):
+            self._floor_clear(pg_db, tid, cid, user)
+        assert _is_soft_banned(pg_db, tid, cid, user) is True
+
+    def test_floor_clear_allowed_after_recovery_or_when_admin_disabled_auto_ban(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid = _scope(pg_db, "t-fl-recover")
+        _policy(pg_db, tid, cid, soft_ban_enabled=True, soft_ban_floor=550)
+        recovered, disabled = _member(pg_db, cid), _member(pg_db, cid)
+        for u in (recovered, disabled):
+            self._floor_ban(pg_db, tid, cid, u)
+        # recovery without going through apply (which would auto-clear on its own)
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_scores SET balance = 600 WHERE community_id=%s AND user_uuid=%s",
+            (cid, recovered),
+        )
+        assert self._floor_clear(pg_db, tid, cid, recovered) is True
+        assert _is_soft_banned(pg_db, tid, cid, recovered) is False
+        with pytest.raises(
+            psycopg2.errors.InvalidParameterValue, match="floor_still_breached"
+        ):
+            self._floor_clear(pg_db, tid, cid, disabled)
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_policy SET soft_ban_enabled = false WHERE community_id=%s",
+            (cid,),
+        )
+        assert self._floor_clear(pg_db, tid, cid, disabled) is True
+        assert (
+            self._floor_clear(pg_db, tid, cid, disabled) is False
+        )  # nothing left to lift
+
+    def test_floor_clear_never_touches_a_manual_ban(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid = _scope(pg_db, "t-fl-manual")
+        user = _member(pg_db, cid)
+        _soft_ban(pg_db, tid, cid, user)  # manual
+        assert self._floor_clear(pg_db, tid, cid, user) is False
+        assert _is_soft_banned(pg_db, tid, cid, user) is True
+
+    def test_floor_lift_quota_per_user_and_per_community(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid = _scope(pg_db, "t-fl-quota")
+        _policy(
+            pg_db,
+            tid,
+            cid,
+            soft_ban_enabled=False,
+            floor_lift_user_daily_quota=1,
+            floor_lift_community_daily_quota=2,
+        )
+        u1, u2, u3 = (_member(pg_db, cid) for _ in range(3))
+        for u in (u1, u2, u3):
+            _soft_ban(pg_db, tid, cid, u, reason=1)
+        assert self._floor_clear(pg_db, tid, cid, u1) is True
+        _soft_ban(pg_db, tid, cid, u1, reason=1)
+        with pytest.raises(
+            psycopg2.errors.ProgramLimitExceeded, match="quota_exceeded"
+        ):
+            self._floor_clear(pg_db, tid, cid, u1)  # per-user (1/day)
+        assert _is_soft_banned(pg_db, tid, cid, u1) is True
+        assert self._floor_clear(pg_db, tid, cid, u2) is True
+        with pytest.raises(
+            psycopg2.errors.ProgramLimitExceeded, match="quota_exceeded"
+        ):
+            self._floor_clear(pg_db, tid, cid, u3)  # per-community (2/day)
 
     def test_floor_wrapper_refuses_unless_floor_actually_breached(
         self, pg_db: PgTestDatabase
