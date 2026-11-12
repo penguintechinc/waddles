@@ -342,6 +342,7 @@ pub async fn run_many_detailed(
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             },
             Arc::clone(&executor),
             "test-peer",

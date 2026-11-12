@@ -235,6 +235,64 @@ pub struct CliConfig {
     #[arg(long, env = "BUNDLE_MAX_COMPONENT_BYTES", default_value_t = 33_554_432)]
     pub bundle_max_component_bytes: u64,
 
+    /// Upper bound on a precompiled `.cwasm` artifact fetched from the bundle
+    /// bucket (`precompiled/<engine_fp>/<digest>.cwasm`). Compiled code is
+    /// several times larger than the source component, hence its own cap
+    /// (default 256 MiB); an oversized object fails the AOT path and falls
+    /// back (loudly) to a local compile.
+    #[arg(
+        long,
+        env = "BUNDLE_MAX_PRECOMPILED_BYTES",
+        default_value_t = 268_435_456
+    )]
+    pub bundle_max_precompiled_bytes: u64,
+
+    /// Resident compiled-module budget for the whole process, in MiB, shared
+    /// by every stage this executor serves. Above it, idle modules no
+    /// in-flight invoke is using are evicted least-recently-used first and
+    /// new loads only verify (compile/deserialize happens on first call).
+    /// `0` = unlimited (unreferenced modules are then dropped immediately).
+    #[arg(long, env = "EXECUTOR_MEMORY_BUDGET_MB", default_value_t = 8192)]
+    pub executor_memory_budget_mb: u64,
+
+    /// JSON map `{key_id: base64 Ed25519 public key}` of the DEDICATED
+    /// precompiler signing key(s) (ConfigMap
+    /// `<fullname>-executor-precompile-signing-public`). The ONLY keys a
+    /// `.cwasm` signature is verified against -- never the bundle-approval
+    /// `BUNDLE_SIGNING_PUBLIC_KEYS`. Unset = every load JIT-compiles (each
+    /// one logged at ERROR + `executor_precompile_fallback_total`).
+    #[arg(long, env = "PRECOMPILE_SIGNING_PUBLIC_KEYS")]
+    pub precompile_signing_public_keys: Option<String>,
+
+    /// Kill switch `waddles.disable-aot-precompile` (opt-out, unseen = AOT on).
+    /// This credential-less sandbox has no PostHog egress, so the flag is read
+    /// from its Docker/Helm ENV baseline (`FLAG_` + key, `.`/`-` -> `_`), the
+    /// same convention every stage uses. `true` = never load `.cwasm`
+    /// artifacts; always JIT-compile.
+    #[arg(
+        long,
+        env = "FLAG_WADDLES_DISABLE_AOT_PRECOMPILE",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub flag_disable_aot_precompile: bool,
+
+    /// Stable executor identity (StatefulSet pod name, e.g.
+    /// `waddlebot-svc-bundles-executor-0`) sent to stages in the `hello` frame
+    /// for slot ownership. Unset = `POD_NAME` (downward API).
+    #[arg(long, env = "EXECUTOR_ID")]
+    pub executor_id: Option<String>,
+
+    /// StatefulSet (sharded) mode: refuse to start without a resolvable
+    /// executor identity (see [`CliConfig::validate_executor_id`]).
+    #[arg(
+        long,
+        env = "EXECUTOR_REQUIRE_ID",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub executor_require_id: bool,
+
     /// JSON object mapping `key_id -> base64(32-byte Ed25519 public key)`
     /// (spec SS5.6/Gemini condition 9) -- the platform key(s)
     /// `crate::signing::verify_artifact_signature` checks a bundle's
@@ -380,6 +438,39 @@ impl CliConfig {
         u32::try_from(cpus.min(4)).unwrap_or(4).max(1)
     }
 
+    /// The executor identity reported in `hello`: `EXECUTOR_ID` when set and
+    /// non-blank, else `POD_NAME` (the StatefulSet pod name via the downward
+    /// API), else `None` (stages then fall back to broadcast for this
+    /// executor, logging WARN).
+    #[must_use]
+    pub fn resolved_executor_id(&self) -> Option<String> {
+        self.executor_id
+            .clone()
+            .or_else(|| std::env::var("POD_NAME").ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Fails startup loudly when `EXECUTOR_REQUIRE_ID=true` (StatefulSet mode,
+    /// slot sharding) and no identity resolves -- an anonymous executor in a
+    /// sharded pool would silently degrade every stage to broadcast.
+    pub fn validate_executor_id(&self) -> Result<(), ExecutorError> {
+        if self.executor_require_id && self.resolved_executor_id().is_none() {
+            return Err(ExecutorError::Config(
+                "EXECUTOR_REQUIRE_ID is set (StatefulSet mode) but neither EXECUTOR_ID nor \
+                 POD_NAME is set; wire POD_NAME from metadata.name via the downward API"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The process-wide resident module budget in bytes (`0` = unlimited).
+    #[must_use]
+    pub fn memory_budget_bytes(&self) -> u64 {
+        self.executor_memory_budget_mb.saturating_mul(1024 * 1024)
+    }
+
     /// A config good enough to build the wasmtime `Engine`/`Linker` with
     /// but nothing else -- used only by `run_healthcheck`, which probes
     /// exactly that (this process has no HTTP surface to probe, spec
@@ -415,6 +506,12 @@ impl CliConfig {
             bundle_bucket_ca_file: None,
             bundle_fetch_timeout_s: 30,
             bundle_max_component_bytes: 33_554_432,
+            bundle_max_precompiled_bytes: 268_435_456,
+            executor_memory_budget_mb: 8192,
+            flag_disable_aot_precompile: false,
+            precompile_signing_public_keys: None,
+            executor_id: None,
+            executor_require_id: false,
             bundle_signing_public_keys: None,
             executor_heartbeat_interval_secs: 5,
             executor_heartbeat_enabled: true,

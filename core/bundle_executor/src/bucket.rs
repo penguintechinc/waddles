@@ -85,6 +85,12 @@ const EMPTY_BODY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934
 pub struct SecretAccessKey(String);
 
 impl SecretAccessKey {
+    /// Wraps a secret read from env (the precompiler builds its own
+    /// `BucketConfig`, see `crate::precompile::PrecompileArgs`).
+    pub fn new(secret: String) -> Self {
+        Self(secret)
+    }
+
     fn expose(&self) -> &str {
         &self.0
     }
@@ -108,6 +114,8 @@ pub struct BucketConfig {
     pub ca_file: Option<PathBuf>,
     pub fetch_timeout: Duration,
     pub max_component_bytes: u64,
+    /// Cap for precompiled `.cwasm` objects (`BUNDLE_MAX_PRECOMPILED_BYTES`).
+    pub max_precompiled_bytes: u64,
 }
 
 impl BucketConfig {
@@ -159,6 +167,7 @@ impl BucketConfig {
             ca_file: cfg.bundle_bucket_ca_file.clone(),
             fetch_timeout: Duration::from_secs(cfg.bundle_fetch_timeout_s),
             max_component_bytes: cfg.bundle_max_component_bytes,
+            max_precompiled_bytes: cfg.bundle_max_precompiled_bytes,
         })
     }
 }
@@ -192,14 +201,27 @@ impl BucketComponentSource {
 /// `tokio::time::timeout` so both call sites in [`BucketComponentSource
 /// ::fetch`] report which key timed out.
 async fn timed_get_object(config: &BucketConfig, key: &str) -> Result<Vec<u8>, ExecutorError> {
-    tokio::time::timeout(config.fetch_timeout, get_object(config, key))
-        .await
-        .map_err(|_| {
-            ExecutorError::BucketFetch(format!(
-                "bucket GET for {key:?} timed out after {:?}",
-                config.fetch_timeout
-            ))
-        })?
+    timed_get_object_capped(config, key, config.max_component_bytes).await
+}
+
+/// [`timed_get_object`] with an explicit body-size cap (precompiled
+/// artifacts use `max_precompiled_bytes`).
+async fn timed_get_object_capped(
+    config: &BucketConfig,
+    key: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ExecutorError> {
+    tokio::time::timeout(
+        config.fetch_timeout,
+        get_object_capped(config, key, max_bytes),
+    )
+    .await
+    .map_err(|_| {
+        ExecutorError::BucketFetch(format!(
+            "bucket GET for {key:?} timed out after {:?}",
+            config.fetch_timeout
+        ))
+    })?
 }
 
 impl ComponentSource for BucketComponentSource {
@@ -211,6 +233,14 @@ impl ComponentSource for BucketComponentSource {
         let component = timed_get_object(&self.config, component_key).await?;
         let sidecar = timed_get_object(&self.config, sidecar_key).await?;
         Ok((component, sidecar))
+    }
+
+    async fn fetch_precompiled(&self, key: &str) -> Result<Vec<u8>, ExecutorError> {
+        timed_get_object_capped(&self.config, key, self.config.max_precompiled_bytes).await
+    }
+
+    async fn fetch_object(&self, key: &str) -> Result<Vec<u8>, ExecutorError> {
+        timed_get_object(&self.config, key).await
     }
 }
 
@@ -342,7 +372,9 @@ fn amz_timestamp(now: SystemTime) -> Result<(String, String), ExecutorError> {
 }
 
 /// Builds the SigV4 `Authorization` header value for a body-less `GET` at
-/// `canonical_uri` against `host_header`.
+/// `canonical_uri` against `host_header` -- kept for the AWS published
+/// test-vector test; runtime requests go through [`build_authorization_for`].
+#[cfg(test)]
 fn build_authorization(
     config: &BucketConfig,
     host_header: &str,
@@ -350,8 +382,32 @@ fn build_authorization(
     amz_date: &str,
     date_stamp: &str,
 ) -> Result<String, ExecutorError> {
+    build_authorization_for(
+        config,
+        "GET",
+        EMPTY_BODY_SHA256,
+        host_header,
+        canonical_uri,
+        amz_date,
+        date_stamp,
+    )
+}
+
+/// Builds the SigV4 `Authorization` header for `method` with the body's
+/// hex SHA-256 as `x-amz-content-sha256` (signed, so the server rejects a
+/// body altered in flight). Shared by the runtime `GET` and the
+/// precompiler's `PUT` (`crate::precompile`).
+fn build_authorization_for(
+    config: &BucketConfig,
+    method: &str,
+    payload_sha256: &str,
+    host_header: &str,
+    canonical_uri: &str,
+    amz_date: &str,
+    date_stamp: &str,
+) -> Result<String, ExecutorError> {
     let canonical_request = format!(
-        "GET\n{canonical_uri}\n\nhost:{host_header}\nx-amz-content-sha256:{EMPTY_BODY_SHA256}\nx-amz-date:{amz_date}\n\nhost;x-amz-content-sha256;x-amz-date\n{EMPTY_BODY_SHA256}"
+        "{method}\n{canonical_uri}\n\nhost:{host_header}\nx-amz-content-sha256:{payload_sha256}\nx-amz-date:{amz_date}\n\nhost;x-amz-content-sha256;x-amz-date\n{payload_sha256}"
     );
     let credential_scope = format!("{date_stamp}/{}/s3/aws4_request", config.region);
     let hashed_canonical_request = sha256_hex(canonical_request.as_bytes());
@@ -391,17 +447,109 @@ fn build_bucket_tls_config(config: &BucketConfig) -> Result<ClientConfig, Execut
 }
 
 /// Issues the signed `GET` and returns the response body's bytes.
+#[cfg(test)]
 async fn get_object(config: &BucketConfig, key: &str) -> Result<Vec<u8>, ExecutorError> {
+    get_object_capped(config, key, config.max_component_bytes).await
+}
+
+/// One SigV4-signed GET whose body may not exceed `max_bytes`; any non-200
+/// status is an error.
+async fn get_object_capped(
+    config: &BucketConfig,
+    key: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ExecutorError> {
+    let (status, body) = signed_request(config, "GET", key, None, max_bytes).await?;
+    if status != 200 {
+        return Err(ExecutorError::BucketFetch(format!(
+            "bucket GET returned HTTP {status}"
+        )));
+    }
+    Ok(body)
+}
+
+/// Signed `GET` that maps `404` to `Ok(None)` (the precompiler's "artifact
+/// not built yet" signal) and enforces `max_bytes` instead of the
+/// component cap -- a `.cwasm` is legitimately larger than its `.wasm`.
+/// Any other non-200 status is an error, never treated as absent.
+pub async fn get_object_optional(
+    config: &BucketConfig,
+    key: &str,
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>, ExecutorError> {
+    let (status, body) = tokio::time::timeout(
+        config.fetch_timeout,
+        signed_request(config, "GET", key, None, max_bytes),
+    )
+    .await
+    .map_err(|_| ExecutorError::BucketFetch(format!("bucket GET for {key:?} timed out")))??;
+    match status {
+        200 => Ok(Some(body)),
+        404 => Ok(None),
+        other => Err(ExecutorError::BucketFetch(format!(
+            "bucket GET for {key:?} returned HTTP {other}"
+        ))),
+    }
+}
+
+/// Signed `PUT` of `body` at `key` (the precompiler's only write). The
+/// payload hash is part of the SigV4 signature. Fails on any non-2xx.
+pub async fn put_object(
+    config: &BucketConfig,
+    key: &str,
+    body: &[u8],
+) -> Result<(), ExecutorError> {
+    let (status, _) = tokio::time::timeout(
+        config.fetch_timeout,
+        signed_request(config, "PUT", key, Some(body), 64 * 1024),
+    )
+    .await
+    .map_err(|_| ExecutorError::BucketFetch(format!("bucket PUT for {key:?} timed out")))??;
+    if !(200..300).contains(&status) {
+        return Err(ExecutorError::BucketFetch(format!(
+            "bucket PUT for {key:?} returned HTTP {status}"
+        )));
+    }
+    Ok(())
+}
+
+/// Builds, signs and sends one HTTP/1.1 request, returning the status and
+/// (for `200` only) the body bounded by `max_bytes`.
+async fn signed_request(
+    config: &BucketConfig,
+    method: &str,
+    key: &str,
+    body: Option<&[u8]>,
+    max_bytes: u64,
+) -> Result<(u16, Vec<u8>), ExecutorError> {
     let endpoint = parse_endpoint(&config.endpoint)?;
     let canonical_uri = format!("/{}/{}", uri_encode(&config.bucket), uri_encode(key));
     let host_header = format!("{}:{}", endpoint.host, endpoint.port);
     let (amz_date, date_stamp) = amz_timestamp(SystemTime::now())?;
-    let authorization =
-        build_authorization(config, &host_header, &canonical_uri, &amz_date, &date_stamp)?;
-
-    let request = format!(
-        "GET {canonical_uri} HTTP/1.1\r\nHost: {host_header}\r\nx-amz-date: {amz_date}\r\nx-amz-content-sha256: {EMPTY_BODY_SHA256}\r\nAuthorization: {authorization}\r\nConnection: close\r\n\r\n"
-    );
+    let payload_sha = match body {
+        Some(b) => sha256_hex(b),
+        None => EMPTY_BODY_SHA256.to_string(),
+    };
+    let authorization = build_authorization_for(
+        config,
+        method,
+        &payload_sha,
+        &host_header,
+        &canonical_uri,
+        &amz_date,
+        &date_stamp,
+    )?;
+    let content_length = match body {
+        Some(b) => format!("Content-Length: {}\r\n", b.len()),
+        None => String::new(),
+    };
+    let mut request = format!(
+        "{method} {canonical_uri} HTTP/1.1\r\nHost: {host_header}\r\nx-amz-date: {amz_date}\r\nx-amz-content-sha256: {payload_sha}\r\nAuthorization: {authorization}\r\n{content_length}Connection: close\r\n\r\n"
+    )
+    .into_bytes();
+    if let Some(b) = body {
+        request.extend_from_slice(b);
+    }
 
     let tcp = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
         .await
@@ -417,10 +565,10 @@ async fn get_object(config: &BucketConfig, key: &str) -> Result<Vec<u8>, Executo
             .connect(server_name, tcp)
             .await
             .map_err(ExecutorError::Io)?;
-        send_and_read(&mut stream, request.as_bytes(), config.max_component_bytes).await
+        send_and_read(&mut stream, &request, max_bytes).await
     } else {
         let mut stream = tcp;
-        send_and_read(&mut stream, request.as_bytes(), config.max_component_bytes).await
+        send_and_read(&mut stream, &request, max_bytes).await
     }
 }
 
@@ -467,7 +615,7 @@ async fn send_and_read<T>(
     stream: &mut T,
     request: &[u8],
     max_bytes: u64,
-) -> Result<Vec<u8>, ExecutorError>
+) -> Result<(u16, Vec<u8>), ExecutorError>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
@@ -496,9 +644,10 @@ where
     let header_text = String::from_utf8_lossy(&buf[..header_end]).into_owned();
     let (status, content_length) = parse_status_and_length(&header_text)?;
     if status != 200 {
-        return Err(ExecutorError::BucketFetch(format!(
-            "bucket GET returned HTTP {status}"
-        )));
+        // A non-200 body is never read or trusted; the caller decides
+        // whether the status is an error (always, except the
+        // precompiler's 404-means-absent lookup).
+        return Ok((status, Vec::new()));
     }
     let content_length = content_length.ok_or_else(|| {
         ExecutorError::BucketFetch("bucket response had no Content-Length".to_string())
@@ -522,7 +671,7 @@ where
         body.extend_from_slice(&chunk[..n]);
     }
     body.truncate(content_length as usize);
-    Ok(body)
+    Ok((200, body))
 }
 
 #[cfg(test)]
@@ -543,6 +692,7 @@ mod tests {
             ca_file: None,
             fetch_timeout: Duration::from_secs(5),
             max_component_bytes: 33_554_432,
+            max_precompiled_bytes: 268_435_456,
         }
     }
 
@@ -714,6 +864,7 @@ mod tests {
             ca_file: None,
             fetch_timeout: Duration::from_secs(5),
             max_component_bytes: 33_554_432,
+            max_precompiled_bytes: 268_435_456,
         };
         let authorization = build_authorization(
             &config,
@@ -1063,5 +1214,86 @@ mod tests {
 
         server.await?;
         Ok(())
+    }
+
+    /// One-shot local HTTP server replying `status_line` and returning the
+    /// raw request it received.
+    async fn one_shot_server(
+        status_line: &'static str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut req = Vec::new();
+            let mut buf = vec![0u8; 4096];
+            // Read until headers plus any declared body have arrived.
+            loop {
+                let n = socket.read(&mut buf).await.expect("read");
+                req.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&req).into_owned();
+                if let Some(h) = text.find("\r\n\r\n") {
+                    let len = text
+                        .lines()
+                        .find_map(|l| l.strip_prefix("Content-Length: "))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if req.len() >= h + 4 + len {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+            let resp = format!("{status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            socket.write_all(resp.as_bytes()).await.expect("write");
+            socket.shutdown().await.expect("shutdown");
+            String::from_utf8_lossy(&req).into_owned()
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn put_object_sends_a_signed_body_with_its_payload_hash() {
+        let (endpoint, server) = one_shot_server("HTTP/1.1 200 OK").await;
+        let config = test_bucket_config(&endpoint);
+        put_object(&config, "precompiled/fp/d.cwasm", b"artifact")
+            .await
+            .expect("put ok");
+        let req = server.await.expect("server");
+        assert!(req.starts_with("PUT /waddles-bundles/precompiled/fp/d.cwasm HTTP/1.1\r\n"));
+        assert!(req.contains(&format!(
+            "x-amz-content-sha256: {}",
+            sha256_hex(b"artifact")
+        )));
+        assert!(req.contains("Content-Length: 8\r\n"));
+        assert!(req.ends_with("\r\n\r\nartifact"));
+    }
+
+    #[tokio::test]
+    async fn put_object_fails_loudly_on_a_non_2xx() {
+        let (endpoint, server) = one_shot_server("HTTP/1.1 403 Forbidden").await;
+        let err = put_object(&test_bucket_config(&endpoint), "k", b"x")
+            .await
+            .expect_err("403 must fail");
+        assert!(err.to_string().contains("403"));
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn get_object_optional_maps_404_to_none_and_500_to_error() {
+        let (endpoint, server) = one_shot_server("HTTP/1.1 404 Not Found").await;
+        let got = get_object_optional(&test_bucket_config(&endpoint), "k", 10)
+            .await
+            .expect("404 is not an error");
+        assert!(got.is_none());
+        server.await.expect("server");
+
+        let (endpoint, server) = one_shot_server("HTTP/1.1 500 Internal").await;
+        assert!(get_object_optional(&test_bucket_config(&endpoint), "k", 10)
+            .await
+            .is_err());
+        server.await.expect("server");
     }
 }
