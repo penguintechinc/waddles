@@ -34,8 +34,8 @@ use bundle_capability_gate::{
 use bundle_host_kv::ReconcileOutcome;
 use bundle_host_kv::{BoxFuture as KvFuture, CapabilitySnapshot, KvBackend, QuotaOutcome};
 use bundle_host_reputation::{
-    BoxFuture, IdempotencyKey, ReputationCaps, ReputationError, ReputationScope, ReputationStore,
-    ScoreEntry,
+    ApplyOutcome, BoxFuture, HistoryEntry, IdempotencyKey, ReasonClass, ReputationCaps,
+    ReputationError, ReputationScope, ReputationStore, ScoreEntry, TenantPolicy, TenantScore,
 };
 use opentelemetry::metrics::MeterProvider;
 use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
@@ -69,14 +69,25 @@ const SCENARIO_CAP: Duration = Duration::from_secs(60);
 const ACTOR_UUID: &str = "11111111-1111-4111-8111-111111111111";
 
 /// Tools the reputation bundle exports: `(name, is_write, required_scope)`.
-const REP_TOOLS: [(&str, bool, Option<&str>); 6] = [
+const REP_TOOLS: [(&str, bool, Option<&str>); 14] = [
     ("get_score", false, None),
     ("get_many", false, None),
     ("leaderboard", false, None),
     ("rep", false, None),
     ("adjust", true, None),
+    ("apply_moderation", true, None),
     ("override", true, Some("community:admin")),
+    ("get_tenant_score", false, Some("community:member")),
+    ("history", false, Some("community:member")),
+    ("check", false, None),
+    ("at_risk", false, Some("community:admin")),
+    ("is_soft_banned", false, None),
+    ("get_policy", false, Some("community:admin")),
+    ("set_policy", true, Some("community:admin")),
 ];
+
+/// The legacy score a member holds before any adjustment.
+const START: i64 = 600;
 
 /// One ledger row the in-memory store appends (mirrors the SQL ledger kinds).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,8 +103,12 @@ struct Ledger {
 /// gate (catalog quotas), which runs BEFORE this store.
 #[derive(Default)]
 struct MemStore {
+    /// Per-user tenant aggregate (stand-in for the hub-api-owned table).
+    tenant: Mutex<HashMap<Uuid, i64>>,
     scores: Mutex<HashMap<(i32, Uuid), i64>>,
     ledger: Mutex<Vec<Ledger>>,
+    /// Applied idempotency keys.
+    keys: Mutex<std::collections::HashSet<String>>,
 }
 
 impl MemStore {
@@ -103,7 +118,7 @@ impl MemStore {
             .lock()
             .unwrap()
             .get(&(community, user))
-            .unwrap_or(&0)
+            .unwrap_or(&START)
     }
     fn ledger(&self) -> Vec<Ledger> {
         self.ledger.lock().unwrap().clone()
@@ -129,7 +144,7 @@ impl ReputationStore for MemStore {
     ) -> BoxFuture<'a, Result<i64, ReputationError>> {
         Box::pin(async move {
             let mut s = self.scores.lock().unwrap();
-            let v = s.entry((scope.community_id, user)).or_insert(0);
+            let v = s.entry((scope.community_id, user)).or_insert(START);
             *v += i64::from(delta);
             self.ledger.lock().unwrap().push(Ledger {
                 community: scope.community_id,
@@ -201,6 +216,129 @@ impl ReputationStore for MemStore {
                 })
                 .collect())
         })
+    }
+
+    fn apply<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        delta: i32,
+        class: ReasonClass,
+        _source_event: &'a str,
+        _caps: ReputationCaps,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<ApplyOutcome, ReputationError>> {
+        Box::pin(async move {
+            // Idempotent on the host key (the SQL function's contract).
+            if !self.keys.lock().unwrap().insert(key.as_str().to_string()) {
+                return Ok(ApplyOutcome {
+                    new_score: self.score(scope.community_id, user),
+                    applied: false,
+                });
+            }
+            let mut s = self.scores.lock().unwrap();
+            let v = s.entry((scope.community_id, user)).or_insert(START);
+            let old = *v;
+            *v = (*v + i64::from(delta)).clamp(300, 850);
+            let applied = *v - old;
+            self.ledger.lock().unwrap().push(Ledger {
+                community: scope.community_id,
+                user,
+                kind: if class == ReasonClass::Moderation {
+                    "moderation"
+                } else {
+                    "apply"
+                },
+                value: applied,
+            });
+            let mut t = self.tenant.lock().unwrap();
+            let tv = t.entry(user).or_insert(START);
+            *tv = (*tv + applied).clamp(300, 850);
+            Ok(ApplyOutcome {
+                new_score: *v,
+                applied: true,
+            })
+        })
+    }
+
+    fn get_tenant<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        user: Uuid,
+    ) -> BoxFuture<'a, Result<TenantScore, ReputationError>> {
+        Box::pin(async move {
+            Ok(TenantScore {
+                score: *self.tenant.lock().unwrap().get(&user).unwrap_or(&START),
+                communities: 1,
+            })
+        })
+    }
+
+    fn tenant_policy<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+    ) -> BoxFuture<'a, Result<Option<TenantPolicy>, ReputationError>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn history<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        limit: u32,
+        _before: Option<i64>,
+    ) -> BoxFuture<'a, Result<Vec<HistoryEntry>, ReputationError>> {
+        Box::pin(async move {
+            let l = self.ledger.lock().unwrap();
+            let mut rows: Vec<HistoryEntry> = l
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.community == scope.community_id && r.user == user)
+                .map(|(i, r)| HistoryEntry {
+                    id: i64::try_from(i).unwrap() + 1,
+                    delta: i32::try_from(r.value).unwrap(),
+                    reason_code: r.kind.to_string(),
+                    kind: r.kind.to_string(),
+                    balance_after: None,
+                    occurred_at: "2026-11-11T00:00:00Z".to_string(),
+                })
+                .collect();
+            rows.reverse();
+            rows.truncate(limit as usize);
+            Ok(rows)
+        })
+    }
+
+    fn below_threshold<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        threshold: i64,
+        limit: u32,
+    ) -> BoxFuture<'a, Result<Vec<ScoreEntry>, ReputationError>> {
+        Box::pin(async move {
+            let mut v: Vec<ScoreEntry> = self
+                .scores
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|((c, _), sc)| *c == scope.community_id && **sc < threshold)
+                .map(|((_, u), sc)| ScoreEntry {
+                    user: *u,
+                    score: *sc,
+                })
+                .collect();
+            v.sort_by(|a, b| a.score.cmp(&b.score).then(a.user.cmp(&b.user)));
+            v.truncate(limit as usize);
+            Ok(v)
+        })
+    }
+
+    fn is_soft_banned<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        _user: Uuid,
+    ) -> BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async { Ok(false) })
     }
 
     fn leaderboard<'a>(
@@ -500,7 +638,13 @@ fn gate(members: &[Uuid]) -> Arc<CapabilityGate> {
                     json!({"delta_min": -5, "delta_max": 5,
                            "reason_codes": ["game.win", "game.loss", "loyalty.bonus", "admin.adjust"]}),
                 ),
+                (
+                    "reputation.moderation.write".to_string(),
+                    json!({"delta_min": -200, "delta_max": 200}),
+                ),
                 ("reputation.community.admin".to_string(), json!({})),
+                ("reputation.history.read".to_string(), json!({})),
+                ("reputation.tenant.read".to_string(), json!({})),
                 ("storage.kv".to_string(), json!({})),
             ]),
         );
@@ -575,7 +719,7 @@ impl World {
         Self {
             rig,
             snapshot,
-            gate: gate(&[alice, bob]),
+            gate: gate(&[alice, bob, Uuid::parse_str(ACTOR_UUID).expect("uuid")]),
             store: Arc::new(MemStore::default()),
             metrics,
             telemetry,
@@ -686,7 +830,7 @@ async fn a_draw_filter_fetches_scores_in_one_get_many_through_tool_invoke() {
     let entries = out["ok"]["entries"].as_array().expect("entries");
     assert_eq!(entries.len(), 2, "{out}");
     assert_eq!(entries[0]["user"], json!(w.bob.to_string()), "{out}");
-    assert_eq!(entries[0]["score"], 0, "{out}");
+    assert_eq!(entries[0]["score"], START, "{out}");
     assert_eq!(entries[1]["user"], json!(w.alice.to_string()), "{out}");
     assert_eq!(entries[1]["score"], 120, "{out}");
     assert!(entries[1]["tier"].is_string(), "{out}");
@@ -774,7 +918,7 @@ async fn c_override_is_denied_for_non_admins_before_the_store() {
             "{role:?}/{account:?}"
         );
         assert!(w.store.ledger().is_empty(), "{role:?}: store untouched");
-        assert_eq!(w.store.score(COMMUNITY_A, w.alice), 0);
+        assert_eq!(w.store.score(COMMUNITY_A, w.alice), START);
     }
 }
 
@@ -789,7 +933,7 @@ async fn d_the_24h_cap_is_enforced_by_the_host_whatever_the_bundle_policy_says()
             .go(
                 &format!("evt-d{i}"),
                 "adjust",
-                json!({"user": w.alice.to_string(), "event": "win"}),
+                json!({"user": w.alice.to_string(), "delta": 1, "reason": "activity.win"}),
                 &format!("k-d{i}"),
             )
             .await;
@@ -803,7 +947,7 @@ async fn d_the_24h_cap_is_enforced_by_the_host_whatever_the_bundle_policy_says()
     println!("CAP applied={applied} refused={refused:?}");
     assert_eq!(applied, 5, "exactly the catalog cap worth of deltas lands");
     assert!(refused.is_some(), "the 6th is refused by the host cap");
-    assert_eq!(w.store.score(COMMUNITY_A, w.alice), 5, "no bypass");
+    assert_eq!(w.store.score(COMMUNITY_A, w.alice), START + 5, "no bypass");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -832,12 +976,174 @@ async fn e_scores_never_cross_communities() {
             COMMUNITY_B,
             "evt-e2",
             "adjust",
-            json!({"user": w.alice.to_string(), "event": "win"}),
+            json!({"user": w.alice.to_string(), "delta": 1, "reason": "activity.win"}),
             "k-e2",
         )
         .await;
     assert!(write.get("ok").is_none(), "{write}");
     assert_eq!(w.store.score(COMMUNITY_A, w.alice), 77);
-    assert_eq!(w.store.score(COMMUNITY_B, w.alice), 0);
+    assert_eq!(w.store.score(COMMUNITY_B, w.alice), START);
     assert!(w.store.ledger().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn f_tenant_score_is_the_verified_actors_own_aggregate_only() {
+    let w = World::new(Some("member"), Some("1001")).await;
+    let actor = Uuid::parse_str(ACTOR_UUID).unwrap();
+    w.store.tenant.lock().unwrap().insert(actor, 512);
+    w.store.tenant.lock().unwrap().insert(w.alice, 333);
+    let out = w.go("evt-f1", "get_tenant_score", json!({}), "k-f1").await;
+    assert_eq!(out["ok"]["score"], 512, "{out}");
+    assert_eq!(out["ok"]["user"], json!(ACTOR_UUID), "{out}");
+    // There is no `user` argument: another member's aggregate cannot be named.
+    let other = w
+        .go(
+            "evt-f2",
+            "get_tenant_score",
+            json!({"user": w.alice.to_string()}),
+            "k-f2",
+        )
+        .await;
+    assert!(other.get("ok").is_none(), "{other}");
+    // No verified actor (system / unlinked): forbidden, nothing read.
+    let anon = World::new(None, None).await;
+    let out = anon
+        .go("evt-f3", "get_tenant_score", json!({}), "k-f3")
+        .await;
+    assert_eq!(out, json!({"tool_error": "Forbidden"}), "{out}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn g_history_is_own_or_admin_and_scoped_to_the_community() {
+    let member = World::new(Some("member"), Some("1001")).await;
+    let actor = Uuid::parse_str(ACTOR_UUID).unwrap();
+    // The actor accrues activity, then reads their own ledger.
+    let a = member
+        .go(
+            "evt-g1",
+            "adjust",
+            json!({"user": ACTOR_UUID, "delta": 2, "reason": "activity.follow"}),
+            "k-g1",
+        )
+        .await;
+    assert_eq!(a["ok"]["score"], START + 2, "{a}");
+    let own = member
+        .go(
+            "evt-g2",
+            "history",
+            json!({"user": ACTOR_UUID, "limit": 10}),
+            "k-g2",
+        )
+        .await;
+    assert_eq!(own["ok"]["entries"].as_array().unwrap().len(), 1, "{own}");
+    // A member cannot read someone else's ledger.
+    let other = member
+        .go(
+            "evt-g3",
+            "history",
+            json!({"user": member.alice.to_string()}),
+            "k-g3",
+        )
+        .await;
+    assert_eq!(other, json!({"tool_error": "Forbidden"}), "{other}");
+    // An admin can; and another community sees nothing of it.
+    let admin = World::new(Some("community-admin"), Some("1001")).await;
+    admin
+        .store
+        .scores
+        .lock()
+        .unwrap()
+        .insert((COMMUNITY_A, admin.alice), 610);
+    let ok = admin
+        .go(
+            "evt-g4",
+            "history",
+            json!({"user": admin.alice.to_string()}),
+            "k-g4",
+        )
+        .await;
+    assert!(ok.get("ok").is_some(), "{ok}");
+    let cross = member
+        .go_in(
+            COMMUNITY_B,
+            "evt-g5",
+            "history",
+            json!({"user": ACTOR_UUID}),
+            "k-g5",
+        )
+        .await;
+    assert!(cross.get("ok").is_none(), "isolation: {cross}");
+    let _ = actor;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn h_moderation_class_needs_a_moderator_actor_and_has_its_own_larger_cap() {
+    // A plain member (human-originated invocation): forbidden, store untouched.
+    let member = World::new(Some("member"), Some("1001")).await;
+    let out = member
+        .go(
+            "evt-h1",
+            "apply_moderation",
+            json!({"user": member.alice.to_string(), "delta": -200, "reason": "moderation.ban"}),
+            "k-h1",
+        )
+        .await;
+    assert_eq!(out, json!({"tool_error": "Forbidden"}), "{out}");
+    assert!(member.store.ledger().is_empty());
+    // A moderator: -200 lands in the moderation class (the activity cap is 5).
+    let m = World::new(Some("moderator"), Some("1001")).await;
+    let out = m
+        .go(
+            "evt-h2",
+            "apply_moderation",
+            json!({"user": m.alice.to_string(), "delta": -200, "reason": "moderation.ban"}),
+            "k-h2",
+        )
+        .await;
+    assert_eq!(out["ok"]["score"], START - 200, "{out}");
+    // A replay of the SAME event + key applies once (idempotent).
+    let again = m
+        .go(
+            "evt-h2",
+            "apply_moderation",
+            json!({"user": m.alice.to_string(), "delta": -200, "reason": "moderation.ban"}),
+            "k-h2",
+        )
+        .await;
+    println!("REPLAY {again}");
+    assert_eq!(m.store.score(COMMUNITY_A, m.alice), START - 200);
+    // Activity path is still capped at 5 for the same caller.
+    let act = m
+        .go(
+            "evt-h3",
+            "adjust",
+            json!({"user": m.alice.to_string(), "delta": -200, "reason": "activity.x"}),
+            "k-h3",
+        )
+        .await;
+    assert!(act.get("ok").is_none(), "{act}");
+    // The moderation window is capped per user per day (400): a 3rd -200 is refused by the gate.
+    let ok2 = m
+        .go(
+            "evt-h4",
+            "apply_moderation",
+            json!({"user": m.alice.to_string(), "delta": -200, "reason": "moderation.ban"}),
+            "k-h4",
+        )
+        .await;
+    assert_eq!(ok2["ok"]["score"], 300, "600-400 is clamped to the scale floor: {ok2}");
+    let third = m
+        .go(
+            "evt-h5",
+            "apply_moderation",
+            json!({"user": m.alice.to_string(), "delta": -200, "reason": "moderation.ban"}),
+            "k-h5",
+        )
+        .await;
+    assert!(third.get("ok").is_none(), "daily moderation cap: {third}");
+    assert_eq!(
+        m.store.score(COMMUNITY_A, m.alice),
+        300,
+        "the scale floor is 300"
+    );
 }

@@ -1,21 +1,23 @@
-//! Host-independent reputation tool logic (bundle-MCP-tools P5 Task 3).
+//! Host-independent reputation SERVICE tool logic (v1.1.0).
 //!
-//! Every tool is a pure function over two seams -- [`RepHost`] (the
-//! `reputation` host capability) and [`ConfigStore`] (the bundle's own kv) --
-//! so the whole tool table is unit-tested on the host target with fakes; the
-//! wasm glue in `lib.rs` supplies the real implementations.
+//! The service owns the STORE, the TOOLS and the I/O: apply/adjust, reads,
+//! history, soft-ban state, caps/idempotency/ledger/audit (all enforced by the
+//! host capability) and FLOOR ENFORCEMENT (soft/hard community floors and the
+//! tenant floor) -- floors are admin limits, not scoring logic. It holds NO
+//! scoring weights and no event->delta mapping: the caller (the default
+//! first-party logic bundle `waddles.core.app.reputation-accrual`, or a
+//! third-party replacement) names the delta, and the host bounds it.
+//!
+//! Every tool is a pure function over three seams -- [`RepHost`] (the
+//! `reputation` host capability), [`ConfigStore`] (the bundle's own kv) and
+//! [`Platform`] (flags + the platform ban tool) -- so the whole tool table is
+//! unit-tested on the host target with fakes; `lib.rs` supplies the real wasm
+//! implementations.
 //!
 //! Safety shape: every tool validates its args first (UUIDs, bounded batches,
 //! machine-code reasons) and fails LOUD with a typed error -- never a default
-//! answer. The caller never names a delta: `adjust` takes an EVENT
-//! (`win`/`loss`/`loyalty`) and the community's delta policy decides the
-//! points. Writes ride the host's event+ordinal-keyed `adjust-many` /
-//! `override-score` (replay-safe) and require the caller's idempotency key.
-//! `override` is admin-only: the manifest declares `required_scope:
-//! community:admin` (the HOST refuses before dispatch unless the verified
-//! actor holds it) and the tool re-checks `ToolContext::has_scope` as
-//! defense in depth -- the actor is never read from caller args. The host
-//! separately requires the `reputation.community.admin` grant.
+//! answer. Scope-restricted tools (`override`, `at_risk`, `set_policy`,
+//! `get_policy`) take the verified actor from `ToolContext`, never from args.
 //! No tool ever logs or returns anything but UUIDs, scores and tier names.
 
 use std::sync::Arc;
@@ -26,34 +28,82 @@ use waddle_sdk::tool::{ToolContext, ToolError, ToolRegistry};
 
 /// Largest `get_many` batch (matches the host cap's bound).
 pub const MAX_BATCH: usize = 100;
-/// Largest `leaderboard` page (matches the host cap's bound).
-pub const MAX_LEADERBOARD: u32 = 100;
+/// Largest `leaderboard` / `at_risk` / `history` page (host bound).
+pub const MAX_PAGE: u32 = 100;
 /// Default `leaderboard` page.
 pub const DEFAULT_LEADERBOARD: u32 = 10;
-/// Largest per-event delta a policy may configure (the grant's declared bound).
-pub const MAX_POLICY_DELTA: i32 = 5;
+/// Default `history` page.
+pub const DEFAULT_HISTORY: u32 = 20;
+/// Lowest legacy score (mirrors the host's `SCALE_MIN`).
+pub const SCALE_MIN: i64 = 300;
+/// Highest legacy score (mirrors the host's `SCALE_MAX`).
+pub const SCALE_MAX: i64 = 850;
+/// Largest activity delta the host accepts per `adjust`.
+pub const ACTIVITY_CAP: i32 = 5;
+/// Largest moderation delta the host accepts per `apply_moderation`.
+pub const MODERATION_CAP: i32 = 200;
 /// Most tiers a community may configure.
 pub const MAX_TIERS: usize = 16;
-/// Largest absolute tier `min_score` a ladder may declare (far above the
-/// host's +-1_000_000 score clamp, far below i64 overflow of `min - score`).
-pub const TIER_SCORE_BOUND: i64 = 1_000_000_000_000;
 /// Longest tier name.
 pub const MAX_TIER_NAME: usize = 32;
-/// Longest caller-supplied override reason (host ledger column is 100).
 const DEFAULT_OVERRIDE_REASON: &str = "admin.override";
 
-/// kv key holding the community's delta policy JSON.
-pub const KEY_POLICY: &str = "policy";
+/// kv key holding the community's floor/threshold policy JSON.
+pub const KEY_FLOORS: &str = "floors";
 /// kv key holding the community's tier ladder JSON.
 pub const KEY_TIERS: &str = "tiers";
-/// Scope the verified actor must hold to call `override` (host-enforced too).
-pub const OVERRIDE_SCOPE: &str = "community:admin";
+/// Scope the verified actor must hold for admin tools (host-enforced too).
+pub const ADMIN_SCOPE: &str = "community:admin";
+/// PostHog flag gating every floor action (default OFF).
+pub const FLAG_AUTO_BAN: &str = "waddles.reputation-auto-ban";
+/// Audit reason of a community soft-floor soft ban.
+pub const REASON_SOFT: &str = "community_soft_floor";
+/// Audit reason of a community hard-floor ban.
+pub const REASON_HARD: &str = "community_hard_floor";
+/// Audit reason of a tenant-floor ban.
+pub const REASON_TENANT: &str = "tenant_floor";
+/// Default recommended tenant hard-ban floor (disabled unless the tenant
+/// admin enables it in the hub-api tenant policy).
+pub const DEFAULT_TENANT_FLOOR: i64 = 350;
 
 /// One member's score row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub user: String,
     pub score: i64,
+}
+
+/// Result of an apply call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Applied {
+    pub new_score: i64,
+    pub applied: bool,
+}
+
+/// One audit-ledger row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryRow {
+    pub id: i64,
+    pub delta: i32,
+    pub reason_code: String,
+    pub kind: String,
+    pub balance_after: Option<i64>,
+    pub occurred_at: String,
+}
+
+/// A user's tenant aggregate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TenantScore {
+    pub score: i64,
+    pub communities: u32,
+}
+
+/// The tenant's auto-ban policy (hub-api-owned, read-only here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TenantPolicy {
+    pub auto_ban_enabled: bool,
+    pub auto_ban_floor: i64,
+    pub at_risk_threshold: i64,
 }
 
 /// Every way a host-capability call can fail (mirrors the WIT
@@ -72,18 +122,57 @@ pub enum HostError {
 pub trait RepHost: Send + Sync {
     /// Scores for `users` in request order.
     fn get_many(&self, users: &[String]) -> Result<Vec<Entry>, HostError>;
-    /// Atomically applies `(user, delta)` items (host-keyed, replay-safe).
-    fn adjust_many(&self, items: &[(String, i32)], reason: &str) -> Result<(), HostError>;
+    /// ACTIVITY-class idempotent delta (host-keyed by event + ordinal).
+    fn apply(&self, user: &str, delta: i32, reason: &str) -> Result<Applied, HostError>;
+    /// MODERATION-class idempotent delta (`reputation.moderation.write`).
+    fn apply_moderation(&self, user: &str, delta: i32, reason: &str) -> Result<Applied, HostError>;
     /// ADMIN override to an absolute score; returns the new (clamped) score.
     fn override_score(&self, user: &str, absolute: i64, reason: &str) -> Result<i64, HostError>;
     /// Top `limit` members by score.
     fn leaderboard(&self, limit: u32) -> Result<Vec<Entry>, HostError>;
+    /// `user`'s tenant aggregate.
+    fn get_tenant(&self, user: &str) -> Result<TenantScore, HostError>;
+    /// The tenant's auto-ban policy, if set.
+    fn tenant_policy(&self) -> Result<Option<TenantPolicy>, HostError>;
+    /// Newest-first ledger page.
+    fn history(
+        &self,
+        user: &str,
+        limit: u32,
+        before: Option<i64>,
+    ) -> Result<Vec<HistoryRow>, HostError>;
+    /// Members strictly below `threshold`, lowest first.
+    fn below_threshold(&self, threshold: i64, limit: u32) -> Result<Vec<Entry>, HostError>;
+    /// Whether `user` is soft-banned in this community.
+    fn is_soft_banned(&self, user: &str) -> Result<bool, HostError>;
+    /// Records a soft ban; `true` when newly recorded.
+    fn soft_ban(&self, user: &str, reason: &str) -> Result<bool, HostError>;
+    /// Lifts a soft ban recorded with exactly `only_reason`.
+    fn lift_soft_ban(&self, user: &str, only_reason: &str) -> Result<bool, HostError>;
 }
 
 /// The bundle's own (per-community, host-scoped) key/value config store.
 pub trait ConfigStore: Send + Sync {
     /// Raw bytes at `key`, `None` if unset; `Err` carries a PII-free reason.
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
+    /// Writes `value` at `key` (no TTL).
+    fn set(&self, key: &str, value: &[u8]) -> Result<(), String>;
+}
+
+/// Ambient platform I/O: the feature flag and the platform ban tool.
+pub trait Platform: Send + Sync {
+    /// `flags::enabled(key, false)`.
+    fn flag_enabled(&self, key: &str) -> bool;
+    /// Bans `user` on `platform` through that platform bundle's
+    /// `<platform>.moderation.ban` tool. `Err` carries the stable code only.
+    fn ban(&self, platform: &str, user: &str, reason: &str, key: &str) -> Result<(), String>;
+}
+
+/// Everything a tool handler needs.
+pub struct Env {
+    pub host: Arc<dyn RepHost>,
+    pub cfg: Arc<dyn ConfigStore>,
+    pub platform: Arc<dyn Platform>,
 }
 
 fn invalid(msg: impl Into<String>) -> ToolError {
@@ -96,6 +185,7 @@ pub fn host_to_tool(e: HostError) -> ToolError {
         HostError::NotAMember => invalid("not_a_member"),
         HostError::DailyCapExceeded => invalid("daily_cap_exceeded"),
         HostError::Denied(code) if code == "not_granted" => ToolError::NotGranted,
+        HostError::Denied(code) if code == "forbidden" => ToolError::Forbidden,
         HostError::Denied(code) => invalid(format!("denied:{code}")),
         HostError::Invalid(m) => invalid(m),
         HostError::Unavailable(_) => ToolError::TargetUnavailable,
@@ -146,63 +236,140 @@ fn valid_reason(reason: &str) -> bool {
         })
 }
 
-// ---- config -------------------------------------------------------------
-
-/// The community's per-event point deltas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeltaPolicy {
-    pub win: i32,
-    pub loss: i32,
-    pub loyalty: i32,
+fn reason_field(args: &Value, default: Option<&str>) -> Result<String, ToolError> {
+    match args.get("reason") {
+        None | Some(Value::Null) => default
+            .map(str::to_string)
+            .ok_or_else(|| invalid("reason is required")),
+        Some(Value::String(r)) if valid_reason(r) => Ok(r.clone()),
+        Some(_) => Err(invalid("reason must match [a-z0-9._:-], 1..=100")),
+    }
 }
 
-impl Default for DeltaPolicy {
+fn platform_field(args: &Value) -> Result<Option<String>, ToolError> {
+    match args.get("platform") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(p)) if matches!(p.as_str(), "twitch" | "discord" | "youtube") => {
+            Ok(Some(p.clone()))
+        }
+        Some(_) => Err(invalid("platform must be one of twitch, discord, youtube")),
+    }
+}
+
+fn page_field(args: &Value, default: u32) -> Result<u32, ToolError> {
+    match args.get("limit") {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| (1..=MAX_PAGE).contains(n))
+            .ok_or_else(|| invalid(format!("limit must be 1..={MAX_PAGE}"))),
+    }
+}
+
+fn require_key(ctx: &ToolContext) -> Result<&str, ToolError> {
+    ctx.idempotency_key
+        .as_deref()
+        .ok_or_else(|| invalid("idempotency key required"))
+}
+
+fn require_admin(ctx: &ToolContext) -> Result<(), ToolError> {
+    if ctx.has_scope(ADMIN_SCOPE) {
+        Ok(())
+    } else {
+        Err(ToolError::Forbidden)
+    }
+}
+
+// ---- floor policy (config only: floors and thresholds, no scoring) --------
+
+/// The community's floor policy. All enforcement is OFF by default; the
+/// numbers are the recommended legacy-scale defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloorPolicy {
+    pub soft_ban_enabled: bool,
+    pub soft_ban_floor: i64,
+    pub hard_ban_enabled: bool,
+    pub hard_ban_floor: i64,
+    pub at_risk_threshold: i64,
+}
+
+impl Default for FloorPolicy {
     fn default() -> Self {
         Self {
-            win: 1,
-            loss: -1,
-            loyalty: 1,
+            soft_ban_enabled: false,
+            soft_ban_floor: 550,
+            hard_ban_enabled: false,
+            hard_ban_floor: 400,
+            at_risk_threshold: 600,
         }
+    }
+}
+
+impl FloorPolicy {
+    /// `300 <= hard < soft < at_risk <= 850` (same rule hub-api enforces).
+    pub fn validate(&self) -> Result<(), ToolError> {
+        if self.hard_ban_floor >= SCALE_MIN
+            && self.hard_ban_floor < self.soft_ban_floor
+            && self.soft_ban_floor < self.at_risk_threshold
+            && self.at_risk_threshold <= SCALE_MAX
+        {
+            Ok(())
+        } else {
+            Err(invalid(
+                "policy must satisfy 300 <= hard_ban_floor < soft_ban_floor < at_risk_threshold <= 850",
+            ))
+        }
+    }
+
+    fn to_json(self) -> Value {
+        json!({
+            "soft_ban_enabled": self.soft_ban_enabled,
+            "soft_ban_floor": self.soft_ban_floor,
+            "hard_ban_enabled": self.hard_ban_enabled,
+            "hard_ban_floor": self.hard_ban_floor,
+            "at_risk_threshold": self.at_risk_threshold,
+        })
     }
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawPolicy {
-    win: Option<i32>,
-    loss: Option<i32>,
-    loyalty: Option<i32>,
+struct RawFloors {
+    soft_ban_enabled: Option<bool>,
+    soft_ban_floor: Option<i64>,
+    hard_ban_enabled: Option<bool>,
+    hard_ban_floor: Option<i64>,
+    at_risk_threshold: Option<i64>,
 }
 
-/// Loads the delta policy: absent -> defaults; present-but-invalid -> LOUD error.
-pub fn load_policy(cfg: &dyn ConfigStore) -> Result<DeltaPolicy, ToolError> {
-    let Some(bytes) = cfg
-        .get(KEY_POLICY)
-        .map_err(|_| ToolError::TargetUnavailable)?
-    else {
-        return Ok(DeltaPolicy::default());
-    };
-    let raw: RawPolicy =
-        serde_json::from_slice(&bytes).map_err(|_| invalid("invalid policy config"))?;
-    let d = DeltaPolicy::default();
-    let p = DeltaPolicy {
-        win: raw.win.unwrap_or(d.win),
-        loss: raw.loss.unwrap_or(d.loss),
-        loyalty: raw.loyalty.unwrap_or(d.loyalty),
-    };
-    let in_bound = |v: i32| v != 0 && v.unsigned_abs() <= MAX_POLICY_DELTA.unsigned_abs();
-    if in_bound(p.win)
-        && in_bound(p.loss)
-        && in_bound(p.loyalty)
-        && p.win > 0
-        && p.loss < 0
-        && p.loyalty > 0
-    {
-        Ok(p)
-    } else {
-        Err(invalid("invalid policy config"))
+fn merge_floors(base: FloorPolicy, raw: RawFloors) -> FloorPolicy {
+    FloorPolicy {
+        soft_ban_enabled: raw.soft_ban_enabled.unwrap_or(base.soft_ban_enabled),
+        soft_ban_floor: raw.soft_ban_floor.unwrap_or(base.soft_ban_floor),
+        hard_ban_enabled: raw.hard_ban_enabled.unwrap_or(base.hard_ban_enabled),
+        hard_ban_floor: raw.hard_ban_floor.unwrap_or(base.hard_ban_floor),
+        at_risk_threshold: raw.at_risk_threshold.unwrap_or(base.at_risk_threshold),
     }
 }
+
+/// Loads the floor policy: absent -> defaults (all disabled); present but
+/// invalid -> LOUD error, never silently defaulted.
+pub fn load_floors(cfg: &dyn ConfigStore) -> Result<FloorPolicy, ToolError> {
+    let Some(bytes) = cfg
+        .get(KEY_FLOORS)
+        .map_err(|_| ToolError::TargetUnavailable)?
+    else {
+        return Ok(FloorPolicy::default());
+    };
+    let raw: RawFloors =
+        serde_json::from_slice(&bytes).map_err(|_| invalid("invalid floors config"))?;
+    let p = merge_floors(FloorPolicy::default(), raw);
+    p.validate().map_err(|_| invalid("invalid floors config"))?;
+    Ok(p)
+}
+
+// ---- tiers (display only) -------------------------------------------------
 
 /// One rung of the tier ladder.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -214,11 +381,11 @@ pub struct Tier {
 
 fn default_tiers() -> Vec<Tier> {
     [
-        ("outcast", -1_000_000),
-        ("newcomer", 0),
-        ("regular", 25),
-        ("trusted", 100),
-        ("legend", 500),
+        ("poor", SCALE_MIN),
+        ("fair", 580),
+        ("good", 670),
+        ("very_good", 740),
+        ("exceptional", 800),
     ]
     .into_iter()
     .map(|(name, min_score)| Tier {
@@ -228,10 +395,10 @@ fn default_tiers() -> Vec<Tier> {
     .collect()
 }
 
-/// Loads the tier ladder: absent -> defaults; present-but-invalid -> LOUD error.
-/// Valid = 1..=16 tiers, strictly ascending `min_score`, the first reaching down
-/// to the lowest possible score (so every score has a tier), names
-/// `[a-z0-9_-]`, 1..=32 chars.
+/// Loads the tier ladder: absent -> defaults; present but invalid -> LOUD
+/// error. Valid = 1..=16 tiers, strictly ascending `min_score` within the
+/// scale, the first at or below the scale floor (every score has a tier),
+/// names `[a-z0-9_-]`, 1..=32 chars.
 pub fn load_tiers(cfg: &dyn ConfigStore) -> Result<Vec<Tier>, ToolError> {
     let Some(bytes) = cfg
         .get(KEY_TIERS)
@@ -248,17 +415,13 @@ pub fn load_tiers(cfg: &dyn ConfigStore) -> Result<Vec<Tier>, ToolError> {
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
     };
     let ascending = tiers.windows(2).all(|w| w[0].min_score < w[1].min_score);
-    let covers = tiers.first().is_some_and(|t| t.min_score <= -1_000_000);
-    // Bounded thresholds keep every `min_score - score` provably in i64 range
-    // (scores are host-clamped to +-1_000_000).
-    let bounded = tiers
-        .iter()
-        .all(|t| (-TIER_SCORE_BOUND..=TIER_SCORE_BOUND).contains(&t.min_score));
+    let covers = tiers.first().is_some_and(|t| t.min_score <= SCALE_MIN);
+    let bounded = tiers.iter().all(|t| t.min_score <= SCALE_MAX);
     if tiers.is_empty()
-        || !bounded
         || tiers.len() > MAX_TIERS
         || !ascending
         || !covers
+        || !bounded
         || !tiers.iter().all(|t| name_ok(&t.name))
     {
         return Err(invalid("invalid tier config"));
@@ -273,6 +436,111 @@ pub fn tier_for(tiers: &[Tier], score: i64) -> &Tier {
         .rev()
         .find(|t| score >= t.min_score)
         .unwrap_or(&tiers[0])
+}
+
+// ---- floor enforcement ------------------------------------------------------
+
+/// What the community floors decided for one user after a score change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FloorAction {
+    /// Floors not evaluated (flag OFF).
+    Disabled,
+    /// Nothing to do.
+    None,
+    /// Banned on the platform (hard floor / tenant floor).
+    Ban,
+    /// Soft-banned (floor-triggered).
+    SoftBan,
+    /// A floor-triggered soft ban was lifted (score recovered).
+    SoftBanLifted,
+    /// A ban was due but could not be executed; carries the stable code.
+    BanFailed(String),
+}
+
+impl FloorAction {
+    fn label(&self) -> String {
+        match self {
+            Self::Disabled => "disabled".into(),
+            Self::None => "none".into(),
+            Self::Ban => "ban".into(),
+            Self::SoftBan => "soft_ban".into(),
+            Self::SoftBanLifted => "soft_ban_lifted".into(),
+            Self::BanFailed(c) => format!("ban_failed:{c}"),
+        }
+    }
+}
+
+fn try_ban(env: &Env, platform: Option<&str>, user: &str, reason: &str, key: &str) -> FloorAction {
+    let Some(platform) = platform else {
+        return FloorAction::BanFailed("platform_required".into());
+    };
+    match env.platform.ban(platform, user, reason, key) {
+        Ok(()) => FloorAction::Ban,
+        Err(code) => FloorAction::BanFailed(code),
+    }
+}
+
+/// Evaluates both independent floor policies for `user` at `score`, behind
+/// the `waddles.reputation-auto-ban` flag (default OFF):
+///
+/// * community: `score < hard floor` (enabled) -> ban in this community
+///   (`community_hard_floor`); else `score < soft floor` (enabled) -> soft ban
+///   (`community_soft_floor`); else a floor-triggered soft ban is lifted
+///   (a manual soft ban, recorded under another reason, is never cleared);
+/// * tenant: the user's tenant aggregate `< tenant floor` (policy enabled)
+///   -> ban (`tenant_floor`). The ban runs through the current community's
+///   platform tool; fan-out to the tenant's other communities is a follow-up.
+///
+/// A failed host/ban call never fails the score change that already applied:
+/// it is reported in the result (`ban_failed:<code>`) so it is never silent.
+pub fn enforce_floors(
+    env: &Env,
+    user: &str,
+    score: i64,
+    platform: Option<&str>,
+    key: &str,
+) -> Result<(FloorAction, FloorAction), ToolError> {
+    if !env.platform.flag_enabled(FLAG_AUTO_BAN) {
+        return Ok((FloorAction::Disabled, FloorAction::Disabled));
+    }
+    let p = load_floors(env.cfg.as_ref())?;
+    let community = if p.hard_ban_enabled && score < p.hard_ban_floor {
+        try_ban(env, platform, user, REASON_HARD, &format!("{key}:hard"))
+    } else if p.soft_ban_enabled && score < p.soft_ban_floor {
+        match env.host.soft_ban(user, REASON_SOFT) {
+            Ok(_) => FloorAction::SoftBan,
+            Err(e) => FloorAction::BanFailed(host_code(&e)),
+        }
+    } else {
+        match env.host.lift_soft_ban(user, REASON_SOFT) {
+            Ok(true) => FloorAction::SoftBanLifted,
+            Ok(false) => FloorAction::None,
+            Err(e) => FloorAction::BanFailed(host_code(&e)),
+        }
+    };
+    let tenant = match env.host.tenant_policy() {
+        Ok(Some(tp)) if tp.auto_ban_enabled => match env.host.get_tenant(user) {
+            Ok(t) if t.score < tp.auto_ban_floor => {
+                try_ban(env, platform, user, REASON_TENANT, &format!("{key}:tenant"))
+            }
+            Ok(_) => FloorAction::None,
+            Err(e) => FloorAction::BanFailed(host_code(&e)),
+        },
+        Ok(_) => FloorAction::None,
+        Err(e) => FloorAction::BanFailed(host_code(&e)),
+    };
+    Ok((community, tenant))
+}
+
+fn host_code(e: &HostError) -> String {
+    match e {
+        HostError::NotAMember => "not_a_member".into(),
+        HostError::DailyCapExceeded => "daily_cap_exceeded".into(),
+        HostError::Denied(c) => c.clone(),
+        HostError::Invalid(_) => "invalid".into(),
+        HostError::Unavailable(_) => "unavailable".into(),
+        HostError::Backend(_) => "backend".into(),
+    }
 }
 
 // ---- tools --------------------------------------------------------------
@@ -290,25 +558,15 @@ fn one_score(host: &dyn RepHost, user: &str) -> Result<Entry, ToolError> {
 }
 
 /// `get_score {user}` -> `{user, score, tier}`.
-pub fn get_score(
-    host: &dyn RepHost,
-    cfg: &dyn ConfigStore,
-    _ctx: &ToolContext,
-    args: Value,
-) -> Result<Value, ToolError> {
+pub fn get_score(env: &Env, _ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
     only_fields(&args, &["user"])?;
     let user = uuid_field(&args, "user")?;
-    let tiers = load_tiers(cfg)?;
-    Ok(entry_json(&tiers, &one_score(host, &user)?))
+    let tiers = load_tiers(env.cfg.as_ref())?;
+    Ok(entry_json(&tiers, &one_score(env.host.as_ref(), &user)?))
 }
 
-/// `get_many {users}` -> `{entries: [{user, score, tier}]}` (<= 100, no empty batch).
-pub fn get_many(
-    host: &dyn RepHost,
-    cfg: &dyn ConfigStore,
-    _ctx: &ToolContext,
-    args: Value,
-) -> Result<Value, ToolError> {
+/// `get_many {users}` -> `{entries: [{user, score, tier}]}` (<= 100).
+pub fn get_many(env: &Env, _ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
     only_fields(&args, &["users"])?;
     let raw = args
         .get("users")
@@ -323,96 +581,118 @@ pub fn get_many(
                 .and_then(|s| parse_uuid(s, "users[]"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let tiers = load_tiers(cfg)?;
-    let rows = host.get_many(&users).map_err(host_to_tool)?;
+    let tiers = load_tiers(env.cfg.as_ref())?;
+    let rows = env.host.get_many(&users).map_err(host_to_tool)?;
     Ok(json!({ "entries": rows.iter().map(|e| entry_json(&tiers, e)).collect::<Vec<_>>() }))
 }
 
-fn require_key(ctx: &ToolContext) -> Result<(), ToolError> {
-    if ctx.idempotency_key.is_some() {
-        Ok(())
-    } else {
-        Err(invalid("idempotency key required"))
-    }
+fn apply_result(
+    env: &Env,
+    tiers: &[Tier],
+    user: &str,
+    delta: i32,
+    out: Applied,
+    platform: Option<&str>,
+    key: &str,
+) -> Result<Value, ToolError> {
+    let (community, tenant) = enforce_floors(env, user, out.new_score, platform, key)?;
+    let mut v = entry_json(
+        tiers,
+        &Entry {
+            user: user.to_string(),
+            score: out.new_score,
+        },
+    );
+    v["delta"] = json!(delta);
+    v["applied"] = json!(out.applied);
+    v["floors"] = json!({ "community": community.label(), "tenant": tenant.label() });
+    Ok(v)
 }
 
-/// `adjust {user, event}` (WRITE) -> `{user, delta, score, tier}`. The delta is
-/// the community policy's value for `event` (`win`/`loss`/`loyalty`); the caller
-/// can never name a number. Applied through the host's keyed `adjust-many` so a
-/// redelivered event applies once.
-pub fn adjust(
-    host: &dyn RepHost,
-    cfg: &dyn ConfigStore,
-    ctx: &ToolContext,
-    args: Value,
-) -> Result<Value, ToolError> {
-    only_fields(&args, &["user", "event"])?;
-    require_key(ctx)?;
+/// `adjust {user, delta, reason, platform?}` (WRITE, ACTIVITY class) ->
+/// `{user, score, tier, delta, applied, floors}`. The caller (the logic
+/// bundle) names the delta; the host bounds it to +/-5 and applies it
+/// idempotently (event + ordinal key), then the floors are enforced.
+pub fn adjust(env: &Env, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    only_fields(&args, &["user", "delta", "reason", "platform"])?;
+    let key = require_key(ctx)?;
     let user = uuid_field(&args, "user")?;
-    let (delta, reason) = match args.get("event").and_then(Value::as_str) {
-        Some("win") => (load_policy(cfg)?.win, "game.win"),
-        Some("loss") => (load_policy(cfg)?.loss, "game.loss"),
-        Some("loyalty") => (load_policy(cfg)?.loyalty, "loyalty.bonus"),
-        _ => return Err(invalid("event must be one of win, loss, loyalty")),
-    };
-    let tiers = load_tiers(cfg)?;
-    host.adjust_many(&[(user.clone(), delta)], reason)
+    let delta = delta_field(&args, ACTIVITY_CAP)?;
+    let reason = reason_field(&args, None)?;
+    let platform = platform_field(&args)?;
+    let tiers = load_tiers(env.cfg.as_ref())?;
+    let out = env
+        .host
+        .apply(&user, delta, &reason)
         .map_err(host_to_tool)?;
-    let now = one_score(host, &user)?;
-    let mut out = entry_json(&tiers, &now);
-    out["delta"] = json!(delta);
-    Ok(out)
+    apply_result(env, &tiers, &user, delta, out, platform.as_deref(), key)
 }
 
-/// `override {user, absolute_score, reason?}` (WRITE, ADMIN) -> `{user,
-/// score, tier}`. The HOST-verified actor MUST hold `community:admin`
-/// list, else `forbidden` BEFORE any host call.
-pub fn override_tool(
-    host: &dyn RepHost,
-    cfg: &dyn ConfigStore,
-    ctx: &ToolContext,
-    args: Value,
-) -> Result<Value, ToolError> {
-    only_fields(&args, &["user", "absolute_score", "reason"])?;
-    require_key(ctx)?;
+/// `apply_moderation {user, delta, reason, platform?}` (WRITE, dangerous,
+/// MODERATION class, +/-200): needs the service's `reputation.moderation.write`
+/// grant AND the caller's approved dangerous-tool grant, so a third-party
+/// logic bundle cannot make moderation-size moves unless granted.
+pub fn apply_moderation(env: &Env, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    only_fields(&args, &["user", "delta", "reason", "platform"])?;
+    let key = require_key(ctx)?;
+    let user = uuid_field(&args, "user")?;
+    let delta = delta_field(&args, MODERATION_CAP)?;
+    let reason = reason_field(&args, None)?;
+    let platform = platform_field(&args)?;
+    let tiers = load_tiers(env.cfg.as_ref())?;
+    let out = env
+        .host
+        .apply_moderation(&user, delta, &reason)
+        .map_err(host_to_tool)?;
+    apply_result(env, &tiers, &user, delta, out, platform.as_deref(), key)
+}
+
+fn delta_field(args: &Value, cap: i32) -> Result<i32, ToolError> {
+    let d = args
+        .get("delta")
+        .and_then(Value::as_i64)
+        .and_then(|v| i32::try_from(v).ok())
+        .filter(|d| *d != 0 && d.unsigned_abs() <= cap.unsigned_abs())
+        .ok_or_else(|| invalid(format!("delta must be a non-zero integer within +/-{cap}")))?;
+    Ok(d)
+}
+
+/// `override {user, absolute_score, reason?, platform?}` (WRITE, ADMIN).
+pub fn override_tool(env: &Env, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    only_fields(&args, &["user", "absolute_score", "reason", "platform"])?;
+    let key = require_key(ctx)?;
     let user = uuid_field(&args, "user")?;
     let absolute = args
         .get("absolute_score")
         .and_then(Value::as_i64)
         .ok_or_else(|| invalid("absolute_score must be an integer"))?;
-    let reason = match args.get("reason") {
-        None | Some(Value::Null) => DEFAULT_OVERRIDE_REASON,
-        Some(Value::String(r)) if valid_reason(r) => r.as_str(),
-        Some(_) => return Err(invalid("reason must match [a-z0-9._:-], 1..=100")),
-    };
-    if !ctx.has_scope(OVERRIDE_SCOPE) {
-        return Err(ToolError::Forbidden);
-    }
-    let tiers = load_tiers(cfg)?;
-    let score = host
-        .override_score(&user, absolute, reason)
+    let reason = reason_field(&args, Some(DEFAULT_OVERRIDE_REASON))?;
+    let platform = platform_field(&args)?;
+    require_admin(ctx)?;
+    let tiers = load_tiers(env.cfg.as_ref())?;
+    let score = env
+        .host
+        .override_score(&user, absolute, &reason)
         .map_err(host_to_tool)?;
-    Ok(entry_json(&tiers, &Entry { user, score }))
+    let (community, tenant) = enforce_floors(env, &user, score, platform.as_deref(), key)?;
+    let mut v = entry_json(
+        &tiers,
+        &Entry {
+            user: user.clone(),
+            score,
+        },
+    );
+    v["floors"] = json!({ "community": community.label(), "tenant": tenant.label() });
+    Ok(v)
 }
 
 /// `leaderboard {limit?}` -> `{entries: [{rank, user, score, tier}]}`.
-pub fn leaderboard(
-    host: &dyn RepHost,
-    cfg: &dyn ConfigStore,
-    _ctx: &ToolContext,
-    args: Value,
-) -> Result<Value, ToolError> {
+/// COMMUNITY-scoped only: there is deliberately no tenant-wide leaderboard.
+pub fn leaderboard(env: &Env, _ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
     only_fields(&args, &["limit"])?;
-    let limit = match args.get("limit") {
-        None | Some(Value::Null) => DEFAULT_LEADERBOARD,
-        Some(v) => v
-            .as_u64()
-            .and_then(|n| u32::try_from(n).ok())
-            .filter(|n| (1..=MAX_LEADERBOARD).contains(n))
-            .ok_or_else(|| invalid(format!("limit must be 1..={MAX_LEADERBOARD}")))?,
-    };
-    let tiers = load_tiers(cfg)?;
-    let rows = host.leaderboard(limit).map_err(host_to_tool)?;
+    let limit = page_field(&args, DEFAULT_LEADERBOARD)?;
+    let tiers = load_tiers(env.cfg.as_ref())?;
+    let rows = env.host.leaderboard(limit).map_err(host_to_tool)?;
     let entries: Vec<Value> = rows
         .iter()
         .enumerate()
@@ -425,18 +705,12 @@ pub fn leaderboard(
     Ok(json!({ "entries": entries }))
 }
 
-/// `rep {user}` (the `!rep` read UX) -> `{user, score, tier, next_tier, text}`
-/// where `next_tier` is `{name, needed}` or null at the top rung.
-pub fn rep(
-    host: &dyn RepHost,
-    cfg: &dyn ConfigStore,
-    _ctx: &ToolContext,
-    args: Value,
-) -> Result<Value, ToolError> {
+/// `rep {user}` (the `!rep` read UX) -> `{user, score, tier, next_tier, text}`.
+pub fn rep(env: &Env, _ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
     only_fields(&args, &["user"])?;
     let user = uuid_field(&args, "user")?;
-    let tiers = load_tiers(cfg)?;
-    let e = one_score(host, &user)?;
+    let tiers = load_tiers(env.cfg.as_ref())?;
+    let e = one_score(env.host.as_ref(), &user)?;
     let tier = tier_for(&tiers, e.score);
     let next = tiers.iter().find(|t| t.min_score > e.score);
     let (next_json, text) = match next {
@@ -460,20 +734,165 @@ pub fn rep(
     )
 }
 
+/// `get_tenant_score {}` -> the VERIFIED ACTOR's own tenant aggregate. There
+/// is no `user` argument: a caller can only ever read their own aggregate, and
+/// a call with no verified actor is `forbidden`.
+pub fn get_tenant_score(env: &Env, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    only_fields(&args, &[])?;
+    let user = ctx.actor.as_deref().ok_or(ToolError::Forbidden)?;
+    let user = parse_uuid(user, "actor")?;
+    let tiers = load_tiers(env.cfg.as_ref())?;
+    let t = env.host.get_tenant(&user).map_err(host_to_tool)?;
+    let mut v = entry_json(
+        &tiers,
+        &Entry {
+            user,
+            score: t.score,
+        },
+    );
+    v["communities"] = json!(t.communities);
+    Ok(v)
+}
+
+/// `history {user, limit?, before?}` -> `{entries}`: a member may read their
+/// OWN ledger; reading anyone else's needs `community:admin`.
+pub fn history(env: &Env, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    only_fields(&args, &["user", "limit", "before"])?;
+    let user = uuid_field(&args, "user")?;
+    let own = ctx
+        .actor
+        .as_deref()
+        .is_some_and(|a| a.eq_ignore_ascii_case(&user));
+    if !own {
+        require_admin(ctx)?;
+    }
+    let limit = page_field(&args, DEFAULT_HISTORY)?;
+    let before = match args.get("before") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_i64()
+                .filter(|b| *b > 0)
+                .ok_or_else(|| invalid("before must be a positive id"))?,
+        ),
+    };
+    let rows = env
+        .host
+        .history(&user, limit, before)
+        .map_err(host_to_tool)?;
+    Ok(json!({ "entries": rows.iter().map(|r| json!({
+        "id": r.id, "delta": r.delta, "reason_code": r.reason_code, "kind": r.kind,
+        "balance_after": r.balance_after, "occurred_at": r.occurred_at,
+    })).collect::<Vec<_>>() }))
+}
+
+/// `check {user}` -> score, tier, whether the member is soft-banned and
+/// whether they are at risk (below the community at-risk threshold).
+pub fn check(env: &Env, _ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    only_fields(&args, &["user"])?;
+    let user = uuid_field(&args, "user")?;
+    let tiers = load_tiers(env.cfg.as_ref())?;
+    let floors = load_floors(env.cfg.as_ref())?;
+    let e = one_score(env.host.as_ref(), &user)?;
+    let soft = env.host.is_soft_banned(&user).map_err(host_to_tool)?;
+    let mut v = entry_json(&tiers, &e);
+    v["soft_banned"] = json!(soft);
+    v["at_risk"] = json!(e.score < floors.at_risk_threshold);
+    Ok(v)
+}
+
+/// `at_risk {limit?}` (ADMIN) -> members below the community at-risk
+/// threshold, lowest first.
+pub fn at_risk(env: &Env, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    only_fields(&args, &["limit"])?;
+    require_admin(ctx)?;
+    let limit = page_field(&args, DEFAULT_LEADERBOARD)?;
+    let tiers = load_tiers(env.cfg.as_ref())?;
+    let floors = load_floors(env.cfg.as_ref())?;
+    let rows = env
+        .host
+        .below_threshold(floors.at_risk_threshold, limit)
+        .map_err(host_to_tool)?;
+    Ok(json!({
+        "threshold": floors.at_risk_threshold,
+        "entries": rows.iter().map(|e| entry_json(&tiers, e)).collect::<Vec<_>>(),
+    }))
+}
+
+/// `is_soft_banned {user}` -> `{user, soft_banned}` (cheap read for the
+/// game/raffle/giveaway/economy bundles that must not pay a soft-banned user).
+pub fn is_soft_banned(env: &Env, _ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    only_fields(&args, &["user"])?;
+    let user = uuid_field(&args, "user")?;
+    let banned = env.host.is_soft_banned(&user).map_err(host_to_tool)?;
+    Ok(json!({ "user": user, "soft_banned": banned }))
+}
+
+/// `get_policy {}` (ADMIN) -> the community floor policy plus the read-only
+/// tenant policy and the auto-ban flag state.
+pub fn get_policy(env: &Env, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    only_fields(&args, &[])?;
+    require_admin(ctx)?;
+    let floors = load_floors(env.cfg.as_ref())?;
+    let tenant = env.host.tenant_policy().map_err(host_to_tool)?;
+    Ok(json!({
+        "community": floors.to_json(),
+        "tenant": tenant.map(|t| json!({
+            "tenant_auto_ban_enabled": t.auto_ban_enabled,
+            "tenant_auto_ban_floor": t.auto_ban_floor,
+            "tenant_at_risk_threshold": t.at_risk_threshold,
+        })),
+        "recommended_tenant_floor": DEFAULT_TENANT_FLOOR,
+        "auto_ban_flag": env.platform.flag_enabled(FLAG_AUTO_BAN),
+    }))
+}
+
+/// `set_policy {..}` (ADMIN, WRITE): merges the given floor fields over the
+/// current policy, validates `300 <= hard < soft < at_risk <= 850` and stores
+/// it. Floors are limits only; this never touches scoring weights.
+pub fn set_policy(env: &Env, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    only_fields(
+        &args,
+        &[
+            "soft_ban_enabled",
+            "soft_ban_floor",
+            "hard_ban_enabled",
+            "hard_ban_floor",
+            "at_risk_threshold",
+        ],
+    )?;
+    require_key(ctx)?;
+    require_admin(ctx)?;
+    let raw: RawFloors = serde_json::from_value(args).map_err(|_| invalid("invalid policy"))?;
+    let merged = merge_floors(load_floors(env.cfg.as_ref())?, raw);
+    merged.validate()?;
+    let bytes = serde_json::to_vec(&merged.to_json()).map_err(|_| invalid("invalid policy"))?;
+    env.cfg
+        .set(KEY_FLOORS, &bytes)
+        .map_err(|_| ToolError::TargetUnavailable)?;
+    Ok(merged.to_json())
+}
+
 /// The tool names this bundle serves -- the closed set safe to put in a log line.
-pub const TOOL_NAMES: [&str; 6] = [
+pub const TOOL_NAMES: [&str; 14] = [
     "get_score",
     "get_many",
     "adjust",
+    "apply_moderation",
     "override",
     "leaderboard",
     "rep",
+    "get_tenant_score",
+    "history",
+    "check",
+    "at_risk",
+    "is_soft_banned",
+    "get_policy",
+    "set_policy",
 ];
 
 /// The log label for a caller-supplied tool `name`: the name itself when it is
-/// one of [`TOOL_NAMES`], otherwise the constant `unknown_tool`. A caller can
-/// put anything (an email, a handle) in a tool name, and bundle logs must be
-/// PII-free, so an unrecognized name is never logged verbatim.
+/// one of [`TOOL_NAMES`], otherwise the constant `unknown_tool`. Bundle logs
+/// must be PII-free, so an unrecognized name is never logged verbatim.
 pub fn tool_log_label(name: &str) -> &'static str {
     TOOL_NAMES
         .iter()
@@ -482,633 +901,33 @@ pub fn tool_log_label(name: &str) -> &'static str {
         .unwrap_or("unknown_tool")
 }
 
-/// Builds the tool table: each tool name routes to its handler over `host`/`cfg`.
-pub fn build_registry(host: Arc<dyn RepHost>, cfg: Arc<dyn ConfigStore>) -> ToolRegistry {
+/// Builds the tool table: each tool name routes to its handler over `env`.
+pub fn build_registry(env: Env) -> ToolRegistry {
     let mut r = ToolRegistry::new();
-    type Tool = fn(&dyn RepHost, &dyn ConfigStore, &ToolContext, Value) -> Result<Value, ToolError>;
+    type Tool = fn(&Env, &ToolContext, Value) -> Result<Value, ToolError>;
     let tools: [(&str, Tool); TOOL_NAMES.len()] = [
         ("get_score", get_score),
         ("get_many", get_many),
         ("adjust", adjust),
+        ("apply_moderation", apply_moderation),
         ("override", override_tool),
         ("leaderboard", leaderboard),
         ("rep", rep),
+        ("get_tenant_score", get_tenant_score),
+        ("history", history),
+        ("check", check),
+        ("at_risk", at_risk),
+        ("is_soft_banned", is_soft_banned),
+        ("get_policy", get_policy),
+        ("set_policy", set_policy),
     ];
+    let env = Arc::new(env);
     for (name, f) in tools {
-        let (h, c) = (Arc::clone(&host), Arc::clone(&cfg));
-        r.register(name, move |ctx, args| f(h.as_ref(), c.as_ref(), ctx, args));
+        let e = Arc::clone(&env);
+        r.register(name, move |ctx, args| f(e.as_ref(), ctx, args));
     }
     r
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    const U1: &str = "11111111-1111-1111-1111-111111111111";
-    const U2: &str = "22222222-2222-2222-2222-222222222222";
-    const ADMIN: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-
-    #[derive(Default)]
-    struct FakeHost {
-        scores: Mutex<HashMap<String, i64>>,
-        calls: Mutex<Vec<String>>,
-        fail: Mutex<Option<HostError>>,
-    }
-    impl FakeHost {
-        fn with(scores: &[(&str, i64)]) -> Arc<Self> {
-            let h = Self::default();
-            *h.scores.lock().unwrap() = scores.iter().map(|(u, s)| (u.to_string(), *s)).collect();
-            Arc::new(h)
-        }
-        fn failing(e: HostError) -> Arc<Self> {
-            let h = Self::default();
-            *h.fail.lock().unwrap() = Some(e);
-            Arc::new(h)
-        }
-        fn log(&self) -> Vec<String> {
-            self.calls.lock().unwrap().clone()
-        }
-        fn gate(&self) -> Result<(), HostError> {
-            self.fail.lock().unwrap().clone().map_or(Ok(()), Err)
-        }
-    }
-    impl RepHost for FakeHost {
-        fn get_many(&self, users: &[String]) -> Result<Vec<Entry>, HostError> {
-            self.gate()?;
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("get_many:{}", users.len()));
-            let s = self.scores.lock().unwrap();
-            users
-                .iter()
-                .map(|u| {
-                    s.get(u)
-                        .map(|v| Entry {
-                            user: u.clone(),
-                            score: *v,
-                        })
-                        .ok_or(HostError::NotAMember)
-                })
-                .collect()
-        }
-        fn adjust_many(&self, items: &[(String, i32)], reason: &str) -> Result<(), HostError> {
-            self.gate()?;
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("adjust_many:{items:?}:{reason}"));
-            let mut s = self.scores.lock().unwrap();
-            for (u, d) in items {
-                *s.get_mut(u).ok_or(HostError::NotAMember)? += i64::from(*d);
-            }
-            Ok(())
-        }
-        fn override_score(
-            &self,
-            user: &str,
-            absolute: i64,
-            reason: &str,
-        ) -> Result<i64, HostError> {
-            self.gate()?;
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("override:{user}:{absolute}:{reason}"));
-            self.scores
-                .lock()
-                .unwrap()
-                .insert(user.to_string(), absolute);
-            Ok(absolute)
-        }
-        fn leaderboard(&self, limit: u32) -> Result<Vec<Entry>, HostError> {
-            self.gate()?;
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("leaderboard:{limit}"));
-            let mut v: Vec<Entry> = self
-                .scores
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(u, s)| Entry {
-                    user: u.clone(),
-                    score: *s,
-                })
-                .collect();
-            v.sort_by(|a, b| b.score.cmp(&a.score).then(a.user.cmp(&b.user)));
-            v.truncate(limit as usize);
-            Ok(v)
-        }
-    }
-
-    #[derive(Default)]
-    struct FakeCfg(HashMap<String, Vec<u8>>, bool);
-    impl FakeCfg {
-        fn with(pairs: &[(&str, &str)]) -> Arc<Self> {
-            Arc::new(Self(
-                pairs
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
-                    .collect(),
-                false,
-            ))
-        }
-        fn broken() -> Arc<Self> {
-            Arc::new(Self(HashMap::new(), true))
-        }
-    }
-    impl ConfigStore for FakeCfg {
-        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-            if self.1 {
-                return Err("kv down".into());
-            }
-            Ok(self.0.get(key).cloned())
-        }
-    }
-
-    fn call(
-        h: &Arc<FakeHost>,
-        c: &Arc<FakeCfg>,
-        tool: &str,
-        args: Value,
-        key: Option<&str>,
-    ) -> Result<Value, ToolError> {
-        let reg = build_registry(h.clone(), c.clone());
-        let mut args = args;
-        if let Some(k) = key {
-            args[waddle_sdk::tool::IDEMPOTENCY_ARG] = json!(k);
-        }
-        reg.call(tool, &serde_json::to_vec(&args).unwrap())
-            .map(|b| serde_json::from_slice(&b).unwrap())
-    }
-
-    #[test]
-    fn the_tool_table_routes_every_tool_and_rejects_unknown_ones() {
-        let (h, c) = (FakeHost::with(&[(U1, 30)]), FakeCfg::with(&[]));
-        for (t, a) in [
-            ("get_score", json!({"user": U1})),
-            ("get_many", json!({"users": [U1]})),
-            ("leaderboard", json!({})),
-            ("rep", json!({"user": U1})),
-        ] {
-            assert!(call(&h, &c, t, a, None).is_ok(), "{t}");
-        }
-        assert!(
-            call(
-                &h,
-                &c,
-                "adjust",
-                json!({"user": U1, "event": "win"}),
-                Some("k")
-            )
-            .is_ok()
-        );
-        let reg = build_registry(h, c);
-        assert!(
-            matches!(reg.call("nope", b"{}"), Err(ToolError::InvalidArgs(m)) if m.contains("unknown tool"))
-        );
-    }
-
-    #[test]
-    fn get_score_returns_score_and_tier_and_canonicalizes_the_uuid() {
-        let (h, c) = (FakeHost::with(&[(U1, 30)]), FakeCfg::with(&[]));
-        let out = call(
-            &h,
-            &c,
-            "get_score",
-            json!({"user": U1.to_uppercase()}),
-            None,
-        )
-        .unwrap();
-        assert_eq!(out, json!({"user": U1, "score": 30, "tier": "regular"}));
-    }
-
-    #[test]
-    fn arguments_are_validated_before_any_host_call() {
-        let (h, c) = (FakeHost::with(&[(U1, 0)]), FakeCfg::with(&[]));
-        for (t, a) in [
-            ("get_score", json!({})),
-            ("get_score", json!({"user": "bob"})),
-            ("get_score", json!({"user": U1, "extra": 1})),
-            ("get_many", json!({"users": []})),
-            ("get_many", json!({"users": ["x"]})),
-            ("get_many", json!({"users": vec![U1; MAX_BATCH + 1]})),
-            ("leaderboard", json!({"limit": 0})),
-            ("leaderboard", json!({"limit": MAX_LEADERBOARD + 1})),
-            ("rep", json!({"user": 5})),
-        ] {
-            assert!(
-                matches!(
-                    call(&h, &c, t, a.clone(), None),
-                    Err(ToolError::InvalidArgs(_))
-                ),
-                "{t} {a}"
-            );
-        }
-        assert!(call(&h, &c, "get_score", json!([]), None).is_err());
-        assert!(h.log().is_empty(), "nothing reached the host");
-    }
-
-    #[test]
-    fn get_many_keeps_order_and_surfaces_a_non_member_loudly() {
-        let (h, c) = (FakeHost::with(&[(U1, 5), (U2, -3)]), FakeCfg::with(&[]));
-        let out = call(&h, &c, "get_many", json!({"users": [U2, U1]}), None).unwrap();
-        assert_eq!(out["entries"][0]["user"], json!(U2));
-        assert_eq!(out["entries"][0]["tier"], json!("outcast"));
-        assert_eq!(out["entries"][1]["score"], json!(5));
-        let err = call(
-            &h,
-            &c,
-            "get_many",
-            json!({"users": [U1, "33333333-3333-3333-3333-333333333333"]}),
-            None,
-        )
-        .unwrap_err();
-        assert_eq!(err, ToolError::InvalidArgs("not_a_member".into()));
-    }
-
-    #[test]
-    fn adjust_applies_the_policy_delta_never_a_caller_number() {
-        let h = FakeHost::with(&[(U1, 10)]);
-        let c = FakeCfg::with(&[("policy", r#"{"win": 3, "loss": -2}"#)]);
-        let out = call(
-            &h,
-            &c,
-            "adjust",
-            json!({"user": U1, "event": "win"}),
-            Some("k1"),
-        )
-        .unwrap();
-        assert_eq!(
-            out,
-            json!({"user": U1, "score": 13, "tier": "newcomer", "delta": 3})
-        );
-        call(
-            &h,
-            &c,
-            "adjust",
-            json!({"user": U1, "event": "loss"}),
-            Some("k2"),
-        )
-        .unwrap();
-        call(
-            &h,
-            &c,
-            "adjust",
-            json!({"user": U1, "event": "loyalty"}),
-            Some("k3"),
-        )
-        .unwrap();
-        let log = h.log();
-        assert!(
-            log.iter()
-                .any(|l| l.contains(&format!("[(\"{U1}\", 3)]:game.win")))
-        );
-        assert!(log.iter().any(|l| l.contains("-2)]:game.loss")));
-        assert!(
-            log.iter().any(|l| l.contains("1)]:loyalty.bonus")),
-            "default loyalty delta"
-        );
-        // A caller-supplied delta is an unknown field, not honoured.
-        let err = call(
-            &h,
-            &c,
-            "adjust",
-            json!({"user": U1, "event": "win", "delta": 5}),
-            Some("k4"),
-        )
-        .unwrap_err();
-        assert!(matches!(err, ToolError::InvalidArgs(_)));
-    }
-
-    #[test]
-    fn adjust_is_a_write_it_needs_a_key_and_a_known_event() {
-        let (h, c) = (FakeHost::with(&[(U1, 0)]), FakeCfg::with(&[]));
-        let no_key = call(&h, &c, "adjust", json!({"user": U1, "event": "win"}), None).unwrap_err();
-        assert_eq!(
-            no_key,
-            ToolError::InvalidArgs("idempotency key required".into())
-        );
-        for ev in [json!("jackpot"), json!(7), Value::Null] {
-            let e = call(
-                &h,
-                &c,
-                "adjust",
-                json!({"user": U1, "event": ev}),
-                Some("k"),
-            )
-            .unwrap_err();
-            assert!(matches!(e, ToolError::InvalidArgs(_)));
-        }
-        assert!(h.log().is_empty());
-    }
-
-    #[test]
-    fn a_bad_policy_config_fails_loud_it_is_never_silently_defaulted() {
-        let h = FakeHost::with(&[(U1, 0)]);
-        for bad in [
-            r#"{"win": 0}"#,
-            r#"{"win": 9}"#,
-            r#"{"loss": 1}"#,
-            r#"{"loyalty": -1}"#,
-            r#"{"typo": 1}"#,
-            "not json",
-        ] {
-            let c = FakeCfg::with(&[("policy", bad)]);
-            let e = call(
-                &h,
-                &c,
-                "adjust",
-                json!({"user": U1, "event": "win"}),
-                Some("k"),
-            )
-            .unwrap_err();
-            assert_eq!(
-                e,
-                ToolError::InvalidArgs("invalid policy config".into()),
-                "{bad}"
-            );
-        }
-        assert!(h.log().is_empty());
-        assert_eq!(
-            call(
-                &h,
-                &FakeCfg::broken(),
-                "adjust",
-                json!({"user": U1, "event": "win"}),
-                Some("k")
-            )
-            .unwrap_err(),
-            ToolError::TargetUnavailable
-        );
-    }
-
-    #[test]
-    fn tier_config_is_validated_and_drives_the_tier_names() {
-        let h = FakeHost::with(&[(U1, 50)]);
-        let ok = FakeCfg::with(&[(
-            "tiers",
-            r#"[{"name":"low","min_score":-1000000},{"name":"high","min_score":40}]"#,
-        )]);
-        assert_eq!(
-            call(&h, &ok, "get_score", json!({"user": U1}), None).unwrap()["tier"],
-            json!("high")
-        );
-        for bad in [
-            "[]",
-            r#"[{"name":"a","min_score":0}]"#,
-            r#"[{"name":"a","min_score":-1000000},{"name":"a","min_score":-1000000}]"#,
-            r#"[{"name":"A b","min_score":-1000000}]"#,
-            r#"[{"name":"a","min_score":-1000000,"x":1}]"#,
-        ] {
-            let c = FakeCfg::with(&[("tiers", bad)]);
-            let e = call(&h, &c, "get_score", json!({"user": U1}), None).unwrap_err();
-            assert_eq!(
-                e,
-                ToolError::InvalidArgs("invalid tier config".into()),
-                "{bad}"
-            );
-        }
-    }
-
-    /// Calls `tool` with a host-verified `__ctx` (actor + scopes) attached.
-    fn call_as(
-        h: &Arc<FakeHost>,
-        c: &Arc<FakeCfg>,
-        tool: &str,
-        mut args: Value,
-        ctx: Value,
-    ) -> Result<Value, ToolError> {
-        args[waddle_sdk::tool::IDEMPOTENCY_ARG] = json!("k");
-        args[waddle_sdk::tool::CTX_ARG] = ctx;
-        build_registry(h.clone(), c.clone())
-            .call(tool, &serde_json::to_vec(&args).unwrap())
-            .map(|b| serde_json::from_slice(&b).unwrap())
-    }
-
-    #[test]
-    fn override_is_admin_only_and_checked_before_any_host_call() {
-        let h = FakeHost::with(&[(U1, 5)]);
-        let c = FakeCfg::with(&[]);
-        let args = json!({"user": U1, "absolute_score": 100});
-        // No verified actor, a non-admin actor, and an actor-less scope claim: all forbidden.
-        for ctx in [
-            json!(null),
-            json!({"actor": ADMIN, "scopes": ["community:member", "community:moderate"]}),
-            json!({"actor": null, "scopes": ["community:admin"]}),
-        ] {
-            assert_eq!(
-                call_as(&h, &c, "override", args.clone(), ctx).unwrap_err(),
-                ToolError::Forbidden
-            );
-        }
-        // A caller-supplied `actor` arg is rejected outright (never trusted).
-        let mut spoof = args.clone();
-        spoof["actor"] = json!(ADMIN);
-        assert!(matches!(
-            call_as(
-                &h,
-                &c,
-                "override",
-                spoof,
-                json!({"actor": U2, "scopes": ["community:admin"]})
-            ),
-            Err(ToolError::InvalidArgs(_))
-        ));
-        assert!(h.log().is_empty(), "the host was never reached");
-        // Verified admin.
-        let out = call_as(
-            &h,
-            &c,
-            "override",
-            args,
-            json!({"actor": ADMIN, "scopes": ["community:member", "community:admin"]}),
-        )
-        .unwrap();
-        assert_eq!(out, json!({"user": U1, "score": 100, "tier": "trusted"}));
-        assert_eq!(h.log(), vec![format!("override:{U1}:100:admin.override")]);
-    }
-
-    #[test]
-    fn override_validates_its_arguments() {
-        let h = FakeHost::with(&[(U1, 5)]);
-        let c = FakeCfg::with(&[]);
-        let admin = json!({"actor": ADMIN, "scopes": ["community:admin"]});
-        let base = json!({"user": U1, "absolute_score": 1});
-        let mut nokey = base.clone();
-        nokey[waddle_sdk::tool::CTX_ARG] = admin.clone();
-        assert_eq!(
-            build_registry(h.clone(), c.clone())
-                .call("override", &serde_json::to_vec(&nokey).unwrap())
-                .unwrap_err(),
-            ToolError::InvalidArgs("idempotency key required".into())
-        );
-        for patch in [
-            json!({"absolute_score": "x"}),
-            json!({"absolute_score": 1.5}),
-            json!({"reason": "Bad Reason"}),
-            json!({"user": "nope"}),
-            json!({"extra": 1}),
-        ] {
-            let mut a = base.clone();
-            for (k, v) in patch.as_object().unwrap() {
-                a[k] = v.clone();
-            }
-            assert!(
-                matches!(
-                    call_as(&h, &c, "override", a, admin.clone()),
-                    Err(ToolError::InvalidArgs(_))
-                ),
-                "{patch}"
-            );
-        }
-        let mut with_reason = base.clone();
-        with_reason["reason"] = json!("admin.correction");
-        call_as(&h, &c, "override", with_reason, admin).unwrap();
-        assert!(h.log().last().unwrap().ends_with(":admin.correction"));
-    }
-
-    #[test]
-    fn leaderboard_ranks_entries_and_defaults_its_limit() {
-        let (h, c) = (FakeHost::with(&[(U1, 200), (U2, 10)]), FakeCfg::with(&[]));
-        let out = call(&h, &c, "leaderboard", json!({}), None).unwrap();
-        assert_eq!(h.log(), vec!["leaderboard:10".to_string()]);
-        assert_eq!(
-            out["entries"][0],
-            json!({"rank": 1, "user": U1, "score": 200, "tier": "trusted"})
-        );
-        assert_eq!(out["entries"][1]["rank"], json!(2));
-        let one = call(&h, &c, "leaderboard", json!({"limit": 1}), None).unwrap();
-        assert_eq!(one["entries"].as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn rep_reports_progress_to_the_next_tier_and_the_top_rung() {
-        let c = FakeCfg::with(&[]);
-        let h = FakeHost::with(&[(U1, 30), (U2, 900)]);
-        let mid = call(&h, &c, "rep", json!({"user": U1}), None).unwrap();
-        assert_eq!(mid["next_tier"], json!({"name": "trusted", "needed": 70}));
-        assert_eq!(
-            mid["text"],
-            json!("Reputation 30 (regular); 70 more for trusted")
-        );
-        let top = call(&h, &c, "rep", json!({"user": U2}), None).unwrap();
-        assert_eq!(top["next_tier"], Value::Null);
-        assert_eq!(top["text"], json!("Reputation 900 (legend); top tier"));
-    }
-
-    #[test]
-    fn host_failures_map_to_stable_tool_errors_without_leaking_detail() {
-        let c = FakeCfg::with(&[]);
-        for (e, want) in [
-            (
-                HostError::NotAMember,
-                ToolError::InvalidArgs("not_a_member".into()),
-            ),
-            (
-                HostError::DailyCapExceeded,
-                ToolError::InvalidArgs("daily_cap_exceeded".into()),
-            ),
-            (
-                HostError::Denied("not_granted".into()),
-                ToolError::NotGranted,
-            ),
-            (
-                HostError::Denied("quota_exceeded".into()),
-                ToolError::InvalidArgs("denied:quota_exceeded".into()),
-            ),
-            (
-                HostError::Unavailable("db password=hunter2".into()),
-                ToolError::TargetUnavailable,
-            ),
-            (
-                HostError::Backend("secret detail".into()),
-                ToolError::InvalidArgs("backend".into()),
-            ),
-        ] {
-            let h = FakeHost::failing(e);
-            assert_eq!(
-                call(&h, &c, "get_score", json!({"user": U1}), None).unwrap_err(),
-                want
-            );
-        }
-    }
-
-    /// regression: #983 review -- an unrecognized (caller-supplied) tool name,
-    /// e.g. an email, is never a log label.
-    #[test]
-    fn unknown_tool_names_are_never_logged_verbatim() {
-        for pii in [
-            "alice@example.com",
-            "@SomeHandle",
-            "get_score ",
-            "GET_SCORE",
-            "",
-        ] {
-            assert_eq!(tool_log_label(pii), "unknown_tool", "{pii:?}");
-        }
-        for known in TOOL_NAMES {
-            assert_eq!(tool_log_label(known), known);
-        }
-    }
-
-    /// regression: #983 review -- `i32::MIN.abs()` wraps with overflow checks off.
-    #[test]
-    fn policy_deltas_at_i32_extremes_are_rejected() {
-        let h = FakeHost::with(&[]);
-        for bad in [
-            format!(r#"{{"loss": {}}}"#, i32::MIN),
-            format!(r#"{{"win": {}}}"#, i32::MAX),
-            format!(r#"{{"loyalty": {}}}"#, i32::MAX),
-            r#"{"loss": -6}"#.to_string(),
-            r#"{"win": 6}"#.to_string(),
-        ] {
-            let c = FakeCfg::with(&[("policy", bad.as_str())]);
-            assert_eq!(
-                call(
-                    &h,
-                    &c,
-                    "adjust",
-                    json!({"user": U1, "event": "loss"}),
-                    Some("k")
-                )
-                .unwrap_err(),
-                ToolError::InvalidArgs("invalid policy config".into()),
-                "{bad}"
-            );
-        }
-        assert!(h.log().is_empty());
-    }
-
-    /// regression: #983 review -- `min_score - score` overflowed for a tier
-    /// threshold near `i64::MAX`.
-    #[test]
-    fn tier_thresholds_outside_the_bound_are_rejected_not_overflowed() {
-        let h = FakeHost::with(&[(U1, -1_000_000)]);
-        for bad in [
-            format!(
-                r#"[{{"name":"low","min_score":-1000000}},{{"name":"x","min_score":{}}}]"#,
-                i64::MAX
-            ),
-            format!(r#"[{{"name":"low","min_score":{}}}]"#, i64::MIN),
-        ] {
-            let c = FakeCfg::with(&[("tiers", bad.as_str())]);
-            assert_eq!(
-                call(&h, &c, "rep", json!({"user": U1}), None).unwrap_err(),
-                ToolError::InvalidArgs("invalid tier config".into()),
-                "{bad}"
-            );
-        }
-        let ok = FakeCfg::with(&[(
-            "tiers",
-            r#"[{"name":"low","min_score":-1000000},{"name":"x","min_score":1000000000}]"#,
-        )]);
-        let out = call(&h, &ok, "rep", json!({"user": U1}), None).unwrap();
-        assert_eq!(out["next_tier"]["needed"], json!(1_001_000_000_i64));
-    }
-}
+mod tests;

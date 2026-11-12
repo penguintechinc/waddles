@@ -3493,6 +3493,31 @@ impl<K: KvBackend> StageCapabilities<K> {
                 .await
                 .map(|b| serde_json::json!({ "flag": b })),
         };
+        // An idempotent REPLAY applied nothing: hand its magnitude back so a
+        // redelivered event never burns the user's daily quota twice.
+        if let (
+            Op::Apply {
+                user, delta, class, ..
+            },
+            Ok(v),
+        ) = (&op, &result)
+        {
+            if v.get("applied") == Some(&serde_json::Value::Bool(false)) {
+                let perm = match class {
+                    ReasonClass::Activity => PermissionId::ReputationCommunityWrite,
+                    ReasonClass::Moderation => PermissionId::ReputationModerationWrite,
+                };
+                self.gate.refund(
+                    &self.gate_scope(),
+                    perm,
+                    &ResourceRef::ReputationScoped(ReputationTarget {
+                        target_user: Some(*user),
+                        scope_kind: ScopeKind::Community,
+                        delta: Some(*delta),
+                    }),
+                );
+            }
+        }
         if let (Some((invocation, kind, ordinal)), Err(ReputationError::Backend(_))) =
             (reservation, &result)
         {

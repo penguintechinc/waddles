@@ -1462,7 +1462,7 @@ bundles:
   # the crate's own Cargo.toml `[package.metadata.component.target] world`. The seeder installs
   # it with trusted_source=True (the only path allowed to declare `kind: service`).
   - app_id: waddles.core.service.reputation
-    version: "1.0.1"
+    version: "1.1.0"
     language: rust
     wit_world: stage-tools
     kind: service
