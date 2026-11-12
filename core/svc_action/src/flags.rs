@@ -44,6 +44,12 @@ pub const BUNDLE_EGRESS_FLAG: &str = "waddles.core.bundle-egress";
 /// identical flag so enabling `db` is one PostHog toggle, not two.
 pub const BUNDLE_DB_CAPABILITY_FLAG: &str = "waddles.bundle-db-capability";
 
+/// The automated reputation floor-ban kill switch (default OFF). The process stage refuses to
+/// enqueue and THIS stage's outbox dispatcher does not sweep while it is OFF, so a queued ban never
+/// reaches a platform with the flag off (rows stay queued, nothing is lost). The durable SQL switch
+/// (`reputation_floor_ban_halted`) is checked by both stages in addition.
+pub const REPUTATION_AUTO_BAN_FLAG: &str = "waddles.reputation-auto-ban";
+
 /// Opt-out kill-switch for the DB-driven active-bundle loader
 /// (`crate::bundle_loader`) -- **inverted from the retired
 /// `waddles.core.db-bundle-config` flag it replaces** (user decision,

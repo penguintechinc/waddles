@@ -40,6 +40,8 @@ struct FakeStore {
     rechecks: Mutex<Vec<i64>>,
     fail_claim: bool,
     fail_complete: bool,
+    backlog: Mutex<Backlog>,
+    claim_calls: std::sync::atomic::AtomicU32,
 }
 
 impl FakeStore {
@@ -60,8 +62,13 @@ impl FloorBanStore for FakeStore {
     fn reap(&self, _limit: u32) -> StoreFuture<'_, Vec<DeadFloorBan>> {
         Box::pin(async { Ok(std::mem::take(&mut *self.dead.lock().unwrap())) })
     }
+    fn backlog(&self) -> StoreFuture<'_, Backlog> {
+        Box::pin(async { Ok(*self.backlog.lock().unwrap()) })
+    }
     fn claim(&self, _limit: u32, _lease: u32) -> StoreFuture<'_, Vec<ClaimedFloorBan>> {
         Box::pin(async {
+            self.claim_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.fail_claim {
                 return Err("db down".to_string());
             }
@@ -355,9 +362,15 @@ async fn the_sweeper_loop_runs_until_shutdown_and_reports_nothing_lost() {
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let (s2, t2) = (Arc::clone(&store), Arc::clone(&sender));
     let task = tokio::spawn(async move {
-        run_floor_ban_sweeper(s2, t2, Arc::new(m), async {
-            let _ = rx.await;
-        })
+        run_floor_ban_sweeper(
+            s2,
+            t2,
+            Arc::new(m),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
+            async {
+                let _ = rx.await;
+            },
+        )
         .await;
     });
     // The first sweep happens immediately; wait for it, then shut down.
@@ -371,4 +384,91 @@ async fn the_sweeper_loop_runs_until_shutdown_and_reports_nothing_lost() {
     task.await.unwrap();
     assert_eq!(store.completions().len(), 3);
     assert_eq!(sender.sent.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn m2_a_halted_kill_switch_releases_the_row_and_sends_nothing() {
+    let store = FakeStore::with_rows(vec![row(1)]);
+    store.recheck.lock().unwrap().insert(1, Recheck::Halted);
+    let sender = FakeSender::default();
+    let (h, m) = metrics();
+    let r = sweep_once(&store, &sender, &m).await;
+    assert_eq!((r.claimed, r.halted, r.done), (1, 1, 0));
+    assert!(sender.sent.lock().unwrap().is_empty(), "nothing is sent");
+    assert!(
+        store.completions().is_empty(),
+        "the SQL already released the row back to the queue"
+    );
+    assert_eq!(count(&h, "halted"), 1.0);
+}
+
+#[tokio::test]
+async fn a_backlog_past_the_threshold_raises_the_alert_metric() {
+    let store = FakeStore::default();
+    *store.backlog.lock().unwrap() = Backlog {
+        pending: BACKLOG_ALERT_PENDING + 1,
+        rate_limited: 3,
+        oldest_seconds: 10,
+    };
+    let (h, m) = metrics();
+    sweep_once(&store, &FakeSender::default(), &m).await;
+    assert_eq!(count(&h, "backlog_alert"), 1.0);
+    // An old row alerts too; a small young backlog does not.
+    *store.backlog.lock().unwrap() = Backlog {
+        pending: 1,
+        rate_limited: 0,
+        oldest_seconds: BACKLOG_ALERT_AGE_SECONDS + 1,
+    };
+    sweep_once(&store, &FakeSender::default(), &m).await;
+    assert_eq!(count(&h, "backlog_alert"), 2.0);
+    *store.backlog.lock().unwrap() = Backlog {
+        pending: 5,
+        rate_limited: 0,
+        oldest_seconds: 5,
+    };
+    sweep_once(&store, &FakeSender::default(), &m).await;
+    assert_eq!(count(&h, "backlog_alert"), 2.0);
+}
+
+#[tokio::test]
+async fn m2_flag_off_means_no_sweep_no_claim_no_send_and_the_rows_remain() {
+    let store = Arc::new(FakeStore::with_rows(vec![row(1), row(2)]));
+    let sender = Arc::new(FakeSender::default());
+    let (h, m) = metrics();
+    let m = Arc::new(m);
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let (s2, t2, m2) = (Arc::clone(&store), Arc::clone(&sender), Arc::clone(&m));
+    let task = tokio::spawn(async move {
+        run_floor_ban_sweeper(
+            s2,
+            t2,
+            m2,
+            crate::flags::boxed(crate::flags::StaticFlag(false)),
+            async {
+                let _ = rx.await;
+            },
+        )
+        .await;
+    });
+    // Several loop turns' worth of time with the flag OFF.
+    for _ in 0..20 {
+        if count(&h, "flag_off") >= 1.0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tx.send(()).unwrap();
+    task.await.unwrap();
+    assert!(count(&h, "flag_off") >= 1.0, "the pause is counted");
+    assert_eq!(
+        store.claim_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the outbox is never even read while the flag is OFF"
+    );
+    assert!(sender.sent.lock().unwrap().is_empty(), "nothing dispatched");
+    assert_eq!(
+        store.claim.lock().unwrap().len(),
+        2,
+        "the queued rows remain queued"
+    );
 }

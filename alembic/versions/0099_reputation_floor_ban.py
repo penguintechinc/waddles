@@ -45,12 +45,16 @@ def downgrade() -> None:
         "reputation_floor_ban_enqueue(bigint, bigint, bigint, uuid, smallint, text, text)",
         "reputation_floor_ban_reap(int)",
         "reputation_floor_ban_claim(int, int)",
+        "reputation_floor_ban_backlog()",
+        "reputation_floor_ban_halted()",
+        "reputation_floor_ban_set_halted(boolean, text)",
         "reputation_floor_ban_recheck(bigint, uuid)",
         "reputation_floor_ban_complete(bigint, uuid, smallint, text, text)",
         "reputation_tenant_communities(bigint)",
     ):
         op.execute(f"DROP FUNCTION IF EXISTS {sig}")
     op.execute("DROP TABLE IF EXISTS bundle_reputation_floor_bans")
+    op.execute("DROP TABLE IF EXISTS bundle_reputation_floor_ban_control")
     op.execute(
         "ALTER TABLE bundle_reputation_policy DROP COLUMN IF EXISTS floor_ban_hourly_quota"
     )

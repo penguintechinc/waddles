@@ -58,6 +58,9 @@ pub(super) const FLOOR_BAN_PLATFORMS: &[&str] = &["discord"];
 pub(super) enum FloorResult {
     /// Queued for delivery (or an idempotent replay of an already-queued/delivered slot).
     Queued,
+    /// The user already has bans pending/delivered in this community inside the quota window:
+    /// nothing more is recorded (one user can never exhaust the community's quota).
+    UserCapped,
     /// Re-verification said the floor is not breached (or the switch is off).
     Refused,
     /// The per-community floor-ban quota was hit; recorded and retried after the window.
@@ -71,6 +74,7 @@ impl FloorResult {
     fn label(&self) -> &'static str {
         match self {
             Self::Queued => "queued",
+            Self::UserCapped => "user_capped",
             Self::Refused => "refused",
             Self::RateLimited => "rate_limited",
             Self::Failed(_) => "error",
@@ -93,8 +97,7 @@ fn valid_platform(p: &str) -> bool {
         && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
 
-/// Derives the HOST-side idempotency key of a floor ban from the invocation's host-derived event
-/// id, the user and the scope -- never a guest-chosen value. The key is in the SQL alphabet
+/// Derives the HOST-side idempotency key of a floor ban from the invocation's ROOT event id, the user and the scope -- never a guest-chosen value. The key is in the SQL alphabet
 /// (`^[a-z0-9._:-]{1,128}$`): `fb:` + a 40-hex SHA-256 prefix, domain-separated.
 pub(super) fn floor_ban_key(event_id: &str, user: Uuid, scope: FloorScope) -> String {
     let mut hash = Sha256::new();
@@ -252,11 +255,15 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
                 "a floor ban requires an idempotency key".to_string(),
             ));
         }
+        // The ROOT spine event id (hop-verified, preserved across tool hops) -- never the per-hop
+        // mutation namespace, which derives from a guest retry token.
         let event_id = self
             .invocation_identity
             .as_deref()
-            .and_then(|i| i.event_id())
-            .ok_or_else(|| forbidden("floor_ban_unavailable: the invocation has no event id"))?;
+            .and_then(|i| i.root_event_id())
+            .ok_or_else(|| {
+                forbidden("floor_ban_unavailable: the invocation has no root event id")
+            })?;
         let key = floor_ban_key(event_id, user, floor);
         let origin = self.community_id;
         let targets: Vec<i32> = match floor {
@@ -348,6 +355,14 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
                 );
                 FloorResult::RateLimited
             }
+            Ok(FloorEnqueue::UserCapped) => {
+                tracing::warn!(
+                    community_id = target,
+                    scope = floor.reason(),
+                    "floor ban suppressed: this user already has bans in the quota window"
+                );
+                FloorResult::UserCapped
+            }
             Ok(FloorEnqueue::Refused(_)) => FloorResult::Refused,
             Err(e) => {
                 tracing::error!(
@@ -431,9 +446,10 @@ pub(super) fn summarise(
     results: &[FloorResult],
 ) -> Result<serde_json::Value, ToolRefusal> {
     let total = results.len();
+    // A capped user already has a ban pending/delivered in this window: that is success.
     let queued = results
         .iter()
-        .filter(|r| **r == FloorResult::Queued)
+        .filter(|r| matches!(r, FloorResult::Queued | FloorResult::UserCapped))
         .count();
     let refused = results
         .iter()

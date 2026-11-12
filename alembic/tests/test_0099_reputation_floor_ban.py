@@ -276,8 +276,9 @@ class TestFloorBanOutbox:
 
     @pytest.fixture(autouse=True)
     def _empty_outbox(self, pg_db: PgTestDatabase) -> None:
-        """Claims are global (cross-tenant), so each test starts from an empty outbox."""
+        """Claims are global (cross-tenant), so each test starts from an empty, un-halted outbox."""
         _q(pg_db, "TRUNCATE bundle_reputation_floor_bans")
+        _q(pg_db, "SELECT reputation_floor_ban_set_halted(false, 'test reset')")
 
     def _slot(
         self, db: PgTestDatabase, name: str, *, score: int = 350
@@ -516,7 +517,10 @@ class TestFloorBanOutbox:
         _q(
             pg_db,
             "UPDATE bundle_reputation_floor_bans SET created_at = NOW() - INTERVAL '2 hours', "
-            "next_retry_at = NOW() - INTERVAL '1 second' WHERE id IN (%s, %s)",
+            "dispatched_at = CASE WHEN dispatched_at IS NULL THEN NULL "
+            "ELSE NOW() - INTERVAL '2 hours' END, "
+            "next_retry_at = CASE WHEN status = 5 THEN NOW() - INTERVAL '1 second' "
+            "ELSE next_retry_at END WHERE id IN (%s, %s)",
             (id1, id2),
         )
         later = self._claim(pg_db)
@@ -666,6 +670,212 @@ class TestFloorBanOutbox:
             "the lease is gone once the row is closed"
         )
 
+    # --- review fixes: quota at claim, kill switch, per-user cap, backlog ------------------
+
+    def _queue_many(
+        self, db: PgTestDatabase, tid: int, cid: int, n: int
+    ) -> list[int]:
+        ids = []
+        for i in range(n):
+            user = str(uuid.uuid4())
+            _score(db, tid, cid, user, 300)
+            state, row_id = self._enqueue(db, tid, cid, user, key=f"fb:q{i}")
+            assert state == 0
+            ids.append(row_id)
+        return ids
+
+    def test_the_hourly_quota_is_enforced_at_claim_and_deferred_rows_stay_limited(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, _u = self._slot(pg_db, "t-ob-claimquota")
+        ids = self._queue_many(pg_db, tid, cid, 5)
+        # The community's quota shrinks after the rows were queued (policy change): the claim,
+        # not the enqueue, is now the authority.
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_policy SET floor_ban_hourly_quota = 2 "
+            "WHERE community_id=%s",
+            (cid,),
+        )
+        claimed = self._claim(pg_db)
+        assert len(claimed) == 2, "exactly the quota is leased"
+        leased = {r[0] for r in claimed}
+        deferred = [i for i in ids if i not in leased]
+        rows = _q(
+            pg_db,
+            "SELECT status, last_error, next_retry_at > NOW() + INTERVAL '29 seconds', "
+            "lease_token IS NULL FROM bundle_reputation_floor_bans WHERE id = ANY(%s)",
+            (deferred,),
+        )
+        assert rows == [(5, "rate_limited", True, True)] * 3, (
+            "over-quota rows are NOT leased: status 5 with a jittered future retry"
+        )
+        assert self._claim(pg_db) == [], "nothing more until the window or the retry passes"
+        # The retry time passes but the window is still full: still not promoted (a retry or a
+        # status-5/3 row can never bypass the quota).
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_floor_bans SET next_retry_at = NOW() - INTERVAL '1 s' "
+            "WHERE status = 5 AND community_id=%s",
+            (cid,),
+        )
+        assert self._claim(pg_db) == []
+        # One dispatched row leaves the window: exactly ONE slot is free -> exactly one promoted.
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_floor_bans SET dispatched_at = NOW() - INTERVAL '2 hours' "
+            "WHERE id = %s",
+            (claimed[0][0],),
+        )
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_floor_bans SET next_retry_at = NOW() - INTERVAL '1 s' "
+            "WHERE status = 5 AND community_id=%s",
+            (cid,),
+        )
+        promoted = self._claim(pg_db)
+        assert len(promoted) == 1
+        assert self._row(pg_db, promoted[0][0])[0] == 7
+
+    def test_a_failed_row_retried_past_its_backoff_cannot_bypass_the_quota(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, _u = self._slot(pg_db, "t-ob-retryquota")
+        a, b = self._queue_many(pg_db, tid, cid, 2)
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_policy SET floor_ban_hourly_quota = 1 "
+            "WHERE community_id=%s",
+            (cid,),
+        )
+        first = self._claim(pg_db)
+        assert len(first) == 1
+        # Fail it (retry due now): the dispatch still counts inside the window. Its OWN retry reuses
+        # that one slot (a row counts once however often it is re-dispatched), but the other
+        # queued row can never be leased: the community stays at 1 dispatched row per hour.
+        self._complete(pg_db, first[0][0], str(first[0][7]), 2, "relay_unconfirmed")
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_floor_bans SET next_retry_at = NOW() - INTERVAL '1 s' "
+            "WHERE status = 3",
+        )
+        retried = self._claim(pg_db)
+        assert [r[0] for r in retried] == [first[0][0]], "only the retry of the same row"
+        other = b if first[0][0] == a else a
+        assert self._row(pg_db, other)[0] in (1, 5), "the other row stays waiting"
+        assert (
+            _q(
+                pg_db,
+                "SELECT COUNT(*) FROM bundle_reputation_floor_bans "
+                "WHERE community_id=%s AND dispatched_at IS NOT NULL",
+                (cid,),
+            )[0][0]
+            == 1
+        )
+
+    def test_a_concurrent_claim_never_exceeds_the_quota(self, pg_db: PgTestDatabase) -> None:
+        tid, cid, _u = self._slot(pg_db, "t-ob-claimconc")
+        self._queue_many(pg_db, tid, cid, 8)
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_policy SET floor_ban_hourly_quota = 3 "
+            "WHERE community_id=%s",
+            (cid,),
+        )
+        got: list[int] = []
+        lock = threading.Lock()
+
+        def worker() -> None:
+            n = len(self._claim(pg_db, limit=8))
+            with lock:
+                got.append(n)
+
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert sum(got) <= 3, f"leased {sum(got)} across claimants, quota is 3"
+        dispatched = _q(
+            pg_db,
+            "SELECT COUNT(*) FROM bundle_reputation_floor_bans WHERE community_id=%s "
+            "AND dispatched_at IS NOT NULL",
+            (cid,),
+        )[0][0]
+        assert dispatched <= 3
+
+    def test_the_durable_kill_switch_stops_enqueue_claim_and_recheck(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = self._slot(pg_db, "t-ob-halt")
+        _state, row_id = self._enqueue(pg_db, tid, cid, user)
+        token = str(self._mine(self._claim(pg_db), row_id)[7])
+        _q(pg_db, "SELECT reputation_floor_ban_set_halted(true, 'operator stop')")
+        # recheck sees the switch: the leased row is released back to the queue, attempt refunded.
+        recheck = "SELECT reputation_floor_ban_recheck(%s, %s::uuid)"
+        assert _q(pg_db, recheck, (row_id, token), _ACTION_LOGIN)[0][0] == 3
+        assert self._row(pg_db, row_id)[:2] == (1, 0)
+        # Nothing is claimable and new enqueues are refused (recorded) while halted.
+        assert self._claim(pg_db) == []
+        user2 = str(uuid.uuid4())
+        _score(pg_db, tid, cid, user2, 300)
+        state, rid2 = self._enqueue(pg_db, tid, cid, user2, key="fb:halted")
+        assert state == 3
+        assert self._row(pg_db, rid2)[:3] == (6, 0, "kill_switch")
+        # Cleared: the original row is delivered again, from the start.
+        _q(pg_db, "SELECT reputation_floor_ban_set_halted(false, NULL)")
+        again = self._mine(self._claim(pg_db), row_id)
+        assert again[6] == 1
+
+    def test_a_missing_control_row_reads_as_halted_fail_closed(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        _q(pg_db, "DELETE FROM bundle_reputation_floor_ban_control")
+        assert _q(pg_db, "SELECT reputation_floor_ban_halted()")[0][0] is True
+        _q(pg_db, "SELECT reputation_floor_ban_set_halted(false, 'restore')")
+        assert _q(pg_db, "SELECT reputation_floor_ban_halted()")[0][0] is False
+
+    def test_one_user_cannot_exhaust_the_community_quota(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = self._slot(pg_db, "t-ob-usercap")
+        assert self._enqueue(pg_db, tid, cid, user, key="fb:a")[0] == 0
+        assert self._enqueue(pg_db, tid, cid, user, key="fb:b")[0] == 0
+        state, rid = self._enqueue(pg_db, tid, cid, user, key="fb:c")
+        assert (state, rid) == (4, 0), "third distinct event for the same user is capped"
+        n = _q(
+            pg_db,
+            "SELECT COUNT(*) FROM bundle_reputation_floor_bans WHERE user_uuid=%s",
+            (user,),
+        )[0][0]
+        assert n == 2, "a capped enqueue records nothing"
+        # A replay of an existing slot is still the idempotent no-op; another user is unaffected.
+        assert self._enqueue(pg_db, tid, cid, user, key="fb:a")[0] == 1
+        other = str(uuid.uuid4())
+        _score(pg_db, tid, cid, other, 300)
+        assert self._enqueue(pg_db, tid, cid, other, key="fb:d")[0] == 0
+
+    def test_backlog_reports_waiting_rows_for_the_alert(self, pg_db: PgTestDatabase) -> None:
+        tid, cid, _u = self._slot(pg_db, "t-ob-backlog")
+        ids = self._queue_many(pg_db, tid, cid, 3)
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_floor_bans SET created_at = NOW() - INTERVAL '30 minutes' "
+            "WHERE id = %s",
+            (ids[0],),
+        )
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_floor_bans SET status = 5, next_retry_at = NOW() "
+            "WHERE id = %s",
+            (ids[1],),
+        )
+        pending, limited, oldest = _q(
+            pg_db, "SELECT * FROM reputation_floor_ban_backlog()", (), _ACTION_LOGIN
+        )[0]
+        assert (pending, limited) == (2, 1)
+        assert oldest >= 1800
+
     # --- input / privilege boundaries -----------------------------------------------------
 
     @pytest.mark.parametrize(
@@ -708,15 +918,24 @@ class TestFloorBanOutbox:
             "reputation_floor_ban_enqueue(bigint,bigint,bigint,uuid,smallint,text,text)",
             "reputation_tenant_communities(bigint)",
         )
+        both_fns = ("reputation_floor_ban_halted()",)
+        hub_only_fns = ("reputation_floor_ban_set_halted(boolean,text)",)
         action_fns = (
             "reputation_floor_ban_reap(int)",
             "reputation_floor_ban_claim(int,int)",
+            "reputation_floor_ban_backlog()",
             "reputation_floor_ban_recheck(bigint,uuid)",
             "reputation_floor_ban_complete(bigint,uuid,smallint,text,text)",
         )
         _q(pg_db, "CREATE ROLE rep_ban_stranger LOGIN PASSWORD %s", (_LOGIN_PW,))
-        for fn in process_fns + action_fns:
+        for fn in process_fns + action_fns + both_fns + hub_only_fns:
             assert _q(pg_db, sql, ("rep_ban_stranger", fn))[0][0] is False, fn
+        for fn in both_fns:
+            assert _q(pg_db, sql, (_BUNDLE_LOGIN, fn))[0][0] is True, fn
+            assert _q(pg_db, sql, (_ACTION_LOGIN, fn))[0][0] is True, fn
+        for fn in hub_only_fns:
+            assert _q(pg_db, sql, (_BUNDLE_LOGIN, fn))[0][0] is False, fn
+            assert _q(pg_db, sql, (_ACTION_LOGIN, fn))[0][0] is False, fn
         for fn in process_fns:
             assert _q(pg_db, sql, (_BUNDLE_LOGIN, fn))[0][0] is True, fn
             assert _q(pg_db, sql, (_ACTION_LOGIN, fn))[0][0] is False, fn

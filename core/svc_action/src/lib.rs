@@ -1036,7 +1036,13 @@ async fn build_stage_capabilities(
     if event_sync_enabled {
         start_event_sync_consumer(&spine_cfg, Arc::clone(&caps)).await;
     }
-    start_floor_ban_dispatcher(cli, &db_password, Arc::clone(&caps)).await;
+    start_floor_ban_dispatcher(
+        cli,
+        &db_password,
+        flag_or_closed(&license, flags::REPUTATION_AUTO_BAN_FLAG),
+        Arc::clone(&caps),
+    )
+    .await;
     Some(caps)
 }
 
@@ -1048,6 +1054,7 @@ async fn build_stage_capabilities(
 async fn start_floor_ban_dispatcher(
     cli: &config::CliConfig,
     db_password: &config::Secret,
+    flag: Arc<dyn flags::FeatureFlag>,
     caps: Arc<
         capabilities::StageCapabilities<
             redis::aio::MultiplexedConnection,
@@ -1068,7 +1075,8 @@ async fn start_floor_ban_dispatcher(
     let store = Arc::new(floor_ban_dispatch::PgFloorBanStore::new(conn));
     let metrics = stage_metrics::stage_metrics();
     tokio::spawn(async move {
-        floor_ban_dispatch::run_floor_ban_sweeper(store, caps, metrics, shutdown_signal()).await;
+        floor_ban_dispatch::run_floor_ban_sweeper(store, caps, metrics, flag, shutdown_signal())
+            .await;
     });
 }
 

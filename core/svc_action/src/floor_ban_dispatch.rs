@@ -7,7 +7,8 @@
 //! 1. REAPs rows that exhausted their attempts (they become DEAD: ERROR log + metric alert);
 //! 2. CLAIMs a bounded batch under a lease token (queued rows, failed / rate-limited rows past
 //!    their retry time, and in-flight rows whose lease EXPIRED -- a crashed dispatcher);
-//! 3. re-checks the breach in SQL immediately before sending (a recovered score cancels it);
+//! 3. re-checks the breach AND the durable kill switch in SQL immediately before sending (a
+//!    recovered score cancels it; a halted switch releases the row back to the queue);
 //! 4. emits the signed outbound `mod.ban` command through the existing sender path
 //!    ([`crate::capabilities::StageCapabilities::emit_floor_ban`]) and waits for the sender's
 //!    CONFIRMED ack;
@@ -30,6 +31,7 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, Value};
 use uuid::Uuid;
 
 use crate::capabilities::{FloorBanCommand, FloorSendError, FloorSendFailure};
+use crate::flags::FeatureFlag;
 use crate::stage_metrics::StageMetrics;
 
 /// Rows claimed (leased) per sweep.
@@ -42,6 +44,10 @@ pub const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const SEND_CONCURRENCY: usize = 4;
 /// Dead-row reap bound per sweep.
 const REAP_BATCH: u32 = 100;
+/// Pending (queued/failed) rows past which a backlog ALERT fires.
+pub const BACKLOG_ALERT_PENDING: i64 = 100;
+/// Oldest waiting row (seconds) past which a backlog ALERT fires.
+pub const BACKLOG_ALERT_AGE_SECONDS: i64 = 900;
 
 /// A boxed store future (same style as the other trait seams of this crate).
 pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
@@ -87,6 +93,19 @@ pub enum Recheck {
     NotBreached,
     /// The lease is not ours any more: do nothing.
     LeaseLost,
+    /// The durable kill switch is halted: the row was released back to the queue; do not send.
+    Halted,
+}
+
+/// The delivery backlog (rows still waiting), the source of the backlog alert.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Backlog {
+    /// Queued or failed (retry-due) rows.
+    pub pending: i64,
+    /// Rows deferred by the hourly quota.
+    pub rate_limited: i64,
+    /// Age of the oldest waiting row, seconds.
+    pub oldest_seconds: i64,
 }
 
 /// What to record for a leased row.
@@ -121,6 +140,8 @@ pub trait FloorBanStore: Send + Sync {
     fn reap(&self, limit: u32) -> StoreFuture<'_, Vec<DeadFloorBan>>;
     /// Leases up to `limit` due rows.
     fn claim(&self, limit: u32, lease_seconds: u32) -> StoreFuture<'_, Vec<ClaimedFloorBan>>;
+    /// The waiting backlog (for the alert).
+    fn backlog(&self) -> StoreFuture<'_, Backlog>;
     /// Re-verifies the breach of a leased row right before sending.
     fn recheck(&self, id: i64, lease: Uuid) -> StoreFuture<'_, Recheck>;
     /// Records the outcome for the lease holder.
@@ -170,6 +191,8 @@ pub struct SweepReport {
     pub dead: usize,
     /// Rows whose lease was lost.
     pub lease_lost: usize,
+    /// Rows released because the durable kill switch is halted.
+    pub halted: usize,
     /// Outbox/store errors.
     pub store_errors: usize,
 }
@@ -182,6 +205,7 @@ impl SweepReport {
         self.refused += other.refused;
         self.dead += other.dead;
         self.lease_lost += other.lease_lost;
+        self.halted += other.halted;
         self.store_errors += other.store_errors;
     }
 }
@@ -288,6 +312,17 @@ async fn process_one<S: FloorBanStore, T: FloorBanSender>(
                 ..SweepReport::default()
             };
         }
+        Ok(Recheck::Halted) => {
+            metrics.record_floor_ban_dispatch("halted");
+            tracing::warn!(
+                floor_ban_id = row.id,
+                "floor ban not sent: the durable kill switch is halted; the row was released to the queue"
+            );
+            return SweepReport {
+                halted: 1,
+                ..SweepReport::default()
+            };
+        }
         Err(e) => {
             metrics.record_floor_ban_dispatch("store_error");
             tracing::error!(
@@ -367,6 +402,27 @@ pub async fn sweep_once<S: FloorBanStore, T: FloorBanSender>(
             tracing::error!(error = %e, "floor ban reap failed");
         }
     }
+    match store.backlog().await {
+        Ok(b)
+            if b.pending > BACKLOG_ALERT_PENDING
+                || b.oldest_seconds > BACKLOG_ALERT_AGE_SECONDS =>
+        {
+            metrics.record_floor_ban_dispatch("backlog_alert");
+            tracing::error!(
+                pending = b.pending,
+                rate_limited = b.rate_limited,
+                oldest_seconds = b.oldest_seconds,
+                "ALERT floor ban backlog: automated bans are waiting past the threshold \
+                 (quota, outage or kill switch)"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            report.store_errors += 1;
+            metrics.record_floor_ban_dispatch("store_error");
+            tracing::error!(error = %e, "floor ban backlog read failed");
+        }
+    }
     let claimed = match store.claim(CLAIM_BATCH, LEASE_SECONDS).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -389,20 +445,37 @@ pub async fn sweep_once<S: FloorBanStore, T: FloorBanSender>(
 }
 
 /// Runs [`sweep_once`] every [`SWEEP_INTERVAL`] (immediately again after a full batch) until
-/// `shutdown` resolves.
+/// `shutdown` resolves -- but ONLY while `flag` (`waddles.reputation-auto-ban`) is ON: with it OFF
+/// nothing is reaped, claimed or sent (queued rows simply stay queued; the durable SQL kill
+/// switch is enforced inside the claim and the pre-send re-check as well).
 pub async fn run_floor_ban_sweeper<S, T>(
     store: Arc<S>,
     sender: Arc<T>,
     metrics: Arc<StageMetrics>,
+    flag: Arc<dyn FeatureFlag>,
     shutdown: impl Future<Output = ()>,
 ) where
     S: FloorBanStore,
     T: FloorBanSender,
 {
     tokio::pin!(shutdown);
+    let mut warned_off = false;
     loop {
-        let report = sweep_once(&*store, &*sender, &metrics).await;
-        if report.claimed >= CLAIM_BATCH as usize {
+        let mut full_batch = false;
+        if flag.enabled().await {
+            warned_off = false;
+            let report = sweep_once(&*store, &*sender, &metrics).await;
+            full_batch = report.claimed >= CLAIM_BATCH as usize;
+        } else {
+            metrics.record_floor_ban_dispatch("flag_off");
+            if !warned_off {
+                warned_off = true;
+                tracing::warn!(
+                    "floor-ban dispatch paused: waddles.reputation-auto-ban is OFF (queued bans stay queued)"
+                );
+            }
+        }
+        if full_batch {
             continue;
         }
         tokio::select! {
@@ -485,6 +558,27 @@ impl FloorBanStore for PgFloorBanStore {
         })
     }
 
+    fn backlog(&self) -> StoreFuture<'_, Backlog> {
+        Box::pin(async move {
+            let row = self
+                .conn
+                .query_one_raw(stmt(
+                    "SELECT r_pending, r_rate_limited, r_oldest_seconds \
+                     FROM reputation_floor_ban_backlog()",
+                    vec![],
+                ))
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "reputation_floor_ban_backlog returned no row".to_string())?;
+            let err = |e: sea_orm::DbErr| e.to_string();
+            Ok(Backlog {
+                pending: row.try_get("", "r_pending").map_err(err)?,
+                rate_limited: row.try_get("", "r_rate_limited").map_err(err)?,
+                oldest_seconds: row.try_get("", "r_oldest_seconds").map_err(err)?,
+            })
+        })
+    }
+
     fn recheck(&self, id: i64, lease: Uuid) -> StoreFuture<'_, Recheck> {
         Box::pin(async move {
             let row = self
@@ -500,6 +594,7 @@ impl FloorBanStore for PgFloorBanStore {
                 0 => Ok(Recheck::Breached),
                 1 => Ok(Recheck::NotBreached),
                 2 => Ok(Recheck::LeaseLost),
+                3 => Ok(Recheck::Halted),
                 other => Err(format!("unexpected floor-ban recheck state {other}")),
             }
         })

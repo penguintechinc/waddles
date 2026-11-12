@@ -397,7 +397,9 @@ impl StageMetrics {
     /// Records one floor-ban outbox delivery outcome (`waddles_floor_ban_dispatch_total`).
     /// `result` is a host constant: `done` (sender-confirmed), `failed` (retry scheduled),
     /// `refused` (permanent or no longer breached), `dead` (attempts exhausted: ALERT),
-    /// `lease_lost` (another claimant owns it), `store_error` (outbox unreachable).
+    /// `lease_lost` (another claimant owns it), `store_error` (outbox unreachable), `halted`
+    /// (durable kill switch: released), `flag_off` (sweep skipped, flag OFF), `backlog_alert`
+    /// (rows waiting past the threshold: ALERT).
     pub fn record_floor_ban_dispatch(&self, result: &'static str) {
         self.floor_ban_dispatch.add(
             1,

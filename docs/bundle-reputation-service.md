@@ -207,7 +207,16 @@ map to `rate_limited`, non-members to `not_a_member`). Consequences for the bund
   ```
 
   The row id is the correlation id (sender op id `fb-<row>-<attempt>-<nonce>`). The idempotency key is
-  HOST-derived (`fb:` + hash of the invocation event id, user and scope), never the guest's value. Statuses:
+  HOST-derived (`fb:` + hash of the ROOT spine event id, user and scope; the root id is preserved across tool
+  hops, never the per-hop mutation namespace that derives from a guest retry token). A user with 2 bans already
+  in the quota window is capped (`user_capped`, nothing recorded) so one user cannot exhaust the community quota.
+  The hourly quota is enforced AT CLAIM under the per-community advisory lock, counting `dispatched_at` over the
+  last hour: over-quota rows stay/become status 5 with a jittered retry after the window, retries and promoted
+  rows can never exceed it. KILL SWITCH: the PostHog flag gates the process-stage enqueue AND the action-stage
+  sweep (flag OFF = no reap/claim/send, rows stay queued); the durable SQL switch
+  (`bundle_reputation_floor_ban_control.halted`, set via `reputation_floor_ban_set_halted`, a missing row = halted)
+  is read by enqueue (refuse), claim (nothing) and the pre-send recheck (row released to the queue). Backlog
+  alert: pending > 100 or oldest > 15 min -> ERROR + `waddles_floor_ban_dispatch_total{result="backlog_alert"}`. Statuses:
   1 queued, 2 done (sender-confirmed), 3 failed (backoff retry), 4 dead (8 attempts: ERROR log +
   `waddles_floor_ban_dispatch_total{result="dead"}` alert), 5 rate-limited (retried after the quota window;
   `waddles_floor_ban_enqueue_total{result="rate_limited"}` + ERROR log), 6 refused (not breached / protected

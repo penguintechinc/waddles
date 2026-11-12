@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS bundle_reputation_floor_bans (
     next_retry_at       TIMESTAMPTZ,
     lease_token         UUID,
     lease_expires_at    TIMESTAMPTZ,
+    dispatched_at       TIMESTAMPTZ,
     op_id               TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -56,7 +57,43 @@ CREATE INDEX IF NOT EXISTS idx_bundle_reputation_floor_bans_community_recent
     ON bundle_reputation_floor_bans (community_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_bundle_reputation_floor_bans_due
     ON bundle_reputation_floor_bans (status, next_retry_at, lease_expires_at);
+CREATE INDEX IF NOT EXISTS idx_bundle_reputation_floor_bans_dispatched
+    ON bundle_reputation_floor_bans (community_id, dispatched_at);
 REVOKE ALL ON bundle_reputation_floor_bans FROM PUBLIC;
+
+-- 2b. The durable KILL SWITCH, the single source of truth BOTH stages read (enqueue refuses, claim
+-- returns nothing, recheck releases the row back to the queue) in addition to the PostHog flag each
+-- stage checks. `halted` defaults FALSE; a missing control row reads as halted (fail closed).
+CREATE TABLE IF NOT EXISTS bundle_reputation_floor_ban_control (
+    id         SMALLINT    PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    halted     BOOLEAN     NOT NULL DEFAULT FALSE,
+    reason     TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+INSERT INTO bundle_reputation_floor_ban_control (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+REVOKE ALL ON bundle_reputation_floor_ban_control FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION reputation_floor_ban_halted() RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $fh$
+    SELECT COALESCE((SELECT halted FROM bundle_reputation_floor_ban_control WHERE id = 1), TRUE);
+$fh$;
+
+-- Operator switch (hub-api only): stops enqueue/dispatch of automated bans until cleared.
+CREATE OR REPLACE FUNCTION reputation_floor_ban_set_halted(p_halted boolean, p_reason text)
+RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
+AS $fs$
+BEGIN
+    IF p_halted IS NULL THEN
+        RAISE EXCEPTION 'invalid_input' USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO bundle_reputation_floor_ban_control (id, halted, reason, updated_at)
+    VALUES (1, p_halted, left(p_reason, 200), NOW())
+    ON CONFLICT (id) DO UPDATE
+        SET halted = EXCLUDED.halted, reason = EXCLUDED.reason, updated_at = NOW();
+END
+$fs$;
 
 -- 3. Re-verification: TRUE only if the scope's ban is enabled AND the user's score is below the
 -- floor. p_scope 1 = community hard (hard_ban_enabled + hard_ban_floor, the community score,
@@ -107,8 +144,11 @@ $vf$;
 -- quota count and the slot's idempotency): (a) a slot already queued/done/in-flight/failed/dead is an
 -- idempotent no-op; (b) the breach is RE-VERIFIED here, in the same transaction that records the
 -- dispatch (a stale or raced decision never queues a ban); (c) the hourly quota is applied;
--- (d) a QUEUED row is recorded. Returns (state, id): 0 queued, 1 already known, 2 rate limited
--- (recorded, retried after the quota window), 3 refused (floor not breached, recorded).
+-- (d) a QUEUED row is recorded. A halted kill switch refuses; a user who already has
+-- `v_user_cap` bans of this community inside the window is capped so one user can never exhaust
+-- the community's quota. Returns (state, id): 0 queued, 1 already known, 2 rate limited (recorded,
+-- retried after the quota window), 3 refused (floor not breached / halted, recorded), 4 capped
+-- (the user already has pending/delivered bans in this window; nothing recorded, id 0).
 CREATE OR REPLACE FUNCTION reputation_floor_ban_enqueue(
     p_tenant bigint, p_community bigint, p_origin bigint, p_user_uuid uuid,
     p_scope smallint, p_key text, p_platform text
@@ -122,6 +162,8 @@ DECLARE
     v_recent bigint;
     v_oldest timestamptz;
     v_reason text;
+    v_user_cap int := 2;
+    v_user_recent bigint;
 BEGIN
     IF p_scope IS NULL OR p_scope NOT IN (1, 2) THEN
         RAISE EXCEPTION 'invalid_input' USING ERRCODE = '22023';
@@ -145,6 +187,19 @@ BEGIN
         r_state := 1; r_id := v_id; RETURN NEXT; RETURN;
     END IF;
 
+    IF reputation_floor_ban_halted() THEN
+        INSERT INTO bundle_reputation_floor_bans
+            (tenant_id, community_id, origin_community_id, user_uuid, scope, idempotency_key,
+             reason, platform, status, last_error, completed_at)
+        VALUES (p_tenant, p_community, p_origin, p_user_uuid, p_scope, p_key, v_reason,
+                p_platform, 6, 'kill_switch', NOW())
+        ON CONFLICT (tenant_id, community_id, user_uuid, scope, idempotency_key)
+        DO UPDATE SET status = 6, last_error = 'kill_switch', next_retry_at = NULL,
+                      updated_at = NOW()
+        RETURNING id INTO v_id;
+        r_state := 3; r_id := v_id; RETURN NEXT; RETURN;
+    END IF;
+
     IF NOT reputation_verify_floor_breach(p_tenant, p_community, p_user_uuid, p_scope) THEN
         INSERT INTO bundle_reputation_floor_bans
             (tenant_id, community_id, origin_community_id, user_uuid, scope, idempotency_key,
@@ -156,6 +211,14 @@ BEGIN
                       updated_at = NOW()
         RETURNING id INTO v_id;
         r_state := 3; r_id := v_id; RETURN NEXT; RETURN;
+    END IF;
+
+    SELECT COUNT(*) INTO v_user_recent FROM bundle_reputation_floor_bans
+     WHERE community_id = p_community AND user_uuid = p_user_uuid
+       AND created_at > NOW() - INTERVAL '1 hour' AND status IN (1, 2, 3, 5, 7)
+       AND NOT (scope = p_scope AND idempotency_key = p_key);
+    IF v_user_recent >= v_user_cap THEN
+        r_state := 4; r_id := 0; RETURN NEXT; RETURN;
     END IF;
 
     SELECT floor_ban_hourly_quota INTO v_quota FROM bundle_reputation_policy
@@ -221,39 +284,106 @@ $fp$;
 
 -- 6. Claim (action stage): lease up to p_limit (<= 50) rows for dispatch -- queued rows, failed or
 -- rate-limited rows past next_retry_at, and in-flight rows whose lease EXPIRED (a crashed
--- dispatcher). Each claim bumps `attempts` and mints a fresh lease token; a row under an unexpired
--- lease is never returned, and only the current token may complete it (no double fire).
+-- dispatcher). The hourly quota is enforced HERE, at dispatch, under the same per-community
+-- advisory lock the enqueue takes, counting rows dispatched in the last hour by `dispatched_at`: a
+-- row over quota is NOT leased -- it stays (or becomes) status 5 with a jittered next_retry_at
+-- after the oldest dispatch leaves the window, so retried/promoted rows can never exceed the
+-- community's quota. Nothing is claimed while the kill switch is halted. Each claim bumps
+-- `attempts` and mints a fresh lease token; a row under an unexpired lease is never returned, and
+-- only the current token may complete it (no double fire). Lock order is advisory-then-row and the
+-- advisory lock is a TRY lock (a busy community is skipped until the next sweep): no deadlocks.
 CREATE OR REPLACE FUNCTION reputation_floor_ban_claim(p_limit int, p_lease_seconds int)
 RETURNS TABLE(r_id bigint, r_tenant_id int, r_community_id int, r_user_uuid uuid,
               r_scope smallint, r_platform text, r_attempt int, r_lease_token uuid)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $fc$
+DECLARE
+    cand record;
+    v_limit int;
+    v_lease int;
+    v_quota int;
+    v_count bigint;
+    v_oldest timestamptz;
+    v_n int := 0;
 BEGIN
-    RETURN QUERY
-    WITH due AS (
-        SELECT b.id FROM bundle_reputation_floor_bans b
+    IF reputation_floor_ban_halted() THEN
+        RETURN;
+    END IF;
+    v_limit := LEAST(GREATEST(COALESCE(p_limit, 1), 1), 50);
+    v_lease := LEAST(GREATEST(COALESCE(p_lease_seconds, 120), 30), 900);
+    FOR cand IN
+        SELECT b.id, b.tenant_id, b.community_id FROM bundle_reputation_floor_bans b
          WHERE b.attempts < 8
            AND (b.status = 1
                 OR (b.status IN (3, 5) AND b.next_retry_at IS NOT NULL AND b.next_retry_at <= NOW())
                 OR (b.status = 7 AND b.lease_expires_at < NOW()))
          ORDER BY b.updated_at
-         LIMIT LEAST(GREATEST(COALESCE(p_limit, 1), 1), 50)
-         FOR UPDATE SKIP LOCKED
-    )
-    UPDATE bundle_reputation_floor_bans u
-       SET status = 7, attempts = u.attempts + 1, lease_token = gen_random_uuid(),
-           lease_expires_at = NOW() + make_interval(
-               secs => LEAST(GREATEST(COALESCE(p_lease_seconds, 120), 30), 900)),
-           next_retry_at = NULL, updated_at = NOW()
-      FROM due WHERE u.id = due.id
-    RETURNING u.id, u.tenant_id, u.community_id, u.user_uuid, u.scope, u.platform,
-              u.attempts, u.lease_token;
+         LIMIT v_limit * 4
+    LOOP
+        EXIT WHEN v_n >= v_limit;
+        IF NOT pg_try_advisory_xact_lock(
+                hashtextextended('rep_floor_ban:' || cand.community_id, 0)) THEN
+            CONTINUE;
+        END IF;
+        PERFORM 1 FROM bundle_reputation_floor_bans b
+         WHERE b.id = cand.id AND b.attempts < 8
+           AND (b.status = 1
+                OR (b.status IN (3, 5) AND b.next_retry_at IS NOT NULL AND b.next_retry_at <= NOW())
+                OR (b.status = 7 AND b.lease_expires_at < NOW()))
+           FOR UPDATE SKIP LOCKED;
+        IF NOT FOUND THEN
+            CONTINUE;
+        END IF;
+        SELECT floor_ban_hourly_quota INTO v_quota FROM bundle_reputation_policy
+         WHERE community_id = cand.community_id AND tenant_id = cand.tenant_id;
+        IF NOT FOUND THEN
+            v_quota := 60;
+        END IF;
+        SELECT COUNT(*), MIN(b.dispatched_at) INTO v_count, v_oldest
+          FROM bundle_reputation_floor_bans b
+         WHERE b.community_id = cand.community_id AND b.id <> cand.id
+           AND b.dispatched_at > NOW() - INTERVAL '1 hour';
+        IF v_count >= v_quota THEN
+            UPDATE bundle_reputation_floor_bans u
+               SET status = 5, last_error = 'rate_limited', lease_token = NULL,
+                   lease_expires_at = NULL, updated_at = NOW(),
+                   next_retry_at = GREATEST(NOW() + INTERVAL '30 seconds',
+                                            v_oldest + INTERVAL '1 hour')
+                                   + random() * INTERVAL '60 seconds'
+             WHERE u.id = cand.id;
+            CONTINUE;
+        END IF;
+        UPDATE bundle_reputation_floor_bans u
+           SET status = 7, attempts = u.attempts + 1, lease_token = gen_random_uuid(),
+               lease_expires_at = NOW() + make_interval(secs => v_lease),
+               dispatched_at = NOW(), next_retry_at = NULL, updated_at = NOW()
+         WHERE u.id = cand.id
+        RETURNING u.id, u.tenant_id, u.community_id, u.user_uuid, u.scope, u.platform,
+                  u.attempts, u.lease_token
+          INTO r_id, r_tenant_id, r_community_id, r_user_uuid, r_scope, r_platform,
+               r_attempt, r_lease_token;
+        v_n := v_n + 1;
+        RETURN NEXT;
+    END LOOP;
 END
 $fc$;
 
+-- 6b. Backlog (action stage alert source): rows still waiting for delivery. The dispatcher raises an
+-- ERROR + metric when the pending count or the oldest wait crosses its threshold.
+CREATE OR REPLACE FUNCTION reputation_floor_ban_backlog()
+RETURNS TABLE(r_pending bigint, r_rate_limited bigint, r_oldest_seconds bigint)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $fg$
+    SELECT COUNT(*) FILTER (WHERE status IN (1, 3)),
+           COUNT(*) FILTER (WHERE status = 5),
+           COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::bigint, 0)
+      FROM bundle_reputation_floor_bans WHERE status IN (1, 3, 5);
+$fg$;
+
 -- 7. Re-check (action stage), immediately before the command is emitted: the leased row's breach is
--- verified AGAIN. 0 = still breached (go), 1 = no longer breached (row marked refused, do not send),
--- 2 = the lease is not ours any more (do nothing).
+-- verified AGAIN and the kill switch is re-read. 0 = still breached (go), 1 = no longer breached (row
+-- marked refused, do not send), 2 = the lease is not ours any more (do nothing), 3 = the kill switch
+-- is halted (the row is released back to the queue, attempt refunded; nothing is sent).
 CREATE OR REPLACE FUNCTION reputation_floor_ban_recheck(p_id bigint, p_lease uuid)
 RETURNS smallint
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
@@ -270,6 +400,13 @@ BEGIN
      WHERE id = p_id AND status = 7 AND lease_token = p_lease FOR UPDATE;
     IF NOT FOUND THEN
         RETURN 2;
+    END IF;
+    IF reputation_floor_ban_halted() THEN
+        UPDATE bundle_reputation_floor_bans
+           SET status = 1, attempts = GREATEST(attempts - 1, 0), lease_token = NULL,
+               lease_expires_at = NULL, next_retry_at = NULL, updated_at = NOW()
+         WHERE id = p_id;
+        RETURN 3;
     END IF;
     IF reputation_verify_floor_breach(v_tenant, v_community, v_user, v_scope) THEN
         RETURN 0;
@@ -340,8 +477,11 @@ REVOKE ALL ON FUNCTION
     reputation_floor_ban_enqueue(bigint, bigint, bigint, uuid, smallint, text, text),
     reputation_floor_ban_reap(int),
     reputation_floor_ban_claim(int, int),
+    reputation_floor_ban_backlog(),
     reputation_floor_ban_recheck(bigint, uuid),
     reputation_floor_ban_complete(bigint, uuid, smallint, text, text),
+    reputation_floor_ban_halted(),
+    reputation_floor_ban_set_halted(boolean, text),
     reputation_tenant_communities(bigint)
     FROM PUBLIC;
 
@@ -351,6 +491,7 @@ BEGIN
         GRANT EXECUTE ON FUNCTION
             reputation_verify_floor_breach(bigint, bigint, uuid, smallint),
             reputation_floor_ban_enqueue(bigint, bigint, bigint, uuid, smallint, text, text),
+            reputation_floor_ban_halted(),
             reputation_tenant_communities(bigint)
             TO waddles_bundle_reputation;
     END IF;
@@ -358,12 +499,17 @@ BEGIN
         GRANT EXECUTE ON FUNCTION
             reputation_floor_ban_reap(int),
             reputation_floor_ban_claim(int, int),
+            reputation_floor_ban_backlog(),
             reputation_floor_ban_recheck(bigint, uuid),
-            reputation_floor_ban_complete(bigint, uuid, smallint, text, text)
+            reputation_floor_ban_complete(bigint, uuid, smallint, text, text),
+            reputation_floor_ban_halted()
             TO waddles_svc_action;
     END IF;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hub_api') THEN
         GRANT SELECT ON bundle_reputation_floor_bans TO hub_api;
+        GRANT SELECT ON bundle_reputation_floor_ban_control TO hub_api;
+        GRANT EXECUTE ON FUNCTION reputation_floor_ban_set_halted(boolean, text),
+                                  reputation_floor_ban_halted() TO hub_api;
         GRANT SELECT, INSERT, UPDATE ON bundle_reputation_policy TO hub_api;
     END IF;
 END

@@ -46,6 +46,8 @@ struct FloorStore {
     /// Communities whose enqueue answers `Refused` (SQL re-verification said not breached).
     not_breached: Mutex<HashSet<i32>>,
     rate_limited: Mutex<bool>,
+    /// When set, the enqueue answers `UserCapped` (the user already has bans in the window).
+    user_capped: Mutex<bool>,
     /// Slots already enqueued: `(target, key)` -> row id.
     known: Mutex<HashMap<(i32, String), i64>>,
     /// Every enqueue: `(origin, target, user, scope, key, platform)`.
@@ -60,6 +62,7 @@ impl FloorStore {
             communities: communities.to_vec(),
             not_breached: Mutex::default(),
             rate_limited: Mutex::new(false),
+            user_capped: Mutex::new(false),
             known: Mutex::default(),
             enqueues: Mutex::default(),
             enqueue_calls: AtomicU32::new(0),
@@ -166,6 +169,9 @@ impl ReputationStore for FloorStore {
             }
             if *self.rate_limited.lock().unwrap() {
                 return Ok(FloorEnqueue::RateLimited(0));
+            }
+            if *self.user_capped.lock().unwrap() {
+                return Ok(FloorEnqueue::UserCapped);
             }
             let id = i64::from(target) * 100;
             self.known
@@ -769,5 +775,72 @@ fn summary_is_ok_only_when_everything_is_queued_and_names_counts_only() {
             .unwrap_err()
             .code(),
         "forbidden"
+    );
+}
+
+#[tokio::test]
+async fn the_key_derives_from_the_root_event_id_not_the_per_hop_guest_namespace() {
+    // Two tool hops of the SAME root event whose per-hop mutation namespaces differ (each derives
+    // from a different guest retry token) must land in the SAME slot: the key is bound to the
+    // hop-verified root event id, which `for_tool_call` preserves unchanged.
+    let user = Uuid::parse_str(USER).unwrap();
+    let root =
+        InvocationIdentity::new("discord", Some("12345".to_string()), vec![]).with_event_id(EVENT);
+    assert_eq!(root.root_event_id(), Some(EVENT));
+    let mut w = standard(false, true).await;
+    for guest in ["tool:guest-A", "tool:guest-B"] {
+        let hop = root.for_tool_call(Some(guest.to_string()), LOGIC, REP);
+        assert_eq!(
+            hop.event_id(),
+            Some(guest),
+            "the per-hop namespace is guest-derived"
+        );
+        assert_eq!(
+            hop.root_event_id(),
+            Some(EVENT),
+            "the root id survives the hop"
+        );
+        hop.mark_reputation_applied(user, 3);
+        w.caps.invocation_identity = Some(Arc::new(hop));
+        run(&w.caps, ban_call("community_hard_floor", Some("any")))
+            .await
+            .unwrap();
+    }
+    let enq = w.store.enqueues();
+    assert_eq!(enq.len(), 1, "one slot per (root event, user, scope)");
+    assert_eq!(
+        enq[0].4,
+        floor_ban_key(EVENT, user, FloorScope::CommunityHard)
+    );
+    // An invocation with no root event id (e.g. a bundle-admin call) fails closed.
+    let orphan = InvocationIdentity::new("discord", None, vec![]);
+    orphan.mark_reputation_applied(user, 3);
+    let orphan = orphan.for_tool_call(Some("tool:x".into()), LOGIC, REP);
+    orphan.mark_reputation_applied(user, 3);
+    w.caps.invocation_identity = Some(Arc::new(orphan));
+    assert_eq!(
+        run(&w.caps, ban_call("community_hard_floor", Some("any")))
+            .await
+            .unwrap_err(),
+        "forbidden"
+    );
+}
+
+#[tokio::test]
+async fn a_user_capped_enqueue_is_success_but_counted_separately() {
+    let harness = crate::stage_metrics::test_support::Harness::new();
+    let metrics = Arc::new(crate::stage_metrics::StageMetrics::new(&harness.meter()));
+    let mut w = standard(true, true).await;
+    w.caps = w.caps.with_stage_metrics(Arc::clone(&metrics));
+    *w.store.user_capped.lock().unwrap() = true;
+    let out = run(&w.caps, ban_call("community_hard_floor", Some("k1")))
+        .await
+        .unwrap();
+    assert_eq!(out["ok"]["queued"], 1);
+    assert!(w.store.enqueues().is_empty(), "nothing more is recorded");
+    let capped = [("scope", "community_hard_floor"), ("result", "user_capped")];
+    assert_eq!(
+        harness.count("waddles_floor_ban_enqueue_total", &capped),
+        1.0
     );
 }

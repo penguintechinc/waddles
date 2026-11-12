@@ -275,6 +275,11 @@ pub struct InvocationIdentity {
     /// `None` until [`Self::with_event_id`]: an invocation without one cannot
     /// make a money-moving call (it could not be made idempotent).
     event_id: Option<String>,
+    /// The ROOT spine envelope's hop-verified `event_id`, preserved UNCHANGED across every tool hop
+    /// ([`Self::for_tool_call`] replaces `event_id` with a per-hop mutation namespace that derives
+    /// from a guest retry token; this one never changes). The automated floor ban derives its
+    /// idempotency key from it, so no guest value can steer which slot a ban lands in.
+    root_event_id: Option<String>,
     /// Next ordinal per economy mutation kind (`wager` | `transfer`); see
     /// [`Self::reserve_mutation`]. Never held across an `.await`.
     mutation_seq: Mutex<HashMap<&'static str, u32>>,
@@ -395,6 +400,7 @@ impl InvocationIdentity {
             mentions,
             resolved: Mutex::new(HashMap::new()),
             event_id: None,
+            root_event_id: None,
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
             preverified: None,
@@ -452,6 +458,7 @@ impl InvocationIdentity {
             mentions: table,
             resolved: Mutex::new(HashMap::new()),
             event_id: None,
+            root_event_id: None,
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
             preverified: None,
@@ -470,6 +477,7 @@ impl InvocationIdentity {
             mentions: HashMap::new(),
             resolved: Mutex::new(HashMap::new()),
             event_id: None,
+            root_event_id: None,
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
             preverified: Some(actor),
@@ -482,7 +490,9 @@ impl InvocationIdentity {
     /// handles. `event_id` is the hop-verified spine envelope id, never guest
     /// input. Without it every money-moving economy call is refused.
     pub fn with_event_id(mut self, event_id: impl Into<String>) -> Self {
-        self.event_id = Some(event_id.into());
+        let event_id = event_id.into();
+        self.root_event_id = Some(event_id.clone());
+        self.event_id = Some(event_id);
         self
     }
 
@@ -504,6 +514,12 @@ impl InvocationIdentity {
         self.event_id.as_deref()
     }
 
+    /// The root spine event id, unchanged across tool hops (see the field docs). `None` for an
+    /// invocation that never had a hop-verified event id (e.g. a bundle-admin call).
+    pub(crate) fn root_event_id(&self) -> Option<&str> {
+        self.root_event_id.as_deref()
+    }
+
     /// Forks verified actor/mention facts with a fresh mutation sequence for one
     /// nested tool call. The host supplies a domain-separated retry namespace
     /// for writes; reads receive `None` and cannot mutate economy/reputation.
@@ -519,6 +535,7 @@ impl InvocationIdentity {
             mentions: self.mentions.clone(),
             resolved: Mutex::new(HashMap::new()),
             event_id: mutation_event_id,
+            root_event_id: self.root_event_id.clone(),
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
             preverified: self.preverified.clone(),

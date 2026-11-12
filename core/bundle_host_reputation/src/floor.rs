@@ -68,13 +68,16 @@ pub enum FloorEnqueue {
     AlreadyKnown(i64),
     /// The per-community hourly quota was hit: recorded, retried after the quota window.
     RateLimited(i64),
-    /// SQL re-verification said the floor is not breached (or the switch is off): recorded.
+    /// SQL re-verification said the floor is not breached, or the kill switch is halted: recorded.
     Refused(i64),
+    /// The user already has bans pending/delivered in this community inside the quota window:
+    /// nothing recorded (one user can never exhaust the community's quota).
+    UserCapped,
 }
 
 impl FloorEnqueue {
     /// Parses the SQL `r_state` smallint of an enqueue result (0 queued, 1 known, 2 limited,
-    /// 3 refused) plus the row id.
+    /// 3 refused, 4 user-capped) plus the row id.
     #[must_use]
     pub fn from_sql(state: i16, id: i64) -> Option<Self> {
         match state {
@@ -82,6 +85,7 @@ impl FloorEnqueue {
             1 => Some(Self::AlreadyKnown(id)),
             2 => Some(Self::RateLimited(id)),
             3 => Some(Self::Refused(id)),
+            4 => Some(Self::UserCapped),
             _ => None,
         }
     }
@@ -150,7 +154,8 @@ mod tests {
             Some(FloorEnqueue::RateLimited(9))
         );
         assert_eq!(FloorEnqueue::from_sql(3, 9), Some(FloorEnqueue::Refused(9)));
-        assert_eq!(FloorEnqueue::from_sql(4, 9), None);
+        assert_eq!(FloorEnqueue::from_sql(4, 0), Some(FloorEnqueue::UserCapped));
+        assert_eq!(FloorEnqueue::from_sql(5, 9), None);
         for code in 1..=7 {
             assert_eq!(
                 FloorBanStatus::from_code(code).map(|s| s as i16),
