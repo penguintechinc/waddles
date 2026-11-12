@@ -1509,7 +1509,8 @@ fn try_start_process_loop(
             &bundle_db_license_client,
         )
         .await;
-        let gameserver_net_wiring = try_build_gameserver_net_wiring(&cli, &bundle_db_license_client);
+        let gameserver_net_wiring =
+            try_build_gameserver_net_wiring(&cli, &bundle_db_license_client);
         let economy_wiring = try_build_economy_wiring(
             &bundle_economy_cfg,
             bundle_economy_password.as_ref(),

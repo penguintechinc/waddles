@@ -6,7 +6,7 @@
 schema_version: 2
 app_id: waddles.core.service.reputation
 name: Reputation Service Bundle (Rust)
-version: 1.0.1
+version: 1.1.0
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -31,18 +31,50 @@ limits:
   egress_rps: 10
 permissions:
   - id: reputation.read
-    justification: "serves get_score/get_many/leaderboard tool calls from the community reputation store"
+    justification: "serves score/leaderboard/check/at_risk/is_soft_banned tool calls from the community reputation store"
   - id: reputation.community.write
-    justification: "applies the bundle's win/loss/loyalty delta policy through the capped reputation host capability"
+    justification: "applies caller-named ACTIVITY deltas (|delta| <= 5) through the capped, idempotent reputation host capability"
     params:
       delta_min: -5
       delta_max: 5
-      reason_codes: ["game.win", "game.loss", "loyalty.bonus", "admin.adjust"]
+  - id: reputation.moderation.write
+    justification: "applies MODERATION-class deltas (|delta| <= 200) and floor-triggered soft bans; core/approved bundles only"
+    params:
+      delta_min: -200
+      delta_max: 200
   - id: reputation.community.admin
     justification: "serves the admin-only absolute score override tool; the host enforces required_scope community:admin on the verified actor before dispatch"
+  - id: reputation.history.read
+    justification: "serves the history tool (own ledger, or admin)"
+  - id: reputation.tenant.read
+    justification: "serves get_tenant_score (the actor's own aggregate) and reads the tenant auto-ban policy for floor enforcement"
   - id: storage.kv
-    justification: "persists the per-community delta-policy and tier configuration"
+    justification: "persists the per-community floor/threshold policy and tier ladder (no scoring weights live here)"
+  - id: flags.read
+    justification: "reads the waddles.reputation-auto-ban flag (default OFF) that gates every floor action"
+  - id: "tool.call:waddles.core.service.twitch:twitch.moderation.ban"
+    justification: "hard/tenant floor ban on Twitch (flag-gated, default OFF)"
+    params:
+      write: true
+  - id: "tool.call:waddles.core.service.discord:discord.moderation.ban"
+    justification: "hard/tenant floor ban on Discord (flag-gated, default OFF)"
+    params:
+      write: true
+  - id: "tool.call:waddles.core.service.youtube:youtube.moderation.ban"
+    justification: "hard/tenant floor ban on YouTube (flag-gated, default OFF)"
+    params:
+      write: true
 routes_to: []
+requested_tools:
+  - tool: twitch.moderation.ban
+    access: write
+    target_app_id: waddles.core.service.twitch
+  - tool: discord.moderation.ban
+    access: write
+    target_app_id: waddles.core.service.discord
+  - tool: youtube.moderation.ban
+    access: write
+    target_app_id: waddles.core.service.youtube
 # Tools this service exposes through tool-provider.call; identical in hub-manifest.yaml and
 # bundle.yaml (the seeder's agreement check fails on drift).
 exported_tools:
@@ -52,16 +84,18 @@ exported_tools:
   input_schema:
     type: object
     properties:
-      user: &id001
+      user:
         type: string
         format: uuid
     required:
     - user
     additionalProperties: false
-  output_schema: &id002
+  output_schema:
     type: object
     properties:
-      user: *id001
+      user:
+        type: string
+        format: uuid
       score:
         type: integer
       tier:
@@ -74,7 +108,9 @@ exported_tools:
     properties:
       users:
         type: array
-        items: *id001
+        items:
+          type: string
+          format: uuid
         minItems: 1
         maxItems: 100
     required:
@@ -85,24 +121,102 @@ exported_tools:
     properties:
       entries:
         type: array
-        items: *id002
+        items:
+          type: object
+          properties:
+            user:
+              type: string
+              format: uuid
+            score:
+              type: integer
+            tier:
+              type: string
 - name: adjust
   access: write
   risk: dangerous
   input_schema:
     type: object
     properties:
-      user: *id001
-      event:
+      user:
+        type: string
+        format: uuid
+      delta:
+        type: integer
+        minimum: -5
+        maximum: 5
+      reason:
+        type: string
+        pattern: ^[a-z0-9._:-]{1,100}$
+      platform:
+        type: string
         enum:
-        - win
-        - loss
-        - loyalty
+        - twitch
+        - discord
+        - youtube
     required:
     - user
-    - event
+    - delta
+    - reason
     additionalProperties: false
-  output_schema: *id002
+  output_schema:
+    type: object
+    properties:
+      user:
+        type: string
+        format: uuid
+      score:
+        type: integer
+      tier:
+        type: string
+      delta:
+        type: integer
+      applied:
+        type: boolean
+      floors:
+        type: object
+- name: apply_moderation
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      user:
+        type: string
+        format: uuid
+      delta:
+        type: integer
+        minimum: -200
+        maximum: 200
+      reason:
+        type: string
+        pattern: ^[a-z0-9._:-]{1,100}$
+      platform:
+        type: string
+        enum:
+        - twitch
+        - discord
+        - youtube
+    required:
+    - user
+    - delta
+    - reason
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      user:
+        type: string
+        format: uuid
+      score:
+        type: integer
+      tier:
+        type: string
+      delta:
+        type: integer
+      applied:
+        type: boolean
+      floors:
+        type: object
 - name: override
   access: write
   risk: dangerous
@@ -110,16 +224,26 @@ exported_tools:
   input_schema:
     type: object
     properties:
-      user: *id001
+      user:
+        type: string
+        format: uuid
       absolute_score:
         type: integer
       reason:
         type: string
+        pattern: ^[a-z0-9._:-]{1,100}$
+      platform:
+        type: string
+        enum:
+        - twitch
+        - discord
+        - youtube
     required:
     - user
     - absolute_score
     additionalProperties: false
-  output_schema: *id002
+  output_schema:
+    type: object
 - name: leaderboard
   access: read
   risk: normal
@@ -137,21 +261,34 @@ exported_tools:
     properties:
       entries:
         type: array
-        items: *id002
+        items:
+          type: object
+          properties:
+            user:
+              type: string
+              format: uuid
+            score:
+              type: integer
+            tier:
+              type: string
 - name: rep
   access: read
   risk: normal
   input_schema:
     type: object
     properties:
-      user: *id001
+      user:
+        type: string
+        format: uuid
     required:
     - user
     additionalProperties: false
   output_schema:
     type: object
     properties:
-      user: *id001
+      user:
+        type: string
+        format: uuid
       score:
         type: integer
       tier:
@@ -162,6 +299,131 @@ exported_tools:
         - 'null'
       text:
         type: string
+- name: get_tenant_score
+  access: read
+  risk: normal
+  required_scope: community:member
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: history
+  access: read
+  risk: normal
+  required_scope: community:member
+  input_schema:
+    type: object
+    properties:
+      user:
+        type: string
+        format: uuid
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 100
+      before:
+        type: integer
+        minimum: 1
+    required:
+    - user
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      entries:
+        type: array
+        items:
+          type: object
+- name: check
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      user:
+        type: string
+        format: uuid
+    required:
+    - user
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: at_risk
+  access: read
+  risk: normal
+  required_scope: community:admin
+  input_schema:
+    type: object
+    properties:
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 100
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: is_soft_banned
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      user:
+        type: string
+        format: uuid
+    required:
+    - user
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      user:
+        type: string
+        format: uuid
+      soft_banned:
+        type: boolean
+- name: get_policy
+  access: read
+  risk: normal
+  required_scope: community:admin
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: set_policy
+  access: write
+  risk: dangerous
+  required_scope: community:admin
+  input_schema:
+    type: object
+    properties:
+      soft_ban_enabled:
+        type: boolean
+      soft_ban_floor:
+        type: integer
+        minimum: 300
+        maximum: 850
+      hard_ban_enabled:
+        type: boolean
+      hard_ban_floor:
+        type: integer
+        minimum: 300
+        maximum: 850
+      at_risk_threshold:
+        type: integer
+        minimum: 300
+        maximum: 850
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
 # Admin UI surface via hub-api's generic bundle-admin gateway (docs/BUNDLE_ADMIN_GATEWAY.md); identical in both manifests.
 admin_tools:
 - name: leaderboard
@@ -170,5 +432,13 @@ admin_tools:
   scope: community:moderate
 - name: override
   tool: override
+  kind: action
+  scope: community:admin
+- name: at_risk
+  tool: at_risk
+  kind: read
+  scope: community:admin
+- name: set_policy
+  tool: set_policy
   kind: action
   scope: community:admin

@@ -154,10 +154,13 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             media: self.media.clone(),
             media_deadline: ctx.deadline.or(self.media_deadline),
             ai_deadline: ctx.deadline.or(self.ai_deadline),
-            invocation_identity: self
-                .invocation_identity
-                .as_ref()
-                .map(|identity| Arc::new(identity.for_tool_call(mutation_event_id))),
+            invocation_identity: self.invocation_identity.as_ref().map(|identity| {
+                Arc::new(identity.for_tool_call(
+                    mutation_event_id,
+                    &plan.caller_app_id,
+                    &plan.target_app_id,
+                ))
+            }),
             verified_scope: self.verified_scope,
             stage_metrics: Arc::clone(&self.stage_metrics),
             // The direct caller of this hop: its own grants (not the target's)

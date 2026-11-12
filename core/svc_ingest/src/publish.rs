@@ -114,6 +114,11 @@ pub enum PublishError {
     /// `EventAppender::append` (the `XADD`) failed.
     #[error("spine append failed: {0}")]
     Append(#[from] SpineError),
+    /// The event claims a RESERVED internal event type (`reputation.*`,
+    /// `internal.*`). Only the platform's own in-cluster emitters may mint
+    /// those; an external/connector-originated one is dropped, never published.
+    #[error("event dropped, reserved internal event type")]
+    ReservedEventType,
     /// Dynamic-connections mode could not resolve the event's source to a
     /// real scope: the event is DROPPED (never published, never given a
     /// default tenant/community -- svc-ingest is a cross-tenant ingest point).
@@ -449,6 +454,15 @@ pub async fn publish_event_scoped<A: EventAppender, M: SpineMetrics + ?Sized, D:
 /// The shared stamping/encryption/append body. `resolved: Some` publishes a
 /// schema-v3 envelope under the resolved scope; `None` the v2 static-`scope` one.
 #[allow(clippy::too_many_arguments)]
+/// `true` for event types reserved to the platform's own internal emitters
+/// (`reputation.*`, `internal.*`): ingest, which only carries external /
+/// connector input, must never publish one -- a system-originated event type
+/// grants the process stage authority a human-typed event must not have.
+#[must_use]
+pub fn is_reserved_event_type(event_type: &str) -> bool {
+    event_type.starts_with("reputation.") || event_type.starts_with("internal.")
+}
+
 async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProvider>(
     resolved: Option<ResolvedScope>,
     appender: &A,
@@ -463,6 +477,9 @@ async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProv
     dek_provider: &D,
     identity_metrics: &prometheus::IntCounterVec,
 ) -> Result<String, PublishError> {
+    if is_reserved_event_type(&event.event_type) {
+        return Err(PublishError::ReservedEventType);
+    }
     let v3_scope = resolved.as_ref().map(ResolvedScope::spine_scope);
     let scope = match (&resolved, &v3_scope) {
         (Some(res), Some(sc)) => {
@@ -1140,6 +1157,45 @@ mod tests {
         .unwrap();
         let (stream, env) = appender.calls.lock().unwrap()[0].clone();
         (stream, env, keyring)
+    }
+
+    #[tokio::test]
+    async fn an_ingested_event_claiming_a_reserved_internal_type_is_dropped() {
+        for reserved in [
+            "reputation.floor_check",
+            "reputation.anything",
+            "internal.x",
+        ] {
+            let appender = FakeAppender {
+                calls: Mutex::new(vec![]),
+                fail: false,
+            };
+            let mut ev = test_event();
+            ev.event_type = reserved.to_string();
+            let res = publish_event_with(
+                None::<&ScopeResolver<FixedSource>>,
+                &appender,
+                &RecordingMetrics::default(),
+                &test_keyring(),
+                "test-kid",
+                &Scope::new("static-tenant", None),
+                "tw-channelA",
+                "ws-1",
+                None,
+                ev,
+                &test_dek_provider(),
+                &test_identity_metrics(),
+            )
+            .await;
+            assert!(
+                matches!(res, Err(PublishError::ReservedEventType)),
+                "{reserved}"
+            );
+            assert!(appender.calls.lock().unwrap().is_empty(), "{reserved}");
+        }
+        assert!(!is_reserved_event_type("channel.follow"));
+        assert!(!is_reserved_event_type("message"));
+        assert!(!is_reserved_event_type("reputation"));
     }
 
     #[derive(Default)]

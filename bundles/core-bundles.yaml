@@ -1462,7 +1462,7 @@ bundles:
   # the crate's own Cargo.toml `[package.metadata.component.target] world`. The seeder installs
   # it with trusted_source=True (the only path allowed to declare `kind: service`).
   - app_id: waddles.core.service.reputation
-    version: "1.0.1"
+    version: "1.1.0"
     language: rust
     wit_world: stage-tools
     kind: service
@@ -1674,6 +1674,21 @@ bundles:
     source_dir: rust/dj
     manifest_path: dj.manifest.yaml
     artifact_path: dj.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
+  # Reputation ACCRUAL app (Rust, `stage-next-tools`, `provides: reputation-logic`): default logic
+  # turning platform events into reputation deltas via the reputation service's adjust /
+  # apply_moderation tools. Flag waddles.reputation-accrual defaults OFF.
+  - app_id: waddles.core.app.reputation-accrual
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-next-tools
+    kind: app
+    source_dir: rust/reputation-accrual
+    manifest_path: reputation-accrual.manifest.yaml
+    artifact_path: reputation-accrual.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null
