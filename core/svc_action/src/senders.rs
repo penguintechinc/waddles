@@ -234,12 +234,10 @@ mod tests {
                 queue: "waddles:transport:irc:kick:outbound".to_string()
             }
         );
-        for platform in [Platform::Slack] {
-            assert!(matches!(
-                sender_status(platform),
-                SenderStatus::PendingSeam { .. }
-            ));
-        }
+        assert!(matches!(
+            sender_status(Platform::Slack),
+            SenderStatus::PendingSeam { .. }
+        ));
     }
 
     #[test]

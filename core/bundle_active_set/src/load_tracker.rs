@@ -294,7 +294,10 @@ mod tests {
                 .min(Duration::from_secs(300));
             for unit in [0.0, 0.25, 0.5, 0.999_999, 1.0, -3.0, 7.0, f64::NAN] {
                 let d = full_jitter_delay(attempt, p, unit);
-                assert!(d <= ceiling, "attempt {attempt} unit {unit}: {d:?} > {ceiling:?}");
+                assert!(
+                    d <= ceiling,
+                    "attempt {attempt} unit {unit}: {d:?} > {ceiling:?}"
+                );
             }
         }
         assert_eq!(full_jitter_delay(1, p, 0.0), Duration::ZERO);

@@ -222,19 +222,64 @@ impl SessionRouter {
     }
 }
 
-/// The optional `executor_id` an executor reports in its handshake
-/// (`penguin_bundle_host::wire::HelloBody.executor_id`, a serde-defaulted
-/// back-compat field). Read through the body's own serde form so stages
-/// compile and behave identically against penguin-libs revisions with and
-/// without the field: absent, null or empty -> `None` (broadcast fallback).
-pub fn hello_executor_id<H: serde::Serialize>(hello: &H) -> Option<String> {
-    serde_json::to_value(hello)
-        .ok()?
-        .get("executor_id")?
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+/// Remembers the last routing decision across ticks so a stage logs a
+/// routing change (WARN for the missing-executor-id broadcast fallback)
+/// once per change, never per tick, and counts slot-owner moves when the
+/// executor membership changes.
+#[derive(Debug, Clone, Default)]
+pub struct RoutingObserver {
+    last: Option<(RoutingMode, Vec<SessionId>)>,
+    owner_table: Vec<Vec<String>>,
+}
+
+impl RoutingObserver {
+    /// Observes this tick's `router`; returns how many slots changed owner
+    /// set since the previous sharded membership (0 on the first sharded
+    /// tick and in broadcast modes) for `executor_slot_owner_changes_total`.
+    pub fn observe(&mut self, router: &SessionRouter) -> u64 {
+        let mode = router.mode();
+        let current = Some((mode, router.sessions_missing_executor_id().to_vec()));
+        if self.last != current {
+            match mode {
+                RoutingMode::BroadcastMissingExecutorId => tracing::warn!(
+                    sessions_without_executor_id = ?router.sessions_missing_executor_id(),
+                    "executor sharding: a live executor sent no executor_id in its handshake \
+                     (older executor); falling back to broadcast Load to every session"
+                ),
+                RoutingMode::BroadcastDisabled => tracing::warn!(
+                    "executor sharding disabled by kill switch \
+                     waddles.disable-executor-sharding; broadcasting every bundle to every executor"
+                ),
+                RoutingMode::Sharded => tracing::info!(
+                    executors = router.executors().len(),
+                    replicas = router.replicas,
+                    "executor sharding active: each app loads only on its owner executors"
+                ),
+            }
+            self.last = current;
+        }
+        if mode != RoutingMode::Sharded {
+            return 0;
+        }
+        let table = slot_owner_table(router.executors(), router.replicas);
+        if table == self.owner_table {
+            return 0;
+        }
+        let changed = if self.owner_table.is_empty() {
+            0
+        } else {
+            count_owner_changes(&self.owner_table, &table)
+        };
+        if changed > 0 {
+            tracing::info!(
+                changed_slots = changed,
+                executors = router.executors().len(),
+                "executor sharding: membership changed, slot owners moved"
+            );
+        }
+        self.owner_table = table;
+        changed
+    }
 }
 
 /// Age of a Valkey stream entry from its id (`<ms>-<seq>`) relative to
@@ -244,7 +289,9 @@ pub fn hello_executor_id<H: serde::Serialize>(hello: &H) -> Option<String> {
 pub fn stream_entry_age(entry_id: &str, now_ms: u128) -> Option<Duration> {
     let ms: u128 = entry_id.split('-').next()?.parse().ok()?;
     let age = now_ms.saturating_sub(ms);
-    Some(Duration::from_millis(u64::try_from(age).unwrap_or(u64::MAX)))
+    Some(Duration::from_millis(
+        u64::try_from(age).unwrap_or(u64::MAX),
+    ))
 }
 
 #[cfg(test)]
@@ -324,7 +371,10 @@ mod tests {
         }
         // R=2: removal of one executor only touches slots it owned.
         let r2_before = slot_owner_table(&execs(n), 2);
-        let shrunk: Vec<String> = execs(n).into_iter().filter(|e| !e.ends_with("-3")).collect();
+        let shrunk: Vec<String> = execs(n)
+            .into_iter()
+            .filter(|e| !e.ends_with("-3"))
+            .collect();
         let r2_after = slot_owner_table(&shrunk, 2);
         for (b, a) in r2_before.iter().zip(&r2_after) {
             if b != a {
@@ -401,7 +451,10 @@ mod tests {
     #[test]
     fn routing_mode_labels_are_stable() {
         assert_eq!(RoutingMode::Sharded.as_str(), "sharded");
-        assert_eq!(RoutingMode::BroadcastDisabled.as_str(), "broadcast_disabled");
+        assert_eq!(
+            RoutingMode::BroadcastDisabled.as_str(),
+            "broadcast_disabled"
+        );
         assert_eq!(
             RoutingMode::BroadcastMissingExecutorId.as_str(),
             "broadcast_missing_executor_id"
@@ -414,39 +467,17 @@ mod tests {
         assert_eq!(count_owner_changes(&[vec![]], &[vec![]]), 0);
     }
 
-    #[derive(serde::Serialize)]
-    struct NewHello {
-        protocol_version: u32,
-        executor_id: Option<String>,
-    }
-
-    #[derive(serde::Serialize)]
-    struct OldHello {
-        protocol_version: u32,
-    }
-
-    /// executor_id is read when present and None for old executors.
+    /// The observer counts owner moves only on a sharded membership change.
     #[test]
-    fn hello_executor_id_is_optional() {
-        let new = NewHello {
-            protocol_version: 1,
-            executor_id: Some("waddlebot-svc-bundles-executor-0".into()),
-        };
-        assert_eq!(
-            hello_executor_id(&new).as_deref(),
-            Some("waddlebot-svc-bundles-executor-0")
-        );
-        let none = NewHello {
-            protocol_version: 1,
-            executor_id: None,
-        };
-        assert_eq!(hello_executor_id(&none), None);
-        let blank = NewHello {
-            protocol_version: 1,
-            executor_id: Some("  ".into()),
-        };
-        assert_eq!(hello_executor_id(&blank), None);
-        assert_eq!(hello_executor_id(&OldHello { protocol_version: 1 }), None);
+    fn routing_observer_counts_owner_changes_on_membership_change() {
+        let mut obs = RoutingObserver::default();
+        let three = [(1, "e0"), (2, "e1"), (3, "e2")];
+        assert_eq!(obs.observe(&router(&[1, 2, 3], &three, true)), 0);
+        assert_eq!(obs.observe(&router(&[1, 2, 3], &three, true)), 0);
+        let four = [(1, "e0"), (2, "e1"), (3, "e2"), (4, "e3")];
+        let moved = obs.observe(&router(&[1, 2, 3, 4], &four, true));
+        assert!(moved > 0 && moved < u64::from(SLOT_COUNT), "{moved}");
+        assert_eq!(obs.observe(&router(&[1, 2], &[(1, "e0")], true)), 0);
     }
 
     #[test]

@@ -217,6 +217,11 @@ pub struct Connection {
     /// events are metriced; `OnceLock` so the many bare
     /// `Connection::new` test call sites need no metrics plumbing.
     metrics: std::sync::OnceLock<crate::telemetry::HostApiMetrics>,
+    /// The stable executor identity (StatefulSet pod name) the peer sent in
+    /// its `hello` (`HelloBody.executor_id`) -- unset for an executor that
+    /// predates the field, which forces broadcast placement
+    /// (`bundle_active_set::sharding`). Set once, at handshake.
+    executor_id: std::sync::OnceLock<String>,
 }
 
 /// Drop guard for one in-flight [`Connection::invoke`]: removes its per-invoke
@@ -262,7 +267,20 @@ impl Connection {
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scopes: std::sync::Mutex::new(std::collections::HashMap::new()),
             metrics: std::sync::OnceLock::new(),
+            executor_id: std::sync::OnceLock::new(),
         })
+    }
+
+    /// The executor id this peer reported in its handshake, if any.
+    pub fn executor_id(&self) -> Option<&str> {
+        self.executor_id.get().map(String::as_str)
+    }
+
+    /// Records the handshake's executor id (first call wins; empty ignored).
+    pub fn set_executor_id(&self, id: &str) {
+        if !id.is_empty() {
+            let _ = self.executor_id.set(id.to_string());
+        }
     }
 
     /// Wires the Prometheus handles in (production only -- called by
@@ -579,6 +597,18 @@ where
             code: ErrorCode::UnsandboxedExecutor,
             message: "executor sandbox posture mismatch".to_string(),
         });
+    }
+    match hello
+        .executor_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => connection.set_executor_id(id),
+        None => warn!(
+            "host-api hello carried no executor_id (executor predates the field); \
+             bundle placement falls back to broadcast while this session is live"
+        ),
     }
     debug!(?hello, "host-api hello accepted");
     connection
@@ -957,6 +987,16 @@ impl ConnectionRegistry {
         self.prune_and_snapshot()
             .into_iter()
             .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Executor id of every live session that reported one -- sessions of
+    /// old executors (no id) are absent, which the router treats as
+    /// "broadcast" (`bundle_active_set::SessionRouter`).
+    pub fn live_executor_ids(&self) -> HashMap<u64, String> {
+        self.prune_and_snapshot()
+            .into_iter()
+            .filter_map(|(id, conn)| conn.executor_id().map(|e| (id, e.to_string())))
             .collect()
     }
 
