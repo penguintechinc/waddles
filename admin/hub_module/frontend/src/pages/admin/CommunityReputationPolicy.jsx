@@ -71,7 +71,11 @@ function CommunityReputationPolicy() {
         description="Score floors on the 300-850 scale. Hard-ban floor must be lower than the soft-ban floor, which must be lower than the at-risk threshold."
         actions={<Link to={`/admin/${communityId}/reputation/bans`} className="btn btn-secondary">Soft-banned and at-risk members</Link>}
       />
-      {!form && !loadError && <LoadingState label="Loading reputation settings" />}
+      <p className="mb-4 text-sm text-fg-muted" data-testid="rep-weights-note">
+        Scoring weights are configured in your reputation logic bundle&apos;s settings.{' '}
+        <Link to={`/admin/${communityId}/bundles`} className="underline">Open bundles</Link>
+      </p>
+      {!form && !loadError &&<LoadingState label="Loading reputation settings" />}
       {loadError && (
         <div data-testid="rep-load-error">
           <Alert tone="danger">

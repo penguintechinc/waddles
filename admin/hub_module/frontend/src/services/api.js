@@ -189,7 +189,9 @@ export const adminApi = {
     api.get(`/api/v1/admin/${communityId}/reputation/config`),
   updateReputationConfig: (communityId, data) =>
     api.put(`/api/v1/admin/${communityId}/reputation/config`, data),
-  getReputationSoftBans: (communityId) =>
+  getReputationHistory: (communityId, params) =>
+    api.get(`/api/v1/admin/${communityId}/reputation/history`, { params }),
+  getReputationSoftBans:(communityId) =>
     api.get(`/api/v1/admin/${communityId}/reputation/soft-bans`),
   setReputationSoftBan: (communityId, userId, expiresAt) =>
     api.put(`/api/v1/admin/${communityId}/reputation/soft-bans/${userId}`, expiresAt ? { expiresAt } : {}),

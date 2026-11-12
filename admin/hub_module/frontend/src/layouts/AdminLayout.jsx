@@ -135,7 +135,6 @@ function AdminLayout() {
           items: [
             { to: `/admin/${communityId}/security`, icon: FireIcon, label: 'Security' },
             { to: `/admin/${communityId}/bot-detection`, icon: ShieldCheckIcon, label: 'Bot Detection' },
-            { to: `/admin/${communityId}/reputation`, icon: ScaleIcon, label: 'Reputation' },
             { to: `/admin/${communityId}/reputation/policy`, icon: ScaleIcon, label: 'Reputation Policy' },
             { to: `/admin/${communityId}/reputation/bans`, icon: ShieldCheckIcon, label: 'Soft Bans' },
             { to: `/admin/${communityId}/commands`, icon: HashtagIcon, label: 'Commands' },

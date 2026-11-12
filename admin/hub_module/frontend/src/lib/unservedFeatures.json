@@ -78,13 +78,6 @@
       "PUT /api/v1/admin/:communityId/translation/config"
     ]
   },
-  "reputation-weights": {
-    "label": "Reputation scoring weights",
-    "endpoints": [
-      "GET /api/v1/admin/:communityId/reputation/weights",
-      "PUT /api/v1/admin/:communityId/reputation/weights"
-    ]
-  },
   "software-discovery": {
     "label": "Software discovery",
     "endpoints": [

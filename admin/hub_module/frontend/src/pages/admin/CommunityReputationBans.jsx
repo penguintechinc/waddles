@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { adminApi } from '../../services/api';
 import { Alert, Badge, Button, Card, CardBody, EmptyState, LoadingState, PageHeader, TextField } from '../../components/ui';
 import { serverErrorMessage } from '../../lib/reputationPolicy';
@@ -113,7 +113,8 @@ function CommunityReputationBans() {
                       <td>{b.setByType}</td>
                       <td>{fmt(b.setAt)}</td>
                       <td>{b.expiresAt ? fmt(b.expiresAt) : 'Until cleared'}</td>
-                      <td>
+                      <td className="space-x-2">
+                        <Link to={`/admin/${communityId}/reputation/history?userId=${b.userId}`} className="underline">History</Link>
                         <Button size="sm" variant="outline" disabled={busy} onClick={() => clearBan(b.userId)}>
                           Clear soft ban
                         </Button>
@@ -152,7 +153,8 @@ function CommunityReputationBans() {
                       <td>
                         {m.belowHardBanFloor ? 'Below hard-ban floor' : m.belowSoftBanFloor ? 'Below soft-ban floor' : 'At risk'}
                       </td>
-                      <td>
+                      <td className="space-x-2">
+                        {m.userId && <Link to={`/admin/${communityId}/reputation/history?userId=${m.userId}`} className="underline">History</Link>}
                         <Button size="sm" variant="outline" disabled={busy || !m.userId} onClick={() => softBan(m.userId)}>
                           Soft-ban
                         </Button>

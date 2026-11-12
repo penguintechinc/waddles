@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 import CommunityReputationPolicy from '../CommunityReputationPolicy';
 import CommunityReputationBans from '../CommunityReputationBans';
+import CommunityReputationHistory from '../CommunityReputationHistory';
 import TenantReputationSettings from '../../tenant/TenantReputationSettings';
 import { adminApi, tenantApi } from '../../../services/api';
 import {
@@ -18,6 +19,7 @@ vi.mock('../../../services/api', () => ({
     getReputationConfig: vi.fn(),
     updateReputationConfig: vi.fn(),
     getReputationSoftBans: vi.fn(),
+    getReputationHistory: vi.fn(),
     getAtRiskUsers: vi.fn(),
     setReputationSoftBan: vi.fn(),
     clearReputationSoftBan: vi.fn(),
@@ -212,5 +214,27 @@ describe('CommunityReputationBans', () => {
     adminApi.getAtRiskUsers.mockResolvedValue({ data: { members: [] } });
     load();
     expect(await screen.findByTestId('rep-load-error')).toHaveTextContent(/do not have permission/i);
+  });
+});
+
+describe('CommunityReputationHistory and policy note', () => {
+  it('renders ledger for a member and 403 state', async () => {
+    adminApi.getReputationHistory.mockResolvedValueOnce({
+      data: { entries: [{ id: 1, delta: -20, balanceAfter: 480, kind: 'adjust', actorType: 'admin', sourceEvent: null, occurredAt: '2026-11-01T00:00:00Z' }] },
+    });
+    mount(<CommunityReputationHistory />, '/admin/7/reputation/history?userId=11', '/admin/:communityId/reputation/history');
+    expect(await screen.findByTestId('history-table')).toHaveTextContent('-20');
+    expect(adminApi.getReputationHistory).toHaveBeenCalledWith('7', { userId: '11' });
+  });
+  it('403 shows permission message', async () => {
+    adminApi.getReputationHistory.mockRejectedValue(httpError(403, 'denied'));
+    mount(<CommunityReputationHistory />, '/admin/7/reputation/history', '/admin/:communityId/reputation/history');
+    expect(await screen.findByTestId('rep-load-error')).toHaveTextContent(/do not have permission/i);
+  });
+  it('policy page links to bundles for scoring weights', async () => {
+    adminApi.getReputationConfig.mockResolvedValue({ data: { softBanFloor: 550, hardBanFloor: 400, atRiskThreshold: 600 } });
+    mount(<CommunityReputationPolicy />, '/admin/7/reputation/policy', '/admin/:communityId/reputation/policy');
+    expect(await screen.findByTestId('rep-weights-note')).toHaveTextContent(/Scoring weights are configured/);
+    expect(screen.getByRole('link', { name: /open bundles/i })).toHaveAttribute('href', '/admin/7/bundles');
   });
 });
