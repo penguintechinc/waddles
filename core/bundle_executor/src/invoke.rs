@@ -1092,6 +1092,7 @@ impl<S: ComponentSource> Executor<S> {
                 runtime: sandbox_runtime.to_string(),
                 verified: sandbox_verified,
             },
+            executor_id: None,
         }
     }
 
