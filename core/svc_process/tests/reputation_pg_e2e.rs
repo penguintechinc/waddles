@@ -242,6 +242,7 @@ async fn build_caps(cfg: &ConnectConfig) -> StageCapabilities {
     .with_reputation(ReputationWiring {
         store: Arc::new(PostgresReputationStore::new(rep_conn)) as Arc<dyn ReputationStore>,
         flag: Arc::new(StaticGate(true)),
+        auto_ban_flag: None,
     })
 }
 

@@ -20,9 +20,10 @@ use bundle_capability_gate::{
     HostInvokeScopeBuilder, MembershipCheck, ScopeKind, SnapshotMembership, TenantTier,
 };
 use bundle_host_reputation::{
-    connect, load_membership, ApplyOutcome, ConnectConfig, IdempotencyKey, PostgresReputationStore,
-    ReasonClass, ReputationCaps, ReputationError, ReputationScope, ReputationStore, ScoreEntry,
-    TenantPolicy, TenantScore, FLOOR_SOFT_BAN_REASON, MAX_LEADERBOARD_LIMIT,
+    connect, floor_sql_key, load_membership, ApplyOutcome, ConnectConfig, FloorBanBegin,
+    FloorBanOutcome, FloorScope, IdempotencyKey, PostgresReputationStore, ReasonClass,
+    ReputationCaps, ReputationError, ReputationScope, ReputationStore, ScoreEntry, TenantPolicy,
+    TenantScore, FLOOR_SOFT_BAN_REASON, MAX_LEADERBOARD_LIMIT,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use uuid::Uuid;
@@ -37,6 +38,7 @@ const REP_PASSWORD: &str = "waddles_bundle_reputation_test_pw";
 const APP_ID: &str = "waddles.core.test-reputation";
 const SHIPPED_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_store.sql");
 const HOST_OPS_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_host_ops.sql");
+const FLOOR_BAN_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_floor_ban.sql");
 
 const TENANT: i32 = 1;
 const COMMUNITY: i32 = 10;
@@ -161,7 +163,8 @@ async fn fixture() -> Fixture {
     exec(
         &su,
         "CREATE TABLE tenants (id SERIAL PRIMARY KEY, slug TEXT);
-         CREATE TABLE communities (id SERIAL PRIMARY KEY, tenant_id INTEGER REFERENCES tenants(id));
+         CREATE TABLE communities (id SERIAL PRIMARY KEY, tenant_id INTEGER REFERENCES tenants(id),
+             is_active BOOLEAN DEFAULT true, deleted_at TIMESTAMP);
          CREATE TABLE community_members (
              id SERIAL PRIMARY KEY,
              community_id INTEGER REFERENCES communities(id) ON DELETE CASCADE,
@@ -210,6 +213,9 @@ async fn fixture() -> Fixture {
     // The reputation SQL contract (functions + policy/soft-ban tables + the
     // role's contract grants).
     exec(&su, &contract_sql()).await;
+    // The automated-floor-ban SQL (alembic 0098), idempotent like the rest.
+    exec(&su, FLOOR_BAN_DDL).await;
+    exec(&su, FLOOR_BAN_DDL).await;
 
     let member = Uuid::new_v4();
     exec(
@@ -1125,4 +1131,148 @@ async fn the_bundle_role_is_denied_direct_writes_on_every_reputation_table() {
             "{t}"
         );
     }
+}
+
+#[tokio::test]
+async fn floor_ban_store_calls_hit_the_real_sql_contract() {
+    let f = fixture().await;
+    // Community 10 (tenant 1): hard ban enabled, floor 400; the member scores 350.
+    exec(
+        &f.su,
+        "INSERT INTO bundle_reputation_policy (tenant_id, community_id, hard_ban_enabled) \
+         VALUES (1, 10, true)",
+    )
+    .await;
+    exec(
+        &f.su,
+        &format!(
+            "INSERT INTO bundle_reputation_scores (tenant_id, community_id, user_uuid, balance) \
+             VALUES (1, 10, '{}', 350)",
+            f.member
+        ),
+    )
+    .await;
+    assert_eq!(
+        f.store
+            .verify_floor_breach(&scope(), f.member, FloorScope::CommunityHard)
+            .await,
+        Ok(true)
+    );
+    // Tenant scope: no tenant policy -> never a breach.
+    assert_eq!(
+        f.store
+            .verify_floor_breach(&scope(), f.member, FloorScope::Tenant)
+            .await,
+        Ok(false)
+    );
+    // Another tenant's community is never verifiable under this tenant (fail closed).
+    let wrong = ReputationScope {
+        tenant_id: 2,
+        community_id: 10,
+        app_id: APP_ID.to_string(),
+    };
+    assert_eq!(
+        f.store
+            .verify_floor_breach(&wrong, f.member, FloorScope::CommunityHard)
+            .await,
+        Ok(false)
+    );
+
+    // The idempotency key is escaped into the SQL alphabet by the host (uppercase, dots).
+    let key = floor_sql_key("Evt.1:hard").unwrap();
+    let begin = |scope_kind: FloorScope, k: &str, platform: &'static str| {
+        let k = k.to_string();
+        let f = &f;
+        async move {
+            f.store
+                .floor_ban_begin(&scope(), 10, f.member, scope_kind, &k, platform)
+                .await
+        }
+    };
+    assert_eq!(
+        begin(FloorScope::CommunityHard, &key, "discord").await,
+        Ok(FloorBanBegin::Proceed)
+    );
+    assert_eq!(
+        f.store
+            .floor_ban_record(
+                &scope(),
+                10,
+                f.member,
+                FloorScope::CommunityHard,
+                &key,
+                FloorBanOutcome::Done,
+                ""
+            )
+            .await,
+        Ok(())
+    );
+    assert_eq!(
+        begin(FloorScope::CommunityHard, &key, "discord").await,
+        Ok(FloorBanBegin::AlreadyDone)
+    );
+    assert_eq!(
+        scalar_text(
+            &f.su,
+            "SELECT actor || '|' || reason || '|' || platform || '|' || status FROM \
+             bundle_reputation_floor_bans"
+        )
+        .await,
+        "system:reputation_floor|community_hard_floor|discord|2"
+    );
+    // A key that is not already in the SQL alphabet is refused host-side, never re-escaped.
+    assert!(matches!(
+        begin(FloorScope::CommunityHard, "Bad Key", "discord").await,
+        Err(ReputationError::Invalid(_))
+    ));
+
+    // Failure -> durable retry; `due` leases it (and returns the platform for the retry).
+    let k2 = floor_sql_key("evt2:tenant").unwrap();
+    begin(FloorScope::Tenant, &k2, "twitch").await.unwrap();
+    f.store
+        .floor_ban_record(
+            &scope(),
+            10,
+            f.member,
+            FloorScope::Tenant,
+            &k2,
+            FloorBanOutcome::Failed,
+            "target_unavailable",
+        )
+        .await
+        .unwrap();
+    assert!(f
+        .store
+        .floor_ban_due(&scope(), 10)
+        .await
+        .unwrap()
+        .is_empty());
+    exec(
+        &f.su,
+        "UPDATE bundle_reputation_floor_bans SET next_retry_at = NOW() - INTERVAL '1 second' \
+         WHERE status = 3",
+    )
+    .await;
+    let due = f.store.floor_ban_due(&scope(), 10).await.unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!((due[0].community_id, due[0].origin_community_id), (10, 10));
+    assert_eq!(due[0].scope, FloorScope::Tenant);
+    assert_eq!(due[0].platform, "twitch");
+    assert_eq!(due[0].key, k2);
+    assert!(f
+        .store
+        .floor_ban_due(&scope(), 10)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // The fan-out set is host-enumerated in SQL: tenant 1's live communities only.
+    assert_eq!(f.store.tenant_communities(&scope()).await, Ok(vec![10]));
+
+    // The role has no direct access to the audit table (functions only).
+    assert!(f
+        .rep_conn
+        .execute_unprepared("SELECT 1 FROM bundle_reputation_floor_bans")
+        .await
+        .is_err());
 }

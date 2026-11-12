@@ -492,6 +492,7 @@ fn fixture_app(
         caps = caps.with_reputation(ReputationWiring {
             store: Arc::clone(&store) as Arc<dyn ReputationStore>,
             flag: Arc::new(FixedGate(flag_on)),
+            auto_ban_flag: None,
         });
     }
     Fixture {
@@ -1864,6 +1865,46 @@ async fn a_positive_moderation_delta_is_forbidden_for_everyone_including_admins(
         ))
         .await
         .is_ok());
+}
+
+#[tokio::test]
+async fn only_a_successful_apply_marks_the_invocation_for_the_automated_floor_gate() {
+    let f = sys_fixture(v2_grants());
+    let applied = |f: &Fixture| {
+        f.caps
+            .invocation_identity
+            .as_deref()
+            .is_some_and(|i| i.reputation_applied())
+    };
+    assert!(!applied(&f), "nothing applied yet");
+    // A refused apply (store failure) never marks the invocation.
+    f.store.answer(Err(ReputationError::Backend("down".into())));
+    let args = serde_json::json!({
+        "user": f.member.to_string(), "delta": 1, "reason": "activity.follow",
+    });
+    assert!(f
+        .caps
+        .handle(rep_call("reputation.apply", args.clone()))
+        .await
+        .is_err());
+    assert!(!applied(&f), "a failed apply is not a successful apply");
+    // A read never marks it either.
+    f.store.answer(Ok(600));
+    f.caps
+        .handle(rep_call(
+            "reputation.get_tenant",
+            serde_json::json!({"user": f.member.to_string()}),
+        ))
+        .await
+        .ok();
+    assert!(!applied(&f));
+    // A successful apply does.
+    f.store.answer(Ok(601));
+    f.caps
+        .handle(rep_call("reputation.apply", args))
+        .await
+        .expect("apply succeeds");
+    assert!(applied(&f));
 }
 
 /// Sets what the store's `reputation_active_logic_app` answers.

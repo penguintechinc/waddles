@@ -58,6 +58,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -291,6 +292,11 @@ pub struct InvocationIdentity {
     /// reputation ops from a system-originated invocation need no human actor
     /// scope (the automatic floor evaluation), every other caller does.
     system_originated: bool,
+    /// HOST-tracked: a reputation apply succeeded in THIS invocation's capability set (set by the
+    /// `reputation.apply*` host handler, never by guest input). The automated floor-ban gate
+    /// requires it, so a floor ban can only follow a real score change in the same invocation.
+    /// A fresh `false` on every tool hop ([`Self::for_tool_call`]): never inherited.
+    reputation_applied: AtomicBool,
 }
 
 impl fmt::Debug for InvocationIdentity {
@@ -389,6 +395,7 @@ impl InvocationIdentity {
             actor_role: Mutex::new(None),
             preverified: None,
             system_originated: false,
+            reputation_applied: AtomicBool::new(false),
         }
     }
 
@@ -445,6 +452,7 @@ impl InvocationIdentity {
             actor_role: Mutex::new(None),
             preverified: None,
             system_originated: false,
+            reputation_applied: AtomicBool::new(false),
         }
     }
 
@@ -462,6 +470,7 @@ impl InvocationIdentity {
             actor_role: Mutex::new(None),
             preverified: Some(actor),
             system_originated: false,
+            reputation_applied: AtomicBool::new(false),
         }
     }
 
@@ -514,7 +523,19 @@ impl InvocationIdentity {
             system_originated: self.system_originated
                 && is_first_party(caller_app_id)
                 && is_first_party(target_app_id),
+            // Never inherited across ANY hop: each hop must see its own successful apply.
+            reputation_applied: AtomicBool::new(false),
         }
+    }
+
+    /// Records that a reputation apply succeeded in this invocation (host handler only).
+    pub(crate) fn mark_reputation_applied(&self) {
+        self.reputation_applied.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a reputation apply succeeded in this invocation (see the field docs).
+    pub(crate) fn reputation_applied(&self) -> bool {
+        self.reputation_applied.load(Ordering::SeqCst)
     }
 
     /// Claims the next ordinal for a `kind` (`wager` | `transfer`) economy

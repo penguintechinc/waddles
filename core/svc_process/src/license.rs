@@ -313,6 +313,27 @@ impl FeatureGate for BundleReputationCapabilityGate {
     }
 }
 
+/// Gates the AUTOMATED floor ban (`crate::capabilities::floor_ban`): the host-asserted
+/// `system:reputation_floor` actor is attached only while this flag is ON. A plain opt-in flag,
+/// default OFF (unseen / license server unreachable resolve to `false`).
+pub const REPUTATION_AUTO_BAN_FLAG: &str = "waddles.reputation-auto-ban";
+
+/// Production [`FeatureGate`] for [`REPUTATION_AUTO_BAN_FLAG`] -- plain read of
+/// `LicenseClient::flag_enabled` (fail-closed default).
+pub struct ReputationAutoBanGate(Arc<LicenseClient>);
+
+impl ReputationAutoBanGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for ReputationAutoBanGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0.flag_enabled(REPUTATION_AUTO_BAN_FLAG).await })
+    }
+}
+
 /// Gates the bundle `economy` host capability (`crate::capabilities::
 /// StageCapabilities::handle_economy`, issue #714) -- a plain opt-in flag,
 /// same shape as [`BUNDLE_REPUTATION_CAPABILITY_FLAG`]: unseen/OFF/license-

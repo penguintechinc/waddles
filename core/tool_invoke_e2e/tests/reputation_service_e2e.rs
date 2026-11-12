@@ -772,6 +772,7 @@ impl World {
         .with_reputation(ReputationWiring {
             store: Arc::clone(&self.store) as Arc<dyn ReputationStore>,
             flag: Arc::new(StaticGate(true)),
+            auto_ban_flag: None,
         })
         .with_tool(ToolContext {
             connections: Arc::clone(&self.rig.registry),

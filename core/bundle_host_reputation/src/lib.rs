@@ -41,16 +41,21 @@
 //! without the score having moved. Denied/rejected attempts never reach the
 //! store; the gate records those (`bundle_capability_gate::audit`).
 
+mod floor;
 mod metrics;
 mod postgres;
 mod scale;
+
+pub use floor::{
+    DueFloorBan, FloorBanBegin, FloorBanOutcome, FloorScope, FLOOR_ACTOR, MAX_TENANT_FANOUT,
+};
 
 use std::future::Future;
 use std::pin::Pin;
 
 pub use postgres::{
-    connect, load_membership, run_membership_refresh, ConnectConfig, PostgresReputationStore,
-    FLOOR_SOFT_BAN_REASON,
+    connect, floor_sql_key, load_membership, run_membership_refresh, ConnectConfig,
+    PostgresReputationStore, FLOOR_SOFT_BAN_REASON,
 };
 pub use scale::{
     ReasonClass, ScoreScale, ACTIVITY_CAP, MODERATION_CAP, SCALE_DEFAULT, SCALE_MAX, SCALE_MIN,
@@ -481,6 +486,65 @@ pub trait ReputationStore: Send + Sync {
         _only_reason: &'a str,
     ) -> BoxFuture<'a, Result<bool, ReputationError>> {
         Box::pin(async { Err(unsupported("lift_soft_ban")) })
+    }
+
+    /// Re-verifies an automated floor ban in SQL (`reputation_verify_floor_breach`): `true` only if
+    /// the scope's ban is enabled AND the user's score is below its floor. `scope.community_id`
+    /// is the community to verify (tenant scope: the target community of the fan-out).
+    fn verify_floor_breach<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        _user: uuid::Uuid,
+        _floor: FloorScope,
+    ) -> BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async { Err(unsupported("verify_floor_breach")) })
+    }
+
+    /// Claims the (`target_community`, user, scope, `key`) floor-ban slot; `scope.community_id` is
+    /// the ORIGIN community. See [`FloorBanBegin`].
+    fn floor_ban_begin<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        _target_community: i32,
+        _user: uuid::Uuid,
+        _floor: FloorScope,
+        _key: &'a str,
+        _platform: &'a str,
+    ) -> BoxFuture<'a, Result<FloorBanBegin, ReputationError>> {
+        Box::pin(async { Err(unsupported("floor_ban_begin")) })
+    }
+
+    /// Records the outcome of a begun attempt; `error` is a stable machine code, never free text.
+    #[allow(clippy::too_many_arguments)]
+    fn floor_ban_record<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        _target_community: i32,
+        _user: uuid::Uuid,
+        _floor: FloorScope,
+        _key: &'a str,
+        _outcome: FloorBanOutcome,
+        _error: &'a str,
+    ) -> BoxFuture<'a, Result<(), ReputationError>> {
+        Box::pin(async { Err(unsupported("floor_ban_record")) })
+    }
+
+    /// Claims (leases) up to `limit` due floor-ban retries of `scope.tenant_id`.
+    fn floor_ban_due<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        _limit: u32,
+    ) -> BoxFuture<'a, Result<Vec<DueFloorBan>, ReputationError>> {
+        Box::pin(async { Err(unsupported("floor_ban_due")) })
+    }
+
+    /// The tenant's live community ids (the tenant-ban fan-out set), host-enumerated in SQL.
+    /// More than [`MAX_TENANT_FANOUT`] communities is an error, never a truncated set.
+    fn tenant_communities<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+    ) -> BoxFuture<'a, Result<Vec<i32>, ReputationError>> {
+        Box::pin(async { Err(unsupported("tenant_communities")) })
     }
 }
 

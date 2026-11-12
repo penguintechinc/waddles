@@ -957,6 +957,9 @@ async fn try_build_reputation_wiring(
                 flag: Arc::new(license::BundleReputationCapabilityGate::new(Arc::clone(
                     license_client,
                 ))),
+                auto_ban_flag: Some(Arc::new(license::ReputationAutoBanGate::new(Arc::clone(
+                    license_client,
+                )))),
             })
         }
         Err(err) => {

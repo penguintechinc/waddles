@@ -194,5 +194,24 @@ map to `rate_limited`, non-members to `not_a_member`). Consequences for the bund
   chain's origin is the tenant's single active reputation-logic app
   (`reputation_active_logic_app`; none or ambiguous fails closed) or the core service itself.
 - Unscored members read as `COALESCE(balance, community policy score_default, 600)` everywhere.
+- **Automated hard ban** (`waddles.reputation-auto-ban`, default OFF): a floor ban
+  (`community_hard_floor` / `tenant_floor`) through `<platform>.moderation.ban` carries the
+  host-asserted automated actor `system:reputation_floor` (scope `community:moderate` only), attached by
+  `svc_process` `capabilities/floor_ban.rs` ONLY when the caller is the core reputation service reached as the
+  chain `[active reputation-logic app, service]`, a reputation apply already succeeded in the same invocation
+  (host-tracked on the invocation identity; fresh on every hop, never inherited), and the flag is ON.
+  Anything else falls through to the ordinary human-scope check (`forbidden`). Per community the host claims
+  an idempotency/rate-limit slot (`reputation_floor_ban_begin`, 60/h default, `floor_ban_hourly_quota`),
+  re-verifies the breach in SQL (`reputation_verify_floor_breach`: scope switch enabled AND score below
+  floor), runs the ban through the normal per-community grant check, and records the outcome
+  (`reputation_floor_ban_record`; table `bundle_reputation_floor_bans` is the audit trail: actor, reason,
+  scope, community, target UUID, platform, status). The tenant floor fans out over every live community of the
+  tenant (`reputation_tenant_communities`, 4 at a time); failures are durable retries (exponential backoff,
+  8 attempts, picked up by `reputation_floor_ban_due` on the next floor call), a partial fan-out is reported
+  as `target_unavailable`, never as success. Limit: the ban uses the triggering event's platform; the
+  per-community platform-connection enumeration is a follow-up, so a community without that platform's ban
+  grant is recorded as a failed (retried) attempt.
 - Migrations: `alembic/versions/0072_reputation_host_ops.py` (score clamp CHECK + ledger columns),
+  `alembic/versions/0098_reputation_floor_ban.py` + `scripts/db/bundle_reputation_floor_ban.sql`
+  (automated hard ban; tests `alembic/tests/test_0098_reputation_floor_ban.py`),
   `alembic/versions/0097_reputation_unify.py` + `scripts/db/bundle_reputation_unify.sql` (PR #1236, authoritative).

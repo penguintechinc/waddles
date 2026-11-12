@@ -20,10 +20,10 @@ use sea_orm::{
 use uuid::Uuid;
 
 use crate::{
-    metrics, validate_delta, validate_reason, ApplyOutcome, BoxFuture, HistoryEntry,
-    IdempotencyKey, ReasonClass, ReputationCaps, ReputationError, ReputationScope, ReputationStore,
-    ScoreEntry, ScoreScale, TenantPolicy, TenantScore, MAX_BATCH, MAX_HISTORY_LIMIT,
-    MAX_LEADERBOARD_LIMIT,
+    metrics, validate_delta, validate_reason, ApplyOutcome, BoxFuture, DueFloorBan, FloorBanBegin,
+    FloorBanOutcome, FloorScope, HistoryEntry, IdempotencyKey, ReasonClass, ReputationCaps,
+    ReputationError, ReputationScope, ReputationStore, ScoreEntry, ScoreScale, TenantPolicy,
+    TenantScore, MAX_BATCH, MAX_HISTORY_LIMIT, MAX_LEADERBOARD_LIMIT, MAX_TENANT_FANOUT,
 };
 
 /// Per-transaction statement timeout, so a stuck row lock can never hold a
@@ -103,6 +103,10 @@ const BUNDLE_ACTOR: &str = "system:bundle";
 /// alphabet with an injective escape (`.` -> `..`, uppercase `X` -> `.x`), so
 /// two distinct host keys can never collide after lowercasing. Over-long
 /// results are rejected, never truncated.
+pub fn floor_sql_key(key: &str) -> Result<String, ReputationError> {
+    sql_key(key)
+}
+
 fn sql_key(key: &str) -> Result<String, ReputationError> {
     let mut out = String::with_capacity(key.len() + 4);
     for c in key.chars() {
@@ -992,6 +996,275 @@ impl ReputationStore for PostgresReputationStore {
             );
             result
         })
+    }
+
+    fn verify_floor_breach<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        floor: FloorScope,
+    ) -> BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.verify_floor_breach_impl(scope, user, floor).await;
+            metrics::record_call(
+                "verify_floor_breach",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn floor_ban_begin<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        target_community: i32,
+        user: Uuid,
+        floor: FloorScope,
+        key: &'a str,
+        platform: &'a str,
+    ) -> BoxFuture<'a, Result<FloorBanBegin, ReputationError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self
+                .floor_ban_begin_impl(scope, target_community, user, floor, key, platform)
+                .await;
+            metrics::record_call(
+                "floor_ban_begin",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn floor_ban_record<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        target_community: i32,
+        user: Uuid,
+        floor: FloorScope,
+        key: &'a str,
+        outcome: FloorBanOutcome,
+        error: &'a str,
+    ) -> BoxFuture<'a, Result<(), ReputationError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self
+                .floor_ban_record_impl(scope, target_community, user, floor, key, outcome, error)
+                .await;
+            metrics::record_call(
+                "floor_ban_record",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn floor_ban_due<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        limit: u32,
+    ) -> BoxFuture<'a, Result<Vec<DueFloorBan>, ReputationError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.floor_ban_due_impl(scope, limit).await;
+            metrics::record_call(
+                "floor_ban_due",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn tenant_communities<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+    ) -> BoxFuture<'a, Result<Vec<i32>, ReputationError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.tenant_communities_impl(scope).await;
+            metrics::record_call(
+                "tenant_communities",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+}
+
+/// The automated-floor-ban SQL calls (alembic 0098). Every call goes through a SECURITY DEFINER
+/// function; this crate never reads or writes `bundle_reputation_floor_bans` itself.
+impl PostgresReputationStore {
+    /// Validates an already-SQL-form floor-ban key (see [`floor_sql_key`]); never re-escapes, so a
+    /// key claimed back from `floor_ban_due` round-trips unchanged.
+    fn floor_key(key: &str) -> Result<String, ReputationError> {
+        let ok = !key.is_empty()
+            && key.len() <= crate::MAX_IDEMPOTENCY_KEY_LEN
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._:-".contains(&b));
+        if ok {
+            Ok(key.to_string())
+        } else {
+            Err(ReputationError::Invalid(
+                "floor-ban key must already be in the SQL alphabet".to_string(),
+            ))
+        }
+    }
+
+    async fn verify_floor_breach_impl(
+        &self,
+        scope: &ReputationScope,
+        user: Uuid,
+        floor: FloorScope,
+    ) -> Result<bool, ReputationError> {
+        let row = self
+            .conn
+            .query_one_raw(stmt(
+                "SELECT reputation_verify_floor_breach($1::bigint, $2::bigint, $3::uuid, \
+                 $4::smallint) AS breached",
+                vec![
+                    Value::BigInt(Some(i64::from(scope.tenant_id))),
+                    Value::BigInt(Some(i64::from(scope.community_id))),
+                    Value::Uuid(Some(user)),
+                    Value::SmallInt(Some(floor.code())),
+                ],
+            ))
+            .await
+            .map_err(map_sql_err)?
+            .ok_or_else(|| backend_err("reputation_verify_floor_breach returned no row"))?;
+        row.try_get::<bool>("", "breached").map_err(backend_err)
+    }
+
+    async fn floor_ban_begin_impl(
+        &self,
+        scope: &ReputationScope,
+        target_community: i32,
+        user: Uuid,
+        floor: FloorScope,
+        key: &str,
+        platform: &str,
+    ) -> Result<FloorBanBegin, ReputationError> {
+        let key = Self::floor_key(key)?;
+        let row = self
+            .conn
+            .query_one_raw(stmt(
+                "SELECT reputation_floor_ban_begin($1::bigint, $2::bigint, $3::bigint, \
+                 $4::uuid, $5::smallint, $6::text, $7::text) AS state",
+                vec![
+                    Value::BigInt(Some(i64::from(scope.tenant_id))),
+                    Value::BigInt(Some(i64::from(target_community))),
+                    Value::BigInt(Some(i64::from(scope.community_id))),
+                    Value::Uuid(Some(user)),
+                    Value::SmallInt(Some(floor.code())),
+                    Value::String(Some(key)),
+                    Value::String(Some(platform.to_string())),
+                ],
+            ))
+            .await
+            .map_err(map_sql_err)?
+            .ok_or_else(|| backend_err("reputation_floor_ban_begin returned no row"))?;
+        match row.try_get::<i16>("", "state").map_err(backend_err)? {
+            0 => Ok(FloorBanBegin::Proceed),
+            1 => Ok(FloorBanBegin::AlreadyDone),
+            2 => Ok(FloorBanBegin::RateLimited),
+            other => Err(backend_err(format!(
+                "unexpected floor-ban begin state {other}"
+            ))),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn floor_ban_record_impl(
+        &self,
+        scope: &ReputationScope,
+        target_community: i32,
+        user: Uuid,
+        floor: FloorScope,
+        key: &str,
+        outcome: FloorBanOutcome,
+        error: &str,
+    ) -> Result<(), ReputationError> {
+        let key = Self::floor_key(key)?;
+        self.conn
+            .execute_raw(stmt(
+                "SELECT reputation_floor_ban_record($1::bigint, $2::bigint, $3::uuid, \
+                 $4::smallint, $5::text, $6::smallint, $7::text)",
+                vec![
+                    Value::BigInt(Some(i64::from(scope.tenant_id))),
+                    Value::BigInt(Some(i64::from(target_community))),
+                    Value::Uuid(Some(user)),
+                    Value::SmallInt(Some(floor.code())),
+                    Value::String(Some(key)),
+                    Value::SmallInt(Some(outcome.code())),
+                    Value::String(Some(error.to_string())),
+                ],
+            ))
+            .await
+            .map_err(map_sql_err)?;
+        Ok(())
+    }
+
+    async fn floor_ban_due_impl(
+        &self,
+        scope: &ReputationScope,
+        limit: u32,
+    ) -> Result<Vec<DueFloorBan>, ReputationError> {
+        let rows = self
+            .conn
+            .query_all_raw(stmt(
+                "SELECT r_community_id, r_origin_community_id, r_user_uuid, r_scope, r_key, r_platform \
+                 FROM reputation_floor_ban_due($1::bigint, $2::int)",
+                vec![
+                    Value::BigInt(Some(i64::from(scope.tenant_id))),
+                    Value::Int(Some(i32::try_from(limit).unwrap_or(50))),
+                ],
+            ))
+            .await
+            .map_err(map_sql_err)?;
+        rows.into_iter()
+            .map(|r| {
+                let code: i16 = r.try_get("", "r_scope").map_err(backend_err)?;
+                Ok(DueFloorBan {
+                    community_id: r.try_get("", "r_community_id").map_err(backend_err)?,
+                    origin_community_id: r
+                        .try_get("", "r_origin_community_id")
+                        .map_err(backend_err)?,
+                    user: r.try_get("", "r_user_uuid").map_err(backend_err)?,
+                    scope: FloorScope::from_code(code)
+                        .ok_or_else(|| backend_err("unknown floor-ban scope"))?,
+                    key: r.try_get("", "r_key").map_err(backend_err)?,
+                    platform: r.try_get("", "r_platform").map_err(backend_err)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn tenant_communities_impl(
+        &self,
+        scope: &ReputationScope,
+    ) -> Result<Vec<i32>, ReputationError> {
+        let rows = self
+            .conn
+            .query_all_raw(stmt(
+                "SELECT r_community_id FROM reputation_tenant_communities($1::bigint)",
+                vec![Value::BigInt(Some(i64::from(scope.tenant_id)))],
+            ))
+            .await
+            .map_err(map_sql_err)?;
+        if rows.len() > MAX_TENANT_FANOUT {
+            return Err(backend_err(
+                "tenant has more communities than the floor-ban fan-out bound",
+            ));
+        }
+        rows.into_iter()
+            .map(|r| r.try_get("", "r_community_id").map_err(backend_err))
+            .collect()
     }
 }
 
