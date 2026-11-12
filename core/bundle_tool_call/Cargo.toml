@@ -21,7 +21,7 @@ sha2 = "=0.10.9"
 bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
 bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
 # Reply interpretation (`Message`/`ErrorCode`) -- same pinned rev as the stages.
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "53e95619f1b3e49e1150b78a125981fcc5905d8a", package = "penguin-bundle-host", version = "=0.5.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "96a5065f1d379ea0cfc7c7716c6eab628138330a", package = "penguin-bundle-host", version = "=0.6.0" }
 
 [dev-dependencies]
 tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }

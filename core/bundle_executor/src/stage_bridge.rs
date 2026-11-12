@@ -43,6 +43,7 @@ where
                 runtime: "runc".to_string(),
                 verified: false,
             },
+            executor_id: None,
         }),
     );
     write_frame(&mut writer, &hello)

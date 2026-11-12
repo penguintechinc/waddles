@@ -2245,12 +2245,19 @@ fn try_start_changelog_consumer(
                 None => None,
             };
 
+        // Executor slot sharding kill switch (unseen = sharding ON). No
+        // license client means "flag unseen", i.e. sharding ON, never off.
+        let sharding_gate: Arc<dyn license::FeatureGate> = match &bundle_db_license_client {
+            Some(client) => Arc::new(license::ExecutorShardingGate::new(Arc::clone(client))),
+            None => Arc::new(license::StaticGate(true)),
+        };
         changelog_consumer::run(
             db,
             poll_interval,
             full_reconcile_interval,
             call_timeout_ms,
             gate,
+            sharding_gate,
             connections,
             spawner,
             excluded_metric,
