@@ -43,7 +43,7 @@
 //! loaded by svc-process AND svc-action compiles and stays resident once
 //! (previously twice). Per-stage registries (scopes, slots, limits) stay
 //! separate, so stage isolation is unchanged. Modules are made resident from
-//! a signed precompiled `.cwasm` when one verifies (`crate::aot`), else
+//! a signed precompiled `.cwasm` when one verifies (`crate::precompile`), else
 //! JIT-compiled with a LOUD fallback; residency is bounded by
 //! `EXECUTOR_MEMORY_BUDGET_MB` with LRU eviction of idle, unpinned modules,
 //! and an evicted (or over-budget, verify-only) module is made resident again
@@ -413,6 +413,10 @@ pub struct SharedRuntime {
     max_concurrent_compiles: u32,
     /// `false` when the `waddles.disable-aot-precompile` kill switch is on.
     aot_enabled: bool,
+    /// `PRECOMPILE_SIGNING_PUBLIC_KEYS`: the ONLY keys a `.cwasm` signature
+    /// is checked against (a dedicated precompiler key, distinct from the
+    /// bundle-approval `BUNDLE_SIGNING_PUBLIC_KEYS`). Empty = no AOT.
+    precompile_keys: PlatformPublicKeys,
     cache: std::sync::Mutex<ModuleCache<GuestPre>>,
     /// Single-flight make-resident tracker (gh security review item 2,
     /// now process-wide): concurrent requests for the SAME cold digest --
@@ -452,6 +456,20 @@ impl SharedRuntime {
         let epoch_ticker = crate::engine::spawn_epoch_ticker(&engine);
         let max_compiles = cfg.effective_max_concurrent_compiles();
         let aot_enabled = !cfg.flag_disable_aot_precompile;
+        let precompile_keys = match cfg
+            .precompile_signing_public_keys
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            Some(raw) => PlatformPublicKeys::from_json(raw)?,
+            None => PlatformPublicKeys::default(),
+        };
+        if aot_enabled && precompile_keys.is_empty() {
+            warn!(
+                "PRECOMPILE_SIGNING_PUBLIC_KEYS unset: every load will fall back (loudly) to \
+                 a JIT compile"
+            );
+        }
         info!(
             engine_fingerprint,
             aot_enabled,
@@ -466,6 +484,7 @@ impl SharedRuntime {
             compile_limiter: Arc::new(Semaphore::new(max_compiles as usize)),
             max_concurrent_compiles: max_compiles,
             aot_enabled,
+            precompile_keys,
             cache: std::sync::Mutex::new(ModuleCache::new(cfg.memory_budget_bytes())),
             resolving: tokio::sync::Mutex::new(HashMap::new()),
             metrics,
@@ -699,13 +718,25 @@ impl SharedRuntime {
                 ),
             ));
         }
+        if self.precompile_keys.is_empty() {
+            return Err((
+                "signature",
+                ExecutorError::SignatureInvalid(
+                    "no PRECOMPILE_SIGNING_PUBLIC_KEYS configured; refusing to deserialize an \
+                     unverifiable .cwasm"
+                        .to_string(),
+                ),
+            ));
+        }
         let fp = &self.engine_fingerprint;
+        let (artifact_key, sig_key) =
+            crate::precompile::object_keys(fp, &req.digest).map_err(|e| ("fetch", e))?;
         let cwasm = source
-            .fetch_precompiled(&crate::aot::cwasm_key(fp, &req.digest))
+            .fetch_precompiled(&artifact_key)
             .await
             .map_err(|e| ("fetch", e))?;
         let sig = source
-            .fetch_precompiled(&crate::aot::cwasm_signature_key(fp, &req.digest))
+            .fetch_precompiled(&sig_key)
             .await
             .map_err(|e| ("fetch", e))?;
         let sidecar = source
@@ -720,14 +751,17 @@ impl SharedRuntime {
             &req.digest,
         )
         .map_err(|e| ("signature", e))?;
-        crate::aot::verify_cwasm(&cwasm, &sig, keys, &req.digest, fp)
+        // The ONLY gate before the unsafe deserialize: the precompiler's
+        // dedicated signing key (`PRECOMPILE_SIGNING_PUBLIC_KEYS`), never the
+        // bundle-approval key.
+        crate::precompile::verify_precompiled(&cwasm, &sig, &self.precompile_keys, &req.digest, fp)
             .map_err(|e| ("signature", e))?;
         let (engine, linker) = (self.engine.clone(), Arc::clone(&self.linker));
         tokio::task::spawn_blocking(move || {
             // SAFETY: `Component::deserialize` trusts its input as native
-            // code. `cwasm` reached here only after `verify_cwasm` proved it
+            // code. `cwasm` reached here only after `verify_precompiled` proved it
             // is byte-identical to an artifact the platform signing key
-            // signed for THIS digest and THIS engine fingerprint (and the
+            // (precompile key) signed for THIS digest and THIS engine fingerprint (and the
             // bundle's own sidecar signature verified above); wasmtime still
             // re-checks engine compatibility inside `deserialize`.
             let component = unsafe { Component::deserialize(&engine, &cwasm) }?;
@@ -4637,11 +4671,17 @@ mod tests {
             SigningKey::from_bytes(&[21u8; 32])
         }
 
+        fn precompile_signer() -> crate::precompile::PrecompileSigner {
+            crate::precompile::PrecompileSigner::from_seed("pc1", [33u8; 32]).expect("signer")
+        }
+
         fn keyed_config() -> CliConfig {
             let mut cfg = test_config();
             cfg.bundle_signing_public_keys = Some(
                 json!({ KEY_ID: BASE64.encode(key().verifying_key().to_bytes()) }).to_string(),
             );
+            cfg.precompile_signing_public_keys =
+                Some(json!({ "pc1": precompile_signer().public_key_b64() }).to_string());
             cfg
         }
 
@@ -4707,14 +4747,9 @@ mod tests {
         }
 
         fn signed(runtime: &SharedRuntime, wasm: &[u8], cwasm: &[u8]) -> Vec<u8> {
-            serde_json::to_vec(&crate::aot::sign_cwasm(
-                &key(),
-                KEY_ID,
-                &digest_of(wasm),
-                runtime.engine_fingerprint(),
-                cwasm,
-            ))
-            .expect("json")
+            precompile_signer()
+                .sign(&digest_of(wasm), runtime.engine_fingerprint(), cwasm)
+                .expect("sign")
         }
 
         /// T1: two stages on one runtime compile a shared digest exactly once
@@ -4819,20 +4854,39 @@ mod tests {
             Ok(())
         }
 
+        /// T5: an artifact signed by the BUNDLE key (not the dedicated
+        /// precompile key) is refused -- key separation.
+        #[tokio::test]
+        async fn bundle_key_cannot_sign_precompiled_artifacts() -> Result<(), ExecutorError> {
+            let cfg = keyed_config();
+            let runtime = SharedRuntime::new(&cfg)?;
+            let cwasm = precompiled(&runtime, FIXTURE_WASM);
+            let wrong = crate::precompile::PrecompileSigner::from_seed(KEY_ID, [21u8; 32])
+                .expect("signer")
+                .sign(&fixture_digest(), runtime.engine_fingerprint(), &cwasm)
+                .expect("sign");
+            let source = AotSource {
+                wasm: FIXTURE_WASM.to_vec(),
+                cwasm: Some((cwasm, wrong)),
+            };
+            let exec = Executor::with_runtime(&cfg, source, Arc::clone(&runtime))?;
+            exec.on_load(load_body(FIXTURE_WASM, "a"))
+                .await
+                .expect("load");
+            assert_eq!(runtime.aot_loads_total(), 0);
+            assert_eq!(runtime.aot_fallbacks_total(), 1);
+            Ok(())
+        }
+
         /// T5: an artifact signed for another engine fingerprint is refused.
         #[tokio::test]
         async fn foreign_engine_fingerprint_falls_back() -> Result<(), ExecutorError> {
             let cfg = keyed_config();
             let runtime = SharedRuntime::new(&cfg)?;
             let cwasm = precompiled(&runtime, FIXTURE_WASM);
-            let sig = serde_json::to_vec(&crate::aot::sign_cwasm(
-                &key(),
-                KEY_ID,
-                &fixture_digest(),
-                &"0".repeat(64),
-                &cwasm,
-            ))
-            .expect("json");
+            let sig = precompile_signer()
+                .sign(&fixture_digest(), &"0".repeat(64), &cwasm)
+                .expect("sign");
             let source = AotSource {
                 wasm: FIXTURE_WASM.to_vec(),
                 cwasm: Some((cwasm, sig)),

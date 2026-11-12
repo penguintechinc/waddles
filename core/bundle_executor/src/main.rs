@@ -55,6 +55,15 @@ fn healthcheck_mode(args: &[String]) -> Option<HealthcheckMode> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--precompile") {
+        // AOT precompile mode (`bundle_executor::precompile`): its own
+        // clap config, no STAGE_HOST_API_ADDR, JSON logs to stdout.
+        bundle_executor::telemetry_init_precompile_logging();
+        let parsed =
+            <bundle_executor::precompile::PrecompileArgs as clap::Parser>::parse_from(&args);
+        let code = bundle_executor::precompile::run_cli(parsed).await?;
+        std::process::exit(code);
+    }
     if let Some(mode) = healthcheck_mode(&args) {
         let result = match mode {
             HealthcheckMode::Engine => bundle_executor::run_healthcheck().await,

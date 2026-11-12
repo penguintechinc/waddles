@@ -1,0 +1,32 @@
+# executor-scale task 4 -- one-shot backfill: precompile EVERY signed, active bundle version for
+# the engine fingerprint of the executor image in this release, so executors find warm .cwasm
+# artifacts (no JIT storm). Idempotent: artifacts already present for this fingerprint are skipped.
+# Hook phase is configurable: default post-install/post-upgrade (the precompiler S3 identity and
+# signing key exist by then); set backfill.hookPhase "pre-upgrade" once they exist on the cluster
+# to build artifacts BEFORE the new executor image rolls out. Fails the release loudly if any
+# bundle cannot be precompiled (`ack --backfill` exits 1).
+{{- if and .Values.pipeline.hubApi.executorPrecompile.enabled .Values.pipeline.hubApi.executorPrecompile.backfill.enabled }}
+{{- $cfg := .Values.pipeline.hubApi.executorPrecompile }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-executor-precompile-backfill
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor-precompile-backfill
+  annotations:
+    "helm.sh/hook": {{ $cfg.backfill.hookPhase | default "post-install,post-upgrade" | quote }}
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ $cfg.backoffLimit }}
+  activeDeadlineSeconds: {{ $cfg.backfill.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: executor-precompile-backfill
+    spec:
+      {{- include "waddlebot.executorPrecompile.podSpec" (dict "root" . "mode" "backfill") | nindent 6 }}
+{{- end }}

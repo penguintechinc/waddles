@@ -1739,6 +1739,22 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("registered_at", DateTime),
         UniqueConstraint("tenant_id", "community_id", "app_id", "command"),
     )
+    # bundle_precompile_requests (migration 0100) -- AOT precompile queue, enqueued by the
+    # approval/signing paths. sqlite mirror; the lease SQL is Postgres-only and proven in
+    # alembic/tests/test_0100_bundle_precompile_requests.py.
+    Table(
+        "bundle_precompile_requests",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("artifact_digest", String(80), nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(64), nullable=False),
+        Column("requested_at", DateTime),
+        Column("claimed_at", DateTime),
+        Column("attempts", Integer, nullable=False, server_default="0"),
+        Column("last_error", String(500)),
+        UniqueConstraint("artifact_digest"),
+    )
     # app_global_installs / bundle_tenant_availability (migration 0027) --
     # GLOBAL and TENANT tiers of the App Bundle 3-tier split
     # (services/bundle_approval_service.py's own module docstring).

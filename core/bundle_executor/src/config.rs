@@ -255,6 +255,15 @@ pub struct CliConfig {
     #[arg(long, env = "EXECUTOR_MEMORY_BUDGET_MB", default_value_t = 8192)]
     pub executor_memory_budget_mb: u64,
 
+    /// JSON map `{key_id: base64 Ed25519 public key}` of the DEDICATED
+    /// precompiler signing key(s) (ConfigMap
+    /// `<fullname>-executor-precompile-signing-public`). The ONLY keys a
+    /// `.cwasm` signature is verified against -- never the bundle-approval
+    /// `BUNDLE_SIGNING_PUBLIC_KEYS`. Unset = every load JIT-compiles (each
+    /// one logged at ERROR + `executor_precompile_fallback_total`).
+    #[arg(long, env = "PRECOMPILE_SIGNING_PUBLIC_KEYS")]
+    pub precompile_signing_public_keys: Option<String>,
+
     /// Kill switch `waddles.disable-aot-precompile` (opt-out, unseen = AOT on).
     /// This credential-less sandbox has no PostHog egress, so the flag is read
     /// from its Docker/Helm ENV baseline (`FLAG_` + key, `.`/`-` -> `_`), the
@@ -500,6 +509,7 @@ impl CliConfig {
             bundle_max_precompiled_bytes: 268_435_456,
             executor_memory_budget_mb: 8192,
             flag_disable_aot_precompile: false,
+            precompile_signing_public_keys: None,
             executor_id: None,
             executor_require_id: false,
             bundle_signing_public_keys: None,

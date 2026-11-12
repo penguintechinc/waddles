@@ -111,6 +111,7 @@ from services import (
     app_command_service,
     app_source_binding_service,
     bundle_audit,
+    bundle_precompile_service,
     bundle_signing_service,
     reputation_logic_exclusivity,
     valkey_admin_client,
@@ -1398,6 +1399,14 @@ async def activate_tenant_wide_with_warnings(
     # SIGN (post-commit sidecar upload to the executor's bundle bucket) -- raised, not
     # best-effort: see `activate_for_community()`'s own SIGN note.
     await bundle_signing_service.upload_signed_sidecar(**signing_result)
+    # PRECOMPILE -- queue the now-signed digest for the AOT precompiler (idempotent per digest;
+    # raised like the sidecar upload above, the caller may simply retry).
+    await bundle_precompile_service.enqueue_precompile(
+        install_dal,
+        app_id=signing_result["app_id"],
+        version=signing_result["version"],
+        digest=signing_result["digest"],
+    )
 
     if bound:
         tenant_slug = await _tenant_slug(install_dal, tenant_id)
@@ -1667,6 +1676,14 @@ async def activate_for_community_with_warnings(
     # actually carrying the signature (see that function's own doc for the
     # backfill CLI that re-runs this write idempotently).
     await bundle_signing_service.upload_signed_sidecar(**signing_result)
+    # PRECOMPILE -- queue the now-signed digest for the AOT precompiler (idempotent per digest;
+    # raised like the sidecar upload above, the caller may simply retry).
+    await bundle_precompile_service.enqueue_precompile(
+        install_dal,
+        app_id=signing_result["app_id"],
+        version=signing_result["version"],
+        digest=signing_result["digest"],
+    )
 
     # PROVISION -- AFTER the transaction above committed: ensure_group is a
     # Valkey side effect with no rollback, so it must never run inside a

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wasmtime::component::{HasData, Linker};
-use wasmtime::{Collector, Config, Engine, InstanceAllocationStrategy, PoolingAllocationConfig};
+use wasmtime::Engine;
 
 use crate::config::CliConfig;
 use crate::error::ExecutorError;
@@ -327,73 +327,12 @@ impl HasData for HasExecState {
 /// `cfg.executor_wasm_collector` is validated to be exactly `"drc"` by
 /// [`CliConfig::validate`], so this function does not re-validate it).
 pub fn build_engine(_cfg: &CliConfig) -> Result<Engine, ExecutorError> {
-    let mut config = Config::new();
-    config.wasm_component_model(true);
-    config.epoch_interruption(true);
-    // Connector spec SS0 condition 4: fuel metering alongside the epoch
-    // deadline above. Epoch ticks bound wall-clock time between yield
-    // points; fuel bounds the amount of guest-executed work directly, so a
-    // tight loop that never reaches a yield point (component-model host
-    // calls are the only yield points under `async` instantiation) still
-    // traps deterministically rather than riding out the remainder of an
-    // epoch tick. `crate::invoke::on_invoke` arms the actual per-call budget
-    // via `Store::set_fuel`; this only turns fuel accounting on for the
-    // engine -- a `Store` with accounting on and no fuel set traps
-    // immediately (zero fuel), so every call site MUST call `set_fuel`.
-    config.consume_fuel(true);
-    config.collector(Collector::DeferredReferenceCounting);
-
-    let mut pooling = PoolingAllocationConfig::default();
-    // spec SS7.2 defaults: EXECUTOR_INSTANCES_PER_BUNDLE (4) resident
-    // stores per bundle, EXECUTOR_MAX_CONCURRENT_CALLS (32) globally. The
-    // pooling allocator's own ceiling is set generously above both so a
-    // legitimate per-bundle/global config override never gets silently
-    // capped by an allocator limit not visible in SS7.3's table.
-    pooling.total_component_instances(256);
-    pooling.total_memories(256);
-    pooling.total_tables(256);
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
-
-    Ok(Engine::new(&config)?)
+    // The Config lives in `crate::engine_config` so the AOT precompiler
+    // (`crate::precompile`) builds byte-identical engines -- no drift.
+    Ok(Engine::new(&crate::engine_config::engine_config())?)
 }
 
-/// Feeds `Hash` input into SHA-256 so wasmtime's
-/// `precompile_compatibility_hash` (an `impl Hash`) becomes a stable,
-/// process-independent digest rather than a `DefaultHasher` value (which is
-/// randomly seeded per process and so useless across the precompiler/executor
-/// boundary).
-struct Sha256Hasher(sha2::Sha256);
-
-impl std::hash::Hasher for Sha256Hasher {
-    fn finish(&self) -> u64 {
-        // Never read: the fingerprint finalizes the inner SHA-256 directly.
-        0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        sha2::Digest::update(&mut self.0, bytes);
-    }
-}
-
-/// The engine fingerprint a precompiled `.cwasm` is keyed and signed by
-/// (executor-scale CONTRACT: "hash of wasmtime version + Config"): lowercase
-/// hex SHA-256 over the pinned [`WASMTIME_VERSION`] and wasmtime's own
-/// `Engine::precompile_compatibility_hash` (target, tunables, features,
-/// collector -- everything `Component::deserialize` checks). The precompiler
-/// and the executor both obtain their `Engine` from [`build_engine`], so the
-/// two can never drift; an engine built any other way gets a different
-/// fingerprint and every artifact misses (loudly) instead of deserializing.
-#[must_use]
-pub fn engine_fingerprint(engine: &Engine) -> String {
-    use std::hash::Hash;
-    let mut hasher = Sha256Hasher(<sha2::Sha256 as sha2::Digest>::new());
-    sha2::Digest::update(&mut hasher.0, b"waddles-engine-fp-v1\0wasmtime=");
-    sha2::Digest::update(&mut hasher.0, WASMTIME_VERSION.as_bytes());
-    sha2::Digest::update(&mut hasher.0, b"\0");
-    engine.precompile_compatibility_hash().hash(&mut hasher);
-    let digest = sha2::Digest::finalize(hasher.0);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
-}
+pub use crate::engine_config::engine_fingerprint;
 
 /// Wires every WIT import the `stage` world declares -- `context`, `http`,
 /// `kv`, `db`, `relay`, `%flags`, `log`, `clock` (via the generated
@@ -703,7 +642,7 @@ mod tests {
     #[test]
     fn engine_fingerprint_changes_with_engine_config() -> Result<(), ExecutorError> {
         let ours = engine_fingerprint(&build_engine(&test_config())?);
-        let mut config = Config::new();
+        let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
         let other = engine_fingerprint(&Engine::new(&config)?);
         assert_ne!(ours, other);

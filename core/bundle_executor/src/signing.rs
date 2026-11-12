@@ -216,6 +216,13 @@ impl PlatformPublicKeys {
         self.keys.is_empty()
     }
 
+    /// Builds a key set from already-decoded keys -- used by
+    /// `crate::precompile` to check existing artifacts against the
+    /// precompiler's own verifying key.
+    pub fn from_keys(keys: HashMap<String, VerifyingKey>) -> Self {
+        Self { keys }
+    }
+
     pub(crate) fn get(&self, key_id: &str) -> Option<&VerifyingKey> {
         self.keys.get(key_id)
     }

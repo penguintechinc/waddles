@@ -816,6 +816,12 @@ infrastructure:
       streaming:
         accessKey: "REPLACE_ME"
         secretKey: "REPLACE_ME"
+      # templates/executor-precompile*.yaml (bundle-executor --precompile) ONLY: Read/List
+      # pipeline.rustDataPlane.bundleExecutor.bucketName + Write scoped to its precompiled/
+      # prefix -- it can never overwrite a bundle component or signed sidecar.
+      precompiler:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
       # core host stages (svc-process/svc-action `storage` capability, spec
       # 2026-11-06-bundle-object-storage) -- Read/Write/List/Tagging scoped to
       # bundleStorage.bucketName ONLY. Never given to a bundle (host-mediated).
@@ -1410,6 +1416,40 @@ pipeline:
     # that was only ever recorded as a backfill-CLI row outcome, never retried). Runs
     # hub_api/cli/reconcile_signed_sidecars.py on a schedule; metrics via the same
     # bundle_telemetry meter the backfill CLI uses.
+    # executor-scale task 4 -- AOT precompile of approved bundles into signed .cwasm
+    # (templates/executor-precompile-cronjob.yaml + executor-precompile-backfill-job.yaml).
+    # Each run: hub-api `cli.precompile_queue export` -> `bundle-executor --precompile` (SAME
+    # image/tag as svc-bundles-executor, so the engine fingerprint matches) -> `ack`.
+    executorPrecompile:
+      enabled: true
+      schedule: "*/2 * * * *"
+      concurrencyPolicy: Forbid
+      backoffLimit: 1
+      activeDeadlineSeconds: 3600
+      # Max queue rows leased per CronJob run.
+      batchLimit: 50
+      # Backfill (all active versions for the CURRENT executor image's fingerprint) as a
+      # pre-upgrade hook, so a new executor image rolls out with its artifacts already built.
+      backfill:
+        enabled: true
+        activeDeadlineSeconds: 7200
+        # post-install,post-upgrade (default) | pre-upgrade (once the precompiler identity +
+        # signing key exist, so artifacts are warm before the executor rollout).
+        hookPhase: "post-install,post-upgrade"
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "4"
+          memory: "8Gi"
+      hubApiResources:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
     bundleSigningReconciler:
       enabled: true
       schedule: "*/30 * * * *"
@@ -2949,6 +2989,16 @@ autoProvisionedKeys:
     secretName: ""  # default: "<fullname>-bundle-signing" when empty
     publicKeyConfigMapName: ""  # default: "<fullname>-bundle-signing-public" when empty
     keyId: "waddlebot-1"
+    externalSecret: false
+  # executor-scale task 4 -- DEDICATED Ed25519 keypair signing AOT-precompiled .cwasm
+  # artifacts (bundle-executor --precompile). Private half (PRECOMPILE_SIGNING_PRIVATE_KEY,
+  # base64 32-byte seed) mounted as a FILE only into templates/executor-precompile*.yaml;
+  # public half (PRECOMPILE_SIGNING_PUBLIC_KEYS JSON) published to publicKeyConfigMapName
+  # for svc-bundles-executor's AOT load path to verify before Component::deserialize.
+  precompileSigning:
+    secretName: ""  # default: "<fullname>-executor-precompile-signing" when empty
+    publicKeyConfigMapName: ""  # default: "<fullname>-executor-precompile-signing-public"
+    keyId: "precompile-1"
     externalSecret: false
   # PR #438 -- per-service ES256 (ECDSA P-256) machine-JWT signing key.
   # Private half: SERVICE_JWT_PRIVATE_KEY_<kid>/SERVICE_JWT_ACTIVE_KID in secretName
