@@ -23,6 +23,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.database import AsyncDAL
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from pydal import Field
 from waddles.hub.internal.v1 import dataplane_scope_pb2, dataplane_scope_pb2_grpc
 
@@ -106,7 +107,7 @@ async def db(tmp_path: Any) -> AsyncIterator[Any]:
     bind_community_authz_tables(dal, migrate=True)
     bind_admin_tables(dal, migrate=True)
     seed = Seed()
-    seed.demo_tenant = int(dal.tenants.insert(slug="global", display_name="Global"))
+    seed.demo_tenant = int(dal.tenants.insert(slug=DEFAULT_TENANT_SLUG, display_name="Default"))
     seed.other_tenant = int(dal.tenants.insert(slug="other-corp", display_name="Other"))
     seed.demo_community = int(
         dal.communities.insert(
@@ -293,7 +294,7 @@ class TestResolve:
             "success": True,
             "tenantId": db.seed.demo_tenant,
             "communityId": db.seed.demo_community,
-            "tenantSlug": "global",
+            "tenantSlug": DEFAULT_TENANT_SLUG,
             "communityName": "waddlebot",
         }
 

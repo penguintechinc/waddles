@@ -91,9 +91,21 @@ python3 app.py                          # or: hypercorn app:app --bind 0.0.0.0:8
 
 ## Testing
 
+Run the suite from the repo root with the repeatable target -- it builds (or
+refreshes, when any requirements file changes) a hash-pinned Python 3.13 venv at
+`.venv-hub-api/` with penguin-dal, flask_core and the dev deps, regenerates the
+internal gRPC stubs only if one is missing, sets
+`PYTHONPATH=grpc_internal/pb:../alembic/tests`, and fails loudly
+(`set -euo pipefail`, pytest's own exit code):
+
 ```bash
-uv pip install pytest pytest-asyncio mypy ruff
-python3 -m pytest tests/ -v
+make test-hub-api                                          # full suite
+make test-hub-api PYTEST_ARGS="tests/test_config.py -x -q" # passthrough
+```
+
+Lint/type checks (inside that venv):
+
+```bash
 ruff check . && ruff format --check .
 python3 -m mypy .
 ```
