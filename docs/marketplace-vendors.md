@@ -44,10 +44,11 @@ core-bundle seeder now writes/reconciles attribution on every run.
 
 > **Nothing is decided and nothing is charged today.** This is a forward-looking note only.
 
-PenguinTech may eventually charge vendors a fee for **paid** app bundles listed in the marketplace.
+Penguin Technologies, Inc. may eventually charge vendors a fee for **paid** app bundles listed in the marketplace.
 Two models are under consideration: a one-time or periodic **registration fee**, or a
 **transaction fee** on sales. A registration fee is the likely direction. No model, amount, or
 date has been chosen.
 
 - **Free bundles are unaffected** -- no fee of any kind is planned for them.
+- **Penguin Technologies, Inc. will never charge for an open source, free app bundle** listed on the marketplace.
 - Any change will be announced in advance and documented here before it takes effect.
