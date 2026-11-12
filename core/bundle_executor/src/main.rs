@@ -55,7 +55,10 @@ fn healthcheck_mode(args: &[String]) -> Option<HealthcheckMode> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("--precompile") {
+    if matches!(
+        args.get(1).map(String::as_str),
+        Some("--precompile" | "--precompile-compile-only" | "--precompile-sign")
+    ) {
         // AOT precompile mode (`bundle_executor::precompile`): its own
         // clap config, no STAGE_HOST_API_ADDR, JSON logs to stdout.
         bundle_executor::telemetry_init_precompile_logging();

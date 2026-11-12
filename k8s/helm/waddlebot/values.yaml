@@ -1428,6 +1428,16 @@ pipeline:
       activeDeadlineSeconds: 3600
       # Max queue rows leased per CronJob run.
       batchLimit: 50
+      # Dedicated ServiceAccount for the precompile pods (no API token is ever mounted).
+      # Empty name = "<fullname>-executor-precompile".
+      serviceAccount:
+        name: ""
+      # Kata isolation for the pods that compile attacker-influenced wasm. Value-driven, default
+      # OFF (empty = runc + Tetragon exec allowlist). Setting it on an `internal` deployment class
+      # is pending user approval (no KATA EXCEPTION is declared here); e.g. "kata-clh".
+      runtimeClassName: ""
+      # Cap on the emptyDir the compile step stages .cwasm files into for the sign step.
+      stagedSizeLimit: "2Gi"
       # Backfill (all active versions for the CURRENT executor image's fingerprint) as a
       # pre-upgrade hook, so a new executor image rolls out with its artifacts already built.
       backfill:
