@@ -33,8 +33,6 @@ permissions:
     justification: "declares the single Wix REST host the HOST executes the wix.event.* request templates against (Events V3 query/get/create/update/cancel); the guest never calls it, and the API key + site id are host-resolved secret-refs, never in the component"
     params:
       methods: ["GET", "POST", "PATCH"]
-  - id: connector.pii.read
-    justification: "gates identity.lookup, used to tokenize each Wix member id to its canonical UUID; first-party core only, dangerous, global-admin-approved (no raw Wix member id leaves the connector)"
 routes_to: []
 exported_tools:
   - name: wix.event.list

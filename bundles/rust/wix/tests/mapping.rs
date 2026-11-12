@@ -57,23 +57,33 @@ fn payload(m: &Mapped) -> Value {
 }
 
 #[test]
-fn member_events_carry_only_ids() {
-    for (wix, kind) in [
-        ("wix.members.v1.member_created", "member.linked"),
-        ("wix.members.v1.member_updated", "member.updated"),
-        ("wix.members.v1.member_deleted", "member.deleted"),
+fn member_webhooks_produce_zero_records() {
+    for wix in [
+        "wix.members.v1.member_created",
+        "wix.members.v1.member_updated",
+        "wix.members.v1.member_deleted",
     ] {
         let ev = json!({"id": "e1", "entityId": "mem-9", "eventTime": "2026-11-05T12:00:00Z",
                         "createdEvent": {"entity": "{\"contact\":{\"firstName\":\"X\"},\"loginEmail\":\"a@b.c\"}"}});
-        let m = one(&token("inst-0001", wix, &ev));
-        assert_eq!((m.platform.as_str(), m.event_type.as_str()), ("wix", kind));
-        assert_eq!(m.member.as_deref(), Some("mem-9"));
-        assert_eq!(m.occurred_at, "2026-11-05T12:00:00Z");
-        assert_eq!(
-            payload(&m),
-            json!({"event_id": "e1", "instance_id": "inst-0001", "time_source": "wix"})
+        let p = parse_frame(&token("inst-0001", wix, &ev), RECV).expect("ok");
+        assert_eq!((p.events.len(), p.skipped), (0, 1), "{wix}");
+    }
+}
+
+#[test]
+fn manifest_does_not_request_pii_read() {
+    for f in ["bundle.yaml", "hub-manifest.yaml"] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f);
+        let text = std::fs::read_to_string(&path).expect("manifest");
+        assert!(text.contains("permissions:"), "{f}: no permissions block");
+        assert!(
+            !text.contains("connector.pii.read"),
+            "{f} still requests pii.read"
         );
-        assert!(!m.payload_json.contains("a@b.c") && !m.payload_json.contains("firstName"));
+        assert!(
+            !text.contains("identity.lookup"),
+            "{f} still mentions identity.lookup"
+        );
     }
 }
 
@@ -165,7 +175,7 @@ fn calendar_events_map_without_an_actor() {
     ] {
         let ev = domain("e6", "createdEvent", "entity", &e);
         let m = one(&token("inst-0001", &format!("wix.events.v3.{t}"), &ev));
-        assert_eq!((m.event_type.as_str(), m.member.is_none()), (kind, true));
+        assert_eq!(m.event_type.as_str(), kind);
         assert_eq!(
             payload(&m),
             json!({"event_id":"e6","instance_id":"inst-0001","time_source":"wix","wix_event_id":"wev-1","title":"Meetup",
@@ -222,8 +232,8 @@ fn unknown_event_types_are_skipped_not_errors() {
 fn malformed_frames_fail_loud() {
     let good = String::from_utf8(token(
         "inst-0001",
-        "wix.members.v1.member_created",
-        &json!({"id":"e","entityId":"m"}),
+        "wix.events.v3.event_created",
+        &json!({"id":"e","createdEvent":{"entity":"{\"_id\":\"ev-1\"}"}}),
     ))
     .expect("utf8");
     let bad_frames: Vec<Vec<u8>> = vec![
@@ -236,28 +246,28 @@ fn malformed_frames_fail_loud() {
         format!("{}.{}.x", b64("{}"), b64(r#"{"data":"{}"}"#)).into_bytes(),
         token(
             "",
-            "wix.members.v1.member_created",
-            &json!({"id":"e","entityId":"m"}),
+            "wix.events.v3.event_created",
+            &json!({"id":"e","createdEvent":{"entity":"{\"_id\":\"ev-1\"}"}}),
         ),
         token(
             "inst bad",
-            "wix.members.v1.member_created",
-            &json!({"id":"e","entityId":"m"}),
+            "wix.events.v3.event_created",
+            &json!({"id":"e","createdEvent":{"entity":"{\"_id\":\"ev-1\"}"}}),
         ),
         token(
             "inst-0001",
-            "wix.members.v1.member_created",
-            &json!({"entityId":"m"}),
+            "wix.events.v3.event_created",
+            &json!({"createdEvent":{"entity":"{\"_id\":\"ev-1\"}"}}),
         ),
         token(
             "inst-0001",
-            "wix.members.v1.member_created",
+            "wix.events.v3.event_created",
+            &json!({"id":"e","createdEvent":{"entity":"{\"_id\":\"ev/../x\"}"}}),
+        ),
+        token(
+            "inst-0001",
+            "wix.events.v3.event_created",
             &json!({"id":"e"}),
-        ),
-        token(
-            "inst-0001",
-            "wix.members.v1.member_created",
-            &json!({"id":"e","entityId":"m/../x"}),
         ),
         token(
             "inst-0001",

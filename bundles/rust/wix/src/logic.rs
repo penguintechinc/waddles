@@ -2,9 +2,9 @@
 //! normalized event records out. The host (svc-ingest `Scheme::WixJwt`) has
 //! already checked the RS256 signature, `alg`, freshness, instance binding and
 //! replay; this module therefore decodes the payload WITHOUT re-verifying and
-//! must never be fed an unverified body. It never emits an email, name or any
-//! free-form member data: member events carry only ids that the component then
-//! tokenizes through `identity.lookup`.
+//! must never be fed an unverified body. Wix syncs EVENTS only: member,
+//! pricing-plan, order and subscription webhooks are ignored (counted as
+//! `skipped`) and emit no records, so no member id or member data is handled.
 
 use serde_json::{Map, Value, json};
 
@@ -21,12 +21,11 @@ fn bad<T>(msg: &str) -> Result<T> {
     Err(LogicError::Malformed(msg.to_owned()))
 }
 
-/// One mapped event; `member` is the Wix member id the component must tokenize.
+/// One mapped Wix calendar event record (no actor: events carry no member id).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mapped {
     pub platform: String,
     pub event_type: String,
-    pub member: Option<String>,
     pub payload_json: String,
     pub occurred_at: String,
 }
@@ -78,7 +77,7 @@ fn req_str<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| LogicError::Malformed(format!("missing `{key}`")))
 }
 
-/// `^[A-Za-z0-9_-]{1,128}$` (Wix member/event ids are GUID-like).
+/// `^[A-Za-z0-9_-]{1,128}$` (Wix instance/event ids are GUID-like).
 fn is_ref(s: &str) -> bool {
     (1..=128).contains(&s.len())
         && s.bytes()
@@ -144,22 +143,16 @@ impl Ctx<'_> {
         m
     }
 
-    fn mapped(&self, kind: &str, member: Option<String>, extra: Map<String, Value>) -> Mapped {
+    fn mapped(&self, kind: &str, extra: Map<String, Value>) -> Mapped {
         let mut payload = self.base();
         payload.extend(extra);
         Mapped {
             platform: "wix".into(),
             event_type: kind.into(),
-            member,
             payload_json: Value::Object(payload).to_string(),
             occurred_at: self.occurred_at.clone(),
         }
     }
-}
-
-fn member_event(ctx: &Ctx<'_>, kind: &str, event: &Value) -> Result<Mapped> {
-    let id = checked_ref(req_str(event, "entityId")?, "entityId")?;
-    Ok(ctx.mapped(kind, Some(id), Map::new()))
 }
 
 fn calendar_event(ctx: &Ctx<'_>, kind: &str, deleted: bool, ent: &Value) -> Result<Mapped> {
@@ -196,7 +189,7 @@ fn calendar_event(ctx: &Ctx<'_>, kind: &str, deleted: bool, ent: &Value) -> Resu
         text(ev.get("status"))
     };
     extra.insert("status".into(), json!(status));
-    Ok(ctx.mapped(kind, None, extra))
+    Ok(ctx.mapped(kind, extra))
 }
 
 /// Maps one VERIFIED webhook body (the raw JWT) into normalized events.
@@ -243,14 +236,8 @@ pub fn parse_frame(bytes: &[u8], received_at: &str) -> Result<Parsed> {
 }
 
 fn map_event(ctx: &Ctx<'_>, event_type: &str, event: &Value) -> Result<Option<Mapped>> {
-    if let Some(s) = event_type.strip_prefix("wix.members.v1.") {
-        return match s {
-            "member_created" => member_event(ctx, "member.linked", event).map(Some),
-            "member_updated" => member_event(ctx, "member.updated", event).map(Some),
-            "member_deleted" => member_event(ctx, "member.deleted", event).map(Some),
-            _ => Ok(None),
-        };
-    }
+    // Member webhooks (`wix.members.v1.*`) existed only for the removed plan->role
+    // sync and are deliberately NOT mapped (decision 2026-11-12).
     // Pricing-plan / order / subscription webhooks are deliberately NOT mapped:
     // Wix syncs EVENTS only; product subscriptions go through the PenguinTech
     // license server (decision 2026-11-12). They fall through to `skipped`.
