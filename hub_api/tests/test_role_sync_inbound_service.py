@@ -216,6 +216,7 @@ class TestApply:
             direction="twitch_to_discord",
             role_name_prefix="[BC]",
             actor_user_id=None,
+            ownership_verified=True,
         )
         update_pairing(dal, community_id, created.id, sync_enabled=True)
         out = await _apply(dal, _member(tenant_id, community_id, ["1"]))

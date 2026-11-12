@@ -59,6 +59,8 @@ tables:
   - discord_role_mirror_grants
   - role_sync_community_grants
   - role_sync_discord_grants
+  - role_sync_purged_bindings
+  - role_sync_remediation_queue
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -1043,4 +1045,52 @@ grants:
     privileges: []
   - role: migration_runner
     table: role_sync_discord_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api
+    table: role_sync_purged_bindings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: role_sync_purged_bindings
+    privileges: []
+  - role: svc_ingest
+    table: role_sync_purged_bindings
+    privileges: []
+  - role: svc_process
+    table: role_sync_purged_bindings
+    privileges: []
+  - role: svc_action
+    table: role_sync_purged_bindings
+    privileges: []
+  - role: svc_streaming
+    table: role_sync_purged_bindings
+    privileges: []
+  - role: webui
+    table: role_sync_purged_bindings
+    privileges: []
+  - role: migration_runner
+    table: role_sync_purged_bindings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api
+    table: role_sync_remediation_queue
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: role_sync_remediation_queue
+    privileges: []
+  - role: svc_ingest
+    table: role_sync_remediation_queue
+    privileges: []
+  - role: svc_process
+    table: role_sync_remediation_queue
+    privileges: []
+  - role: svc_action
+    table: role_sync_remediation_queue
+    privileges: []
+  - role: svc_streaming
+    table: role_sync_remediation_queue
+    privileges: []
+  - role: webui
+    table: role_sync_remediation_queue
+    privileges: []
+  - role: migration_runner
+    table: role_sync_remediation_queue
     privileges: [SELECT, INSERT, UPDATE, DELETE]

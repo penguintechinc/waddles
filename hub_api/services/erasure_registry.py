@@ -277,6 +277,7 @@ RULES: tuple[Rule, ...] = (
     delete("discord_role_mirror_grants", platform("platform", "platform_user_id")),
     delete("role_sync_community_grants", hub("hub_user_id")),
     delete("role_sync_discord_grants", platform("platform", "platform_user_id")),
+    delete("role_sync_remediation_queue", hub("hub_user_id")),
     delete("economy_balances", uuid("user_uuid")),
     delete("user_active_context", uuid("user_uuid")),
     delete("economy_ledger", uuid("user_uuid")),

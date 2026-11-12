@@ -2981,6 +2981,9 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("propagate_moderators", "boolean", notnull=True, default=False),
         #: migration 0104 -- NULL = grandfathered pre-0104 pairing (never ownership-proven).
         Field("ownership_verified_at", "datetime"),
+        #: migration 0104 -- TRUE only for rows that existed at upgrade time (bounded).
+        Field("grandfathered", "boolean", notnull=True, default=False),
+        Field("discord_grants_backfilled_at", "datetime"),
         Field("created_by_user_id", "integer"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
@@ -3035,6 +3038,27 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("granted_role", "string", length=20, notnull=True),
         Field("prior_role", "string", length=20),
         Field("granted_at", "datetime"),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "role_sync_purged_bindings",
+        Field("pairing_id", "integer", notnull=True),
+        Field("community_id", "integer", notnull=True),
+        Field("discord_role_id", "string", length=255, notnull=True),
+        Field("community_role", "string", length=20, notnull=True),
+        Field("purged_at", "datetime"),
+        migrate=migrate,
+    )
+    #: status: 0 pending review, 1 demoted to baseline, 2 dismissed.
+    dal.define_table(
+        "role_sync_remediation_queue",
+        Field("purged_binding_id", "integer", notnull=True),
+        Field("community_id", "integer", notnull=True),
+        Field("hub_user_id", "integer", notnull=True),
+        Field("role_at_review", "string", length=20, notnull=True),
+        Field("status", "integer", notnull=True, default=0),
+        Field("created_at", "datetime"),
+        Field("resolved_at", "datetime"),
         migrate=migrate,
     )
     dal.define_table(

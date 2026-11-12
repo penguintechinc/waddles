@@ -85,6 +85,7 @@ from services.role_sync_service import (
     _flag_enabled,
     _resolve_desired_community_role,
     _resolve_tenant_for_community,
+    pairing_sync_allowed,
 )
 from services.schema import bind_guild_pairing_tables
 from services.sync_worker_dal import open_worker_dal
@@ -472,6 +473,8 @@ async def apply_inbound_event(
         return InboundOutcome("direction_not_inbound")
     if not await _flag_enabled(tenant_slug):
         return InboundOutcome("flag_off")
+    if not await pairing_sync_allowed(pairing, tenant_slug):
+        return InboundOutcome("pairing_unverified")
 
     bindings = list_bindings(dal, event.community_id, int(pairing.id))
     if event.event_type != _MEMBER_EVENT:

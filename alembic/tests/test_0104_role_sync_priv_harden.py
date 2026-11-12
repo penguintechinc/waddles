@@ -156,6 +156,25 @@ def test_downgrade_purge_and_reupgrade(db: PgTestDatabase) -> None:
                 (pid,),
             )
             assert [r[0] for r in cur.fetchall()] == ["vip"]
+            # The purge is recorded for remediation, and the pre-existing pairing is the only
+            # one grandfathered (bounded); a pairing created after the upgrade is not.
+            cur.execute(
+                "SELECT community_role FROM role_sync_purged_bindings WHERE pairing_id = %s "
+                "ORDER BY community_role",
+                (pid,),
+            )
+            assert [r[0] for r in cur.fetchall()] == ["community-admin", "moderator"]
+            cur.execute(
+                "SELECT grandfathered FROM guild_tenant_pairings WHERE id = %s", (pid,)
+            )
+            assert cur.fetchone() == (True,)
+            new_pid = _pairing(cur)
+            cur.execute(
+                "SELECT grandfathered, discord_grants_backfilled_at FROM guild_tenant_pairings "
+                "WHERE id = %s",
+                (new_pid,),
+            )
+            assert cur.fetchone() == (False, None)
             cur.execute(
                 "SELECT count(*) FROM information_schema.tables WHERE table_name IN "
                 "('role_sync_community_grants', 'role_sync_discord_grants')"

@@ -625,6 +625,8 @@ class ReconcileSummary:
     mirror_roles_added: int = 0
     mirror_roles_removed: int = 0
     mirror_skipped_not_member: int = 0
+    #: Pairings refused because they carry no ownership proof (see `pairing_sync_allowed`).
+    pairings_skipped_unverified: int = 0
 
 
 def _list_enabled_pairings(dal: Any) -> list[Any]:
@@ -871,6 +873,14 @@ def _revoke_community_grant(
             dal.commit()
             return "not_a_member" if member is None else "not_owned"
         restore = grant.prior_role or baseline_role
+        if restore != baseline_role and (
+            dal(
+                (dal.community_roles.community_id == community_id)
+                & (dal.community_roles.name == restore)
+            ).count()
+            == 0
+        ):
+            restore = baseline_role  # prior role no longer exists in this community
         if _ROLE_RANK.get(restore, 0) > _ROLE_RANK.get(grant.granted_role, 0):
             restore = baseline_role  # defensive: a revoke never raises anyone
         _set_member_role(dal, member, community_id, restore)
@@ -985,14 +995,36 @@ def _current_role(dal: Any, community_id: int, hub_user_id: int) -> str | None:
     return None if row is None else str(row.role)
 
 
-def _warn_if_grandfathered(pairing: Any) -> None:
-    """WARN + count a pre-0104 pairing that never passed the guild-ownership proof (still runs)."""
-    if getattr(pairing, "ownership_verified_at", None) is None:
-        logger.warning(
-            "role_sync.pairing_ownership_unverified pairing_id=%s -- grandfathered",
-            pairing.id,
-        )
-        _unverified_pairings_counter.add(1)
+#: Opt-out kill switch (critical-rules.md core-mechanism pattern). Unseen/OFF = pre-0104
+#: grandfathered pairings keep syncing; ON = they are skipped everywhere (batch + inbound push).
+#: `FLAG_WADDLES_DISABLE_UNVERIFIED_PAIRING_SYNC` is the env override (flag plane ENV layer).
+FLAG_DISABLE_UNVERIFIED_PAIRING_SYNC = "waddles.disable-unverified-pairing-sync"
+
+
+async def pairing_sync_allowed(pairing: Any, tenant_slug: str) -> bool:
+    """True when role-sync may act for `pairing`: verified, or grandfathered with the switch OFF.
+
+    A pairing created after migration 0104 with no `ownership_verified_at` never syncs. A
+    pre-0104 (`grandfathered`) pairing syncs with a WARN + metric until
+    `waddles.disable-unverified-pairing-sync` is turned ON.
+    """
+    if getattr(pairing, "ownership_verified_at", None) is not None:
+        return True
+    if not getattr(pairing, "grandfathered", False):
+        logger.error("role_sync.pairing_unverified_refused pairing_id=%s", pairing.id)
+        _unverified_pairings_counter.add(1, {"outcome": "refused"})
+        return False
+    if feature_enabled is not None and await feature_enabled(
+        FLAG_DISABLE_UNVERIFIED_PAIRING_SYNC, tenant=tenant_slug, default=False
+    ):
+        logger.warning("role_sync.pairing_grandfathered_disabled pairing_id=%s", pairing.id)
+        _unverified_pairings_counter.add(1, {"outcome": "kill_switch"})
+        return False
+    logger.warning(
+        "role_sync.pairing_ownership_unverified pairing_id=%s -- grandfathered", pairing.id
+    )
+    _unverified_pairings_counter.add(1, {"outcome": "grandfathered"})
+    return True
 
 
 def _discord_grants(dal: Any, pairing_id: int) -> dict[str, set[str]]:
@@ -1003,6 +1035,47 @@ def _discord_grants(dal: Any, pairing_id: int) -> dict[str, set[str]]:
     for row in dal(g.pairing_id == pairing_id).select():
         out.setdefault(str(row.platform_user_id), set()).add(str(row.discord_role_id))
     return out
+
+
+async def _backfill_discord_grants_once(
+    dal: Any,
+    pairing: Any,
+    discord_client: DiscordRoleTargetClient,
+    guild_id: str,
+    managed_role_ids: frozenset[str],
+) -> int:
+    """First post-0104 pass of a grandfathered pairing: ledger managed roles members already hold.
+
+    Pre-0104 role adds were never ledgered, so without this the ledger-only removal could never
+    take them back. Runs once (stamps `discord_grants_backfilled_at`), only for `grandfathered`
+    pairings -- a pairing created after 0104 has a complete ledger from its first add. A member
+    read that is not provably complete leaves the stamp unset so the next pass retries.
+    """
+    if not getattr(pairing, "grandfathered", False) or getattr(
+        pairing, "discord_grants_backfilled_at", None
+    ):
+        return 0
+    checked = getattr(discord_client, "list_guild_members_checked", None)
+    if checked is None:
+        return 0
+    snapshot = await checked(guild_id=guild_id)
+    if not snapshot.complete:
+        logger.warning("role_sync.grant_backfill_incomplete pairing_id=%s", pairing.id)
+        return 0
+    added = 0
+    for member in snapshot.members:
+        for role_id in member.role_ids & managed_role_ids:
+            _record_discord_grant(dal, int(pairing.id), role_id, member.user_id)
+            added += 1
+    t = dal.guild_tenant_pairings
+    try:
+        dal(t.id == pairing.id).update(discord_grants_backfilled_at=datetime.now(UTC))
+        dal.commit()
+    except Exception:
+        dal.rollback()
+        raise
+    logger.info("role_sync.grant_backfill pairing_id=%s ledgered=%d", pairing.id, added)
+    return added
 
 
 def _record_discord_grant(dal: Any, pairing_id: int, role_id: str, user_id: str) -> None:
@@ -1185,6 +1258,9 @@ async def reconcile_pairing(
 
         # Removal is ledger-only: a role is removed solely when THIS pairing granted it, so a
         # role an admin assigned by hand in Discord is never taken away.
+        await _backfill_discord_grants_once(
+            dal, pairing, discord_client, guild_id, frozenset(managed_role_ids)
+        )
         ledger = _discord_grants(dal, pairing_id)
         roles_added = 0
         roles_removed = 0
@@ -1203,11 +1279,15 @@ async def reconcile_pairing(
                     roles_added += 1
                     _record_discord_grant(dal, pairing_id, role_id, discord_user_id)
             for role_id in owned - desired_roles:
-                if role_id in current and await discord_client.remove_role(
+                if role_id not in current:
+                    # Confirmed absent (removed by hand or by Discord): forget the grant.
+                    _drop_discord_grant(dal, pairing_id, role_id, discord_user_id)
+                elif await discord_client.remove_role(
                     guild_id=guild_id, user_id=discord_user_id, role_id=role_id
                 ):
                     roles_removed += 1
-                _drop_discord_grant(dal, pairing_id, role_id, discord_user_id)
+                    _drop_discord_grant(dal, pairing_id, role_id, discord_user_id)
+                # else: removal failed -- keep the ledger row so the next pass retries.
 
         logger.info(
             "role_sync.pairing_synced pairing_id=%s community_id=%s guild_id=%s "
@@ -1455,7 +1535,6 @@ async def run_role_sync_reconcile_batch(
         pairings = _list_enabled_pairings(dal)
         summary.pairings_examined = len(pairings)
         for pairing in pairings:
-            _warn_if_grandfathered(pairing)
             direction = pairing.direction
             if (
                 direction not in _TWITCH_TO_DISCORD_DIRECTIONS
@@ -1467,6 +1546,10 @@ async def run_role_sync_reconcile_batch(
                 # dropped, if it is ever hit (e.g. a future direction value added to the DB
                 # before this worker is updated to handle it).
                 summary.pairings_skipped_wrong_direction += 1
+                continue
+            tenant = _resolve_tenant_for_community(dal, int(pairing.community_id))
+            if tenant is None or not await pairing_sync_allowed(pairing, tenant[1]):
+                summary.pairings_skipped_unverified += 1
                 continue
 
             pairing_failed = False

@@ -173,6 +173,7 @@ def _make_pairing(
         direction=direction,
         role_name_prefix="[AC]",
         actor_user_id=None,
+        ownership_verified=True,
     )
     if sync_enabled:
         update_pairing(dal, community_id, created.id, sync_enabled=True)
@@ -428,6 +429,7 @@ class TestMultiCommunityIsolation:
             direction="twitch_to_discord",
             role_name_prefix="[OTHER]",
             actor_user_id=None,
+            ownership_verified=True,
         )
         update_pairing(
             dal, other_community_id, pairing_b.id, sync_enabled=True, propagate_moderators=True
@@ -540,6 +542,7 @@ class TestFailClosed:
             direction="twitch_to_discord",
             role_name_prefix="[BAD]",
             actor_user_id=None,
+            ownership_verified=True,
         )
         update_pairing(dal, other_community_id, bad_pairing.id, sync_enabled=True)
         create_binding(
@@ -662,6 +665,7 @@ def _make_platform_pairing(
         direction=direction,
         role_name_prefix="[AC]",
         actor_user_id=None,
+        ownership_verified=True,
     )
     update_pairing(dal, community_id, created.id, sync_enabled=True)
     create_binding(

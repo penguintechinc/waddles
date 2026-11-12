@@ -146,6 +146,7 @@ class _World:
             direction="discord_to_twitch",
             role_name_prefix="[AC]",
             actor_user_id=None,
+            ownership_verified=True,
         )
         update_pairing(self.dal, self.community_id, created.id, sync_enabled=True)
         create_binding(
@@ -481,7 +482,7 @@ async def test_discord_to_hub_user_to_member_resolution_guards(
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
     victim = world.member("800001", "member")
     owner = world.member("800002", "community-owner")
-    vip = world.member("800003", "vip")  # manual/unmanaged role
+    vip = world.member("800003", "vip", granted=False)  # manual role, no sync ledger row
     left = world.member("800004", "member", active=False)  # inactive membership
     # same hub user also a member of ANOTHER community: must stay untouched
     elsewhere = world.member("800005", "member")
@@ -510,7 +511,7 @@ async def test_grant_still_applies_and_hub_row_is_never_created(
 ) -> None:
     world.roles()
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
-    promoted = world.member("800001", "vip")
+    promoted = world.member("800001", "member", granted=False)
     # linked hub user, but never joined this community -> skipped, no row auto-created
     ghost = int(pg.scalar(world.dal, "INSERT INTO hub_users (username) VALUES ('g') RETURNING id"))
     pg.q(
@@ -522,10 +523,10 @@ async def test_grant_still_applies_and_hub_row_is_never_created(
     result = await _run(
         world,
         pairing,
-        _Discord([("800001", [MEMBER_DISCORD_ROLE]), ("800002", [MEMBER_DISCORD_ROLE])]),
+        _Discord([("800001", [ADMIN_DISCORD_ROLE]), ("800002", [MEMBER_DISCORD_ROLE])]),
     )
     assert result.community_roles_applied == 1 and result.users_skipped_not_member == 1
-    assert world.role_of(promoted) == "member"
+    assert world.role_of(promoted) == "vip"  # grant-only: raised, and ledgered
     assert (
         pg.scalar(
             world.dal, "SELECT count(*) FROM community_members WHERE user_id = %s", [str(ghost)]
