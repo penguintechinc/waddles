@@ -20,10 +20,10 @@ use sea_orm::{
 use uuid::Uuid;
 
 use crate::{
-    metrics, validate_delta, validate_reason, ApplyOutcome, BoxFuture, DueFloorBan, FloorBanBegin,
-    FloorBanOutcome, FloorScope, HistoryEntry, IdempotencyKey, ReasonClass, ReputationCaps,
-    ReputationError, ReputationScope, ReputationStore, ScoreEntry, ScoreScale, TenantPolicy,
-    TenantScore, MAX_BATCH, MAX_HISTORY_LIMIT, MAX_LEADERBOARD_LIMIT, MAX_TENANT_FANOUT,
+    metrics, validate_delta, validate_reason, ApplyOutcome, BoxFuture, FloorEnqueue, FloorScope,
+    HistoryEntry, IdempotencyKey, ReasonClass, ReputationCaps, ReputationError, ReputationScope,
+    ReputationStore, ScoreEntry, ScoreScale, TenantPolicy, TenantScore, MAX_BATCH,
+    MAX_HISTORY_LIMIT, MAX_LEADERBOARD_LIMIT, MAX_TENANT_FANOUT,
 };
 
 /// Per-transaction statement timeout, so a stuck row lock can never hold a
@@ -1016,7 +1016,7 @@ impl ReputationStore for PostgresReputationStore {
         })
     }
 
-    fn floor_ban_begin<'a>(
+    fn floor_ban_enqueue<'a>(
         &'a self,
         scope: &'a ReputationScope,
         target_community: i32,
@@ -1024,55 +1024,14 @@ impl ReputationStore for PostgresReputationStore {
         floor: FloorScope,
         key: &'a str,
         platform: &'a str,
-    ) -> BoxFuture<'a, Result<FloorBanBegin, ReputationError>> {
+    ) -> BoxFuture<'a, Result<FloorEnqueue, ReputationError>> {
         Box::pin(async move {
             let start = Instant::now();
             let result = self
-                .floor_ban_begin_impl(scope, target_community, user, floor, key, platform)
+                .floor_ban_enqueue_impl(scope, target_community, user, floor, key, platform)
                 .await;
             metrics::record_call(
-                "floor_ban_begin",
-                outcome_of(&result),
-                start.elapsed().as_secs_f64(),
-            );
-            result
-        })
-    }
-
-    fn floor_ban_record<'a>(
-        &'a self,
-        scope: &'a ReputationScope,
-        target_community: i32,
-        user: Uuid,
-        floor: FloorScope,
-        key: &'a str,
-        outcome: FloorBanOutcome,
-        error: &'a str,
-    ) -> BoxFuture<'a, Result<(), ReputationError>> {
-        Box::pin(async move {
-            let start = Instant::now();
-            let result = self
-                .floor_ban_record_impl(scope, target_community, user, floor, key, outcome, error)
-                .await;
-            metrics::record_call(
-                "floor_ban_record",
-                outcome_of(&result),
-                start.elapsed().as_secs_f64(),
-            );
-            result
-        })
-    }
-
-    fn floor_ban_due<'a>(
-        &'a self,
-        scope: &'a ReputationScope,
-        limit: u32,
-    ) -> BoxFuture<'a, Result<Vec<DueFloorBan>, ReputationError>> {
-        Box::pin(async move {
-            let start = Instant::now();
-            let result = self.floor_ban_due_impl(scope, limit).await;
-            metrics::record_call(
-                "floor_ban_due",
+                "floor_ban_enqueue",
                 outcome_of(&result),
                 start.elapsed().as_secs_f64(),
             );
@@ -1141,7 +1100,7 @@ impl PostgresReputationStore {
         row.try_get::<bool>("", "breached").map_err(backend_err)
     }
 
-    async fn floor_ban_begin_impl(
+    async fn floor_ban_enqueue_impl(
         &self,
         scope: &ReputationScope,
         target_community: i32,
@@ -1149,13 +1108,13 @@ impl PostgresReputationStore {
         floor: FloorScope,
         key: &str,
         platform: &str,
-    ) -> Result<FloorBanBegin, ReputationError> {
+    ) -> Result<FloorEnqueue, ReputationError> {
         let key = Self::floor_key(key)?;
         let row = self
             .conn
             .query_one_raw(stmt(
-                "SELECT reputation_floor_ban_begin($1::bigint, $2::bigint, $3::bigint, \
-                 $4::uuid, $5::smallint, $6::text, $7::text) AS state",
+                "SELECT r_state, r_id FROM reputation_floor_ban_enqueue($1::bigint, $2::bigint, \
+                 $3::bigint, $4::uuid, $5::smallint, $6::text, $7::text)",
                 vec![
                     Value::BigInt(Some(i64::from(scope.tenant_id))),
                     Value::BigInt(Some(i64::from(target_community))),
@@ -1168,81 +1127,11 @@ impl PostgresReputationStore {
             ))
             .await
             .map_err(map_sql_err)?
-            .ok_or_else(|| backend_err("reputation_floor_ban_begin returned no row"))?;
-        match row.try_get::<i16>("", "state").map_err(backend_err)? {
-            0 => Ok(FloorBanBegin::Proceed),
-            1 => Ok(FloorBanBegin::AlreadyDone),
-            2 => Ok(FloorBanBegin::RateLimited),
-            other => Err(backend_err(format!(
-                "unexpected floor-ban begin state {other}"
-            ))),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn floor_ban_record_impl(
-        &self,
-        scope: &ReputationScope,
-        target_community: i32,
-        user: Uuid,
-        floor: FloorScope,
-        key: &str,
-        outcome: FloorBanOutcome,
-        error: &str,
-    ) -> Result<(), ReputationError> {
-        let key = Self::floor_key(key)?;
-        self.conn
-            .execute_raw(stmt(
-                "SELECT reputation_floor_ban_record($1::bigint, $2::bigint, $3::uuid, \
-                 $4::smallint, $5::text, $6::smallint, $7::text)",
-                vec![
-                    Value::BigInt(Some(i64::from(scope.tenant_id))),
-                    Value::BigInt(Some(i64::from(target_community))),
-                    Value::Uuid(Some(user)),
-                    Value::SmallInt(Some(floor.code())),
-                    Value::String(Some(key)),
-                    Value::SmallInt(Some(outcome.code())),
-                    Value::String(Some(error.to_string())),
-                ],
-            ))
-            .await
-            .map_err(map_sql_err)?;
-        Ok(())
-    }
-
-    async fn floor_ban_due_impl(
-        &self,
-        scope: &ReputationScope,
-        limit: u32,
-    ) -> Result<Vec<DueFloorBan>, ReputationError> {
-        let rows = self
-            .conn
-            .query_all_raw(stmt(
-                "SELECT r_community_id, r_origin_community_id, r_user_uuid, r_scope, r_key, r_platform \
-                 FROM reputation_floor_ban_due($1::bigint, $2::int)",
-                vec![
-                    Value::BigInt(Some(i64::from(scope.tenant_id))),
-                    Value::Int(Some(i32::try_from(limit).unwrap_or(50))),
-                ],
-            ))
-            .await
-            .map_err(map_sql_err)?;
-        rows.into_iter()
-            .map(|r| {
-                let code: i16 = r.try_get("", "r_scope").map_err(backend_err)?;
-                Ok(DueFloorBan {
-                    community_id: r.try_get("", "r_community_id").map_err(backend_err)?,
-                    origin_community_id: r
-                        .try_get("", "r_origin_community_id")
-                        .map_err(backend_err)?,
-                    user: r.try_get("", "r_user_uuid").map_err(backend_err)?,
-                    scope: FloorScope::from_code(code)
-                        .ok_or_else(|| backend_err("unknown floor-ban scope"))?,
-                    key: r.try_get("", "r_key").map_err(backend_err)?,
-                    platform: r.try_get("", "r_platform").map_err(backend_err)?,
-                })
-            })
-            .collect()
+            .ok_or_else(|| backend_err("reputation_floor_ban_enqueue returned no row"))?;
+        let state: i16 = row.try_get("", "r_state").map_err(backend_err)?;
+        let id: i64 = row.try_get("", "r_id").map_err(backend_err)?;
+        FloorEnqueue::from_sql(state, id)
+            .ok_or_else(|| backend_err(format!("unexpected floor-ban enqueue state {state}")))
     }
 
     async fn tenant_communities_impl(

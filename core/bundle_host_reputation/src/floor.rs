@@ -58,55 +58,69 @@ impl FloorScope {
     }
 }
 
-/// Result of claiming a floor-ban slot (`reputation_floor_ban_begin`).
+/// Result of enqueueing a floor ban (`reputation_floor_ban_enqueue`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FloorBanBegin {
-    /// Slot claimed: verify, act, then record the outcome.
-    Proceed,
-    /// Idempotent replay of an already-done ban: do nothing.
-    AlreadyDone,
-    /// Per-community floor-ban throttle hit: do nothing (recorded).
-    RateLimited,
+pub enum FloorEnqueue {
+    /// A QUEUED row was recorded (breach re-verified in SQL under the community lock); the
+    /// action stage will dispatch the `mod.ban` command. Carries the row id (the correlation id).
+    Queued(i64),
+    /// The slot was already queued / in flight / done / failed / dead: an idempotent no-op.
+    AlreadyKnown(i64),
+    /// The per-community hourly quota was hit: recorded, retried after the quota window.
+    RateLimited(i64),
+    /// SQL re-verification said the floor is not breached (or the switch is off): recorded.
+    Refused(i64),
 }
 
-/// Outcome recorded for a begun floor-ban attempt (`reputation_floor_ban_record`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FloorBanOutcome {
-    /// The platform ban succeeded.
-    Done,
-    /// The platform ban failed; a durable retry is scheduled.
-    Failed,
-    /// Re-verification refused the ban (floor not breached).
-    Refused,
-}
-
-impl FloorBanOutcome {
-    /// The SQL `p_outcome` smallint.
+impl FloorEnqueue {
+    /// Parses the SQL `r_state` smallint of an enqueue result (0 queued, 1 known, 2 limited,
+    /// 3 refused) plus the row id.
     #[must_use]
-    pub fn code(self) -> i16 {
-        match self {
-            Self::Done => 1,
-            Self::Failed => 2,
-            Self::Refused => 3,
+    pub fn from_sql(state: i16, id: i64) -> Option<Self> {
+        match state {
+            0 => Some(Self::Queued(id)),
+            1 => Some(Self::AlreadyKnown(id)),
+            2 => Some(Self::RateLimited(id)),
+            3 => Some(Self::Refused(id)),
+            _ => None,
         }
     }
 }
 
-/// One floor ban whose durable retry is due (claimed with a lease by `floor_ban_due`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DueFloorBan {
-    /// The community the ban must be executed in.
-    pub community_id: i32,
-    /// The community whose score event originally triggered it.
-    pub origin_community_id: i32,
-    /// The banned user (UUID only).
-    pub user: uuid::Uuid,
-    /// Which floor policy.
-    pub scope: FloorScope,
-    /// The SQL-normalised idempotency key of the original attempt.
-    pub key: String,
-    /// The platform (`discord`, `twitch`, ...) whose `<platform>.moderation.ban` tool to retry.
-    pub platform: String,
+/// Persisted status of a floor-ban row (the SQL `status` smallint).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloorBanStatus {
+    /// Verified and queued for the action stage.
+    Queued = 1,
+    /// The sender confirmed the ban.
+    Done = 2,
+    /// Failed; a retry is due at `next_retry_at`.
+    Failed = 3,
+    /// Attempts exhausted: needs an operator (alerted).
+    Dead = 4,
+    /// Quota hit; retried after the quota window.
+    RateLimited = 5,
+    /// The floor was not breached at (re-)verification.
+    Refused = 6,
+    /// In flight under a lease.
+    Dispatched = 7,
+}
+
+impl FloorBanStatus {
+    /// Parses the SQL `status` smallint.
+    #[must_use]
+    pub fn from_code(code: i16) -> Option<Self> {
+        match code {
+            1 => Some(Self::Queued),
+            2 => Some(Self::Done),
+            3 => Some(Self::Failed),
+            4 => Some(Self::Dead),
+            5 => Some(Self::RateLimited),
+            6 => Some(Self::Refused),
+            7 => Some(Self::Dispatched),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -125,9 +139,25 @@ mod tests {
     }
 
     #[test]
-    fn outcome_codes_match_the_sql_contract() {
-        assert_eq!(FloorBanOutcome::Done.code(), 1);
-        assert_eq!(FloorBanOutcome::Failed.code(), 2);
-        assert_eq!(FloorBanOutcome::Refused.code(), 3);
+    fn enqueue_states_and_statuses_match_the_sql_contract() {
+        assert_eq!(FloorEnqueue::from_sql(0, 9), Some(FloorEnqueue::Queued(9)));
+        assert_eq!(
+            FloorEnqueue::from_sql(1, 9),
+            Some(FloorEnqueue::AlreadyKnown(9))
+        );
+        assert_eq!(
+            FloorEnqueue::from_sql(2, 9),
+            Some(FloorEnqueue::RateLimited(9))
+        );
+        assert_eq!(FloorEnqueue::from_sql(3, 9), Some(FloorEnqueue::Refused(9)));
+        assert_eq!(FloorEnqueue::from_sql(4, 9), None);
+        for code in 1..=7 {
+            assert_eq!(
+                FloorBanStatus::from_code(code).map(|s| s as i16),
+                Some(code)
+            );
+        }
+        assert_eq!(FloorBanStatus::from_code(0), None);
+        assert_eq!(FloorBanStatus::from_code(8), None);
     }
 }

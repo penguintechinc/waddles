@@ -20,10 +20,10 @@ use bundle_capability_gate::{
     HostInvokeScopeBuilder, MembershipCheck, ScopeKind, SnapshotMembership, TenantTier,
 };
 use bundle_host_reputation::{
-    connect, floor_sql_key, load_membership, ApplyOutcome, ConnectConfig, FloorBanBegin,
-    FloorBanOutcome, FloorScope, IdempotencyKey, PostgresReputationStore, ReasonClass,
-    ReputationCaps, ReputationError, ReputationScope, ReputationStore, ScoreEntry, TenantPolicy,
-    TenantScore, FLOOR_SOFT_BAN_REASON, MAX_LEADERBOARD_LIMIT,
+    connect, floor_sql_key, load_membership, ApplyOutcome, ConnectConfig, FloorEnqueue, FloorScope,
+    IdempotencyKey, PostgresReputationStore, ReasonClass, ReputationCaps, ReputationError,
+    ReputationScope, ReputationStore, ScoreEntry, TenantPolicy, TenantScore, FLOOR_SOFT_BAN_REASON,
+    MAX_LEADERBOARD_LIMIT,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use uuid::Uuid;
@@ -1178,38 +1178,28 @@ async fn floor_ban_store_calls_hit_the_real_sql_contract() {
         Ok(false)
     );
 
-    // The idempotency key is escaped into the SQL alphabet by the host (uppercase, dots).
-    let key = floor_sql_key("Evt.1:hard").unwrap();
-    let begin = |scope_kind: FloorScope, k: &str, platform: &'static str| {
+    // The key is host-derived and already in the SQL alphabet; a key that is not is refused
+    // host-side, never re-escaped.
+    let key = floor_sql_key("evt1:hard").unwrap();
+    let enqueue = |scope_kind: FloorScope, k: &str, platform: &'static str| {
         let k = k.to_string();
         let f = &f;
         async move {
             f.store
-                .floor_ban_begin(&scope(), 10, f.member, scope_kind, &k, platform)
+                .floor_ban_enqueue(&scope(), 10, f.member, scope_kind, &k, platform)
                 .await
         }
     };
+    let queued = enqueue(FloorScope::CommunityHard, &key, "discord")
+        .await
+        .unwrap();
+    let FloorEnqueue::Queued(id) = queued else {
+        panic!("expected a queued row, got {queued:?}")
+    };
+    // The replay is an idempotent no-op that names the same row (the correlation id).
     assert_eq!(
-        begin(FloorScope::CommunityHard, &key, "discord").await,
-        Ok(FloorBanBegin::Proceed)
-    );
-    assert_eq!(
-        f.store
-            .floor_ban_record(
-                &scope(),
-                10,
-                f.member,
-                FloorScope::CommunityHard,
-                &key,
-                FloorBanOutcome::Done,
-                ""
-            )
-            .await,
-        Ok(())
-    );
-    assert_eq!(
-        begin(FloorScope::CommunityHard, &key, "discord").await,
-        Ok(FloorBanBegin::AlreadyDone)
+        enqueue(FloorScope::CommunityHard, &key, "discord").await,
+        Ok(FloorEnqueue::AlreadyKnown(id))
     );
     assert_eq!(
         scalar_text(
@@ -1218,53 +1208,35 @@ async fn floor_ban_store_calls_hit_the_real_sql_contract() {
              bundle_reputation_floor_bans"
         )
         .await,
-        "system:reputation_floor|community_hard_floor|discord|2"
+        "system:reputation_floor|community_hard_floor|discord|1"
     );
-    // A key that is not already in the SQL alphabet is refused host-side, never re-escaped.
     assert!(matches!(
-        begin(FloorScope::CommunityHard, "Bad Key", "discord").await,
+        enqueue(FloorScope::CommunityHard, "Bad Key", "discord").await,
         Err(ReputationError::Invalid(_))
     ));
-
-    // Failure -> durable retry; `due` leases it (and returns the platform for the retry).
-    let k2 = floor_sql_key("evt2:tenant").unwrap();
-    begin(FloorScope::Tenant, &k2, "twitch").await.unwrap();
-    f.store
-        .floor_ban_record(
-            &scope(),
-            10,
-            f.member,
-            FloorScope::Tenant,
-            &k2,
-            FloorBanOutcome::Failed,
-            "target_unavailable",
-        )
-        .await
-        .unwrap();
-    assert!(f
-        .store
-        .floor_ban_due(&scope(), 10)
-        .await
-        .unwrap()
-        .is_empty());
+    // M1: a user who is NOT below the floor is refused in SQL at enqueue time (recorded as
+    // status 6), whatever the caller believed.
     exec(
         &f.su,
-        "UPDATE bundle_reputation_floor_bans SET next_retry_at = NOW() - INTERVAL '1 second' \
-         WHERE status = 3",
+        &format!(
+            "UPDATE bundle_reputation_scores SET balance = 900 WHERE user_uuid = '{}'",
+            f.member
+        ),
     )
     .await;
-    let due = f.store.floor_ban_due(&scope(), 10).await.unwrap();
-    assert_eq!(due.len(), 1);
-    assert_eq!((due[0].community_id, due[0].origin_community_id), (10, 10));
-    assert_eq!(due[0].scope, FloorScope::Tenant);
-    assert_eq!(due[0].platform, "twitch");
-    assert_eq!(due[0].key, k2);
-    assert!(f
-        .store
-        .floor_ban_due(&scope(), 10)
-        .await
-        .unwrap()
-        .is_empty());
+    let k2 = floor_sql_key("evt2:hard").unwrap();
+    assert!(matches!(
+        enqueue(FloorScope::CommunityHard, &k2, "discord").await,
+        Ok(FloorEnqueue::Refused(_))
+    ));
+    assert_eq!(
+        scalar_text(
+            &f.su,
+            "SELECT status::text FROM bundle_reputation_floor_bans WHERE idempotency_key = 'evt2:hard'"
+        )
+        .await,
+        "6"
+    );
 
     // The fan-out set is host-enumerated in SQL: tenant 1's live communities only.
     assert_eq!(f.store.tenant_communities(&scope()).await, Ok(vec![10]));

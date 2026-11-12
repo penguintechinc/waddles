@@ -46,9 +46,7 @@ mod metrics;
 mod postgres;
 mod scale;
 
-pub use floor::{
-    DueFloorBan, FloorBanBegin, FloorBanOutcome, FloorScope, FLOOR_ACTOR, MAX_TENANT_FANOUT,
-};
+pub use floor::{FloorBanStatus, FloorEnqueue, FloorScope, FLOOR_ACTOR, MAX_TENANT_FANOUT};
 
 use std::future::Future;
 use std::pin::Pin;
@@ -500,9 +498,11 @@ pub trait ReputationStore: Send + Sync {
         Box::pin(async { Err(unsupported("verify_floor_breach")) })
     }
 
-    /// Claims the (`target_community`, user, scope, `key`) floor-ban slot; `scope.community_id` is
-    /// the ORIGIN community. See [`FloorBanBegin`].
-    fn floor_ban_begin<'a>(
+    /// Enqueues a floor ban for (`target_community`, user, scope, `key`) as a QUEUED outbox row
+    /// for the action stage: SQL re-verifies the breach and applies the hourly quota under the
+    /// community's advisory lock in one transaction. `scope.community_id` is the ORIGIN community;
+    /// `key` is HOST-derived (never guest-chosen). See [`FloorEnqueue`].
+    fn floor_ban_enqueue<'a>(
         &'a self,
         _scope: &'a ReputationScope,
         _target_community: i32,
@@ -510,32 +510,8 @@ pub trait ReputationStore: Send + Sync {
         _floor: FloorScope,
         _key: &'a str,
         _platform: &'a str,
-    ) -> BoxFuture<'a, Result<FloorBanBegin, ReputationError>> {
-        Box::pin(async { Err(unsupported("floor_ban_begin")) })
-    }
-
-    /// Records the outcome of a begun attempt; `error` is a stable machine code, never free text.
-    #[allow(clippy::too_many_arguments)]
-    fn floor_ban_record<'a>(
-        &'a self,
-        _scope: &'a ReputationScope,
-        _target_community: i32,
-        _user: uuid::Uuid,
-        _floor: FloorScope,
-        _key: &'a str,
-        _outcome: FloorBanOutcome,
-        _error: &'a str,
-    ) -> BoxFuture<'a, Result<(), ReputationError>> {
-        Box::pin(async { Err(unsupported("floor_ban_record")) })
-    }
-
-    /// Claims (leases) up to `limit` due floor-ban retries of `scope.tenant_id`.
-    fn floor_ban_due<'a>(
-        &'a self,
-        _scope: &'a ReputationScope,
-        _limit: u32,
-    ) -> BoxFuture<'a, Result<Vec<DueFloorBan>, ReputationError>> {
-        Box::pin(async { Err(unsupported("floor_ban_due")) })
+    ) -> BoxFuture<'a, Result<FloorEnqueue, ReputationError>> {
+        Box::pin(async { Err(unsupported("floor_ban_enqueue")) })
     }
 
     /// The tenant's live community ids (the tenant-ban fan-out set), host-enumerated in SQL.

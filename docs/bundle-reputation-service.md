@@ -69,10 +69,8 @@ default **350**), `tenant_at_risk_threshold`. After every applied change, behind
 4. tenant: the user's tenant aggregate `<` tenant floor (policy enabled) -> ban (`tenant_floor`).
 
 The result carries `floors:{community,tenant}` (`disabled|none|ban|soft_ban|soft_ban_lifted|ban_failed:<code>`); a
-failed ban never fails the already-applied score change and is never silent. Known limits: a human-less platform
-ban needs a host-asserted automated actor for the platform moderation tool (it is `required_scope:
-community:moderate`) - until that lands a floor ban reports `ban_failed:forbidden`; tenant-floor ban fan-out
-runs in the current community only. Kill switch: `waddles.disable-bundle-reputation`.
+failed ban never fails the already-applied score change and is never silent (`floors.community` reports the
+enqueue result; delivery is asynchronous on the action stage). Kill switch: `waddles.disable-bundle-reputation`.
 
 ### Soft ban
 
@@ -194,24 +192,32 @@ map to `rate_limited`, non-members to `not_a_member`). Consequences for the bund
   chain's origin is the tenant's single active reputation-logic app
   (`reputation_active_logic_app`; none or ambiguous fails closed) or the core service itself.
 - Unscored members read as `COALESCE(balance, community policy score_default, 600)` everywhere.
-- **Automated hard ban** (`waddles.reputation-auto-ban`, default OFF): a floor ban
-  (`community_hard_floor` / `tenant_floor`) through `<platform>.moderation.ban` carries the
-  host-asserted automated actor `system:reputation_floor` (scope `community:moderate` only), attached by
-  `svc_process` `capabilities/floor_ban.rs` ONLY when the caller is the core reputation service reached as the
-  chain `[active reputation-logic app, service]`, a reputation apply already succeeded in the same invocation
-  (host-tracked on the invocation identity; fresh on every hop, never inherited), and the flag is ON.
-  Anything else falls through to the ordinary human-scope check (`forbidden`). Per community the host claims
-  an idempotency/rate-limit slot (`reputation_floor_ban_begin`, 60/h default, `floor_ban_hourly_quota`),
-  re-verifies the breach in SQL (`reputation_verify_floor_breach`: scope switch enabled AND score below
-  floor), runs the ban through the normal per-community grant check, and records the outcome
-  (`reputation_floor_ban_record`; table `bundle_reputation_floor_bans` is the audit trail: actor, reason,
-  scope, community, target UUID, platform, status). The tenant floor fans out over every live community of the
-  tenant (`reputation_tenant_communities`, 4 at a time); failures are durable retries (exponential backoff,
-  8 attempts, picked up by `reputation_floor_ban_due` on the next floor call), a partial fan-out is reported
-  as `target_unavailable`, never as success. Limit: the ban uses the triggering event's platform; the
-  per-community platform-connection enumeration is a follow-up, so a community without that platform's ban
-  grant is recorded as a failed (retried) attempt.
+- **Automated hard ban** (`waddles.reputation-auto-ban`, default OFF), delivered through an OUTBOX and the
+  EXISTING outbound moderation path (the platform service bundle runs on another stage, so a nested
+  `tool.invoke` can never reach Discord):
+
+  ```text
+  process stage (svc_process floor_ban.rs)      action stage (svc_action floor_ban_dispatch.rs)
+   ONLY IF core service, chain [logic, service],  claim (lease token) -> recheck breach in SQL
+   a really-APPLIED (applied==true) apply of the  -> signed outbound `mod.ban` (guild:- , {user:uuid})
+   SAME user+community in this invocation, flag   -> svc_ingest sender_exec -> Discord
+   ON, platform deliverable (discord)             -> ack ok  => complete(done)   [only on the ack]
+   -> reputation_floor_ban_enqueue (SQL re-verify,   ack/err => failed (backoff) | refused | dead
+      per-community lock, hourly quota) = QUEUED row
+  ```
+
+  The row id is the correlation id (sender op id `fb-<row>-<attempt>-<nonce>`). The idempotency key is
+  HOST-derived (`fb:` + hash of the invocation event id, user and scope), never the guest's value. Statuses:
+  1 queued, 2 done (sender-confirmed), 3 failed (backoff retry), 4 dead (8 attempts: ERROR log +
+  `waddles_floor_ban_dispatch_total{result="dead"}` alert), 5 rate-limited (retried after the quota window;
+  `waddles_floor_ban_enqueue_total{result="rate_limited"}` + ERROR log), 6 refused (not breached / protected
+  target / no linked account), 7 dispatched (lease). An expired lease is reclaimed; only the current lease
+  token can complete a row (no double fire; a platform ban is idempotent anyway). Tenant floor fans out over
+  every live community (`reputation_tenant_communities`); a partial fan-out is `target_unavailable`, never
+  success. The caller's per-community `tool.call` grant is checked at enqueue; the platform bundle's
+  `moderation.<platform>` grant, the protected-target check (owner/admin/mod) and drain readiness at dispatch.
+  Limit: only Discord has an outbound floor-ban path today (other platforms are refused up front).
 - Migrations: `alembic/versions/0072_reputation_host_ops.py` (score clamp CHECK + ledger columns),
   `alembic/versions/0098_reputation_floor_ban.py` + `scripts/db/bundle_reputation_floor_ban.sql`
-  (automated hard ban; tests `alembic/tests/test_0098_reputation_floor_ban.py`),
+  (automated hard ban outbox; tests `alembic/tests/test_0098_reputation_floor_ban.py`),
   `alembic/versions/0097_reputation_unify.py` + `scripts/db/bundle_reputation_unify.sql` (PR #1236, authoritative).

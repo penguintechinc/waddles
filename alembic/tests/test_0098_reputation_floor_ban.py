@@ -2,13 +2,15 @@
 
 Covers chain position / single head, `reputation_verify_floor_breach()` (community hard and tenant
 scopes, switch off, floor boundaries, unscored default, tenant pairing, fail-closed inputs), the
-audit/idempotency/rate-limit/durable-retry functions, the tenant fan-out set, and the bundle
-role's privilege boundary (EXECUTE on the functions, no direct table access).
+outbox functions (enqueue with SQL re-verification + exact quota under concurrency; lease/claim,
+recheck, complete-by-token, dead reaping), the tenant fan-out set, and each stage role's
+privilege boundary (EXECUTE on its own functions, no direct table access).
 """
 
 from __future__ import annotations
 
 import importlib.util
+import threading
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -30,8 +32,18 @@ _PATH = _ROOT / "alembic" / "versions" / "0098_reputation_floor_ban.py"
 _BUNDLE_LOGIN = "rep_ban_bundle"
 _LOGIN_PW = "rep-ban-test-only-pw"
 _VERIFY = "SELECT reputation_verify_floor_breach(%s, %s, %s::uuid, %s::smallint)"
-_BEGIN = "SELECT reputation_floor_ban_begin(%s, %s, %s, %s::uuid, %s::smallint, %s, %s)"
-_RECORD = "SELECT reputation_floor_ban_record(%s, %s, %s::uuid, %s::smallint, %s, %s::smallint, %s)"
+_ACTION_LOGIN = "rep_ban_action"
+_ENQUEUE = (
+    "SELECT r_state, r_id FROM reputation_floor_ban_enqueue("
+    "%s, %s, %s, %s::uuid, %s::smallint, %s, %s)"
+)
+_CLAIM = (
+    "SELECT r_id, r_tenant_id, r_community_id, r_user_uuid, r_scope, r_platform, r_attempt, "
+    "r_lease_token FROM reputation_floor_ban_claim(%s, %s)"
+)
+_COMPLETE = (
+    "SELECT reputation_floor_ban_complete(%s, %s::uuid, %s::smallint, %s, %s)"
+)
 
 
 def _load():  # type: ignore[no-untyped-def]
@@ -68,6 +80,10 @@ def pg_db() -> Iterator[PgTestDatabase]:
             )
             cur.execute(
                 f"CREATE ROLE {_BUNDLE_LOGIN} LOGIN PASSWORD %s IN ROLE waddles_bundle_reputation",
+                (_LOGIN_PW,),
+            )
+            cur.execute(
+                f"CREATE ROLE {_ACTION_LOGIN} LOGIN PASSWORD %s IN ROLE waddles_svc_action",
                 (_LOGIN_PW,),
             )
         yield db
@@ -248,43 +264,38 @@ class TestVerifyFloorBreach:
             assert _verify(pg_db, tid, cid, user, scope) is False
         assert _q(pg_db, _VERIFY, (tid, cid, user, None))[0][0] is False
 
-    def test_the_bundle_role_may_execute_it_but_not_read_the_audit_table(
-        self, pg_db: PgTestDatabase
-    ) -> None:
+    def test_the_bundle_role_may_execute_it(self, pg_db: PgTestDatabase) -> None:
         tid = _tenant(pg_db, "t-vf-role")
         cid = _community(pg_db, tid, "c1")
         assert _verify(pg_db, tid, cid, str(uuid.uuid4()), 1, _BUNDLE_LOGIN) is False
-        with pytest.raises(psycopg2.errors.InsufficientPrivilege):
-            _q(pg_db, "SELECT * FROM bundle_reputation_floor_bans", login=_BUNDLE_LOGIN)
-        with pytest.raises(psycopg2.errors.InsufficientPrivilege):
-            _q(
-                pg_db,
-                "INSERT INTO bundle_reputation_floor_bans (tenant_id, community_id, "
-                "origin_community_id, user_uuid, scope, idempotency_key, reason, platform) "
-                "VALUES (1, 1, 1, gen_random_uuid(), 1, 'k', 'community_hard_floor', 'discord')",
-                login=_BUNDLE_LOGIN,
-            )
-        # PUBLIC has no EXECUTE: a plain role cannot call it.
-        _q(pg_db, "CREATE ROLE rep_ban_stranger LOGIN PASSWORD %s", (_LOGIN_PW,))
-        for fn in (
-            "reputation_verify_floor_breach(bigint,bigint,uuid,smallint)",
-            "reputation_floor_ban_begin(bigint,bigint,bigint,uuid,smallint,text,text)",
-            "reputation_floor_ban_record(bigint,bigint,uuid,smallint,text,smallint,text)",
-            "reputation_floor_ban_due(bigint,int)",
-            "reputation_tenant_communities(bigint)",
-        ):
-            sql = "SELECT has_function_privilege(%s, %s, 'EXECUTE')"
-            assert _q(pg_db, sql, ("rep_ban_stranger", fn))[0][0] is False, fn
-            assert _q(pg_db, sql, (_BUNDLE_LOGIN, fn))[0][0] is True, fn
 
 
 @requires_docker
-class TestFloorBanLifecycle:
-    def _slot(self, db: PgTestDatabase, name: str) -> tuple[int, int, str]:
-        tid = _tenant(db, name)
-        return tid, _community(db, tid, "c1"), str(uuid.uuid4())
+class TestFloorBanOutbox:
+    """Enqueue (process stage) -> claim/recheck/complete (action stage) on a real Postgres."""
 
-    def _begin(
+    @pytest.fixture(autouse=True)
+    def _empty_outbox(self, pg_db: PgTestDatabase) -> None:
+        """Claims are global (cross-tenant), so each test starts from an empty outbox."""
+        _q(pg_db, "TRUNCATE bundle_reputation_floor_bans")
+
+    def _slot(
+        self, db: PgTestDatabase, name: str, *, score: int = 350
+    ) -> tuple[int, int, str]:
+        """A tenant+community with the hard ban ON (floor 400) and a user scoring `score`."""
+        tid = _tenant(db, name)
+        cid = _community(db, tid, "c1")
+        user = str(uuid.uuid4())
+        _q(
+            db,
+            "INSERT INTO bundle_reputation_policy (tenant_id, community_id, hard_ban_enabled) "
+            "VALUES (%s, %s, true)",
+            (tid, cid),
+        )
+        _score(db, tid, cid, user, score)
+        return tid, cid, user
+
+    def _enqueue(
         self,
         db: PgTestDatabase,
         tid: int,
@@ -292,14 +303,14 @@ class TestFloorBanLifecycle:
         user: str,
         *,
         scope: int = 1,
-        key: str = "evt1:hard",
+        key: str = "fb:evt1",
         platform: str = "discord",
         origin: int | None = None,
         login: str | None = _BUNDLE_LOGIN,
-    ) -> int:
-        return _q(
+    ) -> tuple[int, int]:
+        row = _q(
             db,
-            _BEGIN,
+            _ENQUEUE,
             (
                 tid,
                 cid,
@@ -310,183 +321,352 @@ class TestFloorBanLifecycle:
                 platform,
             ),
             login,
-        )[0][0]
+        )[0]
+        return row[0], row[1]
 
-    def _record(
+    def _claim(
+        self, db: PgTestDatabase, limit: int = 50, lease: int = 120
+    ) -> list[tuple[Any, ...]]:
+        return _q(db, _CLAIM, (limit, lease), _ACTION_LOGIN)
+
+    def _complete(
         self,
         db: PgTestDatabase,
-        tid: int,
-        cid: int,
-        user: str,
+        row_id: int,
+        lease: str,
         outcome: int,
         error: str = "",
-        *,
-        scope: int = 1,
-        key: str = "evt1:hard",
-    ) -> None:
-        _q(db, _RECORD, (tid, cid, user, scope, key, outcome, error), _BUNDLE_LOGIN)
+        op_id: str = "",
+    ) -> int:
+        return _q(db, _COMPLETE, (row_id, lease, outcome, error, op_id), _ACTION_LOGIN)[
+            0
+        ][0]
 
-    def _row(self, db: PgTestDatabase, cid: int) -> tuple[Any, ...]:
+    def _row(self, db: PgTestDatabase, row_id: int) -> tuple[Any, ...]:
         return _q(
             db,
             "SELECT status, attempts, last_error, actor, reason, platform, "
-            "next_retry_at IS NOT NULL, completed_at IS NOT NULL "
-            "FROM bundle_reputation_floor_bans WHERE community_id=%s",
-            (cid,),
+            "next_retry_at IS NOT NULL, completed_at IS NOT NULL, lease_token IS NOT NULL, "
+            "op_id FROM bundle_reputation_floor_bans WHERE id=%s",
+            (row_id,),
         )[0]
 
-    def test_audit_row_carries_actor_reason_scope_platform_and_outcome(
+    def _mine(self, claimed: list[tuple[Any, ...]], row_id: int) -> tuple[Any, ...]:
+        return next(r for r in claimed if r[0] == row_id)
+
+    # --- enqueue --------------------------------------------------------------------------
+
+    def test_enqueue_records_a_queued_audit_row_and_a_replay_is_a_no_op(
         self, pg_db: PgTestDatabase
     ) -> None:
-        tid, cid, user = self._slot(pg_db, "t-fb-audit")
-        assert self._begin(pg_db, tid, cid, user) == 0
-        assert self._row(pg_db, cid)[0] == 1  # pending
-        self._record(pg_db, tid, cid, user, 1)
-        status, attempts, err, actor, reason, platform, retry, completed = self._row(
-            pg_db, cid
+        tid, cid, user = self._slot(pg_db, "t-ob-audit")
+        state, row_id = self._enqueue(pg_db, tid, cid, user)
+        assert state == 0
+        status, attempts, err, actor, reason, platform, retry, done, leased, op = (
+            self._row(pg_db, row_id)
         )
-        assert (status, attempts, err) == (2, 1, None)
+        assert (status, attempts, err) == (1, 0, None)
         assert (actor, reason, platform) == (
             "system:reputation_floor",
             "community_hard_floor",
             "discord",
         )
-        assert (retry, completed) == (False, True)
-
-    def test_replay_of_a_done_ban_is_idempotent(self, pg_db: PgTestDatabase) -> None:
-        tid, cid, user = self._slot(pg_db, "t-fb-idem")
-        assert self._begin(pg_db, tid, cid, user) == 0
-        self._record(pg_db, tid, cid, user, 1)
-        assert self._begin(pg_db, tid, cid, user) == 1  # already done: do nothing
-        assert self._begin(pg_db, tid, cid, user) == 1
-        assert self._row(pg_db, cid)[:2] == (2, 1), (
-            "a replay never re-opens or recounts"
-        )
+        assert (retry, done, leased, op) == (False, False, False, None)
+        # The replay (same slot) names the SAME row (the correlation id) and changes nothing.
+        assert self._enqueue(pg_db, tid, cid, user) == (1, row_id)
+        assert self._row(pg_db, row_id)[:2] == (1, 0)
         # A different key / scope / user is a distinct slot.
-        assert self._begin(pg_db, tid, cid, user, key="evt2:hard") == 0
-        assert self._begin(pg_db, tid, cid, user, scope=2, key="evt1:hard") == 0
-        assert self._begin(pg_db, tid, cid, str(uuid.uuid4())) == 0
+        assert self._enqueue(pg_db, tid, cid, user, key="fb:evt2")[0] == 0
+        assert self._enqueue(pg_db, tid, cid, user, scope=2)[0] == 3, (
+            "tenant scope has no tenant policy: refused by the SQL re-verification"
+        )
 
-    def test_failure_schedules_a_durable_retry_that_due_leases_once(
+    def test_m1_the_breach_is_reverified_in_sql_at_enqueue_and_a_refusal_is_recorded(
         self, pg_db: PgTestDatabase
     ) -> None:
-        tid, cid, user = self._slot(pg_db, "t-fb-retry")
-        origin = _community(pg_db, tid, "origin")
-        assert self._begin(pg_db, tid, cid, user, scope=2, origin=origin) == 0
-        self._record(pg_db, tid, cid, user, 2, "not_granted", scope=2)
-        status, attempts, err, *_rest, retry, _done = self._row(pg_db, cid)
-        assert (status, attempts, err, retry) == (3, 1, "not_granted", True)
-        # Backoff has not elapsed: nothing due yet.
-        assert (
-            _q(
-                pg_db,
-                "SELECT * FROM reputation_floor_ban_due(%s, 10)",
-                (tid,),
-                _BUNDLE_LOGIN,
-            )
-            == []
+        tid, cid, user = self._slot(pg_db, "t-ob-m1", score=900)
+        state, row_id = self._enqueue(pg_db, tid, cid, user)
+        assert state == 3, "score is NOT below the floor: refused, never queued"
+        assert self._row(pg_db, row_id)[:3] == (6, 0, "floor_not_breached")
+        assert self._claim(pg_db) == [], "a refused row is never claimable"
+        # Switch off: refused too, whatever the caller believed.
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_scores SET balance = 100 WHERE community_id=%s",
+            (cid,),
         )
         _q(
             pg_db,
-            "UPDATE bundle_reputation_floor_bans SET next_retry_at = NOW() - INTERVAL '1 second' "
+            "UPDATE bundle_reputation_policy SET hard_ban_enabled = false "
             "WHERE community_id=%s",
             (cid,),
         )
-        due = _q(
-            pg_db,
-            "SELECT * FROM reputation_floor_ban_due(%s, 10)",
-            (tid,),
-            _BUNDLE_LOGIN,
-        )
-        assert due == [(cid, origin, user, 2, "evt1:hard", "discord")]
-        # Leased: a second claim (another replica) gets nothing.
-        assert (
-            _q(
-                pg_db,
-                "SELECT * FROM reputation_floor_ban_due(%s, 10)",
-                (tid,),
-                _BUNDLE_LOGIN,
-            )
-            == []
-        )
-        # The retry re-begins the same slot (attempts +1) and can then complete.
-        assert self._begin(pg_db, tid, cid, user, scope=2, origin=origin) == 0
-        self._record(pg_db, tid, cid, user, 1, scope=2)
-        assert self._row(pg_db, cid)[:2] == (2, 2)
-
-    def test_exhausted_retries_stay_visible_and_are_never_due(
-        self, pg_db: PgTestDatabase
-    ) -> None:
-        tid, cid, user = self._slot(pg_db, "t-fb-exhaust")
-        for _ in range(8):
-            assert self._begin(pg_db, tid, cid, user) == 0
-            self._record(pg_db, tid, cid, user, 2, "target_unavailable")
-        status, attempts, err, *_rest, retry, _done = self._row(pg_db, cid)
-        assert (status, attempts, err, retry) == (3, 8, "target_unavailable", False)
-        assert (
-            _q(
-                pg_db,
-                "SELECT * FROM reputation_floor_ban_due(%s, 10)",
-                (tid,),
-                _BUNDLE_LOGIN,
-            )
-            == []
-        )
-
-    def test_refused_outcome_is_recorded_and_free_text_errors_are_not_stored(
-        self, pg_db: PgTestDatabase
-    ) -> None:
-        tid, cid, user = self._slot(pg_db, "t-fb-refused")
-        assert self._begin(pg_db, tid, cid, user) == 0
-        self._record(pg_db, tid, cid, user, 3, "floor_not_breached")
-        assert self._row(pg_db, cid)[:3] == (4, 1, "floor_not_breached")
-        assert self._begin(pg_db, tid, cid, user, key="evt2:hard") == 0
-        self._record(pg_db, tid, cid, user, 2, "User 1234 not found!", key="evt2:hard")
-        err = _q(
-            pg_db,
-            "SELECT last_error FROM bundle_reputation_floor_bans "
-            "WHERE community_id=%s AND idempotency_key='evt2:hard'",
-            (cid,),
-        )[0][0]
-        assert err == "unknown"
-
-    def test_only_a_pending_attempt_can_be_recorded(
-        self, pg_db: PgTestDatabase
-    ) -> None:
-        tid, cid, user = self._slot(pg_db, "t-fb-pending")
-        with pytest.raises(psycopg2.errors.InvalidParameterValue):
-            self._record(pg_db, tid, cid, user, 1)  # never begun
-        assert self._begin(pg_db, tid, cid, user) == 0
-        self._record(pg_db, tid, cid, user, 1)
-        with pytest.raises(psycopg2.errors.InvalidParameterValue):
-            self._record(pg_db, tid, cid, user, 2, "late")  # already done
-        with pytest.raises(psycopg2.errors.InvalidParameterValue):
-            self._record(pg_db, tid, cid, user, 9)
-
-    def test_per_community_rate_limit_throttles_and_records(
-        self, pg_db: PgTestDatabase
-    ) -> None:
-        tid, cid, _user = self._slot(pg_db, "t-fb-rate")
+        assert self._enqueue(pg_db, tid, cid, user, key="fb:evt2")[0] == 3
+        # Back on and breached: a fresh slot queues.
         _q(
             pg_db,
-            "INSERT INTO bundle_reputation_policy (tenant_id, community_id, "
-            "floor_ban_hourly_quota) VALUES (%s, %s, 3)",
-            (tid, cid),
-        )
-        for i in range(3):
-            assert self._begin(pg_db, tid, cid, str(uuid.uuid4()), key=f"k{i}") == 0
-        victim = str(uuid.uuid4())
-        assert self._begin(pg_db, tid, cid, victim, key="k9") == 2
-        rows = _q(
-            pg_db,
-            "SELECT status, last_error FROM bundle_reputation_floor_bans "
-            "WHERE community_id=%s AND idempotency_key='k9'",
+            "UPDATE bundle_reputation_policy SET hard_ban_enabled = true "
+            "WHERE community_id=%s",
             (cid,),
         )
-        assert rows == [(5, "rate_limited")]
+        assert self._enqueue(pg_db, tid, cid, user, key="fb:evt3")[0] == 0
+        # A refused slot re-evaluates on replay (a score that dropped since can now queue).
+        assert self._enqueue(pg_db, tid, cid, user, key="fb:evt2")[0] == 0
+
+    def test_tenant_scope_fans_out_one_row_per_target_community_naming_the_origin(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid = _tenant(pg_db, "t-ob-tenant")
+        origin = _community(pg_db, tid, "origin")
+        target = _community(pg_db, tid, "target")
+        user = str(uuid.uuid4())
+        _tenant_score(pg_db, tid, user, 320)
+        _q(
+            pg_db,
+            "INSERT INTO bundle_reputation_tenant_policy (tenant_id, tenant_auto_ban_enabled, "
+            "tenant_auto_ban_floor) VALUES (%s, true, 350)",
+            (tid,),
+        )
+        ids = [
+            self._enqueue(pg_db, tid, c, user, scope=2, key="fb:t1", origin=origin)
+            for c in (origin, target)
+        ]
+        assert [s for s, _ in ids] == [0, 0]
+        rows = _q(
+            pg_db,
+            "SELECT community_id, origin_community_id, scope, reason FROM "
+            "bundle_reputation_floor_bans WHERE user_uuid=%s ORDER BY community_id",
+            (user,),
+        )
+        assert rows == [
+            (origin, origin, 2, "tenant_floor"),
+            (target, origin, 2, "tenant_floor"),
+        ]
+
+    def test_m2_m3_the_hourly_quota_is_exact_under_concurrency_and_recorded(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid = _tenant(pg_db, "t-ob-quota")
+        cid = _community(pg_db, tid, "c1")
+        _q(
+            pg_db,
+            "INSERT INTO bundle_reputation_policy (tenant_id, community_id, hard_ban_enabled, "
+            "floor_ban_hourly_quota) VALUES (%s, %s, true, 3)",
+            (tid, cid),
+        )
+        users = [str(uuid.uuid4()) for _ in range(12)]
+        for u in users:
+            _score(pg_db, tid, cid, u, 300)
+        results: list[int] = []
+        lock = threading.Lock()
+
+        def worker(u: str) -> None:
+            state, _ = self._enqueue(pg_db, tid, cid, u, key=f"fb:{u[:8]}")
+            with lock:
+                results.append(state)
+
+        threads = [threading.Thread(target=worker, args=(u,)) for u in users]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert sorted(results) == [0] * 3 + [2] * 9, (
+            "the per-community advisory lock makes the count exact: exactly the quota queues"
+        )
+        limited = _q(
+            pg_db,
+            "SELECT status, last_error, next_retry_at > NOW() FROM bundle_reputation_floor_bans "
+            "WHERE community_id=%s AND status=5",
+            (cid,),
+        )
+        assert len(limited) == 9
+        assert all(r == (5, "rate_limited", True) for r in limited), (
+            "recorded for retry AFTER the quota window, never silently dropped"
+        )
         # Another community is unaffected.
         other = _community(pg_db, tid, "c-other")
-        assert self._begin(pg_db, tid, other, victim, key="k9") == 0
+        _q(
+            pg_db,
+            "INSERT INTO bundle_reputation_policy (tenant_id, community_id, hard_ban_enabled) "
+            "VALUES (%s, %s, true)",
+            (tid, other),
+        )
+        _score(pg_db, tid, other, users[0], 300)
+        assert self._enqueue(pg_db, tid, other, users[0], key="fb:other")[0] == 0
+
+    def test_a_rate_limited_row_is_retried_only_after_the_window(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, _u = self._slot(pg_db, "t-ob-window")
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_policy SET floor_ban_hourly_quota = 1 "
+            "WHERE community_id=%s",
+            (cid,),
+        )
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        _score(pg_db, tid, cid, first, 300)
+        _score(pg_db, tid, cid, second, 300)
+        s1, id1 = self._enqueue(pg_db, tid, cid, first, key="fb:a")
+        s2, id2 = self._enqueue(pg_db, tid, cid, second, key="fb:b")
+        assert (s1, s2) == (0, 2)
+        claimed = self._claim(pg_db)
+        assert [r[0] for r in claimed] == [id1], "the limited row is NOT claimable yet"
+        # The window passes (the first ban is old): the limited row becomes due and is claimed.
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_floor_bans SET created_at = NOW() - INTERVAL '2 hours', "
+            "next_retry_at = NOW() - INTERVAL '1 second' WHERE id IN (%s, %s)",
+            (id1, id2),
+        )
+        later = self._claim(pg_db)
+        assert [r[0] for r in later] == [id2]
+        assert self._row(pg_db, id2)[0] == 7
+
+    # --- claim / lease --------------------------------------------------------------------
+
+    def test_claim_leases_a_queued_row_once_and_only_the_token_holder_completes_it(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = self._slot(pg_db, "t-ob-lease")
+        _state, row_id = self._enqueue(pg_db, tid, cid, user)
+        claimed = self._claim(pg_db)
+        mine = self._mine(claimed, row_id)
+        # (id, tenant, community, user, scope, platform, attempt, lease)
+        assert mine[1:7] == (tid, cid, user, 1, "discord", 1)
+        token = str(mine[7])
+        assert self._row(pg_db, row_id)[0] == 7
+        # L2: a second claimant (another replica) gets nothing while the lease is live.
+        assert self._claim(pg_db) == []
+        # A wrong token cannot complete it.
+        assert self._complete(pg_db, row_id, str(uuid.uuid4()), 1) == 0
+        assert self._row(pg_db, row_id)[0] == 7
+        # The holder completes it: done ONLY via the confirmed-result call, op id recorded.
+        assert self._complete(pg_db, row_id, token, 1, op_id="fb-1-1-abc") == 2
+        status, attempts, err, *_r, op = self._row(pg_db, row_id)
+        assert (status, attempts, err, op) == (2, 1, None, "fb-1-1-abc")
+        assert self._row(pg_db, row_id)[7] is True  # completed_at
+        # A second completion (replayed / stale) is a no-op.
+        assert self._complete(pg_db, row_id, token, 2, "late") == 0
+        assert self._row(pg_db, row_id)[0] == 2
+
+    def test_l2_an_expired_lease_is_reclaimed_and_the_old_token_can_no_longer_complete(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = self._slot(pg_db, "t-ob-expire")
+        _state, row_id = self._enqueue(pg_db, tid, cid, user)
+        old = str(self._mine(self._claim(pg_db), row_id)[7])
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_floor_bans SET lease_expires_at = NOW() - INTERVAL '1 s' "
+            "WHERE id=%s",
+            (row_id,),
+        )
+        again = self._mine(self._claim(pg_db), row_id)
+        assert again[6] == 2, "the reclaim is attempt 2"
+        new = str(again[7])
+        assert new != old
+        assert self._complete(pg_db, row_id, old, 1) == 0, "no double fire"
+        assert self._row(pg_db, row_id)[0] == 7
+        assert self._complete(pg_db, row_id, new, 1) == 2
+
+    def test_failure_schedules_a_backoff_retry_that_is_claimed_when_due(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = self._slot(pg_db, "t-ob-retry")
+        _state, row_id = self._enqueue(pg_db, tid, cid, user)
+        token = str(self._mine(self._claim(pg_db), row_id)[7])
+        assert self._complete(pg_db, row_id, token, 2, "relay_unconfirmed", "fb-x") == 3
+        status, attempts, err, *_r = self._row(pg_db, row_id)
+        assert (status, attempts, err) == (3, 1, "relay_unconfirmed")
+        assert self._row(pg_db, row_id)[6] is True  # next_retry_at set
+        assert self._claim(pg_db) == [], "backoff has not elapsed"
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_floor_bans SET next_retry_at = NOW() - INTERVAL '1 s' "
+            "WHERE id=%s",
+            (row_id,),
+        )
+        retried = self._mine(self._claim(pg_db), row_id)
+        assert retried[6] == 2
+        assert self._complete(pg_db, row_id, str(retried[7]), 1) == 2
+
+    def test_m2_exhausted_attempts_become_dead_and_are_never_claimed_again(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = self._slot(pg_db, "t-ob-dead")
+        _state, row_id = self._enqueue(pg_db, tid, cid, user)
+        outcome = 0
+        for attempt in range(1, 9):
+            _q(
+                pg_db,
+                "UPDATE bundle_reputation_floor_bans SET next_retry_at = NOW() - INTERVAL '1 s' "
+                "WHERE id=%s AND status=3",
+                (row_id,),
+            )
+            mine = self._mine(self._claim(pg_db), row_id)
+            assert mine[6] == attempt
+            outcome = self._complete(pg_db, row_id, str(mine[7]), 2, "relay_unconfirmed")
+        assert outcome == 4, "the 8th failure is DEAD"
+        assert self._row(pg_db, row_id)[:3] == (4, 8, "relay_unconfirmed")
+        assert self._claim(pg_db) == []
+        assert _q(pg_db, "SELECT * FROM reputation_floor_ban_reap(10)", (), _ACTION_LOGIN) == []
+
+    def test_m2_a_crashed_final_attempt_is_reaped_dead_and_returned_for_the_alert(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = self._slot(pg_db, "t-ob-reap")
+        _state, row_id = self._enqueue(pg_db, tid, cid, user)
+        self._claim(pg_db)
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_floor_bans SET attempts = 8, "
+            "lease_expires_at = NOW() - INTERVAL '1 s' WHERE id=%s",
+            (row_id,),
+        )
+        assert self._claim(pg_db) == [], "attempts exhausted: not leased again"
+        reaped = _q(pg_db, "SELECT * FROM reputation_floor_ban_reap(10)", (), _ACTION_LOGIN)
+        assert [(r[0], r[1], r[2]) for r in reaped] == [(row_id, tid, cid)]
+        assert self._row(pg_db, row_id)[:3] == (4, 8, "attempts_exhausted")
+
+    def test_a_permanent_refusal_closes_the_row_and_free_text_errors_are_not_stored(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = self._slot(pg_db, "t-ob-refuse")
+        _state, row_id = self._enqueue(pg_db, tid, cid, user)
+        token = str(self._mine(self._claim(pg_db), row_id)[7])
+        assert self._complete(pg_db, row_id, token, 3, "protected_target") == 6
+        assert self._row(pg_db, row_id)[:3] == (6, 1, "protected_target")
+        assert self._claim(pg_db) == []
+        _state, row2 = self._enqueue(pg_db, tid, cid, user, key="fb:evt2")
+        token2 = str(self._mine(self._claim(pg_db), row2)[7])
+        assert self._complete(pg_db, row2, token2, 2, "User 1234 not found!") == 3
+        assert self._row(pg_db, row2)[2] == "unknown"
+        with pytest.raises(psycopg2.errors.InvalidParameterValue):
+            self._complete(pg_db, row2, token2, 9)
+
+    def test_m1_the_breach_is_rechecked_again_right_before_the_command_is_sent(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = self._slot(pg_db, "t-ob-recheck")
+        _state, row_id = self._enqueue(pg_db, tid, cid, user)
+        token = str(self._mine(self._claim(pg_db), row_id)[7])
+        recheck = "SELECT reputation_floor_ban_recheck(%s, %s::uuid)"
+        assert _q(pg_db, recheck, (row_id, token), _ACTION_LOGIN)[0][0] == 0
+        assert _q(pg_db, recheck, (row_id, str(uuid.uuid4())), _ACTION_LOGIN)[0][0] == 2
+        # The score recovers between enqueue and dispatch: the send is cancelled, row refused.
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_scores SET balance = 900 WHERE community_id=%s",
+            (cid,),
+        )
+        assert _q(pg_db, recheck, (row_id, token), _ACTION_LOGIN)[0][0] == 1
+        assert self._row(pg_db, row_id)[:3] == (6, 1, "floor_not_breached")
+        assert _q(pg_db, recheck, (row_id, token), _ACTION_LOGIN)[0][0] == 2, (
+            "the lease is gone once the row is closed"
+        )
+
+    # --- input / privilege boundaries -----------------------------------------------------
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -504,44 +684,67 @@ class TestFloorBanLifecycle:
     def test_invalid_input_is_22023(
         self, pg_db: PgTestDatabase, kwargs: dict[str, Any]
     ) -> None:
-        tid, cid, user = self._slot(
-            pg_db, f"t-fb-inval-{abs(hash(str(kwargs))) % 10**8}"
-        )
+        tid, cid, user = self._slot(pg_db, f"t-ob-inval-{abs(hash(str(kwargs))) % 10**8}")
         with pytest.raises(psycopg2.errors.InvalidParameterValue):
-            self._begin(pg_db, tid, cid, user, **kwargs)
+            self._enqueue(pg_db, tid, cid, user, **kwargs)
 
     def test_a_community_outside_the_tenant_is_rejected_42501(
         self, pg_db: PgTestDatabase
     ) -> None:
-        tid, cid, user = self._slot(pg_db, "t-fb-pair-a")
-        other_tid = _tenant(pg_db, "t-fb-pair-b")
+        tid, cid, user = self._slot(pg_db, "t-ob-pair-a")
+        other_tid = _tenant(pg_db, "t-ob-pair-b")
         with pytest.raises(psycopg2.errors.InsufficientPrivilege):
-            self._begin(pg_db, other_tid, cid, user)
+            self._enqueue(pg_db, other_tid, cid, user)
         foreign = _community(pg_db, other_tid, "foreign")
         with pytest.raises(psycopg2.errors.InsufficientPrivilege):
-            self._begin(pg_db, tid, cid, user, origin=foreign)
-        # Retry rows of another tenant are never returned.
-        assert (
-            _q(
-                pg_db,
-                "SELECT * FROM reputation_floor_ban_due(%s, 10)",
-                (other_tid,),
-                _BUNDLE_LOGIN,
-            )
-            == []
+            self._enqueue(pg_db, tid, cid, user, origin=foreign)
+
+    def test_each_stage_role_may_execute_only_its_own_functions(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        sql = "SELECT has_function_privilege(%s, %s, 'EXECUTE')"
+        process_fns = (
+            "reputation_verify_floor_breach(bigint,bigint,uuid,smallint)",
+            "reputation_floor_ban_enqueue(bigint,bigint,bigint,uuid,smallint,text,text)",
+            "reputation_tenant_communities(bigint)",
         )
+        action_fns = (
+            "reputation_floor_ban_reap(int)",
+            "reputation_floor_ban_claim(int,int)",
+            "reputation_floor_ban_recheck(bigint,uuid)",
+            "reputation_floor_ban_complete(bigint,uuid,smallint,text,text)",
+        )
+        _q(pg_db, "CREATE ROLE rep_ban_stranger LOGIN PASSWORD %s", (_LOGIN_PW,))
+        for fn in process_fns + action_fns:
+            assert _q(pg_db, sql, ("rep_ban_stranger", fn))[0][0] is False, fn
+        for fn in process_fns:
+            assert _q(pg_db, sql, (_BUNDLE_LOGIN, fn))[0][0] is True, fn
+            assert _q(pg_db, sql, (_ACTION_LOGIN, fn))[0][0] is False, fn
+        for fn in action_fns:
+            assert _q(pg_db, sql, (_ACTION_LOGIN, fn))[0][0] is True, fn
+            assert _q(pg_db, sql, (_BUNDLE_LOGIN, fn))[0][0] is False, fn
+        # Neither stage role can read or write the table directly.
+        for login in (_BUNDLE_LOGIN, _ACTION_LOGIN):
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                _q(pg_db, "SELECT * FROM bundle_reputation_floor_bans", login=login)
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                _q(
+                    pg_db,
+                    "UPDATE bundle_reputation_floor_bans SET status = 2",
+                    login=login,
+                )
 
     def test_tenant_communities_is_the_tenants_live_communities_only(
         self, pg_db: PgTestDatabase
     ) -> None:
-        tid = _tenant(pg_db, "t-fb-fanout")
+        tid = _tenant(pg_db, "t-ob-fanout")
         a = _community(pg_db, tid, "a")
         b = _community(pg_db, tid, "b")
         gone = _community(pg_db, tid, "gone")
         inactive = _community(pg_db, tid, "inactive")
         _q(pg_db, "UPDATE communities SET deleted_at = NOW() WHERE id=%s", (gone,))
         _q(pg_db, "UPDATE communities SET is_active = false WHERE id=%s", (inactive,))
-        _community(pg_db, _tenant(pg_db, "t-fb-fanout-other"), "other-tenant")
+        _community(pg_db, _tenant(pg_db, "t-ob-fanout-other"), "other-tenant")
         got = _q(
             pg_db,
             "SELECT * FROM reputation_tenant_communities(%s)",

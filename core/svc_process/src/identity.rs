@@ -54,11 +54,10 @@
 //! `waddles_bundle_reader` role the stage already holds for the grant tables --
 //! no new role, password or privilege.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -292,11 +291,13 @@ pub struct InvocationIdentity {
     /// reputation ops from a system-originated invocation need no human actor
     /// scope (the automatic floor evaluation), every other caller does.
     system_originated: bool,
-    /// HOST-tracked: a reputation apply succeeded in THIS invocation's capability set (set by the
-    /// `reputation.apply*` host handler, never by guest input). The automated floor-ban gate
-    /// requires it, so a floor ban can only follow a real score change in the same invocation.
-    /// A fresh `false` on every tool hop ([`Self::for_tool_call`]): never inherited.
-    reputation_applied: AtomicBool,
+    /// HOST-tracked: the `(user, community)` pairs whose reputation apply really APPLIED
+    /// (`applied == true`, never an idempotent replay) in THIS invocation's capability set, set by
+    /// the `reputation.apply*` host handler and never by guest input. The automated floor-ban gate
+    /// requires the banned user and community to be in this set, so a floor ban can only follow a
+    /// real score change of THAT user in THAT community in the same invocation. Bounded
+    /// ([`MAX_APPLIED_TRACKED`]); empty on every tool hop ([`Self::for_tool_call`]): never inherited.
+    reputation_applied: Mutex<HashSet<(Uuid, i32)>>,
 }
 
 impl fmt::Debug for InvocationIdentity {
@@ -309,6 +310,9 @@ impl fmt::Debug for InvocationIdentity {
             .finish()
     }
 }
+
+/// Most `(user, community)` applies tracked per invocation for the floor-ban gate.
+const MAX_APPLIED_TRACKED: usize = 1024;
 
 /// First-party (core) bundle app ids.
 pub(crate) fn is_first_party(app_id: &str) -> bool {
@@ -395,7 +399,7 @@ impl InvocationIdentity {
             actor_role: Mutex::new(None),
             preverified: None,
             system_originated: false,
-            reputation_applied: AtomicBool::new(false),
+            reputation_applied: Mutex::new(HashSet::new()),
         }
     }
 
@@ -452,7 +456,7 @@ impl InvocationIdentity {
             actor_role: Mutex::new(None),
             preverified: None,
             system_originated: false,
-            reputation_applied: AtomicBool::new(false),
+            reputation_applied: Mutex::new(HashSet::new()),
         }
     }
 
@@ -470,7 +474,7 @@ impl InvocationIdentity {
             actor_role: Mutex::new(None),
             preverified: Some(actor),
             system_originated: false,
-            reputation_applied: AtomicBool::new(false),
+            reputation_applied: Mutex::new(HashSet::new()),
         }
     }
 
@@ -524,18 +528,30 @@ impl InvocationIdentity {
                 && is_first_party(caller_app_id)
                 && is_first_party(target_app_id),
             // Never inherited across ANY hop: each hop must see its own successful apply.
-            reputation_applied: AtomicBool::new(false),
+            reputation_applied: Mutex::new(HashSet::new()),
         }
     }
 
-    /// Records that a reputation apply succeeded in this invocation (host handler only).
-    pub(crate) fn mark_reputation_applied(&self) {
-        self.reputation_applied.store(true, Ordering::SeqCst);
+    /// Records that a reputation apply of `user` in `community_id` really applied in this
+    /// invocation (host handler only). Past the bound nothing more is recorded: the floor-ban
+    /// gate then fails closed for the overflow, never open.
+    pub(crate) fn mark_reputation_applied(&self, user: Uuid, community_id: i32) {
+        let mut set = self
+            .reputation_applied
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if set.len() < MAX_APPLIED_TRACKED {
+            set.insert((user, community_id));
+        }
     }
 
-    /// Whether a reputation apply succeeded in this invocation (see the field docs).
-    pub(crate) fn reputation_applied(&self) -> bool {
-        self.reputation_applied.load(Ordering::SeqCst)
+    /// Whether a reputation apply of exactly `user` in exactly `community_id` applied in this
+    /// invocation (see the field docs).
+    pub(crate) fn reputation_applied_for(&self, user: Uuid, community_id: i32) -> bool {
+        self.reputation_applied
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&(user, community_id))
     }
 
     /// Claims the next ordinal for a `kind` (`wager` | `transfer`) economy

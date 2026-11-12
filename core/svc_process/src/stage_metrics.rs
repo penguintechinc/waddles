@@ -55,7 +55,7 @@ pub const COUNT_BUCKETS: [f64; 12] = [
 /// against the emitted data in tests and mirrored in
 /// `docs/observability/data-plane-metrics.md`, so a rename is a conscious,
 /// documented act.
-pub const METRIC_NAMES: [&str; 17] = [
+pub const METRIC_NAMES: [&str; 18] = [
     "waddles_stage_latency_seconds",
     "waddles_executor_call_seconds",
     "waddles_host_call_latency_seconds",
@@ -73,6 +73,7 @@ pub const METRIC_NAMES: [&str; 17] = [
     "waddles_group_pending",
     "waddles_insecure_transport",
     "waddles_tenant_boundary_violations_total",
+    "waddles_floor_ban_enqueue_total",
 ];
 
 /// The OTel instrument name behind a documented (Prometheus-form) metric
@@ -262,6 +263,7 @@ pub struct StageMetrics {
     group_pending: Histogram<u64>,
     insecure_transport: Gauge<u64>,
     boundary_violations: Counter<u64>,
+    floor_ban_enqueue: Counter<u64>,
 }
 
 impl StageMetrics {
@@ -362,6 +364,10 @@ impl StageMetrics {
                 "waddles_tenant_boundary_violations_total",
                 "Hop-verification (tenant boundary) failures, by stage and reason",
             ),
+            floor_ban_enqueue: counter(
+                "waddles_floor_ban_enqueue_total",
+                "Automated floor-ban outbox enqueues, by scope and result",
+            ),
         }
     }
 
@@ -415,6 +421,20 @@ impl StageMetrics {
                 KeyValue::new("stage", STAGE),
                 KeyValue::new("capability", capability),
                 KeyValue::new("op", op),
+                KeyValue::new("result", result),
+            ],
+        );
+    }
+
+    /// Records one automated floor-ban enqueue (`waddles_floor_ban_enqueue_total`). `scope` is
+    /// `community_hard_floor` / `tenant_floor`; `result` is `queued`, `known`, `rate_limited`,
+    /// `refused` or `error` (all host-derived constants, never guest strings).
+    pub fn record_floor_ban_enqueue(&self, scope: &'static str, result: &'static str) {
+        self.floor_ban_enqueue.add(
+            1,
+            &[
+                KeyValue::new("stage", STAGE),
+                KeyValue::new("scope", scope),
                 KeyValue::new("result", result),
             ],
         );
@@ -1059,6 +1079,7 @@ mod tests {
         m.group_pending("a", "s", 1);
         m.insecure_transport("valkey", "tls", false);
         m.tenant_boundary_violation("process", "unknown_kid");
+        m.record_floor_ban_enqueue("tenant_floor", "queued");
 
         let exported: std::collections::BTreeSet<String> =
             h.points().into_iter().map(|p| p.name).collect();
@@ -1070,7 +1091,7 @@ mod tests {
             );
         }
         // Verification Integrity: report the denominator, and fail on zero.
-        assert_eq!(METRIC_NAMES.len(), 17);
+        assert_eq!(METRIC_NAMES.len(), 18);
         assert!(
             exported.len() >= METRIC_NAMES.len(),
             "examined {} exported series for {} documented names",

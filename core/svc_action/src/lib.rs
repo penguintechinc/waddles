@@ -77,6 +77,7 @@ pub mod distribution;
 pub mod egress;
 pub mod error;
 pub mod flags;
+pub mod floor_ban_dispatch;
 pub mod grant_gate;
 pub mod hop;
 pub mod host_api;
@@ -425,6 +426,7 @@ where
         host_api_metrics,
         hub_client_conn,
         app_version_snapshot.clone(),
+        config.db_password.clone(),
     );
 
     let state = http::AppState::new(config.clone(), prom_registry, Arc::clone(&connections));
@@ -833,6 +835,7 @@ async fn build_stage_capabilities(
     hub_client_conn: Option<Arc<hub_client::HubClient>>,
     connections: Arc<host_api::ConnectionRegistry>,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    db_password: config::Secret,
 ) -> Option<Arc<dyn capabilities::CapabilityHandler>> {
     let spine_cfg = match penguin_spine::SpineConfig::from_env() {
         Ok(c) => c,
@@ -1033,7 +1036,40 @@ async fn build_stage_capabilities(
     if event_sync_enabled {
         start_event_sync_consumer(&spine_cfg, Arc::clone(&caps)).await;
     }
+    start_floor_ban_dispatcher(cli, &db_password, Arc::clone(&caps)).await;
     Some(caps)
+}
+
+/// Starts the automated reputation floor-ban outbox dispatcher
+/// ([`floor_ban_dispatch`]): it claims the rows the process stage queued and delivers each as a
+/// signed outbound `mod.ban` command through THIS stage's sender path, completing a row only on
+/// the sender's confirmed ack. A database connect failure is logged loudly and leaves it off:
+/// queued bans then wait in the outbox (nothing is lost) until the next start.
+async fn start_floor_ban_dispatcher(
+    cli: &config::CliConfig,
+    db_password: &config::Secret,
+    caps: Arc<
+        capabilities::StageCapabilities<
+            redis::aio::MultiplexedConnection,
+            redis::aio::MultiplexedConnection,
+        >,
+    >,
+) {
+    let conn = match db::connect_with(cli, db_password).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "floor-ban dispatcher NOT started: database connection failed; queued automated bans wait in the outbox"
+            );
+            return;
+        }
+    };
+    let store = Arc::new(floor_ban_dispatch::PgFloorBanStore::new(conn));
+    let metrics = stage_metrics::stage_metrics();
+    tokio::spawn(async move {
+        floor_ban_dispatch::run_floor_ban_sweeper(store, caps, metrics, shutdown_signal()).await;
+    });
 }
 
 /// Builds the `db` bundle host capability's production wiring, mirroring
@@ -1221,6 +1257,7 @@ fn try_start_host_api(
     metrics: telemetry::HostApiMetrics,
     hub_client_conn: Option<Arc<hub_client::HubClient>>,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    db_password: config::Secret,
 ) -> Arc<host_api::ConnectionRegistry> {
     let registry = Arc::new(host_api::ConnectionRegistry::new());
     registry.set_dead_letter_metric(metrics.dead_lettered_no_executor_total.clone());
@@ -1245,6 +1282,7 @@ fn try_start_host_api(
             hub_client_conn,
             Arc::clone(&registry_for_task),
             app_version_snapshot,
+            db_password,
         )
         .await
         .unwrap_or_else(|| Arc::new(capabilities::DenyAllCapabilities));

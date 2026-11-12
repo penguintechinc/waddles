@@ -1,19 +1,20 @@
-//! Automated hard-ban gate tests: the REAL `handle_tool` dispatch, the real planner/gate and a
-//! real handshaken `Connection` to a scripted fake executor, against a stateful fake reputation
-//! store (idempotency, throttle, audit and durable-retry records). The store's own SQL is proven
-//! against a real Postgres in `alembic/tests/test_0098_reputation_floor_ban.py`.
+//! Automated hard-ban gate tests: the REAL `handle_tool` dispatch and the real planner/gate,
+//! against a stateful fake reputation store (the enqueue outbox: idempotency, quota, refusal).
+//! The gate never invokes the platform bundle (delivery is the action stage's outbox dispatch,
+//! tested in `svc_action`); the store's own SQL is proven against a real Postgres in
+//! `alembic/tests/test_0098_reputation_floor_ban.py`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bundle_host_reputation::{
-    BoxFuture, DueFloorBan, FloorBanBegin, FloorBanOutcome, FloorScope, IdempotencyKey,
-    ReputationCaps, ReputationError, ReputationScope, ReputationStore, ScoreEntry,
+    BoxFuture, FloorEnqueue, FloorScope, IdempotencyKey, ReputationCaps, ReputationError,
+    ReputationScope, ReputationStore, ScoreEntry,
 };
 use uuid::Uuid;
 
 use super::*;
-use crate::capabilities::floor_ban::{detect_claim, summarise, FloorResult};
+use crate::capabilities::floor_ban::{detect_claim, floor_ban_key, summarise, FloorResult};
 use crate::capabilities::ReputationWiring;
 use crate::identity::InvocationIdentity;
 use crate::license::test_support::FixedGate;
@@ -24,6 +25,8 @@ const REP: &str = "waddles.core.service.reputation";
 const DISCORD: &str = "waddles.core.service.discord";
 const BAN: &str = "discord.moderation.ban";
 const USER: &str = "3f2b8c1e-9d4a-4c55-8a10-0a1b2c3d4e5f";
+const OTHER_USER: &str = "9a8b7c6d-1111-4222-8333-444455556666";
+const EVENT: &str = "evt-floor-1";
 const LOGIC_VERSION: i64 = 11;
 const REP_VERSION: i64 = 22;
 const DISCORD_VERSION: i64 = 33;
@@ -32,18 +35,22 @@ fn unsupported() -> ReputationError {
     ReputationError::Backend("unused in this test".to_string())
 }
 
-/// Stateful fake of the floor-ban half of the store.
+/// One recorded enqueue: `(origin, target, user, scope, key, platform)`.
+type Enqueued = (i32, i32, Uuid, FloorScope, String, String);
+
+/// Stateful fake of the floor-ban half of the store: the enqueue outbox.
 struct FloorStore {
     /// `Some(app)` answers the lookup, `None` makes it fail.
     active: Mutex<Option<Option<String>>>,
     communities: Vec<i32>,
+    /// Communities whose enqueue answers `Refused` (SQL re-verification said not breached).
     not_breached: Mutex<HashSet<i32>>,
-    done: Mutex<HashSet<(i32, String)>>,
     rate_limited: Mutex<bool>,
-    due: Mutex<Vec<DueFloorBan>>,
-    begins: Mutex<Vec<(i32, i32, String, String)>>,
-    records: Mutex<Vec<(i32, FloorBanOutcome, String)>>,
-    begin_calls: AtomicU32,
+    /// Slots already enqueued: `(target, key)` -> row id.
+    known: Mutex<HashMap<(i32, String), i64>>,
+    /// Every enqueue: `(origin, target, user, scope, key, platform)`.
+    enqueues: Mutex<Vec<Enqueued>>,
+    enqueue_calls: AtomicU32,
 }
 
 impl FloorStore {
@@ -52,17 +59,15 @@ impl FloorStore {
             active: Mutex::new(Some(Some(active.to_string()))),
             communities: communities.to_vec(),
             not_breached: Mutex::default(),
-            done: Mutex::default(),
             rate_limited: Mutex::new(false),
-            due: Mutex::default(),
-            begins: Mutex::default(),
-            records: Mutex::default(),
-            begin_calls: AtomicU32::new(0),
+            known: Mutex::default(),
+            enqueues: Mutex::default(),
+            enqueue_calls: AtomicU32::new(0),
         })
     }
-    fn records(&self) -> Vec<(i32, FloorBanOutcome, String)> {
-        let mut r = self.records.lock().unwrap().clone();
-        r.sort_by_key(|(c, _, _)| *c);
+    fn enqueues(&self) -> Vec<Enqueued> {
+        let mut r = self.enqueues.lock().unwrap().clone();
+        r.sort_by_key(|e| e.1);
         r
     }
 }
@@ -142,64 +147,41 @@ impl ReputationStore for FloorStore {
                 .contains(&scope.community_id))
         })
     }
-    fn floor_ban_begin<'a>(
+    fn floor_ban_enqueue<'a>(
         &'a self,
         scope: &'a ReputationScope,
         target: i32,
-        _u: Uuid,
-        _f: FloorScope,
+        user: Uuid,
+        floor: FloorScope,
         key: &'a str,
         platform: &'a str,
-    ) -> BoxFuture<'a, Result<FloorBanBegin, ReputationError>> {
+    ) -> BoxFuture<'a, Result<FloorEnqueue, ReputationError>> {
         Box::pin(async move {
-            self.begin_calls.fetch_add(1, Ordering::SeqCst);
-            self.begins.lock().unwrap().push((
+            self.enqueue_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(id) = self.known.lock().unwrap().get(&(target, key.to_string())) {
+                return Ok(FloorEnqueue::AlreadyKnown(*id));
+            }
+            if self.not_breached.lock().unwrap().contains(&target) {
+                return Ok(FloorEnqueue::Refused(0));
+            }
+            if *self.rate_limited.lock().unwrap() {
+                return Ok(FloorEnqueue::RateLimited(0));
+            }
+            let id = i64::from(target) * 100;
+            self.known
+                .lock()
+                .unwrap()
+                .insert((target, key.to_string()), id);
+            self.enqueues.lock().unwrap().push((
                 scope.community_id,
                 target,
+                user,
+                floor,
                 key.to_string(),
                 platform.to_string(),
             ));
-            if self
-                .done
-                .lock()
-                .unwrap()
-                .contains(&(target, key.to_string()))
-            {
-                return Ok(FloorBanBegin::AlreadyDone);
-            }
-            if *self.rate_limited.lock().unwrap() {
-                return Ok(FloorBanBegin::RateLimited);
-            }
-            Ok(FloorBanBegin::Proceed)
+            Ok(FloorEnqueue::Queued(id))
         })
-    }
-    fn floor_ban_record<'a>(
-        &'a self,
-        _s: &'a ReputationScope,
-        target: i32,
-        _u: Uuid,
-        _f: FloorScope,
-        key: &'a str,
-        outcome: FloorBanOutcome,
-        error: &'a str,
-    ) -> BoxFuture<'a, Result<(), ReputationError>> {
-        Box::pin(async move {
-            if outcome == FloorBanOutcome::Done {
-                self.done.lock().unwrap().insert((target, key.to_string()));
-            }
-            self.records
-                .lock()
-                .unwrap()
-                .push((target, outcome, error.to_string()));
-            Ok(())
-        })
-    }
-    fn floor_ban_due<'a>(
-        &'a self,
-        _s: &'a ReputationScope,
-        _l: u32,
-    ) -> BoxFuture<'a, Result<Vec<DueFloorBan>, ReputationError>> {
-        Box::pin(async { Ok(std::mem::take(&mut *self.due.lock().unwrap())) })
     }
 }
 
@@ -302,9 +284,10 @@ async fn world(
         flag: Arc::new(FixedGate(true)),
         auto_ban_flag: Some(Arc::new(FixedGate(flag_on))),
     });
-    let identity = InvocationIdentity::new("discord", Some("12345".to_string()), vec![]);
+    let identity =
+        InvocationIdentity::new("discord", Some("12345".to_string()), vec![]).with_event_id(EVENT);
     if applied {
-        identity.mark_reputation_applied();
+        identity.mark_reputation_applied(Uuid::parse_str(USER).unwrap(), 3);
     }
     caps.invocation_identity = Some(Arc::new(identity));
     World { exec, store, caps }
@@ -328,29 +311,77 @@ fn ban_call(reason: &str, key: Option<&str>) -> HostCallBody {
 }
 
 #[tokio::test]
-async fn community_hard_floor_ban_happy_path_carries_the_host_asserted_automated_actor() {
+async fn community_hard_floor_ban_is_enqueued_for_the_action_stage_and_never_invokes_the_target() {
     let w = standard(true, true).await;
-    let out = run(&w.caps, ban_call("community_hard_floor", Some("evt1:hard")))
+    let out = run(&w.caps, ban_call("community_hard_floor", Some("guest-key")))
         .await
         .unwrap();
-    assert_eq!(out["ok"]["banned"], 1);
-    let inv = recorded(&w.exec);
-    assert_eq!(inv.len(), 1);
-    assert_eq!(inv[0].app_id, DISCORD);
-    // The actor is the fixed automated identity with ONLY the moderate scope.
-    assert_eq!(
-        inv[0].payload["args"]["__ctx"],
-        serde_json::json!({"actor": "system:reputation_floor", "scopes": ["community:moderate"]})
+    assert_eq!(out["ok"]["queued"], 1);
+    // H1: delivery is the OUTBOX, not a cross-stage tool call: no executor invoke at all.
+    assert!(
+        recorded(&w.exec).is_empty(),
+        "the process stage must never invoke the platform bundle"
     );
+    let user = Uuid::parse_str(USER).unwrap();
     assert_eq!(
-        w.store.records(),
-        vec![(3, FloorBanOutcome::Done, String::new())]
+        w.store.enqueues(),
+        vec![(
+            3,
+            3,
+            user,
+            FloorScope::CommunityHard,
+            floor_ban_key(EVENT, user, FloorScope::CommunityHard),
+            "discord".to_string()
+        )]
     );
-    let begins = w.store.begins.lock().unwrap().clone();
+}
+
+#[tokio::test]
+async fn the_stored_key_is_host_derived_never_the_guest_chosen_one() {
+    // M3: two calls with DIFFERENT guest keys in the same invocation (same event id) collapse to
+    // one slot, and the stored key never contains the guest's value.
+    let w = standard(true, true).await;
+    run(
+        &w.caps,
+        ban_call("community_hard_floor", Some("guest-key-A")),
+    )
+    .await
+    .unwrap();
+    run(
+        &w.caps,
+        ban_call("community_hard_floor", Some("guest-key-B")),
+    )
+    .await
+    .unwrap();
+    let enq = w.store.enqueues();
+    assert_eq!(enq.len(), 1, "one slot per (event, user, scope)");
+    assert!(!enq[0].4.contains("guest"), "{}", enq[0].4);
+    assert!(enq[0].4.starts_with("fb:"));
+    assert_eq!(w.store.enqueue_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_floor_ban_without_a_host_event_id_or_a_retry_token_is_refused() {
+    let w = standard(true, true).await;
+    // No retry token at all: a write tool requires one.
     assert_eq!(
-        begins,
-        vec![(3, 3, "evt1:hard".to_string(), "discord".to_string())]
+        run(&w.caps, ban_call("community_hard_floor", None))
+            .await
+            .unwrap_err(),
+        "invalid_args"
     );
+    // An invocation with no host-derived event id cannot derive a key: fail closed.
+    let mut caps = w.caps;
+    let identity = InvocationIdentity::new("discord", Some("12345".to_string()), vec![]);
+    identity.mark_reputation_applied(Uuid::parse_str(USER).unwrap(), 3);
+    caps.invocation_identity = Some(Arc::new(identity));
+    assert_eq!(
+        run(&caps, ban_call("community_hard_floor", Some("k")))
+            .await
+            .unwrap_err(),
+        "forbidden"
+    );
+    assert_eq!(w.store.enqueue_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -362,7 +393,7 @@ async fn a_non_logic_app_chain_origin_is_forbidden_and_never_acts() {
         .unwrap_err();
     assert_eq!(err, "forbidden");
     assert!(recorded(&w.exec).is_empty());
-    assert_eq!(w.store.begin_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(w.store.enqueue_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -377,7 +408,7 @@ async fn no_or_ambiguous_active_logic_app_and_a_lookup_failure_all_fail_closed()
             "forbidden"
         );
         assert!(recorded(&w.exec).is_empty());
-        assert_eq!(w.store.begin_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(w.store.enqueue_calls.load(Ordering::SeqCst), 0);
     }
 }
 
@@ -404,14 +435,14 @@ async fn only_the_core_reputation_service_hop_chain_is_eligible() {
             "{app_id}: {code}"
         );
         assert!(recorded(&w.exec).is_empty());
-        assert_eq!(w.store.begin_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(w.store.enqueue_calls.load(Ordering::SeqCst), 0);
     }
 }
 
 #[tokio::test]
 async fn human_origin_without_moderator_scope_and_no_prior_apply_is_forbidden() {
     // The same eligible chain, but NO reputation apply succeeded in this invocation: the
-    // automated actor is not attached and the human (no `community:moderate`) is refused.
+    // automated path is not taken and the human (no `community:moderate`) is refused.
     let w = standard(false, true).await;
     assert_eq!(
         run(&w.caps, ban_call("community_hard_floor", Some("k1")))
@@ -420,11 +451,56 @@ async fn human_origin_without_moderator_scope_and_no_prior_apply_is_forbidden() 
         "forbidden"
     );
     assert!(recorded(&w.exec).is_empty());
-    assert_eq!(w.store.begin_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(w.store.enqueue_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
-async fn a_non_floor_reason_never_gets_the_automated_actor() {
+async fn h2_an_apply_of_another_user_or_in_another_community_does_not_unlock_the_ban() {
+    let applied_user = Uuid::parse_str(OTHER_USER).unwrap();
+    let target_user = Uuid::parse_str(USER).unwrap();
+    // The applied user is someone else: banning USER is not unlocked.
+    let mut w = standard(false, true).await;
+    let identity =
+        InvocationIdentity::new("discord", Some("12345".to_string()), vec![]).with_event_id(EVENT);
+    identity.mark_reputation_applied(applied_user, 3);
+    w.caps.invocation_identity = Some(Arc::new(identity));
+    assert_eq!(
+        run(&w.caps, ban_call("community_hard_floor", Some("k1")))
+            .await
+            .unwrap_err(),
+        "forbidden"
+    );
+    assert_eq!(
+        run(&w.caps, ban_call("tenant_floor", Some("k1")))
+            .await
+            .unwrap_err(),
+        "forbidden",
+        "the tenant scope is bound to the same user"
+    );
+    // The right user, but applied in a DIFFERENT community: not unlocked either.
+    let identity =
+        InvocationIdentity::new("discord", Some("12345".to_string()), vec![]).with_event_id(EVENT);
+    identity.mark_reputation_applied(target_user, 4);
+    w.caps.invocation_identity = Some(Arc::new(identity));
+    assert_eq!(
+        run(&w.caps, ban_call("community_hard_floor", Some("k1")))
+            .await
+            .unwrap_err(),
+        "forbidden"
+    );
+    assert_eq!(w.store.enqueue_calls.load(Ordering::SeqCst), 0);
+    // The right user in the right community: unlocked.
+    let identity =
+        InvocationIdentity::new("discord", Some("12345".to_string()), vec![]).with_event_id(EVENT);
+    identity.mark_reputation_applied(target_user, 3);
+    w.caps.invocation_identity = Some(Arc::new(identity));
+    assert!(run(&w.caps, ban_call("community_hard_floor", Some("k1")))
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn a_non_floor_reason_never_gets_the_automated_path() {
     let w = standard(true, true).await;
     for reason in ["manual", "community_soft_floor", ""] {
         assert_eq!(
@@ -436,10 +512,12 @@ async fn a_non_floor_reason_never_gets_the_automated_actor() {
         );
     }
     assert!(recorded(&w.exec).is_empty());
+    assert_eq!(w.store.enqueue_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
-async fn floor_not_breached_is_refused_recorded_and_no_ban_runs() {
+async fn floor_not_breached_is_refused_by_the_sql_reverification_at_enqueue() {
+    // M1: the breach is re-verified inside the enqueue transaction; the host trusts only that.
     let w = standard(true, true).await;
     w.store.not_breached.lock().unwrap().insert(3);
     assert_eq!(
@@ -448,15 +526,8 @@ async fn floor_not_breached_is_refused_recorded_and_no_ban_runs() {
             .unwrap_err(),
         "forbidden"
     );
-    assert!(recorded(&w.exec).is_empty(), "no platform call");
-    assert_eq!(
-        w.store.records(),
-        vec![(
-            3,
-            FloorBanOutcome::Refused,
-            "floor_not_breached".to_string()
-        )]
-    );
+    assert!(w.store.enqueues().is_empty(), "no row is queued");
+    assert!(recorded(&w.exec).is_empty());
 }
 
 #[tokio::test]
@@ -480,14 +551,25 @@ async fn flag_off_or_unwired_refuses_before_touching_the_store() {
     );
     for w in [&w, &w2] {
         assert!(recorded(&w.exec).is_empty());
-        assert_eq!(w.store.begin_calls.load(Ordering::SeqCst), 0);
-        assert!(w.store.records().is_empty());
+        assert_eq!(w.store.enqueue_calls.load(Ordering::SeqCst), 0);
     }
 }
 
 #[tokio::test]
-async fn tenant_fan_out_records_every_community_and_a_failing_one_is_retried_durably() {
-    // Community 4 has no ban grant (the per-community authorization refuses it); 3, 5, 6 succeed.
+async fn a_platform_the_action_stage_cannot_deliver_is_refused_loudly_not_queued_to_die() {
+    let w = standard(true, true).await;
+    let mut call = ban_call("community_hard_floor", Some("k1"));
+    call.args["target"] = serde_json::json!("waddles.core.service.twitch");
+    call.args["tool"] = serde_json::json!("twitch.moderation.ban");
+    // Ineligible-by-shape falls to the ordinary path (no grant for twitch): refused either way,
+    // and nothing is ever enqueued.
+    assert!(run(&w.caps, call).await.is_err());
+    assert_eq!(w.store.enqueue_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn tenant_fan_out_enqueues_every_authorised_community_and_reports_a_partial_failure() {
+    // Community 4 has no ban grant (the per-community authorization refuses it); 3, 5, 6 queue.
     let w = world(REP, vec![LOGIC, REP], &[3, 4, 5, 6], &[3, 5, 6], true, true).await;
     let err = run(&w.caps, ban_call("tenant_floor", Some("evt9:tenant")))
         .await
@@ -496,102 +578,83 @@ async fn tenant_fan_out_records_every_community_and_a_failing_one_is_retried_dur
         err, "target_unavailable",
         "a partial fan-out is never reported as success"
     );
+    assert!(recorded(&w.exec).is_empty());
+    let enq = w.store.enqueues();
     assert_eq!(
-        recorded(&w.exec).len(),
-        3,
-        "only the granted communities were banned"
+        enq.iter().map(|e| e.1).collect::<Vec<_>>(),
+        vec![3, 5, 6],
+        "only the granted communities were queued"
     );
-    assert_eq!(
-        w.store.records(),
-        vec![
-            (3, FloorBanOutcome::Done, String::new()),
-            (4, FloorBanOutcome::Failed, "not_granted".to_string()),
-            (5, FloorBanOutcome::Done, String::new()),
-            (6, FloorBanOutcome::Done, String::new()),
-        ]
-    );
-    // Every begun slot names the ORIGIN community (3) and the claim's platform.
-    let begins = w.store.begins.lock().unwrap().clone();
-    assert_eq!(begins.len(), 4);
-    assert!(begins
+    // Every slot names the ORIGIN community (3), the tenant scope and the claim's platform.
+    assert!(enq
         .iter()
-        .all(|(origin, _, k, p)| *origin == 3 && k == "evt9:tenant" && p == "discord"));
+        .all(|e| e.0 == 3 && e.3 == FloorScope::Tenant && e.5 == "discord"));
 }
 
 #[tokio::test]
-async fn a_due_durable_retry_is_re_run_and_recorded_on_the_next_floor_call() {
-    let w = world(REP, vec![LOGIC, REP], &[3, 4], &[3, 4], true, true).await;
-    let user = Uuid::parse_str(USER).unwrap();
-    w.store.due.lock().unwrap().push(DueFloorBan {
-        community_id: 4,
-        origin_community_id: 3,
-        user,
-        scope: FloorScope::Tenant,
-        key: "evt-old:tenant".to_string(),
-        platform: "discord".to_string(),
-    });
-    run(
-        &w.caps,
-        ban_call("community_hard_floor", Some("evt-new:hard")),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        recorded(&w.exec).len(),
-        2,
-        "the new ban and the retried one"
-    );
-    assert_eq!(
-        w.store.records(),
-        vec![
-            (3, FloorBanOutcome::Done, String::new()),
-            (4, FloorBanOutcome::Done, String::new()),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn an_idempotent_replay_does_nothing_the_second_time() {
+async fn an_idempotent_replay_queues_nothing_the_second_time() {
     let w = standard(true, true).await;
     let call = || ban_call("community_hard_floor", Some("evt1:hard"));
     run(&w.caps, call()).await.unwrap();
     run(&w.caps, call()).await.unwrap();
-    assert_eq!(
-        recorded(&w.exec).len(),
-        1,
-        "one platform ban for two identical calls"
-    );
-    assert_eq!(
-        w.store.records().len(),
-        1,
-        "the replay is not re-audited as a new action"
-    );
-    assert_eq!(w.store.begin_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(w.store.enqueues().len(), 1, "one outbox row for two calls");
+    assert_eq!(w.store.enqueue_calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
-async fn the_per_community_rate_limit_blocks_the_ban() {
+async fn m2_the_rate_limit_is_recorded_and_the_caller_message_says_it_is_retried_later() {
     let w = standard(true, true).await;
     *w.store.rate_limited.lock().unwrap() = true;
-    assert_eq!(
-        run(&w.caps, ban_call("community_hard_floor", Some("k1")))
-            .await
-            .unwrap_err(),
-        "target_unavailable"
+    let err = w
+        .caps
+        .handle(ban_call("community_hard_floor", Some("k1")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "target_unavailable");
+    assert!(
+        err.message.contains("retried after the quota window"),
+        "{}",
+        err.message
     );
     assert!(recorded(&w.exec).is_empty());
 }
 
 #[tokio::test]
+async fn every_enqueue_result_is_counted_with_pii_free_labels() {
+    let harness = crate::stage_metrics::test_support::Harness::new();
+    let metrics = Arc::new(crate::stage_metrics::StageMetrics::new(&harness.meter()));
+    let mut w = standard(true, true).await;
+    w.caps = w.caps.with_stage_metrics(Arc::clone(&metrics));
+    run(&w.caps, ban_call("community_hard_floor", Some("k1")))
+        .await
+        .unwrap();
+    *w.store.rate_limited.lock().unwrap() = true;
+    w.store.known.lock().unwrap().clear();
+    let _ = run(&w.caps, ban_call("community_hard_floor", Some("k2"))).await;
+    let queued = [("scope", "community_hard_floor"), ("result", "queued")];
+    let limited = [
+        ("scope", "community_hard_floor"),
+        ("result", "rate_limited"),
+    ];
+    assert_eq!(
+        harness.count("waddles_floor_ban_enqueue_total", &queued),
+        1.0
+    );
+    assert_eq!(
+        harness.count("waddles_floor_ban_enqueue_total", &limited),
+        1.0
+    );
+    for p in harness.points() {
+        assert!(
+            !p.attrs.values().any(|v| v.contains(USER)),
+            "a user id leaked into a label: {p:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn malformed_floor_arguments_are_invalid_args_and_never_act() {
     let w = standard(true, true).await;
-    // No idempotency key.
-    assert_eq!(
-        run(&w.caps, ban_call("community_hard_floor", None))
-            .await
-            .unwrap_err(),
-        "invalid_args"
-    );
     // Extra argument (e.g. a guest trying to smuggle a target or duration).
     let mut call = ban_call("community_hard_floor", Some("k1"));
     call.args["args"]["duration"] = serde_json::json!(60);
@@ -601,15 +664,19 @@ async fn malformed_floor_arguments_are_invalid_args_and_never_act() {
     call.args["args"]["user"] = serde_json::json!("1234");
     assert_eq!(run(&w.caps, call).await.unwrap_err(), "invalid_args");
     assert!(recorded(&w.exec).is_empty());
-    assert_eq!(w.store.begin_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(w.store.enqueue_calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]
-fn the_applied_fact_and_the_actor_are_never_inherited_across_a_hop() {
+fn the_applied_fact_is_per_user_per_community_and_never_inherited_across_a_hop() {
+    let user = Uuid::parse_str(USER).unwrap();
+    let other = Uuid::parse_str(OTHER_USER).unwrap();
     let base =
         InvocationIdentity::new("discord", Some("1".into()), vec![]).with_system_originated(true);
-    base.mark_reputation_applied();
-    assert!(base.reputation_applied());
+    base.mark_reputation_applied(user, 3);
+    assert!(base.reputation_applied_for(user, 3));
+    assert!(!base.reputation_applied_for(other, 3), "another user");
+    assert!(!base.reputation_applied_for(user, 4), "another community");
     // Core -> core hop (the floor chain's own shape) and a hop through a third party: both fresh.
     for (caller, target) in [
         (LOGIC, REP),
@@ -619,34 +686,39 @@ fn the_applied_fact_and_the_actor_are_never_inherited_across_a_hop() {
         assert!(
             !base
                 .for_tool_call(Some("k".into()), caller, target)
-                .reputation_applied(),
+                .reputation_applied_for(user, 3),
             "{caller} -> {target}"
         );
     }
     // A fresh identity (no apply) is not applied.
-    assert!(!InvocationIdentity::new("discord", None, vec![]).reputation_applied());
+    assert!(!InvocationIdentity::new("discord", None, vec![]).reputation_applied_for(user, 3));
 }
 
-#[tokio::test]
-async fn the_nested_target_hop_cannot_reclaim_the_automated_actor() {
-    // The fake executor makes the DISCORD hop issue its own floor-ban tool.invoke. That hop's
-    // capability set has app_id = DISCORD and a fresh identity, so it is refused: the actor is
-    // not inherited across the hop.
-    let w = standard(true, true).await;
-    let nested = ban_call("community_hard_floor", Some("nested")).args;
-    let exec = fake_executor(Behavior::NestedCallThenReply(nested)).await;
-    let mut caps = w.caps;
-    if let Some(t) = caps.tool.as_mut() {
-        t.connections = Arc::clone(&exec.registry);
+#[test]
+fn the_applied_set_is_bounded_and_fails_closed_past_the_bound() {
+    let base = InvocationIdentity::new("discord", None, vec![]);
+    for i in 0..2000u128 {
+        base.mark_reputation_applied(Uuid::from_u128(i), 3);
     }
-    run(&caps, ban_call("community_hard_floor", Some("evt1:hard")))
-        .await
-        .unwrap();
-    // The outer ban ran once; the nested claim from the target hop never reached the floor gate
-    // (no second slot was begun) and issued no second platform ban.
-    assert_eq!(recorded(&exec).len(), 1);
-    assert_eq!(w.store.begin_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(w.store.records().len(), 1);
+    assert!(base.reputation_applied_for(Uuid::from_u128(0), 3));
+    assert!(!base.reputation_applied_for(Uuid::from_u128(1999), 3));
+}
+
+#[test]
+fn the_host_key_is_sql_safe_stable_and_separates_event_user_and_scope() {
+    let u = Uuid::from_u128(7);
+    let k = floor_ban_key("evt-1", u, FloorScope::CommunityHard);
+    assert!(k.starts_with("fb:") && k.len() == 43, "{k}");
+    assert!(k
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b':'));
+    assert_eq!(k, floor_ban_key("evt-1", u, FloorScope::CommunityHard));
+    assert_ne!(k, floor_ban_key("evt-2", u, FloorScope::CommunityHard));
+    assert_ne!(k, floor_ban_key("evt-1", u, FloorScope::Tenant));
+    assert_ne!(
+        k,
+        floor_ban_key("evt-1", Uuid::from_u128(8), FloorScope::CommunityHard)
+    );
 }
 
 #[test]
@@ -681,19 +753,17 @@ fn only_a_floor_ban_on_the_matching_core_service_is_a_claim() {
 }
 
 #[test]
-fn summary_is_ok_only_when_everything_is_banned_and_names_counts_only() {
+fn summary_is_ok_only_when_everything_is_queued_and_names_counts_only() {
     use FloorResult::*;
-    let ok = summarise(FloorScope::Tenant, &[Done, Done]).unwrap();
-    assert_eq!(ok["ok"]["banned"], 2);
-    let partial = summarise(FloorScope::Tenant, &[Done, Failed("not_granted".into())]).unwrap_err();
+    let ok = summarise(FloorScope::Tenant, &[Queued, Queued]).unwrap();
+    assert_eq!(ok["ok"]["queued"], 2);
+    let partial =
+        summarise(FloorScope::Tenant, &[Queued, Failed("not_granted".into())]).unwrap_err();
     assert_eq!(partial.code(), "target_unavailable");
     assert!(!partial.message().contains(USER));
-    assert_eq!(
-        summarise(FloorScope::Tenant, &[Done, RateLimited])
-            .unwrap_err()
-            .code(),
-        "target_unavailable"
-    );
+    let limited = summarise(FloorScope::Tenant, &[Queued, RateLimited]).unwrap_err();
+    assert_eq!(limited.code(), "target_unavailable");
+    assert!(limited.message().contains("retried after the quota window"));
     assert_eq!(
         summarise(FloorScope::CommunityHard, &[Refused])
             .unwrap_err()

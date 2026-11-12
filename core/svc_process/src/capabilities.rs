@@ -3666,11 +3666,14 @@ impl<K: KvBackend> StageCapabilities<K> {
         {
             invocation.release_mutation(kind, ordinal);
         }
-        // Host-tracked fact for the automated floor-ban gate: a reputation apply really succeeded
-        // in THIS invocation (never guest input; see `floor_ban`).
-        if matches!(op, Op::Apply { .. }) && result.is_ok() {
-            if let Some(invocation) = self.invocation_identity.as_deref() {
-                invocation.mark_reputation_applied();
+        // Host-tracked fact for the automated floor-ban gate: THIS user's score in THIS community
+        // really changed in THIS invocation. Only `applied == true` counts: an idempotent replay
+        // changed nothing and must never unlock a ban (never guest input; see `floor_ban`).
+        if let (Op::Apply { user, .. }, Ok(v)) = (&op, &result) {
+            if v.get("applied") == Some(&serde_json::Value::Bool(true)) {
+                if let Some(invocation) = self.invocation_identity.as_deref() {
+                    invocation.mark_reputation_applied(*user, scope.community_id);
+                }
             }
         }
         result.map_err(reputation_error_to_host)
