@@ -415,7 +415,8 @@ impl ConnectorHost {
     /// `bridge` services the component's `http`/`log`/`clock`/`flags`/
     /// `identity` imports; `None` means every host call fails
     /// `ConnectionUnavailable` (a connector that never calls an import, like
-    /// Echo, needs none).
+    /// Echo, needs none). Uses a private single-permit compile limiter;
+    /// the executor calls [`Self::load_bounded`] with its shared one.
     pub async fn load(
         engine: &Engine,
         linkers: &LinkerCache,
@@ -423,6 +424,29 @@ impl ConnectorHost {
         component_bytes: Vec<u8>,
         limits: ConnectorLimits,
         bridge: Option<Arc<HostBridge>>,
+    ) -> Result<Self, ExecutorError> {
+        Self::load_bounded(
+            engine,
+            linkers,
+            manifest,
+            component_bytes,
+            limits,
+            bridge,
+            Arc::new(Semaphore::new(1)),
+        )
+        .await
+    }
+
+    /// [`Self::load`], but the JIT compile holds a permit from
+    /// `compile_limiter` (shared with app-bundle loads) for its duration.
+    pub async fn load_bounded(
+        engine: &Engine,
+        linkers: &LinkerCache,
+        manifest: &VerifiedManifest,
+        component_bytes: Vec<u8>,
+        limits: ConnectorLimits,
+        bridge: Option<Arc<HostBridge>>,
+        compile_limiter: Arc<Semaphore>,
     ) -> Result<Self, ExecutorError> {
         if !manifest.world.is_connector() {
             return Err(ExecutorError::ConnectorLoad(format!(
@@ -445,13 +469,20 @@ impl ConnectorHost {
 
         let linker = linkers.get_or_build(manifest)?;
         let compile_engine = engine.clone();
-        let component =
-            tokio::task::spawn_blocking(move || Component::new(&compile_engine, &component_bytes))
-                .await
-                .map_err(|e| ExecutorError::ConnectorLoad(format!("compile task failed: {e}")))?
-                .map_err(|e| {
-                    ExecutorError::ConnectorLoad(format!("component does not compile: {e}"))
-                })?;
+        // Shares the executor-wide `compile_limiter` with app-bundle loads:
+        // an unbounded burst of connector JIT compiles at boot is what
+        // OOM-killed the pod (16Gi) and starved every app-bundle load.
+        let permit = compile_limiter
+            .acquire_owned()
+            .await
+            .map_err(|_| ExecutorError::ConnectorLoad("executor is shutting down".to_string()))?;
+        let component = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            Component::new(&compile_engine, &component_bytes)
+        })
+        .await
+        .map_err(|e| ExecutorError::ConnectorLoad(format!("compile task failed: {e}")))?
+        .map_err(|e| ExecutorError::ConnectorLoad(format!("component does not compile: {e}")))?;
         let instance_pre = linker.instantiate_pre(&component).map_err(|e| {
             ExecutorError::ConnectorLoad(format!(
                 "component does not link against the connector world: {e}"
@@ -993,6 +1024,60 @@ mod tests {
         assert!(ConnectorCallError::DeadlineExceeded(String::new()).is_sandbox_trip());
         assert!(ConnectorCallError::MemoryLimit(String::new()).is_sandbox_trip());
         assert!(ConnectorCallError::Trap(String::new()).is_sandbox_trip());
+    }
+
+    /// Connector compiles share the executor `compile_limiter`: with zero
+    /// free permits the load must queue (not compile), and proceed once a
+    /// permit frees. Regression for the boot-time OOM (unbounded compiles).
+    #[tokio::test]
+    async fn connector_load_waits_on_compile_limiter() {
+        use crate::engine::{build_engine, LinkerCache};
+        use clap::Parser;
+        use sha2::{Digest, Sha256};
+
+        const ECHO: &[u8] = include_bytes!("../tests/fixtures/echo_connector.wasm");
+        let cfg = CliConfig::try_parse_from([
+            "bundle-executor",
+            "--stage-host-api-addr",
+            "svc-process:8301",
+        ])
+        .expect("static test args always parse");
+        let engine = build_engine(&cfg).expect("engine");
+        let _ticker = crate::engine::spawn_epoch_ticker(&engine);
+        let mut h = Sha256::new();
+        h.update(ECHO);
+        let manifest = VerifiedManifest::new(
+            "waddles.core.test.connector-limiter",
+            format!("sha256:{:x}", h.finalize()),
+            WitWorld::Connector,
+            std::collections::HashSet::new(),
+        );
+        let limiter = Arc::new(Semaphore::new(1));
+        let held = Arc::clone(&limiter).acquire_owned().await.unwrap();
+        let linkers = LinkerCache::new(engine.clone());
+        let load = ConnectorHost::load_bounded(
+            &engine,
+            &linkers,
+            &manifest,
+            ECHO.to_vec(),
+            ConnectorLimits::from_config(&cfg),
+            None,
+            Arc::clone(&limiter),
+        );
+        tokio::pin!(load);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut load)
+                .await
+                .is_err(),
+            "load must queue while no compile permit is free"
+        );
+        drop(held);
+        load.await.expect("load proceeds once a permit frees");
+        assert_eq!(
+            limiter.available_permits(),
+            1,
+            "permit released after compile"
+        );
     }
 
     /// Metrics are EMITTED by a real call, not merely defined: one ok and one

@@ -425,6 +425,8 @@ pipeline:
     # compiles the active set via Cranelift: the OOM finding that sized these still applies).
     bundleExecutor:
       replicas: 1
+      # 2-CPU limit on alpha: compile 2 at a time (connectors + apps share it).
+      maxConcurrentCompiles: 2
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
       resources:

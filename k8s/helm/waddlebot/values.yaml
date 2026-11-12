@@ -1982,6 +1982,10 @@ pipeline:
       maxMemoryLimitMb: 256
       instancesPerBundle: 4
       maxConcurrentCalls: 32
+      # Concurrent WASM JIT compiles (app bundles AND connectors share it).
+      # 0 = auto: min(4, CPUs). Each compile holds ~100s of MiB; an unbounded
+      # boot burst OOM-killed the pod at 16Gi.
+      maxConcurrentCompiles: 0
       poolWaitMs: 500
       precompileDir: "/var/cache/waddles/wasm"
       wasmCollector: "drc"

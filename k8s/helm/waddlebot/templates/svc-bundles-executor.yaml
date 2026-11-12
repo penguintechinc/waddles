@@ -160,6 +160,8 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.instancesPerBundle | quote }}
         - name: EXECUTOR_MAX_CONCURRENT_CALLS
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.maxConcurrentCalls | quote }}
+        - name: EXECUTOR_MAX_CONCURRENT_COMPILES
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.maxConcurrentCompiles | default 0 | quote }}
         - name: EXECUTOR_POOL_WAIT_MS
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.poolWaitMs | quote }}
         - name: EXECUTOR_PRECOMPILE_DIR
