@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "op": "mod.ban",
+  "platform": "discord",
+  "community_id": 3,
+  "tenant_id": 7,
+  "origin_channel": "guild:-",
+  "user_id": "{user:7a1d2c3e-1111-4222-8333-444455556666}"
+}

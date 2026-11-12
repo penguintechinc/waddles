@@ -1417,3 +1417,6 @@ async fn write_actor_directory_outage_fails_closed_but_actorless_events_proceed(
         .unwrap();
     assert_eq!(recorded(&exec).len(), 1);
 }
+
+#[path = "floor_ban_tests.rs"]
+mod floor_ban_tests;

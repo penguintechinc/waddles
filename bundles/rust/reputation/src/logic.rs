@@ -493,8 +493,11 @@ fn try_ban(env: &Env, platform: Option<&str>, user: &str, reason: &str, key: &st
 ///   (`community_soft_floor`); else a floor-triggered soft ban is lifted
 ///   (a manual soft ban, recorded under another reason, is never cleared);
 /// * tenant: the user's tenant aggregate `< tenant floor` (policy enabled)
-///   -> ban (`tenant_floor`). The ban runs through the current community's
-///   platform tool; fan-out to the tenant's other communities is a follow-up.
+///   -> ban (`tenant_floor`). Both bans go through the platform ban tool with the
+///   host-asserted `system:reputation_floor` actor (svc_process `floor_ban`): the HOST
+///   re-verifies the breach in SQL, enforces the per-scope switches, idempotency and
+///   rate limit, audits every attempt, and fans a tenant ban out across every community
+///   of the tenant with a durable retry record for failures.
 ///
 /// A failed host/ban call never fails the score change that already applied:
 /// it is reported in the result (`ban_failed:<code>`) so it is never silent.

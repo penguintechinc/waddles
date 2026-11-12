@@ -78,6 +78,8 @@ struct RecordingStore {
     active_logic: Mutex<Option<Option<String>>>,
     /// Idempotency keys `adjust` was called with.
     adjust_keys: Mutex<Vec<String>>,
+    /// When set, `apply` answers an idempotent REPLAY (`applied: false`).
+    apply_replay: Mutex<bool>,
 }
 
 impl RecordingStore {
@@ -256,7 +258,7 @@ impl ReputationStore for RecordingStore {
             self.take()
                 .map(|new_score| bundle_host_reputation::ApplyOutcome {
                     new_score,
-                    applied: true,
+                    applied: !*self.apply_replay.lock().unwrap(),
                 })
         })
     }
@@ -492,6 +494,7 @@ fn fixture_app(
         caps = caps.with_reputation(ReputationWiring {
             store: Arc::clone(&store) as Arc<dyn ReputationStore>,
             flag: Arc::new(FixedGate(flag_on)),
+            auto_ban_flag: None,
         });
     }
     Fixture {
@@ -1864,6 +1867,64 @@ async fn a_positive_moderation_delta_is_forbidden_for_everyone_including_admins(
         ))
         .await
         .is_ok());
+}
+
+#[tokio::test]
+async fn only_a_really_applied_apply_marks_that_user_and_community_for_the_floor_gate() {
+    let f = sys_fixture(v2_grants());
+    let community = f.caps.reputation_scope().community_id;
+    let applied = |f: &Fixture, user: Uuid, community: i32| {
+        f.caps
+            .invocation_identity
+            .as_deref()
+            .is_some_and(|i| i.reputation_applied_for(user, community))
+    };
+    assert!(!applied(&f, f.member, community), "nothing applied yet");
+    // A refused apply (store failure) never marks the invocation.
+    f.store.answer(Err(ReputationError::Backend("down".into())));
+    let args = serde_json::json!({
+        "user": f.member.to_string(), "delta": 1, "reason": "activity.follow",
+    });
+    assert!(f
+        .caps
+        .handle(rep_call("reputation.apply", args.clone()))
+        .await
+        .is_err());
+    assert!(
+        !applied(&f, f.member, community),
+        "a failed apply is not a successful apply"
+    );
+    // A read never marks it either.
+    f.store.answer(Ok(600));
+    f.caps
+        .handle(rep_call(
+            "reputation.get_tenant",
+            serde_json::json!({"user": f.member.to_string()}),
+        ))
+        .await
+        .ok();
+    assert!(!applied(&f, f.member, community));
+    // L1: an idempotent REPLAY (`applied == false`) succeeded but changed nothing: not marked.
+    *f.store.apply_replay.lock().unwrap() = true;
+    f.store.answer(Ok(601));
+    f.caps
+        .handle(rep_call("reputation.apply", args.clone()))
+        .await
+        .expect("a replay is not an error");
+    assert!(
+        !applied(&f, f.member, community),
+        "a replay must not unlock a ban"
+    );
+    // A really-applied apply marks exactly that user in exactly that community.
+    *f.store.apply_replay.lock().unwrap() = false;
+    f.store.answer(Ok(602));
+    f.caps
+        .handle(rep_call("reputation.apply", args))
+        .await
+        .expect("apply succeeds");
+    assert!(applied(&f, f.member, community));
+    assert!(!applied(&f, Uuid::from_u128(42), community), "another user");
+    assert!(!applied(&f, f.member, community + 1), "another community");
 }
 
 /// Sets what the store's `reputation_active_logic_app` answers.

@@ -66,6 +66,8 @@ Guest op strings are folded through an allow-list (`KNOWN_OPS`, else `other`); t
 | `waddles_sandbox_trip_total` | counter | `stage, app_id, limit` | executor-reported trips: `timeout`, `memory`, `trap`, `denied` |
 | `waddles_spine_dlq_total` | counter | `stage, reason` | dead-letter writes by the record's `error.kind` |
 | `waddles_tenant_boundary_violations_total` | counter | `stage, reason` | §5.11 hop-verification failures |
+| `waddles_floor_ban_enqueue_total` | counter | `stage, scope, result` | process-stage automated floor-ban outbox enqueues. `scope`: `community_hard_floor`, `tenant_floor`; `result`: `queued`, `known`, `rate_limited` (alert: quota hit), `refused`, `error` |
+| `waddles_floor_ban_dispatch_total` | counter | `stage, result` | action-stage automated floor-ban outbox deliveries. `result`: `done` (sender-confirmed), `failed` (retry scheduled), `refused`, `dead` (attempts exhausted: ALERT), `lease_lost`, `store_error` |
 | `waddles_consumer_skipped_total` | counter | `stage, app_id, reason` | read + acked without an executor call (e.g. `route_denied`) |
 | `waddles_stream_trimmed_total` | counter | `stage` | `XADD` observed the stream at its approximate `MAXLEN` |
 | `waddles_stream_claimed_total` | counter | `stage, app_id` | `XAUTOCLAIM` recoveries |

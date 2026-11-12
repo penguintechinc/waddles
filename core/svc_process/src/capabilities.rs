@@ -90,6 +90,7 @@ use crate::stage_metrics::{self, StageMetrics};
 
 mod gameserver_net;
 pub use gameserver_net::{GameServerNetWiring, BUNDLE_GAMESERVER_NET_CAPABILITY_FLAG};
+mod floor_ban;
 mod tool;
 pub use tool::ToolContext;
 
@@ -444,6 +445,9 @@ pub struct ReputationWiring {
     /// `crate::license::BUNDLE_REPUTATION_CAPABILITY_FLAG` gate -- OFF denies
     /// every call `feature_disabled` before the store is touched.
     pub flag: Arc<dyn FeatureGate>,
+    /// `crate::license::REPUTATION_AUTO_BAN_FLAG` gate (`waddles.reputation-auto-ban`, default
+    /// OFF) for the automated floor ban (`floor_ban`). `None` or OFF refuses every floor ban.
+    pub auto_ban_flag: Option<Arc<dyn FeatureGate>>,
 }
 
 /// Live wiring for the `platform-table` bundle host capability (spec
@@ -3661,6 +3665,16 @@ impl<K: KvBackend> StageCapabilities<K> {
             (reservation, &result)
         {
             invocation.release_mutation(kind, ordinal);
+        }
+        // Host-tracked fact for the automated floor-ban gate: THIS user's score in THIS community
+        // really changed in THIS invocation. Only `applied == true` counts: an idempotent replay
+        // changed nothing and must never unlock a ban (never guest input; see `floor_ban`).
+        if let (Op::Apply { user, .. }, Ok(v)) = (&op, &result) {
+            if v.get("applied") == Some(&serde_json::Value::Bool(true)) {
+                if let Some(invocation) = self.invocation_identity.as_deref() {
+                    invocation.mark_reputation_applied(*user, scope.community_id);
+                }
+            }
         }
         result.map_err(reputation_error_to_host)
     }

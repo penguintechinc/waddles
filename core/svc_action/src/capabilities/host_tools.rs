@@ -539,7 +539,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
 
     /// Resolves the tokenized user UUID to the platform id, community-scoped, HOST-side.
     /// Any failure refuses the call (nothing queued); the raw id is never logged.
-    async fn detokenize_user(
+    pub(super) async fn detokenize_user(
         &self,
         scope: &InvokeScope,
         platform: &str,
@@ -578,7 +578,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     /// well permit it, the host never does. The strict default has no mod-on-mod exemption (no
     /// community-config source is wired). Fails closed: with no directory, or on a directory
     /// failure, the call is refused as unavailable -- an unverifiable target is not attacked.
-    async fn refuse_protected_target(
+    pub(super) async fn refuse_protected_target(
         &self,
         scope: &InvokeScope,
         platform: &str,

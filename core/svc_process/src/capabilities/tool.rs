@@ -279,6 +279,13 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
         // 1-5: validate, guard, matrix, gate, resolve. No executor slot is
         // touched until this returns.
         let req = bundle_tool_call::parse_request(&call.args)?;
+        // The AUTOMATED floor ban (reputation service -> platform ban tool): the host-asserted
+        // `system:reputation_floor` actor, only under the strict eligibility in `floor_ban`.
+        // `None` (not an eligible claim) continues through the ordinary human-actor path below,
+        // which refuses a caller without the tool's required scope.
+        if let Some(outcome) = self.try_floor_ban(ctx, &req).await {
+            return outcome;
+        }
         let gate_scope = self.gate_scope();
         // Steps 1-5 (self/cycle/depth, the caller's requested_tools, the P2
         // gate, target resolution + app->app ban, write-key) are actor-
@@ -326,7 +333,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
     }
 
     /// Step 6: the nested invoke of the planned target on the active executor connection.
-    async fn run_nested(
+    pub(super) async fn run_nested(
         &self,
         ctx: &ToolContext,
         plan: &bundle_tool_call::ToolPlan,

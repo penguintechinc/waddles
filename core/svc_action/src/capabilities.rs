@@ -65,9 +65,11 @@ use crate::stage_metrics::{self, StageMetrics};
 use crate::usage::UsageBatcher;
 
 mod event_sync;
+mod floor_ban;
 mod host_tools;
 pub use event_sync::{run_event_sync_consumer, EVENT_SYNC_REQUEST_QUEUE, EVENT_SYNC_RESULT_PREFIX};
 mod tool;
+pub use floor_ban::{FloorBanCommand, FloorSendError, FloorSendFailure};
 pub use tool::ToolWiring;
 
 /// A raw platform account id held host-side. A newtype so the id can never reach a log line or
