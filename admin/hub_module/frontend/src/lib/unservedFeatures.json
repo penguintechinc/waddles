@@ -78,19 +78,6 @@
       "PUT /api/v1/admin/:communityId/translation/config"
     ]
   },
-  "reputation-config": {
-    "label": "Reputation settings",
-    "endpoints": [
-      "GET /api/v1/admin/:communityId/reputation/config",
-      "PUT /api/v1/admin/:communityId/reputation/config"
-    ]
-  },
-  "reputation-at-risk": {
-    "label": "At-risk members",
-    "endpoints": [
-      "GET /api/v1/admin/:communityId/reputation/at-risk"
-    ]
-  },
   "software-discovery": {
     "label": "Software discovery",
     "endpoints": [
