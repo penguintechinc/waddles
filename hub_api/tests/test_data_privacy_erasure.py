@@ -466,6 +466,16 @@ def _seed_reputation(
         dal.bundle_reputation_scores.insert(
             tenant_id=1, community_id=community_id, user_uuid=user_uuid, balance=50
         )
+        dal.bundle_reputation_tenant_scores.insert(
+            tenant_id=1, user_uuid=user_uuid, score=620, event_count=2
+        )
+        dal.bundle_reputation_soft_bans.insert(
+            tenant_id=1,
+            community_id=community_id,
+            user_uuid=user_uuid,
+            reason_code=2,
+            set_by="admin:1",
+        )
         dal.bundle_reputation_adjustments.insert(
             app_id="rep-app",
             tenant_id=1,
@@ -488,6 +498,12 @@ def _rep_counts(db: Any, *, user_id: int, user_uuid: str | None = None) -> dict[
     }
     if user_uuid is not None:
         counts["bundle_scores"] = dal(dal.bundle_reputation_scores.user_uuid == user_uuid).count()
+        counts["bundle_tenant_scores"] = dal(
+            dal.bundle_reputation_tenant_scores.user_uuid == user_uuid
+        ).count()
+        counts["bundle_soft_bans"] = dal(
+            dal.bundle_reputation_soft_bans.user_uuid == user_uuid
+        ).count()
         counts["bundle_ledger"] = dal(
             dal.bundle_reputation_adjustments.target_user_uuid == user_uuid
         ).count()

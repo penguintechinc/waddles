@@ -431,6 +431,8 @@ async def get_ai_chatter_config(community_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
+    if not bot_ai_chatter.is_configured():
+        return {"error": "service_unavailable", "service": bot_ai_chatter.SERVICE_NAME}, 503
     config = await bot_ai_chatter.get_chatter_config(community_id)
     return AIChatterConfigResponse(success=True, config=_chatter_dto(config))
 
@@ -445,6 +447,8 @@ async def update_ai_chatter_config(data: AIChatterConfigRequest, community_id: i
     denied = await _require_community(community_id)
     if denied:
         return denied
+    if not bot_ai_chatter.is_configured():
+        return {"error": "service_unavailable", "service": bot_ai_chatter.SERVICE_NAME}, 503
     update = bot_ai_chatter.AIChatterConfigUpdate(
         enabled=data.enabled,
         max_responses_per_window=data.max_responses_per_window,

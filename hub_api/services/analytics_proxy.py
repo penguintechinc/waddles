@@ -39,8 +39,10 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-#: Mirrors `config/index.js`'s `analyticsCore` -> `ANALYTICS_CORE_API_URL` env var + default.
-_DEFAULT_BASE_URL = "http://analytics-core:8040"
+#: `ANALYTICS_CORE_API_URL` env var. No default: the legacy analytics-core service was deleted, so
+#: an unset URL fails LOUD with a typed 503 (`service_unavailable`) instead of dialing a dead host.
+_DEFAULT_BASE_URL = ""
+SERVICE_NAME = "analytics-core"
 #: Mirrors `analyticsService.js`'s axios client `timeout: 10000` (milliseconds).
 _DEFAULT_TIMEOUT_MS = 10000
 #: Mirrors `config/index.js`'s `serviceApiKey` -> `SERVICE_API_KEY` env var.
@@ -107,6 +109,15 @@ class AnalyticsCoreProxyClient:
         caller_role: str | None = None,
     ) -> ProxyResult:
         """Forward `GET path` to `analytics-core`, relaying its JSON response."""
+        if not self._config.base_url:
+            logger.error(
+                "analytics_proxy_service_unavailable service=%s path=%s", SERVICE_NAME, path
+            )
+            return ProxyResult(
+                ok=False,
+                status_code=503,
+                body={"error": "service_unavailable", "service": SERVICE_NAME},
+            )
         url = f"{self._config.base_url}{path}"
         headers = {
             "Content-Type": "application/json",

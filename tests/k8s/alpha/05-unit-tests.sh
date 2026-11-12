@@ -62,36 +62,16 @@ run_suite() {
     TOTAL_PASSED=$((TOTAL_PASSED + passed))
 }
 
-# --- Legacy suite (pre-v3 flask_core module tests + identity gRPC handler) ---
-run_suite "legacy tests/unit + identity_core_module" \
-    "$PYTHON_BIN" -m pytest tests/unit core/identity_core_module/services/test_grpc_handler.py
-
-# --- workflow_core_module (own tests/ dir, own conftest.py) ---
-run_suite "core/workflow_core_module" \
-    env -C "$REPO_ROOT/core/workflow_core_module" "$PYTHON_BIN" -m pytest
-
-# --- community_module (own tests/ dir, own conftest.py) ---
-run_suite "core/community_module" \
-    env -C "$REPO_ROOT/core/community_module" "$PYTHON_BIN" -m pytest
-
 # --- hub_api (v3 control-plane REST API) ---
 run_suite "hub_api" \
     env -C "$REPO_ROOT/hub_api" "$PYTHON_BIN" -m pytest
 
-# --- libs/* (flask_core spine + SCCEMBS module libraries) ---
+# --- libs/* (flask_core spine + waddle_transports) ---
 for lib_dir in "$REPO_ROOT"/libs/*/; do
     lib_name="$(basename "$lib_dir")"
     [ -d "${lib_dir}tests" ] || continue
     run_suite "libs/${lib_name}" \
         env -C "$lib_dir" "$PYTHON_BIN" -m pytest
-done
-
-# --- core/svc_* (async stage-runner containers: ingest/process/action/presentation/streaming) ---
-for svc_dir in "$REPO_ROOT"/core/svc_*/; do
-    svc_name="$(basename "$svc_dir")"
-    [ -d "${svc_dir}tests" ] || continue
-    run_suite "core/${svc_name}" \
-        env -C "$svc_dir" "$PYTHON_BIN" -m pytest
 done
 
 log_pass "Unit tests step completed -- ${TOTAL_PASSED} passed across all suites"

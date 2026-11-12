@@ -94,6 +94,7 @@ from services.schema import (
     bind_auth_tables,
     bind_calendar_sync_tables,
     bind_community_authz_tables,
+    bind_erasure_reputation_tables,
     bind_github_sync_tables,
     bind_guild_pairing_tables,
     bind_lifecycle_tables,
@@ -102,6 +103,7 @@ from services.schema import (
     bind_overlay_tables,
     bind_platform_tables,
     bind_privacy_tables,
+    bind_reputation_policy_tables,
     bind_stream_keys_tables,
     bind_streaming_tables,
     bind_superadmin_tenant_fields,
@@ -581,6 +583,9 @@ def admin_db(tmp_path: Any) -> Any:
     bind_admin_tables(dal, migrate=True)
     bind_marketplace_module_tables(dal, migrate=True)
     bind_superadmin_tenant_fields(dal, migrate=True)
+    # Bundle-store reputation (alembic 0050/0097): admin reads/overrides go through these.
+    bind_erasure_reputation_tables(dal, migrate=True)
+    bind_reputation_policy_tables(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
     # See auth_db's own comment above -- forces lazy CREATE TABLE DDL to

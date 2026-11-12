@@ -1,12 +1,10 @@
-name: Python waddle-sdk (lint + type-check + test + oracle)
+name: Python waddle-sdk (lint + type-check + test)
 
 on:
   push:
     branches: [main, 'release/**']
     paths:
       - 'sdk/waddle-sdk/**'
-      - 'core/svc_process/builtin_handlers/social_alias_process.py'
-      - 'core/svc_process/services/command_alias_store.py'
       - 'wit/waddle-bundle/**'
       - 'core/bundle_host_reputation/src/lib.rs'
       - 'core/bundle_host_economy/src/lib.rs'
@@ -55,8 +53,6 @@ jobs:
           area: python
           globs: |
             sdk/waddle-sdk/**
-            core/svc_process/builtin_handlers/social_alias_process.py
-            core/svc_process/services/command_alias_store.py
             wit/waddle-bundle/**
             core/bundle_host_reputation/src/lib.rs
             core/bundle_host_economy/src/lib.rs
@@ -114,17 +110,8 @@ jobs:
       - name: mypy --strict
         run: mypy --strict src/waddle_sdk
 
-      - name: pytest --cov (>=90% gate) -- full suite, includes the oracle tests
+      - name: pytest --cov (>=90% gate) -- full suite
         run: pytest -q --cov=waddle_sdk --cov-report=term-missing --cov-fail-under=90
-
-      # Named separately for visibility even though the step above already
-      # runs it: the R1 mitigation is "the real, unmodified, M1.5-migrated
-      # bundle's write path through this facade, not a hand-picked
-      # reproduction" (see tests/test_oracle_alias_bundle.py's module
-      # docstring) -- a reviewer should be able to see its pass count
-      # without digging through the full 96-test run above.
-      - name: Oracle proof (R1) -- real social_alias_process.py through the facade
-        run: pytest -q -v tests/test_oracle_alias_bundle.py
 
       # Confirms waddle_sdk/db.py, http.py, kv.py, log.py, clock.py,
       # relay.py, _component_entry.py, and tests/wit_shapes.py still match

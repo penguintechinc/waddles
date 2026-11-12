@@ -106,14 +106,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Hub backend
-            path: admin/hub_module/backend
           - name: Hub frontend
             path: admin/hub_module/frontend
             # GHSA-mrhx-c7xc-m3w5: zod DoS, transitive via @penguintechinc/react-libs@1.3.4 (pins zod 3.x, no 3.x patch); allow-list pending react-libs->zod4. Low exposure (login-form lib).
             audit_allow: "GHSA-mrhx-c7xc-m3w5"
-          - name: Marketplace
-            path: admin/marketplace_module/backend
           - name: Website
             path: website
           - name: API tests
@@ -199,12 +195,7 @@ jobs:
           # Review by 2026-12-31: re-grep for `linkify` before renewing, and
           # drop this once upstream publishes a fix or bleach is replaced.
           #
-          # PYSEC-2026-2633/2634/2635/2636 (mem0ai 0.1.115, core/ai_researcher_module):
-          # mem0ai is used library-only with a Qdrant vector store; advisories
-          # assessed not reachable. Only 2636 has a fix (pre-release 2.0.0b2
-          # major bump) - deliberately not adopted. Real exit is migrating
-          # memories to WaddleAI. Tracking: #959. Review by 2027-01-27.
-          IGNORES="--ignore-vuln PYSEC-2022-252 --ignore-vuln GHSA-g75f-g53v-794x --ignore-vuln PYSEC-2026-2633 --ignore-vuln PYSEC-2026-2634 --ignore-vuln PYSEC-2026-2635 --ignore-vuln PYSEC-2026-2636"
+          IGNORES="--ignore-vuln PYSEC-2022-252 --ignore-vuln GHSA-g75f-g53v-794x"
 
           gated=0; ungated=0; gated_bad=0; ungated_bad=0
           for f in $(find . -name requirements.txt \

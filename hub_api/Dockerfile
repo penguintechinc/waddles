@@ -1,6 +1,6 @@
 # hub-api -- Quart control-plane service (Task 0.5 scaffold).
 #
-# Multi-stage, rootless. Base digest reused from services/interactive-social/
+# Multi-stage, rootless. Base digest reused from the other python:3.13-slim-bookworm
 # Dockerfile (already pinned in this repo -- devops-containers.md forbids
 # inventing a second one for the same python:3.13-slim-bookworm tag).
 FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS builder

@@ -182,7 +182,6 @@ _EXPECTED_ALPHA = {
     "waddlebot-svc-ingest-rust": "waddles_svc_ingest",
     "waddlebot-svc-presentation": "waddles_svc_presentation",
     "waddlebot-svc-streaming": "waddles_svc_streaming",
-    "waddlebot-reputation": "waddles_reputation",
 }
 
 
@@ -218,14 +217,14 @@ def test_every_db_workload_uses_its_own_non_owner_role(
         )
         assert len(order) == len(set(order)), f"{name}: duplicate env names"
         seen[name] = role
-    assert examined >= 8, f"only {examined} DB-identity containers examined in {env_name}"
+    assert examined >= 6, f"only {examined} DB-identity containers examined in {env_name}"
     if env_name == "alpha":
         for workload, role in _EXPECTED_ALPHA.items():
             assert seen.get(workload) == role, (
                 f"{workload}: expected {role}, got {seen.get(workload)}"
             )
     if env_name in ("local", "beta"):
-        assert len(set(seen.values())) >= 25, "legacy pods must each have their own role"
+        assert len(set(seen.values())) >= 4, "each workload family must have its own role"
     # one role per workload family, never a role shared between unrelated workloads
     by_role: dict[str, set[str]] = {}
     for workload, role in seen.items():

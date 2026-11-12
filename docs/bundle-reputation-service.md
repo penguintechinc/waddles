@@ -194,3 +194,5 @@ map to `rate_limited`, non-members to `not_a_member`). Consequences for the bund
   chain's origin is the tenant's single active reputation-logic app
   (`reputation_active_logic_app`; none or ambiguous fails closed) or the core service itself.
 - Unscored members read as `COALESCE(balance, community policy score_default, 600)` everywhere.
+- Migrations: `alembic/versions/0072_reputation_host_ops.py` (score clamp CHECK + ledger columns),
+  `alembic/versions/0097_reputation_unify.py` + `scripts/db/bundle_reputation_unify.sql` (PR #1236, authoritative).
