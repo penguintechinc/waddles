@@ -18,8 +18,8 @@ Changes:
   The refresh is throttled (only when the handle changed or the stamp is over an hour old) so
   the chat hot path does not rewrite the row on every message.
 
-Revision ID: 0100_twitch_handle_freshness
-Revises: 0099_discord_role_mirror
+Revision ID: 0105_twitch_handle_freshness
+Revises: 0104_role_sync_priv_harden
 Create Date: 2026-11-12
 """
 
@@ -30,8 +30,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0100_twitch_handle_freshness"
-down_revision = "0099_discord_role_mirror"
+revision = "0105_twitch_handle_freshness"
+down_revision = "0104_role_sync_priv_harden"
 branch_labels = None
 depends_on = None
 
