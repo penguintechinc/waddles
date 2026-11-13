@@ -1089,6 +1089,10 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// set in production; tests swap it via `with_stage_metrics` so they can
     /// read back exactly what this call emitted.
     stage_metrics: Arc<StageMetrics>,
+    /// Live per-community config cache (`hub_client::bundle_config`); `None` until
+    /// [`Self::with_bundle_config`] (hub-api not configured) -- `get-context` then carries no
+    /// `config_json` (the guest sees `{}`), exactly as before this feature.
+    bundle_config: Option<Arc<hub_client::bundle_config::BundleConfigCache>>,
     /// Operational toggle (`crate::flags::EGRESS_VIA_DISPATCHER_FLAG`);
     /// `None` until [`Self::with_egress_dispatcher_flag`] -- reads as OFF
     /// (fail-safe to the inline egress path).
@@ -1141,6 +1145,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             gate,
             db: None,
             stage_metrics: stage_metrics::stage_metrics(),
+            bundle_config: None,
             egress_dispatcher_flag: None,
             tool: None,
             pin_keys: None,
@@ -1275,6 +1280,39 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     pub fn with_stage_metrics(mut self, metrics: Arc<StageMetrics>) -> Self {
         self.stage_metrics = metrics;
         self
+    }
+
+    /// Attaches the live community-config cache so `get-context` carries `config_json`.
+    #[must_use]
+    pub fn with_bundle_config(
+        mut self,
+        cache: Option<Arc<hub_client::bundle_config::BundleConfigCache>>,
+    ) -> Self {
+        self.bundle_config = cache;
+        self
+    }
+
+    /// Adds `config_json` (the merged live config of this app for the invoke's community) to the
+    /// `get-context` reply. Served ONLY under the same guard as the numeric ids themselves
+    /// (`tenant_id >= 1 && community_id >= 0`, host-derived from the verified envelope), keyed by
+    /// the host-derived `app_id` -- never a guest-supplied value.
+    async fn attach_config_json(&self, scope: &InvokeScope, ctx: &mut serde_json::Value) {
+        let Some(cache) = &self.bundle_config else {
+            return;
+        };
+        if scope.tenant_id < 1 || scope.community_id < 0 {
+            return;
+        }
+        let key = hub_client::bundle_config::ConfigKey::new(
+            i64::from(scope.tenant_id),
+            i64::from(scope.community_id),
+            scope.app_id.clone(),
+        );
+        // Kill switch ON: no lookup, no `config_json` (pre-feature behaviour).
+        let Some(config) = cache.lookup_if_enabled(&key).await else {
+            return;
+        };
+        ctx["config_json"] = serde_json::json!(&*config);
     }
 
     /// Overrides how long a queued Discord op waits for the drain's
@@ -3253,7 +3291,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         match call.capability {
             CapabilityKind::Relay => self.handle_relay(scope, &call.args).await,
             CapabilityKind::Clock => self.handle_clock(scope, &call.op),
-            CapabilityKind::Context => self.handle_context(scope),
+            CapabilityKind::Context => {
+                let mut ctx = self.handle_context(scope)?;
+                self.attach_config_json(scope, &mut ctx).await;
+                Ok(ctx)
+            }
             CapabilityKind::Log => self.handle_log(scope, &call.args),
             CapabilityKind::Http => {
                 let host = extract_http_host(&call.args)
@@ -3971,6 +4013,66 @@ mod tests {
         let ctx = h.handle_context(&scope()).expect("context");
         assert_eq!(ctx["tenant_id"], 7);
         assert_eq!(ctx["community_id"], 3);
+    }
+
+    /// Kill switch `waddles.disable-bundle-community-config`: OFF/unset serves config, ON adds none.
+    #[tokio::test]
+    async fn get_context_config_kill_switch_both_states() {
+        use hub_client::bundle_config::{
+            BundleConfigCache, CacheConfig, ConfigKey, StaticConfigSource, StaticLiveGate,
+        };
+        let src = Arc::new(StaticConfigSource::new());
+        src.set(ConfigKey::new(10, 7, "waddles.bot.commands.default"), 3, r#"{"x":1}"#);
+        for (live, expect) in [(true, true), (false, false)] {
+            let cache = Arc::new(BundleConfigCache::new(
+                Arc::clone(&src) as Arc<dyn hub_client::bundle_config::ConfigSource>,
+                None,
+                CacheConfig::default(),
+            ));
+            cache.set_gate(Arc::new(StaticLiveGate(live)));
+            let h = caps(FakeRelayQueue::default())
+                .with_bundle_config(Some(Arc::clone(&cache)));
+            let mut ctx = h.handle_context(&scope()).expect("context");
+            h.attach_config_json(&scope(), &mut ctx).await;
+            assert_eq!(ctx.get("config_json").is_some(), expect);
+            assert_eq!(cache.len() == 1, expect, "disabled switch must not load");
+        }
+    }
+
+    /// Live community config rides `get-context` for the invoke's host-derived scope only.
+    #[tokio::test]
+    async fn get_context_carries_live_community_config() {
+        use hub_client::bundle_config::{
+            BundleConfigCache, CacheConfig, ConfigKey, StaticConfigSource,
+        };
+        let src = Arc::new(StaticConfigSource::new());
+        src.set(
+            ConfigKey::new(7, 3, "waddles.bot.commands.default"),
+            2,
+            r#"{"default_duration_minutes":45}"#,
+        );
+        let cache = Arc::new(BundleConfigCache::new(src, None, CacheConfig::default()));
+        let h = caps(FakeRelayQueue::default()).with_bundle_config(Some(Arc::clone(&cache)));
+        let mut ctx = h.handle_context(&scope()).expect("context");
+        h.attach_config_json(&scope(), &mut ctx).await;
+        assert_eq!(ctx["config_json"], r#"{"default_duration_minutes":45}"#);
+
+        // Unresolved scope (tenant_id 0): no config, same guard as the ids.
+        let unresolved = InvokeScope {
+            tenant_id: 0,
+            ..scope()
+        };
+        // (the gate itself refuses `get-context` for an unresolved scope; the config guard is
+        // independent of it, so exercise it directly)
+        let mut ctx = serde_json::json!({});
+        h.attach_config_json(&unresolved, &mut ctx).await;
+        assert!(ctx.get("config_json").is_none());
+
+        // No cache wired: unchanged.
+        let bare = caps(FakeRelayQueue::default());
+        let mut ctx = bare.handle_context(&scope()).expect("context");
+        bare.attach_config_json(&scope(), &mut ctx).await;
+        assert!(ctx.get("config_json").is_none());
     }
 
     /// [`scope`] bound to the Twitch IRC channel `somechannel` (the

@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -261,8 +262,13 @@ async def save_config(
     actor_id: int,
     config: dict[str, Any],
     expected_version: int,
+    on_saved: Callable[[int, int, str, int], Awaitable[object]] | None = None,
 ) -> ConfigSnapshot:
     """Validate `config` against the manifest schema and append `expected_version + 1`.
+
+    `on_saved(tenant_id, community_id, app_id, version)` runs after a successful append (the
+    blueprint passes the Valkey version-key publisher so running stages reload the live config);
+    it must not raise -- a failure there only delays propagation to the stage TTL.
 
     Community-admin only. 422 `config_invalid` (value-free `{path, rule}` errors), 409
     `config_version_conflict` when another save landed first (the UNIQUE constraint closes the
@@ -338,6 +344,8 @@ async def save_config(
         details={**base, "phase": "result", "outcome": "ok", "version": new_version},
         tenant_id=tenant_id,
     )
+    if on_saved is not None:
+        await on_saved(tenant_id, community_id, bundle.app_id, new_version)
     return await get_config(
         install_dal, bundle, membership, tenant_id=tenant_id, community_id=community_id
     )

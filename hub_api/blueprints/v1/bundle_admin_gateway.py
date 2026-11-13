@@ -34,6 +34,8 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import bundle_admin_gateway_service as svc
+from services import bundle_community_config_runtime as bundle_config_runtime
+from services import valkey_admin_client
 from services.bundle_tool_transport import ToolTransport, ValkeyToolTransport
 from services.community_authz import CommunityMembership, authorize_community
 from services.current_user import get_current_user_id
@@ -55,6 +57,32 @@ ACTION_RATE_PER_MIN = 30
 READ_RATE_PER_MIN = 120
 _RATE_WINDOW_S = 60
 _MAX_QUERY_ARGS = 4096
+
+
+async def _publish_config_version(
+    tenant_id: int, community_id: int, app_id: str, version: int
+) -> bool:
+    """Bump the Valkey version key stages poll (best-effort; never fails the admin's save)."""
+    try:
+        valkey = valkey_admin_client.build_client()
+    except Exception as exc:  # noqa: BLE001 - propagation is best-effort (stage TTL backstop)
+        logger.warning(
+            "bundle_config.publish_unavailable error_type=%s tenant_id=%s community_id=%s",
+            type(exc).__name__,
+            tenant_id,
+            community_id,
+        )
+        return False
+    try:
+        return await bundle_config_runtime.publish_version(
+            valkey,
+            tenant_id=tenant_id,
+            community_id=community_id,
+            app_id=app_id,
+            version=version,
+        )
+    finally:
+        await valkey.aclose()
 
 
 def _err(exc: ApiError) -> tuple[Any, int]:
@@ -276,6 +304,7 @@ async def put_config(
             actor_id=gate.user_id,
             config=data.config,
             expected_version=data.expectedVersion,
+            on_saved=_publish_config_version,
         )
     except ApiError as exc:
         logger.warning(

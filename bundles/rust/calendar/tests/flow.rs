@@ -1090,3 +1090,26 @@ fn engine_refuses_upserts_for_non_scheduled_events_even_if_queued() {
         "discord.scheduled_event.cancel"
     );
 }
+
+/// Cross-language contract with hub-api (`hub_api/tests/test_bundle_community_config_grpc.py::
+/// test_calendar_saved_default_duration_is_served`): that test saves
+/// `{"default_duration_minutes": 45}` through the gateway service against the REAL calendar
+/// `community_config_schema` and asserts `BundleConfigService` serves exactly this fixture. Here the
+/// same bytes arrive as `get-context().config_json` and must drive the event end time.
+#[test]
+fn live_community_config_default_duration_flows_into_new_events() {
+    const SERVED: &str = include_str!("fixtures/live_config_served.json");
+    let cfg = store::effective_config(SERVED).unwrap();
+    assert_eq!(cfg.default_duration_minutes, 45);
+    assert_eq!(cfg.default_location, "Online");
+
+    let w = World::new();
+    let ctx = w.ctx();
+    let ev = service::create(&ctx, &cfg, &approver(), new_ev("Short sync", SOON)).unwrap();
+    assert_eq!(ev.end - ev.start, 45 * 60, "saved default_duration_minutes must be used");
+
+    // Never saved / hub-api down: `{}` (or empty) falls back to the compiled default of 60.
+    let dflt = store::effective_config("{}").unwrap();
+    let ev2 = service::create(&ctx, &dflt, &approver(), new_ev("Default length", SOON)).unwrap();
+    assert_eq!(ev2.end - ev2.start, 3600);
+}

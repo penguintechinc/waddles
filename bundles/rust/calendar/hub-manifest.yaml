@@ -73,15 +73,34 @@ requested_tools:
   - tool: discord.scheduled_event.delete
     access: write
     target_app_id: waddles.core.service.discord
-config_schema:
+community_config_schema:
   type: object
   additionalProperties: false
   properties:
-    approval_required: {type: boolean, default: false}
-    default_tz: {type: string, default: UTC, description: IANA timezone}
-    default_duration_minutes: {type: integer, minimum: 1, maximum: 10080, default: 60}
-    default_location: {type: string, minLength: 1, maxLength: 100, default: Online}
-    sync_discord: {type: boolean, default: false}
-    sync_twitch: {type: boolean, default: false}
-    sync_wix: {type: boolean, default: false}
+    approval_required:
+      type: boolean
+      default: false
+    default_tz:
+      type: string
+      default: UTC
+      description: IANA timezone
+    default_duration_minutes:
+      type: integer
+      minimum: 1
+      maximum: 10080
+      default: 60
+    default_location:
+      type: string
+      minLength: 1
+      maxLength: 100
+      default: Online
+    sync_discord:
+      type: boolean
+      default: false
+    sync_twitch:
+      type: boolean
+      default: false
+    sync_wix:
+      type: boolean
+      default: false
 routes_to: []

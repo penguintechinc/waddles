@@ -36,6 +36,11 @@ async-trait = "=0.1.89"
 # module docs in src/lib.rs for why this crate depends on it directly
 # rather than re-implementing token fetch/caching.
 service_auth = { path = "../service_auth", version = "=0.1.0" }
+# Bundle community-config cache (src/bundle_config.rs): metrics on the process-global meter
+# (same pin core/svc_process + core/svc_action use) and the Valkey version-key probe
+# (same redis pin as the stages; `tokio-comp` only -- the stage owns TLS/auth of its connection).
+opentelemetry = "=0.32.0"
+redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp"] }
 # Stream-DEK delivery (`src/dek.rs`): open the X25519/HKDF/AES-256-GCM sealed DEK
 # KeyService returns. Same exact pins svc_ingest/svc_process already carried for their
 # (now removed) per-crate copies of this code.

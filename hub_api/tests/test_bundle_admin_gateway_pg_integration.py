@@ -397,3 +397,42 @@ async def test_config_versions_and_unique_race_on_real_pg(pg_dal: Any, run_id: i
         await svc.save_config(
             pg_dal, bundle, MOD, actor_id=1, config={"greeting": "z"}, expected_version=2, **kw
         )
+
+
+async def test_runtime_config_merges_saved_over_defaults_on_real_pg(
+    pg_dal: Any, run_id: int
+) -> None:
+    """`BundleConfigService`'s read path on the real schema: latest version wins, tenant-bound."""
+    from services import bundle_community_config_runtime as rt
+
+    tenant, community = await _setup(pg_dal, run_id)
+    manifest = _demo_manifest()
+    # The reputation manifest no longer parses on this base (pre-existing unknown_permission /
+    # missing_reason_codes); runtime config does not depend on it, so no cross-bundle tool grant.
+    manifest["requested_tools"] = []
+    manifest["version"] = "1.0.9"  # own version: `_activate` installs once per (app, version)
+    manifest["community_config_schema"] = {
+        **manifest["community_config_schema"],
+        "properties": {
+            **manifest["community_config_schema"]["properties"],
+            "greeting": {"type": "string", "maxLength": 20, "default": "hello"},
+        },
+        "required": [],
+    }
+    await _activate(pg_dal, tenant, community, manifest)
+    bundle = await svc.load_active_bundle(
+        pg_dal, tenant_id=tenant, community_id=community, app_id=APP
+    )
+    kw: dict[str, Any] = {"tenant_id": tenant, "community_id": community}
+    before = await rt.get_runtime_config(pg_dal, app_id=APP, **kw)
+    assert (before.version, before.config.get("greeting")) == (0, "hello")
+    await svc.save_config(
+        pg_dal, bundle, ADMIN, actor_id=1, config={"greeting": "hi"}, expected_version=0, **kw
+    )
+    after = await rt.get_runtime_config(pg_dal, app_id=APP, **kw)
+    assert (after.version, after.config["greeting"]) == (1, "hi")
+    other_tenant, _ = await _setup(pg_dal, run_id + 7_000)
+    with pytest.raises(rt.CommunityNotInTenantError):
+        await rt.get_runtime_config(
+            pg_dal, tenant_id=other_tenant, community_id=community, app_id=APP
+        )

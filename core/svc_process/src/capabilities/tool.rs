@@ -162,6 +162,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
                 ))
             }),
             verified_scope: self.verified_scope,
+            bundle_config: self.bundle_config.clone(),
             stage_metrics: Arc::clone(&self.stage_metrics),
             // The direct caller of this hop: its own grants (not the target's)
             // authorize the target's elevated primitives.

@@ -787,6 +787,24 @@ async fn build_stage_capabilities(
         Some(kv_conn) => caps.with_kv(kv_conn, kv_capabilities),
         None => caps,
     };
+    // Live per-community bundle config for `get-context().config_json`: hub-api gRPC + a Valkey
+    // version-key probe on hub-api's own (durable spine) instance; non-fatal when unconfigured.
+    let config_probe_conn = match build_redis_client(&spine_cfg) {
+        Some(client) => client.get_multiplexed_async_connection().await.ok(),
+        None => None,
+    };
+    let bundle_config = hub_client::bundle_config::connect_and_install(
+        &cli.hub_api_grpc_endpoint,
+        &cli.service_jwt_token_endpoint,
+        &cli.service_jwt_sa_token_path,
+        (!cli.hub_api_grpc_ca_file.is_empty()).then_some(cli.hub_api_grpc_ca_file.as_str()),
+        config_probe_conn,
+    )
+    .await;
+    if let Some(cache) = &bundle_config {
+        cache.set_gate(Arc::new(flags::LiveBundleConfigGate(license.clone())));
+    }
+    let caps = caps.with_bundle_config(bundle_config);
     // `db` host capability (v1 + v2 `db2.*`): see `try_build_db_wiring`'s doc for
     // its two distinct unwired outcomes.
     let bundle_db_cfg = bundle_host_db::ConnectConfig {

@@ -38,6 +38,7 @@
 //! `Arc`-backed handle) rather than opening a new connection per call.
 
 pub mod active_context;
+pub mod bundle_config;
 pub mod bundle_schedule;
 pub mod dek;
 pub mod resolve_scope;

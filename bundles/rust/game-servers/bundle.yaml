@@ -4,7 +4,7 @@
 schema_version: 2
 app_id: waddles.core.example.game-servers
 name: Game Servers (Rust)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -60,7 +60,7 @@ requested_tools:
 - tool: gameserver.rcon.exec
   access: write
   target_app_id: waddles.core.service.gameserver
-config_schema:
+community_config_schema:
   type: object
   additionalProperties: false
   properties:
@@ -72,9 +72,17 @@ config_schema:
       enum:
       - twitch
       - discord
+      - null
+      type:
+      - string
+      - 'null'
+      default: null
     status_post_channel_id:
-      type: string
+      type:
+      - string
+      - 'null'
       maxLength: 64
+      default: null
     status_post_servers:
       type: array
       maxItems: 5
@@ -82,6 +90,7 @@ config_schema:
         type: string
         maxLength: 64
       description: Server aliases to include (empty = all enabled)
+      default: []
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
