@@ -18,8 +18,6 @@ use svc_ingest::connector::webhook::SecretError;
 use svc_ingest::connector_runtime::feed::TransportPlan;
 use svc_ingest::connector_runtime::plan::{ConnectorProfile, RuntimeEnv};
 use svc_ingest::connector_runtime::profiles::youtube::YoutubeProfile;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const CHAT: &str = "Cg0KC-abc_123";
 const TOKEN: &str = "ya29.test-token";
@@ -51,7 +49,6 @@ fn dest(url: &str) -> Destination {
 
 #[tokio::test]
 async fn real_transport_secrets_release_only_the_oauth_token_to_the_pinned_host() {
-    let hub = MockServer::start().await;
     // The mint is gRPC: a real in-process `ServiceAuthService` answers only community 7.
     let mint_endpoint = service_auth::test_support::MockHub::builder()
         .mint(vec![service_auth::test_support::MintReply::when(

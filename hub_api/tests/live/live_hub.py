@@ -168,7 +168,7 @@ def _seed(container: str) -> dict[str, int]:
 
 async def _serve(manifest_path: Path) -> None:
     with migrated_postgres("connection-resolver-live") as pg:
-        ids = _seed("waddles-migtest-connection-resolver-live")
+        ids = _seed(pg.container)
         identities_env = _chart_identities_env()
         os.environ["SERVICE_JWT_IDENTITIES"] = identities_env
         identities = load_identities_from_env(env="alpha")
@@ -265,7 +265,7 @@ async def _serve(manifest_path: Path) -> None:
             "community_a": ids["a"],
             "community_b": ids["b"],
             "community_other_tenant": ids["c"],
-            "pg_container": "waddles-migtest-connection-resolver-live",
+            "pg_container": pg.container,
             "sa_tokens": SA_TOKENS,
             "twitch_bot_tokens": twitch_bot_tokens,
             "twitch_channels": [CHANNEL_LOGIN, OTHER_CHANNEL_LOGIN],

@@ -171,21 +171,13 @@ bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
 bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
 # Per-community / host-minted credentials + Valkey quota for bundle http.send secret refs (host-seams-2).
 bundle-host-credentials = { path = "../bundle_host_credentials", version = "=0.1.0" }
-# Outbound PII-detokenization pass (`src/capabilities.rs`'s
-# `detokenize_text`/`with_detokenize`) -- the egress half of the PII
-# boundary whose inbound half is `core/svc_process`'s own `pii_tokenize`
-# dependency on `hub_client`. Same-repo path dependency, same rationale as
-# `bundle-active-set` above.
-egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
 # Discord `allowed_mentions` mass-mention backstop (`src/capabilities.rs`'s Discord
 # relay body, `src/senders.rs`'s webhook body) -- one definition shared with
 # `core/svc_ingest`'s bot-token REST sender so no Discord send path can forget
 # it. Same-repo path dependency, same rationale as `bundle-active-set` above.
 discord-mentions = { path = "../discord_mentions", version = "=0.1.0" }
-# `waddles.hub.internal.v1.IdentityService.ResolveDisplayNames` client,
-# needed directly (not just transitively via `egress_detokenizer`) so
-# `crate::lib`'s startup wiring can construct the real
-# `egress_detokenizer::HubClientResolver`.
+# `waddles.hub.internal.v1.IdentityService.ResolvePlatformUser` client
+# (`crate::platform_user`'s producer-side host-tool user resolver).
 hub_client = { path = "../hub_client", version = "=0.1.0" }
 # `crate::platform_user` classifies `hub_client`'s gRPC status codes (producer-side user
 # detokenization) -- same exact pin hub_client already resolves, no new version in the graph.

@@ -13,7 +13,6 @@ on:
       - 'core/circuit_breaker/**'
       - 'core/discord_mentions/**'
       - 'core/hub_client/**'
-      - 'core/egress_detokenizer/**'
       - '.github/workflows/rust-svc-action.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
@@ -62,7 +61,6 @@ jobs:
             core/circuit_breaker/**
             core/discord_mentions/**
             core/hub_client/**
-            core/egress_detokenizer/**
 
   lint-test:
     needs: changes

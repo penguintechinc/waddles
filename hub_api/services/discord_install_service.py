@@ -48,6 +48,10 @@ from services.credential_resolver import store_tenant_credentials
 from services.discord_bot_install import DISCORD_BOT_INSTALL_PERMISSIONS
 from services.errors import ApiError, bad_request
 from services.install_state_binding import InstallStateError
+from services.provider_connections.adapter import Credentials
+from services.provider_connections.discord import DiscordAdapter
+from services.provider_connections.errors import ProviderConnectionError
+from services.tenant_discord_app import ensure_tenant_discord_connection
 from services.tenant_discord_install_state import consume_state, create_state
 from services.url_guard import validate_outbound_url
 
@@ -84,6 +88,9 @@ class InstallResult:
     tenant_id: int
     platform: str
     installed_by_user_id: int
+    connection_id: int | None = None
+    guild_id: str | None = None
+    community_granted: bool = False
 
 
 async def build_authorize_url(
@@ -109,8 +116,9 @@ async def build_authorize_url(
     """
     if is_global_tenant:
         raise bad_request("the global tenant cannot install its own Discord app")
-    if not application_id or not client_secret:
-        raise bad_request("application_id and client_secret are required")
+    if not application_id or not client_secret or not bot_token:
+        # A private tenant brings its OWN app: id, secret AND bot token. No shared-app fallback.
+        raise bad_request("application_id, client_secret and bot_token are required")
 
     state = await create_state(
         tenant_id=tenant_id,
@@ -181,8 +189,35 @@ async def _exchange_code(
     return payload
 
 
+async def _validate_bot_token(bot_token: str) -> None:
+    """Prove `bot_token` is a real Discord BOT token (live `GET /users/@me`); raise on failure."""
+    try:
+        await DiscordAdapter().validate_credentials(Credentials(access_token=bot_token))
+    except ProviderConnectionError as exc:
+        raise DiscordInstallError(
+            "the submitted bot token was rejected by Discord", 400, "DISCORD_BOT_TOKEN_INVALID"
+        ) from exc
+
+
+def _guild_id_of(token_payload: dict[str, Any], query_guild_id: str | None) -> str:
+    """The guild the bot was added to: token response `guild.id`, else the callback query."""
+    guild = token_payload.get("guild")
+    candidate = guild.get("id") if isinstance(guild, dict) else None
+    guild_id = str(candidate or query_guild_id or "")
+    if not guild_id.isdigit() or not 17 <= len(guild_id) <= 20:
+        raise DiscordInstallError(
+            "discord did not report which guild the bot was added to", 400, "DISCORD_GUILD_MISSING"
+        )
+    return guild_id
+
+
 async def complete_install(
-    dal: Any, *, code: str, state: str, binding_nonce: str | None
+    dal: Any,
+    *,
+    code: str,
+    state: str,
+    binding_nonce: str | None,
+    guild_id: str | None = None,
 ) -> InstallResult:
     """Verify `state`, exchange `code`, then persist the now-verified tenant Discord app.
 
@@ -203,19 +238,28 @@ async def complete_install(
             "invalid, expired, already-used, or foreign-browser install state", 400, exc.code
         ) from exc
 
-    await _exchange_code(
+    if not pending.bot_token:
+        raise bad_request("bot_token is required for a tenant-owned Discord app")
+    tenant_row = dal(dal.tenants.id == pending.tenant_id).select(dal.tenants.is_global).first()
+    if tenant_row is None or bool(tenant_row.is_global):
+        # Defense in depth: our app serves ONLY the default tenant; never store/serve for it here.
+        raise bad_request("the global tenant cannot install its own Discord app")
+
+    token_payload = await _exchange_code(
         application_id=pending.application_id,
         client_secret=pending.client_secret,
         code=code,
         redirect_uri=pending.redirect_uri,
     )
 
+    resolved_guild_id = _guild_id_of(token_payload, guild_id)
+    await _validate_bot_token(pending.bot_token)
+
     payload: dict[str, Any] = {
         "client_id": pending.application_id,
         "client_secret": pending.client_secret,
+        "bot_token": pending.bot_token,
     }
-    if pending.bot_token:
-        payload["bot_token"] = pending.bot_token
 
     store_tenant_credentials(
         dal,
@@ -226,8 +270,20 @@ async def complete_install(
         installed_by_user_id=pending.admin_user_id,
     )
 
+    written = ensure_tenant_discord_connection(
+        dal,
+        tenant_id=pending.tenant_id,
+        application_id=pending.application_id,
+        bot_token=pending.bot_token,
+        guild_id=resolved_guild_id,
+        installed_by_user_id=pending.admin_user_id,
+    )
+
     return InstallResult(
         tenant_id=pending.tenant_id,
         platform=PLATFORM_DISCORD,
         installed_by_user_id=pending.admin_user_id,
+        connection_id=written.connection_id,
+        guild_id=resolved_guild_id,
+        community_granted=written.granted_community_id is not None,
     )

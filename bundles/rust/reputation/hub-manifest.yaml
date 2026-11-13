@@ -6,7 +6,7 @@
 schema_version: 2
 app_id: waddles.core.service.reputation
 name: Reputation Service Bundle (Rust)
-version: 1.1.0
+version: 1.1.1
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -37,6 +37,24 @@ permissions:
     params:
       delta_min: -5
       delta_max: 5
+      # Activity reasons callers (reputation-accrual, games, admin tools) pass through `adjust`.
+      reason_codes:
+        - chat.message
+        - command.usage
+        - follow
+        - subscription
+        - subscription.tier2
+        - subscription.tier3
+        - gift.subscription
+        - cheer
+        - raid
+        - donation
+        - boost
+        - giveaway.entry
+        - game.win
+        - game.loss
+        - loyalty.bonus
+        - admin.adjust
   - id: reputation.moderation.write
     justification: "applies MODERATION-class deltas (|delta| <= 200) and floor-triggered soft bans; core/approved bundles only"
     params:

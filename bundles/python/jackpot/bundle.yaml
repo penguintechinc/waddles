@@ -2,7 +2,7 @@ schema_version: 2
 app_id: waddles.core.example.jackpot
 name: Jackpot Bundle (Python)
 # 1.0.0: initial -- !jackpot <stake> / !jackpot. Economy-SDK stake, kv.increment pot, activation-gated.
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin

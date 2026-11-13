@@ -911,9 +911,7 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
     redis_client: &redis::Client,
     spine_cfg: penguin_spine::SpineConfig,
     metrics: Arc<crate::telemetry::IngestMetrics>,
-    dek: crate::identity_crypto::ConfiguredDekProvider<
-        crate::identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek: crate::identity_crypto::ConfiguredDekProvider,
     registry: prometheus::Registry,
     tokenizer: Arc<dyn IdentityTokenizer>,
 ) -> anyhow::Result<Started> {
@@ -1012,9 +1010,7 @@ pub async fn start_connector(
     webhook_env: &Arc<WebhookEnv>,
     state: &mut crate::http::AppState,
     metrics: Arc<crate::telemetry::IngestMetrics>,
-    dek: crate::identity_crypto::ConfiguredDekProvider<
-        crate::identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek: crate::identity_crypto::ConfiguredDekProvider,
 ) -> anyhow::Result<Started> {
     let lookup = |k: &str| std::env::var(k).ok();
     let scope: Arc<dyn ScopeLookup> = crate::publish::installed_scope_resolver()
@@ -1062,9 +1058,7 @@ pub async fn start_connector_with<R: ConnectionResolve + 'static>(
     webhook_env: &Arc<WebhookEnv>,
     state: &mut crate::http::AppState,
     metrics: Arc<crate::telemetry::IngestMetrics>,
-    dek: crate::identity_crypto::ConfiguredDekProvider<
-        crate::identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek: crate::identity_crypto::ConfiguredDekProvider,
     deps: ConnectorDeps<'_, R>,
 ) -> anyhow::Result<Started> {
     let cli = &config.cli;
@@ -1523,7 +1517,7 @@ mod tests {
     impl DekProvider for FixedDek {
         async fn get_dek(
             &self,
-            _t: &str,
+            _t: i64,
         ) -> Result<(crate::identity_crypto::Dek, u32), crate::identity_crypto::DekUnavailableError>
         {
             Ok((zeroize::Zeroizing::new([1u8; 32]), 1))
@@ -1853,7 +1847,7 @@ mod tests {
             .await
             .is_err());
         assert!(NoScope.lookup("twitch", "x").await.is_err());
-        assert!(FixedDek.get_dek("t").await.is_ok());
+        assert!(FixedDek.get_dek(1).await.is_ok());
     }
 
     #[tokio::test]

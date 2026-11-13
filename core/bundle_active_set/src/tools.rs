@@ -157,7 +157,10 @@ impl HostOpDecl {
                     if !is_arg_name(k) {
                         return None;
                     }
-                    out.push((k.clone(), a.as_str().filter(|s| is_arg_name(s))?.to_string()));
+                    out.push((
+                        k.clone(),
+                        a.as_str().filter(|s| is_arg_name(s))?.to_string(),
+                    ));
                 }
                 out.sort();
                 out
@@ -356,7 +359,10 @@ mod tests {
         assert_eq!((d.platform.as_str(), d.op.as_str()), ("twitch", "mod.ban"));
         assert_eq!(d.user_wire, HostOpUserWire::PlatformId);
         assert_eq!(d.origin, HostOpOrigin::Channel);
-        assert_eq!(d.text_object, vec![("reason".to_string(), "reason".to_string())]);
+        assert_eq!(
+            d.text_object,
+            vec![("reason".to_string(), "reason".to_string())]
+        );
         for bad in [
             json!({"platform": "twitch"}),
             json!({"platform": "twitch", "op": "mod.ban", "extra": 1}),

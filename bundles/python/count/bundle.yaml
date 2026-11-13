@@ -8,7 +8,7 @@ name: Dynamic Counter Bundle (Python)
 # fix (gh-631, #638) -- app_versions is immutable per (app_id, version).
 # 1.0.7: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
 # 1.0.8: activation-gated only -- removed the in-bundle waddles.command-count feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.10
+version: 1.0.11
 feature: waddles.core.example
 module: core
 provider: builtin

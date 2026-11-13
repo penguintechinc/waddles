@@ -42,9 +42,12 @@ from services.envelope.models import (
     TenantKmsConfig,
 )
 
-#: The only key lineage this repository reads/writes (``ingest-stream`` is
-#: reserved for the DEK-broker PR's purpose-limited stream key).
+#: Key lineages (``keystore.tenant_encryption_keys.purpose``, CHECK-constrained by 0054):
+#: ``at-rest`` = field encryption; ``ingest-stream`` = stream identity-field DEKs that
+#: ``KeyService.GetStreamDek`` hands (sealed) to svc-ingest/svc-process.
 PURPOSE_AT_REST = "at-rest"
+PURPOSE_INGEST_STREAM = "ingest-stream"
+KEY_PURPOSES: frozenset[str] = frozenset({PURPOSE_AT_REST, PURPOSE_INGEST_STREAM})
 
 _SQL_GET_ACTIVE = """
 SELECT id, tenant_id, dek_version, wrapped_dek, kek_kind, kek_ref, status, usage_count,
@@ -270,12 +273,12 @@ def _config(row: Mapping[str, Any]) -> TenantKmsConfig:
 
 
 def _insert_params(
-    tenant_id: int, wrapped_dek: bytes, kek_kind: str, kek_ref: str
+    tenant_id: int, wrapped_dek: bytes, kek_kind: str, kek_ref: str, purpose: str
 ) -> dict[str, Any]:
     """Bind parameters for :data:`_SQL_INSERT_NEXT_VERSION`."""
     return {
         "tenant_id": tenant_id,
-        "purpose": PURPOSE_AT_REST,
+        "purpose": purpose,
         "wrapped": wrapped_dek,
         "kek_ref": kek_ref,
         "kek_kind": kek_kind,
@@ -285,13 +288,20 @@ def _insert_params(
 class PenguinDalEnvelopeRepository:
     """Postgres implementation of both repository protocols over a penguin-dal ``AsyncDB``."""
 
-    def __init__(self, dal: AsyncDB) -> None:
-        """Wrap `dal` (the hub-api ``install_dal``, or one on the key-store role)."""
+    def __init__(self, dal: AsyncDB, *, purpose: str = PURPOSE_AT_REST) -> None:
+        """Wrap `dal` (the hub-api ``install_dal``, or one on the key-store role).
+
+        `purpose` pins the key lineage every key method reads/writes; the KMS-config methods
+        are lineage-independent (one BYOK config per tenant covers every lineage).
+        """
+        if purpose not in KEY_PURPOSES:
+            raise ValueError(f"unknown key purpose {purpose!r}")
         self._dal = dal
+        self._purpose = purpose
 
     async def get_active(self, tenant_id: int) -> DekRecord | None:
         """See :meth:`EnvelopeKeyRepository.get_active`."""
-        params = {"t": tenant_id, "p": PURPOSE_AT_REST}
+        params = {"t": tenant_id, "p": self._purpose}
         rows = await raw_sql_rows(self._dal, _SQL_GET_ACTIVE, params)
         row = rows.first()
         return _key_record(row.as_dict()) if row is not None else None
@@ -299,14 +309,14 @@ class PenguinDalEnvelopeRepository:
     async def get_version(self, tenant_id: int, dek_version: int) -> DekRecord | None:
         """See :meth:`EnvelopeKeyRepository.get_version`."""
         rows = await raw_sql_rows(
-            self._dal, _SQL_GET_VERSION, {"t": tenant_id, "p": PURPOSE_AT_REST, "v": dek_version}
+            self._dal, _SQL_GET_VERSION, {"t": tenant_id, "p": self._purpose, "v": dek_version}
         )
         row = rows.first()
         return _key_record(row.as_dict()) if row is not None else None
 
     async def list_keys(self, tenant_id: int) -> list[DekRecord]:
         """See :meth:`EnvelopeKeyRepository.list_keys`."""
-        params = {"t": tenant_id, "p": PURPOSE_AT_REST}
+        params = {"t": tenant_id, "p": self._purpose}
         rows = await raw_sql_rows(self._dal, _SQL_LIST_KEYS, params)
         return [_key_record(row) for row in rows.as_list()]
 
@@ -318,7 +328,7 @@ class PenguinDalEnvelopeRepository:
             rows = await raw_sql_write(
                 self._dal,
                 _SQL_INSERT_NEXT_VERSION,
-                _insert_params(tenant_id, wrapped_dek, kek_kind, kek_ref),
+                _insert_params(tenant_id, wrapped_dek, kek_kind, kek_ref, self._purpose),
             )
         except IntegrityError as exc:
             raise KeyConflictError("tenant key was created concurrently") from exc
@@ -340,7 +350,7 @@ class PenguinDalEnvelopeRepository:
         try:
             async with self._dal.engine.begin() as conn:
                 retired = await conn.execute(
-                    text(_SQL_RETIRE_ACTIVE), {"t": tenant_id, "p": PURPOSE_AT_REST}
+                    text(_SQL_RETIRE_ACTIVE), {"t": tenant_id, "p": self._purpose}
                 )
                 retired_versions = [int(r[0]) for r in retired.all()]
                 if expected_version is None:
@@ -350,7 +360,7 @@ class PenguinDalEnvelopeRepository:
                     raise KeyConflictError("the active key changed concurrently")
                 inserted = await conn.execute(
                     text(_SQL_INSERT_NEXT_VERSION),
-                    _insert_params(tenant_id, wrapped_dek, kek_kind, kek_ref),
+                    _insert_params(tenant_id, wrapped_dek, kek_kind, kek_ref, self._purpose),
                 )
                 mapping = inserted.mappings().first()
         except IntegrityError as exc:
@@ -382,7 +392,7 @@ class PenguinDalEnvelopeRepository:
         rows = await raw_sql_write(
             self._dal,
             _SQL_ADD_USAGE,
-            {"n": count, "t": tenant_id, "p": PURPOSE_AT_REST, "v": dek_version},
+            {"n": count, "t": tenant_id, "p": self._purpose, "v": dek_version},
         )
         row = rows.first()
         return int(row["usage_count"]) if row is not None else 0

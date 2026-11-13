@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-dance"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!dance [@user]` -> a flavor-text reply, relayed back. Stateless relay, no kv/db."
 requires-python = ">=3.13"
 dependencies = []
