@@ -105,7 +105,7 @@ struct FakeDekProvider;
 impl svc_ingest::identity_crypto::DekProvider for FakeDekProvider {
     async fn get_dek(
         &self,
-        _tenant_id: &str,
+        _tenant_id: i64,
     ) -> Result<
         (svc_ingest::identity_crypto::Dek, u32),
         svc_ingest::identity_crypto::DekUnavailableError,

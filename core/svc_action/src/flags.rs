@@ -236,59 +236,6 @@ pub fn multi_tenant_watermark_flag(
     }
 }
 
-/// Opt-out kill-switch for the outbound PII-detokenization pass
-/// (`egress_detokenizer`, wired into `crate::capabilities::
-/// StageCapabilities::handle_relay`/`handle_discord_relay`) -- same
-/// opt-out-kill-switch shape as [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]:
-/// detokenization is a core platform mechanism, not a licensed feature, so
-/// unseen/OFF/license-server-unreachable must leave it ENABLED (the
-/// default -- real display names, not opaque tokens, appear in chat/
-/// overlay output). ON opts back OUT of it: every relay send shows the raw
-/// `{user:<token>}` placeholder it received from the bundle rather than a
-/// resolved name -- never raw PII either way, since nothing upstream of
-/// this pass ever holds raw PII (`core/svc_process`'s inbound tokenization
-/// pass already stripped it) -- a documented, deliberate degraded-UX
-/// tradeoff, never the default.
-pub const DISABLE_PII_DETOKENIZATION_FLAG: &str = "waddles.core.disable-pii-detokenization";
-
-/// Production [`FeatureFlag`] for [`DISABLE_PII_DETOKENIZATION_FLAG`] --
-/// same bypass-aware negation shape as [`DisableDbBundleConfigFlag`] (see
-/// that type's own doc for the full bypass-awareness rationale, identical
-/// here).
-pub struct DisablePiiDetokenizationFlag(Arc<penguin_licensing::LicenseClient>);
-
-impl DisablePiiDetokenizationFlag {
-    pub fn new(client: Arc<penguin_licensing::LicenseClient>) -> Self {
-        Self(client)
-    }
-}
-
-impl FeatureFlag for DisablePiiDetokenizationFlag {
-    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            if self.0.bypass_active() {
-                return true;
-            }
-            !self.0.flag_enabled(DISABLE_PII_DETOKENIZATION_FLAG).await
-        })
-    }
-}
-
-/// Builds the [`FeatureFlag`] `crate::lib::build_hub_client`/
-/// `crate::capabilities::StageCapabilities::with_detokenize`'s call site
-/// gate on: [`DisablePiiDetokenizationFlag`] over a real client, or a fixed
-/// "detokenization enabled" answer when no license client is available at
-/// all -- mirrors [`db_bundle_config_flag`]/[`multi_tenant_watermark_flag`]'s
-/// identical `None`-branch rationale.
-pub fn pii_detokenization_flag(
-    license: &Option<Arc<penguin_licensing::LicenseClient>>,
-) -> Arc<dyn FeatureFlag> {
-    match license {
-        Some(client) => boxed(DisablePiiDetokenizationFlag::new(Arc::clone(client))),
-        None => boxed(StaticFlag(true)),
-    }
-}
-
 /// Operational [`FeatureFlag`] for [`EGRESS_VIA_DISPATCHER_FLAG`]: resolves
 /// through [`resolve_flag`] (PostHog, then `FLAG_WADDLES_CORE_EGRESS_VIA_
 /// DISPATCHER` env baseline, then default OFF) on every read, so flipping
@@ -404,9 +351,8 @@ impl FlagSource for Arc<penguin_licensing::LicenseClient> {
 
 /// `FLAGS_CAPABILITY_ENABLED` -- a plain env off-switch for the whole
 /// `flags` host capability, independent of any individual PostHog flag's
-/// own state, mirroring `crate::config::CliConfig::
-/// pii_detokenization_enabled_override`'s "explicit, loudly-logged
-/// operator escape hatch" shape. Default ON (unset, or any other value,
+/// own state -- an explicit, loudly-logged operator escape hatch.
+/// Default ON (unset, or any other value,
 /// leaves the capability wired); `false`/`0`/`off`/`no` makes every
 /// `flags.enabled` host-call resolve straight to the caller's own
 /// `default_value`, with no license-client lookup at all.
@@ -448,7 +394,7 @@ fn env_flag_var_name(key: &str) -> String {
 /// **LICENSE-flag immunity:** wired *only* into [`resolve_flag_with`]'s
 /// plain FEATURE-flag path -- the [`FeatureFlag`] implementations above
 /// ([`LicenseFlag`], [`DisableDbBundleConfigFlag`],
-/// [`DisableMultiTenantWatermarkFlag`], [`DisablePiiDetokenizationFlag`])
+/// [`DisableMultiTenantWatermarkFlag`])
 /// call `LicenseClient::flag_enabled` directly and never pass through this
 /// function or [`resolve_flag_with`] at all.
 fn env_flag_value(key: &str) -> Option<bool> {
@@ -1058,56 +1004,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn disable_pii_detokenization_flag_matches_the_product_flag_key_convention() {
-        assert_eq!(
-            DISABLE_PII_DETOKENIZATION_FLAG,
-            "waddles.core.disable-pii-detokenization"
-        );
-    }
-
-    /// Same hard invariant as the DB-bundle-config kill-switch regression
-    /// test above: a never-seen flag must leave outbound detokenization
-    /// ENABLED -- real display names, not raw tokens, appear by default.
-    #[tokio::test]
-    async fn disable_pii_detokenization_flag_defaults_enabled_when_never_seen() {
-        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-pii-detok-default")
-            .expect("default LicenseConfig::new never fails");
-        let client = penguin_licensing::LicenseClient::new(cfg)
-            .expect("LicenseClient::new with a valid default config never fails");
-        let flag = DisablePiiDetokenizationFlag::new(client);
-        assert!(
-            flag.enabled().await,
-            "an unseen kill-switch flag must leave PII detokenization enabled"
-        );
-    }
-
     #[tokio::test]
     async fn multi_tenant_watermark_flag_defaults_enabled_when_no_license_client_is_available() {
         let flag = multi_tenant_watermark_flag(&None);
         assert!(flag.enabled().await);
-    }
-
-    #[tokio::test]
-    async fn pii_detokenization_flag_defaults_enabled_when_no_license_client_is_available() {
-        let flag = pii_detokenization_flag(&None);
-        assert!(flag.enabled().await);
-    }
-
-    /// `Some(client)` branch: wraps a real client in
-    /// `DisablePiiDetokenizationFlag` rather than the `None` fallback's
-    /// fixed `StaticFlag(true)`.
-    #[tokio::test]
-    async fn pii_detokenization_flag_wraps_a_real_client_when_available() {
-        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-pii-detok-some")
-            .expect("default LicenseConfig::new never fails");
-        let client = penguin_licensing::LicenseClient::new(cfg)
-            .expect("LicenseClient::new with a valid default config never fails");
-        let flag = pii_detokenization_flag(&Some(client));
-        assert!(
-            flag.enabled().await,
-            "an unseen kill-switch flag must leave PII detokenization enabled"
-        );
     }
 
     /// `Some(client)` branch: wraps a real client in

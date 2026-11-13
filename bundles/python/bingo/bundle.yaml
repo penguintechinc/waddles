@@ -4,7 +4,7 @@ name: Chat Bingo Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !bingo (card) / bingo (claim) / status / start / call / end. Cards are
 # derived from a per-round seed + the viewer's pseudonym, never stored. See src/app.py's module
 # docstring. Activation-gated only (no feature flag).
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin

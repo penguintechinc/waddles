@@ -139,6 +139,12 @@ jobs:
       - name: check-no-stubs
         run: make check-no-stubs
 
+      # PII boundary: only svc-ingest's outbound drain and svc-presentation may reference the
+      # egress detokenizer (svc-action used to detokenize into Valkey queues). Prints files
+      # examined; zero examined or any violation fails, and the negative test runs first.
+      - name: check-pii-egress
+        run: make check-pii-egress
+
   python-unit:
     name: Python unit tests
     needs: changes

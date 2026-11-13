@@ -176,7 +176,7 @@ async def build_internal_grpc_server(
         ],
     )
     identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(async_dal), server)
-    key_pb2_grpc.add_KeyServiceServicer_to_server(KeyServicer(), server)
+    key_pb2_grpc.add_KeyServiceServicer_to_server(KeyServicer(app_config), server)
     dataplane_scope_pb2_grpc.add_DataplaneScopeServiceServicer_to_server(
         DataplaneScopeServicer(async_dal), server
     )

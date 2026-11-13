@@ -6,35 +6,44 @@
       "title": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 100
+        "maxLength": 200
       },
       "description": {
         "type": "string",
-        "maxLength": 1000
+        "maxLength": 500
       },
-      "start_date": {
-        "type": "string"
+      "starts_at": {
+        "type": "string",
+        "description": "RFC 3339 timestamp"
       },
-      "end_date": {
-        "type": "string"
+      "ends_at": {
+        "type": "string",
+        "description": "RFC 3339 timestamp"
       },
       "timezone": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 100,
+        "description": "IANA time-zone id"
       },
-      "location": {
+      "location_name": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 100
+        "maxLength": 50
+      },
+      "location_type": {
+        "type": "string",
+        "enum": [
+          "VENUE",
+          "ONLINE"
+        ]
       }
     },
     "required": [
       "title",
-      "description",
-      "start_date",
-      "end_date",
-      "timezone",
-      "location"
+      "starts_at",
+      "ends_at",
+      "timezone"
     ],
     "additionalProperties": false
   }

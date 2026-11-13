@@ -206,6 +206,72 @@ fn build_ai_wiring(
     }
 }
 
+/// Builds this stage's tenant stream-DEK source (`crate::identity_crypto`): the counterpart of
+/// svc-ingest's encrypt side, shared by every consumer through `Config::identity_dek`.
+///
+/// Production posture: `ConfiguredDekProvider::hub` over a `hub_client::HubClient` holding the
+/// `key:stream-dek:read` scope. The machine JWT is minted/cached/refreshed by
+/// `service_auth::MachineJwtClient` from the pod's projected ServiceAccount token; DEKs come
+/// from hub-api's internal gRPC `KeyService`, sealed to a per-call ephemeral X25519 key, and
+/// every failure is fail-closed (the event is dead-lettered, see `spine::decrypt_inbound_event`).
+/// The channel is lazy, so the stage starts before hub-api is reachable.
+///
+/// Dev/alpha only: when `INGEST_DEV_KEK` is set AND `WADDLES_ENV` is `alpha`/`local`,
+/// `LocalDevDekProvider` is used (the same hard gate svc-ingest applies -- it must be the same
+/// KEK there). Set but refused (any other environment) is logged and falls through to the
+/// broker, never to a silently-accepted dev key.
+///
+/// # Errors
+/// `HUB_API_GRPC_ENDPOINT` (https) and `SERVICE_JWT_TOKEN_ENDPOINT` are required: a stage that
+/// could only ever dead-letter every identity-bearing event must not start looking healthy.
+fn build_dek_provider(
+    cli: &config::CliConfig,
+) -> anyhow::Result<hub_client::dek::ConfiguredDekProvider> {
+    use hub_client::dek::{ConfiguredDekProvider, LocalDevDekProvider, STREAM_DEK_SCOPE};
+
+    if std::env::var_os("INGEST_DEV_KEK").is_some() {
+        // Unset `WADDLES_ENV` must never satisfy the dev gate: default to production.
+        let env_name = std::env::var("WADDLES_ENV").unwrap_or_else(|_| "production".to_string());
+        match LocalDevDekProvider::new(&env_name, "INGEST_DEV_KEK") {
+            Ok(provider) => return Ok(ConfiguredDekProvider::local_dev(provider)),
+            Err(err) => tracing::error!(
+                error = %err,
+                "INGEST_DEV_KEK is set but LocalDevDekProvider was refused; using the \
+                 hub-api key broker (never a silent dev-key fallback outside alpha/local)"
+            ),
+        }
+    }
+    let endpoint = cli.hub_api_grpc_endpoint.trim();
+    if endpoint.is_empty() || cli.service_jwt_token_endpoint.trim().is_empty() {
+        anyhow::bail!(
+            "identity-field decryption needs HUB_API_GRPC_ENDPOINT and \
+             SERVICE_JWT_TOKEN_ENDPOINT to fetch tenant DEKs from hub-api's key broker; \
+             refusing to start a stage that could only dead-letter every event"
+        );
+    }
+    if !endpoint.to_ascii_lowercase().starts_with("https://") {
+        anyhow::bail!(
+            "HUB_API_GRPC_ENDPOINT must be https:// (tenant DEK delivery is never plaintext)"
+        );
+    }
+    let ca =
+        (!cli.hub_api_grpc_ca_file.trim().is_empty()).then_some(cli.hub_api_grpc_ca_file.as_str());
+    let client = hub_client::HubClient::connect_lazy(
+        endpoint,
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        STREAM_DEK_SCOPE,
+        ca,
+    )
+    .map_err(|e| anyhow::anyhow!("key broker client unavailable: {e}"))?;
+    tracing::info!(
+        endpoint = %endpoint,
+        scope = STREAM_DEK_SCOPE,
+        "identity-field DEKs are fetched from hub-api's KeyService"
+    );
+    Ok(ConfiguredDekProvider::hub(Arc::new(client), "svc-process"))
+}
+
 /// Builds and connects the shared `hub_client::HubClient` the inbound
 /// PII-tokenization pass (`crate::pii_tokenize`) needs, or `Ok(None)` when
 /// `tokenization_enabled` is `false` (the opt-out kill-switch is ON) -- no
@@ -514,6 +580,11 @@ where
         },
         "resolved inbound PII tokenization state"
     );
+    // Installed before any consumer path below clones it out of `config.identity_dek`.
+    let dek_provider = build_dek_provider(&config.cli)?;
+    if config.identity_dek.set(dek_provider).is_err() {
+        anyhow::bail!("identity DEK provider was already installed");
+    }
     let hub_minter: Option<Arc<dyn pii_tokenize::IdentityMinter>> =
         build_hub_client(&config.cli, pii_tokenization_enabled)
             .await?
@@ -1432,6 +1503,7 @@ fn try_start_process_loop(
         user: cli.bundle_platform_table_user.clone(),
     };
     let bundle_platform_table_password = config.bundle_platform_table_password.clone();
+    let identity_dek = config.identity_dek.get().cloned();
 
     tokio::spawn(async move {
         // TODO(M4+): tenant/community scope hardcoded to the tenant-wide
@@ -1658,6 +1730,7 @@ fn try_start_process_loop(
                 // enabled and the connect failed), and passes it down
                 // unconditionally from here.
                 pii_minter: hub_minter.clone(),
+                dek_provider: identity_dek.clone(),
                 db_wiring: db_wiring.clone(),
                 reputation_wiring: reputation_wiring.clone(),
                 economy_wiring: economy_wiring.clone(),
@@ -2435,6 +2508,10 @@ async fn build_source_supervisor_deps(
         identity_wiring: None,
         ai_wiring: None,
         media_wiring: None,
+        // The shared, once-built tenant stream-DEK source (`build_dek_provider`); `None`
+        // only before `run_with_shutdown` has installed it, in which case every event that
+        // carries an encrypted identity field is dead-lettered (fail closed).
+        dek_provider: config.identity_dek.get().cloned(),
     })
 }
 
@@ -2663,6 +2740,10 @@ mod tests {
             unsafe {
                 std::env::set_var("DB_PASSWORD", "test-db-pass");
                 std::env::set_var("SERVICE_API_KEY", "test-api-key");
+                // The stage refuses to start without a tenant-DEK source; the hard-gated
+                // dev/alpha KEK is the in-process stand-in for hub-api's key broker here.
+                std::env::set_var("WADDLES_ENV", "local");
+                std::env::set_var("INGEST_DEV_KEK", "k".repeat(48));
             }
             // Fixed high ports rather than `0` (OS-assigned):
             // `run_with_shutdown` needs the bound port back out to hit it,
@@ -2724,6 +2805,7 @@ mod tests {
             bundle_reputation_password: None,
             bundle_economy_password: None,
             bundle_platform_table_password: None,
+            identity_dek: Default::default(),
         }
     }
 
@@ -3574,6 +3656,7 @@ mod tests {
             bundle_reputation_password: None,
             bundle_economy_password: None,
             bundle_platform_table_password: None,
+            identity_dek: Default::default(),
         };
         let state = crate::http::AppState::new(
             config,

@@ -25,10 +25,8 @@ EV = {
     "scheduled_end_time": "t",
     "location": "l",
 }
-#: Exactly the args `plan_roles` / `event_sync` send (see their `toolcall.call` sites).
+#: Exactly the args `event_sync` sends (see their `toolcall.call` sites).
 CONSUMED: dict[str, dict[str, str]] = {
-    "discord.member.roles.add": {"user": "u", "role_key": "vip"},
-    "discord.member.roles.remove": {"user": "u", "role_key": "vip"},
     "discord.scheduled_event.create": dict(EV),
     "discord.scheduled_event.update": {"event_id": "1", **EV},
     "discord.scheduled_event.cancel": {"event_id": "1"},
@@ -61,7 +59,7 @@ def test_consumed_discord_args_satisfy_the_discord_schemas() -> None:
         assert set(args) <= set(schema["properties"]), name
         assert schema.get("additionalProperties") is False
         checked += 1
-    assert checked == 5
+    assert checked == 3
 
 
 @pytest.mark.parametrize("manifest", ["bundle.yaml", "hub-manifest.yaml"])
@@ -75,6 +73,5 @@ def test_python_manifests_declare_every_consumed_tool(manifest: str) -> None:
         assert (name, svc, "write") in requested, name
     wix = [c for c in doc["stages"]["process"]["consumes"] if c["platform"] == "wix"]
     assert len(wix) == 1
-    assert {"subscription.started", "subscription.ended", "event.created", "event.canceled"} <= set(
-        wix[0]["event_types"]
-    )
+    assert set(wix[0]["event_types"]) == {"event.created", "event.updated", "event.canceled"}
+    assert not any(n.startswith("discord.member.roles") for n, _s, _a in requested)

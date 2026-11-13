@@ -455,7 +455,21 @@ fn twitch_and_wix_adapters_follow_their_contracts_end_to_end() {
     let x = store::sync_record(ctx.kv, ev.id, Target::Wix)
         .unwrap()
         .unwrap();
-    assert_eq!(x.remote_id.as_deref(), Some("wix1002"));
+    assert_eq!(x.remote_id.as_deref(), Some(common::wix_id(1002).as_str()));
+    let upd = w
+        .calls()
+        .into_iter()
+        .find(|c| c.tool == "wix.event.update")
+        .unwrap();
+    assert_eq!(
+        upd.args["revision"], 1,
+        "update carries the revision create reported"
+    );
+    assert_eq!(
+        x.remote_revision,
+        Some(2),
+        "revision advances from the update result"
+    );
 }
 
 #[test]

@@ -40,6 +40,7 @@
 pub mod active_context;
 pub mod bundle_config;
 pub mod bundle_schedule;
+pub mod dek;
 pub mod resolve_scope;
 pub(crate) mod rpc;
 
@@ -351,6 +352,31 @@ impl HubClient {
             deadline: DEFAULT_RPC_DEADLINE,
             max_retries: 2,
         })
+    }
+
+    /// Like [`HubClient::connect`] but **lazy**: nothing is dialed until the first RPC, and a
+    /// dropped connection is transparently re-dialed (see [`lazy_channel`]). For services that
+    /// must start (and report readiness honestly) before hub-api is reachable and fail each
+    /// call closed meanwhile, instead of crash-looping at boot. Same TLS/CA-pinning and
+    /// machine-JWT bootstrap as `connect`. Must run inside a tokio runtime.
+    pub fn connect_lazy(
+        endpoint: &str,
+        token_endpoint: impl Into<String>,
+        sa_token_path: impl Into<String>,
+        scope: impl Into<String>,
+        ca_cert_path: Option<&str>,
+    ) -> Result<Self, HubClientError> {
+        let channel = lazy_channel(endpoint, ca_cert_path)?;
+        let token_client = Arc::new(MachineJwtClient::with_channel(
+            HubChannel::lazy(
+                token_endpoint,
+                ca_cert_path.map(str::to_owned),
+                HttpTimeouts::from_env(),
+            ),
+            sa_token_path,
+            scope,
+        ));
+        Ok(Self::with_channel(channel, token_client))
     }
 
     /// Builds a client over an already-established [`Channel`] with an explicit machine-JWT

@@ -31,6 +31,7 @@ triggers/tables/grants.
 
 from __future__ import annotations
 
+import atexit
 import importlib.util
 import json
 import os
@@ -215,11 +216,18 @@ class PgTestDatabase:
     #: Per-service LOGIN role passwords this container was migrated with (role -> password),
     #: so a test can authenticate AS a service role. Empty when the caller never migrated.
     service_role_passwords: Mapping[str, str] = field(default_factory=dict)
+    #: Docker container name backing this database (for `docker exec`); per-process unique.
+    container: str = ""
 
     @property
     def dsn(self) -> str:
         """`postgresql://` DSN, the exact form `DATABASE_URL`/`psycopg2.connect` accept."""
         return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.dbname}"
+
+
+def container_name(name_suffix: str) -> str:
+    """Per-process container name: concurrent sessions/agents never `docker rm -f` each other's."""
+    return f"waddles-migtest-{name_suffix}-{os.getpid()}"
 
 
 def _free_port() -> int:
@@ -228,28 +236,141 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _wait_ready(container: str, user: str, dbname: str, timeout_s: float = 180.0) -> None:
-    """Block until `dbname` actually accepts a real query.
+#: Overall readiness deadline (seconds) for one container; override via env on a loaded host.
+_READY_TIMEOUT_ENV = "WADDLES_PG_READY_TIMEOUT_S"
+#: Per-probe (`docker exec ... psql`) timeout (seconds) so one wedged exec can't hang the run.
+_PROBE_TIMEOUT_ENV = "WADDLES_PG_PROBE_TIMEOUT_S"
+_DEFAULT_READY_TIMEOUT_S = 120.0
+_DEFAULT_PROBE_TIMEOUT_S = 10.0
+_LOG_TAIL_LINES = 50
+
+#: Containers started by this process and not yet removed -- the atexit finalizer's worklist.
+_LIVE_CONTAINERS: set[str] = set()
+
+
+def _env_seconds(name: str, default: float) -> float:
+    """Read a positive float of seconds from env `name`; fail loudly on a malformed value."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name}={raw!r} is not a number of seconds") from exc
+    if value <= 0:
+        raise ValueError(f"{name}={raw!r} must be > 0")
+    return value
+
+
+def _container_log_tail(container: str) -> str:
+    """Last `_LOG_TAIL_LINES` lines of `docker logs` for a failure message (bounded, never raises)."""
+    try:
+        result = subprocess.run(  # noqa: S603 -- fixed argv, no shell, test-only
+            ["docker", "logs", "--tail", str(_LOG_TAIL_LINES), container],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return "<docker logs timed out>"
+    return (result.stdout + result.stderr).strip() or "<empty>"
+
+
+def _remove_container(container: str) -> None:
+    """`docker rm -f` with a bounded timeout; drops it from the live set either way."""
+    try:
+        subprocess.run(  # noqa: S603 -- fixed argv, no shell, test-only
+            ["docker", "rm", "-f", container], capture_output=True, check=False, timeout=60
+        )
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(f"pg_docker: docker rm -f {container} timed out; container may leak\n")
+    finally:
+        _LIVE_CONTAINERS.discard(container)
+
+
+def _cleanup_live_containers() -> None:
+    """atexit finalizer: remove any container a crashed/interrupted test never tore down."""
+    for container in sorted(_LIVE_CONTAINERS):
+        _remove_container(container)
+
+
+atexit.register(_cleanup_live_containers)
+
+
+def _start_container(container: str, db: PgTestDatabase) -> None:
+    """`docker run` a fresh Postgres 17 container and register it for guaranteed teardown."""
+    _remove_container(container)
+    _LIVE_CONTAINERS.add(container)
+    subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        [
+            "docker", "run", "-d", "--name", container,
+            "--label", "waddles.test=pg_docker",
+            "-e", f"POSTGRES_USER={db.user}",
+            "-e", f"POSTGRES_PASSWORD={db.password}",
+            "-e", f"POSTGRES_DB={db.dbname}",
+            "-p", f"{db.port}:5432",
+            "postgres:17-bookworm",
+        ],
+        capture_output=True,
+        check=True,
+        timeout=300,
+    )
+
+
+def _wait_ready(
+    container: str,
+    user: str,
+    dbname: str,
+    timeout_s: float | None = None,
+    probe_timeout_s: float | None = None,
+) -> None:
+    """Block until `dbname` actually accepts a real query, or raise with the container log tail.
 
     `pg_isready` alone is insufficient: the official Postgres image
     accepts connections briefly during its own first-run `initdb`
     bootstrap, then restarts once more before `POSTGRES_DB` actually
-    exists -- `pg_isready` returns success during that brief window,
-    racily reporting "ready" before the target database exists at all
-    (`FATAL: database "..." does not exist`). A real `SELECT 1` against
-    the actual database is the only check that can't false-positive here.
+    exists -- a real `SELECT 1` against the actual database is the only
+    check that can't false-positive here. Each probe is bounded by
+    `probe_timeout_s` (env `WADDLES_PG_PROBE_TIMEOUT_S`, default 10s) and the
+    whole wait by `timeout_s` (env `WADDLES_PG_READY_TIMEOUT_S`, default 120s),
+    so a loaded host fails loudly instead of hanging forever.
     """
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        result = subprocess.run(  # noqa: S603 -- fixed argv, no shell, test-only
-            ["docker", "exec", container, "psql", "-U", user, "-d", dbname, "-c", "SELECT 1"],
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode == 0:
-            return
-        time.sleep(1)
-    raise TimeoutError(f"postgres container {container!r} never became ready within {timeout_s}s")
+    total = timeout_s if timeout_s is not None else _env_seconds(
+        _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_S
+    )
+    per_probe = probe_timeout_s if probe_timeout_s is not None else _env_seconds(
+        _PROBE_TIMEOUT_ENV, _DEFAULT_PROBE_TIMEOUT_S
+    )
+    deadline = time.monotonic() + total
+    attempts = 0
+    last_error = "<no probe ran>"
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        attempts += 1
+        try:
+            result = subprocess.run(  # noqa: S603 -- fixed argv, no shell, test-only
+                ["docker", "exec", container, "psql", "-U", user, "-d", dbname, "-c", "SELECT 1"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=min(per_probe, max(remaining, 0.1)),
+            )
+        except subprocess.TimeoutExpired:
+            last_error = f"probe timed out after {per_probe}s"
+        else:
+            if result.returncode == 0:
+                return
+            last_error = (result.stderr or result.stdout).strip() or f"exit {result.returncode}"
+        time.sleep(min(1.0, max(deadline - time.monotonic(), 0)))
+    raise TimeoutError(
+        f"postgres container {container!r} never became ready within {total}s "
+        f"({attempts} probes, per-probe timeout {per_probe}s); last error: {last_error}\n"
+        f"--- docker logs --tail {_LOG_TAIL_LINES} {container} ---\n"
+        f"{_container_log_tail(container)}"
+    )
 
 
 @contextmanager
@@ -261,7 +382,7 @@ def migrated_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
             (or any other concurrently running agent's) container --
             never a shared/fixed name.
     """
-    container = f"waddles-migtest-{name_suffix}"
+    container = container_name(name_suffix)
     port = _free_port()
     service_role_passwords = throwaway_service_role_passwords()
     db = PgTestDatabase(
@@ -271,23 +392,10 @@ def migrated_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
         password="testpass123",
         dbname="waddlebot",
         service_role_passwords=service_role_passwords,
-    )
-    subprocess.run(  # noqa: S603 -- fixed argv, no shell
-        ["docker", "rm", "-f", container], capture_output=True, check=False
-    )
-    subprocess.run(  # noqa: S603 -- fixed argv, no shell
-        [
-            "docker", "run", "-d", "--name", container,
-            "-e", f"POSTGRES_USER={db.user}",
-            "-e", f"POSTGRES_PASSWORD={db.password}",
-            "-e", f"POSTGRES_DB={db.dbname}",
-            "-p", f"{port}:5432",
-            "postgres:17-bookworm",
-        ],
-        capture_output=True,
-        check=True,
+        container=container,
     )
     try:
+        _start_container(container, db)
         _wait_ready(container, db.user, db.dbname)
         subprocess.run(  # noqa: S603 -- fixed argv, no shell
             ["docker", "exec", "-i", container, "psql", "-U", db.user, "-d", db.dbname],
@@ -332,9 +440,7 @@ def migrated_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
             )
         yield db
     finally:
-        subprocess.run(  # noqa: S603 -- fixed argv, no shell
-            ["docker", "rm", "-f", container], capture_output=True, check=False
-        )
+        _remove_container(container)
 
 
 @contextmanager
@@ -344,33 +450,22 @@ def empty_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
     what `hub_api/bootstrap.py`'s `create_all()` path alone produces on a truly fresh
     database, as opposed to `migrated_postgres()`'s full Alembic-chain result above.
     """
-    container = f"waddles-migtest-{name_suffix}"
+    container = container_name(name_suffix)
     port = _free_port()
     db = PgTestDatabase(
-        host="127.0.0.1", port=port, user="waddlebot", password="testpass123", dbname="waddlebot"
-    )
-    subprocess.run(  # noqa: S603 -- fixed argv, no shell
-        ["docker", "rm", "-f", container], capture_output=True, check=False
-    )
-    subprocess.run(  # noqa: S603 -- fixed argv, no shell
-        [
-            "docker", "run", "-d", "--name", container,
-            "-e", f"POSTGRES_USER={db.user}",
-            "-e", f"POSTGRES_PASSWORD={db.password}",
-            "-e", f"POSTGRES_DB={db.dbname}",
-            "-p", f"{port}:5432",
-            "postgres:17-bookworm",
-        ],
-        capture_output=True,
-        check=True,
+        host="127.0.0.1",
+        port=port,
+        user="waddlebot",
+        password="testpass123",
+        dbname="waddlebot",
+        container=container,
     )
     try:
+        _start_container(container, db)
         _wait_ready(container, db.user, db.dbname)
         yield db
     finally:
-        subprocess.run(  # noqa: S603 -- fixed argv, no shell
-            ["docker", "rm", "-f", container], capture_output=True, check=False
-        )
+        _remove_container(container)
 
 
 def bootstrap_minimal_schema(name_suffix: str, db: PgTestDatabase) -> None:
@@ -382,7 +477,7 @@ def bootstrap_minimal_schema(name_suffix: str, db: PgTestDatabase) -> None:
     """
     subprocess.run(  # noqa: S603 -- fixed argv, no shell
         [
-            "docker", "exec", "-i", f"waddles-migtest-{name_suffix}",
+            "docker", "exec", "-i", db.container or container_name(name_suffix),
             "psql", "-U", db.user, "-d", db.dbname,
         ],
         input=_BOOTSTRAP_SQL,
