@@ -126,6 +126,10 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.metricsPort | quote }}
         - name: RUNNER_TENANT_SLUG
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
+        {{- if .Values.pipeline.defaultTenantId }}
+        - name: DEFAULT_TENANT_ID
+          value: {{ .Values.pipeline.defaultTenantId | quote }}
+        {{- end }}
         - name: HUB_API_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
         # Machine-JWT bootstrap + hub-api's internal gRPC, ALWAYS rendered: every tenant's

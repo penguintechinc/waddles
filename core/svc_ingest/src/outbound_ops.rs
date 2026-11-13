@@ -314,6 +314,10 @@ pub struct OutboundEntry {
     /// the producer from the binding-verified scope. `None` when absent or
     /// not a positive id (never defaulted; a per-community drain refuses it).
     pub community_id: Option<i64>,
+    /// The MAC-bound numeric tenant stamp exactly as sent (`None` when absent).
+    /// Unlike the per-action filtered copy, `0` is preserved; the env-token
+    /// Discord drain serves only the default tenant ([`crate::tenant_discord`]).
+    pub tenant_id: Option<i64>,
 }
 
 /// `true` for a safe `op_id`: 1..=[`MAX_OP_ID_LEN`] ASCII alphanumerics or
@@ -539,6 +543,7 @@ pub fn parse_outbound_entry(
     }
     let (op_id, exp_ms) = (wire.op_id.clone(), wire.exp_ms);
     let community_id = wire.community_id.filter(|c| *c > 0);
+    let tenant_id = wire.tenant_id;
     if let Some(v) = wire.v {
         if v > SCHEMA_VERSION {
             return Err(OutboundParseError::UnsupportedVersion(v));
@@ -600,6 +605,7 @@ pub fn parse_outbound_entry(
         op_id,
         exp_ms,
         community_id,
+        tenant_id,
     })
 }
 

@@ -596,7 +596,10 @@ fn chat_tenant_stamp(scope: &InvokeScope) -> Option<i64> {
 }
 
 /// The numeric tenant to stamp for `op`, from the verified scope only.
-/// `None` for ops that do not need it; a typed refusal when the op needs it
+/// Every op carries the scope's tenant when it has one (MAC-bound), so the
+/// svc-ingest drain can tell a non-default tenant from the default one and
+/// never serve it with the process-wide env Discord token; ops that do not
+/// need it ignore an unresolved scope (`None`); a typed refusal when the op needs it
 /// and the scope carries no resolved tenant (the drain would refuse
 /// `no_tenant_scope` anyway -- fail at the producer, before queueing).
 fn tenant_stamp(op: RelayOp, scope: &InvokeScope) -> Result<Option<i64>, HostResultError> {
@@ -604,7 +607,7 @@ fn tenant_stamp(op: RelayOp, scope: &InvokeScope) -> Result<Option<i64>, HostRes
         return Ok(chat_tenant_stamp(scope));
     }
     if !op.needs_tenant() {
-        return Ok(None);
+        return Ok(chat_tenant_stamp(scope));
     }
     if scope.tenant_id >= 1 {
         Ok(Some(i64::from(scope.tenant_id)))
@@ -5210,7 +5213,8 @@ mod tests {
 
     /// p6a producer-completeness (3): `dm.send` stamps the numeric tenant from
     /// the verified invoke scope (MAC-bound); a bundle-supplied
-    /// `tenant_id`/`community_id` is ignored. chat.send/chat.delete carry none.
+    /// `tenant_id`/`community_id` is ignored. chat.delete stamps it too (so the
+    /// drain can refuse a non-default tenant on the env-token path).
     #[tokio::test]
     async fn dm_send_stamps_the_scope_tenant_and_ignores_the_bundle_s() {
         let caps = caps(FakeRelayQueue::with_live_drain());
@@ -5234,12 +5238,13 @@ mod tests {
         for (c, t) in [(3, 999), (3, 0), (888, 7), (0, 7)] {
             assert!(verifies(dm, c, t).is_err(), "({c},{t}) must not verify");
         }
-        assert!(
-            del.get("tenant_id").is_none(),
-            "chat.delete needs no tenant"
+        assert_eq!(
+            del["tenant_id"], 7,
+            "chat.delete carries the scope's tenant"
         );
         assert_eq!(del["community_id"], 3);
-        assert_eq!(verifies(del, 3, 0), Ok(()));
+        assert_eq!(verifies(del, 3, 7), Ok(()));
+        assert!(verifies(del, 3, 0).is_err(), "tenant is MAC-bound");
     }
 
     /// dm.send / role ops with no resolved tenant are refused up front with a
@@ -5258,7 +5263,10 @@ mod tests {
             assert_eq!(err.code, "tenant_scope_missing", "{}", op.as_str());
         }
         // Ops that do not need a tenant are unaffected.
-        assert_eq!(tenant_stamp(RelayOp::ChatDelete, &sc).unwrap(), None);
+        assert_eq!(
+            tenant_stamp(RelayOp::ChatDelete, &sc).unwrap(),
+            chat_tenant_stamp(&sc)
+        );
     }
 
     /// dm.send also accepts the tokenized `{user:<uuid>}` form (the only form

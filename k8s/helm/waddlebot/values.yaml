@@ -1188,6 +1188,11 @@ pipeline:
   # runner stays tenant-wide rather than community-scoped -- see roadmap DATA-MODEL
   # GAPS "guild->community" shortcut (community_id=None, activated tenant-wide).
   runnerTenantSlug: "default"
+  # Numeric id of the default (is_global) tenant -- the ONLY tenant the process-wide
+  # DISCORD_BOT_TOKEN application may serve. Rendered as DEFAULT_TENANT_ID on svc-ingest;
+  # svc-ingest refuses to start with DISCORD_BOT_TOKEN set and this unset/0. Every
+  # environment that runs the env Discord app MUST set it (alpha: 1).
+  defaultTenantId: ""
 
   # PR-H -- ONE source of truth for the pinned connector component digests
   # (sha256:<64 lowercase hex>; empty = unset). Rendered into svc-ingest

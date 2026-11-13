@@ -654,6 +654,16 @@ async fn run_loop<C, A, M, P, Dk>(
                             "resolved discord permissions"
                         );
                         let event = crate::normalize::normalize_discord(&msg, &perms);
+                        // The env-token gateway is the default tenant's app only.
+                        if !crate::tenant_discord::env_gateway_event_allowed(
+                            crate::publish::installed_scope_resolver().as_deref(),
+                            &event,
+                            crate::tenant_discord::default_tenant_id(),
+                        )
+                        .await
+                        {
+                            continue;
+                        }
                         if let Err(err) = publish_event(
                             appender,
                             metrics,

@@ -181,7 +181,17 @@ def _twitch_flow(app: Quart, auth: Any, monkeypatch: pytest.MonkeyPatch) -> Flow
 def _discord_flow(app: Quart, auth: Any, monkeypatch: pytest.MonkeyPatch) -> Flow:
     client = app.test_client(use_cookies=False)
     monkeypatch.setattr(discord_bp_module, "feature_enabled", AsyncMock(return_value=True))
-    monkeypatch.setattr(discord_svc, "_exchange_code", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        discord_svc,
+        "_exchange_code",
+        AsyncMock(return_value={"guild": {"id": "123456789012345678"}}),
+    )
+    monkeypatch.setattr(discord_svc, "_validate_bot_token", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        discord_svc,
+        "ensure_tenant_discord_connection",
+        MagicMock(return_value=MagicMock(connection_id=1, granted_community_id=None)),
+    )
     store = MagicMock()
     monkeypatch.setattr(discord_svc, "store_tenant_credentials", store)
 
@@ -192,7 +202,9 @@ def _discord_flow(app: Quart, auth: Any, monkeypatch: pytest.MonkeyPatch) -> Flo
                 **auth(user_id=user_id, scope="tenant.discord_install:write"),
                 "Content-Type": "application/json",
             },
-            data=json_module.dumps({"application_id": "app-1", "client_secret": "sec-1"}),
+            data=json_module.dumps(
+                {"application_id": "app-1", "client_secret": "sec-1", "bot_token": "bot-1"}
+            ),
         )
         assert resp.status_code == 200
         header = _cookie_header(resp, discord_bp_module.BINDING_COOKIE)
