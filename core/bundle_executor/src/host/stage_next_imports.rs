@@ -375,3 +375,329 @@ impl overlay::Host for ExecState {
         Err(overlay_not_implemented())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use crate::host::imports::tests::{one_shot_bridge_capturing, state_with};
+    use penguin_bundle_host::wire::HostResultError;
+    use serde_json::json;
+
+    fn refusal(code: &str, message: &str) -> HostResultError {
+        HostResultError {
+            code: code.to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    fn host_denied(code: &str) -> ExecutorError {
+        ExecutorError::HostCallDenied {
+            capability: "db",
+            op: "reputation.get",
+            code: code.to_string(),
+            message: "msg".to_string(),
+        }
+    }
+
+    /// Stage refusal codes map onto the typed WIT `reputation.error` variants.
+    #[test]
+    fn stage_codes_map_to_typed_reputation_errors() {
+        assert!(matches!(
+            reputation_error_from(host_denied("user_not_in_scope")),
+            reputation::Error::NotAMember
+        ));
+        assert!(matches!(
+            reputation_error_from(host_denied("not_a_member")),
+            reputation::Error::NotAMember
+        ));
+        assert!(matches!(
+            reputation_error_from(host_denied("daily_cap_exceeded")),
+            reputation::Error::DailyCapExceeded
+        ));
+        assert!(matches!(
+            reputation_error_from(host_denied("invalid_args")),
+            reputation::Error::Invalid(m) if m == "msg"
+        ));
+        for unavailable in ["not_implemented", "feature_disabled"] {
+            assert!(matches!(
+                reputation_error_from(host_denied(unavailable)),
+                reputation::Error::Unavailable(m) if m == "msg"
+            ));
+        }
+        assert!(matches!(
+            reputation_error_from(host_denied("backend")),
+            reputation::Error::Backend(m) if m == "msg"
+        ));
+        assert!(matches!(
+            reputation_error_from(host_denied("quota_exceeded")),
+            reputation::Error::Denied(c) if c == "quota_exceeded"
+        ));
+        // A non-HostCallDenied failure (transport) is a backend error, never a denial.
+        assert!(matches!(
+            reputation_error_from(ExecutorError::Config("boom".to_string())),
+            reputation::Error::Backend(_)
+        ));
+    }
+
+    /// Malformed success payloads are a loud `backend` error, never a default.
+    #[test]
+    fn malformed_payloads_are_loud_backend_errors() {
+        assert!(matches!(
+            decode_balance(json!({"nope": 1})),
+            Err(reputation::Error::Backend(m)) if m.contains("malformed host-result")
+        ));
+        assert!(matches!(
+            decode_entries(json!({"entries": [{"user": 1}]})),
+            Err(reputation::Error::Backend(m)) if m.contains("malformed host-result")
+        ));
+        assert!(matches!(
+            decode_apply(json!({"new_score": "x"})),
+            Err(reputation::Error::Backend(_))
+        ));
+        assert!(matches!(
+            decode_flag(json!({})),
+            Err(reputation::Error::Backend(_))
+        ));
+        assert_eq!(decode_balance(json!({"balance": 7})).unwrap(), 7);
+        assert!(decode_flag(json!({"flag": true})).unwrap());
+    }
+
+    /// `get` / `adjust` / `override_score` send exactly the guest's words and
+    /// decode the balance.
+    #[tokio::test]
+    async fn balance_ops_cross_the_bridge_with_their_args() {
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"balance": 11})));
+        let mut st = state_with(bridge);
+        assert_eq!(
+            reputation::Host::get(&mut st, "u1".into()).await.unwrap(),
+            11
+        );
+        assert_eq!(args.await.unwrap(), json!({"user": "u1"}));
+
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"balance": 12})));
+        let mut st = state_with(bridge);
+        let got = reputation::Host::adjust(&mut st, "u1".into(), -3, "game.loss".into())
+            .await
+            .unwrap();
+        assert_eq!(got, 12);
+        assert_eq!(
+            args.await.unwrap(),
+            json!({"user": "u1", "delta": -3, "reason": "game.loss"})
+        );
+
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"balance": 500})));
+        let mut st = state_with(bridge);
+        let got = reputation::Host::override_score(&mut st, "u1".into(), 500, "admin".into())
+            .await
+            .unwrap();
+        assert_eq!(got, 500);
+        assert_eq!(
+            args.await.unwrap(),
+            json!({"user": "u1", "absolute_score": 500, "reason": "admin"})
+        );
+    }
+
+    /// Batch ops send the adjustments list / user list and decode entries.
+    #[tokio::test]
+    async fn batch_ops_cross_the_bridge_and_decode_entries() {
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({})));
+        let mut st = state_with(bridge);
+        reputation::Host::adjust_many(
+            &mut st,
+            vec![
+                reputation::Adjustment {
+                    user: "a".into(),
+                    delta: 2,
+                },
+                reputation::Adjustment {
+                    user: "b".into(),
+                    delta: -4,
+                },
+            ],
+            "batch.reason".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            args.await.unwrap(),
+            json!({"adjustments": [{"user":"a","delta":2},{"user":"b","delta":-4}], "reason": "batch.reason"})
+        );
+
+        let rows = json!({"entries": [{"user": "a", "score": 600}, {"user": "b", "score": 590}]});
+        let (bridge, args) = one_shot_bridge_capturing(Ok(rows.clone()));
+        let mut st = state_with(bridge);
+        let got = reputation::Host::get_many(&mut st, vec!["a".into(), "b".into()])
+            .await
+            .unwrap();
+        assert_eq!(args.await.unwrap(), json!({"users": ["a", "b"]}));
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].user.as_str(), got[0].score), ("a", 600));
+        assert_eq!((got[1].user.as_str(), got[1].score), ("b", 590));
+
+        let (bridge, args) = one_shot_bridge_capturing(Ok(rows.clone()));
+        let mut st = state_with(bridge);
+        let got = reputation::Host::leaderboard(&mut st, 10).await.unwrap();
+        assert_eq!(args.await.unwrap(), json!({"limit": 10}));
+        assert_eq!(got.len(), 2);
+
+        let (bridge, args) = one_shot_bridge_capturing(Ok(rows));
+        let mut st = state_with(bridge);
+        let got = reputation::Host::below_threshold(&mut st, 400, 5)
+            .await
+            .unwrap();
+        assert_eq!(args.await.unwrap(), json!({"threshold": 400, "limit": 5}));
+        assert_eq!(got.len(), 2);
+    }
+
+    /// `apply` / `apply_moderation` decode `(new_score, applied)`.
+    #[tokio::test]
+    async fn apply_ops_decode_the_outcome() {
+        for moderation in [false, true] {
+            let (bridge, args) =
+                one_shot_bridge_capturing(Ok(json!({"new_score": 610, "applied": !moderation})));
+            let mut st = state_with(bridge);
+            let out = if moderation {
+                reputation::Host::apply_moderation(&mut st, "u".into(), 5, "r".into()).await
+            } else {
+                reputation::Host::apply(&mut st, "u".into(), 5, "r".into()).await
+            }
+            .unwrap();
+            assert_eq!(out.new_score, 610);
+            assert_eq!(out.applied, !moderation);
+            assert_eq!(
+                args.await.unwrap(),
+                json!({"user": "u", "delta": 5, "reason": "r"})
+            );
+        }
+    }
+
+    /// Tenant aggregate, policy (present and absent) and history decode.
+    #[tokio::test]
+    async fn tenant_policy_and_history_decode() {
+        let (bridge, _args) =
+            one_shot_bridge_capturing(Ok(json!({"score": 640, "communities": 3})));
+        let mut st = state_with(bridge);
+        let t = reputation::Host::get_tenant(&mut st, "u".into())
+            .await
+            .unwrap();
+        assert_eq!((t.score, t.communities), (640, 3));
+
+        let (bridge, _args) = one_shot_bridge_capturing(Ok(json!({
+            "policy": {"auto_ban_enabled": true, "auto_ban_floor": 350, "at_risk_threshold": 450}
+        })));
+        let mut st = state_with(bridge);
+        let p = reputation::Host::get_tenant_policy(&mut st)
+            .await
+            .unwrap()
+            .expect("policy present");
+        assert!(p.auto_ban_enabled);
+        assert_eq!((p.auto_ban_floor, p.at_risk_threshold), (350, 450));
+
+        let (bridge, _args) = one_shot_bridge_capturing(Ok(json!({"policy": null})));
+        let mut st = state_with(bridge);
+        assert!(reputation::Host::get_tenant_policy(&mut st)
+            .await
+            .unwrap()
+            .is_none());
+
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"entries": [{
+            "id": 9, "delta": -2, "reason_code": "game.loss", "kind": "adjust",
+            "balance_after": 598, "occurred_at": "2026-11-12T00:00:00Z"
+        }]})));
+        let mut st = state_with(bridge);
+        let h = reputation::Host::history(&mut st, "u".into(), 20, Some(50))
+            .await
+            .unwrap();
+        assert_eq!(
+            args.await.unwrap(),
+            json!({"user": "u", "limit": 20, "before": 50})
+        );
+        assert_eq!(h.len(), 1);
+        assert_eq!((h[0].id, h[0].delta), (9, -2));
+        assert_eq!(h[0].reason_code, "game.loss");
+        assert_eq!(h[0].kind, "adjust");
+        assert_eq!(h[0].balance_after, Some(598));
+        assert_eq!(h[0].occurred_at, "2026-11-12T00:00:00Z");
+    }
+
+    /// Soft-ban ops carry their args and decode the boolean flag.
+    #[tokio::test]
+    async fn soft_ban_ops_decode_the_flag() {
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"flag": true})));
+        let mut st = state_with(bridge);
+        assert!(reputation::Host::is_soft_banned(&mut st, "u".into())
+            .await
+            .unwrap());
+        assert_eq!(args.await.unwrap(), json!({"user": "u"}));
+
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"flag": false})));
+        let mut st = state_with(bridge);
+        assert!(
+            !reputation::Host::soft_ban(&mut st, "u".into(), "floor".into())
+                .await
+                .unwrap()
+        );
+        assert_eq!(args.await.unwrap(), json!({"user": "u", "reason": "floor"}));
+
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"flag": true})));
+        let mut st = state_with(bridge);
+        assert!(
+            reputation::Host::lift_soft_ban(&mut st, "u".into(), "floor".into())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            args.await.unwrap(),
+            json!({"user": "u", "only_reason": "floor"})
+        );
+    }
+
+    /// A stage refusal reaches every op as its typed variant, not a default.
+    #[tokio::test]
+    async fn stage_refusals_surface_through_the_host_methods() {
+        let (bridge, _a) =
+            one_shot_bridge_capturing(Err(refusal("not_a_member", "not in this community")));
+        let mut st = state_with(bridge);
+        assert!(matches!(
+            reputation::Host::get(&mut st, "u".into()).await,
+            Err(reputation::Error::NotAMember)
+        ));
+
+        let (bridge, _a) = one_shot_bridge_capturing(Err(refusal("rate_limited", "slow down")));
+        let mut st = state_with(bridge);
+        assert!(matches!(
+            reputation::Host::apply(&mut st, "u".into(), 1, "r".into()).await,
+            Err(reputation::Error::Denied(c)) if c == "rate_limited"
+        ));
+
+        let (bridge, _a) = one_shot_bridge_capturing(Err(refusal("feature_disabled", "flag off")));
+        let mut st = state_with(bridge);
+        assert!(matches!(
+            reputation::Host::is_soft_banned(&mut st, "u".into()).await,
+            Err(reputation::Error::Unavailable(m)) if m == "flag off"
+        ));
+
+        // A success body of the wrong shape is a loud backend error end to end.
+        let (bridge, _a) = one_shot_bridge_capturing(Ok(json!({"unexpected": true})));
+        let mut st = state_with(bridge);
+        assert!(matches!(
+            reputation::Host::get_tenant(&mut st, "u".into()).await,
+            Err(reputation::Error::Backend(m)) if m.contains("malformed host-result")
+        ));
+    }
+
+    /// The linked-but-unhandled `overlay` import fails loudly, never succeeds.
+    #[tokio::test]
+    async fn overlay_imports_fail_loudly_with_not_implemented() {
+        let (bridge, _a) = one_shot_bridge_capturing(Ok(json!({})));
+        let mut st = state_with(bridge);
+        let err = overlay::Host::push(&mut st, "w1".into(), overlay::Surface::Chat, "{}".into())
+            .await
+            .expect_err("overlay.push has no stage handler");
+        assert_eq!(err.code, "not_implemented");
+        assert!(!err.retryable);
+        assert_eq!(err.retry_after_ms, None);
+    }
+}

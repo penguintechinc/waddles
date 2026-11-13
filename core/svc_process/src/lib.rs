@@ -3573,4 +3573,200 @@ mod tests {
 
         assert!(result.is_ok(), "run_healthcheck must succeed: {result:?}");
     }
+
+    /// `BUNDLE_REPUTATION_PASSWORD` unset leaves the reputation capability unwired.
+    #[tokio::test]
+    async fn try_build_reputation_wiring_is_none_when_password_unset() {
+        let cfg = bundle_host_reputation::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_bundle_reputation".to_string(),
+        };
+        let wiring = try_build_reputation_wiring(
+            &cfg,
+            None,
+            &test_license_client(),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(wiring.is_none());
+    }
+
+    /// A configured reputation password with an unreachable DB degrades to `None`, never panics.
+    #[tokio::test]
+    async fn try_build_reputation_wiring_is_none_when_connection_fails() {
+        let cfg = bundle_host_reputation::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_bundle_reputation".to_string(),
+        };
+        let password = crate::config::Secret::new("irrelevant");
+        let wiring = try_build_reputation_wiring(
+            &cfg,
+            Some(&password),
+            &test_license_client(),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(wiring.is_none());
+    }
+
+    /// `BUNDLE_ECONOMY_PASSWORD` unset leaves the economy capability unwired.
+    #[tokio::test]
+    async fn try_build_economy_wiring_is_none_when_password_unset() {
+        let cfg = bundle_host_economy::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_economy_runtime".to_string(),
+        };
+        let wiring = try_build_economy_wiring(
+            &cfg,
+            None,
+            &test_license_client(),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(wiring.is_none());
+    }
+
+    /// A configured economy password with an unreachable DB degrades to `None`.
+    #[tokio::test]
+    async fn try_build_economy_wiring_is_none_when_connection_fails() {
+        let cfg = bundle_host_economy::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_economy_runtime".to_string(),
+        };
+        let password = crate::config::Secret::new("irrelevant");
+        let wiring = try_build_economy_wiring(
+            &cfg,
+            Some(&password),
+            &test_license_client(),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(wiring.is_none());
+    }
+
+    /// `BUNDLE_PLATFORM_TABLE_PASSWORD` unset leaves platform-table unwired.
+    #[tokio::test]
+    async fn try_build_platform_table_wiring_is_none_when_password_unset() {
+        let cfg = bundle_host_platform_table::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_platform_table".to_string(),
+        };
+        let wiring = try_build_platform_table_wiring(&cfg, None, &test_license_client()).await;
+        assert!(wiring.is_none());
+    }
+
+    /// A configured platform-table password with an unreachable DB degrades to `None`.
+    #[tokio::test]
+    async fn try_build_platform_table_wiring_is_none_when_connection_fails() {
+        let cfg = bundle_host_platform_table::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_platform_table".to_string(),
+        };
+        let password = crate::config::Secret::new("irrelevant");
+        let wiring =
+            try_build_platform_table_wiring(&cfg, Some(&password), &test_license_client()).await;
+        assert!(wiring.is_none());
+    }
+
+    /// An unset `SERVICE_JWT_TOKEN_ENDPOINT` leaves gameserver-net unwired.
+    #[tokio::test]
+    async fn try_build_gameserver_net_wiring_is_none_without_token_endpoint() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert!(cli.service_jwt_token_endpoint.is_empty());
+        assert!(try_build_gameserver_net_wiring(&cli, &test_license_client()).is_none());
+    }
+
+    /// With a token endpoint configured the gameserver-net wiring builds with its flag OFF.
+    #[tokio::test]
+    async fn try_build_gameserver_net_wiring_builds_with_flag_off_by_default() {
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--service-jwt-token-endpoint",
+            "https://hub.example.invalid/token",
+        ]);
+        if let Some(w) = try_build_gameserver_net_wiring(&cli, &test_license_client()) {
+            assert!(
+                !w.flag.enabled().await,
+                "the gameserver-net capability flag must default OFF"
+            );
+        }
+    }
+
+    /// The production supervisor spawns a real consumer per binding that survives an
+    /// unreachable Valkey (retrying with backoff) and stops promptly on `stop_all`.
+    #[tokio::test]
+    async fn spine_consumer_supervisor_survives_unreachable_valkey_and_stops_on_request() {
+        {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
+                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
+            }
+        }
+        let config = test_config(CliConfig::parse_from(["svc-process"]));
+        let deps = build_source_supervisor_deps(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            Arc::new(license::test_support::FixedGate(true)),
+            sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+            bundle_active_set::ActiveVersionSnapshot::new(),
+            test_egress_guard(),
+            Arc::new(active_digests::ActiveDigests::new()),
+            Arc::new(license::test_support::FixedGate(true)),
+            None,
+            Arc::new(()),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+        )
+        .await
+        .expect("valid config builds the supervisor deps");
+        // SAFETY: serialized by ENV_LOCK above.
+        unsafe {
+            std::env::remove_var("VALKEY_URL");
+            std::env::remove_var("VALKEY_PASSWORD");
+        }
+        let spawner = source_supervisor::SpineConsumerSupervisor {
+            deps: Arc::new(deps),
+        };
+        let metrics = test_source_supervisor_metrics();
+        let binding = source_supervisor::ResolvedBinding {
+            tenant_id: 1,
+            community_id: 2,
+            tenant_slug: "acme".to_string(),
+            community_name: Some("main".to_string()),
+            app_id: "waddles.core.service.test".to_string(),
+            platform: "twitch".to_string(),
+            source_id: "chan".to_string(),
+        };
+        let mut running = source_supervisor::RunningConsumers::new();
+        source_supervisor::reconcile(&mut running, &[binding], &spawner, &metrics).await;
+        assert_eq!(running.len(), 1);
+        assert_eq!(metrics.active_consumers.get(), 1);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            source_supervisor::stop_all(&mut running, &metrics),
+        )
+        .await
+        .expect("stop_all must return once shutdown is signalled");
+        assert!(running.is_empty());
+        assert_eq!(metrics.active_consumers.get(), 0);
+    }
 }

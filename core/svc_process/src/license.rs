@@ -1756,3 +1756,65 @@ mod tests {
         assert!(!near_miss.domain_bypassed());
     }
 }
+
+#[cfg(test)]
+mod capability_gate_default_tests {
+    use super::*;
+
+    /// A client that has never reached a license server (no network is touched at build).
+    fn unseen_client() -> Arc<LicenseClient> {
+        let cfg = LicenseConfig::new("svc-process-test-capability-gates")
+            .expect("default LicenseConfig::new never fails");
+        LicenseClient::new(cfg).expect("LicenseClient::new with a valid default config")
+    }
+
+    /// Every opt-in capability gate is fail-closed (OFF) when its flag was never seen.
+    #[tokio::test]
+    async fn every_opt_in_capability_gate_defaults_off_for_an_unseen_flag() {
+        let c = unseen_client();
+        let gates: Vec<(&str, Box<dyn FeatureGate>)> = vec![
+            ("db", Box::new(BundleDbCapabilityGate::new(Arc::clone(&c)))),
+            (
+                "reputation",
+                Box::new(BundleReputationCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "economy",
+                Box::new(BundleEconomyCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "platform_table",
+                Box::new(BundlePlatformTableCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "gameserver_net",
+                Box::new(BundleGameServerNetCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "object_storage",
+                Box::new(BundleObjectStorageCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "identity",
+                Box::new(BundleIdentityCapabilityGate::new(Arc::clone(&c))),
+            ),
+            ("ai", Box::new(BundleAiCapabilityGate::new(Arc::clone(&c)))),
+            (
+                "media",
+                Box::new(HarnessMediaGenerationGate::new(Arc::clone(&c))),
+            ),
+        ];
+        assert_eq!(gates.len(), 9);
+        for (name, gate) in gates {
+            assert!(!gate.enabled().await, "{name} gate must default OFF");
+        }
+    }
+
+    /// The bundle egress flag is fail-closed (OFF) for a never-seen flag.
+    #[tokio::test]
+    async fn bundle_egress_flag_defaults_off_for_an_unseen_flag() {
+        use bundle_host_http::egress::FeatureFlag;
+        let flag = BundleEgressFlag::new(unseen_client());
+        assert!(!flag.enabled().await);
+    }
+}

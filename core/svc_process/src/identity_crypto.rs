@@ -850,6 +850,114 @@ mod tests {
         }
     }
 
+    /// A bad-base64 nonce or ct is rejected as a malformed envelope.
+    #[test]
+    fn json_envelope_with_bad_base64_is_malformed() {
+        let dek = test_dek();
+        let bad_nonce = JsonEnvelope {
+            v: 1,
+            dek_version: 1,
+            nonce: "!!!".to_string(),
+            ct: "AAAA".to_string(),
+        };
+        let err = decrypt_identity_value(&bad_nonce, &dek, "t", "s", "actor", "e").unwrap_err();
+        assert!(matches!(
+            err,
+            IdentityCryptoError::Format(CiphertextFormatError::Malformed(_))
+        ));
+        let bad_ct = JsonEnvelope {
+            nonce: "AQIDBAUGBwgJCgsM".to_string(),
+            ct: "***".to_string(),
+            ..bad_nonce
+        };
+        let err = decrypt_identity_value(&bad_ct, &dek, "t", "s", "actor", "e").unwrap_err();
+        assert!(matches!(
+            err,
+            IdentityCryptoError::Format(CiphertextFormatError::Malformed(_))
+        ));
+    }
+
+    /// An envelope shorter than header+nonce+tag is rejected as too short.
+    #[test]
+    fn short_envelope_is_rejected_as_too_short() {
+        let dek = test_dek();
+        let short = JsonEnvelope {
+            v: 1,
+            dek_version: 1,
+            nonce: "AQIDBAUGBwgJCgsM".to_string(),
+            ct: "AAAA".to_string(),
+        };
+        let err = decrypt_identity_value(&short, &dek, "t", "s", "actor", "e").unwrap_err();
+        assert!(matches!(
+            err,
+            IdentityCryptoError::Format(CiphertextFormatError::TooShort { .. })
+        ));
+        assert_eq!(
+            envelope_dek_version(&[1, 0]).unwrap_err(),
+            CiphertextFormatError::TooShort {
+                actual: 2,
+                min: HEADER_LEN
+            }
+        );
+    }
+
+    /// An unknown format version fails closed in both version readers.
+    #[test]
+    fn unknown_format_version_is_rejected() {
+        let dek = test_dek();
+        let aad = build_aad("acme", "s", "actor", "e", 1);
+        let mut raw = encrypt_via_fixture_format("x", &dek, &aad, [1u8; NONCE_LEN]);
+        raw[0] = 9;
+        let json = to_json(&raw);
+        let err = decrypt_identity_value(&json, &dek, "acme", "s", "actor", "e").unwrap_err();
+        assert!(matches!(
+            err,
+            IdentityCryptoError::Format(CiphertextFormatError::UnsupportedVersion(9))
+        ));
+        assert_eq!(
+            envelope_dek_version(&raw).unwrap_err(),
+            CiphertextFormatError::UnsupportedVersion(9)
+        );
+    }
+
+    /// A decrypted payload that is not valid UTF-8 is reported as malformed.
+    #[test]
+    fn non_utf8_plaintext_is_malformed() {
+        let dek = test_dek();
+        let aad = build_aad("acme", "s", "actor", "e", 1);
+        let cipher = Aes256Gcm::new_from_slice(dek.as_ref()).unwrap();
+        let nonce = [2u8; NONCE_LEN];
+        let ct = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                aes_gcm::aead::Payload {
+                    msg: &[0xff, 0xfe, 0xfd][..],
+                    aad: &aad,
+                },
+            )
+            .unwrap();
+        let mut raw = vec![FORMAT_VERSION];
+        raw.extend_from_slice(&1u32.to_be_bytes());
+        raw.extend_from_slice(&nonce);
+        raw.extend_from_slice(&ct);
+        let err = envelope_decrypt(&raw, &dek, &aad).unwrap_err();
+        assert!(matches!(
+            err,
+            IdentityCryptoError::Format(CiphertextFormatError::Malformed(_))
+        ));
+    }
+
+    /// The AAD binds every field, so changing any one yields different bytes.
+    #[test]
+    fn build_aad_is_sensitive_to_every_field() {
+        let base = build_aad("t", "s", "f", "e", 1);
+        assert_ne!(base, build_aad("t2", "s", "f", "e", 1));
+        assert_ne!(base, build_aad("t", "s2", "f", "e", 1));
+        assert_ne!(base, build_aad("t", "s", "f2", "e", 1));
+        assert_ne!(base, build_aad("t", "s", "f", "e2", 1));
+        assert_ne!(base, build_aad("t", "s", "f", "e", 2));
+    }
+
     #[test]
     fn round_trips_a_plaintext_value() {
         let dek = test_dek();

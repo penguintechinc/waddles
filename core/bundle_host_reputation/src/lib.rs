@@ -603,4 +603,155 @@ mod tests {
         assert!(ok(500, 400).is_err());
         assert!(ok(400, 851).is_err());
     }
+
+    /// A minimal store implementing only the required methods, so every
+    /// provided (default) method exercises its fail-loud path.
+    struct MinimalStore;
+
+    impl ReputationStore for MinimalStore {
+        fn get<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _user: uuid::Uuid,
+        ) -> BoxFuture<'a, Result<i64, ReputationError>> {
+            Box::pin(async { Ok(600) })
+        }
+
+        fn adjust<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _user: uuid::Uuid,
+            _delta: i32,
+            _reason: &'a str,
+            _caps: ReputationCaps,
+            _key: &'a IdempotencyKey,
+        ) -> BoxFuture<'a, Result<i64, ReputationError>> {
+            Box::pin(async { Ok(601) })
+        }
+
+        fn adjust_many<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _items: &'a [(uuid::Uuid, i32)],
+            _reason: &'a str,
+            _caps: ReputationCaps,
+            _key: &'a IdempotencyKey,
+        ) -> BoxFuture<'a, Result<(), ReputationError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn get_many<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _users: &'a [uuid::Uuid],
+        ) -> BoxFuture<'a, Result<Vec<ScoreEntry>, ReputationError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn leaderboard<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _limit: u32,
+        ) -> BoxFuture<'a, Result<Vec<ScoreEntry>, ReputationError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    fn is_unsupported<T: std::fmt::Debug>(r: Result<T, ReputationError>, op: &str) {
+        match r {
+            Err(ReputationError::Backend(m)) => {
+                assert_eq!(m, format!("reputation store does not implement {op}"))
+            }
+            other => panic!("{op}: expected fail-loud Backend error, got {other:?}"),
+        }
+    }
+
+    /// Every provided trait method must fail loudly (never return an empty
+    /// success) on a store that does not override it.
+    #[tokio::test]
+    async fn default_trait_methods_fail_loudly() {
+        let store = MinimalStore;
+        let scope = ReputationScope {
+            tenant_id: 1,
+            community_id: 2,
+            app_id: "app".to_string(),
+        };
+        let user = uuid::Uuid::nil();
+        let key = IdempotencyKey::new("k").unwrap();
+        let caps = ReputationCaps {
+            per_user_daily_abs_max: 10,
+            per_scope_daily_abs_max: 100,
+        };
+        // The required methods are still callable through the trait object.
+        let dynstore: &dyn ReputationStore = &store;
+        assert_eq!(dynstore.get(&scope, user).await, Ok(600));
+        assert_eq!(
+            dynstore.adjust(&scope, user, 1, "r", caps, &key).await,
+            Ok(601)
+        );
+        assert_eq!(
+            dynstore
+                .adjust_many(&scope, &[(user, 1)], "r", caps, &key)
+                .await,
+            Ok(())
+        );
+        assert_eq!(dynstore.get_many(&scope, &[user]).await, Ok(Vec::new()));
+        assert_eq!(dynstore.leaderboard(&scope, 5).await, Ok(Vec::new()));
+
+        is_unsupported(
+            store.override_score(&scope, user, 5, "r", &key).await,
+            "override_score",
+        );
+        is_unsupported(
+            store
+                .apply(&scope, user, 1, ReasonClass::Activity, "evt", caps, &key)
+                .await,
+            "apply",
+        );
+        is_unsupported(store.get_tenant(&scope, user).await, "get_tenant");
+        is_unsupported(store.history(&scope, user, 5, None).await, "history");
+        is_unsupported(
+            store.below_threshold(&scope, 400, 5).await,
+            "below_threshold",
+        );
+        is_unsupported(store.tenant_policy(&scope).await, "tenant_policy");
+        is_unsupported(store.active_logic_app(&scope).await, "active_logic_app");
+        is_unsupported(store.is_soft_banned(&scope, user).await, "is_soft_banned");
+        is_unsupported(
+            store.soft_ban(&scope, user, FLOOR_SOFT_BAN_REASON).await,
+            "soft_ban",
+        );
+        is_unsupported(
+            store
+                .lift_soft_ban(&scope, user, FLOOR_SOFT_BAN_REASON)
+                .await,
+            "lift_soft_ban",
+        );
+    }
+
+    /// The rate-limited wire code and the Display text of every variant are
+    /// part of the host contract.
+    #[test]
+    fn rate_limited_wire_code_and_display_messages() {
+        assert_eq!(
+            ReputationError::RateLimited { cap: 3 }.wire_code(),
+            "rate_limited"
+        );
+        assert!(ReputationError::RateLimited { cap: 3 }
+            .to_string()
+            .contains("cap 3"));
+        assert!(ReputationError::DailyCapExceeded { cap: 7 }
+            .to_string()
+            .contains("(7)"));
+        assert!(ReputationError::ScopeQuotaExceeded { cap: 9 }
+            .to_string()
+            .contains("(9)"));
+        assert!(ReputationError::NotAMember.to_string().contains("member"));
+        assert!(ReputationError::IdempotencyConflict
+            .to_string()
+            .contains("idempotency"));
+        assert!(ReputationError::Invalid("x".into())
+            .to_string()
+            .ends_with("x"));
+    }
 }

@@ -190,4 +190,163 @@ mod tests {
         assert!(validate_name("table", &"x".repeat(65)).is_err());
         assert!(validate_name("table", "community_members").is_ok());
     }
+
+    use crate::host::imports::tests::{one_shot_bridge_capturing, state_with};
+    use platform_table::Host as _;
+    use serde_json::json;
+
+    fn cv(c: &str, v: &str) -> platform_table::ColumnValue {
+        platform_table::ColumnValue {
+            column: c.to_string(),
+            value: v.to_string(),
+        }
+    }
+
+    /// `read` returns cells in the REQUEST order (not the host map's order),
+    /// rendering text and booleans.
+    #[tokio::test]
+    async fn read_preserves_request_order_and_renders_cells() {
+        let (bridge, args) =
+            one_shot_bridge_capturing(Ok(json!({"columns": {"is_active": true, "role": "vip"}})));
+        let got = state_with(bridge)
+            .read(
+                "community_members".into(),
+                "u1".into(),
+                vec!["role".into(), "is_active".into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            args.await.unwrap(),
+            json!({"table": "community_members", "user": "u1", "columns": ["role", "is_active"]})
+        );
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            (got[0].column.as_str(), got[0].value.as_str()),
+            ("role", "vip")
+        );
+        assert_eq!(
+            (got[1].column.as_str(), got[1].value.as_str()),
+            ("is_active", "true")
+        );
+    }
+
+    /// `read` validates locally (table, column count, column names) and never
+    /// trusts a malformed result.
+    #[tokio::test]
+    async fn read_rejects_bad_arguments_and_malformed_results() {
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"columns": {}})));
+        let mut st = state_with(bridge);
+        assert!(matches!(
+            st.read("".into(), "u".into(), vec!["c".into()]).await,
+            Err(platform_table::Error::Invalid(_))
+        ));
+        assert!(matches!(
+            st.read("t".into(), "u".into(), vec![]).await,
+            Err(platform_table::Error::Invalid(_))
+        ));
+        let nine: Vec<String> = (0..=MAX_COLUMNS).map(|i| format!("c{i}")).collect();
+        assert!(matches!(
+            st.read("t".into(), "u".into(), nine).await,
+            Err(platform_table::Error::Invalid(_))
+        ));
+        assert!(matches!(
+            st.read("t".into(), "u".into(), vec!["x".repeat(65)]).await,
+            Err(platform_table::Error::Invalid(_))
+        ));
+        let seen = tokio::time::timeout(std::time::Duration::from_millis(300), args).await;
+        assert!(seen.is_err(), "no refusal may reach the stage");
+
+        let (bridge, _a) = one_shot_bridge_capturing(Ok(json!({"nocolumns": 1})));
+        assert!(matches!(
+            state_with(bridge).read("t".into(), "u".into(), vec!["c".into()]).await,
+            Err(platform_table::Error::Backend(m)) if m.contains("no columns object")
+        ));
+        let (bridge, _a) = one_shot_bridge_capturing(Ok(json!({"columns": {"other": "v"}})));
+        assert!(matches!(
+            state_with(bridge).read("t".into(), "u".into(), vec!["c".into()]).await,
+            Err(platform_table::Error::Backend(m)) if m.contains("missing column c")
+        ));
+        let (bridge, _a) = one_shot_bridge_capturing(Ok(json!({"columns": {"c": null}})));
+        assert!(matches!(
+            state_with(bridge).read("t".into(), "u".into(), vec!["c".into()]).await,
+            Err(platform_table::Error::Backend(m)) if m.contains("not text/bool")
+        ));
+        let (bridge, _a) =
+            one_shot_bridge_capturing(Err(penguin_bundle_host::wire::HostResultError {
+                code: "not_allowlisted".into(),
+                message: "t.c".into(),
+            }));
+        assert!(matches!(
+            state_with(bridge).read("t".into(), "u".into(), vec!["c".into()]).await,
+            Err(platform_table::Error::NotAllowlisted(m)) if m == "t.c"
+        ));
+    }
+
+    /// `write` sends the changes list and validates locally.
+    #[tokio::test]
+    async fn write_sends_changes_and_validates_arguments() {
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({})));
+        state_with(bridge)
+            .write(
+                "t".into(),
+                "u".into(),
+                vec![cv("role", "vip"), cv("flag", "true")],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            args.await.unwrap(),
+            json!({"table": "t", "user": "u", "changes": [
+                {"column": "role", "value": "vip"}, {"column": "flag", "value": "true"}
+            ]})
+        );
+
+        let (bridge, _a) = one_shot_bridge_capturing(Ok(json!({})));
+        let mut st = state_with(bridge);
+        assert!(matches!(
+            st.write("".into(), "u".into(), vec![cv("c", "v")]).await,
+            Err(platform_table::Error::Invalid(_))
+        ));
+        assert!(matches!(
+            st.write("t".into(), "u".into(), vec![]).await,
+            Err(platform_table::Error::Invalid(_))
+        ));
+        let nine: Vec<_> = (0..=MAX_COLUMNS)
+            .map(|i| cv(&format!("c{i}"), "v"))
+            .collect();
+        assert!(matches!(
+            st.write("t".into(), "u".into(), nine).await,
+            Err(platform_table::Error::Invalid(_))
+        ));
+        assert!(matches!(
+            st.write("t".into(), "u".into(), vec![cv("", "v")]).await,
+            Err(platform_table::Error::Invalid(_))
+        ));
+
+        let (bridge, _a) =
+            one_shot_bridge_capturing(Err(penguin_bundle_host::wire::HostResultError {
+                code: "not_a_member".into(),
+                message: String::new(),
+            }));
+        assert!(matches!(
+            state_with(bridge)
+                .write("t".into(), "u".into(), vec![cv("c", "v")])
+                .await,
+            Err(platform_table::Error::NotAMember)
+        ));
+    }
+
+    /// A transport (non-host-call) failure is a backend error, never a denial.
+    #[test]
+    fn transport_failure_is_a_backend_error() {
+        assert!(matches!(
+            error_from(ExecutorError::Config("x".into())),
+            platform_table::Error::Backend(_)
+        ));
+        assert!(matches!(
+            error_from(denied("unavailable")),
+            platform_table::Error::Unavailable(_)
+        ));
+    }
 }

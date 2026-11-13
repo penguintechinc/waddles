@@ -475,4 +475,176 @@ mod tests {
             economy::Error::Denied(c) if c == "admin_required"
         ));
     }
+
+    use crate::host::imports::tests::{one_shot_bridge_capturing, state_with};
+    use economy::Host as _;
+    use serde_json::json;
+
+    fn credit(user: &str, amount: u64) -> economy::CreditEntry {
+        economy::CreditEntry {
+            user: user.to_string(),
+            amount,
+        }
+    }
+
+    /// Balance-returning ops each send exactly their args and decode `balance`.
+    #[tokio::test]
+    async fn balance_ops_cross_the_bridge_with_their_args() {
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"balance": 90})));
+        assert_eq!(state_with(bridge).credit("u".into(), 10).await.unwrap(), 90);
+        assert_eq!(args.await.unwrap(), json!({"user": "u", "amount": 10}));
+
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"balance": 80})));
+        assert_eq!(state_with(bridge).debit("u".into(), 10).await.unwrap(), 80);
+        assert_eq!(args.await.unwrap(), json!({"user": "u", "amount": 10}));
+
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"balance": 70})));
+        let got = state_with(bridge)
+            .conditional_debit("u".into(), 10, 50)
+            .await
+            .unwrap();
+        assert_eq!(got, 70);
+        assert_eq!(
+            args.await.unwrap(),
+            json!({"user": "u", "amount": 10, "min_balance": 50})
+        );
+
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"balance": 33})));
+        let got = state_with(bridge)
+            .exchange("u".into(), 100, 1, 3)
+            .await
+            .unwrap();
+        assert_eq!(got, 33);
+        assert_eq!(
+            args.await.unwrap(),
+            json!({"user": "u", "from_amount": 100, "rate_num": 1, "rate_den": 3})
+        );
+
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"max_bet": 25})));
+        assert_eq!(state_with(bridge).max_bet("u".into()).await.unwrap(), 25);
+        assert_eq!(args.await.unwrap(), json!({"user": "u"}));
+    }
+
+    /// `admin_adjust` encodes both modes and decodes the new balance.
+    #[tokio::test]
+    async fn admin_adjust_encodes_delta_and_set_modes() {
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"balance": 5})));
+        let got = state_with(bridge)
+            .admin_adjust("u".into(), economy::BalanceAdjust::Delta(-3))
+            .await
+            .unwrap();
+        assert_eq!(got, 5);
+        assert_eq!(
+            args.await.unwrap(),
+            json!({"user": "u", "mode": "delta", "value": -3})
+        );
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({"balance": 9})));
+        state_with(bridge)
+            .admin_adjust("u".into(), economy::BalanceAdjust::Set(9))
+            .await
+            .unwrap();
+        assert_eq!(
+            args.await.unwrap(),
+            json!({"user": "u", "mode": "set", "value": 9})
+        );
+    }
+
+    /// List-carrying ops send `[{user, amount}]` and ignore the result body.
+    #[tokio::test]
+    async fn batch_credit_and_pay_pot_send_entry_lists() {
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({})));
+        state_with(bridge)
+            .batch_credit(vec![credit("a", 1), credit("b", 2)])
+            .await
+            .unwrap();
+        assert_eq!(
+            args.await.unwrap(),
+            json!({"entries": [{"user": "a", "amount": 1}, {"user": "b", "amount": 2}]})
+        );
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({})));
+        state_with(bridge)
+            .pay_pot(vec![credit("w", 7)])
+            .await
+            .unwrap();
+        assert_eq!(
+            args.await.unwrap(),
+            json!({"winners": [{"user": "w", "amount": 7}]})
+        );
+    }
+
+    /// `leaderboard` and `transfer_from` decode their structured results.
+    #[tokio::test]
+    async fn leaderboard_and_transfer_from_decode() {
+        let (bridge, args) = one_shot_bridge_capturing(Ok(json!({
+            "entries": [{"user": "a", "balance": 9}, {"user": "b", "balance": 4}]
+        })));
+        let rows = state_with(bridge).leaderboard(2).await.unwrap();
+        assert_eq!(args.await.unwrap(), json!({"limit": 2}));
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].user.as_str(), rows[0].balance), ("a", 9));
+
+        let (bridge, args) =
+            one_shot_bridge_capturing(Ok(json!({"from_balance": 4, "to_balance": 16})));
+        let r = state_with(bridge)
+            .transfer_from("f".into(), "t".into(), 6, "steal.win".into())
+            .await
+            .unwrap();
+        assert_eq!((r.from_balance, r.to_balance), (4, 16));
+        assert_eq!(
+            args.await.unwrap(),
+            json!({"from": "f", "to": "t", "amount": 6, "reason": "steal.win"})
+        );
+
+        let (bridge, _a) = one_shot_bridge_capturing(Ok(json!({"from_balance": 4})));
+        assert!(matches!(
+            state_with(bridge)
+                .transfer_from("f".into(), "t".into(), 6, "r".into())
+                .await,
+            Err(economy::Error::Backend(m)) if m.contains("malformed host-result")
+        ));
+    }
+
+    /// Stage refusals reach the typed variants through the host methods.
+    #[tokio::test]
+    async fn stage_refusals_surface_as_typed_economy_errors() {
+        let refuse = |code: &str, msg: &str| {
+            one_shot_bridge_capturing(Err(penguin_bundle_host::wire::HostResultError {
+                code: code.to_string(),
+                message: msg.to_string(),
+            }))
+            .0
+        };
+        assert!(matches!(
+            state_with(refuse("insufficient_funds", "3"))
+                .debit("u".into(), 9)
+                .await,
+            Err(economy::Error::InsufficientFunds(3))
+        ));
+        assert!(matches!(
+            state_with(refuse("over_cap", "100"))
+                .credit("u".into(), 999)
+                .await,
+            Err(economy::Error::OverCap(100))
+        ));
+        assert!(matches!(
+            state_with(refuse("not_a_member", ""))
+                .max_bet("u".into())
+                .await,
+            Err(economy::Error::NotAMember)
+        ));
+        assert!(matches!(
+            state_with(refuse("quota_exceeded", "")).pay_pot(vec![]).await,
+            Err(economy::Error::Denied(c)) if c == "quota_exceeded"
+        ));
+        assert!(matches!(
+            state_with(refuse("feature_disabled", "flag off")).leaderboard(1).await,
+            Err(economy::Error::Unavailable(m)) if m == "flag off"
+        ));
+        assert!(matches!(
+            state_with(refuse("backend", "db down"))
+                .batch_credit(vec![credit("a", 1)])
+                .await,
+            Err(economy::Error::Backend(m)) if m == "db down"
+        ));
+    }
 }
