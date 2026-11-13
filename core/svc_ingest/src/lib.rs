@@ -372,6 +372,7 @@ where
     // With every connector OFF nothing is built, bound or spawned.
     let mut connector_ready: Option<Arc<dyn connector_runtime::RuntimeReady>> = None;
     let license_client = license::build_license_client();
+    license::set_shared_license_client(license_client.clone());
     // Egress detokenizer: installed BEFORE any outbound drain starts. The drain is the only
     // platform egress; it substitutes `{user:<token>}` right before each send.
     egress::install(egress::Egress::from_cli(

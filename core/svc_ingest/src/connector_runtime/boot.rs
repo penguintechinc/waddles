@@ -514,6 +514,8 @@ pub type BootedRuntime<A, D> = ConnectorRuntime<
     ConnectorValkeyLease,
 >;
 
+use super::unverified_gate::LicenseUnverifiedGate;
+
 /// Builds the profile-specific feed for `platform`.
 fn feed_for<R: ConnectionResolve + 'static>(
     platform: &'static str,
@@ -539,7 +541,8 @@ fn feed_for<R: ConnectionResolve + 'static>(
                 FEED_CALL_TIMEOUT,
             )
             .with_metrics(metrics.clone())
-            .with_self_echo(self_echo.clone()),
+            .with_self_echo(self_echo.clone())
+            .with_unverified_gate(Arc::new(LicenseUnverifiedGate)),
         )
     }
     match platform {
@@ -573,7 +576,8 @@ fn feed_for<R: ConnectionResolve + 'static>(
                 FEED_CALL_TIMEOUT,
             )
             .with_metrics(metrics.clone())
-            .with_self_echo(self_echo.clone());
+            .with_self_echo(self_echo.clone())
+            .with_unverified_gate(Arc::new(LicenseUnverifiedGate));
             if kick_route_keys.is_some() {
                 // The webhook lane's broadcaster comes from editable metadata: it is only
                 // planned once proven to be the owner of the community's own token.

@@ -108,6 +108,23 @@ pub fn build_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
     }
 }
 
+/// Process-wide license client, set once at startup so later gates (e.g. the
+/// connector feed's unverified-binding kill-switch) reuse it instead of
+/// spawning a second refresh loop.
+static SHARED_CLIENT: std::sync::OnceLock<Option<Arc<penguin_licensing::LicenseClient>>> =
+    std::sync::OnceLock::new();
+
+/// Publishes `client` as the process-wide license client (first call wins).
+pub fn set_shared_license_client(client: Option<Arc<penguin_licensing::LicenseClient>>) {
+    let _ = SHARED_CLIENT.set(client);
+}
+
+/// The process-wide license client, or `None` when unset/unbuilt (gates then
+/// fall back to their env baseline / default).
+pub fn shared_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
+    SHARED_CLIENT.get().cloned().flatten()
+}
+
 /// Checks the `waddles.core.rust-data-plane` flag. Non-blocking (the
 /// crate's own `flag_enabled` never performs inline network I/O) and
 /// fail-closed: no client (see [`build_license_client`]) or a never-seen/

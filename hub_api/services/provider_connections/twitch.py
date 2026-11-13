@@ -155,6 +155,8 @@ TWITCH_SPEC: Final = AdapterSpec(
         }
     ),
     refreshable=True,
+    requires_ownership=True,
+    ownership_identity_platform="twitch",
     binding_metadata=(
         BindingKey("channel", "channel_login", required=True),
         BindingKey("bot_login", "bot_login", required=True),
@@ -282,6 +284,9 @@ class TwitchAdapter:
             raise ResourceUnresolvable("that Twitch channel does not exist")
         return ResolvedResource(
             resource_id=channel_id,
+            # The channel's owner is the broadcaster whose user id IS the channel id.
+            owner_platform_user_id=channel_id,
+            owner_proven_by_token=channel_id == account.account_id,
             facts={
                 "channel_login": channel,
                 "channel_id": channel_id,
