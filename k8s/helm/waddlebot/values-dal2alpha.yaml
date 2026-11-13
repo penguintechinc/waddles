@@ -188,6 +188,10 @@ pipeline:
   hubApi:
     aiEnabled: false
     replicas: 1
+    # Demo fallback (user-approved 2026-11-12): free-tier flag env baseline; PostHog overrides
+    # once its key is provisioned. Never put license-tier flags here.
+    extraEnv:
+      FLAG_WADDLES_TENANT_DISCORD_INSTALL: "true"
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }

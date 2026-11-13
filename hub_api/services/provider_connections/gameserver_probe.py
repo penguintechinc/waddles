@@ -15,7 +15,11 @@ import socket
 import struct
 from typing import Final
 
+from penguin_utils.logging import get_logger
+
 from services.url_guard import is_private_host
+
+logger = get_logger(__name__)
 
 RESULT_OK_RCON: Final = "ok_rcon"
 RESULT_OK_TCP: Final = "ok_tcp"
@@ -75,7 +79,8 @@ async def resolve_pinned(host: str, port: int) -> str | None:
     loop = asyncio.get_running_loop()
     try:
         infos = await loop.getaddrinfo(bare, port, type=socket.SOCK_STREAM)
-    except OSError:
+    except OSError as exc:
+        logger.warning("gameserver_probe_dns_failed port=%d type=%s", port, type(exc).__name__)
         return None
     ips = [str(info[4][0]) for info in infos]
     if not ips or any(_blocked(ip) for ip in ips):
@@ -115,6 +120,8 @@ async def probe(host: str, port: int, password: str, *, timeout: float = 3.0) ->
             finally:
                 writer.close()
     except TimeoutError:
+        logger.warning("gameserver_probe_timeout port=%d", port)
         return RESULT_TIMEOUT
-    except (OSError, asyncio.IncompleteReadError, struct.error):
+    except (OSError, asyncio.IncompleteReadError, struct.error) as exc:
+        logger.warning("gameserver_probe_unreachable port=%d type=%s", port, type(exc).__name__)
         return RESULT_UNREACHABLE

@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-numberfact"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!numberfact [n]` -> a fun fact about a number from a static canned list. Stateless, no external API."
 requires-python = ">=3.13"
 dependencies = []

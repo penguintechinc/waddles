@@ -58,8 +58,8 @@ impl AppCredentialSource for NoAppCredentials {
     }
 }
 
-/// Config-key lookup (env var name -> value); injectable so tests avoid the process env.
-pub type ConfigGetter = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+/// Host-config lookup: env-var name -> value.
+type ConfigGetter = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// Host-config-backed app credentials for twitch + discord.
 pub struct PlatformAppCredentials {

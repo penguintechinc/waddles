@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-keywordgiveaway"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!kgiveaway` -> a per-community keyword giveaway (open/enter/close/draw/reroll), kv-only. Original Waddles implementation."
 requires-python = ">=3.13"
 dependencies = []

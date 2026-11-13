@@ -1356,6 +1356,8 @@ pipeline:
     # after a per-identity community allow-list exists -- see docs/PROVIDER_CONNECTIONS.md.
     spiffePeerTrust: false
     spiffePeerIdHeader: "X-Spiffe-Peer-Id"
+    # Extra plain env vars for hub-api (map NAME: value). Default empty.
+    extraEnv: {}
     replicas: 2
     # Maps to WADDLES_AI_ENABLED (hub_api/config.py) -- deploy-time
     # kill-switch for the whole services/ai_routing/ subsystem, so
