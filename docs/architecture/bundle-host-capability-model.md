@@ -113,7 +113,8 @@ platform event (svc_ingest)
   │ raw actor, @mention, user_id, author_id
   ▼
 svc_process pii_tokenize   ── MintEphemeralPseudonyms ──►  hub-api IdentityService
-  │                                                         (PII boundary; per-tenant secret)
+  (once per message per process,                           (PII boundary; per-tenant secret)
+   shared by every per-app consumer: tokenize_memo)
   │ actor      := {user:<pseudonym-uuid>}
   │ mentions   := {user:<pseudonym-uuid>}
   ▼
@@ -135,6 +136,7 @@ platform send
 | Actor and mentions replaced by `{user:<uuid>}` placeholder | `pii_tokenize.rs` (`format_user_token`, actor substitution) |
 | Pseudonyms minted by hub-api with per-tenant secret — no local UUIDv5 | `pii_tokenize.rs` module doc |
 | Mint failure → event dead-lettered; no fallback pseudonym | `pii_tokenize.rs` (fail-closed) |
+| One message is tokenized — and minted at hub-api — ONCE per process, however many per-app source-binding consumers read it: a single-flight memo keyed by tenant scope + stream + entry id + event id + content digest (TTL 60 s, 8192 entries; `PROCESS_TOKENIZE_MEMO_TTL_SECS` / `PROCESS_TOKENIZE_MEMO_MAX_ENTRIES`). Pseudonyms are per `(tenant, platform, platform_user_id)`, never per app, so sharing changes nothing a bundle sees. A failed mint is shared with the in-flight waiters (no retry stampede), never cached, and each waiter dead-letters as above; metrics `waddles_process_tokenize_memo_total`, `waddles_process_tokenize_mint_calls_total` | `core/svc_process/src/tokenize_memo.rs`; `spine.rs` `handle_delivered_inner` |
 | Reputation/economy target must parse as UUID (else `invalid`) | `reputation`/`economy` WIT docs |
 | True PII (names, handles) exists only in the gateway (`svc-ingest` outbound drain) and `svc-presentation`; every other service handles UUID tokens only | `core/svc_ingest/src/egress.rs`; `core/svc_presentation/src/overlay/detok.rs`; gate `scripts/ci/check-pii-egress-boundary.sh` (`make check-pii-egress`) |
 | Display names resolved at the platform send only, by a direct read-only DB query (`waddles_svc_ingest`, column-scoped), per message, never cached; kill switch / resolver outage / missing tenant sends the tokens | `core/svc_ingest/src/egress.rs`, `core/svc_ingest/src/display_names.rs`; `core/egress_detokenizer/src/lib.rs` (`DetokenizedText`: the only text type platform sink send fns accept) |
