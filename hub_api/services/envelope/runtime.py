@@ -29,7 +29,7 @@ from services.bundle_install_dal import raw_sql_rows
 from services.envelope.gate import ExternalKmsEntitlement, ExternalKmsGate
 from services.envelope.platform_kek import LazyPlatformKek
 from services.envelope.providers import KmsProviders, ProviderSettings, build_providers
-from services.envelope.repository import PenguinDalEnvelopeRepository
+from services.envelope.repository import PURPOSE_INGEST_STREAM, PenguinDalEnvelopeRepository
 from services.envelope.service import EnvelopeSettings, SlugResolver, TenantEnvelopeService
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,8 @@ class EnvelopeRuntime:
     """The process-wide envelope service and the network resources behind it."""
 
     service: TenantEnvelopeService
+    #: Stream identity-field DEK lineage (``ingest-stream``), served by KeyService.GetStreamDek.
+    stream_service: TenantEnvelopeService
     providers: KmsProviders
     enabled_providers: tuple[str, ...]
     #: Provider id -> the public identity a customer must trust/grant (shown by ``GET /kms``).
@@ -80,20 +82,41 @@ def build_envelope_runtime(
     settings = ProviderSettings.from_env(environ)
     built = providers or build_providers(settings)
     repository = PenguinDalEnvelopeRepository(dal)
+    stream_repository = PenguinDalEnvelopeRepository(dal, purpose=PURPOSE_INGEST_STREAM)
     lazy_kek = platform_kek or LazyPlatformKek()
+    entitlement = gate or ExternalKmsGate()
+    envelope_settings = EnvelopeSettings.from_env(environ)
+    slugs = tenant_slug_resolver(dal)
+    # The at-rest service owns BYOK lifecycle (activate/disable/re-wrap) for EVERY lineage:
+    # the stream repository is its sibling, so stream DEKs move KEK together with at-rest ones.
     service = TenantEnvelopeService(
         keys=repository,
         configs=repository,
         registry=built.registry,
         platform_kek=lazy_kek.get,
-        gate=gate or ExternalKmsGate(),
-        settings=EnvelopeSettings.from_env(environ),
-        slug_resolver=tenant_slug_resolver(dal),
+        gate=entitlement,
+        settings=envelope_settings,
+        slug_resolver=slugs,
+        sibling_keys=(stream_repository,),
+    )
+    # Stream identity-field DEKs (KeyService.GetStreamDek): own lineage + subkey domain, same
+    # tenant KMS config, so a BYOK tenant's stream DEKs are wrapped by the customer key too.
+    stream_service = TenantEnvelopeService(
+        keys=stream_repository,
+        configs=repository,
+        registry=built.registry,
+        platform_kek=lazy_kek.get,
+        gate=entitlement,
+        settings=envelope_settings,
+        slug_resolver=slugs,
+        lineage=PURPOSE_INGEST_STREAM,
+        sibling_keys=(repository,),
     )
     enabled = tuple(sorted(settings.enabled))
     logger.info("envelope.runtime.ready", extra={"providers": list(enabled)})
     return EnvelopeRuntime(
         service=service,
+        stream_service=stream_service,
         providers=built,
         enabled_providers=enabled,
         platform_principals=dict(settings.platform_principals),

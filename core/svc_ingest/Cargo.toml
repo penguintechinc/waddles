@@ -291,6 +291,8 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 wiremock = "=0.6.5"
 # The machine-JWT mint is gRPC: tests serve it from a real in-process `ServiceAuthService`.
 service_auth = { path = "../service_auth", version = "=0.1.0", features = ["test-support"] }
+# In-process KeyService fake (the sealed-DEK contract) for the real-path encryption tests.
+hub_client = { path = "../hub_client", version = "=0.1.0", features = ["test-support"] }
 # Ephemeral CA/leaf certs for the host-API mTLS listener tests (no key material in git).
 rcgen = "=0.14.10"
 # Real tonic server on loopback for the `platform_users` tests (the generated

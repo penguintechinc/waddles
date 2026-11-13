@@ -391,7 +391,7 @@ where
         // `ConfiguredDekProvider` is cheaply `Clone` (see its doc comment),
         // so each independently-spawned receiver task gets its own handle
         // onto the same underlying TTL cache / HTTP client.
-        let dek_provider = build_dek_provider(&config, reqwest::Client::new());
+        let dek_provider = build_dek_provider(&config)?;
         start_bundle_schedules(
             &config,
             &state.metrics,
@@ -480,8 +480,7 @@ struct RealLegacy<'a> {
     config: &'a config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
     readiness: Arc<ReceiverReadiness>,
-    dek_provider:
-        identity_crypto::ConfiguredDekProvider<identity_crypto::UnimplementedMachineJwtProvider>,
+    dek_provider: identity_crypto::ConfiguredDekProvider,
     state: &'a mut http::AppState,
 }
 
@@ -632,9 +631,7 @@ async fn start_bundle_schedules(
     config: &config::Config,
     registry: &prometheus::Registry,
     metrics: Arc<telemetry::IngestMetrics>,
-    dek_provider: identity_crypto::ConfiguredDekProvider<
-        identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek_provider: identity_crypto::ConfiguredDekProvider,
 ) -> anyhow::Result<()> {
     use connector::bundle_schedule::{
         run_manager, HubScheduleSource, ScheduleRunner, SpineReconcileSink, ValkeyScheduleLease,
@@ -738,9 +735,7 @@ fn start_twitch_inbound(
     config: &config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
     readiness: Arc<ReceiverReadiness>,
-    dek_provider: identity_crypto::ConfiguredDekProvider<
-        identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek_provider: identity_crypto::ConfiguredDekProvider,
 ) -> anyhow::Result<()> {
     let mode = config::validate_twitch_mode(config)?;
     let dek_dynamic = dek_provider.clone();
@@ -802,9 +797,7 @@ fn try_start_twitch_irc(
     config: &config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
     readiness: Arc<ReceiverReadiness>,
-    dek_provider: identity_crypto::ConfiguredDekProvider<
-        identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek_provider: identity_crypto::ConfiguredDekProvider,
 ) {
     if !config.twitch_irc_enabled() {
         tracing::info!(
@@ -902,9 +895,7 @@ fn try_start_discord(
     config: &config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
     readiness: Arc<ReceiverReadiness>,
-    dek_provider: identity_crypto::ConfiguredDekProvider<
-        identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek_provider: identity_crypto::ConfiguredDekProvider,
 ) {
     if !config.discord_enabled() {
         tracing::info!("DISCORD_BOT_TOKEN not set; discord gateway receiver not started");
@@ -1158,9 +1149,7 @@ fn try_start_discord_outbound(config: &config::Config) {
 async fn try_build_eventsub_state(
     config: &config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
-    dek_provider: identity_crypto::ConfiguredDekProvider<
-        identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek_provider: identity_crypto::ConfiguredDekProvider,
 ) -> Option<Arc<http::eventsub::EventSubState>> {
     let keyring = resolve_binding_keyring(config, "twitch eventsub")?;
 
@@ -1223,64 +1212,79 @@ async fn try_build_eventsub_state(
 /// shared across every receiver via `try_start_*` (see call sites below).
 ///
 /// Production posture (`config.ingest_dev_kek` unset): [`identity_crypto::
-/// HubApiDekProvider`], authenticated via [`identity_crypto::
-/// UnimplementedMachineJwtProvider`] until `core/service_auth`'s real ES256
-/// machine-JWT minter lands (PR #438) -- every call fails closed with
-/// [`identity_crypto::DekUnavailableError`] until then, the documented gap
-/// this task calls out (not a silent stub). hub-api's own broker endpoint
-/// (`POST /api/v1/internal/keys/tenant-dek`, `feature/tenant-dek-broker`)
-/// is a second, independent documented gap -- also unmerged as of this
-/// writing.
+/// ConfiguredDekProvider::hub`] over a [`hub_client::HubClient`] holding the
+/// `key:stream-dek:read` scope. The machine JWT is minted/cached/refreshed by
+/// `service_auth::MachineJwtClient` from the pod's projected ServiceAccount token, the DEK
+/// is fetched over hub-api's internal gRPC `KeyService` (sealed to a per-call ephemeral
+/// X25519 key), and every failure fails closed. The connection is lazy: the process starts
+/// (and reports readiness) before hub-api is reachable, and events are held -- never written
+/// plaintext -- until it is.
 ///
 /// Dev/alpha fallback (`config.ingest_dev_kek` set): [`identity_crypto::
 /// LocalDevDekProvider`], hard-gated to [`config::Config::
-/// deployment_environment`] `alpha`/`local` regardless of whether the dev
-/// KEK is configured -- refuses construction otherwise (see that type's
-/// doc comment). A misconfigured beta/gamma/prod deployment with
-/// `INGEST_DEV_KEK` accidentally set therefore still falls through to
-/// `HubApiDekProvider` (logged loudly), never to a silently-accepted dev
-/// KEK outside alpha/local.
+/// deployment_environment`] `alpha`/`local` regardless of whether the dev KEK is configured
+/// -- refused otherwise (logged loudly), in which case the broker is used, never a silently
+/// accepted dev KEK outside alpha/local.
 ///
-/// Both are wrapped in [`identity_crypto::TtlCachedDekProvider`] (default
-/// 10-minute TTL) so a steady-state ingest loop does not resolve a DEK on
-/// every event.
+/// # Errors
+/// The broker path needs `HUB_API_GRPC_ENDPOINT` (https), `SERVICE_JWT_TOKEN_ENDPOINT` and a
+/// well-formed `SPIFFE_ID` (its service segment is the seal-context name);
+/// missing/plaintext values are fatal at boot -- a pod that could only ever hold events must
+/// not start looking healthy.
 fn build_dek_provider(
     config: &config::Config,
-    http: reqwest::Client,
-) -> identity_crypto::ConfiguredDekProvider<identity_crypto::UnimplementedMachineJwtProvider> {
-    use identity_crypto::{
-        ConfiguredDekProvider, HubApiDekProvider, LocalDevDekProvider, TtlCachedDekProvider,
-        UnimplementedMachineJwtProvider, DEFAULT_DEK_CACHE_TTL,
-    };
+) -> anyhow::Result<identity_crypto::ConfiguredDekProvider> {
+    use identity_crypto::{ConfiguredDekProvider, LocalDevDekProvider, STREAM_DEK_SCOPE};
 
-    if let Some(kek) = config.ingest_dev_kek.as_ref() {
+    if config.ingest_dev_kek.is_some() {
         match LocalDevDekProvider::new(config.deployment_environment(), "INGEST_DEV_KEK") {
-            Ok(provider) => {
-                let _ = kek; // presence already checked by LocalDevDekProvider::new via std::env::var
-                return ConfiguredDekProvider::LocalDev(TtlCachedDekProvider::new(
-                    provider,
-                    DEFAULT_DEK_CACHE_TTL,
-                ));
-            }
+            Ok(provider) => return Ok(ConfiguredDekProvider::local_dev(provider)),
             Err(err) => {
                 tracing::error!(
                     error = %err,
                     "INGEST_DEV_KEK is set but LocalDevDekProvider was refused; \
-                     falling back to HubApiDekProvider (never a silent dev-key fallback \
+                     using the hub-api key broker (never a silent dev-key fallback \
                      outside alpha/local)"
                 );
             }
         }
     }
-    ConfiguredDekProvider::HubApi(TtlCachedDekProvider::new(
-        HubApiDekProvider::new(
-            http,
-            config.cli.hub_api_url.clone(),
-            UnimplementedMachineJwtProvider,
-            SERVICE_NAME,
-        ),
-        DEFAULT_DEK_CACHE_TTL,
-    ))
+    let cli = &config.cli;
+    let endpoint = cli.hub_api_grpc_endpoint.trim();
+    if endpoint.is_empty() || cli.service_jwt_token_endpoint.trim().is_empty() {
+        anyhow::bail!(
+            "identity-field encryption needs HUB_API_GRPC_ENDPOINT and \
+             SERVICE_JWT_TOKEN_ENDPOINT to fetch tenant DEKs from hub-api's key broker; \
+             refusing to start a data plane that could only hold every event"
+        );
+    }
+    if !endpoint.to_ascii_lowercase().starts_with("https://") {
+        anyhow::bail!(
+            "HUB_API_GRPC_ENDPOINT must be https:// (tenant DEK delivery is never plaintext)"
+        );
+    }
+    let ca =
+        (!cli.hub_api_grpc_ca_file.trim().is_empty()).then_some(cli.hub_api_grpc_ca_file.as_str());
+    let client = hub_client::HubClient::connect_lazy(
+        endpoint,
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        STREAM_DEK_SCOPE,
+        ca,
+    )
+    .map_err(|e| anyhow::anyhow!("key broker client unavailable: {e}"))?;
+    tracing::info!(
+        endpoint = %endpoint,
+        scope = STREAM_DEK_SCOPE,
+        "identity-field DEKs are fetched from hub-api's KeyService"
+    );
+    ConfiguredDekProvider::hub_for_spiffe_id(Arc::new(client), &cli.spiffe_id).map_err(|e| {
+        anyhow::anyhow!(
+            "{e}: SPIFFE_ID must be this pod's spiffe://penguintech.io/<env>/<service> id \
+             (the stream-DEK seal context uses its service segment; a mismatch with hub-api \
+             would fail every unseal)"
+        )
+    })
 }
 
 /// Shared keyring-resolution step for [`try_start_twitch_irc`]/
@@ -1499,6 +1503,38 @@ mod tests {
         }
     }
 
+    /// A production-posture config whose broker prerequisites are satisfied except `SPIFFE_ID`.
+    fn broker_config(spiffe_id: &str) -> config::Config {
+        let mut config = base_config();
+        config.cli.hub_api_grpc_endpoint = "https://hub-api:50204".to_string();
+        config.cli.service_jwt_token_endpoint = "https://hub-api:50204".to_string();
+        config.cli.hub_api_grpc_ca_file = String::new();
+        config.cli.spiffe_id = spiffe_id.to_string();
+        config
+    }
+
+    #[tokio::test]
+    async fn dek_provider_boot_fails_loud_without_a_valid_spiffe_id() {
+        for bad in [
+            "",
+            "svc-ingest",
+            "spiffe://penguintech.io/svc-ingest",
+            "spiffe://evil.example/alpha/svc-ingest",
+        ] {
+            let err = build_dek_provider(&broker_config(bad))
+                .err()
+                .unwrap_or_else(|| panic!("booted with SPIFFE_ID {bad:?}"));
+            assert!(err.to_string().contains("SPIFFE_ID"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dek_provider_boots_with_a_valid_spiffe_id() {
+        assert!(
+            build_dek_provider(&broker_config("spiffe://penguintech.io/alpha/svc-gateway")).is_ok()
+        );
+    }
+
     fn test_readiness() -> Arc<ReceiverReadiness> {
         Arc::new(ReceiverReadiness::new())
     }
@@ -1606,18 +1642,20 @@ mod tests {
     /// tests that never actually resolve a DEK (every `try_start_*`
     /// no-op-before-spawn test below returns before the spawned task would
     /// call `get_dek`).
-    fn test_dek_provider(
-    ) -> identity_crypto::ConfiguredDekProvider<identity_crypto::UnimplementedMachineJwtProvider>
-    {
-        identity_crypto::ConfiguredDekProvider::HubApi(identity_crypto::TtlCachedDekProvider::new(
-            identity_crypto::HubApiDekProvider::new(
-                reqwest::Client::new(),
-                "http://hub-api:8204",
-                identity_crypto::UnimplementedMachineJwtProvider,
-                SERVICE_NAME,
-            ),
-            identity_crypto::DEFAULT_DEK_CACHE_TTL,
-        ))
+    fn test_dek_provider() -> identity_crypto::ConfiguredDekProvider {
+        let client = hub_client::HubClient::connect_lazy(
+            "https://hub-api:50204",
+            "https://hub-api:50204",
+            "/nonexistent/sa-token",
+            identity_crypto::STREAM_DEK_SCOPE,
+            None,
+        )
+        .expect("lazy client never dials");
+        identity_crypto::ConfiguredDekProvider::hub_for_spiffe_id(
+            Arc::new(client),
+            "spiffe://penguintech.io/alpha/svc-ingest",
+        )
+        .expect("well-formed test SPIFFE id")
     }
 
     #[tokio::test]

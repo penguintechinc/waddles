@@ -115,6 +115,13 @@ pub struct CliConfig {
     #[arg(long, env = "WADDLES_ENVIRONMENT", default_value = "")]
     pub environment: String,
 
+    /// This workload's own SPIFFE id (`spiffe://penguintech.io/<env>/<service>`). Its last
+    /// segment is the service name in the stream-DEK seal context, so it must match the id
+    /// hub-api authenticates this pod as. Required on the key-broker path; boot fails loud
+    /// when it is missing or malformed.
+    #[arg(long, env = "SPIFFE_ID", default_value = "")]
+    pub spiffe_id: String,
+
     /// hub-api machine-JWT bootstrap endpoint (`service_auth::MachineJwtClient`).
     #[arg(long, env = "SERVICE_JWT_TOKEN_ENDPOINT", default_value = "")]
     pub service_jwt_token_endpoint: String,
