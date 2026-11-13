@@ -544,82 +544,6 @@ imagePullSecrets:
 {{- end }}
 
 {{/*
-gRPC transport TLS (PR #264, A02 HIGH) -- shared helpers for the services/*
-Deployments whose app.py now calls flask_core.grpc_tls.bind_secure_port /
-secure_channel, which fail closed (GrpcTlsConfigError) if cert material
-isn't wired. See templates/grpc-tls-secret.yaml / grpc-tls-certificate.yaml
-for how the {{ fullname }}-grpc-tls Secret this mounts gets populated.
-*/}}
-
-{{/*
-True only when real cert material will exist in the {{ fullname }}-grpc-tls
-Secret at deploy time -- either cert-manager mints it (grpcTls.certManager.
-enabled) or a full CA+server cert/key was supplied via values. False means
-don't render the volume/env block at all, so grpc_tls.py's own fail-closed
-GrpcTlsConfigError raises with its clear "GRPC_TLS_CERT_PATH ... required"
-message instead of a mounted-but-empty cert file producing an opaque
-low-level TLS parse error at the grpc layer.
-*/}}
-{{- define "waddlebot.grpcTlsMaterialAvailable" -}}
-{{- if or .Values.global.grpcTls.certManager.enabled (and .Values.global.grpcTls.ca.crt .Values.global.grpcTls.tls.crt .Values.global.grpcTls.tls.key) -}}
-true
-{{- end -}}
-{{- end }}
-
-{{/*
-GRPC_TLS_INSECURE_DEV passthrough -- flask_core's own explicit, dev-only
-plaintext escape hatch (refused outright under production posture even if
-set). Rendered unconditionally and defaults to "false"; only values-alpha.yaml
-overrides global.grpcTls.insecureDev to true, as the documented interim so
-alpha doesn't need real cert material.
-*/}}
-{{- define "waddlebot.grpcTlsInsecureDevEnv" -}}
-- name: GRPC_TLS_INSECURE_DEV
-  value: {{ .Values.global.grpcTls.insecureDev | default false | quote }}
-{{- end }}
-
-{{/*
-Server-role env vars: this pod binds a gRPC server (bind_secure_port). Points at
-tls.crt/tls.key -- one identity cert (usages: server auth + client auth) serves both
-roles, matching cert-manager's fixed Secret key names natively; the static Secret path
-(grpc-tls-secret.yaml) mirrors the same 3 keys for that reason.
-*/}}
-{{- define "waddlebot.grpcTlsServerEnv" -}}
-- name: GRPC_TLS_CERT_PATH
-  value: /etc/waddlebot/grpc-tls/tls.crt
-- name: GRPC_TLS_KEY_PATH
-  value: /etc/waddlebot/grpc-tls/tls.key
-- name: GRPC_TLS_CA_PATH
-  value: /etc/waddlebot/grpc-tls/ca.crt
-- name: GRPC_TLS_REQUIRE_CLIENT_CERT
-  value: {{ .Values.global.grpcTls.requireClientCert | quote }}
-{{- end }}
-
-{{/* Client-role env vars: this pod dials another module's gRPC server (secure_channel). */}}
-{{- define "waddlebot.grpcTlsClientEnv" -}}
-- name: GRPC_TLS_CA_PATH
-  value: /etc/waddlebot/grpc-tls/ca.crt
-- name: GRPC_TLS_CLIENT_CERT_PATH
-  value: /etc/waddlebot/grpc-tls/tls.crt
-- name: GRPC_TLS_CLIENT_KEY_PATH
-  value: /etc/waddlebot/grpc-tls/tls.key
-{{- end }}
-
-{{/* Cert volume, sourced from the chart-managed {{ fullname }}-grpc-tls Secret. */}}
-{{- define "waddlebot.grpcTlsVolume" -}}
-- name: grpc-tls
-  secret:
-    secretName: {{ include "waddlebot.fullname" . }}-grpc-tls
-    defaultMode: 0440
-{{- end }}
-
-{{- define "waddlebot.grpcTlsVolumeMount" -}}
-- name: grpc-tls
-  mountPath: /etc/waddlebot/grpc-tls
-  readOnly: true
-{{- end }}
-
-{{/*
 feature/e2e-helm-rust-dataplane -- host-API mTLS helpers (the svc-bundles-executor<->stage wire
 protocol, core/bundle_executor/src/tls.rs + core/svc_action/src/host_api.rs), a separate
 identity from the gRPC helpers above -- different wire protocol, different port, mounted
@@ -825,7 +749,7 @@ joined: a stable hash input for waddlebot.hostApiTlsSansSha256, and directly
 {{- $fullname := include "waddlebot.fullname" . -}}
 {{- $ns := .Values.namespace -}}
 {{- /* Explicit FQDNs, never a `*.<ns>.svc.cluster.local` wildcard: a wildcard cert from the shared internal CA would let any pod holding it impersonate Postgres/Valkey/S3 (security review HIGH). */ -}}
-{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-svc-bundles-executor" $fullname) (printf "%s-svc-process-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-action-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-bundles-executor.%s.svc.cluster.local" $fullname $ns) | sortAlpha | join "," -}}
+{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-svc-process-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-action-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-bundles-executor.%s.svc.cluster.local" $fullname $ns) | sortAlpha | join "," -}}
 {{- end }}
 
 {{/* sha256 of waddlebot.hostApiTlsDesiredDnsNames -- the waddlebot.io/cert-sans-sha256

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any
 
 from flask_core import (
@@ -124,6 +125,7 @@ def _bind_reference_tables(dal: Any) -> None:
     dal.define_table(
         "tenants",
         Field("slug", "string", length=100),
+        Field("public_id", "string", length=36, default=lambda: str(uuid.uuid4())),
         Field("display_name", "string", length=255),
         Field("logo_url", "text"),
         Field("is_global", "boolean", default=False),

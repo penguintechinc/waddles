@@ -1,7 +1,6 @@
 """Shared support for the env-gated, real-endpoint Ollama integration tests.
 
-Used by `hub_api/tests`, `core/ai_researcher_module/tests` and
-`action/interactive/ai_interaction_module/tests` (each module's `conftest.py`
+Used by `hub_api/tests` (its `conftest.py`
 puts this directory on `sys.path` and re-exports the fixtures below; see
 `docs/testing/ollama-realpath.md`).
 

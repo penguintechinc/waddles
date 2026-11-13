@@ -39,8 +39,9 @@ import math
 from datetime import UTC, datetime
 from typing import Any
 
-from services.errors import bad_request, forbidden, not_found
+from services.errors import ApiError, bad_request, forbidden, not_found
 from services.free_tier_caps import add_tenant_admin_capped
+from services.global_identity import SYSTEM_TENANT_SLUG
 
 VALID_TENANT_ADMIN_ROLES = ("tenant-admin", "tenant-owner")
 
@@ -154,49 +155,6 @@ async def get_tenant_communities(
     return list(rows), total, total_pages
 
 
-async def get_tenant_modules(async_dal: Any, dal: Any, *, tenant_id: int) -> tuple[bool, list[Any]]:
-    """Return `(all_modules_allowed, modules)` for a tenant.
-
-    `allowed_module_ids IS NULL` means every published module is allowed
-    (matches Node's `tenant.allowed_module_ids === null` branch); an empty
-    list means none are; a non-empty list scopes to exactly those ids.
-    """
-    tenant = await get_tenant(async_dal, dal, tenant_id=tenant_id)
-    allowed_ids = tenant.allowed_module_ids
-
-    if allowed_ids is None:
-        rows = await async_dal.select_async(
-            dal(dal.hub_modules.is_published == True),  # noqa: E712 - pydal Field comparison
-            orderby=dal.hub_modules.category | dal.hub_modules.display_name,
-        )
-        return True, list(rows)
-
-    if len(allowed_ids) == 0:
-        return False, []
-
-    rows = await async_dal.select_async(
-        dal(dal.hub_modules.id.belongs(allowed_ids)),
-        orderby=dal.hub_modules.category | dal.hub_modules.display_name,
-    )
-    return False, list(rows)
-
-
-async def update_tenant_modules(
-    async_dal: Any, dal: Any, *, tenant_id: int, allowed_module_ids: list[int] | None
-) -> None:
-    """Set the allowed module id list (or `None` for "all modules"). Raises 400 on invalid ids."""
-    if allowed_module_ids is not None:
-        for module_id in allowed_module_ids:
-            if module_id <= 0:
-                raise bad_request("Each allowedModuleId must be a positive integer")
-
-    await async_dal.update_async(
-        dal.tenants.id == tenant_id,
-        allowed_module_ids=allowed_module_ids,
-        updated_at=datetime.now(UTC),
-    )
-
-
 async def get_tenant_admins(async_dal: Any, dal: Any, *, tenant_id: int) -> list[Any]:
     """List tenant admins, joined with `hub_users` for display fields.
 
@@ -221,6 +179,27 @@ async def get_tenant_admins(async_dal: Any, dal: Any, *, tenant_id: int) -> list
     return list(rows)
 
 
+#: Typed error code for the reserved-tenant refusal (clients can branch on it).
+SYSTEM_TENANT_ADMIN_CODE = "SYSTEM_TENANT_ADMIN_VIA_SUPERADMIN_ONLY"
+
+
+def refuse_system_tenant_admin_change(tenant_slug: str) -> None:
+    """Raise 403 when `tenant_slug` is the reserved `system` tenant.
+
+    A `system` tenant admin IS a global admin, so granting/revoking it through the tenant routes
+    would bypass the superadmin path's DB re-check, last-admin guard, session revocation and
+    audit. All system-admin changes go through
+    `POST /api/v1/superadmin/users/<id>/super-admin-role` only.
+    """
+    if tenant_slug == SYSTEM_TENANT_SLUG:
+        raise ApiError(
+            "System tenant admins are global admins; use "
+            "POST /api/v1/superadmin/users/<id>/super-admin-role",
+            403,
+            SYSTEM_TENANT_ADMIN_CODE,
+        )
+
+
 async def add_tenant_admin(
     async_dal: Any, dal: Any, *, tenant_id: int, user_id: int, role: str, tenant_slug: str
 ) -> None:
@@ -229,6 +208,7 @@ async def add_tenant_admin(
     ``tenant_slug`` is the TARGET tenant (the one receiving the admin): the free-tier
     admin cap's tier and count are both resolved against it, never the caller's tenant.
     """
+    refuse_system_tenant_admin_change(tenant_slug)
     if role not in VALID_TENANT_ADMIN_ROLES:
         raise bad_request(f"role must be one of: {', '.join(VALID_TENANT_ADMIN_ROLES)}")
 
@@ -259,8 +239,11 @@ async def add_tenant_admin(
         )
 
 
-async def remove_tenant_admin(async_dal: Any, dal: Any, *, tenant_id: int, user_id: int) -> None:
-    """Revoke a tenant admin role. Raises 404 if no such admin row exists."""
+async def remove_tenant_admin(
+    async_dal: Any, dal: Any, *, tenant_id: int, user_id: int, tenant_slug: str
+) -> None:
+    """Revoke a tenant admin role. Raises 403 for `system`, 404 if no such admin row exists."""
+    refuse_system_tenant_admin_change(tenant_slug)
     deleted = await async_dal.delete_async(
         (dal.tenant_admins.tenant_id == tenant_id) & (dal.tenant_admins.user_id == user_id)
     )
@@ -286,11 +269,11 @@ __all__ = [
     "get_tenant",
     "get_tenant_admins",
     "get_tenant_communities",
-    "get_tenant_modules",
     "get_tenant_settings",
+    "SYSTEM_TENANT_ADMIN_CODE",
+    "refuse_system_tenant_admin_change",
     "remove_tenant_admin",
     "require_matching_tenant",
     "update_tenant",
-    "update_tenant_modules",
     "update_tenant_settings",
 ]

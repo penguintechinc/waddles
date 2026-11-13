@@ -33,6 +33,7 @@ from config import HubAPIConfig
 from services import ban_suppression, login_providers, session_service
 from services.auth_service import SessionUser, create_session_token
 from services.errors import ApiError, bad_request, conflict
+from services.global_identity import is_global_admin
 from services.install_state_binding import (
     ERR_STATE,
     InstallStateError,
@@ -370,7 +371,7 @@ async def _find_or_create_user_from_oauth(
             email=u.email,
             username=u.username,
             avatar_url=u.avatar_url,
-            is_super_admin=bool(u.is_super_admin),
+            is_super_admin=await is_global_admin(async_dal, dal, user_id=int(u.id)),
             is_vendor=bool(u.is_vendor),
             is_analytics_consumer=bool(u.is_analytics_consumer),
         )

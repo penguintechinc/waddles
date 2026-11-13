@@ -166,26 +166,11 @@ jobs:
           python-version: '3.13'
           cache: pip
           cache-dependency-path: |
-            core/identity_core_module/requirements.txt
-            core/workflow_core_module/requirements.txt
-            core/community_module/requirements.txt
             libs/flask_core/requirements.txt
             hub_api/requirements.txt
-            core/svc_action/requirements.txt
-            core/svc_ingest/requirements.txt
-            core/svc_presentation/requirements.txt
-            core/svc_process/requirements.txt
-            core/svc_streaming/requirements.txt
 
-      # test-unit runs the real suites, not just the legacy 173-test subset:
-      # hub_api, libs/* (flask_core + every SCCEMBS module library), and
-      # every core/svc_* stage-runner container each ship their own
-      # hash-pinned requirements.txt -- none of these are satisfied by
-      # identity_core_module's requirements alone. scripts/ci/install-unit-test-deps.sh
-      # is the single source of truth for the sequential per-package install
-      # order (see that script for why a single combined install call
-      # doesn't work); make test-unit also runs it, so local and CI installs
-      # never drift out of sync.
+      # test-unit installs hub_api + libs/flask_core + libs/waddle_transports via
+      # scripts/ci/install-unit-test-deps.sh (single source of truth; make test-unit also runs it).
       - name: Install test dependencies
         env:
           PYTHON_BIN: python
@@ -671,32 +656,6 @@ jobs:
             alembic/tests/test_0055_per_service_db_roles.py \
             alembic/tests/test_chart_credentials_roundtrip.py \
             -v -p no:cacheprovider
-
-  marketplace-refunds:
-    name: Marketplace refund authorization tests
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node == 'true') }}
-    # bare dal2-alpha-ci image has no cc/cmake/libatomic and sudo is blocked (no-new-privileges): C-toolchain / node jobs stay on hosted ubuntu-latest until a custom runner image bakes them in
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: admin/marketplace_module/backend
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
-        with:
-          node-version: '26'
-          cache: npm
-          cache-dependency-path: admin/marketplace_module/backend/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Run refund tests
-        run: npm test
 
   web-builds:
     name: Build ${{ matrix.name }}

@@ -55,9 +55,6 @@ const MyAnalytics = lazy(() => import('./pages/dashboard/MyAnalytics'));
 // Admin pages
 const AdminHome = lazy(() => import('./pages/admin/AdminHome'));
 const AdminMembers = lazy(() => import('./pages/admin/AdminMembers'));
-const AdminModules = lazy(() => import('./pages/admin/AdminModules'));
-const AdminMarketplace = lazy(() => import('./pages/admin/AdminMarketplace'));
-const AdminMarketplaceModuleDetail = lazy(() => import('./pages/admin/AdminMarketplaceModuleDetail.jsx'));
 const AdminCommunityPremium = lazy(() => import('./pages/admin/AdminCommunityPremium.jsx'));
 const SuperAdminMarketplaceSettings = lazy(() => import('./pages/superadmin/SuperAdminMarketplaceSettings.jsx'));
 const AdminStreamOverlays = lazy(() => import('./pages/admin/AdminStreamOverlays'));
@@ -68,7 +65,10 @@ const LiveActivity = lazy(() => import('./pages/community/LiveActivity'));
 const AdminMirrorGroups = lazy(() => import('./pages/admin/AdminMirrorGroups'));
 const AdminLeaderboardConfig = lazy(() => import('./pages/admin/AdminLeaderboardConfig'));
 const AdminCommunityProfile = lazy(() => import('./pages/admin/AdminCommunityProfile'));
-const ReputationSettings = lazy(() => import('./pages/admin/ReputationSettings'));
+const CommunityReputationPolicy = lazy(() => import('./pages/admin/CommunityReputationPolicy'));
+const CommunityReputationBans = lazy(() => import('./pages/admin/CommunityReputationBans'));
+const CommunityReputationHistory = lazy(() => import('./pages/admin/CommunityReputationHistory'));
+const TenantReputationSettings = lazy(() => import('./pages/tenant/TenantReputationSettings'));
 const AdminAIInsights = lazy(() => import('./pages/admin/AdminAIInsights'));
 const AdminAIResearcherConfig = lazy(() => import('./pages/admin/AdminAIResearcherConfig'));
 const AdminAIChatterConfig = lazy(() => import('./pages/admin/AdminAIChatterConfig'));
@@ -145,8 +145,8 @@ const PlatformAnalytics = lazy(() => import('./pages/platform/PlatformAnalytics'
 // Super admin pages
 const SuperAdminDashboard = lazy(() => import('./pages/superadmin/SuperAdminDashboard'));
 const SuperAdminCommunities = lazy(() => import('./pages/superadmin/SuperAdminCommunities'));
-const SuperAdminModuleRegistry = lazy(() => import('./pages/superadmin/SuperAdminModuleRegistry'));
 const SuperAdminBundleApprovals = lazy(() => import('./pages/superadmin/SuperAdminBundleApprovals'));
+const SuperAdminServiceBundles = lazy(() => import('./pages/superadmin/SuperAdminServiceBundles'));
 const SuperAdminPlatformConfig = lazy(() => import('./pages/superadmin/SuperAdminPlatformConfig'));
 const SuperAdminSoftwareDiscovery = lazy(() => import('./pages/superadmin/SuperAdminSoftwareDiscovery'));
 const SuperAdminServiceDiscovery = lazy(() => import('./pages/superadmin/SuperAdminServiceDiscovery'));
@@ -157,7 +157,6 @@ const SuperAdminTenants = lazy(() => import('./pages/superadmin/SuperAdminTenant
 
 // Tenant admin pages
 const TenantDashboard = lazy(() => import('./pages/tenant/TenantDashboard'));
-const TenantModules = lazy(() => import('./pages/tenant/TenantModules'));
 const TenantAdmins = lazy(() => import('./pages/tenant/TenantAdmins'));
 const TenantCommunities = lazy(() => import('./pages/tenant/TenantCommunities'));
 
@@ -169,10 +168,21 @@ const AdminAIKnowledge = lazy(() => import('./pages/admin/AdminAIKnowledge'));
 // Living style guide: development builds only (tree-shaken from production).
 const DesignSystem = import.meta.env.DEV ? lazy(() => import('./pages/dev/DesignSystem')) : null;
 
-// Marketplace redirect helper
-function MarketplaceRedirect() {
+// Legacy v2 reputation editor route; scoring weights now live in the reputation bundle.
+function ReputationRedirect() {
   const { communityId } = useParams();
-  return <Navigate to={`/admin/${communityId}/modules`} replace />;
+  return <Navigate to={`/admin/${communityId}/reputation/policy`} replace />;
+}
+
+// Legacy "modules" URLs were superseded by app bundles; redirect so bookmarks do not 404.
+function CommunityBundlesRedirect() {
+  const { communityId } = useParams();
+  return <Navigate to={`/admin/${communityId}/bundles`} replace />;
+}
+
+function TenantBundlesRedirect() {
+  const { tenantSlug } = useParams();
+  return <Navigate to={`/tenant/${tenantSlug}/bundles`} replace />;
 }
 
 // Protected route wrapper
@@ -314,15 +324,15 @@ function App() {
         <Route path="/admin/:communityId/live-activity" element={<LiveActivity />} />
         <Route path="/admin/:communityId/members" element={<AdminMembers />} />
         <Route path="/admin/:communityId/workflows" element={<AdminWorkflows />} />
-        <Route path="/admin/:communityId/modules" element={<ServedFeature feature="community-marketplace-modules"><AdminModules /></ServedFeature>} />
+        <Route path="/admin/:communityId/modules" element={<CommunityBundlesRedirect />} />
         <Route path="/admin/:communityId/modules/lfg/config" element={<AdminLfgConfig />} />
         <Route path="/admin/:communityId/modules/clip/config" element={<AdminClipConfig />} />
         <Route path="/admin/:communityId/modules/alias/config" element={<AdminAliasConfig />} />
         <Route path="/admin/:communityId/modules/memories/config" element={<AdminMemoriesConfig />} />
         <Route path="/admin/:communityId/modules/server-status/config" element={<AdminServerStatusConfig />} />
         <Route path="/admin/:communityId/modules/server-manager/config" element={<AdminServerManagerConfig />} />
-        <Route path="/admin/:communityId/marketplace" element={<MarketplaceRedirect />} />
-        <Route path="/admin/:communityId/marketplace/:source/:id" element={<ServedFeature feature="community-marketplace-install"><AdminMarketplaceModuleDetail /></ServedFeature>} />
+        <Route path="/admin/:communityId/marketplace" element={<CommunityBundlesRedirect />} />
+        <Route path="/admin/:communityId/marketplace/:source/:id" element={<CommunityBundlesRedirect />} />
         <Route path="/admin/:communityId/premium" element={<AdminCommunityPremium />} />
         <Route path="/admin/:communityId/stream-overlays" element={<AdminStreamOverlays />} />
         <Route path="/admin/:communityId/domains" element={<ServedFeature feature="custom-domains"><AdminDomains /></ServedFeature>} />
@@ -331,7 +341,10 @@ function App() {
         <Route path="/admin/:communityId/mirror-groups" element={<ServedFeature feature="mirror-groups"><AdminMirrorGroups /></ServedFeature>} />
         <Route path="/admin/:communityId/leaderboard" element={<AdminLeaderboardConfig />} />
         <Route path="/admin/:communityId/profile" element={<AdminCommunityProfile />} />
-        <Route path="/admin/:communityId/reputation" element={<ReputationSettings />} />
+        <Route path="/admin/:communityId/reputation" element={<ReputationRedirect />} />
+        <Route path="/admin/:communityId/reputation/policy" element={<CommunityReputationPolicy />} />
+        <Route path="/admin/:communityId/reputation/bans" element={<CommunityReputationBans />} />
+        <Route path="/admin/:communityId/reputation/history" element={<CommunityReputationHistory />} />
         <Route path="/admin/:communityId/ai-insights" element={<ServedFeature feature="ai-insights"><AdminAIInsights /></ServedFeature>} />
         <Route path="/admin/:communityId/ai-config" element={<ServedFeature feature="ai-researcher"><AdminAIResearcherConfig /></ServedFeature>} />
         <Route path="/admin/:communityId/ai-chatter" element={<AdminAIChatterConfig />} />
@@ -412,8 +425,13 @@ function App() {
       >
         <Route path="/superadmin" element={<SuperAdminDashboard />} />
         <Route path="/superadmin/communities" element={<SuperAdminCommunities />} />
-        <Route path="/superadmin/modules" element={<SuperAdminModuleRegistry />} />
-        <Route path="/superadmin/bundle-approvals" element={<SuperAdminBundleApprovals />} />
+        <Route path="/superadmin/modules" element={<Navigate to="/superadmin/bundles/apps" replace />} />
+        <Route path="/superadmin/bundles/apps" element={<SuperAdminBundleApprovals />} />
+        <Route path="/superadmin/bundles/services" element={<SuperAdminServiceBundles />} />
+        <Route
+          path="/superadmin/bundle-approvals"
+          element={<Navigate to="/superadmin/bundles/apps" replace />}
+        />
         <Route path="/superadmin/vendor-submissions" element={<AdminVendorReview />} />
         <Route path="/superadmin/vendor-submissions/:submissionId" element={<AdminVendorReview />} />
         <Route path="/superadmin/vendor-requests" element={<SuperAdminVendorRequests />} />
@@ -437,8 +455,9 @@ function App() {
         }
       >
         <Route path="/tenant/:tenantSlug" element={<TenantDashboard />} />
-        <Route path="/tenant/:tenantSlug/modules" element={<TenantModules />} />
+        <Route path="/tenant/:tenantSlug/modules" element={<TenantBundlesRedirect />} />
         <Route path="/tenant/:tenantSlug/admins" element={<TenantAdmins />} />
+        <Route path="/tenant/:tenantSlug/reputation" element={<TenantReputationSettings />} />
         <Route path="/tenant/:tenantSlug/communities" element={<TenantCommunities />} />
         {/* Wave-1 stub: tenant bundle catalog slice */}
         <Route path="/tenant/:tenantSlug/bundles" element={<TenantBundleCatalog />} />

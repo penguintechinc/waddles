@@ -1803,7 +1803,7 @@ fn try_start_dispatch(
         // (module doc) resolves the real set of (tenant, community,
         // app_id) activations this pod should drain -- a single-tenant
         // deployment (today's only shipped topology) is unaffected.
-        let scope = penguin_spine::Scope::new("global", None);
+        let scope = penguin_spine::Scope::new("default", None);
         let stream_key = scope.action_stream(&app_id);
         let grant = penguin_spine::Grant {
             stream: stream_key.clone(),

@@ -520,7 +520,7 @@ async def login(
             _cfg(),
             email=data.email,
             password=data.password,
-            tenant_slug=data.tenantSlug or "global",
+            tenant_slug=data.tenantSlug or "default",
         )
     except auth_service.RequiresVerificationError:
         return (

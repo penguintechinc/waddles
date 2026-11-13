@@ -305,6 +305,38 @@ components:
       - site_id
       title: ApiCredentialBody
       type: object
+    AtRiskEntryDTO:
+      description: One at-risk member (score below the community's at-risk threshold).
+      properties:
+        belowHardBanFloor:
+          title: Belowhardbanfloor
+          type: boolean
+        belowSoftBanFloor:
+          title: Belowsoftbanfloor
+          type: boolean
+        displayName:
+          title: Displayname
+          type: string
+        score:
+          title: Score
+          type: integer
+        tier:
+          title: Tier
+          type: string
+        userId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Userid
+      required:
+      - userId
+      - displayName
+      - score
+      - tier
+      - belowSoftBanFloor
+      - belowHardBanFloor
+      title: AtRiskEntryDTO
+      type: object
     AuditEntryDTO:
       description: Audit log entry DTO.
       properties:
@@ -524,6 +556,80 @@ components:
       - name
       title: AvailabilityDTO
       type: object
+    BulkItem:
+      description: One `(appId, version)` pair in a bulk request.
+      properties:
+        appId:
+          title: Appid
+          type: string
+        version:
+          title: Version
+          type: string
+      required:
+      - appId
+      - version
+      title: BulkItem
+      type: object
+    BulkItemError:
+      description: Per-item failure detail.
+      properties:
+        code:
+          title: Code
+          type: string
+        message:
+          title: Message
+          type: string
+      required:
+      - code
+      - message
+      title: BulkItemError
+      type: object
+    BulkItemResult:
+      description: 'Per-item outcome: approved / rejected / already_installed / error.'
+      properties:
+        appId:
+          title: Appid
+          type: string
+        error:
+          anyOf:
+          - $ref: '#/components/schemas/BulkItemError'
+          - type: 'null'
+          default: null
+        status:
+          enum:
+          - approved
+          - rejected
+          - already_installed
+          - error
+          title: Status
+          type: string
+        version:
+          title: Version
+          type: string
+      required:
+      - appId
+      - version
+      - status
+      title: BulkItemResult
+      type: object
+    BulkSummary:
+      description: Batch totals; `succeeded` counts approved + rejected + already_installed.
+      properties:
+        failed:
+          title: Failed
+          type: integer
+        succeeded:
+          title: Succeeded
+          type: integer
+        total:
+          title: Total
+          type: integer
+      required:
+      - total
+      - succeeded
+      - failed
+      title: BulkSummary
+      type: object
     BundleDTO:
       description: 'Response DTO: one `app_catalog` row.'
       properties:
@@ -648,6 +754,11 @@ components:
           - type: string
           - type: 'null'
           title: Createdat
+        installedVersion:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Installedversion
         rejectReason:
           anyOf:
           - type: string
@@ -675,6 +786,7 @@ components:
       - requestedBy
       - createdAt
       - rejectReason
+      - installedVersion
       title: BundleVersionSummaryDTO
       type: object
     ByokKeyDTO:
@@ -799,13 +911,35 @@ components:
           title: Source
           type: string
         sourceId:
+          anyOf:
+          - type: integer
+          - type: 'null'
           title: Sourceid
-          type: integer
+        sourceRef:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Sourceref
+        sourceRepo:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Sourcerepo
         updatedAt:
           anyOf:
           - type: string
           - type: 'null'
           title: Updatedat
+        vendorKey:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Vendorkey
+        vendorName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Vendorname
         version:
           anyOf:
           - type: string
@@ -814,6 +948,10 @@ components:
       required:
       - source
       - sourceId
+      - sourceRef
+      - vendorKey
+      - vendorName
+      - sourceRepo
       - name
       - displayName
       - description
@@ -857,20 +995,6 @@ components:
       - total
       - totalPages
       title: CatalogPagination
-      type: object
-    CategoryDTO:
-      description: Category DTO.
-      properties:
-        moduleCount:
-          title: Modulecount
-          type: integer
-        name:
-          title: Name
-          type: string
-      required:
-      - name
-      - moduleCount
-      title: CategoryDTO
       type: object
     CategoryEntry:
       description: One distinct category + its module count.
@@ -1779,8 +1903,12 @@ components:
       title: DeletionRequestDTO
       type: object
     DiscordRole:
-      description: One Discord role -- `id` is a string snowflake (never a JS-lossy
+      description: 'One Discord role -- `id` is a string snowflake (never a JS-lossy
         int).
+
+
+        `privileged` is computed server-side (see `is_privileged_role`) so the webui
+        stays thin.'
       properties:
         color:
           title: Color
@@ -1788,12 +1916,24 @@ components:
         id:
           title: Id
           type: string
+        managed:
+          default: false
+          title: Managed
+          type: boolean
         name:
           title: Name
           type: string
+        permissions:
+          default: 0
+          title: Permissions
+          type: integer
         position:
           title: Position
           type: integer
+        privileged:
+          default: false
+          title: Privileged
+          type: boolean
       required:
       - id
       - name
@@ -1950,6 +2090,41 @@ components:
       - exported_at
       title: ExportManifestDTO
       type: object
+    GameServerDTO:
+      description: 'What an admin may see of a registered server: ids and display
+        fields only.'
+      properties:
+        connectionId:
+          title: Connectionid
+          type: integer
+        enabled:
+          title: Enabled
+          type: boolean
+        game:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Game
+        label:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Label
+        serverId:
+          title: Serverid
+          type: string
+        usable:
+          title: Usable
+          type: boolean
+      required:
+      - connectionId
+      - serverId
+      - game
+      - label
+      - enabled
+      - usable
+      title: GameServerDTO
+      type: object
     GlobalInstallDTO:
       description: 'Response DTO: one `app_global_installs` row.'
       properties:
@@ -2046,6 +2221,57 @@ components:
       - database
       - timestamp
       title: HealthChecksDTO
+      type: object
+    HistoryEntryDTO:
+      description: 'One ledger row, safe for an admin view: actor is a category, never
+        an internal id.'
+      properties:
+        actorType:
+          title: Actortype
+          type: string
+        balanceAfter:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Balanceafter
+        delta:
+          title: Delta
+          type: integer
+        id:
+          title: Id
+          type: integer
+        kind:
+          title: Kind
+          type: string
+        occurredAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Occurredat
+        reasonCode:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Reasoncode
+        sourceEvent:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Sourceevent
+        userUuid:
+          title: Useruuid
+          type: string
+      required:
+      - id
+      - userUuid
+      - delta
+      - balanceAfter
+      - kind
+      - reasonCode
+      - actorType
+      - sourceEvent
+      - occurredAt
+      title: HistoryEntryDTO
       type: object
     IdentityDTO:
       description: Identity DTO.
@@ -2149,6 +2375,48 @@ components:
       - limit
       - nextCursor
       title: IngestSourceMetaDTO
+      type: object
+    InstalledBundleDTO:
+      description: One installed bundle row.
+      properties:
+        appId:
+          title: Appid
+          type: string
+        digestShort:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Digestshort
+        installSource:
+          title: Installsource
+          type: string
+        installedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Installedat
+        kind:
+          title: Kind
+          type: string
+        name:
+          title: Name
+          type: string
+        status:
+          title: Status
+          type: string
+        version:
+          title: Version
+          type: string
+      required:
+      - appId
+      - name
+      - kind
+      - version
+      - digestShort
+      - installedAt
+      - installSource
+      - status
+      title: InstalledBundleDTO
       type: object
     InstancePolicyDTO:
       description: One `instance_permission_policies` row, DTO-shaped for the API
@@ -2645,162 +2913,6 @@ components:
       - isAnalyticsConsumer
       title: LoginUserDTO
       type: object
-    MarketplaceModuleDTO:
-      description: Marketplace module DTO (list row).
-      properties:
-        author:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Author
-        avgRating:
-          title: Avgrating
-          type: string
-        category:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Category
-        createdAt:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Createdat
-        description:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Description
-        displayName:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Displayname
-        iconUrl:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Iconurl
-        id:
-          title: Id
-          type: integer
-        installCount:
-          title: Installcount
-          type: integer
-        isCore:
-          title: Iscore
-          type: boolean
-        name:
-          title: Name
-          type: string
-        reviewCount:
-          title: Reviewcount
-          type: integer
-        version:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Version
-      required:
-      - id
-      - name
-      - displayName
-      - description
-      - version
-      - author
-      - category
-      - iconUrl
-      - isCore
-      - avgRating
-      - reviewCount
-      - installCount
-      - createdAt
-      title: MarketplaceModuleDTO
-      type: object
-    MarketplaceModuleDetailDTO:
-      description: Marketplace module detail DTO.
-      properties:
-        author:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Author
-        avgRating:
-          title: Avgrating
-          type: string
-        category:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Category
-        configSchema:
-          anyOf:
-          - additionalProperties: true
-            type: object
-          - type: 'null'
-          title: Configschema
-        createdAt:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Createdat
-        description:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Description
-        displayName:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Displayname
-        iconUrl:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Iconurl
-        id:
-          title: Id
-          type: integer
-        installCount:
-          title: Installcount
-          type: integer
-        isCore:
-          title: Iscore
-          type: boolean
-        name:
-          title: Name
-          type: string
-        reviewCount:
-          title: Reviewcount
-          type: integer
-        reviews:
-          items:
-            $ref: '#/components/schemas/ReviewDTO'
-          title: Reviews
-          type: array
-        version:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Version
-      required:
-      - id
-      - name
-      - displayName
-      - description
-      - version
-      - author
-      - category
-      - iconUrl
-      - isCore
-      - configSchema
-      - avgRating
-      - reviewCount
-      - installCount
-      - createdAt
-      title: MarketplaceModuleDetailDTO
-      type: object
     MeUserDTO:
       description: Me user DTO.
       properties:
@@ -2977,313 +3089,31 @@ components:
       title: MetadataFieldDTO
       type: object
     ModuleDTO:
-      description: Module summary DTO.
+      description: Per-community module installation DTO.
       properties:
         category:
           anyOf:
           - type: string
           - type: 'null'
           title: Category
-        createdAt:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Createdat
-        description:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Description
-        displayName:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Displayname
-        id:
-          title: Id
-          type: integer
-        isCore:
-          title: Iscore
-          type: boolean
-        isPublished:
-          title: Ispublished
-          type: boolean
-        name:
-          title: Name
-          type: string
-        version:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Version
-      required:
-      - id
-      - name
-      - displayName
-      - description
-      - category
-      - isCore
-      - isPublished
-      - version
-      - createdAt
-      title: ModuleDTO
-      type: object
-    ModuleDetail:
-      description: '`getModuleById()`''s response shape -- `ModuleEntry` fields +
-        `configSchema` + `reviews`.'
-      properties:
-        author:
-          anyOf:
-          - $ref: '#/components/schemas/AuthorDTO'
-          - type: 'null'
-        avgRating:
-          title: Avgrating
-          type: string
-        category:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Category
-        configSchema:
-          additionalProperties: true
-          title: Configschema
-          type: object
-        createdAt:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Createdat
-        description:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Description
-        displayName:
-          title: Displayname
-          type: string
-        iconUrl:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Iconurl
-        id:
-          title: Id
-          type: integer
-        installCount:
-          title: Installcount
-          type: integer
-        isCore:
-          title: Iscore
-          type: boolean
-        isFeatured:
-          title: Isfeatured
-          type: boolean
-        name:
-          title: Name
-          type: string
-        reviewCount:
-          title: Reviewcount
-          type: integer
-        reviews:
-          items:
-            $ref: '#/components/schemas/ModuleReview'
-          title: Reviews
-          type: array
-        updatedAt:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Updatedat
-        version:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Version
-      required:
-      - id
-      - name
-      - displayName
-      - description
-      - version
-      - author
-      - category
-      - iconUrl
-      - isCore
-      - isFeatured
-      - avgRating
-      - reviewCount
-      - installCount
-      - createdAt
-      - updatedAt
-      - configSchema
-      title: ModuleDetail
-      type: object
-    ModuleEntry:
-      description: One `hub_modules` row, camelCase to match `moduleService.js`'s
-        `formatModule`.
-      properties:
-        author:
-          anyOf:
-          - $ref: '#/components/schemas/AuthorDTO'
-          - type: 'null'
-        avgRating:
-          title: Avgrating
-          type: string
-        category:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Category
-        createdAt:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Createdat
-        description:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Description
-        displayName:
-          title: Displayname
-          type: string
-        iconUrl:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Iconurl
-        id:
-          title: Id
-          type: integer
-        installCount:
-          title: Installcount
-          type: integer
-        isCore:
-          title: Iscore
-          type: boolean
-        isFeatured:
-          title: Isfeatured
-          type: boolean
-        name:
-          title: Name
-          type: string
-        reviewCount:
-          title: Reviewcount
-          type: integer
-        updatedAt:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Updatedat
-        version:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Version
-      required:
-      - id
-      - name
-      - displayName
-      - description
-      - version
-      - author
-      - category
-      - iconUrl
-      - isCore
-      - isFeatured
-      - avgRating
-      - reviewCount
-      - installCount
-      - createdAt
-      - updatedAt
-      title: ModuleEntry
-      type: object
-    ModuleListPagination:
-      description: Page metadata for `GET /api/v1/modules`.
-      properties:
-        limit:
-          title: Limit
-          type: integer
-        page:
-          title: Page
-          type: integer
-        total:
-          title: Total
-          type: integer
-        totalPages:
-          title: Totalpages
-          type: integer
-      required:
-      - page
-      - limit
-      - total
-      - totalPages
-      title: ModuleListPagination
-      type: object
-    ModuleReview:
-      description: One `hub_module_reviews` row, camelCase to match `formatReview`.
-      properties:
-        author:
-          title: Author
-          type: string
-        authorAvatar:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Authoravatar
-        createdAt:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Createdat
-        id:
-          title: Id
-          type: integer
-        rating:
-          title: Rating
-          type: integer
-        reviewText:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Reviewtext
-      required:
-      - id
-      - rating
-      - reviewText
-      - author
-      - authorAvatar
-      - createdAt
-      title: ModuleReview
-      type: object
-    ModuleSubscription:
-      description: One community's installation of a module -- camelCase DTO, matches
-        Node's response shape.
-      properties:
-        communityDisplayName:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Communitydisplayname
-        communityId:
-          title: Communityid
-          type: integer
-        communityLogo:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Communitylogo
-        communityName:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Communityname
         config:
-          additionalProperties: true
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
           title: Config
-          type: object
-        id:
-          title: Id
+        description:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Description
+        displayName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Displayname
+        installationId:
+          title: Installationid
           type: integer
         installedAt:
           anyOf:
@@ -3293,22 +3123,25 @@ components:
         isEnabled:
           title: Isenabled
           type: boolean
-        updatedAt:
+        moduleId:
+          title: Moduleid
+          type: string
+        name:
           anyOf:
           - type: string
           - type: 'null'
-          title: Updatedat
+          title: Name
       required:
-      - id
-      - communityId
-      - communityName
-      - communityDisplayName
-      - communityLogo
+      - installationId
+      - moduleId
+      - name
+      - displayName
+      - description
+      - category
       - isEnabled
       - config
       - installedAt
-      - updatedAt
-      title: ModuleSubscription
+      title: ModuleDTO
       type: object
     MusicProviderDTO:
       description: Wire DTO for one connected music provider.
@@ -4306,44 +4139,6 @@ components:
       - incompatibleWith
       title: ResolvedAppDTO
       type: object
-    ReviewDTO:
-      description: Review DTO.
-      properties:
-        author:
-          title: Author
-          type: string
-        authorAvatar:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Authoravatar
-        createdAt:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Createdat
-        id:
-          title: Id
-          type: integer
-        rating:
-          anyOf:
-          - type: integer
-          - type: 'null'
-          title: Rating
-        reviewText:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Reviewtext
-      required:
-      - id
-      - rating
-      - reviewText
-      - author
-      - authorAvatar
-      - createdAt
-      title: ReviewDTO
-      type: object
     RewrapDTO:
       description: 'Response DTO: outcome of re-wrapping every DEK version onto a
         target KEK.'
@@ -4380,6 +4175,67 @@ components:
       - failedVersions
       - ok
       title: RewrapDTO
+      type: object
+    RoleMirrorMapping:
+      description: One `discord_role_mirror_mappings` row -- the wire-shape DTO for
+        API responses.
+      properties:
+        community_id:
+          title: Community Id
+          type: integer
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        id:
+          title: Id
+          type: integer
+        last_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Error
+        last_roles_added:
+          title: Last Roles Added
+          type: integer
+        last_roles_removed:
+          title: Last Roles Removed
+          type: integer
+        last_skipped_not_member:
+          title: Last Skipped Not Member
+          type: integer
+        last_synced_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Synced At
+        source_guild_id:
+          title: Source Guild Id
+          type: string
+        source_role_id:
+          title: Source Role Id
+          type: string
+        target_guild_id:
+          title: Target Guild Id
+          type: string
+        target_role_id:
+          title: Target Role Id
+          type: string
+      required:
+      - id
+      - community_id
+      - source_guild_id
+      - source_role_id
+      - target_guild_id
+      - target_role_id
+      - last_synced_at
+      - last_roles_added
+      - last_roles_removed
+      - last_skipped_not_member
+      - last_error
+      - created_at
+      title: RoleMirrorMapping
       type: object
     RoleSyncBinding:
       description: One `community_role_sync_bindings` row -- the wire-shape DTO for
@@ -4961,6 +4817,43 @@ components:
       - description
       - builtin
       title: SlashCommandDTO
+      type: object
+    SoftBanEntryDTO:
+      description: 'One active soft ban: the member cannot WIN anything in this community
+        (not removed).'
+      properties:
+        displayName:
+          title: Displayname
+          type: string
+        expiresAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Expiresat
+        reason:
+          title: Reason
+          type: string
+        setAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Setat
+        setByType:
+          title: Setbytype
+          type: string
+        userId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Userid
+      required:
+      - userId
+      - displayName
+      - reason
+      - setByType
+      - setAt
+      - expiresAt
+      title: SoftBanEntryDTO
       type: object
     SpotlightedCommunityDTO:
       description: Spotlighted community DTO.
@@ -6105,6 +5998,10 @@ components:
           - type: 'null'
           default: null
           title: Isanalyticsconsumer
+        isPlatformAccount:
+          default: false
+          title: Isplatformaccount
+          type: boolean
         isSuperAdmin:
           default: false
           title: Issuperadmin
@@ -6129,6 +6026,47 @@ components:
       - email
       - username
       title: UserDTO
+      type: object
+    VendorEntry:
+      description: One vendor marketplace (a GitHub org) with its per-repo breakdown.
+      properties:
+        count:
+          title: Count
+          type: integer
+        key:
+          title: Key
+          type: string
+        name:
+          title: Name
+          type: string
+        repos:
+          items:
+            $ref: '#/components/schemas/VendorRepoEntry'
+          title: Repos
+          type: array
+      required:
+      - key
+      - name
+      - count
+      - repos
+      title: VendorEntry
+      type: object
+    VendorRepoEntry:
+      description: One source repo (`org/repo`) inside a vendor marketplace + its
+        entry count.
+      properties:
+        count:
+          title: Count
+          type: integer
+        repo:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Repo
+      required:
+      - repo
+      - count
+      title: VendorRepoEntry
       type: object
     VendorRequestDTO:
       description: Vendor-role request as its requester sees it (no contact PII).
@@ -11175,6 +11113,372 @@ paths:
           description: Undocumented response
       summary: '`api.js` `rconApi.testConnection` -- proxy passthrough, see module
         docstring.'
+  /api/v1/admin/{community_id}/reputation/at-risk:
+    get:
+      description: ''
+      operationId: get_get_reputation_at_risk
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Members below the community's at-risk threshold, lowest
+                  first.
+                properties:
+                  members:
+                    items:
+                      $ref: '#/components/schemas/AtRiskEntryDTO'
+                    title: Members
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - members
+                title: AtRiskResponse
+                type: object
+          description: Members below the community's at-risk threshold, lowest first.
+      summary: Members below the community's at-risk threshold (`?limit=`, default
+        50).
+  /api/v1/admin/{community_id}/reputation/config:
+    get:
+      description: ''
+      operationId: get_get_reputation_config
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Community reputation policy (the 300-850 scale is read-only
+                  product policy).
+                properties:
+                  atRiskThreshold:
+                    title: Atriskthreshold
+                    type: integer
+                  hardBanEnabled:
+                    title: Hardbanenabled
+                    type: boolean
+                  hardBanFloor:
+                    title: Hardbanfloor
+                    type: integer
+                  scoreDefault:
+                    title: Scoredefault
+                    type: integer
+                  scoreMax:
+                    title: Scoremax
+                    type: integer
+                  scoreMin:
+                    title: Scoremin
+                    type: integer
+                  softBanEnabled:
+                    title: Softbanenabled
+                    type: boolean
+                  softBanFloor:
+                    title: Softbanfloor
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  updatedAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Updatedat
+                required:
+                - success
+                - softBanEnabled
+                - softBanFloor
+                - hardBanEnabled
+                - hardBanFloor
+                - atRiskThreshold
+                - scoreMin
+                - scoreMax
+                - scoreDefault
+                - updatedAt
+                title: ReputationConfigResponse
+                type: object
+          description: Community reputation policy (the 300-850 scale is read-only
+            product policy).
+      summary: Community reputation policy -- community admins of THIS community only.
+    put:
+      description: ''
+      operationId: put_put_reputation_config
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Request DTO for PUT reputation config -- only supplied
+                fields change.
+
+
+                Floors are independent, each with its own flag (both default OFF):
+                score < `softBanFloor`
+
+                -> soft ban (cannot WIN), score < `hardBanFloor` -> ban in this community.
+                Must satisfy
+
+                300 <= hardBanFloor < softBanFloor < atRiskThreshold <= 850. Enforcement
+                is the accrual
+
+                bundle''s, behind the `waddles.reputation-auto-ban` flag.'
+              properties:
+                atRiskThreshold:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  default: null
+                  title: Atriskthreshold
+                hardBanEnabled:
+                  anyOf:
+                  - type: boolean
+                  - type: 'null'
+                  default: null
+                  title: Hardbanenabled
+                hardBanFloor:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  default: null
+                  title: Hardbanfloor
+                softBanEnabled:
+                  anyOf:
+                  - type: boolean
+                  - type: 'null'
+                  default: null
+                  title: Softbanenabled
+                softBanFloor:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  default: null
+                  title: Softbanfloor
+              title: ReputationConfigRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Community reputation policy (the 300-850 scale is read-only
+                  product policy).
+                properties:
+                  atRiskThreshold:
+                    title: Atriskthreshold
+                    type: integer
+                  hardBanEnabled:
+                    title: Hardbanenabled
+                    type: boolean
+                  hardBanFloor:
+                    title: Hardbanfloor
+                    type: integer
+                  scoreDefault:
+                    title: Scoredefault
+                    type: integer
+                  scoreMax:
+                    title: Scoremax
+                    type: integer
+                  scoreMin:
+                    title: Scoremin
+                    type: integer
+                  softBanEnabled:
+                    title: Softbanenabled
+                    type: boolean
+                  softBanFloor:
+                    title: Softbanfloor
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  updatedAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Updatedat
+                required:
+                - success
+                - softBanEnabled
+                - softBanFloor
+                - hardBanEnabled
+                - hardBanFloor
+                - atRiskThreshold
+                - scoreMin
+                - scoreMax
+                - scoreDefault
+                - updatedAt
+                title: ReputationConfigResponse
+                type: object
+          description: Community reputation policy (the 300-850 scale is read-only
+            product policy).
+      summary: Set the community's soft/hard ban floors + flags and at-risk threshold
+        (400 if invalid).
+  /api/v1/admin/{community_id}/reputation/history:
+    get:
+      description: ''
+      operationId: get_get_reputation_history
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Reputation ledger entries, newest first.
+                properties:
+                  entries:
+                    items:
+                      $ref: '#/components/schemas/HistoryEntryDTO'
+                    title: Entries
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - entries
+                title: HistoryResponse
+                type: object
+          description: Reputation ledger entries, newest first.
+      summary: Reputation ledger, newest first (`?userId=` hub user id, `?limit=`,
+        `?offset=`).
+  /api/v1/admin/{community_id}/reputation/soft-bans:
+    get:
+      description: ''
+      operationId: get_list_reputation_soft_bans
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Active soft bans in the community.
+                properties:
+                  softBans:
+                    items:
+                      $ref: '#/components/schemas/SoftBanEntryDTO'
+                    title: Softbans
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - softBans
+                title: SoftBansResponse
+                type: object
+          description: Active soft bans in the community.
+      summary: Active soft bans (members who cannot WIN in this community).
+  /api/v1/admin/{community_id}/reputation/soft-bans/{user_id}:
+    delete:
+      description: ''
+      operationId: delete_delete_reputation_soft_ban
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for message endpoints.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - message
+                title: MessageResponse
+                type: object
+          description: Response DTO for message endpoints.
+      summary: Clear a member's soft ban (audited).
+    put:
+      description: ''
+      operationId: put_put_reputation_soft_ban
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for a manual soft ban; `expiresAt` (ISO-8601,
+                future) omitted = until cleared.
+              properties:
+                expiresAt:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Expiresat
+              title: SoftBanRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for message endpoints.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - message
+                title: MessageResponse
+                type: object
+          description: Response DTO for message endpoints.
+      summary: Manually soft-ban a member of this community (audited).
   /api/v1/admin/{community_id}/settings:
     get:
       description: ''
@@ -12816,6 +13120,65 @@ paths:
         default:
           description: Undocumented response
       summary: '`GET /api/v1/analytics/platform/reputation`.'
+  /api/v1/apps/approvals/bulk:
+    post:
+      description: ''
+      operationId: post_post_bulk_approvals
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `POST /api/v1/apps/approvals/bulk`.
+              properties:
+                action:
+                  enum:
+                  - approve
+                  - reject
+                  title: Action
+                  type: string
+                items:
+                  items:
+                    $ref: '#/components/schemas/BulkItem'
+                  title: Items
+                  type: array
+                reason:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Reason
+              required:
+              - action
+              title: BulkApprovalRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for the bulk endpoint (security.md Output
+                  Validation).
+                properties:
+                  results:
+                    items:
+                      $ref: '#/components/schemas/BulkItemResult'
+                    title: Results
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                  summary:
+                    $ref: '#/components/schemas/BulkSummary'
+                required:
+                - success
+                - results
+                - summary
+                title: BulkApprovalResponse
+                type: object
+          description: Response DTO for the bulk endpoint (security.md Output Validation).
+      summary: Approve or reject many bundle versions; per-item results, partial success
+        is HTTP 200.
   /api/v1/apps/community/{community_id}/activation:
     get:
       description: ''
@@ -15661,6 +16024,87 @@ paths:
         default:
           description: Undocumented response
       summary: '`POST /api/v1/communities/<id>/connections/<provider>/authorize`.'
+  /api/v1/communities/{community_id}/discord/role-mirrors:
+    get:
+      description: ''
+      operationId: get_list_role_mirrors
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: List-of-mirror-mappings response envelope.
+                properties:
+                  mappings:
+                    items:
+                      $ref: '#/components/schemas/RoleMirrorMapping'
+                    title: Mappings
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - mappings
+                title: RoleMirrorMappingListResponse
+                type: object
+          description: List-of-mirror-mappings response envelope.
+      summary: '`GET /api/v1/communities/<id>/discord/role-mirrors` -- mappings +
+        last sync counters.'
+    post:
+      description: ''
+      operationId: post_create_role_mirror
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                description: Single mirror-mapping response envelope.
+                properties:
+                  mapping:
+                    $ref: '#/components/schemas/RoleMirrorMapping'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - mapping
+                title: RoleMirrorMappingResponse
+                type: object
+          description: Single mirror-mapping response envelope.
+      summary: '`POST /api/v1/communities/<id>/discord/role-mirrors` -- one-way source
+        -> target mapping.'
+  /api/v1/communities/{community_id}/discord/role-mirrors/{mapping_id}:
+    delete:
+      description: ''
+      operationId: delete_delete_role_mirror
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: mapping_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        default:
+          description: Undocumented response
+      summary: '`DELETE /api/v1/communities/<id>/discord/role-mirrors/<mapping_id>`.'
   /api/v1/communities/{community_id}/discord/roles:
     get:
       description: ''
@@ -15696,6 +16140,149 @@ paths:
             role-sync mapping).
       summary: '`GET /api/v1/communities/<id>/discord/roles[?guild_id=]` -- the paired
         guild''s roles.'
+  /api/v1/communities/{community_id}/gameserver-connections:
+    post:
+      description: ''
+      operationId: post_create_gameserver
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: Body of ``POST``. ``host``/``port``/``rconPassword`` are
+                write-only and never echoed.
+              properties:
+                enabled:
+                  default: true
+                  title: Enabled
+                  type: boolean
+                game:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Game
+                host:
+                  title: Host
+                  type: string
+                label:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Label
+                port:
+                  title: Port
+                  type: integer
+                rconPassword:
+                  default: ''
+                  title: Rconpassword
+                  type: string
+              required:
+              - host
+              - port
+              title: CreateGameServerRequest
+              type: object
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                description: Envelope for one server.
+                properties:
+                  server:
+                    $ref: '#/components/schemas/GameServerDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - server
+                title: GameServerResponse
+                type: object
+          description: Envelope for one server.
+      summary: '``POST`` -- validate, mint the server id, seal host|port|password,
+        store.'
+  /api/v1/communities/{community_id}/gameserver-connections/{connection_id}:
+    delete:
+      description: ''
+      operationId: delete_delete_gameserver
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: connection_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Envelope for delete.
+                properties:
+                  purged:
+                    title: Purged
+                    type: boolean
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - purged
+                title: GameServerDeleteResponse
+                type: object
+          description: Envelope for delete.
+      summary: '``DELETE`` -- remove the server; the sealed secret is purged with
+        the last link.'
+  /api/v1/communities/{community_id}/gameserver-connections/{connection_id}/test:
+    post:
+      description: ''
+      operationId: post_test_gameserver
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: connection_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Closed result code of the connectivity test; never an
+                  address or secret.
+                properties:
+                  result:
+                    title: Result
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - result
+                title: GameServerTestResponse
+                type: object
+          description: Closed result code of the connectivity test; never an address
+            or secret.
+      summary: '``POST .../test`` -- pinned, guarded RCON login (or TCP connect);
+        returns a result code.'
   /api/v1/communities/{community_id}/guild-pairings:
     get:
       description: ''
@@ -16074,6 +16661,20 @@ paths:
           description: Response DTO for a single-ingest-source result (create/update).
       summary: '`PATCH .../ingest-sources/<id>` -- update `label` and/or `enabled`
         only.'
+  /api/v1/communities/{community_id}/join:
+    post:
+      description: ''
+      operationId: post_join_community
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        default:
+          description: Undocumented response
+      summary: Join an open community (idempotent); tenant comes from the token only.
   /api/v1/communities/{community_id}/provider-connections:
     get:
       description: ''
@@ -18629,7 +19230,7 @@ paths:
   /api/v1/marketplace/bundles:
     get:
       description: ''
-      operationId: get_list_bundles
+      operationId: get_list_bundles__get_api_v1_marketplace_bundles
       parameters: []
       responses:
         '200':
@@ -18843,7 +19444,12 @@ paths:
         catalog.
   /api/v1/marketplace/catalog:
     get:
-      description: ''
+      description: '
+
+        `vendor` (GitHub org key, or `_unaffiliated`) and `repo` (`org/repo`) narrow
+        to one vendor
+
+        marketplace / one repo inside it; malformed values are a 400, never ignored.'
       operationId: get_browse_catalog
       parameters: []
       responses:
@@ -18872,6 +19478,36 @@ paths:
           description: Response DTO for `GET /api/v1/marketplace/catalog`.
       summary: '`GET /api/v1/marketplace/catalog` -- paginated browsing with search
         & filters.'
+  /api/v1/marketplace/catalog/bundle/{app_id}:
+    get:
+      description: ''
+      operationId: get_catalog_bundle_entry
+      parameters:
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /api/v1/marketplace/catalog/<source>/<id>`.
+                properties:
+                  module:
+                    $ref: '#/components/schemas/CatalogEntry'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - module
+                title: CatalogEntryResponse
+                type: object
+          description: Response DTO for `GET /api/v1/marketplace/catalog/<source>/<id>`.
+      summary: '`GET /api/v1/marketplace/catalog/bundle/<app_id>` -- single bundle
+        entry (by app_id).'
   /api/v1/marketplace/catalog/categories:
     get:
       description: ''
@@ -20345,6 +20981,40 @@ paths:
                 type: object
           description: '`{success, request}` envelope for the vendor-request routes.'
       summary: '`POST /api/v1/marketplace/vendor/request`.'
+  /api/v1/marketplace/vendors:
+    get:
+      description: ''
+      operationId: get_vendors
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /api/v1/marketplace/vendors`; counts
+                  sum to `total`.
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                  total:
+                    title: Total
+                    type: integer
+                  vendors:
+                    items:
+                      $ref: '#/components/schemas/VendorEntry'
+                    title: Vendors
+                    type: array
+                required:
+                - success
+                - vendors
+                - total
+                title: VendorsResponse
+                type: object
+          description: Response DTO for `GET /api/v1/marketplace/vendors`; counts
+            sum to `total`.
+      summary: '`GET /api/v1/marketplace/vendors` -- vendor marketplaces (GitHub orgs)
+        with repo counts.'
   /api/v1/marketplace/webhooks/paypal:
     post:
       description: ''
@@ -20364,167 +21034,6 @@ paths:
         default:
           description: Undocumented response
       summary: '`POST /webhooks/stripe` -- HMAC-verified, then idempotently persisted.'
-  /api/v1/modules:
-    get:
-      description: ''
-      operationId: get_browse_modules
-      parameters: []
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for `GET /api/v1/modules`.
-                properties:
-                  modules:
-                    items:
-                      $ref: '#/components/schemas/ModuleEntry'
-                    title: Modules
-                    type: array
-                  pagination:
-                    $ref: '#/components/schemas/ModuleListPagination'
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - modules
-                - pagination
-                title: ModuleListResponse
-                type: object
-          description: Response DTO for `GET /api/v1/modules`.
-      summary: '`GET /api/v1/modules` -- public, published-only browse.'
-    post:
-      description: ''
-      operationId: post_create_module_route
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`POST /api/v1/modules` -- superadmin only.'
-  /api/v1/modules/{module_id}:
-    delete:
-      description: ''
-      operationId: delete_delete_module_route
-      parameters:
-      - in: path
-        name: module_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Shared `{success, message}` response for update/delete.
-                properties:
-                  message:
-                    title: Message
-                    type: string
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - message
-                title: SimpleMessageResponse
-                type: object
-          description: Shared `{success, message}` response for update/delete.
-      summary: '`DELETE /api/v1/modules/<id>` -- superadmin only.'
-    get:
-      description: ''
-      operationId: get_module_details
-      parameters:
-      - in: path
-        name: module_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for `GET /api/v1/modules/<id>`.
-                properties:
-                  module:
-                    $ref: '#/components/schemas/ModuleDetail'
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - module
-                title: ModuleDetailResponse
-                type: object
-          description: Response DTO for `GET /api/v1/modules/<id>`.
-      summary: '`GET /api/v1/modules/<id>` -- public, published-only detail + reviews.'
-    put:
-      description: ''
-      operationId: put_update_module_route
-      parameters:
-      - in: path
-        name: module_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Shared `{success, message}` response for update/delete.
-                properties:
-                  message:
-                    title: Message
-                    type: string
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - message
-                title: SimpleMessageResponse
-                type: object
-          description: Shared `{success, message}` response for update/delete.
-      summary: '`PUT /api/v1/modules/<id>` -- superadmin only.'
-  /api/v1/modules/{module_id}/subscriptions:
-    get:
-      description: ''
-      operationId: get_module_subscriptions
-      parameters:
-      - in: path
-        name: module_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for `GET /api/v1/modules/<id>/subscriptions`.
-                properties:
-                  subscriptions:
-                    items:
-                      $ref: '#/components/schemas/ModuleSubscription'
-                    title: Subscriptions
-                    type: array
-                  success:
-                    title: Success
-                    type: boolean
-                  total:
-                    title: Total
-                    type: integer
-                required:
-                - success
-                - subscriptions
-                - total
-                title: ModuleSubscriptionsResponse
-                type: object
-          description: Response DTO for `GET /api/v1/modules/<id>/subscriptions`.
-      summary: '`GET /api/v1/modules/<id>/subscriptions` -- superadmin only.'
   /api/v1/one-time-secrets:
     post:
       description: ''
@@ -20855,33 +21364,6 @@ paths:
                 type: object
           description: Response DTO for system health.
       summary: Get system health.
-  /api/v1/platform/modules:
-    get:
-      description: ''
-      operationId: get_get_module_registry
-      parameters: []
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for module registry.
-                properties:
-                  modules:
-                    items:
-                      $ref: '#/components/schemas/ModuleDTO'
-                    title: Modules
-                    type: array
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - modules
-                title: ModuleRegistryResponse
-                type: object
-          description: Response DTO for module registry.
-      summary: Get module registry.
   /api/v1/platform/stats:
     get:
       description: ''
@@ -21322,92 +21804,6 @@ paths:
                 type: object
           description: Response DTO for stream details.
       summary: Get stream details.
-  /api/v1/public/marketplace/categories:
-    get:
-      description: ''
-      operationId: get_get_marketplace_categories
-      parameters: []
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for categories.
-                properties:
-                  categories:
-                    items:
-                      $ref: '#/components/schemas/CategoryDTO'
-                    title: Categories
-                    type: array
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - categories
-                title: CategoriesResponse
-                type: object
-          description: Response DTO for categories.
-      summary: Get marketplace categories.
-  /api/v1/public/marketplace/modules:
-    get:
-      description: ''
-      operationId: get_get_marketplace_modules
-      parameters: []
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for marketplace modules.
-                properties:
-                  modules:
-                    items:
-                      $ref: '#/components/schemas/MarketplaceModuleDTO'
-                    title: Modules
-                    type: array
-                  pagination:
-                    $ref: '#/components/schemas/PaginationDTO'
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - modules
-                - pagination
-                title: MarketplaceModulesResponse
-                type: object
-          description: Response DTO for marketplace modules.
-      summary: Get marketplace modules.
-  /api/v1/public/marketplace/modules/{module_id}:
-    get:
-      description: ''
-      operationId: get_get_marketplace_module
-      parameters:
-      - in: path
-        name: module_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for marketplace module.
-                properties:
-                  module:
-                    $ref: '#/components/schemas/MarketplaceModuleDetailDTO'
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - module
-                title: MarketplaceModuleResponse
-                type: object
-          description: Response DTO for marketplace module.
-      summary: Get marketplace module.
   /api/v1/public/signup-settings:
     get:
       description: ''
@@ -21447,7 +21843,11 @@ paths:
       summary: Get signup settings.
   /api/v1/public/stats:
     get:
-      description: ''
+      description: '
+
+        Never queries the DB: a cache miss or Valkey error returns a typed 503
+
+        `{"status": "warming"}` and logs a WARN -- no on-request recompute fallback.'
       operationId: get_get_stats__get_api_v1_public_stats
       parameters: []
       responses:
@@ -21457,6 +21857,9 @@ paths:
               schema:
                 description: Response DTO for public stats.
                 properties:
+                  computedAt:
+                    title: Computedat
+                    type: string
                   stats:
                     $ref: '#/components/schemas/PublicStatsDTO'
                   success:
@@ -21465,10 +21868,28 @@ paths:
                 required:
                 - success
                 - stats
+                - computedAt
                 title: StatsResponse
                 type: object
           description: Response DTO for public stats.
-      summary: Get stats.
+        '503':
+          content:
+            application/json:
+              schema:
+                description: 503 body while no snapshot exists yet (CronJob has not
+                  populated the cache).
+                properties:
+                  status:
+                    title: Status
+                    type: string
+                required:
+                - status
+                title: StatsWarmingResponse
+                type: object
+          description: 503 body while no snapshot exists yet (CronJob has not populated
+            the cache).
+      summary: Serve the cached landing stats snapshot (refreshed by the 5-minute
+        CronJob).
   /api/v1/signup-settings:
     get:
       description: ''
@@ -21506,6 +21927,121 @@ paths:
                 type: object
           description: Response DTO for signup settings.
       summary: Get signup settings (top-level alias -- see this module's docstring).
+  /api/v1/superadmin/bundles:
+    get:
+      description: ''
+      operationId: get_list_bundles__get_api_v1_superadmin_bundles
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /api/v1/superadmin/bundles`.
+                properties:
+                  bundles:
+                    items:
+                      $ref: '#/components/schemas/InstalledBundleDTO'
+                    title: Bundles
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - bundles
+                title: InstalledBundlesResponse
+                type: object
+          description: Response DTO for `GET /api/v1/superadmin/bundles`.
+      summary: Installed bundles, optionally filtered by `?kind=app|service`.
+  /api/v1/superadmin/bundles/{app_id}/disable:
+    post:
+      description: ''
+      operationId: post_post_disable
+      parameters:
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for disable/enable; `changed` is false on
+                  an idempotent repeat.
+                properties:
+                  appId:
+                    title: Appid
+                    type: string
+                  changed:
+                    title: Changed
+                    type: boolean
+                  status:
+                    title: Status
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantsHidden:
+                    title: Tenantshidden
+                    type: integer
+                required:
+                - success
+                - appId
+                - status
+                - changed
+                - tenantsHidden
+                title: BundleStateResponse
+                type: object
+          description: Response DTO for disable/enable; `changed` is false on an idempotent
+            repeat.
+      summary: Disable a service bundle globally; 409 `has_dependents` unless `?force=true`.
+  /api/v1/superadmin/bundles/{app_id}/enable:
+    post:
+      description: ''
+      operationId: post_post_enable
+      parameters:
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for disable/enable; `changed` is false on
+                  an idempotent repeat.
+                properties:
+                  appId:
+                    title: Appid
+                    type: string
+                  changed:
+                    title: Changed
+                    type: boolean
+                  status:
+                    title: Status
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantsHidden:
+                    title: Tenantshidden
+                    type: integer
+                required:
+                - success
+                - appId
+                - status
+                - changed
+                - tenantsHidden
+                title: BundleStateResponse
+                type: object
+          description: Response DTO for disable/enable; `changed` is false on an idempotent
+            repeat.
+      summary: Re-enable a disabled service bundle globally (idempotent).
   /api/v1/superadmin/communities:
     get:
       description: ''
@@ -21843,265 +22379,6 @@ paths:
                 type: object
           description: Response DTO for dashboard stats.
       summary: Get superadmin dashboard stats.
-  /api/v1/superadmin/marketplace/modules:
-    get:
-      description: ''
-      operationId: get_get_all_modules
-      parameters: []
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for list-modules.
-                properties:
-                  modules:
-                    items:
-                      $ref: '#/components/schemas/ModuleDTO'
-                    title: Modules
-                    type: array
-                  pagination:
-                    $ref: '#/components/schemas/PaginationDTO'
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - modules
-                - pagination
-                title: ModulesResponse
-                type: object
-          description: Response DTO for list-modules.
-      summary: List all modules (including unpublished).
-    post:
-      description: ''
-      operationId: post_create_module
-      parameters: []
-      requestBody:
-        content:
-          application/json:
-            schema:
-              description: Request DTO for create-module.
-              properties:
-                author:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Author
-                category:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Category
-                configSchema:
-                  anyOf:
-                  - additionalProperties: true
-                    type: object
-                  - type: 'null'
-                  default: null
-                  title: Configschema
-                description:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Description
-                displayName:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Displayname
-                iconUrl:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Iconurl
-                isCore:
-                  anyOf:
-                  - type: boolean
-                  - type: 'null'
-                  default: null
-                  title: Iscore
-                name:
-                  title: Name
-                  type: string
-                version:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Version
-              required:
-              - name
-              title: CreateModuleRequest
-              type: object
-      responses:
-        default:
-          description: Undocumented response
-      summary: Create a new marketplace module.
-  /api/v1/superadmin/marketplace/modules/{module_id}:
-    delete:
-      description: ''
-      operationId: delete_delete_module
-      parameters:
-      - in: path
-        name: module_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for message endpoints.
-                properties:
-                  message:
-                    title: Message
-                    type: string
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - message
-                title: MessageResponse
-                type: object
-          description: Response DTO for message endpoints.
-      summary: Delete a module (blocked if any installations exist).
-    put:
-      description: ''
-      operationId: put_update_module
-      parameters:
-      - in: path
-        name: module_id
-        required: true
-        schema:
-          type: integer
-      requestBody:
-        content:
-          application/json:
-            schema:
-              description: Request DTO for update-module.
-              properties:
-                author:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Author
-                category:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Category
-                configSchema:
-                  anyOf:
-                  - additionalProperties: true
-                    type: object
-                  - type: 'null'
-                  default: null
-                  title: Configschema
-                description:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Description
-                displayName:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Displayname
-                iconUrl:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Iconurl
-                isCore:
-                  anyOf:
-                  - type: boolean
-                  - type: 'null'
-                  default: null
-                  title: Iscore
-                version:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Version
-              title: UpdateModuleRequest
-              type: object
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for message endpoints.
-                properties:
-                  message:
-                    title: Message
-                    type: string
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - message
-                title: MessageResponse
-                type: object
-          description: Response DTO for message endpoints.
-      summary: Update a marketplace module.
-  /api/v1/superadmin/marketplace/modules/{module_id}/publish:
-    put:
-      description: ''
-      operationId: put_publish_module
-      parameters:
-      - in: path
-        name: module_id
-        required: true
-        schema:
-          type: integer
-      requestBody:
-        content:
-          application/json:
-            schema:
-              description: Request DTO for publish-module.
-              properties:
-                isPublished:
-                  title: Ispublished
-                  type: boolean
-              required:
-              - isPublished
-              title: PublishModuleRequest
-              type: object
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for message endpoints.
-                properties:
-                  message:
-                    title: Message
-                    type: string
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - message
-                title: MessageResponse
-                type: object
-          description: Response DTO for message endpoints.
-      summary: Publish/unpublish a module.
   /api/v1/superadmin/platform-config:
     get:
       description: ''
@@ -22556,7 +22833,17 @@ paths:
         content:
           application/json:
             schema:
-              description: Request DTO for create user endpoints.
+              description: 'Request DTO for create user: `type` is `global_admin`
+                or `tenant_admin`.
+
+
+                `tenant` (a tenant UUID / public id) is required for `tenant_admin`
+                and forbidden for
+
+                `global_admin`. Both are validated in the service; `type` is optional
+                here only so a missing
+
+                value is a 422 from the service, not an opaque schema error.'
               properties:
                 email:
                   title: Email
@@ -22564,6 +22851,18 @@ paths:
                 password:
                   title: Password
                   type: string
+                tenant:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Tenant
+                type:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Type
               required:
               - email
               - password
@@ -23859,88 +24158,6 @@ paths:
                 type: object
           description: Response DTO for `POST /kms/activate`.
       summary: Verify the customer key, re-wrap every DEK onto it, and activate (Enterprise-gated).
-  /api/v1/tenant/{tenant_slug}/modules:
-    get:
-      description: ''
-      operationId: get_get_tenant_modules
-      parameters:
-      - in: path
-        name: tenant_slug
-        required: true
-        schema:
-          type: string
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for `GET /<tenant_slug>/modules`.
-                properties:
-                  allModulesAllowed:
-                    title: Allmodulesallowed
-                    type: boolean
-                  modules:
-                    items:
-                      $ref: '#/components/schemas/ModuleDTO'
-                    title: Modules
-                    type: array
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - allModulesAllowed
-                - modules
-                title: ModulesResponse
-                type: object
-          description: Response DTO for `GET /<tenant_slug>/modules`.
-      summary: Get tenant modules.
-    put:
-      description: ''
-      operationId: put_update_tenant_modules
-      parameters:
-      - in: path
-        name: tenant_slug
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              description: Request DTO for `PUT /<tenant_slug>/modules`.
-              properties:
-                allowedModuleIds:
-                  anyOf:
-                  - items:
-                      type: integer
-                    type: array
-                  - type: 'null'
-                  title: Allowedmoduleids
-              required:
-              - allowedModuleIds
-              title: UpdateModulesRequest
-              type: object
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for message-only endpoints.
-                properties:
-                  message:
-                    title: Message
-                    type: string
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - message
-                title: MessageResponse
-                type: object
-          description: Response DTO for message-only endpoints.
-      summary: Update tenant modules.
   /api/v1/tenant/{tenant_slug}/privacy/bulk:
     post:
       description: ''
@@ -24147,6 +24364,121 @@ paths:
           description: Response DTO for the single-user routes.
       summary: Export `user_id`'s personal data held within the admin's own tenant
         (GDPR Art. 15/20).
+  /api/v1/tenant/{tenant_slug}/reputation/config:
+    get:
+      description: ''
+      operationId: get_get_tenant_reputation_config
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Tenant reputation policy.
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantAtRiskThreshold:
+                    title: Tenantatriskthreshold
+                    type: integer
+                  tenantAutoBanEnabled:
+                    title: Tenantautobanenabled
+                    type: boolean
+                  tenantAutoBanFloor:
+                    title: Tenantautobanfloor
+                    type: integer
+                  updatedAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Updatedat
+                required:
+                - success
+                - tenantAutoBanEnabled
+                - tenantAutoBanFloor
+                - tenantAtRiskThreshold
+                - updatedAt
+                title: TenantReputationConfigResponse
+                type: object
+          description: Tenant reputation policy.
+      summary: The caller's own tenant's reputation policy.
+    put:
+      description: ''
+      operationId: put_put_tenant_reputation_config
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: PUT body -- only supplied fields change; 300 <= floor <
+                atRiskThreshold <= 850.
+              properties:
+                tenantAtRiskThreshold:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  default: null
+                  title: Tenantatriskthreshold
+                tenantAutoBanEnabled:
+                  anyOf:
+                  - type: boolean
+                  - type: 'null'
+                  default: null
+                  title: Tenantautobanenabled
+                tenantAutoBanFloor:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  default: null
+                  title: Tenantautobanfloor
+              title: TenantReputationConfigRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Tenant reputation policy.
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantAtRiskThreshold:
+                    title: Tenantatriskthreshold
+                    type: integer
+                  tenantAutoBanEnabled:
+                    title: Tenantautobanenabled
+                    type: boolean
+                  tenantAutoBanFloor:
+                    title: Tenantautobanfloor
+                    type: integer
+                  updatedAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Updatedat
+                required:
+                - success
+                - tenantAutoBanEnabled
+                - tenantAutoBanFloor
+                - tenantAtRiskThreshold
+                - updatedAt
+                title: TenantReputationConfigResponse
+                type: object
+          description: Tenant reputation policy.
+      summary: Set the tenant auto-ban toggle / floor / at-risk threshold (400 if
+        out of range).
   /api/v1/tenant/{tenant_slug}/settings:
     get:
       description: ''

@@ -1611,7 +1611,7 @@ mod tests {
         let err = SpineError::Redis(redis::make_extension_error(
             "NOGROUP".to_string(),
             Some(
-                "No such key 'waddles:t:global:c:_tenant:app:waddles.a:action' or consumer \
+                "No such key 'waddles:t:default:c:_tenant:app:waddles.a:action' or consumer \
                  group 'waddles.a' in XREADGROUP with GROUP option"
                     .to_string(),
             ),

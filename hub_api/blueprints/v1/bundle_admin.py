@@ -23,6 +23,7 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_response
 
 from services import bundle_version_service as svc
+from services.bundle_global_state_service import installed_version
 from services.errors import ApiError
 from services.pagination import parse_limit
 
@@ -66,6 +67,7 @@ class BundleVersionSummaryDTO:
     requestedBy: int | None
     createdAt: str | None
     rejectReason: str | None
+    installedVersion: str | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -102,6 +104,10 @@ async def list_bundle_versions() -> ListBundleVersionsResponse | tuple[dict[str,
     except ApiError as exc:
         return _err(exc)
 
+    installed: dict[str, str | None] = {}
+    for row in rows:
+        if row.app_id not in installed:
+            installed[row.app_id] = await installed_version(install_dal, row.app_id)
     resolved_limit = min(100, max(1, limit))
     total_pages = (total + resolved_limit - 1) // resolved_limit if total else 0
     return ListBundleVersionsResponse(
@@ -115,6 +121,7 @@ async def list_bundle_versions() -> ListBundleVersionsResponse | tuple[dict[str,
                 requestedBy=row.requested_by,
                 createdAt=_iso(row.created_at),
                 rejectReason=row.reject_reason,
+                installedVersion=installed[row.app_id],
             )
             for row in rows
         ],

@@ -110,13 +110,13 @@ def _load_access_token_ttl(raw: Optional[str]) -> int:
 #: Lifetime `create_jwt_token` gives a token that names no explicit expiry.
 ACCESS_TOKEN_TTL_SECONDS = _load_access_token_ttl(os.getenv("JWT_ACCESS_TTL_SECONDS"))
 
-#: Slug of the platform's default tenant (`tenants.slug = 'global'`, seeded by
-#: migration 058) -- single-tenant (Free/Professional, capped) deployments
+#: Slug of the platform's default tenant (`tenants.slug = 'default'`, seeded as
+#: 'global' by migration 058 and renamed by alembic 0095; security.md's reserved catch-all) -- single-tenant (Free/Professional, capped) deployments
 #: *mint* tokens for it, and tenancy.py resolves it with the identical
 #: tenant-scoping code as every other tenant. It is NOT a verification
 #: fallback: a token with no `tenant` claim is rejected, never defaulted to
 #: this slug. See security.md Tenant Isolation.
-DEFAULT_TENANT_SLUG = "global"
+DEFAULT_TENANT_SLUG = "default"
 
 #: OIDC scope guarding tenant-admin management of enterprise SSO connections
 #: (SAML 2.0 / OIDC / Google). Declared by the `auth.sso_saml` /
@@ -709,8 +709,8 @@ SCOPE_BUNDLES: Dict[str, Dict[str, List[str]]] = {
         # super-admin gates (hub_api's `/api/v1/superadmin/users/*`,
         # `platform_config.py`, `analytics.py`, `marketplace_admin_review.py`,
         # `cookie_consent.py`, `marketplace_modules.py` -- every one of them
-        # documented as "granted exactly when hub_users.is_super_admin is
-        # true"). It briefly duplicated 'global'['admin']'s literal here,
+        # documented as "granted exactly to tenant admins of the
+        # `system` tenant (global admins)"). It briefly duplicated 'global'['admin']'s literal here,
         # so `auth_service.create_session_token`'s tenant-owner bundle grant
         # let ANY tenant owner satisfy those platform-only
         # `require_scope("users:admin")` gates and self-promote to platform

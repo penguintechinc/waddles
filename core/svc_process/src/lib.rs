@@ -1437,7 +1437,7 @@ fn try_start_process_loop(
         // TODO(M4+): tenant/community scope hardcoded to the tenant-wide
         // `global` activation until the distribution poll resolves the
         // real grant set -- see this function's doc.
-        let scope = penguin_spine::Scope::new("global", None);
+        let scope = penguin_spine::Scope::new("default", None);
         let grants: Vec<penguin_spine::Grant> = if !cli.process_ingest_platform.is_empty()
             && !cli.process_ingest_source_id.is_empty()
         {
@@ -1509,7 +1509,8 @@ fn try_start_process_loop(
             &bundle_db_license_client,
         )
         .await;
-        let gameserver_net_wiring = try_build_gameserver_net_wiring(&cli, &bundle_db_license_client);
+        let gameserver_net_wiring =
+            try_build_gameserver_net_wiring(&cli, &bundle_db_license_client);
         let economy_wiring = try_build_economy_wiring(
             &bundle_economy_cfg,
             bundle_economy_password.as_ref(),

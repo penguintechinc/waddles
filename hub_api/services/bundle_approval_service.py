@@ -112,9 +112,11 @@ from services import (
     app_source_binding_service,
     bundle_audit,
     bundle_signing_service,
+    reputation_logic_exclusivity,
     valkey_admin_client,
 )
 from services.bundle_access_grants import access_grant_diff_atoms, is_access_grant_id
+from services.bundle_catalog_guard import assert_bundle_globally_enabled
 from services.bundle_data_provisioner import (
     BundleDataProvisioner,
     schema_from_manifest,
@@ -670,6 +672,27 @@ async def _write_global_install(
     return int(new_id)
 
 
+async def _current_install_at_version(install_dal: AsyncDB, *, app_id: str, version: str) -> Any:
+    """The not-yet-superseded `app_global_installs` row for `(app_id, version)`, or None."""
+    rows = await install_dal(
+        (install_dal.app_global_installs.app_id == app_id)
+        & (install_dal.app_global_installs.version == version)
+        & (install_dal.app_global_installs.superseded_by == None)  # noqa: E711 - pydal idiom
+    ).select()
+    return rows.first()
+
+
+async def _same_artifact(install_dal: AsyncDB, installed_id: int, candidate_id: int) -> bool:
+    """True iff the two `app_versions` rows carry the same `artifact_digest`."""
+    if installed_id == candidate_id:
+        return True
+    rows = await install_dal(
+        install_dal.app_versions.id.belongs([installed_id, candidate_id])
+    ).select()
+    digests = {r.artifact_digest for r in rows}
+    return len(digests) == 1
+
+
 async def _live_install_schema(
     install_dal: AsyncDB, *, app_id: str
 ) -> tuple[SchemaDeclV2 | None, bool]:
@@ -768,6 +791,25 @@ async def install_version_globally(
             "the supplied permission_hash does not match the current summary",
             409,
             "permission_hash_mismatch",
+        )
+
+    existing = await _current_install_at_version(install_dal, app_id=app_id, version=version)
+    if existing is not None:
+        # `uq_app_global_installs_current` allows one current row per (app_id, version): a
+        # repeat approve of the very same artifact is a no-op, anything else is a typed 409.
+        if existing.revoked_at is None and await _same_artifact(
+            install_dal, existing.version_id, upload.app_version_id
+        ):
+            logger.info(
+                "bundle install: already installed, approve is a no-op",
+                extra={"app_id": app_id, "version": version},
+            )
+            return existing
+        raise ApiError(
+            f"version {version} of {app_id} is already installed with a different artifact "
+            "or was revoked",
+            409,
+            "version_conflict",
         )
 
     new_schema = schema_from_manifest(upload.manifest_json)
@@ -963,6 +1005,7 @@ async def _write_approval_and_activate(
     `test_bundle_approval_service.py::test_approve_version_rolls_back_the_approval_if_activation_fails`
     and its artifact-signing counterpart.
     """
+    await assert_bundle_globally_enabled(install_dal, app_id)
     approvals_table = install_dal.metadata.tables["app_install_approvals"]
     active_table = install_dal.metadata.tables["app_active_versions"]
     versions_table = install_dal.metadata.tables["app_versions"]
@@ -1112,6 +1155,7 @@ async def _write_tenant_wide_approval_and_activate(
     rule" its own module doc names) -- this is that convention's write
     side, not a bug.
     """
+    await assert_bundle_globally_enabled(install_dal, app_id)
     approvals_table = install_dal.metadata.tables["app_install_approvals"]
     active_table = install_dal.metadata.tables["app_active_versions"]
     versions_table = install_dal.metadata.tables["app_versions"]
@@ -1299,6 +1343,12 @@ async def activate_tenant_wide_with_warnings(
     if upload is None:  # pragma: no cover - defensive, a global install always has a matching row
         raise not_found(f"version {version} of {app_id} not found")
 
+    await reputation_logic_exclusivity.require_single_logic_active(
+        install_dal,
+        tenant_id=tenant_id,
+        app_id=app_id,
+        manifest_json=upload.manifest_json,
+    )
     manifest = _reparse_trusted(upload.manifest_json)
     await _validate_manifest_activation(
         install_dal,
@@ -1544,6 +1594,12 @@ async def activate_for_community_with_warnings(
     if upload is None:  # pragma: no cover - defensive, a global install always has a matching row
         raise not_found(f"version {version} of {app_id} not found")
 
+    await reputation_logic_exclusivity.require_single_logic_active(
+        install_dal,
+        tenant_id=tenant_id,
+        app_id=app_id,
+        manifest_json=upload.manifest_json,
+    )
     manifest = _reparse_trusted(upload.manifest_json)
     await _validate_manifest_activation(
         install_dal,

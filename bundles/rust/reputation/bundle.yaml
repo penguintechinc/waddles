@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.service.reputation
 name: Reputation Service Bundle (Rust)
-version: 1.0.1
+version: 1.1.0
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -36,16 +36,18 @@ exported_tools:
   input_schema:
     type: object
     properties:
-      user: &id001
+      user:
         type: string
         format: uuid
     required:
     - user
     additionalProperties: false
-  output_schema: &id002
+  output_schema:
     type: object
     properties:
-      user: *id001
+      user:
+        type: string
+        format: uuid
       score:
         type: integer
       tier:
@@ -58,7 +60,9 @@ exported_tools:
     properties:
       users:
         type: array
-        items: *id001
+        items:
+          type: string
+          format: uuid
         minItems: 1
         maxItems: 100
     required:
@@ -69,24 +73,102 @@ exported_tools:
     properties:
       entries:
         type: array
-        items: *id002
+        items:
+          type: object
+          properties:
+            user:
+              type: string
+              format: uuid
+            score:
+              type: integer
+            tier:
+              type: string
 - name: adjust
   access: write
   risk: dangerous
   input_schema:
     type: object
     properties:
-      user: *id001
-      event:
+      user:
+        type: string
+        format: uuid
+      delta:
+        type: integer
+        minimum: -5
+        maximum: 5
+      reason:
+        type: string
+        pattern: ^[a-z0-9._:-]{1,100}$
+      platform:
+        type: string
         enum:
-        - win
-        - loss
-        - loyalty
+        - twitch
+        - discord
+        - youtube
     required:
     - user
-    - event
+    - delta
+    - reason
     additionalProperties: false
-  output_schema: *id002
+  output_schema:
+    type: object
+    properties:
+      user:
+        type: string
+        format: uuid
+      score:
+        type: integer
+      tier:
+        type: string
+      delta:
+        type: integer
+      applied:
+        type: boolean
+      floors:
+        type: object
+- name: apply_moderation
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      user:
+        type: string
+        format: uuid
+      delta:
+        type: integer
+        minimum: -200
+        maximum: 200
+      reason:
+        type: string
+        pattern: ^[a-z0-9._:-]{1,100}$
+      platform:
+        type: string
+        enum:
+        - twitch
+        - discord
+        - youtube
+    required:
+    - user
+    - delta
+    - reason
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      user:
+        type: string
+        format: uuid
+      score:
+        type: integer
+      tier:
+        type: string
+      delta:
+        type: integer
+      applied:
+        type: boolean
+      floors:
+        type: object
 - name: override
   access: write
   risk: dangerous
@@ -94,16 +176,26 @@ exported_tools:
   input_schema:
     type: object
     properties:
-      user: *id001
+      user:
+        type: string
+        format: uuid
       absolute_score:
         type: integer
       reason:
         type: string
+        pattern: ^[a-z0-9._:-]{1,100}$
+      platform:
+        type: string
+        enum:
+        - twitch
+        - discord
+        - youtube
     required:
     - user
     - absolute_score
     additionalProperties: false
-  output_schema: *id002
+  output_schema:
+    type: object
 - name: leaderboard
   access: read
   risk: normal
@@ -121,21 +213,34 @@ exported_tools:
     properties:
       entries:
         type: array
-        items: *id002
+        items:
+          type: object
+          properties:
+            user:
+              type: string
+              format: uuid
+            score:
+              type: integer
+            tier:
+              type: string
 - name: rep
   access: read
   risk: normal
   input_schema:
     type: object
     properties:
-      user: *id001
+      user:
+        type: string
+        format: uuid
     required:
     - user
     additionalProperties: false
   output_schema:
     type: object
     properties:
-      user: *id001
+      user:
+        type: string
+        format: uuid
       score:
         type: integer
       tier:
@@ -146,12 +251,137 @@ exported_tools:
         - 'null'
       text:
         type: string
+- name: get_tenant_score
+  access: read
+  risk: normal
+  required_scope: community:member
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: history
+  access: read
+  risk: normal
+  required_scope: community:member
+  input_schema:
+    type: object
+    properties:
+      user:
+        type: string
+        format: uuid
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 100
+      before:
+        type: integer
+        minimum: 1
+    required:
+    - user
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      entries:
+        type: array
+        items:
+          type: object
+- name: check
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      user:
+        type: string
+        format: uuid
+    required:
+    - user
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: at_risk
+  access: read
+  risk: normal
+  required_scope: community:admin
+  input_schema:
+    type: object
+    properties:
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 100
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: is_soft_banned
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      user:
+        type: string
+        format: uuid
+    required:
+    - user
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      user:
+        type: string
+        format: uuid
+      soft_banned:
+        type: boolean
+- name: get_policy
+  access: read
+  risk: normal
+  required_scope: community:admin
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: set_policy
+  access: write
+  risk: dangerous
+  required_scope: community:admin
+  input_schema:
+    type: object
+    properties:
+      soft_ban_enabled:
+        type: boolean
+      soft_ban_floor:
+        type: integer
+        minimum: 300
+        maximum: 850
+      hard_ban_enabled:
+        type: boolean
+      hard_ban_floor:
+        type: integer
+        minimum: 300
+        maximum: 850
+      at_risk_threshold:
+        type: integer
+        minimum: 300
+        maximum: 850
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.1"
-  min_version: "1.0.1"
+  tested_with: "1.1.0"
+  min_version: "1.1.0"
   max_version: null
 # Admin UI surface via hub-api's generic bundle-admin gateway (docs/BUNDLE_ADMIN_GATEWAY.md); identical in both manifests.
 admin_tools:
@@ -161,5 +391,13 @@ admin_tools:
   scope: community:moderate
 - name: override
   tool: override
+  kind: action
+  scope: community:admin
+- name: at_risk
+  tool: at_risk
+  kind: read
+  scope: community:admin
+- name: set_policy
+  tool: set_policy
   kind: action
   scope: community:admin

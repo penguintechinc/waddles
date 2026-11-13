@@ -4,15 +4,27 @@
 # NodePort), and the full security baseline (default-deny CNP, PSA restricted, Tetragon) is ON.
 # Usage: helm upgrade --install waddlebot . -n waddlebot -f values-dal2alpha.yaml (NO other -f needed).
 # Prereqs (operator-provisioned, never in git): Secret ghcr-pull + waddlebot-platform-credentials in ns waddlebot.
+hubApi:
+  trustForwardedHost: true
+  trustedProxyCidrs: ["10.244.0.0/16"]
+
+# Shared Gateway gateway-system/shared listener `https` only admits routes from namespaces carrying this label;
+# without it HTTPRoute `waddlebot` is Accepted=False NotAllowedByListeners and the public URL 404s.
+namespaceLabels:
+  gateway-access: shared-dal2a
+
 webui:
-  publicUrl: "https://waddles-alpha.penguintech.cloud"
+  publicHostnames: ["waddles-alpha.penguintech.cloud"]
+  publicUrl: "https://waddles-alpha.penguintech.cloud:8443"
   # #320 Connections: Google/Spotify only accept http (non-TLS) redirect URIs on
   # `localhost` -- the LAN-IP publicUrl above is rejected by their OAuth consent screens.
-  connectionsCallbackBaseUrl: "https://waddles-alpha.penguintech.cloud"
-  identityCallbackBaseUrl: "https://waddles-alpha.penguintech.cloud"
-  frontendOrigin: "https://waddles-alpha.penguintech.cloud"
+  connectionsCallbackBaseUrl: "https://waddles-alpha.penguintech.cloud:8443"
+  identityCallbackBaseUrl: "https://waddles-alpha.penguintech.cloud:8443"
+  frontendOrigin: "https://waddles-alpha.penguintech.cloud:8443"
 
 global:
+  # Public origin incl. :8443 (CF -> NAT :8443 -> Gateway:443; plain :443 is beta): hub-api CORS_ORIGIN.
+  corsOrigin: "https://waddles-alpha.penguintech.cloud:8443"
   # fix/alpha-helm-deploy -- was "" (empty), which (a) rendered every
   # pipeline app container on its shared stock base image instead of its own
   # app image (templates/hub-api.yaml et al now use waddlebot.legacyModuleImage
@@ -32,17 +44,6 @@ global:
   # POSTURE: dedicated-cluster (stricter than local alpha). The "alpha" tier string is kept ONLY because the
   # chart gates secret self-provisioning on it; every alpha-exempt transport/network shortcut is off here.
   deploymentTier: "alpha"
-  # gRPC transport TLS -- dal2-alpha is a REAL multi-node dedicated cluster (NOT the alpha-exempt
-  # local box), so inter-service gRPC uses real mTLS minted by cert-manager from the internal CA
-  # ClusterIssuer "waddlebot-internal-ca". insecureDev is NEVER set here.
-  # PREREQ (operator): cert-manager installed + ClusterIssuer waddlebot-internal-ca (CA type).
-  grpcTls:
-    insecureDev: false
-    requireClientCert: true
-    certManager:
-      enabled: true
-      issuerKind: "ClusterIssuer"
-      issuerName: "waddlebot-internal-ca"
   # Dedicated transit trust root for Postgres / SeaweedFS S3 / Valkey: a namespaced SelfSigned Issuer -> root CA -> CA Issuer
   # rendered by the chart (PREREQ: cert-manager with the NameConstraints feature gate). Clients trust only that root; the
   # hostApiTls/grpcTls identities below keep waddlebot-internal-ca. Overrides global.valkeyTls.externalSecret (cert-manager owns
@@ -64,15 +65,6 @@ global:
   # reused in beta/gamma/production (see values.yaml global.initialAdmin).
   initialAdmin:
     email: "admin@waddles-alpha.penguintech.cloud"
-
-# Monday-demo: pin ONLY the hub-api image family (hub-api Deployment + role-sync / event-sync /
-# odoo-sync / bundle-signing CronJobs) to the sync-worker DAL fix, rebuilt as
-# ghcr.io/penguintechinc/waddles/hub-api:demo-881ac8dd-syncfix
-# (sha256:0b018eb209f49de03b68088b7576cb51d4a6cbeb8c37aa53547a5da050629954). Every other workload
-# (svc-*-rust, seeder, migrations, ...) stays on global.imageTag above --
-# those images only exist at demo-881ac8dd. Replace with a digest pin for production.
-hubApi:
-  imageTag: "demo-881ac8dd-syncfix"
 
 # fix/helm-platform-credentials -- the Discord bot token / Twitch IRC OAuth
 # token placeholders that used to live here are REMOVED, not just blanked:
@@ -113,6 +105,15 @@ infrastructure:
     resources:
       requests: { cpu: "50m", memory: "64Mi" }
       limits: { cpu: "250m", memory: "256Mi" }
+  # Incident 2026-11: ~150 activated bundles drove a TLS handshake storm that CPU-starved valkey-durable
+  # (250m) until liveness failed and kubelet restarted it. Small requests, generous limits; maxMemory sits
+  # well under the memory limit (AOF-rewrite COW + buffers live outside it). Policy stays noeviction (chart-hardwired).
+  valkeyDurable:
+    maxMemory: "3gb"
+    probeTimeoutSeconds: 10
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits: { cpu: "4", memory: "4Gi" }
   # Issue #287 -- svc-streaming (Rust) recordings target. Min-spec'd for a single-node
   # laptop; service.name overridden to "waddlebot-seaweedfs" so the literal S3_ENDPOINT
   # wired into svc-streaming's env (templates/svc-streaming.yaml) resolves correctly.
@@ -131,9 +132,11 @@ infrastructure:
     # live patch + restart: fast HTTP 403 confirmed, no more OOMKill under
     # the same seed load) rather than carrying a separate, lower alpha tier
     # for this one service.
+    # 2026-11-10: 1Gi also OOMKilled (exit 137) under bundle-seed load during
+    # core-bundle-seeder; raised to 2Gi limit / 512Mi request (alpha only).
     resources:
-      requests: { cpu: "200m", memory: "256Mi" }
-      limits: { cpu: "1000m", memory: "1Gi" }
+      requests: { cpu: "200m", memory: "512Mi" }
+      limits: { cpu: "1000m", memory: "2Gi" }
     # feature/seaweedfs-object-storage -- alpha is exempt from the beta/gamma/production
     # fail guard (templates/infrastructure/seaweedfs.yaml) and may reference this
     # well-known secret name; the Secret itself is never committed -- provision it once
@@ -172,7 +175,7 @@ pipeline:
     schedule: "*/1 * * * *"
     demoteBaselineRole: "member"
   # Monday-demo: Discord event-sync reconcile CronJob ON (was base-default false, so it was NOT
-  # deployed). The hub-api image pinned by hubApi.imageTag above carries the sync-worker DAL fix.
+  # deployed). The hub-api image follows global.imageTag (sync-worker DAL fix, PR #878, is in release).
   # Still double-gated by the waddles.calendar.event_discord_sync PostHog flag (default OFF).
   eventSync:
     enabled: true
@@ -422,6 +425,8 @@ pipeline:
     # compiles the active set via Cranelift: the OOM finding that sized these still applies).
     bundleExecutor:
       replicas: 1
+      # 2-CPU limit on alpha: compile 2 at a time (connectors + apps share it).
+      maxConcurrentCompiles: 2
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
       resources:
@@ -471,20 +476,6 @@ autoscaling:
       maxReplicas: 3
       targetCPUUtilizationPercentage: 70
       targetMemoryUtilizationPercentage: 80
-
-# Reputation service (Issue #310) -- built locally, pushed to the local
-# registry (no CI image for it yet), same as every other alpha module.
-reputation:
-  replicas: 1
-  image:
-    repository: "ghcr.io/penguintechinc/waddles/reputation-module"
-    tag: ""
-  env:
-    deploymentTier: "alpha"
-    workers: 1
-  resources:
-    requests: { cpu: "50m", memory: "96Mi" }
-    limits: { cpu: "300m", memory: "256Mi" }
 
 # Ingress via Gateway API: Waddles does NOT own a gateway. It attaches an HTTPRoute to the
 # cluster-wide Cilium Gateway `shared` (ns gateway-system, class cilium-shared). TLS terminates
@@ -557,7 +548,7 @@ spire:
 # Unlike beta (which already raises this 3x for the same reason), alpha inherited no
 # override at all and ran on the hardcoded 100 req/min production default -- too strict
 # for rapid SERIAL Playwright runs against a cold, cache-less cluster. Alpha-only,
-# env-var driven (admin/hub_module/backend/src/config/index.js); production/default
+# env-var driven; production/default
 # stays untouched at 100.
 #
 # T10 (v3 demo) -- the ~26 legacy per-module Deployments (collectors/pushing/interactive/
@@ -570,145 +561,6 @@ spire:
 # of them for a non-demo alpha run needs no re-sizing. modules.bot/social stay enabled
 # (true, from values.yaml) -- those are the MODULE_LOAD_* bundle-import toggles the
 # pipeline containers themselves read, not legacy Deployment gates.
-modules:
-  hub:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "100m", memory: "128Mi" }
-      limits: { cpu: "400m", memory: "384Mi" }
-    env:
-      RATE_LIMIT_MAX_REQUESTS: "1000"    # ~10x default; local e2e test/dev only
-      RATE_LIMIT_WINDOW_MS: "60000"      # keep 60s window unchanged
-  hubWebui:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "64Mi" }
-      limits: { cpu: "200m", memory: "256Mi" }
-  router:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  # gh-894 -- hosts the consolidated analytics (/api/v1/analytics/*) hub-api proxies to.
-  coreData:
-    enabled: true
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  coreIdentity:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  coreCommunity:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  triggerWebhooks:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  triggerStreaming:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  actionPlatforms:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  actionServerless:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  interactiveSocial:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  interactiveGaming:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  interactiveMedia:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  interactiveProductivity:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  aiResearcher:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  interactiveAi:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  interactiveLoyalty:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  marketplace:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "50m", memory: "96Mi" }
-      limits: { cpu: "300m", memory: "384Mi" }
-  collectors:
-    discord:
-      enabled: false
-      replicas: 1
-      resources:
-        requests: { cpu: "50m", memory: "96Mi" }
-        limits: { cpu: "300m", memory: "384Mi" }
-    twitch:
-      enabled: false
-      replicas: 1
-      resources:
-        requests: { cpu: "50m", memory: "96Mi" }
-        limits: { cpu: "300m", memory: "384Mi" }
-    slack:
-      enabled: false
-      replicas: 1
-      resources:
-        requests: { cpu: "50m", memory: "96Mi" }
-        limits: { cpu: "300m", memory: "384Mi" }
-    youtubeLive:
-      enabled: false
-      replicas: 1
-      resources:
-        requests: { cpu: "50m", memory: "96Mi" }
-        limits: { cpu: "300m", memory: "384Mi" }
-
 # feature/alpha-command-flag-envs -- flipped back OFF: this in-cluster stack was
 # crashlooping on alpha, and the 4 command flags below are now covered by the
 # FLAG_WADDLES_COMMAND_* Docker ENV baseline on svcProcess.extraEnv above
@@ -803,6 +655,9 @@ config:
   # Monday-demo: ENV baseline for waddles.role_sync -> FLAG_WADDLES_ROLE_SYNC
   # (read by hub-api + the role-sync CronJob via envFrom waddlebot-config; PostHog still overrides).
   roleSyncEnabled: true
+  # Cross-guild Discord role mirror demo: guild-pairing routes + the role-sync admin page.
+  guildPairingEnabled: true
+  webuiRoleSyncMappingEnabled: true
 
 # Bundle storage v2 (references only; Secrets are created out-of-band). Enable once the
 # Secrets exist -- off here so the pods keep starting without them:

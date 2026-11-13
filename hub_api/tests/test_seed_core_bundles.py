@@ -787,11 +787,11 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
     assert not missing, f"expected core bundles missing from bundles/core-bundles.yaml: {missing}"
 
     for entry in entries:
-        # ActivationTarget(tenant_slug="global") defaults community_id=None -- every real
+        # ActivationTarget(tenant_slug="default") defaults community_id=None -- every real
         # catalog entry activates tenant-wide, never scoped to one community (seeder.
         # ActivationTarget's own docstring: community_id=None is NOT a skip, see
         # activate_tenant_wide()).
-        assert entry.activation_targets == (ActivationTarget(tenant_slug="global"),)
+        assert entry.activation_targets == (ActivationTarget(tenant_slug="default"),)
 
     # regression: csping 1.0.0 is permanently retired (fix/csping-version-bump) -- alpha's
     # app_versions already had a 1.0.0 row published from the pre-#573 Dockerfile.core-bundles
@@ -804,7 +804,7 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
     assert versions_by_app_id["waddles.core.example.csping"] == "1.0.3"
 
 
-def test_load_catalog_defaults_a_missing_activation_targets_to_global(tmp_path: Path) -> None:
+def test_load_catalog_defaults_a_missing_activation_targets_to_default(tmp_path: Path) -> None:
     catalog_path = tmp_path / "catalog.yaml"
     catalog_path.write_text(
         yaml.safe_dump(
@@ -823,7 +823,7 @@ def test_load_catalog_defaults_a_missing_activation_targets_to_global(tmp_path: 
         encoding="utf-8",
     )
     entries = load_catalog(catalog_path)
-    assert entries[0].activation_targets == (ActivationTarget(tenant_slug="global"),)
+    assert entries[0].activation_targets == (ActivationTarget(tenant_slug="default"),)
 
 
 def test_load_catalog_accepts_a_connector_tools_wit_world_row(tmp_path: Path) -> None:
@@ -2171,3 +2171,129 @@ def test_real_catalog_manifest_and_artifact_filenames_are_unique() -> None:
         names = [r[key] for r in rows]
         dupes = sorted({n for n in names if names.count(n) > 1})
         assert not dupes, f"duplicate {key} in core-bundles.yaml: {dupes}"
+
+
+def _service_manifest() -> Any:
+    """The `_MANIFEST` fixture parsed, then flipped to `kind: service` (trusted-source shape)."""
+    import dataclasses
+
+    from services.bundle_manifest_v2 import parse_bundle_manifest_v2
+
+    manifest = parse_bundle_manifest_v2(
+        dict(_MANIFEST),
+        known_custom_platforms=frozenset(),
+        allow_wildcard_consumes=False,
+        allow_prebuilt=True,
+        trusted_source=True,
+    )
+    return dataclasses.replace(manifest, kind="service")
+
+
+async def test_ensure_app_catalog_row_writes_the_manifest_kind_on_insert(install_dal: Any) -> None:
+    """Regression: a fresh catalog row carries the manifest kind, not the column default.
+
+    The INSERT used to omit `kind`, so every seeded `kind: service` bundle was catalogued as
+    an app and `_validate_requested_tool_targets` rejected it (`tool_target_not_service`).
+    """
+    manifest = _service_manifest()
+    await seeder._ensure_app_catalog_row(install_dal, manifest)
+    row = (await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()).first()
+    assert row.kind == "service"
+
+
+@pytest.mark.parametrize("stale_kind", ["app", None])
+async def test_ensure_app_catalog_row_repairs_a_stale_kind_idempotently(
+    install_dal: Any, stale_kind: str | None
+) -> None:
+    """A row seeded before the fix (kind 'app'/NULL) is reconciled to the manifest kind."""
+    from services.bundle_install_dal import raw_sql_write
+
+    manifest = _service_manifest()
+    await seeder._ensure_app_catalog_row(install_dal, manifest)
+    await raw_sql_write(
+        install_dal,
+        "UPDATE app_catalog SET kind = :k WHERE app_id = :a",
+        {"k": stale_kind, "a": manifest.app_id},
+    )
+    for _ in range(2):  # second pass is a no-op
+        await seeder._ensure_app_catalog_row(install_dal, manifest)
+        row = (
+            await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()
+        ).first()
+        assert row.kind == "service"
+
+
+async def test_ensure_app_catalog_row_persists_vendor_attribution(install_dal: Any) -> None:
+    """A fresh catalog row stores author/source_url so the marketplace can derive its vendor."""
+    manifest = _service_manifest()
+    await seeder._ensure_app_catalog_row(install_dal, manifest)
+    row = (await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()).first()
+    assert row.author == "github:penguintechinc"
+
+
+async def test_ensure_app_catalog_row_backfills_null_attribution_idempotently(
+    install_dal: Any,
+) -> None:
+    """Rows seeded before attribution was written (NULL author/source_url) are reconciled."""
+    import dataclasses
+
+    from services.bundle_install_dal import raw_sql_write
+
+    manifest = dataclasses.replace(
+        _service_manifest(), source_url="https://github.com/penguintechinc/waddles/tree/main/x"
+    )
+    await seeder._ensure_app_catalog_row(install_dal, manifest)
+    await raw_sql_write(
+        install_dal,
+        "UPDATE app_catalog SET author = NULL, source_url = NULL WHERE app_id = :a",
+        {"a": manifest.app_id},
+    )
+    for _ in range(2):  # second pass is a no-op
+        await seeder._ensure_app_catalog_row(install_dal, manifest)
+        row = (
+            await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()
+        ).first()
+        assert row.author == "github:penguintechinc"
+        assert row.source_url == manifest.source_url
+
+
+@pytest.mark.parametrize(
+    ("author", "source_url", "ok"),
+    [
+        pytest.param("github:some-org", None, True, id="github-author"),
+        pytest.param("Plain Name", "https://github.com/some-org/repo/tree/main/x", True, id="url"),
+        pytest.param("Plain Name", None, False, id="neither"),
+        pytest.param(None, "https://gitlab.com/o/r", False, id="non-github-url"),
+    ],
+)
+def test_assert_vendor_derivable(author: str | None, source_url: str | None, ok: bool) -> None:
+    """The seeder refuses a bundle that no GitHub org can be attributed to."""
+    import dataclasses
+
+    manifest = dataclasses.replace(_service_manifest(), author=author, source_url=source_url)
+    if ok:
+        seeder._assert_vendor_derivable(manifest)
+    else:
+        with pytest.raises(CoreBundleSeederError, match="vendor"):
+            seeder._assert_vendor_derivable(manifest)
+
+
+def test_every_real_core_bundle_manifest_has_a_derivable_vendor() -> None:
+    """Denominator-counted: every shipped first-party manifest passes the seeder vendor gate."""
+    from services.bundle_manifest_v2 import parse_bundle_manifest_v2
+
+    bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
+    entries = seeder.load_catalog(bundles_dir / "core-bundles.yaml")
+    checked = 0
+    for entry in entries:
+        raw = yaml.safe_load((bundles_dir / entry.source_dir / "hub-manifest.yaml").read_text())
+        manifest = parse_bundle_manifest_v2(
+            raw,
+            known_custom_platforms=frozenset(),
+            allow_wildcard_consumes=False,
+            allow_prebuilt=True,
+            trusted_source=True,
+        )
+        seeder._assert_vendor_derivable(manifest)
+        checked += 1
+    assert checked >= 100, f"only {checked} manifests examined"

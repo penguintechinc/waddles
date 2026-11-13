@@ -33,6 +33,7 @@ from app import bridge_session_cookie_to_bearer
 from blueprints.v1.auth import auth_bp
 from config import HubAPIConfig
 from services import oauth_service
+from services.global_identity import grant_global_admin_sync
 from services.install_state_binding import bound_state
 from tests.conftest import TENANT_SLUG, make_user_token
 
@@ -128,11 +129,12 @@ def _seed_user(
         password_hash=_hash(password),
         is_active=is_active,
         email_verified=email_verified,
-        is_super_admin=is_super_admin,
         is_analytics_consumer=is_analytics_consumer,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
+    if is_super_admin:
+        grant_global_admin_sync(auth_db.dal, user_id)
     auth_db.dal.commit()
     return user_id
 

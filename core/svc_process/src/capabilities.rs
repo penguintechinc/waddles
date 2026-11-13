@@ -96,6 +96,13 @@ pub use tool::ToolContext;
 /// The community scope the verified caller must hold for `reputation.override`
 /// (mirrors the reputation bundle's manifest `required_scope`).
 const REPUTATION_OVERRIDE_SCOPE: &str = "community:admin";
+/// The first-party reputation SERVICE bundle: when it is the origin of the
+/// call chain (chain length 1) its activity writes are core internals and are
+/// exempt from the logic-bundle exclusivity check.
+const REPUTATION_SERVICE_APP_ID: &str = "waddles.core.service.reputation";
+/// Scope a HUMAN-originated moderation-class reputation call must hold (admins
+/// hold it too: the role mapping is cumulative).
+const REPUTATION_MODERATE_SCOPE: &str = "community:moderate";
 
 /// The durable rolling-24h absolute-delta caps the store enforces for
 /// `reputation.community.write` -- the catalog's own `per_user_daily_abs_max`
@@ -103,10 +110,14 @@ const REPUTATION_OVERRIDE_SCOPE: &str = "community:admin";
 /// community), so the in-memory gate quota and the durable store caps can
 /// never disagree about the ceilings.
 fn reputation_caps() -> ReputationCaps {
-    match PermissionFamily::ReputationCommunityWrite
-        .catalog_entry()
-        .default_quota
-    {
+    reputation_caps_for(PermissionFamily::ReputationCommunityWrite)
+}
+
+/// The durable caps of one reputation write family (activity
+/// `reputation.community.write`, or `reputation.moderation.write`), taken from
+/// the catalog so the gate's in-memory quota and the store can never disagree.
+fn reputation_caps_for(family: PermissionFamily) -> ReputationCaps {
+    match family.catalog_entry().default_quota {
         Quota::ReputationDelta {
             per_user_daily_abs_max,
             per_scope_daily_abs_max,
@@ -2640,6 +2651,69 @@ impl<K: KvBackend> StageCapabilities<K> {
         }
     }
 
+    /// Reputation-logic exclusivity (contract): an ACTIVITY-class write
+    /// (`reputation.adjust` / `adjust_many` / `apply`) is allowed only when the
+    /// invocation's ORIGIN (first app of the tool-call chain -- the accrual
+    /// logic bundle reaches the host through the core reputation service) is
+    /// the tenant's ACTIVE reputation-logic app, as reported by the SQL
+    /// function `reputation_active_logic_app(tenant)` (which is where the
+    /// manifest's `provides: reputation-logic` and the 409 exclusivity are
+    /// enforced), or a core reputation-service internal (the service invoked
+    /// directly, chain length 1). Everything else -- including a bundle that
+    /// does not provide reputation-logic, or a tenant with no active logic app
+    /// -- is `forbidden`; a lookup failure fails closed, and so do absent wiring
+    /// (`not_implemented`) and the flag OFF (`feature_disabled`).
+    async fn enforce_logic_exclusivity(&self) -> Result<(), HostResultError> {
+        // Fail CLOSED here, not only downstream: no wiring or the capability flag
+        // OFF means no activity write is allowed, whatever the caller is.
+        let Some(wiring) = &self.reputation else {
+            return Err(denied(
+                "not_implemented",
+                "reputation capability is not provisioned in this deployment \
+                 (BUNDLE_REPUTATION_PASSWORD unset or connection failed)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "reputation capability is disabled (waddles.bundle-reputation-capability is OFF)",
+            ));
+        }
+        let chain: &[String] = match &self.tool {
+            Some(t) if !t.chain.is_empty() => &t.chain,
+            _ => std::slice::from_ref(&self.app_id),
+        };
+        let origin = chain[0].as_str();
+        if chain.len() == 1 && origin == REPUTATION_SERVICE_APP_ID {
+            return Ok(());
+        }
+        let scope = self.reputation_scope();
+        match wiring.store.active_logic_app(&scope).await {
+            Ok(Some(active)) if active == origin => Ok(()),
+            Ok(_) => {
+                tracing::info!(
+                    app_id = %self.app_id, community_id = self.community_id,
+                    "reputation activity write refused: caller is not the active reputation-logic bundle"
+                );
+                Err(denied(
+                    "forbidden",
+                    "activity-class reputation writes are restricted to the tenant's active reputation-logic bundle",
+                ))
+            }
+            Err(e) => Err(reputation_error_to_host(e)),
+        }
+    }
+
+    /// The host-derived [`ReputationScope`] of this invocation (tenant,
+    /// community and app are never guest input).
+    fn reputation_scope(&self) -> ReputationScope {
+        ReputationScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+        }
+    }
+
     /// `reputation.get` / `reputation.adjust` (`wit/waddle-bundle/stage.wit`
     /// `interface reputation`), carried as `capability = db`,
     /// `op = "reputation.*"` (`penguin-bundle-host`'s closed `CapabilityKind`
@@ -2669,6 +2743,15 @@ impl<K: KvBackend> StageCapabilities<K> {
             | "reputation.adjust_many"
             | "reputation.get_many"
             | "reputation.leaderboard" => return self.handle_reputation_ext(call).await,
+            "reputation.apply"
+            | "reputation.apply_moderation"
+            | "reputation.get_tenant"
+            | "reputation.get_tenant_policy"
+            | "reputation.history"
+            | "reputation.below_threshold"
+            | "reputation.is_soft_banned"
+            | "reputation.soft_ban"
+            | "reputation.lift_soft_ban" => return self.handle_reputation_v2(call).await,
             other => {
                 return Err(denied(
                     "unknown_op",
@@ -2712,6 +2795,9 @@ impl<K: KvBackend> StageCapabilities<K> {
             ));
         }
 
+        if is_adjust {
+            self.enforce_logic_exclusivity().await?;
+        }
         let permission = if is_adjust {
             PermissionId::ReputationCommunityWrite
         } else {
@@ -2743,17 +2829,53 @@ impl<K: KvBackend> StageCapabilities<K> {
             ));
         }
 
-        let scope = ReputationScope {
-            tenant_id: self.tenant_id,
-            community_id: self.community_id,
-            app_id: self.app_id.clone(),
-        };
+        let scope = self.reputation_scope();
+        // The idempotency key is REQUIRED for a write (host-derived from the
+        // replay-stable event id, never guest input): without one a retried
+        // call would double-count, so the call is refused as invalid.
+        let mut adjust_key: Option<bundle_host_reputation::IdempotencyKey> = None;
+        let mut adjust_reservation: Option<(&InvocationIdentity, u32)> = None;
+        if is_adjust {
+            let slot = self.invocation_identity.as_deref().and_then(|inv| {
+                inv.reserve_mutation("reputation_adjust")
+                    .map(|(e, o)| (inv, e.to_string(), o))
+            });
+            let Some((inv, event_id, ordinal)) = slot else {
+                return Err(denied(
+                    "invalid_args",
+                    "idempotency key required: this invocation carries no replay-stable event id",
+                ));
+            };
+            adjust_key = Some(
+                bundle_host_reputation::IdempotencyKey::for_event(
+                    &event_id,
+                    "reputation_adjust",
+                    ordinal,
+                )
+                .map_err(reputation_error_to_host)?,
+            );
+            adjust_reservation = Some((inv, ordinal));
+        }
         let balance = match (delta, reason) {
             (Some(delta), Some(reason)) => {
-                wiring
-                    .store
-                    .adjust(&scope, user, delta, reason, reputation_caps())
-                    .await
+                let result = match (&adjust_key, &adjust_reservation) {
+                    (Some(k), _) => {
+                        wiring
+                            .store
+                            .adjust(&scope, user, delta, reason, reputation_caps(), k)
+                            .await
+                    }
+                    _ => Err(ReputationError::Backend(
+                        "reputation adjust has no idempotency key".to_string(),
+                    )),
+                };
+                if let (Some((inv, ordinal)), Err(ReputationError::Backend(_))) =
+                    (adjust_reservation, &result)
+                {
+                    // A failed attempt hands its ordinal back so a retry reuses the key.
+                    inv.release_mutation("reputation_adjust", ordinal);
+                }
+                result
             }
             _ => wiring.store.get(&scope, user).await,
         }
@@ -2962,18 +3084,17 @@ impl<K: KvBackend> StageCapabilities<K> {
         // other tool in the component, nor a direct WIT call, can override on
         // behalf of a non-admin. Checked BEFORE the gate so a refused caller
         // never burns the admin quota (10/min) a real admin needs.
+        if matches!(op, Op::AdjustMany { .. }) {
+            self.enforce_logic_exclusivity().await?;
+        }
+
         if matches!(op, Op::Override { .. }) {
-            let actor = self.resolve_verified_actor().await;
-            if !actor.has_scope(REPUTATION_OVERRIDE_SCOPE) {
-                tracing::info!(
-                    app_id = %self.app_id, community_id = self.community_id,
-                    "reputation.override refused: caller lacks community:admin"
-                );
-                return Err(denied(
-                    "forbidden",
-                    format!("reputation.override requires the caller to hold {REPUTATION_OVERRIDE_SCOPE}"),
-                ));
-            }
+            // Admin override is `admin_override` (class 3): the SQL denies it to the
+            // bundle role, so it is hub-api only and never served by the host.
+            return Err(denied(
+                "forbidden",
+                "reputation.override is hub-api only (admin_override is denied to the bundle role)",
+            ));
         }
 
         match &op {
@@ -3034,8 +3155,8 @@ impl<K: KvBackend> StageCapabilities<K> {
                 (self.invocation_identity.as_deref(), slot)
             else {
                 return Err(denied(
-                    "not_implemented",
-                    "this invocation carries no replay-stable event id; reputation mutations cannot be made idempotent",
+                    "invalid_args",
+                    "idempotency key required: this invocation carries no replay-stable event id",
                 ));
             };
             key = Some(
@@ -3045,11 +3166,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             reservation = Some((invocation, kind, ordinal));
         }
 
-        let scope = ReputationScope {
-            tenant_id: self.tenant_id,
-            community_id: self.community_id,
-            app_id: self.app_id.clone(),
-        };
+        let scope = self.reputation_scope();
         let no_key = || denied("backend", "reputation mutation has no idempotency key");
         let entries_json = |rows: Vec<bundle_host_reputation::ScoreEntry>| {
             serde_json::json!({
@@ -3103,6 +3220,447 @@ impl<K: KvBackend> StageCapabilities<K> {
             if !matches!(e, ReputationError::Backend(_)) {
                 self.refund_adjust_many(items);
             }
+        }
+        result.map_err(reputation_error_to_host)
+    }
+
+    /// `reputation.apply` / `apply_moderation` / `get_tenant` /
+    /// `get_tenant_policy` / `history` / `below_threshold` / `is_soft_banned` /
+    /// `soft_ban` / `lift_soft_ban` (reputation unification, v3.0.X).
+    ///
+    /// Fail-loud order as the other reputation handlers: (1) argument parsing;
+    /// (2) a real community; (3) the core-only rule for the ops whose
+    /// permission is first-party-only (`history`, the tenant reads, moderation
+    /// writes): a non-`waddles.core.` app is refused `forbidden` BEFORE the
+    /// gate; (4) the idempotency ordinal of a mutating op (before the gate);
+    /// (5) the gate; (6) wiring/flag; (7) the store. The reason CLASS is fixed
+    /// by the op (`apply` = activity under `reputation.community.write`,
+    /// `apply_moderation` = moderation under `reputation.moderation.write`),
+    /// never read from the guest. Scope is always host-derived.
+    async fn handle_reputation_v2(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        use bundle_host_reputation::ReasonClass;
+
+        enum Op {
+            Apply {
+                user: uuid::Uuid,
+                delta: i32,
+                reason: String,
+                class: ReasonClass,
+            },
+            GetTenant(uuid::Uuid),
+            TenantPolicy,
+            History {
+                user: uuid::Uuid,
+                limit: u32,
+                before: Option<i64>,
+            },
+            BelowThreshold {
+                threshold: i64,
+                limit: u32,
+            },
+            IsSoftBanned(uuid::Uuid),
+            SoftBan {
+                user: uuid::Uuid,
+                reason: String,
+            },
+            LiftSoftBan {
+                user: uuid::Uuid,
+                only_reason: String,
+            },
+        }
+
+        fn user_of(args: &serde_json::Value) -> Result<uuid::Uuid, HostResultError> {
+            args.get("user")
+                .and_then(|v| v.as_str())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .ok_or_else(|| denied("invalid_args", "user must be a UUID string"))
+        }
+        fn str_of(args: &serde_json::Value, key: &str) -> Result<String, HostResultError> {
+            let v = args
+                .get(key)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| denied("invalid_args", format!("{key} must be a string")))?;
+            bundle_host_reputation::validate_reason(v).map_err(reputation_error_to_host)?;
+            Ok(v.to_string())
+        }
+        fn limit_of(args: &serde_json::Value, max: u32) -> Result<u32, HostResultError> {
+            args.get("limit")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|v| (1..=max).contains(v))
+                .ok_or_else(|| denied("invalid_args", format!("limit must be 1..={max}")))
+        }
+
+        let args = &call.args;
+        let op = match call.op.as_str() {
+            "reputation.apply" | "reputation.apply_moderation" => {
+                let class = if call.op == "reputation.apply" {
+                    ReasonClass::Activity
+                } else {
+                    ReasonClass::Moderation
+                };
+                let delta = args
+                    .get("delta")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|v| i32::try_from(v).ok())
+                    .ok_or_else(|| denied("invalid_args", "delta must be an i32"))?;
+                bundle_host_reputation::ScoreScale::LEGACY
+                    .check_delta(class, delta)
+                    .map_err(reputation_error_to_host)?;
+                Op::Apply {
+                    user: user_of(args)?,
+                    delta,
+                    reason: str_of(args, "reason")?,
+                    class,
+                }
+            }
+            "reputation.get_tenant" => Op::GetTenant(user_of(args)?),
+            "reputation.get_tenant_policy" => Op::TenantPolicy,
+            "reputation.history" => {
+                Op::History {
+                    user: user_of(args)?,
+                    limit: limit_of(args, bundle_host_reputation::MAX_HISTORY_LIMIT)?,
+                    before: match args.get("before") {
+                        None | Some(serde_json::Value::Null) => None,
+                        Some(v) => Some(v.as_i64().filter(|b| *b > 0).ok_or_else(|| {
+                            denied("invalid_args", "before must be a positive id")
+                        })?),
+                    },
+                }
+            }
+            "reputation.below_threshold" => Op::BelowThreshold {
+                threshold: args
+                    .get("threshold")
+                    .and_then(|v| v.as_i64())
+                    .filter(|t| {
+                        (bundle_host_reputation::SCALE_MIN..=bundle_host_reputation::SCALE_MAX + 1)
+                            .contains(t)
+                    })
+                    .ok_or_else(|| denied("invalid_args", "threshold must be 300..=851"))?,
+                limit: limit_of(args, bundle_host_reputation::MAX_LEADERBOARD_LIMIT)?,
+            },
+            "reputation.is_soft_banned" => Op::IsSoftBanned(user_of(args)?),
+            "reputation.soft_ban" => Op::SoftBan {
+                user: user_of(args)?,
+                reason: str_of(args, "reason")?,
+            },
+            "reputation.lift_soft_ban" => Op::LiftSoftBan {
+                user: user_of(args)?,
+                only_reason: str_of(args, "only_reason")?,
+            },
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("reputation op {other:?} not supported"),
+                ))
+            }
+        };
+
+        if self.community_id == 0 || self.community.is_none() {
+            return Err(denied(
+                "invalid_args",
+                "reputation is community-scoped; this activation has no community",
+            ));
+        }
+
+        // Activity-class apply: only the tenant's ACTIVE reputation-logic bundle
+        // (or a core service internal) may write -- see `enforce_logic_exclusivity`.
+        if matches!(
+            op,
+            Op::Apply {
+                class: ReasonClass::Activity,
+                ..
+            }
+        ) {
+            self.enforce_logic_exclusivity().await?;
+        }
+
+        // Manual soft bans are hub-api-only (contract): a bundle may set/clear
+        // ONLY the score-floor soft ban, identified by its fixed reason.
+        if let Op::SoftBan { reason, .. }
+        | Op::LiftSoftBan {
+            only_reason: reason,
+            ..
+        } = &op
+        {
+            if reason != bundle_host_reputation::FLOOR_SOFT_BAN_REASON {
+                return Err(denied(
+                    "forbidden",
+                    "manual soft bans are managed through hub-api only; a bundle may only set or clear the score-floor soft ban",
+                ));
+            }
+        }
+
+        // Core-only ops: the permission is first-party-only by policy.
+        let core_only = matches!(
+            op,
+            Op::GetTenant(_)
+                | Op::TenantPolicy
+                | Op::History { .. }
+                | Op::SoftBan { .. }
+                | Op::LiftSoftBan { .. }
+        ) || matches!(
+            op,
+            Op::Apply {
+                class: ReasonClass::Moderation,
+                ..
+            }
+        );
+        if core_only && !self.app_id.starts_with("waddles.core.") {
+            return Err(denied(
+                "forbidden",
+                "this reputation operation is restricted to first-party core bundles",
+            ));
+        }
+
+        // Moderation-class writes (`apply_moderation`, `soft_ban`, `lift_soft_ban`):
+        // the bundle's grant says the APP may, not that THIS caller may. A
+        // human-originated invocation must hold a moderator/admin scope for this
+        // community (host-verified actor, never guest input). Only a
+        // system-originated invocation (HOST-derived from the verified event
+        // type: the automatic floor evaluation, a moderation outcome) is exempt.
+        // Checked BEFORE the gate so a refused caller never burns quota.
+        let moderation_write = matches!(
+            op,
+            Op::SoftBan { .. }
+                | Op::LiftSoftBan { .. }
+                | Op::Apply {
+                    class: ReasonClass::Moderation,
+                    ..
+                }
+        );
+        // A POSITIVE moderation delta raises a score with the larger cap: that is
+        // an `admin_override` (class 3), which the SQL denies the bundle role, so
+        // it is hub-api only -- forbidden for everyone here, admin scope or not.
+        if matches!(
+            op,
+            Op::Apply {
+                class: ReasonClass::Moderation,
+                delta: d,
+                ..
+            } if d > 0
+        ) {
+            return Err(denied(
+                "forbidden",
+                "a positive moderation delta is an admin override (hub-api only)",
+            ));
+        }
+        if moderation_write {
+            let system = self
+                .invocation_identity
+                .as_deref()
+                .is_some_and(|i| i.is_system_originated());
+            if !system {
+                let actor = self.resolve_verified_actor().await;
+                if !(actor.has_scope(REPUTATION_MODERATE_SCOPE)
+                    || actor.has_scope(REPUTATION_OVERRIDE_SCOPE))
+                {
+                    tracing::info!(
+                        app_id = %self.app_id, community_id = self.community_id,
+                        "reputation moderation write refused: caller lacks community:moderate"
+                    );
+                    return Err(denied(
+                        "forbidden",
+                        format!(
+                            "this reputation operation requires the caller to hold {REPUTATION_MODERATE_SCOPE}"
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // Idempotency ordinal of the one mutating, replay-sensitive op.
+        let claimed = matches!(op, Op::Apply { .. }).then(|| {
+            self.invocation_identity
+                .as_deref()
+                .and_then(|inv| inv.reserve_mutation("reputation_apply"))
+                .map(|(event_id, ordinal)| (event_id.to_string(), ordinal))
+        });
+
+        // Gate. Soft-ban writes carry no magnitude, so they authorize as a plain
+        // (rate-limited) moderation-write call and are bounded by the store's
+        // durable count-based toggle quota (typed `rate_limited`), not refunded.
+        match &op {
+            Op::Apply {
+                user, delta, class, ..
+            } => {
+                let perm = match class {
+                    ReasonClass::Activity => PermissionId::ReputationCommunityWrite,
+                    ReasonClass::Moderation => PermissionId::ReputationModerationWrite,
+                };
+                self.authorize_reputation(perm, Some(*user), Some(*delta))?;
+            }
+            Op::SoftBan { user, .. } | Op::LiftSoftBan { user, .. } => self.authorize_reputation(
+                PermissionId::ReputationModerationWrite,
+                Some(*user),
+                None,
+            )?,
+            Op::GetTenant(user) => {
+                self.authorize_reputation(PermissionId::ReputationTenantRead, Some(*user), None)?
+            }
+            Op::TenantPolicy => {
+                self.authorize_reputation(PermissionId::ReputationTenantRead, None, None)?
+            }
+            Op::History { user, .. } => {
+                self.authorize_reputation(PermissionId::ReputationHistoryRead, Some(*user), None)?
+            }
+            Op::BelowThreshold { .. } => {
+                self.authorize_reputation(PermissionId::ReputationRead, None, None)?
+            }
+            Op::IsSoftBanned(user) => {
+                self.authorize_reputation(PermissionId::ReputationRead, Some(*user), None)?
+            }
+        }
+
+        let Some(wiring) = &self.reputation else {
+            return Err(denied(
+                "not_implemented",
+                "reputation capability is not provisioned in this deployment \
+                 (BUNDLE_REPUTATION_PASSWORD unset or connection failed)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "reputation capability is disabled (waddles.bundle-reputation-capability is OFF)",
+            ));
+        }
+
+        let mut key: Option<bundle_host_reputation::IdempotencyKey> = None;
+        let mut reservation: Option<(&InvocationIdentity, &'static str, u32)> = None;
+        if let Some(slot) = claimed {
+            let (Some(invocation), Some((event_id, ordinal))) =
+                (self.invocation_identity.as_deref(), slot)
+            else {
+                return Err(denied(
+                    "invalid_args",
+                    "idempotency key required: this invocation carries no replay-stable event id",
+                ));
+            };
+            key = Some(
+                bundle_host_reputation::IdempotencyKey::for_event(
+                    &event_id,
+                    "reputation_apply",
+                    ordinal,
+                )
+                .map_err(reputation_error_to_host)?,
+            );
+            reservation = Some((invocation, "reputation_apply", ordinal));
+        }
+
+        let scope = self.reputation_scope();
+        let result: Result<serde_json::Value, ReputationError> = match &op {
+            Op::Apply {
+                user,
+                delta,
+                reason,
+                class,
+            } => {
+                let family = match class {
+                    ReasonClass::Activity => PermissionFamily::ReputationCommunityWrite,
+                    ReasonClass::Moderation => PermissionFamily::ReputationModerationWrite,
+                };
+                let key = key.as_ref().ok_or_else(|| {
+                    denied("backend", "reputation mutation has no idempotency key")
+                })?;
+                wiring
+                    .store
+                    .apply(
+                        &scope,
+                        *user,
+                        *delta,
+                        *class,
+                        reason,
+                        reputation_caps_for(family),
+                        key,
+                    )
+                    .await
+                    .map(|o| serde_json::json!({ "new_score": o.new_score, "applied": o.applied }))
+            }
+            Op::GetTenant(user) => wiring
+                .store
+                .get_tenant(&scope, *user)
+                .await
+                .map(|t| serde_json::json!({ "score": t.score, "communities": t.communities })),
+            Op::TenantPolicy => wiring.store.tenant_policy(&scope).await.map(|p| {
+                serde_json::json!({ "policy": p.map(|p| serde_json::json!({
+                    "auto_ban_enabled": p.auto_ban_enabled,
+                    "auto_ban_floor": p.auto_ban_floor,
+                    "at_risk_threshold": p.at_risk_threshold,
+                })) })
+            }),
+            Op::History {
+                user,
+                limit,
+                before,
+            } => wiring
+                .store
+                .history(&scope, *user, *limit, *before)
+                .await
+                .map(|rows| {
+                    serde_json::json!({ "entries": rows.into_iter().map(|e| serde_json::json!({
+                        "id": e.id, "delta": e.delta, "reason_code": e.reason_code,
+                        "kind": e.kind, "balance_after": e.balance_after,
+                        "occurred_at": e.occurred_at,
+                    })).collect::<Vec<_>>() })
+                }),
+            Op::BelowThreshold { threshold, limit } => wiring
+                .store
+                .below_threshold(&scope, *threshold, *limit)
+                .await
+                .map(|rows| {
+                    serde_json::json!({ "entries": rows.into_iter().map(|r| serde_json::json!({
+                        "user": r.user.to_string(), "score": r.score,
+                    })).collect::<Vec<_>>() })
+                }),
+            Op::IsSoftBanned(user) => wiring
+                .store
+                .is_soft_banned(&scope, *user)
+                .await
+                .map(|b| serde_json::json!({ "flag": b })),
+            Op::SoftBan { user, reason } => wiring
+                .store
+                .soft_ban(&scope, *user, reason)
+                .await
+                .map(|b| serde_json::json!({ "flag": b })),
+            Op::LiftSoftBan { user, only_reason } => wiring
+                .store
+                .lift_soft_ban(&scope, *user, only_reason)
+                .await
+                .map(|b| serde_json::json!({ "flag": b })),
+        };
+        // An idempotent REPLAY applied nothing: hand its magnitude back so a
+        // redelivered event never burns the user's daily quota twice.
+        if let (
+            Op::Apply {
+                user, delta, class, ..
+            },
+            Ok(v),
+        ) = (&op, &result)
+        {
+            if v.get("applied") == Some(&serde_json::Value::Bool(false)) {
+                let perm = match class {
+                    ReasonClass::Activity => PermissionId::ReputationCommunityWrite,
+                    ReasonClass::Moderation => PermissionId::ReputationModerationWrite,
+                };
+                self.gate.refund(
+                    &self.gate_scope(),
+                    perm,
+                    &ResourceRef::ReputationScoped(ReputationTarget {
+                        target_user: Some(*user),
+                        scope_kind: ScopeKind::Community,
+                        delta: Some(*delta),
+                    }),
+                );
+            }
+        }
+        if let (Some((invocation, kind, ordinal)), Err(ReputationError::Backend(_))) =
+            (reservation, &result)
+        {
+            invocation.release_mutation(kind, ordinal);
         }
         result.map_err(reputation_error_to_host)
     }

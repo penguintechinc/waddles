@@ -107,7 +107,10 @@ pub async fn read_active_set_all(
         )
         .await?;
 
-    let active_rows = app_active_versions::Entity::find().all(&txn).await?;
+    let active_rows = app_active_versions::Entity::find()
+        .filter(crate::query::not_globally_disabled())
+        .all(&txn)
+        .await?;
     if active_rows.is_empty() {
         txn.commit().await?;
         return Ok(HashMap::new());
@@ -170,6 +173,7 @@ pub async fn read_source_bindings_all(
         .await?;
 
     let active_keys: HashSet<(i32, i32, String)> = app_active_versions::Entity::find()
+        .filter(crate::query::not_globally_disabled())
         .all(&txn)
         .await?
         .into_iter()

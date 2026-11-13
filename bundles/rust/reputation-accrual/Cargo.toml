@@ -1,0 +1,25 @@
+[package]
+name = "waddle-bundle-reputation-accrual"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Reputation ACCRUAL app bundle (`provides: reputation-logic`): the default logic that turns platform events into reputation deltas and applies them through the reputation SERVICE bundle's `adjust` / `apply_moderation` tools. Compiled to a WASI 0.2 component on the `stage-next-tools` world."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "=0.44.0", features = ["bitflags"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[package.metadata.component]
+package = "waddle:bundle-reputation-accrual"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-bundle"
+world = "stage-next-tools"
+
+[package.metadata.component.dependencies]

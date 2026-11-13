@@ -1,1 +1,0 @@
-"""Teams module services"""

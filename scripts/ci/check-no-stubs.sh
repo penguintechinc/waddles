@@ -10,7 +10,8 @@
 #   1. Stub markers (grep): TODO/FIXME/XXX/HACK, unimplemented!()/todo!(),
 #      panic!("...not impl..."), NotImplementedError, "not wired"/
 #      "not implemented" string literals -- checked against
-#      .ci/stub-allowlist.yml (exact path + pattern + REQUIRED tracking
+#      <NotAvailableYet>/<ServedFeature> webui placeholder usages --
+#      checked against .ci/stub-allowlist.yml (exact path + pattern + REQUIRED tracking
 #      issue; see that file's header).
 #   2. Silent fallbacks (semgrep, scripts/ci/semgrep-silent-fallback.yml):
 #      an error/except branch that swallows the error and returns a
@@ -47,6 +48,14 @@ SCAN_SPECS=(
 EXCLUDE_REGEX='(^|/)(tests?|__tests__|node_modules|target|dist|build|\.venv[^/]*)(/|$)|_test\.(rs|py)$|^test_.*\.py$|\.test\.(ts|tsx|js|jsx)$|\.spec\.(ts|tsx|js|jsx)$|_pb2(_grpc)?\.py$'
 
 STUB_PATTERN='TODO|FIXME|XXX|HACK|unimplemented!\(\)|todo!\(\)|NotImplementedError|not wired|not implemented|panic!\([^)]*not impl[^)]*\)'
+
+# Webui placeholder usages (NotAvailableYet / ServedFeature render a "Missing
+# server endpoints" placeholder for UI whose hub-api route does not exist).
+# Each JSX use is a stub finding unless allowlisted with a tracking issue.
+# Scoped to the frontend src; the component definition file is excluded.
+PLACEHOLDER_PATTERN='<(NotAvailableYet|ServedFeature)([[:space:]]|$)'
+PLACEHOLDER_ROOT="admin/hub_module/frontend/src"
+PLACEHOLDER_DEFINITION="${PLACEHOLDER_ROOT}/components/ui/NotAvailableYet.tsx"
 
 if [ ! -f "${ALLOWLIST}" ]; then
     echo "check-no-stubs: FAIL -- missing ${ALLOWLIST}" >&2
@@ -106,6 +115,11 @@ echo "[" > "${findings_json}"
 first=1
 while IFS= read -r rel; do
     [ -z "${rel}" ] && continue
+    PATTERN_FOR_FILE="${STUB_PATTERN}"
+    case "${rel}" in
+        "${PLACEHOLDER_DEFINITION}") ;;
+        "${PLACEHOLDER_ROOT}"/*) PATTERN_FOR_FILE="${STUB_PATTERN}|${PLACEHOLDER_PATTERN}" ;;
+    esac
     while IFS=: read -r lineno text; do
         [ -z "${lineno}" ] && continue
         if [ "${first}" -eq 0 ]; then printf ',\n' >> "${findings_json}"; fi
@@ -113,7 +127,7 @@ while IFS= read -r rel; do
         esc_path=$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${rel}")
         esc_text=$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${text}")
         printf '{"kind":"stub","path":%s,"line":%s,"text":%s}' "${esc_path}" "${lineno}" "${esc_text}" >> "${findings_json}"
-    done < <(grep -nE "${STUB_PATTERN}" "${rel}" 2>/dev/null || true)
+    done < <(grep -nE "${PATTERN_FOR_FILE}" "${rel}" 2>/dev/null || true)
 done < "${file_list}"
 echo "]" >> "${findings_json}"
 

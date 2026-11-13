@@ -83,7 +83,7 @@ pub struct CliConfig {
     /// Feeds `penguin_spine::Scope` for every fixed-platform receiver
     /// (`Config::ingest_scope`); not yet consumed by any HTTP handler
     /// (no tenant-scoped routes exist until the generic intake work lands).
-    #[arg(long, env = "RUNNER_TENANT_SLUG", default_value = "global")]
+    #[arg(long, env = "RUNNER_TENANT_SLUG", default_value = "default")]
     pub runner_tenant_slug: String,
 
     /// This runner instance's community scope, empty meaning tenant-wide
@@ -698,7 +698,7 @@ mod tests {
         let cli = CliConfig::parse_from(["svc-ingest"]);
         assert_eq!(cli.http_port, 8200);
         assert_eq!(cli.metrics_port, 9090);
-        assert_eq!(cli.runner_tenant_slug, "global");
+        assert_eq!(cli.runner_tenant_slug, "default");
         assert_eq!(cli.runner_community, "");
         assert_eq!(cli.twitch_irc_host, "irc.chat.twitch.tv");
         assert_eq!(cli.twitch_irc_port, 6697);

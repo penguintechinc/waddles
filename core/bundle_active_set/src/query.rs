@@ -13,6 +13,20 @@ use crate::entities::{
     app_active_versions, app_install_approvals, app_source_bindings, app_versions,
 };
 
+/// SQL predicate excluding apps globally disabled by a super-admin
+/// (`app_catalog.status = 'disabled'`, `hub_api/services/bundle_global_state_service.py`),
+/// read through the `bundle_disabled_apps` view because the restricted
+/// `waddles_bundle_reader` role has no SELECT on `app_catalog` (migration 0095).
+/// Folded into the existing active-set queries (no extra round trip) so a disabled
+/// bundle is never runnable even if the disable cascade has not yet removed its
+/// `app_active_versions` rows -- fail closed on the race.
+pub(crate) fn not_globally_disabled() -> sea_orm::sea_query::SimpleExpr {
+    sea_orm::sea_query::Expr::cust(
+        "app_active_versions.app_id NOT IN \
+         (SELECT app_id FROM bundle_disabled_apps)",
+    )
+}
+
 #[derive(Debug, Error)]
 pub enum ActiveSetError {
     #[error("database query failed: {0}")]
@@ -94,7 +108,9 @@ fn declared_capabilities_from_summary(summary_json: &sea_orm::JsonValue) -> Vec<
 
 /// Extracts `summary_json.egress` (`[{host, methods}]`) and `egressRps`.
 /// Malformed entries are dropped (fail closed: less egress, never more).
-fn egress_from_summary(summary_json: &sea_orm::JsonValue) -> (Vec<(String, Vec<String>)>, Option<u32>) {
+fn egress_from_summary(
+    summary_json: &sea_orm::JsonValue,
+) -> (Vec<(String, Vec<String>)>, Option<u32>) {
     // nosemgrep: rust-silent-unwrap-or-default -- Option<Vec> when egress field is absent (fail closed: zero egress allowed)
     let egress = summary_json
         .get("egress")
@@ -394,7 +410,8 @@ pub async fn read_active_set(
 ) -> Result<ActiveSetRead, ActiveSetError> {
     let mut active_q = app_active_versions::Entity::find()
         .filter(app_active_versions::Column::TenantId.eq(tenant_id))
-        .filter(app_active_versions::Column::CommunityId.eq(community_id));
+        .filter(app_active_versions::Column::CommunityId.eq(community_id))
+        .filter(not_globally_disabled());
     if let Some(app_id) = app_id {
         active_q = active_q.filter(app_active_versions::Column::AppId.eq(app_id));
     }
@@ -695,6 +712,20 @@ mod tests {
             community_id,
             version_id,
         }
+    }
+
+    /// The active-set read excludes globally disabled bundles in SQL (same query, no extra
+    /// round trip), so a disabled service can never be loaded even mid-cascade.
+    #[tokio::test]
+    async fn read_active_set_excludes_globally_disabled_apps() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<app_active_versions::Model>::new()])
+            .into_connection();
+        let read = read_active_set(&db, 1, 1, None).await.unwrap();
+        assert!(read.rows.is_empty());
+        let log = format!("{:?}", db.into_transaction_log());
+        assert!(log.contains("bundle_disabled_apps"), "{log}");
+        assert!(!log.contains("app_catalog"), "{log}");
     }
 
     #[tokio::test]

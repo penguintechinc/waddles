@@ -23,8 +23,11 @@ import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from services import community_reputation_service as reputation_svc
 from services import session_service
+from services.audit_events import AuditAction, AuditCategory
 from services.errors import bad_request, not_found
+from services.platform_account import guard_platform_account
 
 _VALID_ROLES: tuple[str | None, ...] = ("platform-admin", "support", None)
 
@@ -92,6 +95,20 @@ async def get_user(async_dal: Any, dal: Any, *, user_id: int) -> dict[str, Any]:
         raise not_found("User not found")
 
     first = memberships[0].community_members
+    reputation_svc._ensure_reputation_tables(dal)  # noqa: SLF001 - same-package binder
+    scores = dal.bundle_reputation_scores
+    uuids = [m.community_members.user_uuid for m in memberships if m.community_members.user_uuid]
+    score_rows = (
+        await async_dal.select_async(
+            dal(scores.user_uuid.belongs(uuids)),
+            scores.community_id,
+            scores.user_uuid,
+            scores.balance,
+        )
+        if uuids
+        else []
+    )
+    score_by_member = {(r.community_id, r.user_uuid): int(r.balance) for r in score_rows}
     admin_rows = await async_dal.select_async(
         dal(
             (dal.platform_admins.user_id == user_id) & (dal.platform_admins.is_active == True)  # noqa: E712
@@ -109,7 +126,10 @@ async def get_user(async_dal: Any, dal: Any, *, user_id: int) -> dict[str, Any]:
                 "community_id": row.community_members.community_id,
                 "community_name": row.communities.name if row.communities else None,
                 "role": row.community_members.role,
-                "reputation_score": row.community_members.reputation or 0,
+                "reputation_score": score_by_member.get(
+                    (row.community_members.community_id, row.community_members.user_uuid),
+                    reputation_svc.DEFAULT_SCORE,
+                ),
                 "joined_at": row.community_members.joined_at,
                 "last_activity": row.community_members.last_activity,
             }
@@ -154,6 +174,15 @@ async def deactivate_user(
     async_dal: Any, dal: Any, *, user_id: int, reason: str | None, actor_id: int
 ) -> None:
     """Deactivate a user across every community + revoke sessions + platform-admin role."""
+    await guard_platform_account(
+        async_dal,
+        dal,
+        user_id=user_id,
+        actor_user_id=actor_id,
+        category=AuditCategory.USER,
+        action=AuditAction.USER_UPDATED,
+        operation="deactivate",
+    )
     await async_dal.update_async(
         dal.community_members.user_id == str(user_id),
         is_active=False,
@@ -279,14 +308,6 @@ async def get_system_health(async_dal: Any, dal: Any) -> tuple[bool, bool]:
     except Exception:  # noqa: BLE001 - any DB failure means "unhealthy", not a 500
         database_ok = False
     return database_ok, database_ok
-
-
-async def get_module_registry(async_dal: Any, dal: Any) -> list[Any]:
-    """List every registered collector module."""
-    rows = await async_dal.select_async(
-        dal(dal.collector_modules.id > 0), orderby=dal.collector_modules.module_name
-    )
-    return list(rows)
 
 
 async def get_audit_log(

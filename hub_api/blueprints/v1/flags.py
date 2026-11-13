@@ -40,6 +40,7 @@ from typing import cast
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.entitlement import get_entitlement_client
+from flask_core.feature_flags import current_request_host
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from opentelemetry import metrics
 from quart import Blueprint, request
@@ -64,6 +65,7 @@ CLIENT_FLAG_KEYS: tuple[str, ...] = (
     "waddles.webui.discord_bot_install_link",
     "waddles.calendar.event_discord_sync",
     "waddles.secret-messaging",
+    "waddles.community.chat-realtime",
 )
 
 _meter = metrics.get_meter("waddles.hub_api.flags")
@@ -100,7 +102,7 @@ async def get_resolved_flags() -> ResolvedFlagsResponse | tuple[dict[str, object
         )
 
     client = get_entitlement_client()
-    request_host = request.host
+    request_host = current_request_host()
     resolved: dict[str, bool] = {}
     for flag_key in CLIENT_FLAG_KEYS:
         value = await client.evaluate(

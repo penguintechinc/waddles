@@ -16,7 +16,7 @@ Authz order (security.md): `tenant_middleware` first, then DB-backed community m
 (`authorize_community`, tenant-ownership re-checked), then the manifest-declared community scope.
 There is deliberately no flat JWT scope: a community admin never carries one at issuance (see
 `services/community_authz.py`). Every route is rate limited per user/community/bundle/tool and
-fails closed (503) when the limiter is absent.
+fails closed (503) when no limiter is configured on the app.
 """
 
 from __future__ import annotations

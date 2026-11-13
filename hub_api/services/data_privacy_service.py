@@ -48,11 +48,14 @@ from flask_core.db_errors import describe_db_error, log_db_error
 from opentelemetry import trace
 
 from services import ban_suppression, mem0_privacy, session_service
+from services.audit_events import AuditAction, AuditCategory
 from services.audit_service import report_write_failure
 from services.bundle_telemetry import get_meter, get_tracer
 from services.erasure_executor import ErasureSubject, collect_object_urls, run_registry_erasure
 from services.erasure_external import EnvExternalErasure, ExternalErasure
 from services.errors import bad_request, not_found, unauthorized
+from services.global_identity import is_global_admin
+from services.platform_account import guard_platform_account
 from services.suppression_keys import PlatformKekKeySource, SuppressionKeySource
 
 logger = logging.getLogger(__name__)
@@ -105,7 +108,6 @@ async def _export_account(async_dal: Any, dal: Any, user_id: int) -> list[dict[s
         dal.hub_users.username,
         dal.hub_users.email,
         dal.hub_users.avatar_url,
-        dal.hub_users.is_super_admin,
         dal.hub_users.is_vendor,
         dal.hub_users.email_verified,
         dal.hub_users.last_login,
@@ -120,7 +122,7 @@ async def _export_account(async_dal: Any, dal: Any, user_id: int) -> list[dict[s
             "username": r.username,
             "email": r.email,
             "avatar_url": r.avatar_url,
-            "is_super_admin": bool(r.is_super_admin),
+            "is_global_admin": await is_global_admin(async_dal, dal, user_id=int(r.id)),
             "is_vendor": bool(r.is_vendor),
             "email_verified": bool(r.email_verified),
             "last_login": _iso(r.last_login),
@@ -483,6 +485,7 @@ async def request_data_deletion(
     )
     if not rows:
         raise not_found("User not found")
+    await _refuse_platform_account_erasure(async_dal, dal, user_id=user_id, actor_user_id=user_id)
     email = rows[0].email
     password_hash = rows[0].password_hash
 
@@ -497,6 +500,21 @@ async def request_data_deletion(
 
     await anonymize_user_data(async_dal, dal, user_id=user_id, email=email)
     return False, True
+
+
+async def _refuse_platform_account_erasure(
+    async_dal: Any, dal: Any, *, user_id: int, actor_user_id: int | None
+) -> None:
+    """Refuse (typed 403, audited) erasing the non-person bootstrap platform account."""
+    await guard_platform_account(
+        async_dal,
+        dal,
+        user_id=user_id,
+        actor_user_id=actor_user_id,
+        category=AuditCategory.PRIVACY,
+        action=AuditAction.PRIVACY_ERASURE_REQUESTED,
+        operation="erase",
+    )
 
 
 @dataclass(slots=True, frozen=True)
@@ -672,6 +690,14 @@ def _delete_reputation_and_identity(
     ledger = dal.bundle_reputation_adjustments
     counts["bundle_reputation_scores"] = (
         (dal(scores.user_uuid.belongs(uuids)).delete() or 0) if uuids else 0
+    )
+    soft_bans = dal.bundle_reputation_soft_bans
+    counts["bundle_reputation_soft_bans"] = (
+        (dal(soft_bans.user_uuid.belongs(uuids)).delete() or 0) if uuids else 0
+    )
+    tenant_scores = dal.bundle_reputation_tenant_scores
+    counts["bundle_reputation_tenant_scores"] = (
+        (dal(tenant_scores.user_uuid.belongs(uuids)).delete() or 0) if uuids else 0
     )
     counts["bundle_reputation_adjustments"] = (
         (dal(ledger.target_user_uuid.belongs(uuids)).delete() or 0) if uuids else 0
@@ -851,8 +877,12 @@ async def anonymize_user_data(
     email: str | None,
     suppression_keys: SuppressionKeySource | None = None,
     external_stores: ExternalErasure | None = None,
+    actor_user_id: int | None = None,
 ) -> None:
     """Delete/anonymize every PII-bearing row for `user_id`, atomically, and record the outcome.
+
+    Refuses the non-person bootstrap platform account (typed 403, audited) before touching
+    anything -- the backstop behind the callers' own earlier refusals.
 
     The shared erasure core: `request_data_deletion()` (self-service, after
     its password confirmation) and the tenant-admin DSAR console
@@ -874,6 +904,9 @@ async def anonymize_user_data(
     re-raised (a failure to record the failure never masks it). Consent
     and audit logs are retained (`ERASURE_RETAINED_TABLES`).
     """
+    await _refuse_platform_account_erasure(
+        async_dal, dal, user_id=user_id, actor_user_id=actor_user_id
+    )
     now = datetime.now(UTC)
     started = time.perf_counter()
     loop = asyncio.get_running_loop()

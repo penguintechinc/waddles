@@ -1,8 +1,7 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { io } from 'socket.io-client';
 import { interactionApi } from '../../services/api';
-import { useAuth } from '../../contexts/AuthContext';
+import { useSocket } from '../../contexts/SocketContext';
 import ChannelSidebar from '../../components/interaction/ChannelSidebar';
 import ChatView from '../../components/interaction/ChatView';
 import ForumView from '../../components/interaction/ForumView';
@@ -12,41 +11,14 @@ import { ArrowPathIcon, ChatBubbleLeftRightIcon } from '@heroicons/react/24/outl
 function CommunityInteraction() {
   const { communityId, channelId } = useParams();
   const navigate = useNavigate();
-  const { user } = useAuth();
   const [channels, setChannels] = useState([]);
   const [canCreateChannel, setCanCreateChannel] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  // SECURITY (security.md C4): the session JWT lives only in the HttpOnly
-  // `wb_session` cookie — this page can't read it into an `auth: {token}`
-  // handshake payload, so the socket authenticates via `withCredentials`
-  // (the cookie) instead. `user` (from AuthContext's own `/me` check) is
-  // the reactive signal for "should a socket connection exist at all" now,
-  // replacing the old localStorage-token tracking; a token refresh no
-  // longer needs to trigger a manual reconnect -- the browser always sends
-  // whatever the current cookie value is on the next connection attempt.
-  const socket = useMemo(() => {
-    return io(import.meta.env.VITE_API_URL || window.location.origin, {
-      withCredentials: true,
-      transports: ['websocket', 'polling'],
-      autoConnect: false,
-    });
-  }, []); // socket instance created once — connect/disconnect happens via useEffect below
-
-  useEffect(() => {
-    if (!user) {
-      socket.disconnect();
-      return;
-    }
-    if (!socket.connected) {
-      socket.connect();
-    }
-  }, [user, socket]);
-
-  useEffect(() => {
-    return () => { socket.disconnect(); };
-  }, [socket]);
+  // Single shared socket from SocketProvider (cookie-authenticated, flag-gated,
+  // bounded reconnects); `degraded` means live updates are unavailable.
+  const { socket, degraded } = useSocket();
 
   // Load channels
   async function loadChannels() {
@@ -122,7 +94,7 @@ function CommunityInteraction() {
 
     switch (activeChannel.channelType) {
       case 'chat':
-        return <ChatView channel={{ ...activeChannel, communityId }} socket={socket} />;
+        return <ChatView channel={{ ...activeChannel, communityId }} socket={socket} degraded={degraded} />;
       case 'forum':
         return <ForumView channel={{ ...activeChannel, communityId }} />;
       case 'voice':
