@@ -2816,6 +2816,8 @@ serviceJwt:
         # rejects the scope and handle mentions are `unavailable` (fail-closed);
         # the actor and <@id> mentions never call hub-api.
         - "identity:handle:resolve"
+        # KeyService.GetStreamDek (#442) -- per-tenant stream identity-field DEK (decrypt side).
+        - "key:stream-dek:read"
         # feature/egress-proxy-service -- required to call core/egress_proxy
         # for any bundle net.http/CONNECT egress.
         - "egress:connect"
@@ -2877,6 +2879,10 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "connections:resolve"
+        # KeyService.GetStreamDek (#442) -- per-tenant stream identity-field DEK (encrypt side),
+        # sealed to a per-request X25519 key. Only svc-ingest + svc-process hold this scope;
+        # hub-api additionally allow-lists both by SPIFFE service name.
+        - "key:stream-dek:read"
         # feature/edge-reshape-chunk2-conn-store (Task 8) -- unbound binding discovery
         # (GET /api/v1/internal/provider-connections) for the twitch OAuth kind. NOT the
         # `connections:resolve:static` scope: svc-ingest never resolves Lambda/GCP/HTTP secrets.

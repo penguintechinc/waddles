@@ -57,6 +57,7 @@ tables:
   - user_active_context
   - discord_role_mirror_mappings
   - discord_role_mirror_grants
+  - keystore.stream_dek_issuances
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -991,4 +992,31 @@ grants:
     privileges: []
   - role: migration_runner
     table: discord_role_mirror_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # 0100_stream_dek_issuances: append-only GetStreamDek audit trail. hub-api reads + appends only;
+  # no UPDATE/DELETE so the application can never rewrite an issuance row.
+  - role: hub_api
+    table: keystore.stream_dek_issuances
+    privileges: [SELECT, INSERT]
+  - role: waddles_publisher
+    table: keystore.stream_dek_issuances
+    privileges: []
+  - role: svc_ingest
+    table: keystore.stream_dek_issuances
+    privileges: []
+  - role: svc_process
+    table: keystore.stream_dek_issuances
+    privileges: []
+  - role: svc_action
+    table: keystore.stream_dek_issuances
+    privileges: []
+  - role: svc_streaming
+    table: keystore.stream_dek_issuances
+    privileges: []
+  - role: webui
+    table: keystore.stream_dek_issuances
+    privileges: []
+  - role: migration_runner
+    table: keystore.stream_dek_issuances
     privileges: [SELECT, INSERT, UPDATE, DELETE]
