@@ -24,7 +24,7 @@ requires_docker = pytest.mark.skipif(
 )
 
 REVISION = "0104_role_sync_priv_harden"
-PREVIOUS_REVISION = "0099_discord_role_mirror"
+PREVIOUS_REVISION = "0103_conn_ownership_verified"
 _VERSIONS = Path(__file__).resolve().parent.parent / "versions"
 
 

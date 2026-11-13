@@ -33,7 +33,7 @@ Three changes, all on the role-sync tables 0034/0036 created:
 others must rechain `down_revision` so heads == 1.
 
 Revision ID: 0104_role_sync_priv_harden
-Revises: 0099_discord_role_mirror
+Revises: 0103_conn_ownership_verified
 Create Date: 2026-11-12
 """
 
@@ -47,7 +47,7 @@ from pathlib import Path
 from alembic import op
 
 revision = "0104_role_sync_priv_harden"
-down_revision = "0099_discord_role_mirror"
+down_revision = "0103_conn_ownership_verified"
 branch_labels = None
 depends_on = None
 
