@@ -4736,7 +4736,11 @@ mod tests {
             BundleConfigCache, CacheConfig, ConfigKey, StaticConfigSource, StaticLiveGate,
         };
         let src = Arc::new(StaticConfigSource::new());
-        src.set(ConfigKey::new(10, 7, "waddles.bot.commands.default"), 3, r#"{"x":1}"#);
+        src.set(
+            ConfigKey::new(10, 7, "waddles.bot.commands.default"),
+            3,
+            r#"{"x":1}"#,
+        );
         for (live, expect) in [(true, true), (false, false)] {
             let cache = Arc::new(BundleConfigCache::new(
                 Arc::clone(&src) as Arc<dyn hub_client::bundle_config::ConfigSource>,
@@ -4744,7 +4748,8 @@ mod tests {
                 CacheConfig::default(),
             ));
             cache.set_gate(Arc::new(StaticLiveGate(live)));
-            let h = caps().with_verified_scope(Some((10, 7)))
+            let h = caps()
+                .with_verified_scope(Some((10, 7)))
                 .with_bundle_config(Some(Arc::clone(&cache)));
             let mut ctx = h.handle_context().expect("context");
             h.attach_config_json(&mut ctx).await;

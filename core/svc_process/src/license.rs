@@ -541,7 +541,8 @@ impl hub_client::bundle_config::LiveConfigGate for LiveBundleConfigGate {
         Box::pin(async move {
             match &self.0 {
                 Some(c) if !c.bypass_active() => {
-                    !c.flag_enabled(hub_client::bundle_config::DISABLE_FLAG).await
+                    !c.flag_enabled(hub_client::bundle_config::DISABLE_FLAG)
+                        .await
                 }
                 _ => true,
             }

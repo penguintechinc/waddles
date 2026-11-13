@@ -67,6 +67,8 @@ Guest op strings are folded through an allow-list (`KNOWN_OPS`, else `other`); t
 | `waddles_spine_dlq_total` | counter | `stage, reason` | dead-letter writes by the record's `error.kind` |
 | `waddles_tenant_boundary_violations_total` | counter | `stage, reason` | §5.11 hop-verification failures |
 | `waddles_identity_decrypt_failures_total` | counter | `stage, reason` | inbound identity-field decrypt failures (`dek_unavailable`, `dek_unconfigured`, `aead`, `bad_envelope`, `not_an_envelope`); the event is dead-lettered (`IDENTITY_DECRYPT_FAILED`), never dropped |
+| `waddles_process_tokenize_memo_total` | counter | `stage, result` | **process only** — per-message PII-tokenization memo lookups (`core/svc_process/src/tokenize_memo.rs`). `result`: `miss` (this consumer ran the tokenization and the hub-api mint), `hit` (reused a completed entry), `inflight_wait` (joined another consumer's in-flight tokenization), `bypass` (memo skipped, tokenized directly). Healthy: `miss` ≈ distinct messages, `hit + inflight_wait` ≈ messages × (consuming apps − 1) |
+| `waddles_process_tokenize_mint_calls_total` | counter | `stage, outcome` | **process only** — hub-api `MintEphemeralPseudonyms` calls issued by the tokenization pass; `outcome`: `ok`, `error`. Mint calls per message = this ÷ `waddles_process_tokenize_memo_total{result="miss"}` (must be ≤ 1) |
 | `waddles_consumer_skipped_total` | counter | `stage, app_id, reason` | read + acked without an executor call (e.g. `route_denied`) |
 | `waddles_stream_trimmed_total` | counter | `stage` | `XADD` observed the stream at its approximate `MAXLEN` |
 | `waddles_stream_claimed_total` | counter | `stage, app_id` | `XAUTOCLAIM` recoveries |
