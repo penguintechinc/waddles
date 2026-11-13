@@ -1366,10 +1366,10 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
- "hkdf",
+ "hkdf 0.12.4",
  "prost",
  "service_auth",
- "sha2",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
  "tokio",
  "tonic",
