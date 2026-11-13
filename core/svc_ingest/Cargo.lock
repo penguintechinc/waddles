@@ -340,6 +340,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backon"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
+dependencies = [
+ "fastrand",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -481,6 +490,7 @@ dependencies = [
 name = "circuit-breaker"
 version = "0.1.0"
 dependencies = [
+ "tokio",
  "tracing",
 ]
 
@@ -2592,11 +2602,14 @@ version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2acbc41a996f7652b2ddd9dfd98cc4ff602cfd742ae35382f07f608405ab50ed"
 dependencies = [
+ "arc-swap",
  "arcstr",
  "async-lock",
+ "backon",
  "bytes",
  "cfg-if",
  "combine",
+ "futures-channel",
  "futures-util",
  "itoa",
  "percent-encoding",

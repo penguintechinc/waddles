@@ -819,7 +819,7 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `not_implemented` rather than this loop failing to start, the same
     /// graceful-degradation posture `core/svc_action::capabilities::
     /// StageCapabilities::with_kv`'s doc describes.
-    pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    pub kv_conn: Option<redis::aio::ConnectionManager>,
     /// The manifest-declared-capability snapshot
     /// `bundle_host_kv::authorize::authorize_kv` checks before granting
     /// `kv` (coordinator fix on PR #425: "undeclared means denied").
@@ -1090,8 +1090,8 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
     verified_scope: Option<(i32, i32)>,
     trace: Option<TraceContext>,
     invocation: Option<Arc<crate::identity::InvocationIdentity>>,
-) -> StageCapabilities<redis::aio::MultiplexedConnection> {
-    let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+) -> StageCapabilities<redis::aio::ConnectionManager> {
+    let caps = StageCapabilities::<redis::aio::ConnectionManager>::new(
         tenant,
         community,
         deps.app_id.clone(),
@@ -1781,8 +1781,23 @@ pub async fn run(
     deps: ProcessDeps<SpineClient>,
     shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), SpineError> {
-    let app_id = deps.app_id.clone();
     let dlq = SpineClient::connect(cfg.clone(), deps.metrics.clone()).await?;
+    run_with_client(cfg, grants, deps, dlq, shutdown).await
+}
+
+/// Same as [`run`] but reuses an already-connected, process-shared `dlq`
+/// [`SpineClient`] (cheap clone of one multiplexed connection) instead of
+/// opening and probing a fresh TLS connection per consumer -- the
+/// connection-storm fix (alpha incident 2026-11). Only the blocking
+/// [`GroupReader`] socket stays per-consumer (spec Sec5.7 rule 2).
+pub async fn run_with_client(
+    cfg: SpineConfig,
+    grants: Vec<Grant>,
+    deps: ProcessDeps<SpineClient>,
+    dlq: SpineClient,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(), SpineError> {
+    let app_id = deps.app_id.clone();
     let streams: Vec<String> = grants.iter().map(|g| g.stream.clone()).collect();
     let sampler_client = dlq.clone();
     let reader = GroupReader::connect(
@@ -1951,7 +1966,7 @@ pub(crate) async fn ensure_consumer_group(
     group: &str,
 ) -> Result<bool, SpineError> {
     let client = build_raw_client(cfg)?;
-    let mut conn = client.get_multiplexed_async_connection().await?;
+    let mut conn = client.get_connection_manager().await?;
     let result: Result<(), redis::RedisError> = redis::cmd("XGROUP")
         .arg("CREATE")
         .arg(stream)
@@ -5068,10 +5083,7 @@ mod tests {
 
             // Three entries; read two without acking -> pending 2, lag 1.
             let raw = redis::Client::open(cfg.valkey_url.as_str()).expect("redis client");
-            let mut conn = raw
-                .get_multiplexed_async_connection()
-                .await
-                .expect("raw connection");
+            let mut conn = raw.get_connection_manager().await.expect("raw connection");
             for _ in 0..3 {
                 let _: String = redis::cmd("XADD")
                     .arg(&stream)

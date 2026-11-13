@@ -346,7 +346,7 @@ async fn boot_wiring_publishes_scoped_events_and_refuses_the_mismatched_tenant()
     );
     let lease_conn = redis::Client::open(valkey.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let settings = RuntimeSettings {
@@ -435,7 +435,7 @@ async fn boot_wiring_publishes_scoped_events_and_refuses_the_mismatched_tenant()
     assert!(events >= 2.0, "published events: {events}");
     let mut kc = redis::Client::open(valkey.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let keys: Vec<String> = redis::cmd("KEYS")

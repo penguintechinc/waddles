@@ -502,10 +502,10 @@ impl Ctx {
         }
     }
 
-    async fn kc(&self) -> redis::aio::MultiplexedConnection {
+    async fn kc(&self) -> redis::aio::ConnectionManager {
         redis::Client::open(self.valkey.as_str())
             .unwrap()
-            .get_multiplexed_async_connection()
+            .get_connection_manager()
             .await
             .unwrap()
     }

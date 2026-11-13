@@ -91,7 +91,7 @@ async fn bounded<T>(
 
 /// Valkey-backed connector lease identified by a random per-boot replica id.
 pub struct ConnectorValkeyLease {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
     replica_id: String,
     renew: redis::Script,
     release: redis::Script,
@@ -100,13 +100,13 @@ pub struct ConnectorValkeyLease {
 impl ConnectorValkeyLease {
     /// Wraps a connected Valkey connection with a fresh random replica UUID.
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self::with_replica_id(conn, uuid::Uuid::new_v4().to_string())
     }
 
     /// As [`Self::new`] with an explicit replica id (tests simulating peers).
     #[must_use]
-    pub fn with_replica_id(conn: redis::aio::MultiplexedConnection, replica_id: String) -> Self {
+    pub fn with_replica_id(conn: redis::aio::ConnectionManager, replica_id: String) -> Self {
         Self {
             conn,
             replica_id,

@@ -238,13 +238,13 @@ impl SpectrumStore for MemorySpectrumStore {
 /// time, oldest evicted by rank), a `primed` flag and the snapshot string, all
 /// under one base key with a refreshed TTL.
 pub struct RedisSpectrumStore {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
 }
 
 impl RedisSpectrumStore {
     /// Wraps a connected Valkey connection.
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self { conn }
     }
 }

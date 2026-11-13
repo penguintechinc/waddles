@@ -851,7 +851,7 @@ fn kv_degraded(reason: &str, detail: &str) {
 /// regardless.
 async fn connect_kv(
     spine_cfg: &penguin_spine::SpineConfig,
-) -> Option<redis::aio::MultiplexedConnection> {
+) -> Option<redis::aio::ConnectionManager> {
     // Dedicated kv instance, never the durable spine one -- see
     // `kv_instance_config`. Unavailability is LOUD (`kv_degraded`) and
     // fail-closed (kv `None` => not_implemented), never a fallback.
@@ -867,7 +867,7 @@ async fn connect_kv(
         );
         return None;
     };
-    match client.get_multiplexed_async_connection().await {
+    match client.get_connection_manager().await {
         Ok(mut conn) => {
             let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut conn).await;
             bundle_host_kv::policy::log_and_record(&policy_check);
@@ -2394,7 +2394,7 @@ async fn start_bundle_admin_consumer(deps: &Arc<source_supervisor::SupervisorDep
             return;
         }
     };
-    let conn = match client.get_multiplexed_async_connection().await {
+    let conn = match client.get_connection_manager().await {
         Ok(c) => c,
         Err(err) => {
             tracing::error!(code = ?err.kind(), "bundle-admin consumer: valkey connect failed; not started");
@@ -2501,6 +2501,8 @@ async fn build_source_supervisor_deps(
         // (`SupervisorDeps::breaker`'s doc) -- built here (no I/O, so no
         // reason to defer it like `kv_conn`/`db_wiring` above).
         breaker: Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics)),
+        shared_spine: Arc::new(circuit_breaker::valkey_resilience::SharedConn::new()),
+        log_throttle: Arc::new(circuit_breaker::valkey_resilience::LogThrottle::default()),
         reputation_wiring: None,
         economy_wiring: None,
         platform_table_wiring: None,

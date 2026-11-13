@@ -322,7 +322,7 @@ async fn a_youtube_binding_resolves_its_tenant_and_publishes_while_a_mismatch_is
     );
     let lease_conn = redis::Client::open(valkey.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let settings = RuntimeSettings {
@@ -406,7 +406,7 @@ async fn a_youtube_binding_resolves_its_tenant_and_publishes_while_a_mismatch_is
     eventually("youtube messages published", || published(&registry) >= 2.0).await;
     let mut kc = redis::Client::open(valkey.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let keys: Vec<String> = redis::cmd("KEYS")

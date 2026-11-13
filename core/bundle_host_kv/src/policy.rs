@@ -37,7 +37,9 @@ pub enum PolicyCheck {
 /// Valkey connection (`core/svc_action`/`core/svc_process`'s
 /// `connect_kv`/`build_stage_capabilities` call site) -- never on the
 /// per-op hot path.
-pub async fn check_maxmemory_policy(conn: &mut redis::aio::MultiplexedConnection) -> PolicyCheck {
+pub async fn check_maxmemory_policy<C: redis::aio::ConnectionLike + Send>(
+    conn: &mut C,
+) -> PolicyCheck {
     let result: Result<Vec<String>, redis::RedisError> = redis::cmd("CONFIG")
         .arg("GET")
         .arg("maxmemory-policy")

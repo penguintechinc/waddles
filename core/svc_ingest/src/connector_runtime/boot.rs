@@ -372,7 +372,7 @@ const GATEWAY_BOT_MAX_BYTES: usize = 64 * 1024;
 /// `session_start_limit`.
 pub struct IdentifyBudgetBackend {
     /// Connected Valkey shared by every replica (the fleet-wide budget).
-    pub conn: redis::aio::MultiplexedConnection,
+    pub conn: redis::aio::ConnectionManager,
     /// Discord REST base for `GET /gateway/bot` (production:
     /// [`crate::connector::identify_budget::DISCORD_API_BASE`]).
     pub api_base: String,
@@ -488,7 +488,7 @@ where
     /// Identity-encryption counter vec.
     pub identity_metrics: prometheus::IntCounterVec,
     /// Connected Valkey for the per-connection lease.
-    pub lease_conn: redis::aio::MultiplexedConnection,
+    pub lease_conn: redis::aio::ConnectionManager,
     /// The shared executor link + active table.
     pub bridge: HostBridge,
     /// Webhook ingress + env when any webhook platform is listed.
@@ -937,12 +937,9 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
     .ok_or_else(|| {
         anyhow::anyhow!("connector runtime: spine did not connect within the grace period")
     })?;
-    let lease_conn = redis_client
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!("connector runtime: valkey connect failed ({:?})", e.kind())
-        })?;
+    let lease_conn = redis_client.get_connection_manager().await.map_err(|e| {
+        anyhow::anyhow!("connector runtime: valkey connect failed ({:?})", e.kind())
+    })?;
     let budget_conn = lease_conn.clone();
     // Same gate as the interaction tap: routing exists exactly when Discord is ON, and a
     // missing dependency is a boot error here (never a ContextSink-less Discord runtime).
@@ -1087,12 +1084,9 @@ pub async fn start_connector_with<R: ConnectionResolve + 'static>(
     crate::interaction_tap::register_metrics(&registry)
         .map_err(|_| anyhow::anyhow!("interaction intake metrics could not be registered"))?;
     state.interactions = Some(crate::interaction_store::InteractionStore::new(
-        redis_client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("interaction store: valkey connect failed ({:?})", e.kind())
-            })?,
+        redis_client.get_connection_manager().await.map_err(|e| {
+            anyhow::anyhow!("interaction store: valkey connect failed ({:?})", e.kind())
+        })?,
     ));
     let (tls, addr) = crate::outbound_boot::host_api_from_lookup(cli, deps.lookup)?;
     let (bridge, _) = start_bridge_with(
@@ -1524,12 +1518,12 @@ mod tests {
         }
     }
 
-    async fn lease_conn() -> redis::aio::MultiplexedConnection {
+    async fn lease_conn() -> redis::aio::ConnectionManager {
         let url = std::env::var("VALKEY_URL")
             .expect("VALKEY_URL must be set: this test needs a REAL Valkey (no silent skip)");
         redis::Client::open(url)
             .unwrap()
-            .get_multiplexed_async_connection()
+            .get_connection_manager()
             .await
             .unwrap()
     }

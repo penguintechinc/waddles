@@ -343,7 +343,7 @@ async fn flag_on_runs_spectrum_through_the_production_boot_and_refuses_a_mismatc
     );
     let lease_conn = redis::Client::open(valkey.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     // The production path: selector (flag ON) -> settings (digest from env).
@@ -444,7 +444,7 @@ async fn flag_on_runs_spectrum_through_the_production_boot_and_refuses_a_mismatc
     );
     let mut kc = redis::Client::open(valkey.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let keys: Vec<String> = redis::cmd("KEYS")

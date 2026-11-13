@@ -337,7 +337,7 @@ async fn a_missing_or_unreadable_drain_refuses_without_queueing() {
         refused("relay_unavailable")
     );
     // No outbound signing key -> refused, never queued unsigned.
-    let unsigned = StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
+    let unsigned = StageCapabilities::<_, redis::aio::ConnectionManager>::new(
         FakeRelayQueue::with_live_drain(),
         super::super::tests::test_egress(),
         Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),

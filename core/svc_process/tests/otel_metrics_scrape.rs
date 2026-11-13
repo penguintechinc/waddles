@@ -130,7 +130,7 @@ async fn stage_metrics_and_gate_counters_surface_on_the_prometheus_scrape() {
 
     // And the real capability gate, through the real host-call handler: one
     // authorized call (clock), one denied (http to an ungranted host).
-    let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+    let caps = StageCapabilities::<redis::aio::ConnectionManager>::new(
         "acme".to_string(),
         Some("main".to_string()),
         "waddles.scrape.test".to_string(),

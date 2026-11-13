@@ -114,7 +114,7 @@ fn caps_d(
         .unwrap(),
         bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
     ));
-    let c = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+    let c = StageCapabilities::<redis::aio::ConnectionManager>::new(
         "acme".into(),
         Some("main".into()),
         app.to_string(),
@@ -400,7 +400,7 @@ async fn image_and_video_job_end_to_end_on_valkey_and_seaweedfs_with_bundle_isol
     .await;
     let conn = redis::Client::open(format!("redis://{}:{}/", valkey.host(), valkey.port()))
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let name = seaweed_name();

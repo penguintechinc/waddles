@@ -167,7 +167,7 @@ tokio-tungstenite = { version = "=0.30.0", default-features = false, features = 
 # Twitch outbound relay's raw BRPOP list" note). Same exact version
 # `penguin-spine`/`core/svc_action` already pin, so this never introduces a
 # second `redis` crate instance into the dependency graph.
-redis = { version = "=1.7.0", default-features = false, features = [
+redis = { version = "=1.7.0", default-features = false, features = ["connection-manager", 
     "tokio-comp",
     "tls-rustls",
     "tokio-rustls-comp",

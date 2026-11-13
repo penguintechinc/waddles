@@ -546,7 +546,7 @@ fn kv_degraded(reason: &str, detail: &str) {
 /// username/password/TLS/CA-file settings -- the same client-construction
 /// logic as `crate::usage::connect` (duplicated rather than shared: that
 /// function also opens the connection and returns
-/// `Result<MultiplexedConnection, UsageError>`, not the reusable
+/// `Result<ConnectionManager, UsageError>`, not the reusable
 /// `redis::Client` `grant_gate::build_production_gate`'s caller needs to
 /// hand to `run_grant_gate_refresh_loop`). `None` (logged) on a malformed
 /// `VALKEY_URL` or a TLS client-build failure.
@@ -780,7 +780,7 @@ async fn build_stage_capabilities(
             poll_interval,
         ),
     };
-    let caps = capabilities::StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
+    let caps = capabilities::StageCapabilities::<_, redis::aio::ConnectionManager>::new(
         relay_conn, egress, usage, gate,
     );
     let caps = match kv_conn {
@@ -977,8 +977,8 @@ async fn start_event_sync_consumer(
     spine_cfg: &penguin_spine::SpineConfig,
     caps: Arc<
         capabilities::StageCapabilities<
-            redis::aio::MultiplexedConnection,
-            redis::aio::MultiplexedConnection,
+            redis::aio::ConnectionManager,
+            redis::aio::ConnectionManager,
         >,
     >,
 ) {
@@ -1482,6 +1482,12 @@ fn try_start_changelog_consumer(
                                 breaker: Arc::new(circuit_breaker::CircuitBreaker::new(
                                     Arc::clone(&breaker_metrics),
                                 )),
+                                shared_spine: Arc::new(
+                                    circuit_breaker::valkey_resilience::SharedConn::new(),
+                                ),
+                                log_throttle: Arc::new(
+                                    circuit_breaker::valkey_resilience::LogThrottle::default(),
+                                ),
                             });
                             Some(Arc::new(dispatch_supervisor::SpineConsumerSupervisor {
                                 deps,

@@ -120,7 +120,7 @@ rustls-pki-types = "=1.15.1"
 # (`capabilities::INCR_WINDOW_SCRIPT`) -- already compiled in via
 # `bundle-host-kv`'s own redis dependency; declared here too so this crate
 # never relies on cargo feature unification for it.
-redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp", "script"] }
+redis = { version = "=1.7.0", default-features = false, features = ["connection-manager", "tokio-comp", "tls-rustls", "tokio-rustls-comp", "script"] }
 # Unguessable id for each queued Discord op's confirmation handshake
 # (`capabilities::handle_discord_queued_op`'s `op_id`). Already in this
 # crate's lockfile transitively at the same exact version.
