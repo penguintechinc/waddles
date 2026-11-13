@@ -11,15 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import socket
 import struct
 from typing import Final
 
-from penguin_utils.logging import get_logger
-
 from services.url_guard import is_private_host
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 RESULT_OK_RCON: Final = "ok_rcon"
 RESULT_OK_TCP: Final = "ok_tcp"

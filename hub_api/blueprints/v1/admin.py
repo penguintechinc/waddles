@@ -24,6 +24,7 @@ already taken by the Bot module port (M5, per this PR's task brief).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -40,6 +41,8 @@ from services.current_user import get_optional_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.pagination import parse_limit
+
+logger = logging.getLogger(__name__)
 
 admin_bp = Blueprint("v1_admin", __name__, url_prefix="/api/v1/admin")
 
@@ -671,6 +674,8 @@ async def put_reputation_soft_ban(
     try:
         expires = datetime.fromisoformat(data.expiresAt) if data.expiresAt else None
     except ValueError:
+        # The raw value is caller input and is deliberately not logged.
+        logger.info("reputation.soft_ban.invalid_expires_at community_id=%s", community_id)
         return _err(ApiError("Invalid expiresAt", 400, "BAD_REQUEST"))
     if expires is not None and expires.tzinfo is None:
         expires = expires.replace(tzinfo=UTC)

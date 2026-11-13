@@ -204,7 +204,11 @@ jobs:
             if grep -q -- '--hash=sha256' "$f"; then
               gated=$((gated + 1))
               echo "::group::[gated] $f"
-              PIP_ONLY_BINARY=:all: pip-audit -r "$f" --no-deps --progress-spinner off $IGNORES \
+              # --disable-pip: a fully hash-pinned lockfile already lists every package at its
+              # exact version, so pip-audit reads the pins directly instead of dry-run
+              # installing them. That install step failed on sdist-only pins (flask-principal
+              # 0.4.0 ships no wheel) and built nothing the audit needs.
+              pip-audit -r "$f" --no-deps --disable-pip --progress-spinner off $IGNORES \
                 || gated_bad=$((gated_bad + 1))
               echo "::endgroup::"
             else
@@ -258,8 +262,16 @@ jobs:
       - name: Set up Go (CodeQL Go extraction)
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: '1.26.10'
+          go-version: '1.26.11'
           cache: false
+
+      # Same runners ship no Node.js either; CodeQL's JavaScript/TypeScript extractor needs
+      # `node` on PATH ("Could not start Node.js. It is required for TypeScript extraction").
+      - name: Set up Node.js (CodeQL TypeScript extraction)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '26'
+          package-manager-cache: false
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@95e58e9a2cdfd71adc6e0353d5c52f41a045d225  # v4

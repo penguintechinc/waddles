@@ -85,6 +85,7 @@ impl ReputationStore for MemStore {
         _d: i32,
         _r: &'a str,
         _c: ReputationCaps,
+        _k: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<i64, ReputationError>> {
         Box::pin(async { Err(ReputationError::Backend("unused in this test".into())) })
     }
@@ -385,10 +386,13 @@ fn rep_row() -> ActiveBundleRow {
                     name: (*n).to_string(),
                     write: *w,
                     required_scope: s.map(str::to_string),
+                    host_op: None,
                 })
                 .collect(),
             requested: Vec::new(),
         },
+        egress: Vec::new(),
+        egress_rps: None,
     }
 }
 

@@ -22,6 +22,7 @@ nonexistent `id`).
 
 from __future__ import annotations
 
+import logging
 import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,6 +37,8 @@ from services.schema import (
     bind_erasure_reputation_tables,
     bind_reputation_policy_tables,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "REPUTATION_TIERS",
@@ -212,6 +215,9 @@ def _actor_type(actor: str | None) -> str:
     try:
         uuid_mod.UUID(actor)
     except ValueError:
+        # Stored actors are `system:*` or a UUID; anything else is legacy/corrupt data. The value
+        # itself is not logged (it may be a pre-tokenization handle).
+        logger.warning("reputation.actor_type.unrecognized_actor")
         return "unknown"
     return "admin"
 

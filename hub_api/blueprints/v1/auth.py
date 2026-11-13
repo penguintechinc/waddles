@@ -523,6 +523,7 @@ async def login(
             tenant_slug=data.tenantSlug or "default",
         )
     except auth_service.RequiresVerificationError:
+        logger.info("auth.login.requires_verification")
         return (
             VerificationRequiredResponse(
                 success=False,

@@ -169,6 +169,12 @@ def logged_py():
     except ValueError as exc:
         logger.warning("bad int: %s", exc)
         return None
+
+def mapped_py():
+    try:
+        return int("bad")
+    except ValueError as exc:
+        return _err(exc)
 """
     )
 
@@ -195,6 +201,9 @@ def logged_py():
     assert ("sample.rs", 6, "rust-silent-unwrap-or-default") in found
     assert ("sample.py", 5, "python-silent-except-return-default") in found
     assert ("sample.py", 5, "python-capability-silent-denial") in found
+
+    # True negative: an exception mapped into the returned value (`return _err(exc)`) is surfaced.
+    assert not any(f == "sample.py" and line == 18 for (f, line, _) in found), found
 
     # True negatives: mutex_poison_recovery, loud_panic, logged_closure, nosemgrep_annotated, mod tests, *_tests.rs, logged_py
     rust_lines = {line for (fname, line, _) in found if fname == "sample.rs"}

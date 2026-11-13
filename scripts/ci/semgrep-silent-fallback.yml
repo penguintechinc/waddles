@@ -87,6 +87,14 @@ rules:
               ...
               logger.$METHOD(...)
               return $DEFAULT
+      # A returned value built from the caught exception (`return _err(exc)`,
+      # `error_response(exc.message, ...)`) maps the error into a response the caller sees;
+      # that surfaces the failure, it does not swallow it.
+      - pattern-not: |
+          try:
+              ...
+          except $EXC as $E:
+              return <... $E ...>
     paths:
       exclude:
         - "**/tests/**"
