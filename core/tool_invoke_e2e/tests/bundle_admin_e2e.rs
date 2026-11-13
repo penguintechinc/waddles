@@ -15,6 +15,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -85,6 +86,7 @@ impl ReputationStore for MemStore {
         _d: i32,
         _r: &'a str,
         _c: ReputationCaps,
+        _k: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<i64, ReputationError>> {
         Box::pin(async { Err(ReputationError::Backend("unused in this test".into())) })
     }
@@ -273,6 +275,8 @@ fn egress() -> Arc<bundle_host_http::egress::EgressGuard> {
 }
 
 struct Harness {
+    /// Times the planner actually dispatched a request to the bundle (replay/refusal observability).
+    executions: AtomicUsize,
     rig: Rig,
     snapshot: ActiveVersionSnapshot,
     gate: Arc<CapabilityGate>,
@@ -293,6 +297,7 @@ impl AdminExecutor for E2eExecutor {
         actor: ActorContext,
     ) -> Result<Value, ToolRefusal> {
         let h = &self.0;
+        h.executions.fetch_add(1, Ordering::SeqCst);
         // Same names the event path keys kv on (recorded by the changelog consumer in prod).
         let (tenant, community) = svc_process::bundle_admin::display_scope(scope)?;
         let kv_caps = Arc::new(CapabilitySnapshot::new());
@@ -385,10 +390,13 @@ fn rep_row() -> ActiveBundleRow {
                     name: (*n).to_string(),
                     write: *w,
                     required_scope: s.map(str::to_string),
+                    host_op: None,
                 })
                 .collect(),
             requested: Vec::new(),
         },
+        egress: Vec::new(),
+        egress_rps: None,
     }
 }
 
@@ -409,6 +417,7 @@ async fn harness() -> Arc<Harness> {
     );
     let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
     Arc::new(Harness {
+        executions: AtomicUsize::new(0),
         rig,
         snapshot,
         gate: gate(&[alice, bob]),
@@ -555,10 +564,15 @@ async fn hub_api_signed_requests_reach_the_real_reputation_bundle_and_reply() {
     assert_eq!(entries[0]["user"], json!(alice.to_string()), "{reply}");
     assert_eq!(entries[0]["score"], 120, "{reply}");
 
-    // 2. A community admin overrides a score: lands in the store, replied ok.
+    // 2. A community admin's `override` passes the planner's scope check and reaches the real
+    //    bundle, but the HOST refuses it: absolute overrides are `admin_override` (class 3), which
+    //    the reputation SQL contract denies the bundle role, so they are hub-api-only
+    //    (`handle_reputation_v2`, docs/bundle-reputation-service.md). The refusal therefore comes
+    //    from the bundle (`tool_error: true`), and the store is never touched.
     let id = unique("ov");
     let args = json!({"user": bob.to_string(), "absolute_score": 77, "reason": "admin.adjust"})
         .to_string();
+    let before = h.executions.load(Ordering::SeqCst);
     let reply = roundtrip(
         &conn,
         &id,
@@ -567,11 +581,21 @@ async fn hub_api_signed_requests_reach_the_real_reputation_bundle_and_reply() {
     )
     .await
     .expect("override reply");
-    assert_eq!(reply["ok"], true, "{reply}");
-    assert_eq!(reply["result"]["score"], 77, "{reply}");
-    assert_eq!(h.store.overrides.lock().unwrap().as_slice(), &[(bob, 77)]);
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(reply["code"], "forbidden", "{reply}");
+    assert_eq!(
+        reply["tool_error"], true,
+        "the host-level refusal surfaces as a bundle tool_error: {reply}"
+    );
+    assert_eq!(h.executions.load(Ordering::SeqCst), before + 1);
+    assert!(
+        h.store.overrides.lock().unwrap().is_empty(),
+        "store untouched"
+    );
+    assert_eq!(h.store.scores.lock().unwrap()[&(COMMUNITY, bob)], 5);
 
-    // 3. A moderator's signed scope does NOT satisfy `community:admin`: refused before the store.
+    // 3. A moderator's signed scope does NOT satisfy `community:admin`: refused by the shared admin
+    //    planner BEFORE the bundle runs (no `tool_error`), store untouched.
     let id = unique("mod");
     let args = json!({"user": alice.to_string(), "absolute_score": -999}).to_string();
     let reply = roundtrip(
@@ -584,26 +608,32 @@ async fn hub_api_signed_requests_reach_the_real_reputation_bundle_and_reply() {
     .expect("refusal reply");
     assert_eq!(reply["ok"], false, "{reply}");
     assert_eq!(reply["code"], "forbidden", "{reply}");
-    assert_eq!(
-        h.store.overrides.lock().unwrap().len(),
-        1,
+    assert!(
+        reply.get("tool_error").is_none(),
+        "planner refusal, not a bundle error: {reply}"
+    );
+    assert!(
+        h.store.overrides.lock().unwrap().is_empty(),
         "store untouched"
     );
 
-    // 4. Replay: the same signed bytes (same request_id) never run twice.
+    // 4. Replay: the same signed bytes (same request_id) never run twice -- the second delivery
+    //    is answered `request_replayed` and the executor is not entered again.
     let id = unique("rp");
     let args = json!({"user": alice.to_string(), "absolute_score": 1}).to_string();
     let wire = signed(&id, "community:admin", "override", &args).to_wire();
+    let before = h.executions.load(Ordering::SeqCst);
     let first = roundtrip(&conn, &id, wire.clone(), 20)
         .await
         .expect("first");
-    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(first["code"], "forbidden", "{first}");
+    assert_eq!(h.executions.load(Ordering::SeqCst), before + 1);
     let second = roundtrip(&conn, &id, wire, 20).await.expect("replay reply");
     assert_eq!(second["code"], "request_replayed", "{second}");
     assert_eq!(
-        h.store.overrides.lock().unwrap().len(),
-        2,
-        "exactly one more override"
+        h.executions.load(Ordering::SeqCst),
+        before + 1,
+        "exactly one execution"
     );
 
     // 5. A forged MAC is dropped: no reply (untrusted request_id) and nothing executed.
@@ -615,7 +645,7 @@ async fn hub_api_signed_requests_reach_the_real_reputation_bundle_and_reply() {
         roundtrip(&conn, &id, v.to_string(), 3).await.is_none(),
         "forged request must get no reply"
     );
-    assert_eq!(h.store.overrides.lock().unwrap().len(), 2);
+    assert!(h.store.overrides.lock().unwrap().is_empty());
 
     // 6. An expired request is refused-by-drop as well.
     let id = unique("old");

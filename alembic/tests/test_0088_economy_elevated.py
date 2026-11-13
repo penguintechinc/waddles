@@ -21,7 +21,7 @@ import psycopg2.errors
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from pg_docker import DOCKER_AVAILABLE, PgTestDatabase, migrated_postgres
+from pg_docker import DOCKER_AVAILABLE, PgTestDatabase, alembic_cli, migrated_postgres
 
 requires_docker = pytest.mark.skipif(
     not DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
@@ -149,3 +149,30 @@ class TestElevatedSchema:
         with _cursor(pg_db) as cur:
             cur.execute(sql)
             cur.execute(sql)
+
+
+@requires_docker
+def test_downgrade_revokes_the_runtime_roles_grants_so_the_role_can_be_dropped() -> None:
+    """regression: the 0088 downgrade leaves no privileges behind for DROP ROLE to trip on.
+
+    It used to drop `grant_id` but keep the role's SELECT on the other `community_permission_grants`
+    columns, so the later 0051 downgrade's DROP ROLE failed with DependentObjectsStillExist. Own
+    container: the module one must stay at head.
+    """
+    with migrated_postgres("0088-economy-elevated-down") as db:
+        with _cursor(db) as cur:
+            cur.execute(
+                "SELECT count(*) FROM information_schema.column_privileges "
+                "WHERE grantee = 'waddles_economy_runtime' "
+                "AND table_name = 'community_permission_grants'"
+            )
+            assert cur.fetchone()[0] > 0  # the upgrade granted something to revoke (denominator)
+        alembic_cli("downgrade", "0087_bundle_data_v2", dsn=db.dsn)
+        with _cursor(db) as cur:
+            cur.execute(
+                "SELECT count(*) FROM information_schema.column_privileges "
+                "WHERE grantee = 'waddles_economy_runtime' "
+                "AND table_name = 'community_permission_grants'"
+            )
+            assert cur.fetchone()[0] == 0
+        alembic_cli("upgrade", "head", dsn=db.dsn)  # re-applies cleanly

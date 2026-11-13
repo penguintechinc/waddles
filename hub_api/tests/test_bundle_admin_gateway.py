@@ -37,6 +37,7 @@ _SCORE = {
 _SVC_MANIFEST: dict[str, Any] = {
     "schema_version": 2,
     "app_id": SVC_APP,
+    "author": "github:penguintechinc",
     "name": "Rep",
     "version": "1.0.0",
     "feature": "waddles.core.service",
@@ -93,6 +94,7 @@ _SVC_MANIFEST: dict[str, Any] = {
 _APP_MANIFEST: dict[str, Any] = {
     "schema_version": 2,
     "app_id": APP,
+    "author": "github:penguintechinc",
     "name": "Demo",
     "version": "1.0.0",
     "feature": "waddles.socials.demo",
@@ -400,6 +402,8 @@ def test_real_reputation_manifest_declares_admin_tools() -> None:
     assert {(t.name, t.kind, t.scope) for t in m.admin_tools} == {
         ("leaderboard", "read", "community:moderate"),
         ("override", "action", "community:admin"),
+        ("at_risk", "read", "community:admin"),
+        ("set_policy", "action", "community:admin"),
     }
     assert hub["admin_tools"] == raw["admin_tools"]
 
