@@ -154,6 +154,12 @@ pipeline:
   hubApi:
     aiEnabled: false
     replicas: 1
+    # Explicit reserved catch-all tenant slug (security.md Reserved Tenants): mirrors
+    # pipeline.defaultTenantId above. Alpha's tenants table holds only `default` and `system`;
+    # there is no reserved `global` tenant. hub-api logs an ERROR and returns a structured 5xx
+    # if this slug has no active tenants row.
+    extraEnv:
+      DEFAULT_TENANT_SLUG: "default"
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }

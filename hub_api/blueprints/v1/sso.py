@@ -42,6 +42,7 @@ from datetime import datetime
 from typing import cast
 
 from flask_core.api_utils import error_response
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from flask_core.authz import require_scope
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from pydantic import ConfigDict
@@ -421,7 +422,7 @@ async def _connection_dto(
 @validate_response(SsoOptionsResponse)
 async def sso_options() -> SsoOptionsResponse | tuple[dict[str, object], int]:
     """`GET /options?tenant=<slug>` -- enabled, currently-entitled SSO buttons for a tenant."""
-    slug = (request.args.get("tenant") or "default").strip()[:100]
+    slug = (request.args.get("tenant") or DEFAULT_TENANT_SLUG).strip()[:100]
     try:
         options = await list_login_options(_ctx(), slug)
     except SsoError as exc:

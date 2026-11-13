@@ -35,6 +35,7 @@ import os
 from dataclasses import dataclass
 from urllib.parse import quote_plus
 
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from flask_core.secrets import require_secret_key
 
 #: DB_TYPE values this config understands (backend-database.md Database
@@ -337,7 +338,7 @@ class HubAPIConfig:
             db_retry_delay=int(os.getenv("DB_RETRY_DELAY", "5")),
             secret_key=require_secret_key(),
             jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256"),
-            default_tenant_slug=os.getenv("DEFAULT_TENANT_SLUG", "default"),
+            default_tenant_slug=os.getenv("DEFAULT_TENANT_SLUG", DEFAULT_TENANT_SLUG),
             posthog_api_key=os.getenv("POSTHOG_API_KEY") or os.getenv("POSTHOG_KEY"),
             posthog_host=os.getenv("POSTHOG_HOST", "https://license.penguintech.io"),
             license_server_url=os.getenv("LICENSE_SERVER_URL", "https://license.penguintech.io"),

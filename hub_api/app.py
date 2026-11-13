@@ -53,6 +53,7 @@ from services.bundle_active_set_watermark_job import BundleActiveSetWatermarkJob
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
 from services.community_common import api_error
+from services.default_tenant import verify_default_tenant_at_startup
 from services.envelope.runtime import build_envelope_runtime
 from services.identity_resolution_service import run_uuid_availability_monitor
 from services.object_storage_kms import get_object_storage_sse
@@ -353,6 +354,12 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         _bind_reference_tables(dal)
         app.config["async_dal"] = async_dal
         app.config["dal"] = dal
+        # Fail loud on a bad DEFAULT_TENANT_SLUG: logs an ERROR (slug + the reserved tenants that
+        # exist) and records the outcome; never crashes boot (the schema may still be bootstrapping
+        # -- first use of the default tenant re-checks and returns a structured 5xx).
+        app.config["DEFAULT_TENANT_STATUS"] = await verify_default_tenant_at_startup(
+            async_dal, dal, cfg.default_tenant_slug
+        )
         # penguin-dal (R52): a SEPARATE AsyncDB/pool against the same
         # DATABASE_URL, reflecting the ingest_sources/workstreams/
         # workstream_usage_hourly tables migrations 0020-0021 create
