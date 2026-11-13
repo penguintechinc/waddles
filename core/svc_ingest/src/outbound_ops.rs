@@ -55,8 +55,10 @@ use crate::connector::sender_exec::{
     DutyHook, ExecError, ExecRequest, FlagGate, SenderExecutor, SlotSource, TemplateBuilder,
 };
 use crate::discord_rest::{DiscordRestClient, DiscordRestError};
+use crate::egress::DetokenizedAction;
 use crate::outbound::{IrcOutbound, IrcSendError};
 use crate::outbound_creds::CredError;
+use egress_detokenizer::DetokenizedText;
 
 /// Highest queue-envelope schema version this consumer understands.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -72,6 +74,9 @@ pub enum OutboundAction {
         /// Host-pinned destination stamped by the producer; `channel` must
         /// equal it ([`crate::outbound_pin`]) or the send is refused.
         origin_channel: Option<String>,
+        /// Numeric tenant id from the MAC-bound stamp (`None` = absent); the
+        /// egress detokenizer resolves the text's `{user:<token>}` under it.
+        tenant_id: Option<i64>,
     },
     /// `chat.delete` -- delete message `message_id` in `channel`.
     ChatDelete {
@@ -553,6 +558,7 @@ pub fn parse_outbound_entry(
             channel: require(wire.channel, "chat.send", "channel")?,
             text: require(wire.text, "chat.send", "text")?,
             origin_channel: wire.origin_channel.filter(|s| !s.is_empty()),
+            tenant_id: wire.tenant_id.filter(|t| *t > 0),
         },
         "chat.delete" => OutboundAction::ChatDelete {
             channel: require(wire.channel, "chat.delete", "channel")?,
@@ -646,7 +652,7 @@ pub trait PlatformSender: Send + Sync {
     /// `<platform>` and the queue key.
     fn platform(&self) -> &'static str;
     /// `chat.send`.
-    async fn send_chat(&self, channel: &str, text: &str) -> Result<(), SenderError>;
+    async fn send_chat(&self, channel: &str, text: &DetokenizedText) -> Result<(), SenderError>;
     /// `chat.delete`.
     async fn delete_chat(&self, channel: &str, message_id: &str) -> Result<(), SenderError>;
     /// `dm.send`. `origin_channel` is the channel of the event that
@@ -656,7 +662,7 @@ pub trait PlatformSender: Send + Sync {
     async fn send_dm(
         &self,
         user_id: &str,
-        text: &str,
+        text: &DetokenizedText,
         origin_channel: &str,
     ) -> Result<(), SenderError>;
 }
@@ -685,15 +691,21 @@ fn enforce_pin(
 /// Whatever the adapter returns, including [`SenderError::Unsupported`].
 pub async fn dispatch_to<S: PlatformSender>(
     sender: &S,
-    action: &OutboundAction,
+    detok: &DetokenizedAction,
 ) -> Result<(), SenderError> {
+    let action: &OutboundAction = detok;
     match action {
         OutboundAction::ChatSend {
             channel,
-            text,
             origin_channel,
+            ..
         } => {
             let pinned = enforce_pin(sender.platform(), "chat.send", channel, origin_channel)?;
+            let text = detok.text().ok_or(SenderError::Failed {
+                platform: sender.platform(),
+                op: "chat.send",
+                message: "no detokenized text".to_string(),
+            })?;
             sender.send_chat(&pinned, text).await
         }
         OutboundAction::ChatDelete {
@@ -706,10 +718,16 @@ pub async fn dispatch_to<S: PlatformSender>(
         }
         OutboundAction::DmSend {
             user_id,
-            text,
             origin_channel,
             ..
-        } => sender.send_dm(user_id, text, origin_channel).await,
+        } => {
+            let text = detok.text().ok_or(SenderError::Failed {
+                platform: sender.platform(),
+                op: "dm.send",
+                message: "no detokenized text".to_string(),
+            })?;
+            sender.send_dm(user_id, text, origin_channel).await
+        }
         // Role and event ops exist only on the generic executor path; a per-platform
         // sender has no such method -- fail loud, never a silent no-op.
         OutboundAction::RoleOp { .. }
@@ -740,7 +758,7 @@ pub trait ActionExecutor: Send + Sync {
         &self,
         platform: &'static str,
         community_id: Option<i64>,
-        action: &OutboundAction,
+        action: &DetokenizedAction,
     ) -> Result<Option<String>, SenderError>;
 }
 
@@ -754,7 +772,7 @@ impl ActionExecutor for NoExecutor {
         &self,
         platform: &'static str,
         _community_id: Option<i64>,
-        action: &OutboundAction,
+        action: &DetokenizedAction,
     ) -> Result<Option<String>, SenderError> {
         Err(SenderError::Unsupported {
             platform: platform.to_string(),
@@ -809,12 +827,12 @@ where
         &self,
         platform: &'static str,
         community_id: Option<i64>,
-        action: &OutboundAction,
+        action: &DetokenizedAction,
     ) -> Result<Option<String>, SenderError> {
         // The same pin gate `dispatch_to` applies, so a destination the
         // stamp does not prove is refused (and counted) before the executor
         // builds anything.
-        match action {
+        match &**action {
             OutboundAction::ChatSend {
                 channel,
                 origin_channel,
@@ -872,7 +890,7 @@ where
 /// platform.
 pub async fn route<T: PlatformSender, D: PlatformSender>(
     platform: &str,
-    action: &OutboundAction,
+    action: &DetokenizedAction,
     twitch: &T,
     discord: &D,
 ) -> Result<(), SenderError> {
@@ -925,7 +943,7 @@ impl<'a, S: IrcOutbound, X: ActionExecutor> TwitchSender<'a, S, X> {
     }
 
     /// Runs `action` through the attached executor, or fails loud when none is attached.
-    async fn via_executor(&self, action: &OutboundAction) -> Result<(), SenderError> {
+    async fn via_executor(&self, action: &DetokenizedAction) -> Result<(), SenderError> {
         match self.exec {
             Some(x) => x
                 .execute_action("twitch", self.community_id, action)
@@ -944,7 +962,7 @@ impl<S: IrcOutbound, X: ActionExecutor> PlatformSender for TwitchSender<'_, S, X
         "twitch"
     }
 
-    async fn send_chat(&self, channel: &str, text: &str) -> Result<(), SenderError> {
+    async fn send_chat(&self, channel: &str, text: &DetokenizedText) -> Result<(), SenderError> {
         self.irc
             .send(self.community_id, channel, text)
             .await
@@ -972,26 +990,31 @@ impl<S: IrcOutbound, X: ActionExecutor> PlatformSender for TwitchSender<'_, S, X
     async fn delete_chat(&self, channel: &str, message_id: &str) -> Result<(), SenderError> {
         // `channel` was already pinned against the stamp by `dispatch_to`, so it is its own
         // origin here; the executor re-proves it regardless.
-        self.via_executor(&OutboundAction::ChatDelete {
-            channel: channel.to_string(),
-            message_id: message_id.to_string(),
-            origin_channel: Some(channel.to_string()),
-        })
+        self.via_executor(&DetokenizedAction::tokens_unchanged(
+            OutboundAction::ChatDelete {
+                channel: channel.to_string(),
+                message_id: message_id.to_string(),
+                origin_channel: Some(channel.to_string()),
+            },
+        ))
         .await
     }
 
     async fn send_dm(
         &self,
         user_id: &str,
-        text: &str,
+        text: &DetokenizedText,
         origin_channel: &str,
     ) -> Result<(), SenderError> {
-        self.via_executor(&OutboundAction::DmSend {
-            user_id: user_id.to_string(),
-            text: text.to_string(),
-            origin_channel: origin_channel.to_string(),
-            tenant_id: None,
-        })
+        // `text` already went through the egress pass; re-wrapping it as-is keeps it that way.
+        self.via_executor(&DetokenizedAction::tokens_unchanged(
+            OutboundAction::DmSend {
+                user_id: user_id.to_string(),
+                text: text.as_str().to_string(),
+                origin_channel: origin_channel.to_string(),
+                tenant_id: None,
+            },
+        ))
         .await
     }
 }
@@ -1051,7 +1074,7 @@ impl PlatformSender for DiscordSender<'_> {
         "discord"
     }
 
-    async fn send_chat(&self, channel: &str, text: &str) -> Result<(), SenderError> {
+    async fn send_chat(&self, channel: &str, text: &DetokenizedText) -> Result<(), SenderError> {
         let rest = self.client("chat.send")?;
         rest.send_message(channel, text)
             .await
@@ -1082,7 +1105,7 @@ impl PlatformSender for DiscordSender<'_> {
     async fn send_dm(
         &self,
         user_id: &str,
-        text: &str,
+        text: &DetokenizedText,
         origin_channel: &str,
     ) -> Result<(), SenderError> {
         let rest = self.client("dm.send")?;
@@ -1096,6 +1119,15 @@ impl PlatformSender for DiscordSender<'_> {
 
 #[cfg(test)]
 mod tests {
+    /// Test text wrapper: tokens-only, never PII.
+    fn da(a: &OutboundAction) -> DetokenizedAction {
+        DetokenizedAction::tokens_unchanged(a.clone())
+    }
+
+    fn t(s: &str) -> DetokenizedText {
+        egress_detokenizer::tokens_unchanged(s)
+    }
+
     use super::*;
     use std::sync::Mutex;
 
@@ -1109,12 +1141,12 @@ mod tests {
             &self,
             _community_id: Option<i64>,
             channel: &str,
-            text: &str,
+            text: &DetokenizedText,
         ) -> Result<(), IrcSendError> {
             self.calls
                 .lock()
                 .unwrap()
-                .push((channel.to_string(), text.to_string()));
+                .push((channel.to_string(), text.as_str().to_string()));
             Ok(())
         }
     }
@@ -1128,6 +1160,7 @@ mod tests {
                 channel: "#c".into(),
                 text: "hi".into(),
                 origin_channel: None,
+                tenant_id: None,
             }
         );
     }
@@ -1304,10 +1337,16 @@ mod tests {
             channel: "#c".into(),
             text: "hi".into(),
             origin_channel: Some("#c".into()),
+            tenant_id: None,
         };
-        route("twitch", &action, &twitch, &DiscordSender::unconfigured())
-            .await
-            .unwrap();
+        route(
+            "twitch",
+            &da(&action),
+            &twitch,
+            &DiscordSender::unconfigured(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             irc.calls.lock().unwrap().as_slice(),
             &[("#c".to_string(), "hi".to_string())]
@@ -1332,10 +1371,16 @@ mod tests {
                 channel: channel.into(),
                 text: "hi".into(),
                 origin_channel: origin.map(Into::into),
+                tenant_id: None,
             };
-            let err = route("twitch", &action, &twitch, &DiscordSender::unconfigured())
-                .await
-                .unwrap_err();
+            let err = route(
+                "twitch",
+                &da(&action),
+                &twitch,
+                &DiscordSender::unconfigured(),
+            )
+            .await
+            .unwrap_err();
             assert!(
                 matches!(err, SenderError::Rejected { reason: r, .. } if r == reason),
                 "{channel}: {err}"
@@ -1357,9 +1402,14 @@ mod tests {
             message_id: "9".into(),
             origin_channel: Some("1".into()),
         };
-        let err = route("discord", &action, &twitch, &DiscordSender::unconfigured())
-            .await
-            .unwrap_err();
+        let err = route(
+            "discord",
+            &da(&action),
+            &twitch,
+            &DiscordSender::unconfigured(),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(
             err,
             SenderError::Rejected {
@@ -1382,6 +1432,7 @@ mod tests {
                 channel: "#c".into(),
                 text: "hi".into(),
                 origin_channel: Some("#c".into()),
+                tenant_id: None,
             }
         );
     }
@@ -1412,9 +1463,14 @@ mod tests {
             ("discord", &del, "chat.delete"),
             ("discord", &dm, "dm.send"),
         ] {
-            let err = route(platform, action, &twitch, &DiscordSender::unconfigured())
-                .await
-                .unwrap_err();
+            let err = route(
+                platform,
+                &da(action),
+                &twitch,
+                &DiscordSender::unconfigured(),
+            )
+            .await
+            .unwrap_err();
             match err {
                 SenderError::Unsupported { platform: p, op: o } => {
                     assert_eq!((p.as_str(), o), (platform, op));
@@ -1436,17 +1492,23 @@ mod tests {
             channel: "c".into(),
             text: "t".into(),
             origin_channel: None,
+            tenant_id: None,
         };
-        let err = route("myspace", &action, &twitch, &DiscordSender::unconfigured())
-            .await
-            .unwrap_err();
+        let err = route(
+            "myspace",
+            &da(&action),
+            &twitch,
+            &DiscordSender::unconfigured(),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, SenderError::Unsupported { .. }));
     }
 
     #[tokio::test]
     async fn unconfigured_discord_sender_is_unsupported() {
         let err = DiscordSender::unconfigured()
-            .send_chat("c", "t")
+            .send_chat("c", &t("t"))
             .await
             .unwrap_err();
         assert!(matches!(err, SenderError::Unsupported { .. }));
@@ -1517,6 +1579,7 @@ mod tests {
                 channel: "1".into(),
                 text: "hi".into(),
                 origin_channel: Some("1".into()),
+                tenant_id: None,
             },
             OutboundAction::ChatDelete {
                 channel: "1".into(),
@@ -1530,7 +1593,9 @@ mod tests {
                 tenant_id: None,
             },
         ] {
-            route("discord", &action, &twitch, &discord).await.unwrap();
+            route("discord", &da(&action), &twitch, &discord)
+                .await
+                .unwrap();
         }
     }
 
@@ -1547,7 +1612,7 @@ mod tests {
         mount_member_of_guild(&server).await;
         let client = rest(&server);
         let err = DiscordSender::new(&client)
-            .send_dm("3", "secret body", "1")
+            .send_dm("3", &t("secret body"), "1")
             .await
             .unwrap_err();
         match err {
@@ -1575,7 +1640,7 @@ mod tests {
         let client = rest(&server);
         let d = DiscordSender::new(&client);
         assert!(matches!(
-            d.send_chat("1", "x").await,
+            d.send_chat("1", &t("x")).await,
             Err(SenderError::Failed {
                 op: "chat.send",
                 ..
@@ -1589,7 +1654,7 @@ mod tests {
             })
         ));
         assert!(matches!(
-            d.send_dm("1", "x", "1").await,
+            d.send_dm("1", &t("x"), "1").await,
             Err(SenderError::Failed { op: "dm.send", .. })
         ));
     }
@@ -1625,7 +1690,7 @@ mod tests {
             .await;
         let client = rest(&server);
         let err = DiscordSender::new(&client)
-            .send_dm("3", "x", "1")
+            .send_dm("3", &t("x"), "1")
             .await
             .unwrap_err();
         assert!(
@@ -1700,7 +1765,7 @@ mod tests {
             "twitch",
         )
         .unwrap();
-        match dispatch_to(&twitch, &action).await {
+        match dispatch_to(&twitch, &da(&action)).await {
             Err(SenderError::Unsupported { platform, op }) => {
                 assert_eq!((platform.as_str(), op), ("twitch", "mod.ban"));
             }
@@ -1719,12 +1784,12 @@ mod tests {
             &self,
             _platform: &'static str,
             community_id: Option<i64>,
-            action: &OutboundAction,
+            action: &DetokenizedAction,
         ) -> Result<Option<String>, SenderError> {
             self.seen
                 .lock()
                 .unwrap()
-                .push((community_id, action.clone()));
+                .push((community_id, (**action).clone()));
             Ok(None)
         }
     }
@@ -1741,14 +1806,14 @@ mod tests {
             message_id: "m1".into(),
             origin_channel: Some("#c".into()),
         };
-        dispatch_to(&twitch, &del).await.unwrap();
+        dispatch_to(&twitch, &da(&del)).await.unwrap();
         let dm = OutboundAction::DmSend {
             user_id: "u1".into(),
             text: "hi".into(),
             origin_channel: "#c".into(),
             tenant_id: Some(3),
         };
-        dispatch_to(&twitch, &dm).await.unwrap();
+        dispatch_to(&twitch, &da(&dm)).await.unwrap();
         {
             let seen = exec.seen.lock().unwrap();
             assert_eq!(seen.len(), 2);
@@ -1769,7 +1834,7 @@ mod tests {
             origin_channel: Some("#c".into()),
         };
         assert!(matches!(
-            dispatch_to(&twitch, &bad).await,
+            dispatch_to(&twitch, &da(&bad)).await,
             Err(SenderError::Rejected { .. })
         ));
         assert_eq!(exec.seen.lock().unwrap().len(), 2);

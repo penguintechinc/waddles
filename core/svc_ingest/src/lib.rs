@@ -69,6 +69,8 @@ pub mod connector;
 pub mod connector_runtime;
 pub mod crypto;
 pub mod discord_rest;
+pub mod display_names;
+pub mod egress;
 pub mod error;
 pub mod http;
 pub mod identity_crypto;
@@ -366,6 +368,13 @@ where
     // With every connector OFF nothing is built, bound or spawned.
     let mut connector_ready: Option<Arc<dyn connector_runtime::RuntimeReady>> = None;
     let license_client = license::build_license_client();
+    // Egress detokenizer: installed BEFORE any outbound drain starts. The drain is the only
+    // platform egress; it substitutes `{user:<token>}` right before each send.
+    egress::install(egress::Egress::from_cli(
+        &config.cli,
+        license_client.clone(),
+        std::env::var("DATABASE_URL").ok(),
+    ));
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
         // Schema-v3 producer: resolver is installed BEFORE any receiver can
         // publish. A flag that is ON but misconfigured fails the process

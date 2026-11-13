@@ -169,6 +169,16 @@ spec:
         # connection resolver's ProviderConnectionService.ListBindings/ResolveConnection
         # (connections:list / connections:resolve[:static]) -- intra-cluster calls are gRPC,
         # never REST.
+        # Egress detokenization (svc-ingest's outbound drain is the only platform egress) reads
+        # display names straight from Postgres under this pod's own read-only role
+        # (waddles_svc_ingest, column-scoped SELECT -- config/postgres/service-roles.yaml); no
+        # hub-api call in the send path. Plain env off-switch independent of the
+        # waddles.core.disable-pii-detokenization PostHog kill-switch; rendered only when
+        # pipeline.piiTokenization.enabled is false, omitted otherwise.
+        {{- if not .Values.pipeline.piiTokenization.enabled }}
+        - name: PII_DETOKENIZATION_ENABLED
+          value: "false"
+        {{- end }}
         # P6a T6: dedicated outbound pin key (NOT the shared envFrom Secret) -- templates/outbound-pin-secret.yaml.
         - name: OUTBOUND_PIN_KEYS
           valueFrom:

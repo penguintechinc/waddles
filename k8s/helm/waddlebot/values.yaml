@@ -2042,7 +2042,7 @@ pipeline:
   # PostHog-gated, default-ENABLED, fail-loud-when-unreachable behavior is
   # unchanged. `false` renders `PII_TOKENIZATION_ENABLED=false` on
   # svc-process-rust and `PII_DETOKENIZATION_ENABLED=false` on
-  # svc-action-rust and svc-presentation-rust -- both gates short-circuit to disabled (no hub_client
+  # svc-ingest-rust (the outbound egress) and svc-presentation-rust -- both gates short-circuit to disabled (no hub_client
   # connect attempt, no fail-loud exit) and log a WARN naming the override.
   # SECURITY: ON by default in EVERY environment (alpha included) -- no
   # values-*.yaml may set this false. Opt-out is the PostHog kill-switch
@@ -2831,13 +2831,9 @@ serviceJwt:
       serviceAccount: svc-action
       tenant: system
       allowedScopes:
-        # feature/hub-grpc-env-wiring -- was "users:display-name:resolve", which does
-        # not match hub_api/grpc_internal/servicers.py REQUIRED_SCOPES's
-        # "identity:displayname:read" for ResolveDisplayNames (core/svc_action's
-        # HUB_IDENTITY_RESOLVE_SCOPE). The mismatch would have minted a machine JWT
-        # missing the scope the server's AuthInterceptor actually checks, so every
-        # ResolveDisplayNames call would 403 even with a working connection.
-        - "identity:displayname:read"
+        # svc-action holds NO display-name scope: it never detokenizes (PII boundary --
+        # only svc-ingest and svc-presentation may hold true PII); relay text is queued
+        # tokenized and svc-ingest's outbound drain substitutes at the platform send.
         - "egress:connect"
         # feature/edge-reshape-chunk2-conn-store (Task 8) -- svc-action is the per-send EGRESS
         # consumer of the connection store: `connections:resolve` mints a community-bound token

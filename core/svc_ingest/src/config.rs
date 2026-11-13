@@ -152,6 +152,14 @@ pub struct CliConfig {
     #[arg(long, env = "HUB_API_GRPC_CA_FILE", default_value = "")]
     pub hub_api_grpc_ca_file: String,
 
+    /// Plain env/values off-switch for egress detokenization, independent of the
+    /// `waddles.core.disable-pii-detokenization` PostHog kill-switch (for environments with no
+    /// in-cluster PostHog). `Some(false)` makes every outbound send carry its `{user:<token>}`
+    /// placeholders; unset/`true` leaves the PostHog-gated default (enabled). Only ever
+    /// disables; loudly logged at startup.
+    #[arg(long, env = "PII_DETOKENIZATION_ENABLED")]
+    pub pii_detokenization_enabled_override: Option<bool>,
+
     /// The `kid` every newly-minted `binding.mac` is stamped with
     /// (`penguin_spine::compute_binding_mac`'s `kid` argument) -- must name
     /// a key present in `ENVELOPE_BINDING_KEYS`. Non-secret (a key

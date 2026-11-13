@@ -121,6 +121,8 @@ def test_svc_ingest_is_allow_listed_for_exactly_connections_resolve_on_the_syste
         "bundle-schedules:read",
         "key:stream-dek:read",  # DEK broker GetStreamDek (#1246)
     ]
+    # Egress detokenization reads Postgres directly (no hub-api hop): no display-name scope.
+    assert "identity:displayname:read" not in entry["allowed_scopes"]
     assert entry["tenant"] == "system"
     assert entry["k8s_service_account"] == "svc-ingest"
     parsed = urlparse(entry["service_id"])

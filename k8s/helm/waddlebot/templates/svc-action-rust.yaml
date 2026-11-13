@@ -167,28 +167,6 @@ spec:
         # it with "missing required audience").
         - name: SERVICE_JWT_SA_TOKEN_PATH
           value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
-        # fix/pii-tokenization-env-override -- plain env off-switch, independent of the
-        # waddles.core.disable-pii-detokenization PostHog kill-switch (unusable in an
-        # environment with no in-cluster PostHog, e.g. alpha). Only rendered when
-        # pipeline.piiTokenization.enabled is false (see values.yaml's own comment);
-        # omitted entirely otherwise, so the default PostHog-gated behavior is unchanged.
-        {{- if not .Values.pipeline.piiTokenization.enabled }}
-        - name: PII_DETOKENIZATION_ENABLED
-          value: "false"
-        {{- end }}
-        # fix/helm-platform-credentials -- core/svc_action/src/config.rs reads
-        # this directly (`std::env::var("DISCORD_BOT_TOKEN").ok()`) and already
-        # degrades gracefully (relay provider disabled, clear log line) when
-        # absent -- see capabilities.rs/lib.rs. Sourced from the
-        # operator-managed platform-credentials Secret, never the
-        # chart-rendered `-secrets` Secret; `optional: true` so an
-        # unconfigured community starts without this var.
-        - name: DISCORD_BOT_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
-              key: DISCORD_BOT_TOKEN
-              optional: true
         - name: WADDLES_SANDBOX_GVISOR
           value: {{ .Values.pipeline.rustDataPlane.svcAction.sandboxGvisor | quote }}
         # Per-call wall-clock budget handed to the executor on every `invoke` -- kept in
