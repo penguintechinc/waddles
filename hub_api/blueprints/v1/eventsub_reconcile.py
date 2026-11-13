@@ -177,6 +177,7 @@ async def reconcile_route(data: ReconcileRequest) -> Any:
     """Sweep desired state and return the pending create/delete work."""
     if data.afterCommunityId < 0 or not 1 <= data.limit <= es.MAX_WORK:
         return error_response("afterCommunityId/limit out of range", 400, "BAD_REQUEST")
+    # nosemgrep: python-silent-except-return-default -- _refusal() logs via logger.warning
     try:
         summary, work, enabled = await es.reconcile(
             _dal(),
@@ -249,6 +250,7 @@ async def results_route(data: ResultsRequest) -> Any:
             len(data.results),
         )
         return error_response("unknown outcome or failure reason", 400, "BAD_REQUEST")
+    # nosemgrep: python-silent-except-return-default -- _refusal() logs via logger.warning
     try:
         applied = await es.report_results(_dal(), reports)
     except es.EventSubError as exc:
@@ -261,6 +263,7 @@ async def results_route(data: ResultsRequest) -> Any:
 @validate_response(SecretDTO)
 async def secret_route(callback_key: str) -> Any:
     """Webhook secret for the ingest verifier (404 for an unknown key)."""
+    # nosemgrep: python-silent-except-return-default -- _refusal() logs via logger.warning
     try:
         return SecretDTO(
             success=True, secret=await es.secret_for_callback_key(_dal(), callback_key)

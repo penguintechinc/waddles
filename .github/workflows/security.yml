@@ -204,13 +204,13 @@ jobs:
             if grep -q -- '--hash=sha256' "$f"; then
               gated=$((gated + 1))
               echo "::group::[gated] $f"
-              pip-audit -r "$f" --no-deps --progress-spinner off $IGNORES \
+              PIP_ONLY_BINARY=:all: pip-audit -r "$f" --no-deps --progress-spinner off $IGNORES \
                 || gated_bad=$((gated_bad + 1))
               echo "::endgroup::"
             else
               ungated=$((ungated + 1))
               echo "::group::[report-only] $f"
-              pip-audit -r "$f" --no-deps --progress-spinner off $IGNORES \
+              PIP_ONLY_BINARY=:all: pip-audit -r "$f" --no-deps --progress-spinner off $IGNORES \
                 || ungated_bad=$((ungated_bad + 1))
               echo "::endgroup::"
             fi
