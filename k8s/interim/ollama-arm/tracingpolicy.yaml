@@ -1,8 +1,11 @@
 # Tetragon exec allowlist (enforced, Sigkill) for every ollama-labelled pod (server + pull job).
-# ollama re-execs itself (/bin/ollama == /usr/bin/ollama) and execs /usr/lib/ollama/llama-server
-# (GPU discovery + the model runner in 0.40.x); both paths verified against the pinned arm64 image.
-# Second selector: runc memfd re-exec (/proc/self/fd/*) only from runc, so `kubectl exec` works
-# (same shape as the waddlebot policies on this cluster).
+# Convention matches the waddlebot chart (`sys_execve` kprobe + runc /proc/self/fd guard), extended
+# with `sys_execveat` so execveat()/fexecve() cannot bypass it (execveat arg 0 is the dirfd, the path
+# is arg 1; fexecve passes an empty path, which is never allowlisted and is therefore killed).
+# Allowed: /bin/ollama, /usr/bin/ollama (+ re-exec for runners) and /usr/lib/ollama/llama-server
+# (0.40.x GPU discovery + model runner); paths verified against the pinned arm64 image.
+# Second selector per hook: runc memfd re-exec (/proc/self/fd/*) only from runc, so `kubectl exec`
+# works.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicyNamespaced
 metadata:
@@ -35,6 +38,42 @@ spec:
             - action: Sigkill
         - matchArgs:
             - index: 0
+              operator: Prefix
+              values:
+                - /proc/self/fd/
+          matchBinaries:
+            - operator: NotIn
+              followChildren: false
+              values:
+                - /usr/bin/runc
+                - /usr/sbin/runc
+                - /usr/local/sbin/runc
+                - /usr/local/bin/runc
+          matchActions:
+            - action: Sigkill
+    - call: sys_execveat
+      syscall: true
+      args:
+        - index: 0
+          type: int
+        - index: 1
+          type: string
+      selectors:
+        - matchArgs:
+            - index: 1
+              operator: NotEqual
+              values:
+                - /bin/ollama
+                - /usr/bin/ollama
+                - /usr/lib/ollama/llama-server
+            - index: 1
+              operator: NotPrefix
+              values:
+                - /proc/self/fd/
+          matchActions:
+            - action: Sigkill
+        - matchArgs:
+            - index: 1
               operator: Prefix
               values:
                 - /proc/self/fd/

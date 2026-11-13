@@ -46,37 +46,73 @@ Consumers call `POST /api/generate` or `/api/chat` with `"model":"gemma4:e4b"`. 
 thinking model: for `format=json` set `"think": false` (or allow enough `num_predict`), otherwise the
 token budget is spent on `thinking` and `response` comes back empty/truncated.
 
-## Network security
+## Consuming the API (opt-in label)
 
-- `default-deny`: every endpoint in `waddleai` denies all ingress and egress unless allowed (Cilium convention on this cluster).
-- Ingress to `ollama:11434` ONLY from namespaces `waddlebot` and `waddleai`.
-- Server egress: DNS (kube-dns) + `toFQDNs` for the pull hosts only, TCP 443:
-  - `registry.ollama.ai` (manifests; blobs answer 307)
-  - `dd20bb891979d25aebc8bec07b2b3bbc.r2.cloudflarestorage.com` (blob CDN, discovered from a real pull)
-- DNS rule is `matchPattern: "*"` because search-domain lookups (`*.svc.cluster.local`) must resolve; the egress itself is FQDN-scoped.
-- If the CDN host changes (a pull fails with timeouts to a new `*.r2.cloudflarestorage.com` name), find the host from the redirect `Location` of `https://registry.ollama.ai/v2/library/gemma4/blobs/<digest>` and update `networkpolicy.yaml`.
-- Pull job: egress only to DNS and the `ollama` server; it does not reach the internet itself.
+Ollama's HTTP API is unauthenticated and includes admin endpoints, so network access is an explicit
+opt-in plus an L7 allowlist. A consumer pod must be in namespace `waddlebot` and carry:
 
-## Tetragon
+```yaml
+metadata:
+  labels:
+    waddles.penguintech.io/ollama-client: "true"
+```
 
-Allowlist (`sys_execve`, Sigkill): `/bin/ollama`, `/usr/bin/ollama`, `/usr/lib/ollama/llama-server`
-(0.40.x GPU discovery + model runner), plus a second selector so only runc may `/proc/self/fd/*`
-re-exec (keeps `kubectl exec` working). Proven: `ollama --version` runs; `ls` is killed (exit 137).
-Re-check the binary paths whenever the image digest is bumped. `kubectl exec ... -- cat` etc. are
-killed by design; to inspect, temporarily add the binary to the policy and revert.
+Unlabelled pods are dropped. Another namespace needs a change to `networkpolicy.yaml` (add it to the
+first `fromEndpoints`). The label is an opt-in, not authentication: anyone who can create/label pods in
+`waddlebot` can set it, so protect that with RBAC/admission.
 
-## Verification (2026-11-13, dal2alpha, limits cpu 10 / mem 20Gi)
+## Network security (CiliumNetworkPolicy, `networkpolicy.yaml`)
+
+| Rule | What it allows | What it blocks |
+|---|---|---|
+| `default-deny` | nothing | all other ingress/egress in `waddleai` |
+| Server ingress, consumers (L7) | from labelled `waddlebot` pods on 11434: `GET /`, `GET /api/tags`, `GET /api/version`, `POST /api/generate\|chat\|embed\|embeddings` | everything else: `/api/delete`, `/api/create`, `/api/copy`, `/api/push`, `/api/blobs/*`, `/api/pull`, `/api/ps`, any other path/method, trailing-slash and `//` tricks (HTTP 403); unlabelled pods (dropped) |
+| Server ingress, pull Job (L7) | from the pull Job pod only: `HEAD /` (CLI heartbeat), `POST /api/pull` | all other requests from the Job |
+| Server egress DNS | `registry.ollama.ai`, the blob host below, and cluster-local names (`*.cluster.local` forms, needed for search-domain expansion) | every other lookup (resolver gets REFUSED: `lookup hf.co: server misbehaving`), so no DNS exfil channel |
+| Server egress L3/L4 | TCP 443 to `registry.ollama.ai` and `dd20bb891979d25aebc8bec07b2b3bbc.r2.cloudflarestorage.com` (discovered from a real pull) | all other destinations |
+| Pull Job egress | cluster-local DNS names + `ollama` server :11434 | all external lookups and traffic (the server downloads) |
+
+- The server needs the registry names only while pulling. For a steady state with no pulls, drop the two `matchName` DNS entries and the `toFQDNs` block.
+- If a pull times out to a new `*.r2.cloudflarestorage.com` name, read the redirect `Location` of `https://registry.ollama.ai/v2/library/gemma4/blobs/<digest>` and update the policy.
+- OpenAI-compatible `/v1/*` paths are NOT allowed; add `POST ^/v1/(chat/completions|embeddings)$` to the consumer rule if a consumer needs them.
+
+## Tetragon (`tracingpolicy.yaml`)
+
+Enforced (Sigkill) exec allowlist on every `app.kubernetes.io/name=ollama` pod. Two kprobes, same
+selectors: `sys_execve` (path = arg 0) and `sys_execveat` (path = arg 1; `fexecve` passes an empty
+path, which is never allowlisted). The repo's waddlebot chart hooks `sys_execve` only; without the
+`sys_execveat` hook `fexecve`/`execveat` bypass the allowlist (shown live, see below).
+
+Allowed: `/bin/ollama`, `/usr/bin/ollama`, `/usr/lib/ollama/llama-server` (0.40.x GPU discovery + model
+runner). A second selector per hook lets only runc exec `/proc/self/fd/*` so `kubectl exec` keeps working
+and fileless memfd exec by app code is killed. Re-check the binary paths whenever the image digest is
+bumped. `kubectl exec ... -- cat` etc. are killed by design; to inspect, temporarily add the binary to the
+policy and revert.
+
+## Verification (2026-11-13, dal2alpha)
+
+Round 1 (arm64 `ollama-0` on `k8s3-worker`, limits cpu 10 / mem 20Gi):
 
 | Check | Result |
 |---|---|
-| Scheduling | `ollama-0` on `k8s3-worker` |
-| Cross-namespace allow | probe in `waddlebot`: `GET /api/tags` lists `gemma4:e4b` |
-| Cross-namespace deny | probe in `default`: curl exit 28 (timeout) |
-| Egress deny | server `ollama pull hf.co/...`: `dial tcp ...:443: i/o timeout` |
-| Tetragon | `ollama --version` runs; `ls` killed (exit 137) |
-| JSON generate (`format=json`, `think:false`) | valid JSON every call; cold load 9 s (page cache cold: first call 0.96 tok/s); warm 1.7-4.9 tok/s generation, 3-24 tok/s prompt eval (noisy) |
-| Memory | cgroup `memory.peak` 11,650,789,376 B (~10.9 GiB, includes mmapped model page cache); limit 20 GiB |
-| Restart persistence | 2 pod restarts: model still in `ollama list`, no new pull, generation works |
+| Scheduling | `ollama-0` on `k8s3-worker`; PVC `data-ollama-0` 25Gi local-path |
+| JSON generate (`format=json`, `think:false`) | valid JSON every call; cold load 9 s; warm 1.7-4.9 tok/s (arm64 CPU, noisy) |
+| Memory | cgroup `memory.peak` ~10.9 GiB (includes mmapped model page cache); limit 20 GiB |
+| Restart persistence | 2 pod restarts: model stays in `ollama list`, no re-pull |
 
-Throughput is CPU-bound and modest (arm64, no GPU): fine for small JSON jobs, slow for long outputs.
-If it is too slow for a consumer, `gemma4:e2b` is the smaller alternative (not deployed here).
+Round 2 (L7 / DNS / execveat hardening). `k8s3-worker` was cordoned and then went unreachable by an
+operator mid-test, so these were proven on an amd64 stand-in pod (`ollama-tp`: same image digest, labels,
+securityContext, and the SAME applied policies) with `smollm2:135m`, then deleted:
+
+| Check | Result |
+|---|---|
+| Labelled waddlebot pod, allowed calls | `GET /`, `/api/tags`, `/api/version`, `POST /api/generate`, `/api/chat` = 200; `/api/embed`, `/api/embeddings` reach the server (model lacks embeddings: 501/500, not 403) |
+| Labelled pod, blocked calls | `DELETE`/`POST /api/delete`, `/api/pull`, `/api/create`, `/api/copy`, `/api/push`, `/api/blobs/*` (POST/HEAD), `/api/ps`, `/api/tags/`, `//api/delete`, `/api/generate/../delete` = 403 |
+| Unlabelled waddlebot pod | `GET /api/tags` timeout (curl 28, dropped) |
+| Pull Job path | Job (cluster-only DNS) pulls through `POST /api/pull`: success; first attempt was 403 on `HEAD /`, fixed by allowing it for the Job only |
+| DNS | `ollama pull hf.co/...` -> `lookup hf.co ... server misbehaving` (REFUSED); `ollama pull smollm2:135m` (registry + R2 blob host, search-domain expansion) succeeds |
+| Tetragon | old (execve-only) policy: `execve` killed but `fexecve` and `execveat` RAN; new policy: all three killed (exit 137); `kubectl exec ls` killed; `ollama --version` runs; generation still works through `llama-server` |
+| JSON generate on stand-in | 6/6 valid |
+
+Not yet re-verified on the real arm64 pod after Round 2: gemma4:e4b 6/6 JSON generation (node was
+unavailable). Re-run once `k8s3-worker` is schedulable.
