@@ -14,7 +14,10 @@ COPY admin/hub_module/frontend/package*.json ./
 
 # @penguintechinc packages are published to npmjs.com, so no registry auth
 # is needed and no token ever enters the build.
-RUN npm ci --ignore-scripts && npm rebuild esbuild
+# npm download cache mount (id waddles-npm): `npm ci` still verifies every tarball against the
+# lockfile integrity hashes; the cache is not part of any image layer.
+RUN --mount=type=cache,id=waddles-npm,target=/root/.npm,sharing=shared \
+    npm ci --ignore-scripts && npm rebuild esbuild
 
 COPY admin/hub_module/frontend/ ./
 
@@ -42,7 +45,8 @@ COPY admin/hub_module/webui-server/package*.json ./
 # The runtime entrypoint is `node server.js` -- npm/npx/corepack are never invoked after
 # this point, and npm's vendored node_modules (tar, brace-expansion, sigstore, undici, ...)
 # carry independent CVEs unrelated to this lockfile, so they are removed in the same layer.
-RUN npm ci --omit=dev --ignore-scripts \
+RUN --mount=type=cache,id=waddles-npm,target=/root/.npm,sharing=shared \
+    npm ci --omit=dev --ignore-scripts \
     && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
     /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 

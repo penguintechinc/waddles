@@ -7,13 +7,17 @@ FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803
 WORKDIR /app
 
 COPY hub_api/requirements.txt .
-RUN pip install --no-cache-dir --require-hashes -r requirements.txt
+# pip download cache mount (id waddles-pip): wheels stay hash-verified (--require-hashes); the
+# cache is not part of any image layer and is bounded by the BuildKit pod's GC policy.
+RUN --mount=type=cache,id=waddles-pip,target=/root/.cache/pip,sharing=shared \
+    pip install --require-hashes -r requirements.txt
 
 # flask_core (libs/flask_core) is a real installable package (setup.py) --
 # pip install it directly rather than sys.path surgery at runtime; its own
 # requirements.in is the source of truth for its transitive deps.
 COPY libs/flask_core /app/libs/flask_core
-RUN pip install --no-cache-dir /app/libs/flask_core
+RUN --mount=type=cache,id=waddles-pip,target=/root/.cache/pip,sharing=shared \
+    pip install /app/libs/flask_core
 
 # wasm-tools -- `services/bundle_component_validator.py`'s WIT world
 # conformance check (`wasm-tools component wit --json`) on every vendor

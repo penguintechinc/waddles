@@ -42,7 +42,7 @@ fn component() -> &'static [u8] {
                         "build",
                         "-q",
                         "--target",
-                        "rust-bundle-builder",
+                        "bundle-economy",
                         "-f",
                         "bundles/Dockerfile.core-bundles",
                         ".",

@@ -1,0 +1,327 @@
+# Alpha image input map -- the reviewable source of truth for "which images does a
+# change rebuild?" (consumed by scripts/ci/changed_images.py and alpha_plan.py,
+# run by .github/workflows/deploy-dal2alpha.yml).
+#
+# Glob syntax: repo-root anchored. `*` = within one path segment, `**` = across
+# segments, `dir/` or `dir/**` = everything below dir.
+#
+# Classification of a changed path, first match wins:
+#   1. shared_all  -> rebuilds EVERY image
+#   2. an image's inputs -> rebuilds those images
+#   3. ignore      -> proves it affects no image
+#   4. otherwise   -> UNMAPPED -> rebuilds EVERY image (fail safe) and fails
+#      scripts/ci/tests/test_image_inputs.py, so the map is fixed in the same PR.
+#
+# Each image's inputs must be a superset of what its Dockerfile COPYs (checked by
+# test_image_inputs.py against the real Dockerfiles). Base-image digests live in
+# the Dockerfiles themselves, so a Dockerfile edit (always an input) covers them.
+version: 1
+
+# Build lanes -> BuildKit endpoints. Lane `a` is the primary pod and always exists.
+# Lane `b` is a second pod; its URL comes from the BUILDKIT_HOST_B env/repo variable
+# (see the workflow). Unset or unreachable -> lane b folds into lane a, i.e. exactly
+# today's single-endpoint behaviour. Heavy compiles are split so two do not share
+# a pod: a (svc-ingest, svc-process, svc-action, svc-presentation) and
+# b (svc-bundles-executor, svc-streaming, egress-proxy, seeder).
+lanes:
+  a: BUILDKIT_HOST
+  b: BUILDKIT_HOST_B
+
+groups:
+  proto: ["proto/**"]
+  ctx-root: [".dockerignore"]
+  flask-core: ["libs/flask_core/**"]
+
+# Changes to the build machinery itself rebuild everything.
+shared_all:
+  - scripts/ci/image-inputs.yaml
+  - scripts/ci/changed_images.py
+  - scripts/ci/alpha_plan.py
+  - .github/workflows/deploy-dal2alpha.yml
+  - .github/actions/install-deploy-tools/**
+
+images:
+  hub-api:
+    dockerfile: hub_api/Dockerfile
+    context: "."
+    lane: b
+    groups: [ctx-root, flask-core]
+    inputs:
+      - hub_api/requirements.txt
+      - hub_api/app.py
+      - hub_api/config.py
+      - hub_api/bootstrap.py
+      - hub_api/blueprints/**
+      - hub_api/routers/**
+      - hub_api/openapi/**
+      - hub_api/services/**
+      - hub_api/grpc_internal/**
+      - hub_api/cli/**
+      - alembic/versions/**
+
+  hub-webui:
+    dockerfile: admin/hub_module/Dockerfile.webui
+    context: "."
+    lane: a
+    groups: [ctx-root]
+    inputs:
+      - admin/hub_module/.dockerignore
+      - admin/hub_module/frontend/**
+      - admin/hub_module/webui-server/package*.json
+      - admin/hub_module/webui-server/server.js
+      - admin/hub_module/webui-server/proxy.js
+
+  migrations:
+    dockerfile: migrations/Dockerfile
+    context: "."
+    workload: job   # Helm hook Jobs only; not a long-lived Deployment
+    lane: a
+    groups: [ctx-root, flask-core]
+    inputs:
+      - migrations/requirements.txt
+      - migrations/run-alembic.sh
+      - alembic.ini
+      - alembic/**
+      - config/postgres/migrations/**
+      - config/postgres/rbac-matrix.yaml
+      - config/postgres/service-roles.yaml
+      - scripts/db/**
+
+  seeder:
+    dockerfile: bundles/Dockerfile.core-bundles
+    context: "."
+    workload: job
+    lane: b
+    groups: [ctx-root, flask-core]
+    inputs:
+      - wit/**
+      - sdk/waddle-sdk-rs/**
+      - sdk/waddle-sdk/src/**
+      - sdk/waddle-sdk-cs/**
+      - bundles/core-bundles.yaml
+      - bundles/build_python_bundles.py
+      - bundles/python/**
+      - bundles/rust/**
+      - bundles/csharp/csping/**
+      - hub_api/requirements.txt
+      - hub_api/config.py
+      - hub_api/services/**
+      - hub_api/cli/**
+
+  svc-bundles-executor:
+    dockerfile: core/bundle_executor/Dockerfile.rust
+    context: "."
+    lane: b
+    groups: [ctx-root]
+    inputs:
+      - core/bundle_executor/**
+      - wit/**
+
+  svc-ingest:
+    dockerfile: core/svc_ingest/Dockerfile.rust
+    context: core
+    build_contexts: ["proto=./proto"]
+    lane: a
+    groups: [proto]
+    inputs:
+      - core/svc_ingest/Cargo.toml
+      - core/svc_ingest/Cargo.lock
+      - core/svc_ingest/src/**
+      - core/bundle_host_http/**
+      - core/circuit_breaker/**
+      - core/connection_resolver/**
+      - core/discord_mentions/**
+      - core/egress_assertion/**
+      - core/egress_detokenizer/**
+      - core/hub_client/**
+      - core/service_auth/**
+
+  svc-process:
+    dockerfile: core/svc_process/Dockerfile.rust
+    context: core
+    build_contexts: ["proto=./proto"]
+    lane: a
+    groups: [proto]
+    inputs:
+      - core/svc_process/Cargo.toml
+      - core/svc_process/Cargo.lock
+      - core/svc_process/src/**
+      - core/bundle_active_set/**
+      - core/bundle_capability_gate/**
+      - core/bundle_host_credentials/**
+      - core/bundle_host_db/**
+      - core/bundle_host_economy/**
+      - core/bundle_host_gameserver_net/**
+      - core/bundle_host_http/**
+      - core/bundle_host_kv/**
+      - core/bundle_host_media/**
+      - core/bundle_host_platform_table/**
+      - core/bundle_host_reputation/**
+      - core/bundle_host_storage/**
+      - core/bundle_tool_call/**
+      - core/circuit_breaker/**
+      - core/connection_resolver/**
+      - core/egress_assertion/**
+      - core/hub_client/**
+      - core/service_auth/**
+
+  svc-action:
+    dockerfile: core/svc_action/Dockerfile.rust
+    context: core
+    build_contexts: ["proto=./proto"]
+    lane: a
+    groups: [proto]
+    inputs:
+      - core/svc_action/Cargo.toml
+      - core/svc_action/Cargo.lock
+      - core/svc_action/src/**
+      - core/bundle_active_set/**
+      - core/bundle_capability_gate/**
+      - core/bundle_host_credentials/**
+      - core/bundle_host_db/**
+      - core/bundle_host_http/**
+      - core/bundle_host_kv/**
+      - core/bundle_tool_call/**
+      - core/circuit_breaker/**
+      - core/connection_resolver/**
+      - core/discord_mentions/**
+      - core/egress_assertion/**
+      - core/hub_client/**
+      - core/service_auth/**
+
+  svc-presentation:
+    dockerfile: core/svc_presentation/Dockerfile.rust
+    context: core
+    build_contexts: ["proto=./proto"]
+    lane: a
+    groups: [proto]
+    inputs:
+      - core/svc_presentation/Cargo.toml
+      - core/svc_presentation/Cargo.lock
+      - core/svc_presentation/src/**
+      - core/egress_detokenizer/**
+      - core/hub_client/**
+      - core/overlay_auth/**
+      - core/overlay_schema/**
+      - core/service_auth/**
+
+  egress-proxy:
+    dockerfile: core/egress_proxy/Dockerfile.rust
+    context: core
+    build_contexts: ["proto=./proto"]
+    lane: b
+    groups: [proto]
+    inputs:
+      - core/egress_proxy/Cargo.toml
+      - core/egress_proxy/Cargo.lock
+      - core/egress_proxy/src/**
+      - core/bundle_host_http/**
+      - core/egress_assertion/**
+      - core/service_auth/**
+
+  # Chart appends -<variant> to the tag; only the cpu variant is built for alpha.
+  svc-streaming:
+    dockerfile: core/svc_streaming/Dockerfile.rust
+    context: core/svc_streaming
+    target: cpu
+    tag_suffix: "-cpu"
+    lane: b
+    inputs:
+      - core/svc_streaming/Cargo.toml
+      - core/svc_streaming/Cargo.lock
+      - core/svc_streaming/src/**
+      - core/svc_streaming/tests/**
+
+# Paths that provably feed no alpha image. Everything here is a deliberate decision:
+# adding a path to a Dockerfile COPY without moving it out of here is caught by
+# test_image_inputs.py (inputs always win over ignore, and the Dockerfile cross-check
+# fails if a COPY source is not covered by the image's inputs).
+ignore:
+  # Docs, prose, media, repo metadata.
+  - docs/**
+  - website/**
+  - deck/**
+  - Premium/**
+  - .idea/**
+  - .claude/**
+  - "**/*.md"
+  - LICENSE
+  - CONTRIBUTORS
+  - .FUTURE
+  - .version
+  - .gitignore
+  - .gitleaks.toml
+  - .checks-baseline
+  - .flake8
+  - .spectral.yaml
+  - .pre-commit-config.yaml
+  - .ci/**
+  - "*.png"
+  - test-results/**
+  - package.json
+  - package-lock.json
+  - requirements-lint.txt
+  - Makefile
+  - test-all.sh
+  - openapi/**
+  # CI/GitHub plumbing other than the deploy workflow (which is in shared_all).
+  - .github/**
+  - scripts/**
+  # Deploy-only: the Helm chart changes what is deployed, never an image; every
+  # deploy runs helm regardless of which images were rebuilt.
+  - k8s/**
+  # Tests and test-only trees (inputs, e.g. svc_streaming/tests, win over these).
+  - tests/**
+  - "**/tests/**"
+  - "**/test_*.py"
+  - "**/conftest.py"
+  - "**/*_test.go"
+  - "**/*.test.*"
+  - "**/*.spec.*"
+  - hub_api/pytest.ini
+  - hub_api/pyproject.toml
+  - hub_api/.coveragerc
+  - hub_api/requirements-dev.*
+  - hub_api/requirements.in
+  - hub_api/Dockerfile.*
+  # Source trees no alpha image copies.
+  - core/*/target/**
+  - core/*/README*
+  - core/*/Dockerfile*
+  - core/*/benches/**
+  - core/*/examples/**
+  - core/*/docs/**
+  - core/*/.dockerignore
+  - core/*/build/**
+  - core/*/Makefile
+  - core/*/*.toml
+  - core/*/*.lock
+  - core/*/*.yaml
+  - core/*/*.yml
+  - core/*/*.sh
+  - core/*/*.json
+  - core/bundle_compiler/**
+  - core/connector_e2e/**
+  - core/module_rtc/**
+  - core/test_support/**
+  - core/tool_invoke_e2e/**
+  - core/twitch_helix/**
+  - core/waddles_ops_cli/**
+  - admin/**
+  - bundles/csharp/**
+  - bundles/contracts/**
+  - bundles/javascript/**
+  - core/*/scripts/**
+  - deck
+  - bundles/Dockerfile.*
+  - config/nginx/**
+  - config/observability/**
+  - config/redis/**
+  - config/searxng/**
+  - config/postgres/**
+  - libs/**
+  - sdk/**
+  - proto/README*
+  - migrations/README*
+  - migrations/requirements.in
+  - migrations/Dockerfile*

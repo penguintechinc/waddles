@@ -124,7 +124,7 @@ spec:
         # concatenation) -- same pattern as .Values.streaming.image/.Values.reputation.image
         # (see those templates' own image lines); using the waddlebot.image helper here
         # would double-prefix alpha's already-registry-qualified repository value.
-        image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag | toString }}"
+        image: "{{ .Values.bundleExecutor.image.repository }}:{{ include "waddlebot.resolveImageTag" (dict "root" . "image" "svc-bundles-executor" "explicit" .Values.bundleExecutor.image.tag) }}"
         # Values-driven -- see templates/svc-process-rust.yaml's comment on this same line
         # for why the old hardcoded Always was removed (identical here). The stale-image
         # case that motivated it (a same-tag `:alpha` push) is closed by the per-deploy

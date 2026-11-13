@@ -13,9 +13,16 @@
 # componentize-dotnet 0.8.0-preview00011, NativeAOT-LLVM 10.0.0-rc.1.26306.1).
 
 # ---------------------------------------------------------------------------
-# Stage 1: waddles.core.example.ping (Rust) -> WASI 0.2 component
+# Stage 1a: rust-bundle-base -- toolchain + cargo-component + wasm-tools + wit/ + sdk + the
+# reproducible-build ENV pins, shared by every per-bundle stage below.
+#
+# Stage 1b (one `bundle-<name>` stage per Rust bundle, each FROM this base): a bundle's source
+# change rebuilds ONLY that bundle's stage plus the final assembly, instead of every bundle after
+# it in one serial chain. Toolchain/base/wit/sdk changes still rebuild all of them (correct).
+# Each stage keeps the original WORKDIR (/repo/bundles/rust/<name>), env, and
+# `cargo component build ... --locked`, so artifacts are built exactly as before.
 # ---------------------------------------------------------------------------
-FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS rust-bundle-builder
+FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS rust-bundle-base
 
 # build-essential -- required to build `ring` (rustls's crypto provider), same as
 # core/bundle_executor/Dockerfile.rust's own builder stage.
@@ -43,8 +50,6 @@ RUN cargo install cargo-component --version 0.21.1 --locked \
 WORKDIR /repo
 COPY wit wit
 COPY sdk/waddle-sdk-rs sdk/waddle-sdk-rs
-COPY bundles/rust/ping bundles/rust/ping
-WORKDIR /repo/bundles/rust/ping
 
 # Reproducible-build pins -- proven byte-identical sha256 across two independent
 # `--no-cache` builds (scripts/verify-core-bundles-reproducible.sh / `make
@@ -80,113 +85,163 @@ ENV SOURCE_DATE_EPOCH=1704067200 \
     RUSTFLAGS="--remap-path-prefix=/repo=/build --remap-path-prefix=${CARGO_HOME}/registry/src=/cargo/registry/src -C codegen-units=1 -C strip=symbols" \
     TZ=UTC \
     LC_ALL=C.UTF-8
+
+# --- ping
+# waddles.core.example.ping (Rust) -> WASI 0.2 component; the reproducible-build pins in
+# rust-bundle-base are proven byte-identical for this artifact by core-bundles-reproducible.yml.
+FROM rust-bundle-base AS bundle-ping
+COPY bundles/rust/ping /repo/bundles/rust/ping
+WORKDIR /repo/bundles/rust/ping
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- reputation
 # waddles.core.service.reputation (bundle-MCP-tools P5, `kind: service`, world stage-tools):
 # same toolchain and the SAME reproducible-build ENV pins as ping above (they are stage-level
 # ENV, inherited by this RUN). Its own manifest dir; ping's artifact above is unaffected.
+FROM rust-bundle-base AS bundle-reputation
 COPY bundles/rust/reputation /repo/bundles/rust/reputation
 WORKDIR /repo/bundles/rust/reputation
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- ai
 # AI service (catalog `ai`, `kind: service`, world stage-tools): same pinned builder.
+FROM rust-bundle-base AS bundle-ai
 COPY bundles/rust/ai /repo/bundles/rust/ai
 WORKDIR /repo/bundles/rust/ai
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- economy
 # Community economy service uses the tool-provider world and the same pinned builder.
+FROM rust-bundle-base AS bundle-economy
 COPY bundles/rust/economy /repo/bundles/rust/economy
 WORKDIR /repo/bundles/rust/economy
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- dj
 # DJ app bundle (`stage-next-tools` world): same pinned builder.
+FROM rust-bundle-base AS bundle-dj
 COPY bundles/rust/dj /repo/bundles/rust/dj
 WORKDIR /repo/bundles/rust/dj
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- twitch-clips
 # Twitch clips APP bundle (world stage-next-tools): same pinned builder.
+FROM rust-bundle-base AS bundle-twitch-clips
 COPY bundles/rust/twitch-clips /repo/bundles/rust/twitch-clips
 WORKDIR /repo/bundles/rust/twitch-clips
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- twitch
 # Twitch platform connector (P6b, `kind: service`, world connector-tools): same pinned builder.
+FROM rust-bundle-base AS bundle-twitch
 COPY bundles/rust/twitch /repo/bundles/rust/twitch
 WORKDIR /repo/bundles/rust/twitch
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- music-soundcloud
 # SoundCloud music service (`kind: service`, world stage-tools): same pinned builder.
+FROM rust-bundle-base AS bundle-music-soundcloud
 COPY bundles/rust/music-soundcloud /repo/bundles/rust/music-soundcloud
 WORKDIR /repo/bundles/rust/music-soundcloud
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- discord
 # Discord platform connector (P6b, `kind: service`, world connector-tools): same pinned builder.
+FROM rust-bundle-base AS bundle-discord
 COPY bundles/rust/discord /repo/bundles/rust/discord
 WORKDIR /repo/bundles/rust/discord
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- youtube
 # Youtube platform connector (P6b, `kind: service`, world connector-tools): same pinned builder.
+FROM rust-bundle-base AS bundle-youtube
 COPY bundles/rust/youtube /repo/bundles/rust/youtube
 WORKDIR /repo/bundles/rust/youtube
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- kick
 # Kick platform service bundle (`kind: service`, world connector-tools): same pinned builder.
+FROM rust-bundle-base AS bundle-kick
 COPY bundles/rust/kick /repo/bundles/rust/kick
 WORKDIR /repo/bundles/rust/kick
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- live-now
 # live-now app (stage-next-tools world): same pinned builder.
+FROM rust-bundle-base AS bundle-live-now
 COPY bundles/rust/live-now /repo/bundles/rust/live-now
 WORKDIR /repo/bundles/rust/live-now
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- spectrum
 # RSI Spectrum platform connector (#486, `kind: service`, world connector, inbound-only): same pinned builder.
+FROM rust-bundle-base AS bundle-spectrum
 COPY bundles/rust/spectrum /repo/bundles/rust/spectrum
 WORKDIR /repo/bundles/rust/spectrum
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- wix
 # Wix webhook connector (`kind: service`, inbound-only, world connector-tools): same pinned builder.
+FROM rust-bundle-base AS bundle-wix
 COPY bundles/rust/wix /repo/bundles/rust/wix
 WORKDIR /repo/bundles/rust/wix
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- webrtc
 # WebRTC service + rooms app: both build against wit/waddle-bundle (webrtc.wit adds the
 # `webrtc` capability + `stage-tools-webrtc` world); rooms needs `sdk/waddle-sdk-rs` only
 # transitively (webrtc), already copied above.
+FROM rust-bundle-base AS bundle-webrtc
 COPY bundles/rust/webrtc /repo/bundles/rust/webrtc
 WORKDIR /repo/bundles/rust/webrtc
 RUN cargo component build --release --target wasm32-wasip2 --locked
+
+# --- rooms
+FROM rust-bundle-base AS bundle-rooms
 COPY bundles/rust/rooms /repo/bundles/rust/rooms
 WORKDIR /repo/bundles/rust/rooms
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- music-youtube
 # Music YouTube service (`kind: service`, world stage-tools): same pinned builder.
+FROM rust-bundle-base AS bundle-music-youtube
 COPY bundles/rust/music-youtube /repo/bundles/rust/music-youtube
 WORKDIR /repo/bundles/rust/music-youtube
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- gameserver
 # Game-server tooling: `gameserver` SERVICE (world stage-tools) + `game-servers` APP (world stage-next-tools).
+FROM rust-bundle-base AS bundle-gameserver
 COPY bundles/rust/gameserver /repo/bundles/rust/gameserver
 WORKDIR /repo/bundles/rust/gameserver
 RUN cargo component build --release --target wasm32-wasip2 --locked
+
+# --- game-servers
+FROM rust-bundle-base AS bundle-game-servers
 COPY bundles/rust/game-servers /repo/bundles/rust/game-servers
 WORKDIR /repo/bundles/rust/game-servers
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- ai-teammates
 # AI Teammates app bundle (`stage-next-tools` world): same pinned builder.
+FROM rust-bundle-base AS bundle-ai-teammates
 COPY bundles/rust/ai-teammates /repo/bundles/rust/ai-teammates
 WORKDIR /repo/bundles/rust/ai-teammates
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- calendar
 # Calendar app bundle (`kind: app`, world stage-next-tools): same pinned builder.
+FROM rust-bundle-base AS bundle-calendar
 COPY bundles/rust/calendar /repo/bundles/rust/calendar
 WORKDIR /repo/bundles/rust/calendar
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- music-spotify
 # Spotify music service (`kind: service`, world stage-tools): same pinned builder.
+FROM rust-bundle-base AS bundle-music-spotify
 COPY bundles/rust/music-spotify /repo/bundles/rust/music-spotify
 WORKDIR /repo/bundles/rust/music-spotify
 RUN cargo component build --release --target wasm32-wasip2 --locked
-
 
 # ---------------------------------------------------------------------------
 # Stage 2: every `language: python` entry in bundles/core-bundles.yaml -> WASI 0.2
@@ -225,7 +280,7 @@ COPY bundles/build_python_bundles.py bundles/build_python_bundles.py
 # src/_entry_wiring.py (added by that same merge) supplies the static bundle_transform/
 # bundle_dispatch wiring _component_entry.py expects from the bundle's own source directory.
 #
-# Reproducible-build pins (same proof requirement as rust-bundle-builder above --
+# Reproducible-build pins (same proof requirement as the rust bundle stages above --
 # scripts/verify-core-bundles-reproducible.sh / `make verify-core-bundles-reproducible`;
 # waddles.core.example.pyping and the batch bundles remain intentionally EXCLUDED from that
 # gate, see that script's own header comment). componentize-py wizens a real CPython
@@ -262,7 +317,7 @@ RUN python3 bundles/build_python_bundles.py
 # in full there; only the COPY sources differ (repo-root context here vs. that Dockerfile's
 # own COPY of wit/ + bundles/csharp/csping relative to repo root, already identical paths).
 #
-# Reproducibility: UNLIKE rust-bundle-builder above, this stage is NOT covered by
+# Reproducibility: UNLIKE the rust bundle stages above, this stage is NOT covered by
 # scripts/verify-core-bundles-reproducible.sh's byte-identity gate. componentize-dotnet's
 # NativeAOT-LLVM pipeline (clang/LLVM codegen, not rustc) has not been proven byte-identical
 # across two independent --no-cache builds -- SOURCE_DATE_EPOCH/TZ/LC_ALL are pinned below
@@ -397,29 +452,29 @@ COPY bundles/rust/ai-teammates/hub-manifest.yaml /core-bundles/ai-teammates.mani
 COPY bundles/rust/calendar/hub-manifest.yaml /core-bundles/calendar.manifest.yaml
 COPY bundles/rust/music-spotify/hub-manifest.yaml /core-bundles/music-spotify.manifest.yaml
 COPY bundles/csharp/csping/hub-manifest.yaml /core-bundles/csping.manifest.yaml
-COPY --from=rust-bundle-builder /repo/bundles/rust/ping/target/wasm32-wasip2/release/waddle_bundle_ping_rust.wasm /core-bundles/ping.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/reputation/target/wasm32-wasip2/release/waddle_bundle_reputation_service.wasm /core-bundles/reputation.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/ai/target/wasm32-wasip2/release/waddle_bundle_ai_service.wasm /core-bundles/ai.wasm
+COPY --from=bundle-ping /repo/bundles/rust/ping/target/wasm32-wasip2/release/waddle_bundle_ping_rust.wasm /core-bundles/ping.wasm
+COPY --from=bundle-reputation /repo/bundles/rust/reputation/target/wasm32-wasip2/release/waddle_bundle_reputation_service.wasm /core-bundles/reputation.wasm
+COPY --from=bundle-ai /repo/bundles/rust/ai/target/wasm32-wasip2/release/waddle_bundle_ai_service.wasm /core-bundles/ai.wasm
 COPY --from=csharp-bundle-builder /repo/bundles/csharp/csping/bin/Release/net10.0/wasi-wasm/publish/csping.wasm /core-bundles/csping.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/economy/target/wasm32-wasip2/release/waddle_bundle_economy_service.wasm /core-bundles/economy.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/dj/target/wasm32-wasip2/release/waddle_bundle_dj_app.wasm /core-bundles/dj.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/twitch/target/wasm32-wasip2/release/waddle_bundle_twitch_overlay.wasm /core-bundles/twitch.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/twitch-clips/target/wasm32-wasip2/release/waddle_bundle_twitch_clips.wasm /core-bundles/twitch-clips.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/music-soundcloud/target/wasm32-wasip2/release/waddle_bundle_music_soundcloud.wasm /core-bundles/music-soundcloud.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/discord/target/wasm32-wasip2/release/waddle_bundle_discord_overlay.wasm /core-bundles/discord-connector.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/youtube/target/wasm32-wasip2/release/waddle_bundle_youtube_service.wasm /core-bundles/youtube.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/kick/target/wasm32-wasip2/release/waddle_bundle_kick_service.wasm /core-bundles/kick.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/live-now/target/wasm32-wasip2/release/waddle_bundle_live_now.wasm /core-bundles/live-now.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/spectrum/target/wasm32-wasip2/release/waddle_bundle_spectrum_service.wasm /core-bundles/spectrum.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/wix/target/wasm32-wasip2/release/waddle_bundle_wix_service.wasm /core-bundles/wix-connector.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/webrtc/target/wasm32-wasip2/release/waddle_bundle_webrtc_service.wasm /core-bundles/webrtc.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/rooms/target/wasm32-wasip2/release/waddle_bundle_rooms.wasm /core-bundles/rooms.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/music-youtube/target/wasm32-wasip2/release/waddle_bundle_music_youtube_service.wasm /core-bundles/music-youtube.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/gameserver/target/wasm32-wasip2/release/waddle_bundle_gameserver_service.wasm /core-bundles/gameserver.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/game-servers/target/wasm32-wasip2/release/waddle_bundle_game_servers.wasm /core-bundles/game-servers.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/ai-teammates/target/wasm32-wasip2/release/waddle_bundle_ai_teammates.wasm /core-bundles/ai-teammates.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/calendar/target/wasm32-wasip2/release/waddle_bundle_calendar_rust.wasm /core-bundles/calendar.wasm
-COPY --from=rust-bundle-builder /repo/bundles/rust/music-spotify/target/wasm32-wasip2/release/waddle_bundle_music_spotify_service.wasm /core-bundles/music-spotify.wasm
+COPY --from=bundle-economy /repo/bundles/rust/economy/target/wasm32-wasip2/release/waddle_bundle_economy_service.wasm /core-bundles/economy.wasm
+COPY --from=bundle-dj /repo/bundles/rust/dj/target/wasm32-wasip2/release/waddle_bundle_dj_app.wasm /core-bundles/dj.wasm
+COPY --from=bundle-twitch /repo/bundles/rust/twitch/target/wasm32-wasip2/release/waddle_bundle_twitch_overlay.wasm /core-bundles/twitch.wasm
+COPY --from=bundle-twitch-clips /repo/bundles/rust/twitch-clips/target/wasm32-wasip2/release/waddle_bundle_twitch_clips.wasm /core-bundles/twitch-clips.wasm
+COPY --from=bundle-music-soundcloud /repo/bundles/rust/music-soundcloud/target/wasm32-wasip2/release/waddle_bundle_music_soundcloud.wasm /core-bundles/music-soundcloud.wasm
+COPY --from=bundle-discord /repo/bundles/rust/discord/target/wasm32-wasip2/release/waddle_bundle_discord_overlay.wasm /core-bundles/discord-connector.wasm
+COPY --from=bundle-youtube /repo/bundles/rust/youtube/target/wasm32-wasip2/release/waddle_bundle_youtube_service.wasm /core-bundles/youtube.wasm
+COPY --from=bundle-kick /repo/bundles/rust/kick/target/wasm32-wasip2/release/waddle_bundle_kick_service.wasm /core-bundles/kick.wasm
+COPY --from=bundle-live-now /repo/bundles/rust/live-now/target/wasm32-wasip2/release/waddle_bundle_live_now.wasm /core-bundles/live-now.wasm
+COPY --from=bundle-spectrum /repo/bundles/rust/spectrum/target/wasm32-wasip2/release/waddle_bundle_spectrum_service.wasm /core-bundles/spectrum.wasm
+COPY --from=bundle-wix /repo/bundles/rust/wix/target/wasm32-wasip2/release/waddle_bundle_wix_service.wasm /core-bundles/wix-connector.wasm
+COPY --from=bundle-webrtc /repo/bundles/rust/webrtc/target/wasm32-wasip2/release/waddle_bundle_webrtc_service.wasm /core-bundles/webrtc.wasm
+COPY --from=bundle-rooms /repo/bundles/rust/rooms/target/wasm32-wasip2/release/waddle_bundle_rooms.wasm /core-bundles/rooms.wasm
+COPY --from=bundle-music-youtube /repo/bundles/rust/music-youtube/target/wasm32-wasip2/release/waddle_bundle_music_youtube_service.wasm /core-bundles/music-youtube.wasm
+COPY --from=bundle-gameserver /repo/bundles/rust/gameserver/target/wasm32-wasip2/release/waddle_bundle_gameserver_service.wasm /core-bundles/gameserver.wasm
+COPY --from=bundle-game-servers /repo/bundles/rust/game-servers/target/wasm32-wasip2/release/waddle_bundle_game_servers.wasm /core-bundles/game-servers.wasm
+COPY --from=bundle-ai-teammates /repo/bundles/rust/ai-teammates/target/wasm32-wasip2/release/waddle_bundle_ai_teammates.wasm /core-bundles/ai-teammates.wasm
+COPY --from=bundle-calendar /repo/bundles/rust/calendar/target/wasm32-wasip2/release/waddle_bundle_calendar_rust.wasm /core-bundles/calendar.wasm
+COPY --from=bundle-music-spotify /repo/bundles/rust/music-spotify/target/wasm32-wasip2/release/waddle_bundle_music_spotify_service.wasm /core-bundles/music-spotify.wasm
 # Every `language: python` bundle's manifest + .wasm, generated by build_python_bundles.py
 # (python-bundles-builder stage) into one flat dist/ dir keyed by the catalog's own
 # manifest_path/artifact_path filenames -- a single directory COPY instead of one

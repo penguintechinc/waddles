@@ -74,7 +74,19 @@ COPY service_auth ./service_auth
 # rather than COPY'd from `.`.
 COPY --from=proto . /proto
 WORKDIR /build/svc_process
-RUN cargo build --release --locked
+# BuildKit cache mounts (bounded, explicit ids; none of this reaches the image layers):
+#  - cargo registry/git: downloaded crates, shared by every Rust image on the same BuildKit pod.
+#    Content is checksum-verified against Cargo.lock, so it cannot change build output.
+#  - target dir: ONE per image (id waddles-target-<image>) so a source change recompiles only
+#    the changed first-party crates, not every third-party dependency. Lives in the BuildKit
+#    pod's local store, which the pod's GC policy caps (exec.cachemount kept 6h, 40GB total).
+#    The binary is copied out inside the same RUN because cache mounts are not in the layer.
+# `--locked` stays: a stale/poisoned cache can never change the resolved dependency set.
+RUN --mount=type=cache,id=waddles-cargo-registry,target=/usr/local/cargo/registry,sharing=shared \
+    --mount=type=cache,id=waddles-cargo-git,target=/usr/local/cargo/git,sharing=shared \
+    --mount=type=cache,id=waddles-target-svc-process,target=/build/svc_process/target,sharing=locked \
+    cargo build --release --locked \
+    && install -D -m 0755 target/release/svc-process /out/svc-process
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 
@@ -92,7 +104,7 @@ RUN groupadd --system --gid 10001 appuser \
     && useradd --system --uid 10001 --gid appuser --home-dir /nonexistent \
        --shell /usr/sbin/nologin appuser
 
-COPY --from=builder --chown=appuser:appuser /build/svc_process/target/release/svc-process /app/svc-process
+COPY --from=builder --chown=appuser:appuser /out/svc-process /app/svc-process
 
 WORKDIR /app
 USER appuser

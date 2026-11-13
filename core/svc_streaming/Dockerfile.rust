@@ -52,7 +52,19 @@ COPY Cargo.toml Cargo.lock ./
 # `cargo build`). Tests are not compiled by the release build.
 COPY tests ./tests
 COPY src ./src
-RUN cargo build --release --locked
+# BuildKit cache mounts (bounded, explicit ids; none of this reaches the image layers):
+#  - cargo registry/git: downloaded crates, shared by every Rust image on the same BuildKit pod.
+#    Content is checksum-verified against Cargo.lock, so it cannot change build output.
+#  - target dir: ONE per image (id waddles-target-<image>) so a source change recompiles only
+#    the changed first-party crates, not every third-party dependency. Lives in the BuildKit
+#    pod's local store, which the pod's GC policy caps (exec.cachemount kept 6h, 40GB total).
+#    The binary is copied out inside the same RUN because cache mounts are not in the layer.
+# `--locked` stays: a stale/poisoned cache can never change the resolved dependency set.
+RUN --mount=type=cache,id=waddles-cargo-registry,target=/usr/local/cargo/registry,sharing=shared \
+    --mount=type=cache,id=waddles-cargo-git,target=/usr/local/cargo/git,sharing=shared \
+    --mount=type=cache,id=waddles-target-svc-streaming,target=/build/target,sharing=locked \
+    cargo build --release --locked \
+    && install -D -m 0755 target/release/svc-streaming /out/svc-streaming
 
 # ---------------------------------------------------------------------------
 # runtime-base -- CPU software encoders only. Every variant inherits this.
@@ -80,7 +92,7 @@ RUN groupadd --system --gid 10001 appuser \
     && mkdir -p /var/lib/svc-streaming \
     && chown -R appuser:appuser /var/lib/svc-streaming
 
-COPY --from=builder --chown=appuser:appuser /build/target/release/svc-streaming /app/svc-streaming
+COPY --from=builder --chown=appuser:appuser /out/svc-streaming /app/svc-streaming
 
 WORKDIR /app
 USER appuser
