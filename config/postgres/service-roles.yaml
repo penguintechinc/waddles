@@ -159,9 +159,24 @@ roles:
         SELECT: [tenant_id, pseudonym, handle]
 
   waddles_svc_process:
-    description: svc-process (reads active-bundle state only via waddles_bundle_reader)
+    description: svc-process (active-bundle state via waddles_bundle_reader; per-community bundle config read-only, column-scoped)
     workloads: [svc-process-rust, svc-process]
     member_of: [svc_process]
+    # Live per-community bundle config (core/hub_client/src/bundle_config_db.rs, alembic 0106,
+    # issue #1306): ONE batched SELECT per warm-up from the read-only replica -- hub-api (the
+    # writer) is never on the data-plane hot path. Column-scoped SELECT only; no
+    # updated_by/schema_sha256/staging keys/digests, no writes.
+    columns:
+      bundle_community_config:
+        SELECT: [tenant_id, community_id, app_id, version, config]
+      app_active_versions:
+        SELECT: [app_id, tenant_id, community_id, version_id]
+      app_versions:
+        SELECT: [id]
+      app_version_uploads:
+        SELECT: [id, app_version_id, manifest_json]
+      communities:
+        SELECT: [id, tenant_id]
 
   waddles_svc_core:
     description: svc-core placeholder stage (no table access)
@@ -175,6 +190,18 @@ roles:
       action_dispatch_log: [SELECT, INSERT]
       tenants: [SELECT]
       communities: [SELECT]
+    # Live per-community bundle config (core/hub_client/src/bundle_config_db.rs, alembic 0106,
+    # issue #1306): same read-only, column-scoped reads as svc-process (the tenant gate uses the
+    # table-level `communities: SELECT` above). No writes, no secret/PII columns.
+    columns:
+      bundle_community_config:
+        SELECT: [tenant_id, community_id, app_id, version, config]
+      app_active_versions:
+        SELECT: [app_id, tenant_id, community_id, version_id]
+      app_versions:
+        SELECT: [id]
+      app_version_uploads:
+        SELECT: [id, app_version_id, manifest_json]
 
   waddles_svc_presentation:
     description: svc-presentation overlays, captions, images

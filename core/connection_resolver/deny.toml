@@ -29,6 +29,10 @@ allow = [
     "MPL-2.0",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
+    # `xxhash-rust` (transitive via `redis`, through core/hub_client) -- permissive, OSI-approved
+    # and FSF-free (same tier as MIT/BSD). Same allowance core/hub_client, core/svc_ingest and
+    # core/svc_process carry.
+    "BSL-1.0",
 ]
 exceptions = []
 

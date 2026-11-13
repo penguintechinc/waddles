@@ -120,6 +120,12 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
+        # Live per-community bundle config is read straight from the read-only replica (issue
+        # #1306), column-scoped under the SAME role (alembic 0106); hub-api is not on this path.
+        # Rendered only with infrastructure.postgresql.readReplicas.host; unset -> the stage uses
+        # DATABASE_URL above (primary) and logs a WARN. Kill switch (PostHog, opt-out):
+        # waddles.disable-db-bundle-config-reads ON = legacy hub-api gRPC path.
+{{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
 {{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.port | quote }}

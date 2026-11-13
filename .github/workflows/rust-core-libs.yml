@@ -79,3 +79,6 @@ jobs:
       # hub_client's build.rs compiles the repo-root proto/ tree (tonic-prost-build).
       extra_apt_packages: protobuf-compiler cmake build-essential
       extra_apt_reason: 'for hub_client build.rs (protoc) + aws-lc-sys'
+      # hub_client's bundle-config DB reader tests (tests/bundle_config_db_pg.rs) need a real
+      # Postgres via TEST_DATABASE_URL and fail loudly without one.
+      postgres: ${{ matrix.crate == 'hub_client' }}

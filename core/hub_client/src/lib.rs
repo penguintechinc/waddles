@@ -39,6 +39,7 @@
 
 pub mod active_context;
 pub mod bundle_config;
+pub mod bundle_config_db;
 pub mod bundle_schedule;
 pub mod dek;
 pub mod resolve_scope;

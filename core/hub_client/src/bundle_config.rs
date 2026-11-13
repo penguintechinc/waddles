@@ -12,8 +12,16 @@
 //! * on a save hub-api bumps a Valkey *version key* ([`version_key`]); a hit older than
 //!   `recheck` asks the [`VersionProbe`] and reloads when the key is newer than the entry;
 //! * entries also expire after `ttl` (safety net when the probe/Valkey is down);
-//! * hub-api unreachable -> the last-known value is served (WARN + counter), never-seen -> the
-//!   registered schema defaults, else an ERROR log and `{}` -- never a silent empty.
+//! * source unreachable -> the last-known value is served indefinitely (ERROR + counter; no
+//!   max-age cutoff), never-seen -> the registered schema defaults, else an ERROR log and `{}` --
+//!   never a silent empty.
+//!
+//! **Sources (issue #1306).** The data plane reads the database directly
+//! ([`crate::bundle_config_db::DbConfigSource`], read-only replica, one batched warm-up query) and
+//! never needs hub-api on the hot path; the legacy hub-api gRPC [`BundleConfigClient`] remains
+//! behind the opt-out kill switch `waddles.disable-db-bundle-config-reads`
+//! ([`crate::bundle_config_db::RoutedConfigSource`]). Warm-up seeds from many bundle loads are
+//! coalesced into ONE batched load ([`BundleConfigCache::enqueue_seed`]).
 //!
 //! No lock is held across an `.await`; every critical section is a short sync map operation.
 //! Logs/spans/metric labels carry numeric ids and outcomes only -- never a config body.
@@ -21,7 +29,8 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -31,6 +40,7 @@ use service_auth::MachineJwtClient;
 use tonic::transport::{Channel, Endpoint};
 use tracing::Instrument;
 
+use crate::bundle_config_db::{DbConfigSource, DbReadConfig, ReadPathGate, RoutedConfigSource};
 use crate::pb::bundle_config_service_client::BundleConfigServiceClient;
 use crate::pb::{BatchGetCommunityConfigRequest, GetCommunityConfigRequest};
 use crate::rpc::RpcGuard;
@@ -91,6 +101,9 @@ pub trait ConfigSource: Send + Sync {
     async fn get(&self, key: &ConfigKey) -> Result<ConfigValue, HubClientError>;
     /// Loads many scopes; scopes hub-api refuses/does not know are simply absent.
     async fn batch_get(&self, keys: &[ConfigKey]) -> Result<Vec<ConfigValue>, HubClientError>;
+    /// Installs the read-path kill switch on a source that routes between paths; a no-op for
+    /// every single-path source.
+    fn set_read_path_gate(&self, _gate: Arc<dyn ReadPathGate>) {}
 }
 
 /// Reads the invalidation version key. `None` = unavailable/absent (the TTL is then the backstop).
@@ -319,12 +332,12 @@ fn instruments() -> &'static Instruments {
                 .build(),
             load_errors: meter
                 .u64_counter("waddles_bundle_config_load_errors")
-                .with_description("Failed hub-api community-config loads.")
+                .with_description("Failed community-config loads (any read path).")
                 .build(),
             load_seconds: meter
                 .f64_histogram("waddles_bundle_config_load_seconds")
                 .with_unit("s")
-                .with_description("hub-api community-config load latency.")
+                .with_description("Community-config load latency (any read path).")
                 .with_boundaries(vec![
                     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
                 ])
@@ -358,7 +371,16 @@ pub struct BundleConfigCache {
     defaults: RwLock<HashMap<String, Arc<str>>>,
     /// Kill-switch gate; unset = always enabled.
     gate: OnceLock<Arc<dyn LiveConfigGate>>,
+    /// Scopes waiting for the next coalesced warm-up seed ([`Self::enqueue_seed`]).
+    pending_seed: Mutex<Vec<ConfigKey>>,
+    /// True while a coalescing flush task is scheduled.
+    seed_scheduled: AtomicBool,
+    /// How long a flush waits to collect more scopes.
+    seed_window: Duration,
 }
+
+/// Default coalescing window for warm-up seeds.
+pub const DEFAULT_SEED_WINDOW: Duration = Duration::from_millis(250);
 
 impl BundleConfigCache {
     /// A cache loading through `source`; `probe` enables version-key invalidation.
@@ -375,7 +397,50 @@ impl BundleConfigCache {
             entries: RwLock::new(HashMap::new()),
             defaults: RwLock::new(HashMap::new()),
             gate: OnceLock::new(),
+            pending_seed: Mutex::new(Vec::new()),
+            seed_scheduled: AtomicBool::new(false),
+            seed_window: DEFAULT_SEED_WINDOW,
         }
+    }
+
+    /// Overrides the warm-up coalescing window (tests).
+    #[must_use]
+    pub fn with_seed_window(mut self, window: Duration) -> Self {
+        self.seed_window = window;
+        self
+    }
+
+    /// Forwards the database-read-path kill switch to a routing source (no-op otherwise).
+    pub fn set_read_path_gate(&self, gate: Arc<dyn ReadPathGate>) {
+        self.source.set_read_path_gate(gate);
+    }
+
+    /// Queues one scope for the next coalesced warm-up seed and returns immediately. All scopes
+    /// queued within `seed_window` are loaded by ONE `batch_get` -- a stage loading ~160 bundles
+    /// at startup costs one query, not 160. Needs a running Tokio runtime (otherwise a no-op:
+    /// the lazy-load path still covers the scope).
+    pub fn enqueue_seed(self: &Arc<Self>, key: ConfigKey) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if let Ok(mut pending) = self.pending_seed.lock() {
+            pending.push(key);
+        }
+        if self.seed_scheduled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let cache = Arc::clone(self);
+        handle.spawn(async move {
+            tokio::time::sleep(cache.seed_window).await;
+            // Cleared BEFORE draining so a scope queued after the drain schedules a new flush.
+            cache.seed_scheduled.store(false, Ordering::SeqCst);
+            let keys = cache
+                .pending_seed
+                .lock()
+                .map(|mut p| std::mem::take(&mut *p))
+                .unwrap_or_default();
+            cache.seed(&keys).await;
+        });
     }
 
     /// Installs the kill-switch gate (once; later calls are ignored).
@@ -466,7 +531,7 @@ impl BundleConfigCache {
             }
             Err(err) => {
                 instruments().load_errors.add(1, &[]);
-                tracing::warn!(
+                tracing::error!(
                     requested = keys.len(),
                     error = %err,
                     "bundle_config: seed failed; scopes will lazy-load on first use"
@@ -542,12 +607,12 @@ impl BundleConfigCache {
                 instruments().load_errors.add(1, &[]);
                 if let Some(entry) = stale {
                     record("stale");
-                    tracing::warn!(
+                    tracing::error!(
                         tenant_id = key.tenant_id,
                         community_id = key.community_id,
                         app_id = %key.app_id,
                         error = %err,
-                        "bundle_config: hub-api unreachable; serving last-known config"
+                        "bundle_config: config source unavailable; serving last-known config"
                     );
                     return entry.value;
                 }
@@ -642,26 +707,26 @@ pub fn global() -> Option<Arc<BundleConfigCache>> {
     GLOBAL.get().cloned()
 }
 
-/// Seeds the global cache for one `(tenant, community, app)` scope right after the stage loaded
-/// that bundle onto the executor. Fire-and-forget: a failed seed only means the first invocation
+/// Queues one `(tenant, community, app)` scope for seeding right after the stage loaded that
+/// bundle onto the executor. Fire-and-forget and **coalesced**: every scope queued within the
+/// cache's seed window is loaded by one batched query ([`BundleConfigCache::enqueue_seed`]), so a
+/// stage warming ~160 bundles costs one round trip. A failed seed only means the first invocation
 /// lazy-loads (and logs) instead.
 pub fn seed_scope_in_background(tenant_id: i32, community_id: i32, app_id: &str) {
     let Some(cache) = global() else { return };
     if tenant_id < 1 || community_id < 0 {
         return;
     }
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        return;
-    };
-    let key = ConfigKey::new(i64::from(tenant_id), i64::from(community_id), app_id);
-    handle.spawn(async move {
-        cache.seed(&[key]).await;
-    });
+    cache.enqueue_seed(ConfigKey::new(
+        i64::from(tenant_id),
+        i64::from(community_id),
+        app_id,
+    ));
 }
 
-/// Builds, installs and returns the stage's cache. **Non-fatal**: with hub-api unconfigured or
-/// unreachable it logs (ERROR when configured-but-failed) and returns `None`, leaving
-/// `config_json` as before this feature (`{}`) -- never a stage start failure.
+/// Builds, installs and returns the stage's cache with the legacy hub-api source only (no
+/// database path). Prefer [`connect_and_install_routed`]; kept for callers/tests that have no
+/// database settings.
 pub async fn connect_and_install(
     endpoint: &str,
     token_endpoint: &str,
@@ -669,33 +734,84 @@ pub async fn connect_and_install(
     ca_cert_path: Option<&str>,
     valkey: Option<redis::aio::MultiplexedConnection>,
 ) -> Option<Arc<BundleConfigCache>> {
-    if endpoint.is_empty() || token_endpoint.is_empty() {
+    connect_and_install_routed(
+        endpoint,
+        token_endpoint,
+        sa_token_path,
+        ca_cert_path,
+        valkey,
+        &DbReadConfig::from_values(None, None),
+    )
+    .await
+}
+
+/// Builds, installs and returns the stage's cache over the database read path (preferred) and the
+/// legacy hub-api gRPC path (behind the `waddles.disable-db-bundle-config-reads` kill switch).
+///
+/// **Non-fatal**: with neither source configured it logs (ERROR when a configured source failed)
+/// and returns `None`, leaving `config_json` as before this feature (`{}`) -- never a stage start
+/// failure. With the database configured the stage keeps serving config while hub-api is down or
+/// unconfigured: a hub-api connect failure only removes the legacy fallback.
+pub async fn connect_and_install_routed(
+    endpoint: &str,
+    token_endpoint: &str,
+    sa_token_path: &str,
+    ca_cert_path: Option<&str>,
+    valkey: Option<redis::aio::MultiplexedConnection>,
+    db: &DbReadConfig,
+) -> Option<Arc<BundleConfigCache>> {
+    let db_source: Option<Arc<dyn ConfigSource>> = db.url.clone().map(|url| {
+        Arc::new(DbConfigSource::new(
+            url,
+            crate::bundle_config_db::DB_TIMEOUT,
+        )) as Arc<dyn ConfigSource>
+    });
+    let legacy: Option<Arc<dyn ConfigSource>> = if endpoint.is_empty() || token_endpoint.is_empty()
+    {
         tracing::info!(
-            "bundle_config: HUB_API_GRPC_ENDPOINT/SERVICE_JWT_TOKEN_ENDPOINT unset; bundles              receive an empty config_json"
+            "bundle_config: HUB_API_GRPC_ENDPOINT/SERVICE_JWT_TOKEN_ENDPOINT unset; no legacy \
+             hub-api config path"
+        );
+        None
+    } else {
+        match BundleConfigClient::connect(endpoint, token_endpoint, sa_token_path, ca_cert_path)
+            .await
+        {
+            Ok(client) => Some(Arc::new(client) as Arc<dyn ConfigSource>),
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "bundle_config: hub-api connect failed; the legacy hub-api config path is \
+                     unavailable until the stage restarts"
+                );
+                None
+            }
+        }
+    };
+    if db_source.is_none() && legacy.is_none() {
+        tracing::error!(
+            "bundle_config: no config source (set {} or {}, or configure hub-api); bundles \
+             receive an EMPTY config_json",
+            crate::bundle_config_db::REPLICA_URL_ENV,
+            crate::bundle_config_db::PRIMARY_URL_ENV
         );
         return None;
     }
-    match BundleConfigClient::connect(endpoint, token_endpoint, sa_token_path, ca_cert_path).await {
-        Ok(client) => {
-            let probe =
-                valkey.map(|c| Arc::new(ValkeyVersionProbe::new(c)) as Arc<dyn VersionProbe>);
-            let cache = Arc::new(BundleConfigCache::new(
-                Arc::new(client),
-                probe,
-                CacheConfig::default(),
-            ));
-            install_global(Arc::clone(&cache));
-            tracing::info!("bundle_config: live community config cache installed");
-            Some(cache)
-        }
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                "bundle_config: hub-api connect failed; bundles receive an EMPTY config_json                  until the stage restarts"
-            );
-            None
-        }
-    }
+    tracing::info!(
+        db = db_source.is_some(),
+        db_source = ?db.source,
+        legacy_hub_api = legacy.is_some(),
+        "bundle_config: live community config sources"
+    );
+    let probe = valkey.map(|c| Arc::new(ValkeyVersionProbe::new(c)) as Arc<dyn VersionProbe>);
+    let cache = Arc::new(BundleConfigCache::new(
+        Arc::new(RoutedConfigSource::new(db_source, legacy)),
+        probe,
+        CacheConfig::default(),
+    ));
+    install_global(Arc::clone(&cache));
+    tracing::info!("bundle_config: live community config cache installed");
+    Some(cache)
 }
 
 #[cfg(test)]
@@ -907,6 +1023,28 @@ mod tests {
         src.set(2, r#"{"v":2}"#);
         cache.evict(&key());
         assert_eq!(&*cache.lookup(&key()).await, r#"{"v":2}"#);
+    }
+
+    /// Warm-up: N bundle loads queued within the window are loaded by ONE `batch_get`, never N.
+    #[tokio::test]
+    async fn enqueue_seed_coalesces_many_scopes_into_one_batch() {
+        let src = FakeSource::new(1, r#"{"a":1}"#);
+        let cache = Arc::new(
+            BundleConfigCache::new(src.clone(), None, CacheConfig::default())
+                .with_seed_window(Duration::from_millis(50)),
+        );
+        for community in 0..160 {
+            cache.enqueue_seed(ConfigKey::new(1, community, "waddles.core.app.calendar"));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(src.batches.load(Ordering::SeqCst), 1, "one batched load");
+        assert_eq!(src.gets.load(Ordering::SeqCst), 0, "no per-scope loads");
+        assert_eq!(cache.len(), 160);
+        // A scope queued after the flush schedules a fresh (second) batch.
+        cache.enqueue_seed(ConfigKey::new(1, 999, "waddles.core.app.calendar"));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(src.batches.load(Ordering::SeqCst), 2);
+        assert_eq!(cache.len(), 161);
     }
 
     #[tokio::test]

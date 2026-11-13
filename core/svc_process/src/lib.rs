@@ -2321,17 +2321,25 @@ fn try_start_changelog_consumer(
                         Some(client) => client.get_multiplexed_async_connection().await.ok(),
                         None => None,
                     };
-                    let live_cache = hub_client::bundle_config::connect_and_install(
+                    // Read path (issue #1306): the read-only replica database directly
+                    // (`DATABASE_REPLICA_URL`, primary `DATABASE_URL` fallback at WARN), never
+                    // hub-api on the hot path; hub-api gRPC remains only behind the
+                    // `waddles.disable-db-bundle-config-reads` kill switch.
+                    let live_cache = hub_client::bundle_config::connect_and_install_routed(
                         &config.cli.hub_api_grpc_endpoint,
                         &config.cli.service_jwt_token_endpoint,
                         &config.cli.service_jwt_sa_token_path,
                         (!config.cli.hub_api_grpc_ca_file.is_empty())
                             .then_some(config.cli.hub_api_grpc_ca_file.as_str()),
                         config_probe_conn,
+                        &hub_client::bundle_config_db::DbReadConfig::from_env(),
                     )
                     .await;
                     if let Some(cache) = &live_cache {
                         cache.set_gate(Arc::new(license::LiveBundleConfigGate(
+                            bundle_db_license_client.clone(),
+                        )));
+                        cache.set_read_path_gate(Arc::new(license::DbConfigReadsGate(
                             bundle_db_license_client.clone(),
                         )));
                     }

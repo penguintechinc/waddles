@@ -34,6 +34,18 @@ This document provides a comprehensive reference for environment variables used 
 
 ---
 
+## svc-process / svc-action (live bundle config, issue #1306)
+
+`core/svc_process` and `core/svc_action` read per-community bundle config (`get-context().config_json`) directly from Postgres through `core/hub_client/src/bundle_config_db.rs` -- hub-api (the control-plane writer) is not on the hot path and the stages keep serving config while it is down. Details: `docs/BUNDLE_COMMUNITY_CONFIG_LIVE.md`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_REPLICA_URL` | unset | DSN of the **read-only replica**; preferred. Same column-scoped per-service role as the primary (`waddles_svc_process` / `waddles_svc_action`, alembic `0106_bundle_config_db_reads`). The chart renders it only when `infrastructure.postgresql.readReplicas.host` is set (password via `$(DB_PASSWORD)` expansion, never a literal). |
+| `DATABASE_URL` | rendered by `waddlebot.dbEnv` | Primary DSN, used **only** when `DATABASE_REPLICA_URL` is unset -- a WARN is logged ("reading bundle config from the PRIMARY database"). With neither set the DB path is unavailable (ERROR). |
+| `waddles.disable-db-bundle-config-reads` (PostHog flag, not an env var) | OFF | Opt-out kill switch: unseen/OFF/license-server-unreachable = direct database reads; ON = legacy hub-api gRPC path (`HUB_API_GRPC_ENDPOINT`). Never env/CLI-bypassable. |
+
+---
+
 ## Twitch Module
 
 Configuration for the Twitch EventSub webhooks, OAuth, and API integration collector.
