@@ -39,6 +39,16 @@ def _feature_enabled_default_on(monkeypatch: pytest.MonkeyPatch) -> None:
     import blueprints.v1.guild_pairing as guild_pairing_module
 
     monkeypatch.setattr(guild_pairing_module, "feature_enabled", AsyncMock(return_value=True))
+    # The Discord membership check is covered by test_discord_server_install_pg_integration.py.
+    monkeypatch.setattr(
+        guild_pairing_module.roles_svc, "verify_bot_in_guild", AsyncMock(return_value=None)
+    )
+    # Install-grant authority gate is covered on real Postgres in the same PG suite.
+    monkeypatch.setattr(
+        guild_pairing_module.server_install_svc,
+        "community_has_install_grant",
+        lambda *_a, **_k: True,
+    )
 
 
 async def _create_pairing(

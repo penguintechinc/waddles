@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-steal"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!steal @user` risk/reward points steal over the shared community economy (random success/fail, per-actor cooldown). Original Waddles implementation; idea inspired by PenguinTwitchBot by SuperPenguinTV (with permission) -- ideas/design only, no code copied."
 requires-python = ">=3.13"
 dependencies = []

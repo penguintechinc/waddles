@@ -98,3 +98,108 @@ def test_crlf_source_preserves_semgrep_line_semantics(tmp_path):
     result = convert(tmp_path, report())
     assert result.returncode == 0
     assert json.loads(result.stdout)[0]["text"] == "\n".join(SOURCE.splitlines()[1:])
+
+
+def test_semgrep_silent_fallback_rules_true_positives_and_negatives(tmp_path):
+    """Verify the actual semgrep-silent-fallback.yml rules against a Rust + Python fixture."""
+    import shutil
+
+    if shutil.which("semgrep") is None:
+        pytest.skip("semgrep binary not on PATH")
+
+    rust_src = tmp_path / "sample.rs"
+    rust_src.write_text(
+        """\
+pub fn silent_default(x: Result<i32, &str>) -> i32 {
+    x.unwrap_or_default()
+}
+
+pub fn silent_closure(x: Result<i32, &str>) -> i32 {
+    x.unwrap_or_else(|_| 0)
+}
+
+pub fn mutex_poison_recovery(m: &std::sync::Mutex<Vec<i32>>) -> Vec<i32> {
+    m.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub fn loud_panic(x: Result<i32, &str>) -> i32 {
+    x.unwrap_or_else(|e| panic!("fatal: {e}"))
+}
+
+pub fn nosemgrep_annotated(x: Option<&str>) -> String {
+    // nosemgrep: rust-silent-unwrap-or-default -- intentional empty sentinel
+    x.unwrap_or_default().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn inside_tests_ignored() {
+        let v: i32 = Err::<i32, &str>("err").unwrap_or_default();
+        assert_eq!(v, 0);
+    }
+}
+"""
+    )
+
+    test_only_rs = tmp_path / "foo_tests.rs"
+    test_only_rs.write_text(
+        """\
+pub fn helper_in_tests_file(x: Result<i32, &str>) -> i32 {
+    x.unwrap_or_default()
+}
+"""
+    )
+
+    py_src = tmp_path / "sample.py"
+    py_src.write_text(
+        """\
+import logging
+logger = logging.getLogger(__name__)
+
+def silent_py():
+    try:
+        return int("bad")
+    except ValueError:
+        return None
+
+def logged_py():
+    try:
+        return int("bad")
+    except ValueError as exc:
+        logger.warning("bad int: %s", exc)
+        return None
+"""
+    )
+
+    proc = subprocess.run(
+        [
+            "semgrep",
+            "--config",
+            str(CI / "semgrep-silent-fallback.yml"),
+            "--json",
+            "--metrics=off",
+            "-q",
+            str(tmp_path),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode in (0, 1), proc.stderr
+    results = json.loads(proc.stdout)["results"]
+    found = {(Path(r["path"]).name, r["start"]["line"], r["check_id"].split(".")[-1]) for r in results}
+
+    # True positives: silent_default (line 2), silent_closure (line 6), silent_py (line 5)
+    assert ("sample.rs", 2, "rust-silent-unwrap-or-default") in found
+    assert ("sample.rs", 6, "rust-silent-unwrap-or-default") in found
+    assert ("sample.py", 5, "python-silent-except-return-default") in found
+    assert ("sample.py", 5, "python-capability-silent-denial") in found
+
+    # True negatives: mutex_poison_recovery, loud_panic, logged_closure, nosemgrep_annotated, mod tests, *_tests.rs, logged_py
+    rust_lines = {line for (fname, line, _) in found if fname == "sample.rs"}
+    assert rust_lines == {2, 6}
+    assert not any(fname == "foo_tests.rs" for (fname, _, _) in found)
+    py_lines = {line for (fname, line, _) in found if fname == "sample.py"}
+    assert py_lines == {5}
+

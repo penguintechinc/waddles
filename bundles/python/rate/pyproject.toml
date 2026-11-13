@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-rate"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!rate <thing>` -> a deterministic X/10 rating, relayed to the origin platform. Static, stateless."
 requires-python = ">=3.13"
 dependencies = []

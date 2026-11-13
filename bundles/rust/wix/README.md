@@ -1,6 +1,6 @@
 # waddles.core.service.wix -- Wix connector (Rust, `connector-tools`): inbound webhooks + outbound Events tools
 
-Maps **host-verified** Wix app webhooks to normalized member / subscription / event records. The host
+Maps **host-verified** Wix app webhooks to normalized calendar-event records (Wix syncs EVENTS only: member (`wix.members.v1.*`), pricing-plan, order and subscription webhooks are ignored and emit nothing, so the connector needs no `identity.lookup` and requests no `connector.pii.read`; subscriptions go through the PenguinTech license server). The host
 (`core/svc_ingest`, `Scheme::WixJwt`) owns the ingress route, the RS256 JWT verification against the connection's
 app public key, freshness, instance binding and replay; this component never verifies and must not be fed an
 unverified body. 
@@ -20,7 +20,7 @@ Flag: PostHog `waddles.connector-wix` (default OFF); env baseline `CONNECTOR_WIX
 
 ```
 POST /intake/webhook/<route_key>  --verify(host)-->  receiver.on-frame(JWT)  --> normalized-event
-                                                       member id --identity.lookup--> UUID (unlinked: dropped)
+                                                       events only; member webhooks: skipped, 0 records
 ```
 
 Tests: `cargo test --locked` (mapping + hostile input); build: `cargo component build --release --locked`.
