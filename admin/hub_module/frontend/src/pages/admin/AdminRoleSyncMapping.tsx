@@ -1,14 +1,16 @@
-import { useMemo, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FormModalBuilder, type FormField } from '@penguintechinc/react-libs';
 import PairingStatusCard from '../../components/roleSync/PairingStatusCard';
 import BindingTable from '../../components/roleSync/BindingTable';
+import AddDiscordServerPanel from '../../components/roleSync/AddDiscordServerPanel';
 import MirrorRolesSection from '../../components/roleSync/MirrorRolesSection';
 import { useAuth } from '../../contexts/AuthContext';
 import { useFeatureFlag } from '../../lib/useFeatureFlag';
 import {
   roleSyncApi,
+  roleSyncKeys,
   extractErrorMessage,
   COMMUNITY_ROLES,
   SUBSCRIBER_TIERS,
@@ -42,12 +44,14 @@ interface CommunityAuth {
   isCommunityAdmin: (communityId: string | number | undefined) => boolean;
 }
 
-const roleSyncKeys = {
-  pairings: (communityId: number) => ['role-sync-pairings', communityId] as const,
-  bindings: (communityId: number, pairingId: number) =>
-    ['role-sync-bindings', communityId, pairingId] as const,
+/** Friendly text for hub-api's install-callback `?discord_server=error&reason=` codes. */
+const INSTALL_ERROR_REASONS: Record<string, string> = {
+  invalid_or_expired_state: 'The Discord install link expired. Please try adding the server again.',
+  state_binding_mismatch: 'The Discord install could not be verified for this account. Please try again.',
+  cancelled: 'Adding the Discord server was cancelled.',
+  install_failed: 'Discord could not complete the server install. Please try again.',
+  DISCORD_NOT_CONFIGURED: 'Discord bot is not configured for this tenant.',
 };
-
 const SYNC_SCOPE_LABELS: Record<RoleSyncScope, string> = {
   subscriber_tier: 'Twitch subscriber tier → Discord role',
   moderator: 'Twitch moderator → Discord role',
@@ -63,6 +67,23 @@ export default function AdminRoleSyncMapping() {
   const communityId = Number(communityIdParam);
   const hasValidCommunity = Number.isFinite(communityId);
   const canManage = Boolean(isCommunityAdmin(communityIdParam));
+
+  const [searchParams] = useSearchParams();
+  const installResult = searchParams.get('discord_server');
+  const installGuildId = searchParams.get('guild_id');
+  const installReason = searchParams.get('reason');
+
+  // hub-api's install callback redirects here; refetch so the new pairing shows with no reload.
+  useEffect(() => {
+    if (installResult === 'paired' || installResult === 'error') {
+      console.debug('[RoleSyncMapping] ServerInstallCallback', {
+        communityId,
+        result: installResult,
+        reason: installReason,
+      });
+      void queryClient.invalidateQueries({ queryKey: roleSyncKeys.pairings(communityId) });
+    }
+  }, [installResult, installReason, communityId, queryClient]);
 
   const [selectedPairingId, setSelectedPairingId] = useState<number | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -257,6 +278,20 @@ export default function AdminRoleSyncMapping() {
         (never auto-demotes).
       </p>
 
+      {installResult === 'paired' && (
+        <p role="status" data-testid="install-banner-success" className="mb-3 text-sm text-emerald-400">
+          Discord server{installGuildId ? ` ${installGuildId}` : ''} added to this community.
+        </p>
+      )}
+      {installResult === 'error' && (
+        <p role="alert" data-testid="install-banner-error" className="mb-3 text-sm text-red-400">
+          {(installReason && INSTALL_ERROR_REASONS[installReason]) ||
+            'Adding the Discord server failed. Please try again.'}
+        </p>
+      )}
+
+      {canManage && hasValidCommunity && <AddDiscordServerPanel communityId={communityId} canManage={canManage} />}
+
       {pairingsLoading && (
         <p role="status" className="text-fg-muted">
           Loading guild pairings…
@@ -271,8 +306,9 @@ export default function AdminRoleSyncMapping() {
 
       {!pairingsLoading && !pairingsError && (pairings?.length ?? 0) === 0 && (
         <p className="text-fg-muted">
-          No Discord guild is paired with this community yet. Pair a Discord server under{' '}
-          <strong>Connections</strong> before mapping roles.
+          No Discord guild is paired with this community yet. Use{' '}
+          <strong>Add Discord server</strong> above to invite the bot, or pair a server by ID,
+          before mapping roles.
         </p>
       )}
 
