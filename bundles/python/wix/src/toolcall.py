@@ -1,9 +1,9 @@
-"""Shared tool-invocation helpers for the Wix feature modules (`plan_roles`, `event_sync`).
+"""Shared tool-invocation helpers for the Wix event-sync feature module (`event_sync`).
 
 Platform SERVICE bundles own the Discord tool definitions; this APP bundle only calls them through
 `waddle_sdk.tool.invoke` under approved manifest `tool.call:` grants. Every failure here is LOUD:
-it is logged with its typed code AND recorded under `wix.fault.<module>` so `!wix modules` shows it
-to a moderator -- a missing tool or a refused grant is never a silent no-op.
+it is logged with its typed code AND recorded under `wix.fault.<module>` so an operator can read it
+from kv -- a missing tool or a refused grant is never a silent no-op.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ async def call(
     return result
 
 
-#: States after which nothing may re-grant or resurrect (revocations always win).
+#: States after which nothing may resurrect an event (cancels always win).
 TERMINAL = frozenset({"ENDED", "CANCELED"})
 
 
