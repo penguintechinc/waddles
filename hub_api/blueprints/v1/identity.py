@@ -24,7 +24,7 @@ from quart_schema import validate_request, validate_response
 from config import HubAPIConfig
 from services import identity_service
 from services import install_state_binding as binding
-from services.current_user import get_current_user_id
+from services.current_user import get_current_session_id, get_current_user_id
 from services.errors import ApiError
 
 logger = logging.getLogger(__name__)
@@ -239,7 +239,13 @@ async def unlink_identity(platform: str) -> MessageResponse | tuple[dict[str, ob
     async_dal, dal = _dal()
     try:
         user_id = get_current_user_id(request)
-        await identity_service.unlink_identity(async_dal, dal, user_id=user_id, platform=platform)
+        await identity_service.unlink_identity(
+            async_dal,
+            dal,
+            user_id=user_id,
+            platform=platform,
+            keep_session_id=get_current_session_id(request),
+        )
     except ApiError as exc:
         return _err(exc)
     return MessageResponse(success=True, message="Identity unlinked successfully")
