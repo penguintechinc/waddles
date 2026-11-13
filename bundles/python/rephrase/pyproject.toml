@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-rephrase"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!rephrase <text>` -> AI: reword the caller's short text more clearly and politely via the ai.generate host capability."
 requires-python = ">=3.13"
 dependencies = []

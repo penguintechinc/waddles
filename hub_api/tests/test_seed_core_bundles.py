@@ -2,8 +2,8 @@
 
 Reuses the `install_dal`/`bundle_install_db` fixtures every other bundle-install test uses
 (`tests/conftest.py`) -- same schema, same `TENANT_SLUG` ("acme-corp") seeded tenant row, so a
-catalog entry here targets that slug rather than "global" (the seeder never hardcodes a tenant
-slug; "global" is only `bundles/core-bundles.yaml`'s own default).
+catalog entry here targets that slug rather than "default" (the seeder never hardcodes a tenant
+slug; "default" is only `bundles/core-bundles.yaml`'s own default).
 """
 
 from __future__ import annotations
@@ -873,7 +873,7 @@ def test_env_override_replaces_every_entrys_activation_targets(
         language="rust",
         manifest_path="ping.manifest.yaml",
         artifact_path="ping.wasm",
-        activation_targets=(ActivationTarget(tenant_slug="global"),),
+        activation_targets=(ActivationTarget(tenant_slug="default"),),
     )
     resolved = seeder._resolve_activation_targets(entry)
     assert resolved == (
@@ -1483,7 +1483,7 @@ def test_load_platform_connections_extends_the_static_catalog_with_the_env_overr
             {
                 "platform_connections": [
                     {
-                        "tenant_slug": "global",
+                        "tenant_slug": "default",
                         "platform": "twitch",
                         "source_id": "static-source",
                         "label": "static",
@@ -1499,7 +1499,7 @@ def test_load_platform_connections_extends_the_static_catalog_with_the_env_overr
         json.dumps(
             [
                 {
-                    "tenant_slug": "global",
+                    "tenant_slug": "default",
                     "platform": "discord",
                     "source_id": "dg-474965105759748096",
                 }
@@ -1511,10 +1511,10 @@ def test_load_platform_connections_extends_the_static_catalog_with_the_env_overr
 
     assert connections == (
         seeder.PlatformConnection(
-            tenant_slug="global", platform="twitch", source_id="static-source", label="static"
+            tenant_slug="default", platform="twitch", source_id="static-source", label="static"
         ),
         seeder.PlatformConnection(
-            tenant_slug="global",
+            tenant_slug="default",
             platform="discord",
             source_id="dg-474965105759748096",
             label="dg-474965105759748096",

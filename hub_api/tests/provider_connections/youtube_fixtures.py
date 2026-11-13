@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 import pytest
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from pydal import Field
 from quart import Quart
 
@@ -108,7 +109,9 @@ def yt_db(pc_db: Any) -> Any:
         Field("updated_at", "datetime"),
     )
     pc_db.global_tenant_id = int(
-        dal.tenants.insert(slug="global", display_name="Global", is_active=True, is_global=True)
+        dal.tenants.insert(
+            slug=DEFAULT_TENANT_SLUG, display_name="Default", is_active=True, is_global=True
+        )
     )
     pc_db.global_community_id = int(
         dal.communities.insert(name="global-main", tenant_id=pc_db.global_tenant_id)

@@ -324,6 +324,13 @@ spec:
         - name: MODULE_LOAD_MARKETING
           value: "true"
         {{- end }}
+        # Per-environment env baseline (e.g. FLAG_<KEY> feature-flag fallbacks honoured by
+        # flask_core when PostHog is unresolved). Free-tier flags only -- license flags are
+        # never env-bypassable. Rendered last so an explicit entry here wins on collision.
+        {{- range $key, $value := .Values.pipeline.hubApi.extraEnv }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
         {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/ready" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:

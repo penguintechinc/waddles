@@ -1553,6 +1553,38 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
     )
 
 
+def bind_reference_tenants_table(dal: Any) -> None:
+    """Bind the shared `tenants` read table (schema owned by SQL migration 058).
+
+    Single definition used by `app.py::_bind_reference_tables` and by standalone CLIs
+    (`cli/refresh_landing_stats.py`) that never run `create_app()` -- `tenants` can only be
+    `define_table()`-d once per DAL, so it lives here, never re-declared per caller.
+    """
+    if "tenants" in dal.tables:
+        return
+    dal.define_table(
+        "tenants",
+        Field("slug", "string", length=100),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
+        Field("display_name", "string", length=255),
+        Field("logo_url", "text"),
+        Field("is_global", "boolean", default=False),
+        Field("is_active", "boolean", default=True),
+        Field("config", "json"),
+        migrate=False,
+    )
+
+
+def bind_landing_stats_tables(dal: Any) -> None:
+    """Bind every table `public_service` stats reads, for processes without `create_app()`.
+
+    Regression (landing-stats-refresh CronJob): the CLI's bare `init_database()` DAL had no
+    tables bound, so `resolve_default_tenant` raised `'DAL' object has no attribute 'tenants'`.
+    """
+    bind_reference_tenants_table(dal)
+    bind_platform_tables(dal)
+
+
 def bind_platform_tables(dal: Any, *, migrate: bool = False) -> None:
     """Define every table the M3 Platform-admin/Public group queries.
 
