@@ -55,7 +55,7 @@ pub const COUNT_BUCKETS: [f64; 12] = [
 /// against the emitted data in tests and mirrored in
 /// `docs/observability/data-plane-metrics.md`, so a rename is a conscious,
 /// documented act.
-pub const METRIC_NAMES: [&str; 17] = [
+pub const METRIC_NAMES: [&str; 18] = [
     "waddles_stage_latency_seconds",
     "waddles_executor_call_seconds",
     "waddles_host_call_latency_seconds",
@@ -73,6 +73,7 @@ pub const METRIC_NAMES: [&str; 17] = [
     "waddles_group_pending",
     "waddles_insecure_transport",
     "waddles_tenant_boundary_violations_total",
+    "waddles_identity_decrypt_failures_total",
 ];
 
 /// The OTel instrument name behind a documented (Prometheus-form) metric
@@ -262,6 +263,7 @@ pub struct StageMetrics {
     group_pending: Histogram<u64>,
     insecure_transport: Gauge<u64>,
     boundary_violations: Counter<u64>,
+    identity_decrypt_failures: Counter<u64>,
 }
 
 impl StageMetrics {
@@ -362,7 +364,25 @@ impl StageMetrics {
                 "waddles_tenant_boundary_violations_total",
                 "Hop-verification (tenant boundary) failures, by stage and reason",
             ),
+            identity_decrypt_failures: counter(
+                "waddles_identity_decrypt_failures_total",
+                "Inbound identity-field decrypt failures (event dead-lettered, never dropped), by reason",
+            ),
         }
+    }
+
+    /// Records one inbound event whose identity fields could not be decrypted
+    /// (`waddles_identity_decrypt_failures_total`). `reason` is a closed,
+    /// PII-free vocabulary (`IdentityCryptoError::reason_label` plus
+    /// `dek_unconfigured`) -- never a tenant, stream or user.
+    pub fn identity_decrypt_failure(&self, reason: &'static str) {
+        self.identity_decrypt_failures.add(
+            1,
+            &[
+                KeyValue::new("stage", STAGE),
+                KeyValue::new("reason", reason),
+            ],
+        );
     }
 
     /// Records one delivered entry's total handling time and terminal
@@ -1059,6 +1079,7 @@ mod tests {
         m.group_pending("a", "s", 1);
         m.insecure_transport("valkey", "tls", false);
         m.tenant_boundary_violation("process", "unknown_kid");
+        m.identity_decrypt_failure("dek_unavailable");
 
         let exported: std::collections::BTreeSet<String> =
             h.points().into_iter().map(|p| p.name).collect();
@@ -1070,7 +1091,7 @@ mod tests {
             );
         }
         // Verification Integrity: report the denominator, and fail on zero.
-        assert_eq!(METRIC_NAMES.len(), 17);
+        assert_eq!(METRIC_NAMES.len(), 18);
         assert!(
             exported.len() >= METRIC_NAMES.len(),
             "examined {} exported series for {} documented names",

@@ -116,9 +116,7 @@ pub fn try_start_twitch_sessions(
     config: &Config,
     metrics: Arc<telemetry::IngestMetrics>,
     readiness: Arc<ReceiverReadiness>,
-    dek_provider: crate::identity_crypto::ConfiguredDekProvider<
-        crate::identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek_provider: crate::identity_crypto::ConfiguredDekProvider,
 ) -> anyhow::Result<()> {
     let cli = &config.cli;
     validate_dynamic_prereqs(cli, publish::scope_resolver_installed())?;

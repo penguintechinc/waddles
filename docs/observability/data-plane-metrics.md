@@ -66,6 +66,7 @@ Guest op strings are folded through an allow-list (`KNOWN_OPS`, else `other`); t
 | `waddles_sandbox_trip_total` | counter | `stage, app_id, limit` | executor-reported trips: `timeout`, `memory`, `trap`, `denied` |
 | `waddles_spine_dlq_total` | counter | `stage, reason` | dead-letter writes by the record's `error.kind` |
 | `waddles_tenant_boundary_violations_total` | counter | `stage, reason` | §5.11 hop-verification failures |
+| `waddles_identity_decrypt_failures_total` | counter | `stage, reason` | inbound identity-field decrypt failures (`dek_unavailable`, `dek_unconfigured`, `aead`, `bad_envelope`, `not_an_envelope`); the event is dead-lettered (`IDENTITY_DECRYPT_FAILED`), never dropped |
 | `waddles_consumer_skipped_total` | counter | `stage, app_id, reason` | read + acked without an executor call (e.g. `route_denied`) |
 | `waddles_stream_trimmed_total` | counter | `stage` | `XADD` observed the stream at its approximate `MAXLEN` |
 | `waddles_stream_claimed_total` | counter | `stage, app_id` | `XAUTOCLAIM` recoveries |

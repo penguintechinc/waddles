@@ -2796,6 +2796,11 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "identity:ephemeral:mint"
+        # KeyService.GetStreamDek (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES): svc-process
+        # decrypts every inbound event's identity fields (svc-ingest encrypts them before they
+        # touch the stream, outside the PII boundary) with the tenant stream DEK it fetches here,
+        # sealed to a per-call ephemeral key, through a third single-scope hub_client.
+        - "key:stream-dek:read"
         # feature/host-gameserver-net -- the `gameserver-net` host capability resolves an
         # admin-registered game-server connection (provider `gameserver`) per call:
         # `connections:list:gameserver` finds the (community, server id) binding,
@@ -2905,6 +2910,10 @@ serviceJwt:
         # active (tenant, community, app) scopes to tick. Granted to this identity alone; hub-api
         # additionally allow-lists the caller by name.
         - "bundle-schedules:read"
+        # KeyService.GetStreamDek -- svc-ingest envelope-encrypts every identity field with the
+        # tenant stream DEK (fetched by NUMERIC tenant id, sealed to a per-call ephemeral key)
+        # before the event reaches the stream. Always rendered: no DEK, no events.
+        - "key:stream-dek:read"
   # Every calling pod projects its own ServiceAccount token bound to
   # `bootstrapAudience` -- this is the bootstrap credential, no shared
   # secret distributed to callers. Reusable via the
