@@ -146,6 +146,7 @@ class _World:
             direction="discord_to_twitch",
             role_name_prefix="[AC]",
             actor_user_id=None,
+            ownership_verified=True,
         )
         update_pairing(self.dal, self.community_id, created.id, sync_enabled=True)
         create_binding(
@@ -162,7 +163,7 @@ class _World:
             created.id,
             sync_scope="community_role",
             discord_role_id=ADMIN_DISCORD_ROLE,
-            community_role="community-admin",
+            community_role="vip",  # privileged inbound targets are refused since 0104
         )
         self.pairing_id = created.id
         if enable_demote:
@@ -178,7 +179,9 @@ class _World:
         active: bool = True,
         username: str | None = None,
         link: bool = True,
+        granted: bool = True,
     ) -> int:
+        """Linked member; `granted` seeds a ledger row (role-sync granted a managed role)."""
         hub_id = int(
             pg.scalar(
                 self.dal,
@@ -199,6 +202,14 @@ class _World:
             "VALUES (%s, %s, %s, %s)",
             [community_id or self.community_id, str(hub_id), role, active],
         )
+        if granted and self.pairing_id and role in ("member", "vip"):
+            pg.q(
+                self.dal,
+                "INSERT INTO role_sync_community_grants "
+                "(pairing_id, community_id, hub_user_id, granted_role, prior_role) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                [self.pairing_id, community_id or self.community_id, hub_id, role, BASELINE],
+            )
         return hub_id
 
     def role_of(self, hub_id: int, community_id: int | None = None) -> str:
@@ -246,7 +257,7 @@ async def test_demote_end_to_end_with_pagination_and_pii_free_logs(
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
     keep = world.member("800001", "member")  # still holds the mapped role
     gone1 = world.member("800002", "member")  # lost it -> demote
-    gone2 = world.member("800003", "community-admin", username="alice_secret")  # lost it -> demote
+    gone2 = world.member("800003", "vip", username="alice_secret")  # lost it -> demote
     world.member("800004", "member", link=False)  # unlinked discord id -> untouched
     discord = _Discord(
         [
@@ -471,7 +482,7 @@ async def test_discord_to_hub_user_to_member_resolution_guards(
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
     victim = world.member("800001", "member")
     owner = world.member("800002", "community-owner")
-    vip = world.member("800003", "vip")  # manual/unmanaged role
+    vip = world.member("800003", "vip", granted=False)  # manual role, no sync ledger row
     left = world.member("800004", "member", active=False)  # inactive membership
     # same hub user also a member of ANOTHER community: must stay untouched
     elsewhere = world.member("800005", "member")
@@ -500,7 +511,7 @@ async def test_grant_still_applies_and_hub_row_is_never_created(
 ) -> None:
     world.roles()
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
-    promoted = world.member("800001", "vip")
+    promoted = world.member("800001", "member", granted=False)
     # linked hub user, but never joined this community -> skipped, no row auto-created
     ghost = int(pg.scalar(world.dal, "INSERT INTO hub_users (username) VALUES ('g') RETURNING id"))
     pg.q(
@@ -512,10 +523,10 @@ async def test_grant_still_applies_and_hub_row_is_never_created(
     result = await _run(
         world,
         pairing,
-        _Discord([("800001", [MEMBER_DISCORD_ROLE]), ("800002", [MEMBER_DISCORD_ROLE])]),
+        _Discord([("800001", [ADMIN_DISCORD_ROLE]), ("800002", [MEMBER_DISCORD_ROLE])]),
     )
     assert result.community_roles_applied == 1 and result.users_skipped_not_member == 1
-    assert world.role_of(promoted) == "member"
+    assert world.role_of(promoted) == "vip"  # grant-only: raised, and ledgered
     assert (
         pg.scalar(
             world.dal, "SELECT count(*) FROM community_members WHERE user_id = %s", [str(ghost)]

@@ -1,4 +1,4 @@
-.PHONY: backfill-bundle-author seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: backfill-bundle-author role-sync-remediate seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit check-docs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -302,6 +302,12 @@ test-csharp-bundle-compile:
 # env, run from hub_api so `cli.*` resolves). Exits 1 on tampering, 2 if zero records were
 # examined (a check over nothing is not a pass; add ALLOW_EMPTY=1 for deployments with no
 # Enterprise tenant), 3 if it could not run. Pin heads with EXPECT="tenant:1=42:<hash>".
+# role-sync privilege hardening (migration 0104): members promoted by a purged privileged inbound
+# binding. Default queues them for admin review (role_sync_remediation_queue); APPLY=1 demotes
+# them to BASELINE (default member). Needs DATABASE_URL; run from a hub-api pod/shell.
+role-sync-remediate:
+	@cd hub_api && python3 -m cli.role_sync_remediate $(if $(APPLY),--apply) $(if $(BASELINE),--baseline-role $(BASELINE))
+
 verify-audit-chain:
 # NOTE: Rust port complete in core/waddles_ops_cli (`waddles-ops verify-audit-chain`); Python kept until the port is CI-validated. Do not rewire until then.
 	@cd hub_api && python3 -m cli.verify_audit_chain $(if $(ALLOW_EMPTY),--allow-empty) \

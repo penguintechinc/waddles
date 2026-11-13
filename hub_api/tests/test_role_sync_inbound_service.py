@@ -60,8 +60,9 @@ def _member(
     )
 
 
-def _seed(dal: Any, community_id: int, role: str = "vip") -> Any:
-    pairing = _make_platform_pairing(dal, community_id)
+def _seed(dal: Any, community_id: int, role: str = "member", target: str = "vip") -> Any:
+    """Pairing whose Discord member role maps to `target`; hub user 1 holds `role`."""
+    pairing = _make_platform_pairing(dal, community_id, target=target)
     _link_identity(dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_PLATFORM_USER)
     _add_community_member(dal, community_id=community_id, hub_user_id=1, role=role)
     return pairing
@@ -92,31 +93,31 @@ class TestApply:
         ev = _member(tenant_id, community_id, [_MEMBER_ROLE_DISCORD])
         first = await _apply(dal, ev)
         again = await _apply(dal, ev)  # redelivery
-        assert first == inbound.InboundOutcome("applied", "member")
+        assert first == inbound.InboundOutcome("applied", "vip")
         assert again.outcome == "unchanged"
-        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
 
     async def test_highest_priority_mapped_role_wins(self, guild_pairing_db: Any) -> None:
         dal, community_id, tenant_id, _ = guild_pairing_db
-        pairing = _seed(dal, community_id)
+        pairing = _seed(dal, community_id, target="member")
         create_binding(
             dal,
             community_id,
             pairing.id,
             sync_scope="community_role",
             discord_role_id=_COMMUNITY_ADMIN_ROLE,
-            community_role="community-admin",
+            community_role="vip",
         )
         _add_community_role(dal, community_id=community_id, name="member", priority=0)
-        _add_community_role(dal, community_id=community_id, name="community-admin", priority=10)
+        _add_community_role(dal, community_id=community_id, name="vip", priority=10)
         out = await _apply(
             dal, _member(tenant_id, community_id, [_MEMBER_ROLE_DISCORD, _COMMUNITY_ADMIN_ROLE])
         )
-        assert out.applied_role == "community-admin"
+        assert out.applied_role == "vip"
 
     async def test_self_caused_outbound_echo_is_ignored(self, guild_pairing_db: Any) -> None:
         dal, community_id, tenant_id, _ = guild_pairing_db
-        pairing = _seed(dal, community_id, role="vip")
+        pairing = _seed(dal, community_id)
         create_binding(
             dal,
             community_id,
@@ -127,7 +128,7 @@ class TestApply:
         )
         out = await _apply(dal, _member(tenant_id, community_id, [_TIER1_ROLE]))
         assert out.outcome == "echo_ignored"
-        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
 
     async def test_echo_role_alongside_inbound_role_applies_only_inbound(
         self, guild_pairing_db: Any
@@ -162,7 +163,7 @@ class TestApply:
         assert wrong_guild.outcome == "cross_community_refused"
         assert wrong_tenant.outcome == "cross_tenant_refused"
         assert unknown_community.outcome == "no_tenant"
-        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
 
     async def test_other_refusals(self, guild_pairing_db: Any, _flag_on: AsyncMock) -> None:
         dal, community_id, tenant_id, _ = guild_pairing_db
@@ -175,7 +176,7 @@ class TestApply:
         assert (await _apply(dal, unlinked)).outcome == "unlinked"
         _flag_on.return_value = False
         assert (await _apply(dal, ev)).outcome == "flag_off"
-        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
 
     async def test_owner_protected_and_not_a_member(self, guild_pairing_db: Any) -> None:
         dal, community_id, tenant_id, _ = guild_pairing_db
@@ -204,7 +205,7 @@ class TestApply:
         assert (await _apply(dal, no_user)).outcome == "malformed"
         monkeypatch.setattr(inbound, "_resolve_desired_community_role", lambda *_a: None)
         assert (await _apply(dal, ev)).outcome == "no_mapped_roles"
-        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
 
     async def test_twitch_to_discord_pairing_is_not_inbound(self, guild_pairing_db: Any) -> None:
         dal, community_id, tenant_id, _ = guild_pairing_db
@@ -215,6 +216,7 @@ class TestApply:
             direction="twitch_to_discord",
             role_name_prefix="[BC]",
             actor_user_id=None,
+            ownership_verified=True,
         )
         update_pairing(dal, community_id, created.id, sync_enabled=True)
         out = await _apply(dal, _member(tenant_id, community_id, ["1"]))
@@ -236,7 +238,7 @@ class TestApply:
         with caplog.at_level(logging.ERROR):
             out = await _apply(dal, role_ev("guild.role.delete", _MEMBER_ROLE_DISCORD))
         assert out.outcome == "bound_role_deleted"
-        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
         assert _DISCORD_PLATFORM_USER not in caplog.text
 
 
@@ -551,24 +553,24 @@ class TestPayloadConfirmation:
 
     async def test_forged_payload_with_a_valid_mac_is_refused(self, guild_pairing_db: Any) -> None:
         dal, community_id, tenant_id, _ = guild_pairing_db
-        _seed(dal, community_id, role="vip")
+        _seed(dal, community_id)
         ev = _member(tenant_id, community_id, [_MEMBER_ROLE_DISCORD])  # attacker claims a role
         confirm = _Confirm({"999"})  # Discord says the member does not hold it
         out = await _apply(dal, ev, confirm)
         assert out.outcome == "payload_mismatch"
-        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
 
     async def test_absent_member_and_unavailable_discord_refuse(
         self, guild_pairing_db: Any
     ) -> None:
         dal, community_id, tenant_id, _ = guild_pairing_db
-        _seed(dal, community_id, role="vip")
+        _seed(dal, community_id)
         ev = _member(tenant_id, community_id, [_MEMBER_ROLE_DISCORD])
         assert (await _apply(dal, ev, _Confirm(None))).outcome == "payload_mismatch"
         for exc in (inbound.TransportUnavailable("x"), inbound.DiscordSyncError("x")):
             out = await _apply(dal, ev, _Confirm(None, raises=exc))
             assert out.outcome == "confirm_unavailable"
-        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
 
     async def test_confirmation_uses_the_paired_guild_and_resolved_tenant(
         self, guild_pairing_db: Any
@@ -655,7 +657,7 @@ class TestBatch:
             res.replayed,
         ) == (1, 4, 1, 1, 1, 1, 0, 0)
         assert sorted(fake.acked) == ["1-0", "2-0", "3-0", "4-0"]
-        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
         fake.busy = True  # existing group tolerated
         assert (await _batch(fake, dal)).examined == 0
 
@@ -674,11 +676,11 @@ class TestBatch:
         self, guild_pairing_db: Any
     ) -> None:
         dal, community_id, tenant_id, _ = guild_pairing_db
-        _seed(dal, community_id, role="vip")
+        _seed(dal, community_id)
         e = _signed("guild.member.update", _GOOD, tid=tenant_id, cid=community_id)
         res = await _batch(_FakeRedis({_KEY: [("1-0", e)]}), dal, _Confirm({"1"}))
         assert (res.role_events, res.applied) == (1, 0)
-        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
 
     async def test_batch_continues_past_poison_and_unexpected_entries(
         self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch

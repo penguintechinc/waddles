@@ -54,6 +54,10 @@ tables:
   - sso_identities
   - suppression_records
   - app_commands
+  - role_sync_community_grants
+  - role_sync_discord_grants
+  - role_sync_purged_bindings
+  - role_sync_remediation_queue
   - user_active_context
   - discord_role_mirror_mappings
   - discord_role_mirror_grants
@@ -942,6 +946,104 @@ grants:
     privileges: []
   - role: migration_runner
     table: user_active_context
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # 0104_role_sync_priv_harden: role-sync grant ledgers. Hub-api only.
+  - role: hub_api
+    table: role_sync_community_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: role_sync_community_grants
+    privileges: []
+  - role: svc_ingest
+    table: role_sync_community_grants
+    privileges: []
+  - role: svc_process
+    table: role_sync_community_grants
+    privileges: []
+  - role: svc_action
+    table: role_sync_community_grants
+    privileges: []
+  - role: svc_streaming
+    table: role_sync_community_grants
+    privileges: []
+  - role: webui
+    table: role_sync_community_grants
+    privileges: []
+  - role: migration_runner
+    table: role_sync_community_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api
+    table: role_sync_discord_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: role_sync_discord_grants
+    privileges: []
+  - role: svc_ingest
+    table: role_sync_discord_grants
+    privileges: []
+  - role: svc_process
+    table: role_sync_discord_grants
+    privileges: []
+  - role: svc_action
+    table: role_sync_discord_grants
+    privileges: []
+  - role: svc_streaming
+    table: role_sync_discord_grants
+    privileges: []
+  - role: webui
+    table: role_sync_discord_grants
+    privileges: []
+  - role: migration_runner
+    table: role_sync_discord_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api
+    table: role_sync_purged_bindings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: role_sync_purged_bindings
+    privileges: []
+  - role: svc_ingest
+    table: role_sync_purged_bindings
+    privileges: []
+  - role: svc_process
+    table: role_sync_purged_bindings
+    privileges: []
+  - role: svc_action
+    table: role_sync_purged_bindings
+    privileges: []
+  - role: svc_streaming
+    table: role_sync_purged_bindings
+    privileges: []
+  - role: webui
+    table: role_sync_purged_bindings
+    privileges: []
+  - role: migration_runner
+    table: role_sync_purged_bindings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api
+    table: role_sync_remediation_queue
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: role_sync_remediation_queue
+    privileges: []
+  - role: svc_ingest
+    table: role_sync_remediation_queue
+    privileges: []
+  - role: svc_process
+    table: role_sync_remediation_queue
+    privileges: []
+  - role: svc_action
+    table: role_sync_remediation_queue
+    privileges: []
+  - role: svc_streaming
+    table: role_sync_remediation_queue
+    privileges: []
+  - role: webui
+    table: role_sync_remediation_queue
+    privileges: []
+  - role: migration_runner
+    table: role_sync_remediation_queue
     privileges: [SELECT, INSERT, UPDATE, DELETE]
 
   # 0099_discord_role_mirror: cross-guild Discord role mirror mappings + grant ledger. Hub-api only.
