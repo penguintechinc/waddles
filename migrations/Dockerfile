@@ -14,7 +14,8 @@ RUN pip install --no-cache-dir \
 # Hash-locked: alembic revisions 0062/0075 import cryptography (AESGCM).
 # Same pinned version as hub_api (migrations/requirements.txt).
 COPY migrations/requirements.txt /tmp/migrations-requirements.txt
-RUN pip install --no-cache-dir --require-hashes -r /tmp/migrations-requirements.txt && \
+RUN --mount=type=cache,id=waddles-pip,target=/root/.cache/pip,sharing=shared \
+    pip install --require-hashes -r /tmp/migrations-requirements.txt && \
     rm -f /tmp/migrations-requirements.txt
 
 # Copy Alembic configuration

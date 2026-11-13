@@ -60,7 +60,7 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-presentation
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.presentation.rust.imageRepository | default "svc-presentation") "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.presentation.rust.imageRepository | default "svc-presentation")) }}"
         # Values-driven -- per-commit tag, so the old hardcoded Always is unnecessary (and
         # fatal for locally-loaded images); see templates/svc-process-rust.yaml's comment.
         imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}

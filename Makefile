@@ -355,7 +355,7 @@ verify-audit-export:
 		$(if $(HEAD_SEQ),--expect-head-seq $(HEAD_SEQ)) $(if $(HEAD_HASH),--expect-head-hash $(HEAD_HASH))
 
 # Proves bundles/Dockerfile.core-bundles's two example-bundle artifacts (ping.wasm from the
-# rust-bundle-builder stage, pyping.wasm from the python-bundle-builder stage) are both
+# bundle-ping stage, pyping.wasm from the python-bundle-builder stage) are both
 # byte-reproducible -- two independent --no-cache builds of the full image must produce
 # identical sha256 for each. See scripts/verify-core-bundles-reproducible.sh for why.
 verify-core-bundles-reproducible:
@@ -421,6 +421,35 @@ test-seaweedfs-sse-kms:
 # rejects any other KUBE_CONTEXT before build/push/helm run). Usage: make alpha-deploy [ARGS="--skip-build"]
 alpha-deploy:
 	@bash scripts/alpha-deploy.sh $(ARGS)
+
+# --- Changed-only alpha image builds (deploy-dal2alpha) ---------------------------------------
+# scripts/ci/image-inputs.yaml is the reviewable input map; changed_images.py maps a diff to the
+# images that need a rebuild. Usage: make changed-images BASE=<sha> [HEAD=HEAD] [FORCE_ALL=true]
+.PHONY: changed-images changed-images-audit test-ci-image-plan check-alpha-image-pins test-alpha-registry-e2e prune-alpha-images
+changed-images:
+	@test -n "$(BASE)" || { echo "usage: make changed-images BASE=<sha> [HEAD=HEAD] [FORCE_ALL=true]" >&2; exit 2; }
+	@python3 scripts/ci/changed_images.py --base "$(BASE)" --head "$(or $(HEAD),HEAD)" --format names $(if $(filter true,$(FORCE_ALL)),--force-all)
+
+# Fails if any tracked file is neither an image input nor an explicit ignore (map rot guard).
+changed-images-audit:
+	@python3 scripts/ci/changed_images.py --audit
+
+test-ci-image-plan:
+	@python3 -m pytest scripts/ci/tests/test_changed_images.py scripts/ci/tests/test_image_inputs.py scripts/ci/tests/test_alpha_plan.py scripts/ci/tests/test_prune_alpha_images.py -q -p no:cacheprovider
+
+# Helm render proof: pinned images keep their pod template (no restart). Needs helm v3 on PATH.
+check-alpha-image-pins:
+	@python3 scripts/ci/check-alpha-image-pins.py
+
+# Real throwaway registry: plan + digest-verified retag. Needs docker+buildx. [BASE=<sha>]
+test-alpha-registry-e2e:
+	@bash scripts/ci/tests/alpha_registry_e2e.sh $(BASE)
+
+# ghcr alpha tag / stale buildcache pruning. DRY RUN unless ARGS contains --apply (which also
+# needs --deployed <plan.json|values.json>). Never scheduled; enabling a schedule needs owner approval.
+# Usage: GH_TOKEN=... make prune-alpha-images [ARGS="--keep 10 --deployed plan.json"]
+prune-alpha-images:
+	@python3 scripts/ci/prune_alpha_images.py $(ARGS)
 
 # resolve-433 -- alpha-deploy.sh's registry-backed build cache
 # (localhost:32000/waddlebot/buildcache/*) shares disk with the MicroK8s

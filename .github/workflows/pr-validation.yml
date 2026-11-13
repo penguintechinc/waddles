@@ -752,6 +752,12 @@ jobs:
       - name: Helm chart template tests (pytest)
         run: python3 -m pytest k8s/helm/waddlebot/tests/ -v
 
+      # changed-only alpha deploys pin each image via global.imageTags; this proves a pinned
+      # (unchanged) image keeps its pod template byte-identical, so it does NOT restart, and
+      # that a rebuilt image changes only its own workloads. Exits non-zero if helm renders 0.
+      - name: Alpha per-image pins restart only changed workloads
+        run: python3 scripts/ci/check-alpha-image-pins.py
+
       # fix/helm-hook-rbac-ordering -- helm.sh/hook-annotated Jobs run BEFORE any
       # regular (non-hook) chart resource. A pre-install/pre-upgrade Job whose
       # serviceAccountName or mounted ConfigMap/Secret resolves to a regular resource

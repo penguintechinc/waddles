@@ -32,6 +32,18 @@ name: Deploy dal2-alpha
 # NOTE: k8s/helm/waddlebot/values-dal2alpha.yaml is the single canonical overlay, owned by
 # branch chore/values-dal2alpha (must merge to release BEFORE/with this workflow; no copy here).
 #
+# CHANGED-ONLY BUILDS (owner decision 2026-11-13: "only build and deploy images that change"):
+#   plan   -> reads the deployed Helm release, finds each image's last-built revision (OCI label),
+#             diffs it against HEAD with the reviewable map scripts/ci/image-inputs.yaml, and
+#             decides BUILD vs REUSE per image. Anything uncertain builds (fail safe).
+#   build  -> only the BUILD set, spread over BuildKit lanes (a = primary, b = optional 2nd pod).
+#   retag  -> REUSE images are copied to the new alpha tag by digest in the registry (no rebuild).
+#   deploy -> helm gets global.imageTags per image: rebuilt images get the new tag, reused images
+#             keep their old tag string, so only changed workloads restart.
+# Escape hatch: workflow_dispatch with force_all=true rebuilds and redeploys every image.
+# One fixed registry cache ref per image (buildcache/<image>:alpha, mode=max, overwritten each build).
+# Prune old tags with scripts/ci/prune_alpha_images.py (dry-run by default; never scheduled here).
+#
 # Alpha is FULLY self-hosted (build AND deploy on the dal2 runner) so it costs
 # zero GitHub-hosted Actions minutes. Beta/prod will use a separate HYBRID
 # workflow later (GitHub-hosted build + self-hosted deploy) -- not built here.
@@ -40,6 +52,11 @@ on:
   push:
     branches: [release/v3.0.X]
   workflow_dispatch:
+    inputs:
+      force_all:
+        description: "Rebuild and redeploy EVERY image (ignore change detection)"
+        type: boolean
+        default: false
 
 # Serialize deploys; never cancel one mid-flight (a half-applied helm upgrade).
 concurrency:
@@ -51,7 +68,11 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
+  # Lane a (primary BuildKit pod) -- unchanged default.
   BUILDKIT_HOST: tcp://buildkitd.buildkit.svc:1234
+  # Lane b (optional second BuildKit pod, e.g. tcp://buildkitd-1.buildkit.svc:1234). Set the repo
+  # variable BUILDKIT_HOST_B once the pod exists; unset/empty = single endpoint (lane b folds into a).
+  BUILDKIT_HOST_B: ${{ vars.BUILDKIT_HOST_B }}
   IMAGE_PREFIX: ghcr.io/penguintechinc/waddles
 
 jobs:
@@ -76,10 +97,93 @@ jobs:
           echo "tag=alpha-${EPOCH}" >> "$GITHUB_OUTPUT"
           echo "alpha tag: alpha-${EPOCH}"
 
-  build:
-    name: Build ${{ matrix.service }}
+
+  # Decide BUILD vs REUSE per image (scripts/ci/alpha_plan.py). Reads only: the Helm release
+  # values (same ServiceAccount access `helm upgrade` already needs) and ghcr image labels
+  # (GITHUB_TOKEN, packages: read). No new secrets.
+  plan:
+    name: Plan changed images
     needs: prepare
     if: github.repository == 'penguintechinc/waddles' && github.ref == 'refs/heads/release/v3.0.X'
+    runs-on: dal2-alpha
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      build_count: ${{ steps.plan.outputs.build_count }}
+      retag_count: ${{ steps.plan.outputs.retag_count }}
+      plan: ${{ steps.plan.outputs.plan }}
+    steps:
+      - name: Checkout code (full history for per-image diffs)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Install plan dependencies (hash-pinned)
+        run: python3 -m pip install --disable-pip-version-check --no-cache-dir --require-hashes -r scripts/ci/requirements-alpha-plan.txt
+
+      - name: Install helm and kubectl
+        uses: ./.github/actions/install-deploy-tools
+
+      # Also the lane-a preflight: bootstrapping the remote driver connects to buildkitd and
+      # lists its workers (the buildctl-debug-workers equivalent) -- an unreachable primary
+      # fails here, loudly, before anything is built.
+      - name: Set up Docker Buildx (remote buildkitd, lane a)
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
+        with:
+          driver: remote
+          endpoint: ${{ env.BUILDKIT_HOST }}
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read deployed Helm release values
+        env:
+          RELEASE: waddlebot
+          NAMESPACE: waddlebot
+        run: |
+          set -euo pipefail
+          # A missing release (first deploy) or unreadable values is NOT fatal: the plan
+          # treats it as "unknown deployed state" and builds every image (fail safe).
+          if helm get values "${RELEASE}" -n "${NAMESPACE}" -o json > "${RUNNER_TEMP}/helm-values.json" 2> "${RUNNER_TEMP}/helm-values.err"; then
+            echo "read release values: $(wc -c < "${RUNNER_TEMP}/helm-values.json") bytes"
+          else
+            echo "::warning::could not read Helm values ($(head -c 300 "${RUNNER_TEMP}/helm-values.err")); every image will be built"
+            echo null > "${RUNNER_TEMP}/helm-values.json"
+          fi
+
+      - name: Plan (BUILD vs REUSE per image)
+        id: plan
+        env:
+          FORCE_ALL: ${{ inputs.force_all }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/alpha_plan.py plan \
+            --head "${GITHUB_SHA}" \
+            --tag "${TAG}" \
+            --registry "${IMAGE_PREFIX}" \
+            --helm-values "${RUNNER_TEMP}/helm-values.json" \
+            --endpoint-a "${BUILDKIT_HOST}" \
+            --endpoint-b "${BUILDKIT_HOST_B}" \
+            --out "${RUNNER_TEMP}/plan.json"
+
+  build:
+    name: Build ${{ matrix.service }}
+    needs: [prepare, plan]
+    # Only the images the plan marked BUILD; skipped entirely when none changed.
+    if: github.repository == 'penguintechinc/waddles' && github.ref == 'refs/heads/release/v3.0.X' && needs.plan.outputs.build_count != '0'
     runs-on: dal2-alpha
     permissions:
       contents: read
@@ -88,32 +192,21 @@ jobs:
       # false: one failed image must not cancel the others, so a single run
       # surfaces every broken build. Deploy still requires all builds green.
       fail-fast: false
-      matrix:
-        include:
-          # service = image repo name (mirrors scripts/alpha-deploy.sh SERVICES).
-          - { service: hub-api, file: hub_api/Dockerfile, context: ".", extra_ctx: "", target: "", suffix: "" }
-          - { service: hub-webui, file: admin/hub_module/Dockerfile.webui, context: ".", extra_ctx: "", target: "", suffix: "" }
-          - { service: migrations, file: migrations/Dockerfile, context: ".", extra_ctx: "", target: "", suffix: "" }
-          - { service: seeder, file: bundles/Dockerfile.core-bundles, context: ".", extra_ctx: "", target: "", suffix: "" }
-          - { service: svc-bundles-executor, file: core/bundle_executor/Dockerfile.rust, context: ".", extra_ctx: "", target: "", suffix: "" }
-          - { service: svc-ingest, file: core/svc_ingest/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }
-          - { service: svc-process, file: core/svc_process/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }
-          - { service: svc-action, file: core/svc_action/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }
-          - { service: svc-presentation, file: core/svc_presentation/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }
-          - { service: egress-proxy, file: core/egress_proxy/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }
-          # svc-streaming: cpu variant only; chart appends -<variant> to the tag.
-          - { service: svc-streaming, file: core/svc_streaming/Dockerfile.rust, context: core/svc_streaming, extra_ctx: "", target: cpu, suffix: "-cpu" }
+      # Pure fromJSON matrix from scripts/ci/image-inputs.yaml (never mixed with a static include).
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           persist-credentials: false
 
-      - name: Set up Docker Buildx (remote buildkitd)
+      # Lane endpoint comes from the plan (lane a primary; lane b second pod, or lane a when b is
+      # unset/unreachable). Bootstrapping the remote driver fails loudly if the endpoint is down.
+      - name: Set up Docker Buildx (remote buildkitd, ${{ matrix.buildkit_host }})
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
         with:
           driver: remote
-          endpoint: ${{ env.BUILDKIT_HOST }}
+          endpoint: ${{ matrix.buildkit_host }}
 
       - name: Log in to ghcr.io
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
@@ -132,15 +225,67 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ needs.prepare.outputs.tag }}${{ matrix.suffix }}
+          # The revision label is how the NEXT run finds this image's last-built commit.
           labels: org.opencontainers.image.revision=${{ github.sha }}
-          # Registry-backed cache: survives the dal2 runner's docker prune.
+          # ONE fixed cache ref per image, overwritten every build (mode=max): the registry
+          # holds exactly one cache manifest per image, never per-run cache tags. Survives the
+          # dal2 runner's docker prune.
           cache-from: type=registry,ref=${{ env.IMAGE_PREFIX }}/buildcache/${{ matrix.service }}:alpha
           cache-to: type=registry,ref=${{ env.IMAGE_PREFIX }}/buildcache/${{ matrix.service }}:alpha,mode=max,image-manifest=true,oci-mediatypes=true
 
+  # REUSE images: copy the deployed manifest to the new alpha tag by digest (registry-side, no
+  # rebuild) and verify digest equality. Keeps a complete alpha-<epoch> set per image.
+  retag:
+    name: Retag unchanged images
+    needs: [prepare, plan]
+    if: github.repository == 'penguintechinc/waddles' && github.ref == 'refs/heads/release/v3.0.X' && needs.plan.outputs.retag_count != '0'
+    runs-on: dal2-alpha
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci
+            .github/actions
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Install plan dependencies (hash-pinned)
+        run: python3 -m pip install --disable-pip-version-check --no-cache-dir --require-hashes -r scripts/ci/requirements-alpha-plan.txt
+
+      - name: Set up Docker Buildx (remote buildkitd, lane a)
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
+        with:
+          driver: remote
+          endpoint: ${{ env.BUILDKIT_HOST }}
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retag reused images (digest-verified)
+        env:
+          PLAN_JSON: ${{ needs.plan.outputs.plan }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${PLAN_JSON}" > "${RUNNER_TEMP}/plan.json"
+          python3 scripts/ci/alpha_plan.py retag --plan "${RUNNER_TEMP}/plan.json"
+
   deploy:
     name: Deploy to dal2-alpha
-    needs: [prepare, build]
-    if: github.repository == 'penguintechinc/waddles' && github.ref == 'refs/heads/release/v3.0.X'
+    needs: [prepare, plan, build, retag]
+    # build/retag are legitimately skipped when nothing needs them; any failure or cancel blocks deploy.
+    if: ${{ !cancelled() && github.repository == 'penguintechinc/waddles' && github.ref == 'refs/heads/release/v3.0.X' && needs.plan.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.build.result) && contains(fromJSON('["success","skipped"]'), needs.retag.result) }}
     runs-on: dal2-alpha
     # Creates/updates the GitHub Environment + Deployment; job failure = failure status.
     environment:
@@ -150,6 +295,7 @@ jobs:
       contents: read
     env:
       TAG: ${{ needs.prepare.outputs.tag }}
+      PLAN_JSON: ${{ needs.plan.outputs.plan }}
       RELEASE: waddlebot
       NAMESPACE: waddlebot
     steps:
@@ -158,30 +304,22 @@ jobs:
         with:
           persist-credentials: false
 
-      # The stock ARC runner image (actions-runner) ships NO helm/kubectl/gh. Install
-      # pinned releases into a user-writable dir (no sudo), SHA256 verified against
-      # digests pinned here. helm stays v3 (helm v4 breaks fresh installs, helm#31361);
-      # kubectl tracks the alpha cluster's MicroK8s minor (v1.35).
-      - name: Install helm v3.17.3 and kubectl v1.35.10
-        env:
-          HELM_VERSION: v3.17.3
-          HELM_SHA256: ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd
-          KUBECTL_VERSION: v1.35.10
-          KUBECTL_SHA256: c49a28f1f4efc4d475ed05f47f2ce8e563bf7bef69ed77fe1b924ea6d83b6327
+      - name: Install helm and kubectl
+        uses: ./.github/actions/install-deploy-tools
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Install plan dependencies (hash-pinned)
+        run: python3 -m pip install --disable-pip-version-check --no-cache-dir --require-hashes -r scripts/ci/requirements-alpha-plan.txt
+
+      - name: Write per-image Helm values from the plan
         run: |
           set -euo pipefail
-          BIN="${RUNNER_TEMP}/bin"; DL="${RUNNER_TEMP}/dl"
-          mkdir -p "${BIN}" "${DL}"
-          curl -fsSL --retry 3 -o "${DL}/helm.tgz" "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
-          echo "${HELM_SHA256}  ${DL}/helm.tgz" | sha256sum -c -
-          tar -xzf "${DL}/helm.tgz" -C "${DL}" linux-amd64/helm
-          install -m 0755 "${DL}/linux-amd64/helm" "${BIN}/helm"
-          curl -fsSL --retry 3 -o "${DL}/kubectl" "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-          echo "${KUBECTL_SHA256}  ${DL}/kubectl" | sha256sum -c -
-          install -m 0755 "${DL}/kubectl" "${BIN}/kubectl"
-          echo "${BIN}" >> "$GITHUB_PATH"
-          "${BIN}/helm" version --short
-          "${BIN}/kubectl" version --client
+          printf '%s' "${PLAN_JSON}" > "${RUNNER_TEMP}/plan.json"
+          python3 scripts/ci/alpha_plan.py helm-values --plan "${RUNNER_TEMP}/plan.json" --out "${RUNNER_TEMP}/image-tags.json"
 
       - name: Helm upgrade
         run: |
@@ -190,11 +328,12 @@ jobs:
           # Namespace is pre-created (runner RBAC has namespaceCreate:false).
           [ -n "${TAG}" ] || { echo "::error::empty image tag from build job" >&2; exit 1; }
           helm version --short
-          helm lint k8s/helm/waddlebot -f k8s/helm/waddlebot/values-alpha.yaml -f k8s/helm/waddlebot/values-dal2alpha.yaml --set-string "global.imageTag=${TAG}"
+          helm lint k8s/helm/waddlebot -f k8s/helm/waddlebot/values-alpha.yaml -f k8s/helm/waddlebot/values-dal2alpha.yaml -f "${RUNNER_TEMP}/image-tags.json" --set-string "global.imageTag=${TAG}"
           helm upgrade --install "${RELEASE}" k8s/helm/waddlebot \
             --namespace "${NAMESPACE}" \
             -f k8s/helm/waddlebot/values-alpha.yaml \
             -f k8s/helm/waddlebot/values-dal2alpha.yaml \
+            -f "${RUNNER_TEMP}/image-tags.json" \
             --set-string "global.imageTag=${TAG}" \
             --wait --timeout 15m
 
@@ -219,10 +358,10 @@ jobs:
           echo "pods examined=${PODS} bad=${PBAD}"
           [ "${PODS}" -gt 0 ] && [ "${PBAD}" -eq 0 ] || exit 1
 
-          # 3. deployed images carry the new tag (proves this rollout, not a stale one).
-          IMGS="$(kubectl -n "${NAMESPACE}" get deploy -o jsonpath='{range .items[*]}{.spec.template.spec.containers[*].image}{"\n"}{end}' | tr ' ' '\n' | grep -c "ghcr.io/penguintechinc/waddles/.*:${TAG}" || true)"
-          echo "images on ${TAG}=${IMGS}"
-          [ "${IMGS}" -gt 0 ] || { echo "::error::no deployment runs tag ${TAG}" >&2; exit 1; }
+          # 3. every long-lived Deployment runs exactly its planned image (rebuilt -> new tag,
+          #    reused -> its old tag); examined count must equal the planned set, > 0.
+          kubectl -n "${NAMESPACE}" get deploy -o jsonpath='{range .items[*]}{.spec.template.spec.containers[*].image}{"\n"}{end}' \
+            | python3 scripts/ci/alpha_plan.py verify --plan "${RUNNER_TEMP}/plan.json" --registry "${IMAGE_PREFIX}"
 
           # 4. real health + readiness check against hub-api (HTTP 200 required).
           PORT="$(kubectl -n "${NAMESPACE}" get deploy "${RELEASE}-hub-api-v3" -o jsonpath='{.spec.template.spec.containers[?(@.name=="hub-api")].ports[?(@.name=="http")].containerPort}')"
