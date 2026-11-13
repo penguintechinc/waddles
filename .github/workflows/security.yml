@@ -252,6 +252,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The dal2-alpha-ci runners ship no Go toolchain, so CodeQL's Go autobuild failed with
+      # "Unable to locate executable file: go". core/module_rtc is still Go on release/v3.0.X;
+      # same pinned SHA + version as go-gates.yml. Drop this step and `go` below when it is deleted.
+      - name: Set up Go (CodeQL Go extraction)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '1.26.10'
+          cache: false
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@95e58e9a2cdfd71adc6e0353d5c52f41a045d225  # v4
         with:

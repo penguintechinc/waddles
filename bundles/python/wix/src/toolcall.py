@@ -99,6 +99,9 @@ def parse_ts(raw: str) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(raw)
     except ValueError:
+        # Callers turn `None` into a recorded fault; log here so the cause is never silent.
+        # The raw value is caller-supplied input and is deliberately not logged.
+        logger.warn("wix.timestamp_unparseable")
         return None
     return parsed if parsed.tzinfo is not None else None
 
