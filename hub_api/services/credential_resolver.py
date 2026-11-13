@@ -67,6 +67,8 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
+from opentelemetry import metrics
+
 from services.errors import bad_request, not_found
 from services.platform_integrations_crypto import (
     PlatformCredentialCryptoError,
@@ -84,6 +86,19 @@ from services.schema import bind_guild_pairing_tables
 
 logger = logging.getLogger(__name__)
 
+_meter = metrics.get_meter("waddles.hub_api.credential_resolver")
+tenant_discord_app_missing_counter = _meter.create_counter(
+    "waddles_tenant_discord_app_missing_total",
+    description=(
+        "A non-default tenant needed a Discord app/bot credential but has none installed "
+        "(fail-loud; never served from our app or env)."
+    ),
+)
+
+#: Stable machine error code surfaced for a non-default tenant with no Discord app installed.
+TENANT_DISCORD_APP_MISSING = "TENANT_DISCORD_APP_MISSING"
+PLATFORM_DISCORD = "discord"
+
 
 class TransportUnavailable(Exception):  # noqa: N818 - contract-pinned name, see module docstring
     """Raised when no usable credentials exist for a `(tenant_id, platform)` pair.
@@ -93,6 +108,49 @@ class TransportUnavailable(Exception):  # noqa: N818 - contract-pinned name, see
     this as a clear "platform not configured" response rather than a raw
     decrypt or env-lookup failure.
     """
+
+
+class TenantDiscordAppMissing(TransportUnavailable):
+    """A non-default tenant has no (complete) Discord app of its own installed.
+
+    Our WaddleBot Discord application serves ONLY the default tenant; every private tenant
+    brings its own (application id, client secret, bot token). There is deliberately no
+    fallback to our app or to `DISCORD_*` env vars -- the caller gets this stable-coded error
+    (`TENANT_DISCORD_APP_MISSING`) and must surface "install your Discord app" instead.
+    """
+
+    code = TENANT_DISCORD_APP_MISSING
+
+    def __init__(self, message: str, *, tenant_public_id: str = "unknown") -> None:
+        """Carry the tenant's public id (never a numeric pk, never a secret) for telemetry."""
+        super().__init__(message)
+        self.tenant_public_id = tenant_public_id
+
+
+def tenant_public_id(dal: Any, tenant_id: int) -> str:
+    """The tenant's `public_id` UUID for telemetry/logs, or `"unknown"` -- never the numeric pk."""
+    try:
+        row = dal(dal.tenants.id == tenant_id).select(dal.tenants.public_id).first()
+        value = getattr(row, "public_id", None) if row is not None else None
+    except Exception:  # noqa: BLE001 - best-effort label; telemetry must never break a request
+        return "unknown"
+    return str(value) if value else "unknown"
+
+
+def _tenant_discord_app_missing(dal: Any, tenant_id: int, reason: str) -> TenantDiscordAppMissing:
+    """Build the fail-loud error, bump the counter and log it (tenant public id only)."""
+    public_id = tenant_public_id(dal, tenant_id)
+    tenant_discord_app_missing_counter.add(1, {"tenant": public_id, "reason": reason})
+    logger.warning(
+        "credential_resolver.tenant_discord_app_missing tenant=%s reason=%s code=%s",
+        public_id,
+        reason,
+        TENANT_DISCORD_APP_MISSING,
+    )
+    return TenantDiscordAppMissing(
+        f"tenant has no Discord app installed ({reason}); install your own Discord app",
+        tenant_public_id=public_id,
+    )
 
 
 @dataclass(slots=True, frozen=True)
@@ -169,8 +227,11 @@ class DefaultCredentialResolver:
                 tenant_id=tenant_id, platform=platform, payload=payload, source="saas"
             )
 
+        # Non-default tenant: DB-only lane. There is NO env / shared-app fallback here, ever.
         row = _select_tenant_credentials_row(dal, tenant_id, platform)
         if row is None:
+            if platform == PLATFORM_DISCORD:
+                raise _tenant_discord_app_missing(dal, tenant_id, "no_app_row")
             raise TransportUnavailable(
                 f"tenant {tenant_id} has no stored credentials for platform '{platform}'"
             )
@@ -188,14 +249,21 @@ class DefaultCredentialResolver:
             ) from exc
 
         try:
-            payload = json.loads(plaintext)
+            tenant_payload: dict[str, Any] = json.loads(plaintext)
         except json.JSONDecodeError as exc:
             raise TransportUnavailable(
                 f"stored credentials for tenant {tenant_id} platform '{platform}' are malformed"
             ) from exc
 
+        if platform == PLATFORM_DISCORD and not (
+            isinstance(tenant_payload, dict)
+            and tenant_payload.get("client_id")
+            and tenant_payload.get("bot_token")
+        ):
+            raise _tenant_discord_app_missing(dal, tenant_id, "incomplete_app")
+
         return PlatformCredentials(
-            tenant_id=tenant_id, platform=platform, payload=payload, source="tenant"
+            tenant_id=tenant_id, platform=platform, payload=tenant_payload, source="tenant"
         )
 
 
@@ -371,6 +439,7 @@ def upsert_platform_connection(
     refresh_token: str | None,
     installed_by_user_id: int | None,
     status: str = "active",
+    resource_metadata: dict[str, Any] | None = None,
 ) -> int:
     """Insert or update the one `(tenant_id, platform, resource_id)` connection row.
 
@@ -414,6 +483,7 @@ def upsert_platform_connection(
                     seal_version=SEAL_AAD,
                     created_at=now,
                     updated_at=now,
+                    **({"resource_metadata": resource_metadata} if resource_metadata else {}),
                 )
             )
         else:
@@ -426,6 +496,7 @@ def upsert_platform_connection(
                 public_id=public_id,
                 seal_version=SEAL_AAD,
                 updated_at=now,
+                **({"resource_metadata": resource_metadata} if resource_metadata else {}),
             )
         dal.commit()
         return connection_id

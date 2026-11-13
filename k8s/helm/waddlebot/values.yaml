@@ -1188,6 +1188,11 @@ pipeline:
   # runner stays tenant-wide rather than community-scoped -- see roadmap DATA-MODEL
   # GAPS "guild->community" shortcut (community_id=None, activated tenant-wide).
   runnerTenantSlug: "default"
+  # Numeric id of the default (is_global) tenant -- the ONLY tenant the process-wide
+  # DISCORD_BOT_TOKEN application may serve. Rendered as DEFAULT_TENANT_ID on svc-ingest;
+  # svc-ingest refuses to start with DISCORD_BOT_TOKEN set and this unset/0. Every
+  # environment that runs the env Discord app MUST set it (alpha: 1).
+  defaultTenantId: ""
 
   # PR-H -- ONE source of truth for the pinned connector component digests
   # (sha256:<64 lowercase hex>; empty = unset). Rendered into svc-ingest
@@ -1356,6 +1361,8 @@ pipeline:
     # after a per-identity community allow-list exists -- see docs/PROVIDER_CONNECTIONS.md.
     spiffePeerTrust: false
     spiffePeerIdHeader: "X-Spiffe-Peer-Id"
+    # Extra plain env vars for hub-api (map NAME: value). Default empty.
+    extraEnv: {}
     replicas: 2
     # Maps to WADDLES_AI_ENABLED (hub_api/config.py) -- deploy-time
     # kill-switch for the whole services/ai_routing/ subsystem, so
@@ -2040,7 +2047,7 @@ pipeline:
   # PostHog-gated, default-ENABLED, fail-loud-when-unreachable behavior is
   # unchanged. `false` renders `PII_TOKENIZATION_ENABLED=false` on
   # svc-process-rust and `PII_DETOKENIZATION_ENABLED=false` on
-  # svc-action-rust and svc-presentation-rust -- both gates short-circuit to disabled (no hub_client
+  # svc-ingest-rust (the outbound egress) and svc-presentation-rust -- both gates short-circuit to disabled (no hub_client
   # connect attempt, no fail-loud exit) and log a WARN naming the override.
   # SECURITY: ON by default in EVERY environment (alpha included) -- no
   # values-*.yaml may set this false. Opt-out is the PostHog kill-switch
@@ -2794,6 +2801,11 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "identity:ephemeral:mint"
+        # KeyService.GetStreamDek (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES): svc-process
+        # decrypts every inbound event's identity fields (svc-ingest encrypts them before they
+        # touch the stream, outside the PII boundary) with the tenant stream DEK it fetches here,
+        # sealed to a per-call ephemeral key, through a third single-scope hub_client.
+        - "key:stream-dek:read"
         # feature/host-gameserver-net -- the `gameserver-net` host capability resolves an
         # admin-registered game-server connection (provider `gameserver`) per call:
         # `connections:list:gameserver` finds the (community, server id) binding,
@@ -2809,6 +2821,8 @@ serviceJwt:
         # rejects the scope and handle mentions are `unavailable` (fail-closed);
         # the actor and <@id> mentions never call hub-api.
         - "identity:handle:resolve"
+        # KeyService.GetStreamDek (#442) -- per-tenant stream identity-field DEK (decrypt side).
+        - "key:stream-dek:read"
         # feature/egress-proxy-service -- required to call core/egress_proxy
         # for any bundle net.http/CONNECT egress.
         - "egress:connect"
@@ -2817,18 +2831,18 @@ serviceJwt:
         # Granted to this identity alone; hub-api additionally allow-lists the caller by name.
         - "media:byok:resolve"
         - "media:tier:resolve"
+        # feature/bundle-community-config-live -- get-context().config_json: the live per-community
+        # bundle config (BundleConfigService, hub_api/grpc_internal/bundle_config_servicer.py).
+        # Read-only, ids only; hub-api additionally allow-lists the caller by name.
+        - "bundle-config:read"
     svc-action:
       spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-action"
       serviceAccount: svc-action
       tenant: system
       allowedScopes:
-        # feature/hub-grpc-env-wiring -- was "users:display-name:resolve", which does
-        # not match hub_api/grpc_internal/servicers.py REQUIRED_SCOPES's
-        # "identity:displayname:read" for ResolveDisplayNames (core/svc_action's
-        # HUB_IDENTITY_RESOLVE_SCOPE). The mismatch would have minted a machine JWT
-        # missing the scope the server's AuthInterceptor actually checks, so every
-        # ResolveDisplayNames call would 403 even with a working connection.
-        - "identity:displayname:read"
+        # svc-action holds NO display-name scope: it never detokenizes (PII boundary --
+        # only svc-ingest and svc-presentation may hold true PII); relay text is queued
+        # tokenized and svc-ingest's outbound drain substitutes at the platform send.
         - "egress:connect"
         # feature/edge-reshape-chunk2-conn-store (Task 8) -- svc-action is the per-send EGRESS
         # consumer of the connection store: `connections:resolve` mints a community-bound token
@@ -2845,6 +2859,9 @@ serviceJwt:
         # (never wider). Filtered out of the rendered allow-list unless presentation.rust.enabled
         # (waddlebot.svcActionOverlayPush); the Python svc-presentation was removed, Rust is the default.
         - "presentation.overlay:push"
+        # feature/bundle-community-config-live -- live per-community bundle config for
+        # get-context().config_json (hub_api BundleConfigService); read-only, ids only.
+        - "bundle-config:read"
     # Overlay detokenization (core/svc_presentation/src/overlay/detok.rs): resolves
     # `{user:<uuid>}` to display names via ResolveDisplayNames only -- never mints
     # pseudonyms or calls egress, so exactly one scope.
@@ -2870,6 +2887,10 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "connections:resolve"
+        # KeyService.GetStreamDek (#442) -- per-tenant stream identity-field DEK (encrypt side),
+        # sealed to a per-request X25519 key. Only svc-ingest + svc-process hold this scope;
+        # hub-api additionally allow-lists both by SPIFFE service name.
+        - "key:stream-dek:read"
         # feature/edge-reshape-chunk2-conn-store (Task 8) -- unbound binding discovery
         # (GET /api/v1/internal/provider-connections) for the twitch OAuth kind. NOT the
         # `connections:resolve:static` scope: svc-ingest never resolves Lambda/GCP/HTTP secrets.
@@ -2897,6 +2918,10 @@ serviceJwt:
         # active (tenant, community, app) scopes to tick. Granted to this identity alone; hub-api
         # additionally allow-lists the caller by name.
         - "bundle-schedules:read"
+        # KeyService.GetStreamDek -- svc-ingest envelope-encrypts every identity field with the
+        # tenant stream DEK (fetched by NUMERIC tenant id, sealed to a per-call ephemeral key)
+        # before the event reaches the stream. Always rendered: no DEK, no events.
+        - "key:stream-dek:read"
   # Every calling pod projects its own ServiceAccount token bound to
   # `bootstrapAudience` -- this is the bootstrap credential, no shared
   # secret distributed to callers. Reusable via the

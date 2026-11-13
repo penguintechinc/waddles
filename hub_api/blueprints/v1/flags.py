@@ -64,6 +64,7 @@ CLIENT_FLAG_KEYS: tuple[str, ...] = (
     "waddles.webui.role_sync_mapping",
     "waddles.webui.discord_bot_install_link",
     "waddles.calendar.event_discord_sync",
+    "waddles.tenant.discord_install",
     "waddles.secret-messaging",
     "waddles.community.chat-realtime",
 )

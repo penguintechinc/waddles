@@ -5,7 +5,7 @@ name: Remind Bundle (Python)
 # (feature/bundle-remind). Due-time DELIVERY is not wired -- see src/app.py's own module
 # docstring "Delivery" section for the honest scope of this release.
 # 1.0.3: activation-gated only -- removed the in-bundle waddles.command-remind feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.5
+version: 1.0.6
 feature: waddles.core.example
 module: core
 provider: builtin

@@ -49,7 +49,7 @@ impl EventAppender for Recorder {
 struct NoDek;
 
 impl DekProvider for NoDek {
-    async fn get_dek(&self, _t: &str) -> Result<(Dek, u32), DekUnavailableError> {
+    async fn get_dek(&self, _t: i64) -> Result<(Dek, u32), DekUnavailableError> {
         panic!("a bundle.reconcile event carries no identity field, so no DEK may be requested");
     }
 }

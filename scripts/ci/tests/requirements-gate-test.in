@@ -1,3 +1,8 @@
 pytest==9.1.1
 pytest-cov==5.0.0
 coverage==7.16.2
+# Full scripts/ci/tests suite (bundle-hygiene): manifest parsing + repo-owned .csproj XML parsing.
+pyyaml==6.0.3
+# Same pin as hub_api/requirements.txt (SAML); 0.7.1 is the last stable release (2021) -- tracked
+# under the 2-year-unmaintained rule; only parses repo-owned XML here.
+defusedxml==0.7.1

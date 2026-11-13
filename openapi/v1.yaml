@@ -3624,6 +3624,9 @@ components:
           additionalProperties: true
           title: Metadata
           type: object
+        ownershipVerified:
+          title: Ownershipverified
+          type: boolean
         provider:
           title: Provider
           type: string
@@ -3666,6 +3669,7 @@ components:
       - shared
       - hasRefreshToken
       - hasApiCredential
+      - ownershipVerified
       - expiresAt
       - capabilities
       - metadata

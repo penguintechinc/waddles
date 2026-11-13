@@ -30,9 +30,7 @@ use svc_ingest::connector_runtime::scoped::ScopeLookup;
 use svc_ingest::connector_runtime::selector::ConnectorSelector;
 use svc_ingest::connector_runtime::webhook_boot::WebhookEnv;
 use svc_ingest::connector_runtime::Readiness;
-use svc_ingest::identity_crypto::{
-    ConfiguredDekProvider, LocalDevDekProvider, TtlCachedDekProvider, DEFAULT_DEK_CACHE_TTL,
-};
+use svc_ingest::identity_crypto::{ConfiguredDekProvider, LocalDevDekProvider};
 use svc_ingest::scope_resolver::{ResolvedScope, Unresolved};
 
 struct EmptyHub;
@@ -117,11 +115,8 @@ fn config(valkey_kid: bool) -> Config {
     c
 }
 
-fn dek() -> ConfiguredDekProvider<svc_ingest::identity_crypto::UnimplementedMachineJwtProvider> {
-    ConfiguredDekProvider::LocalDev(TtlCachedDekProvider::new(
-        LocalDevDekProvider::new("local", "BOOT_START_KEK").unwrap(),
-        DEFAULT_DEK_CACHE_TTL,
-    ))
+fn dek() -> ConfiguredDekProvider {
+    ConfiguredDekProvider::local_dev(LocalDevDekProvider::new("local", "BOOT_START_KEK").unwrap())
 }
 
 fn lookup(map: HashMap<String, String>) -> impl Fn(&str) -> Option<String> + Sync {

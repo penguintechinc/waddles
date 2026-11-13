@@ -35,16 +35,18 @@ from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
-from quart import Blueprint, current_app, request
+from quart import Blueprint, after_this_request, current_app, request
 from quart_schema import validate_response
 
 from services import discord_guild_roles as roles_svc
 from services import discord_role_mirror as mirror_svc
+from services import discord_server_install as server_install_svc
 from services import guild_ownership as ownership_svc
 from services import guild_pairing as pairing_svc
+from services import install_state_binding as binding
 from services.community_common import community_in_tenant
 from services.current_user import get_current_user_id
-from services.errors import ApiError, bad_request, not_found, payment_required
+from services.errors import ApiError, bad_request, conflict, not_found, payment_required
 
 guild_pairing_bp = Blueprint("v1_guild_pairing", __name__, url_prefix="/api/v1")
 
@@ -186,6 +188,22 @@ async def create_pairing(
     try:
         if not guild_id.isdigit():
             raise bad_request("discord_guild_id must be a non-empty numeric Discord snowflake")
+        if any(
+            p.discord_guild_id == guild_id for p in pairing_svc.list_pairings(_dal(), community_id)
+        ):
+            raise conflict("This Discord server is already paired with this community")
+        # Authority, not just presence: the guild must have been installed through the
+        # OAuth flow under this tenant with an approved grant for THIS community.
+        # Existing pairings are not re-validated (grandfathered); only new creates.
+        if not server_install_svc.community_has_install_grant(_dal(), community_id, guild_id):
+            raise ApiError(
+                "This Discord server has not been installed for this community. "
+                'Use "Add Discord server" to install the bot and pair it.',
+                403,
+                "DISCORD_INSTALL_REQUIRED",
+            )
+        # Only pair a guild the tenant's bot is actually in (409 DISCORD_BOT_NOT_IN_GUILD).
+        await roles_svc.verify_bot_in_guild(_dal(), community_id, guild_id)
         # S3: the tenant's own bot must be in the guild and the actor must administer it.
         await ownership_svc.verify_guild_control(
             _dal(), community_id, guild_id, actor_user_id=actor_user_id
@@ -194,8 +212,10 @@ async def create_pairing(
             _dal(),
             community_id,
             discord_guild_id=guild_id,
-            direction=str(body.get("direction", "")),
-            role_name_prefix=str(body.get("role_name_prefix", "")),
+            direction=str(body.get("direction") or server_install_svc.PAIRING_DIRECTION),
+            role_name_prefix=str(
+                body.get("role_name_prefix") or server_install_svc.DEFAULT_ROLE_NAME_PREFIX
+            ),
             sync_enabled=bool(body.get("sync_enabled", False)),
             propagate_moderators=bool(body.get("propagate_moderators", False)),
             ownership_verified=True,
@@ -204,6 +224,75 @@ async def create_pairing(
     except ApiError as exc:
         return _err(exc)
     return GuildPairingResponse(success=True, pairing=pairing), 201
+
+
+@dataclass(slots=True, frozen=True)
+class ServerInstallAuthorizeResponse:
+    """`authorize_url` envelope for the add-Discord-server flow -- never a secret."""
+
+    success: bool
+    authorize_url: str
+
+
+#: Browser-binding cookie for the add-server flow (``__Host-`` HttpOnly Secure SameSite=Lax).
+SERVER_INSTALL_BINDING_COOKIE = binding.cookie_name("dc_server_install")
+
+
+def _install_redirect_uri() -> str:
+    """The shared Discord install callback (`blueprints.v1.tenant_discord_install`)."""
+    cfg = current_app.config.get("HUB_API_CONFIG")
+    base = str(getattr(cfg, "identity_callback_base_url", "") or "").rstrip("/")
+    return f"{base}/api/v1/discord/install/callback"
+
+
+@guild_pairing_bp.route(
+    "/communities/<int:community_id>/discord/server-install/authorize", methods=["POST"]
+)
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@validate_response(ServerInstallAuthorizeResponse)
+async def start_server_install(
+    community_id: int,
+) -> ServerInstallAuthorizeResponse | tuple[dict[str, object], int]:
+    """`POST /api/v1/communities/<id>/discord/server-install/authorize`.
+
+    Body `{"sync_enabled": bool}`. Returns Discord's bot-authorize URL; the callback records
+    the install and pairs the returned guild with this community.
+    """
+    gate_error = await _feature_gate_and_tenant_check(community_id)
+    if gate_error is not None:
+        return gate_error
+    body = await request.get_json(force=True, silent=True) or {}
+    if not isinstance(body, dict):
+        return _err(bad_request("Request body must be a JSON object"))
+    sync_enabled = body.get("sync_enabled", False)
+    if not isinstance(sync_enabled, bool):
+        return _err(bad_request("sync_enabled must be a boolean"))
+    nonce = binding.new_nonce()
+    try:
+        url = await server_install_svc.build_server_install_url(
+            _dal(),
+            community_id=community_id,
+            admin_user_id=get_current_user_id(request),
+            sync_enabled=sync_enabled,
+            redirect_uri=_install_redirect_uri(),
+            binding_nonce=nonce,
+        )
+    except ApiError as exc:
+        return _err(exc)
+
+    @after_this_request
+    def _bind_browser(response: Any) -> Any:
+        """Bind the state to THIS browser."""
+        binding.set_binding_cookie(
+            response,
+            SERVER_INSTALL_BINDING_COOKIE,
+            nonce,
+            server_install_svc.DEFAULT_TTL_SECONDS,
+        )
+        return response
+
+    return ServerInstallAuthorizeResponse(success=True, authorize_url=url)
 
 
 # ---------------------------------------------------------------------------

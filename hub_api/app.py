@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from typing import Any
 
 from flask_core import (
@@ -38,7 +37,6 @@ from flask_core.service_jwt import (
     load_issuer_from_env,
 )
 from flask_core.token_revocation import get_token_revocation
-from pydal import Field
 from quart import Quart, request
 from quart_schema import Info, QuartSchema
 from werkzeug.exceptions import HTTPException
@@ -66,6 +64,7 @@ from services.schema import (
     bind_marketplace_module_tables,
     bind_music_tables,
     bind_platform_tables,
+    bind_reference_tenants_table,
     bind_token_billing_tables,
 )
 from services.session_cookie import bearer_token_from_cookie
@@ -122,17 +121,7 @@ def _bind_reference_tables(dal: Any) -> None:
     function; M3 is the first group after M1 with its own new tables, so
     this is a net-new call site, not a redefinition of M1's own tables.
     """
-    dal.define_table(
-        "tenants",
-        Field("slug", "string", length=100),
-        Field("public_id", "string", length=36, default=lambda: str(uuid.uuid4())),
-        Field("display_name", "string", length=255),
-        Field("logo_url", "text"),
-        Field("is_global", "boolean", default=False),
-        Field("is_active", "boolean", default=True),
-        Field("config", "json"),
-        migrate=False,
-    )
+    bind_reference_tenants_table(dal)
     bind_platform_tables(dal)
     # Shared marketplace/module table family (hub_modules, reviews,
     # installations, marketplace_catalog, subscriptions, settings, discount

@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.community.feed
 name: Community Feed Reader (Python)
-version: 1.0.2
+version: 1.0.3
 feature: waddles.core.community
 module: core
 provider: builtin

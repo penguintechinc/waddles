@@ -126,6 +126,7 @@ async fn stage_metrics_and_gate_counters_surface_on_the_prometheus_scrape() {
     metrics.group_pending("waddles.scrape.test", "s", 2);
     metrics.insecure_transport("valkey", "tls", false);
     metrics.tenant_boundary_violation("process", "mac_mismatch");
+    metrics.identity_decrypt_failure("dek_unavailable");
 
     // And the real capability gate, through the real host-call handler: one
     // authorized call (clock), one denied (http to an ungranted host).

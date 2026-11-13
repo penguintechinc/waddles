@@ -2,7 +2,8 @@
 """Backfill the validated `author` (and `collection`) on every first-party bundle manifest.
 
 Every bundle under bundles/{python,rust,csharp,javascript}/* gets `author: github:penguintechinc`
-(csharp/superpenguin-roll gets `author: github/psychoboy` + `collection: superpenguintv`). A
+(every csharp/superpenguin-* PenguinTwitchBot port gets `author: github/psychoboy` +
+`collection: superpenguintv`, the SuperPenguinTV marketplace). A
 manifest change needs a patch version bump, applied in lockstep to bundle.yaml,
 hub-manifest.yaml, pyproject.toml (python) and the bundles/core-bundles.yaml catalog row.
 
@@ -19,9 +20,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BUNDLES = ROOT / "bundles"
 DEFAULT_AUTHOR = "github:penguintechinc"
-OVERRIDES: dict[str, tuple[str, str | None]] = {
-    "csharp/superpenguin-roll": ("github/psychoboy", "superpenguintv"),
-}
+SUPERPENGUIN_PREFIX = "csharp/superpenguin-"
+SUPERPENGUIN = ("github/psychoboy", "superpenguintv")
 _AUTHOR_RE = re.compile(r"^author:.*\n", re.MULTILINE)
 _VERSION_RE = re.compile(
     r"^version:\s*[\"']?([0-9][^\s\"']*)[\"']?[ \t]*$", re.MULTILINE
@@ -33,6 +33,14 @@ def bump(version: str) -> str:
     """Patch-bump a MAJOR.MINOR.PATCH string."""
     major, minor, patch = version.split(".")
     return f"{major}.{minor}.{int(patch) + 1}"
+
+
+def target_for(rel: str) -> tuple[str, str | None]:
+    """Return the (author, collection) a bundle at `rel` (`<lang>/<dir>`) must carry.
+
+    PenguinTwitchBot C# ports belong to the SuperPenguinTV marketplace; everything else is first-party.
+    """
+    return SUPERPENGUIN if rel.startswith(SUPERPENGUIN_PREFIX) else (DEFAULT_AUTHOR, None)
 
 
 def set_fields(text: str, author: str, collection: str | None, new_version: str) -> str:
@@ -69,7 +77,7 @@ def main() -> int:
         if p.is_dir()
     ):
         rel = f"{bdir.parent.name}/{bdir.name}"
-        author, collection = OVERRIDES.get(rel, (DEFAULT_AUTHOR, None))
+        author, collection = target_for(rel)
         files = [
             bdir / n
             for n in ("hub-manifest.yaml", "bundle.yaml")

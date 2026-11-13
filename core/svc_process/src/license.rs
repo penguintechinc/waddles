@@ -530,6 +530,25 @@ impl FeatureGate for PiiTokenizationGate {
     }
 }
 
+/// Adapts the license/flag client to the hub_client cache's kill switch
+/// (`waddles.disable-bundle-community-config`): ON = live community config disabled, unseen/OFF/
+/// license-server-unreachable = enabled. Bypass-aware like [`PiiTokenizationGate`]: a bypassed
+/// client reads `true` for every key, which must NOT read as "kill switch ON".
+pub struct LiveBundleConfigGate(pub Option<Arc<LicenseClient>>);
+
+impl hub_client::bundle_config::LiveConfigGate for LiveBundleConfigGate {
+    fn live_enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            match &self.0 {
+                Some(c) if !c.bypass_active() => {
+                    !c.flag_enabled(hub_client::bundle_config::DISABLE_FLAG).await
+                }
+                _ => true,
+            }
+        })
+    }
+}
+
 /// PenguinTech/Waddles-owned bypass suffix -- the sole license/flag
 /// bypass lever, and it must be a hardcoded source-level constant, never
 /// an env var, CLI flag, or Helm-templated value (`rules/critical-

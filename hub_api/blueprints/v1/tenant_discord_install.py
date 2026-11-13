@@ -34,14 +34,16 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any, cast
+from urllib.parse import urlencode
 
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
-from quart import Blueprint, after_this_request, current_app, request
+from quart import Blueprint, after_this_request, current_app, redirect, request
 from quart_schema import validate_response
 
+from services import discord_server_install as server_install_svc
 from services import install_state_binding as binding
 from services.current_user import get_current_user_id
 from services.discord_install_service import (
@@ -50,6 +52,7 @@ from services.discord_install_service import (
     complete_install,
 )
 from services.errors import ApiError, bad_request, unauthorized
+from services.tenant_discord_app import get_install_status
 from services.tenant_discord_install_state import DEFAULT_TTL_SECONDS
 
 logger = logging.getLogger(__name__)
@@ -134,8 +137,8 @@ async def start_install() -> AuthorizeUrlResponse | tuple[dict[str, object], int
     bot_token = body.get("bot_token")
     if not isinstance(application_id, str) or not isinstance(client_secret, str):
         return _err(bad_request("application_id and client_secret are required strings"))
-    if bot_token is not None and not isinstance(bot_token, str):
-        return _err(bad_request("bot_token, if given, must be a string"))
+    if not isinstance(bot_token, str) or not bot_token.strip():
+        return _err(bad_request("bot_token is required: a private tenant brings its own bot"))
 
     actor_id = get_current_user_id(request)
     nonce = binding.new_nonce()
@@ -176,6 +179,8 @@ async def install_callback() -> InstallCallbackResponse | tuple[dict[str, object
     """
     code = request.args.get("code", "")
     state = request.args.get("state", "")
+    if state.startswith(server_install_svc.STATE_PREFIX):
+        return await _server_install_callback(code, state)
 
     @after_this_request
     def _clear_binding(response: Any) -> Any:
@@ -186,7 +191,11 @@ async def install_callback() -> InstallCallbackResponse | tuple[dict[str, object
 
     try:
         result = await complete_install(
-            _dal(), code=code, state=state, binding_nonce=request.cookies.get(BINDING_COOKIE)
+            _dal(),
+            code=code,
+            state=state,
+            binding_nonce=request.cookies.get(BINDING_COOKIE),
+            guild_id=request.args.get("guild_id"),
         )
     except DiscordInstallError as exc:
         logger.warning("discord install callback failed: %s", type(exc).__name__)
@@ -198,6 +207,92 @@ async def install_callback() -> InstallCallbackResponse | tuple[dict[str, object
     return InstallCallbackResponse(
         success=True, tenant_id=result.tenant_id, platform=result.platform
     )
+
+
+@dataclass(slots=True, frozen=True)
+class InstallStatusResponse:
+    """Install-status envelope for the webui -- never carries a secret, token or ciphertext."""
+
+    success: bool
+    installed: bool
+    application_id: str | None
+    connection_status: str
+    guild_id: str | None
+    updated_at: str | None
+    redirect_uri: str
+
+
+@tenant_discord_install_bp.route("/tenants/discord/install/status", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant.discord_install:read")  # type: ignore[misc]
+@validate_response(InstallStatusResponse)
+async def install_status() -> InstallStatusResponse | tuple[dict[str, object], int]:
+    """`GET /api/v1/tenants/discord/install/status` -- the CALLER's tenant only (from the JWT)."""
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        return _err(unauthorized("tenant context missing"))
+    if ctx.is_default:
+        return _err(bad_request("the default tenant uses the platform Discord app"))
+    status = get_install_status(_dal(), tenant_id=ctx.tenant_id)
+    return InstallStatusResponse(
+        success=True,
+        installed=status.installed,
+        application_id=status.application_id,
+        connection_status=status.connection_status,
+        guild_id=status.guild_id,
+        updated_at=status.updated_at,
+        redirect_uri=_redirect_uri(),
+    )
+
+
+#: Must match `blueprints.v1.guild_pairing.SERVER_INSTALL_BINDING_COOKIE`.
+SERVER_INSTALL_BINDING_COOKIE = binding.cookie_name("dc_server_install")
+
+
+async def _server_install_callback(code: str, state: str) -> Any:
+    """Add-Discord-server leg of the shared callback: record install + pair, then redirect.
+
+    Always redirects the browser back to the webui (never a JSON page): success lands on the
+    community's role-sync page with `discord_server=paired`, failures carry a fixed reason code.
+    """
+    cfg = current_app.config.get("HUB_API_CONFIG")
+    origin = str(getattr(cfg, "frontend_origin", "") or "").rstrip("/")
+    nonce = request.cookies.get(SERVER_INSTALL_BINDING_COOKIE)
+    if request.args.get("error"):
+        # User cancelled on Discord: burn the state (if ours) to learn where to send them.
+        try:
+            pending = await server_install_svc.consume_server_state(state, nonce)
+            target = f"{origin}/admin/{pending.community_id}/role-sync"
+        except Exception:  # noqa: BLE001 - any state failure still returns the browser home
+            target = f"{origin}/dashboard"
+        return redirect(f"{target}?{urlencode({'discord_server': 'error', 'reason': 'cancelled'})}")
+    try:
+        result = await server_install_svc.complete_server_install(
+            _dal(),
+            code=code,
+            state=state,
+            guild_id_param=request.args.get("guild_id") or None,
+            binding_nonce=nonce,
+        )
+    except server_install_svc.ServerInstallError as exc:
+        logger.warning("discord server install callback failed: code=%s", exc.code)
+        target = (
+            f"{origin}/admin/{exc.community_id}/role-sync"
+            if exc.community_id is not None
+            else f"{origin}/dashboard"
+        )
+        return redirect(f"{target}?{urlencode({'discord_server': 'error', 'reason': exc.code})}")
+    except ApiError as exc:
+        logger.warning("discord server install callback failed: code=%s", exc.code)
+        return redirect(
+            f"{origin}/dashboard?{urlencode({'discord_server': 'error', 'reason': exc.code})}"
+        )
+    page = redirect(
+        f"{origin}/admin/{result.community_id}/role-sync?"
+        + urlencode({"discord_server": "paired", "guild_id": result.guild_id})
+    )
+    binding.clear_binding_cookie(page, SERVER_INSTALL_BINDING_COOKIE)
+    return page
 
 
 BLUEPRINTS: list[Blueprint] = [tenant_discord_install_bp]

@@ -203,6 +203,9 @@ pub struct SupervisorDeps {
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::media_wiring`'s doc.
     pub media_wiring: Option<crate::media::MediaWiring>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::dek_provider`'s doc.
+    pub dek_provider: Option<hub_client::dek::ConfiguredDekProvider>,
 }
 
 impl SupervisorDeps {
@@ -255,6 +258,7 @@ impl SupervisorDeps {
             identity_wiring: self.identity_wiring.clone(),
             ai_wiring: self.ai_wiring.clone(),
             media_wiring: self.media_wiring.clone(),
+            dek_provider: self.dek_provider.clone(),
         }
     }
 }

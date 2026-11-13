@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.service.reputation
 name: Reputation Service Bundle (Rust)
-version: 1.1.0
+version: 1.1.1
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -27,6 +27,17 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions: []
+# Cross-bundle tools this service calls (floor bans); identical in hub-manifest.yaml.
+requested_tools:
+  - tool: twitch.moderation.ban
+    access: write
+    target_app_id: waddles.core.service.twitch
+  - tool: discord.moderation.ban
+    access: write
+    target_app_id: waddles.core.service.discord
+  - tool: youtube.moderation.ban
+    access: write
+    target_app_id: waddles.core.service.youtube
 # Tools this service exposes through tool-provider.call; identical in hub-manifest.yaml and
 # bundle.yaml (the seeder's agreement check fails on drift).
 exported_tools:
