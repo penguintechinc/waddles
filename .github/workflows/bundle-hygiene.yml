@@ -167,6 +167,19 @@ jobs:
       # trigger is unique across bundle.yaml manifests (pre-existing pairs are an exact, shrink-only
       # allowlist), and each bundle that consumes every chat line declares the heads it answers.
       # Asserts its own denominators (>=100 bundles and triggers).
+      # app_versions is immutable per (app_id, version): changed build inputs (own source, or
+      # wit/ + waddle-sdk for every Python bundle) without a patch bump 409s the seeder on deploy.
+      - name: Bundle version gate unit tests
+        run: python3 -m pytest scripts/ci/tests/test_bundle_version_bump.py -v -p no:cacheprovider
+      - name: Bundles with changed build inputs bump their version
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --deepen=500 origin "$BASE_REF" HEAD
+          python3 scripts/ci/check-bundle-version-bump.py "origin/$BASE_REF"
+
       - name: No two bundles answer the same command trigger
         run: python3 -m pytest scripts/ci/tests/test_bundle_command_collisions.py -v -p no:cacheprovider
 

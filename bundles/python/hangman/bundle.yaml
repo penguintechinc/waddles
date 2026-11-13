@@ -3,7 +3,7 @@ app_id: waddles.core.example.hangman
 name: Hangman Bundle (Python)
 # 1.0.0: initial release -- per-community hangman word-guessing game (feature/bundle-hangman).
 # 1.0.3: activation-gated only -- removed the in-bundle waddles.command-hangman feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.5
+version: 1.0.6
 feature: waddles.core.example
 module: core
 provider: builtin

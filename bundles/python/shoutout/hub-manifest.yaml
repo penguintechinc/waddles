@@ -5,7 +5,7 @@
 schema_version: 2
 app_id: waddles.core.example.shoutout
 name: Shoutout Bundle (Python)
-version: 1.0.7
+version: 1.0.8
 feature: waddles.core.example
 module: core
 provider: builtin
