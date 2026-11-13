@@ -2078,6 +2078,9 @@ _CONNECTOR_APP_IDS = (
     "waddles.core.service.youtube",
     "waddles.core.service.wix",
 )
+#: Connectors whose manifest declares the dangerous `connector.pii.read`. Wix is events-only (it
+#: syncs Wix Events and ingests no member data), so it declares -- and is granted -- none.
+_PII_READ_CONNECTORS = frozenset(_CONNECTOR_APP_IDS) - {"waddles.core.service.wix"}
 
 
 def test_real_catalog_has_the_connector_tools_rows() -> None:
@@ -2124,14 +2127,15 @@ def test_real_catalog_has_the_spectrum_connector_row() -> None:
 
 
 @pytest.mark.parametrize("app_id", _CONNECTOR_APP_IDS)
-async def test_seed_one_seeds_each_real_connector_row_and_grants_pii_read(
+async def test_seed_one_seeds_each_real_connector_row_and_grants_its_declared_permissions(
     app_id: str, install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Seeds every connector from the REAL catalog + REAL hub-manifest (wasm bytes faked).
 
     `wit_world: connector-tools` never reaches the seeder's validation, so the row seeds like any
-    rust service; as a `waddles.core.*` bundle the seeder pre-grants every declared permission,
-    including the dangerous `connector.pii.read`.
+    rust service; as a `waddles.core.*` bundle the seeder pre-grants EVERY declared permission
+    and nothing else -- including the dangerous `connector.pii.read` only where the manifest
+    declares it (not for the events-only Wix connector).
     """
     _patch_validator_and_storage(monkeypatch)
     bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
@@ -2155,7 +2159,16 @@ async def test_seed_one_seeds_each_real_connector_row_and_grants_pii_read(
 
     assert [r.outcome for r in results] == ["made_available", "activated"]
     grants = await install_dal(install_dal.community_permission_grants.app_id == app_id).select()
-    assert "connector.pii.read" in {row.permission_id for row in grants}
+    granted = {row.permission_id for row in grants}
+    declared = {
+        p["id"]
+        for p in yaml.safe_load((bundles_dir / real.source_dir / "hub-manifest.yaml").read_text())[
+            "permissions"
+        ]
+    }
+    assert declared, f"{app_id} declares no permissions"
+    assert granted == declared
+    assert ("connector.pii.read" in granted) == (app_id in _PII_READ_CONNECTORS)
 
 
 def test_real_catalog_manifest_and_artifact_filenames_are_unique() -> None:

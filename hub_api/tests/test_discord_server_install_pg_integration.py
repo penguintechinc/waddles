@@ -33,6 +33,7 @@ from blueprints.v1.tenant_discord_install import tenant_discord_install_bp
 from config import HubAPIConfig
 from services import discord_guild_roles as roles_svc
 from services import discord_server_install as svc
+from services import guild_ownership as ownership_svc
 from services.credential_resolver import (
     PlatformCredentials,
     grant_community_connection_access,
@@ -49,6 +50,8 @@ WRITE = "community.guild_pairing:write"
 GUILD = "323456789012345678"  # gitleaks:allow - fake snowflake
 OTHER_GUILD = "423456789012345678"  # gitleaks:allow - fake snowflake
 FRONTEND = "http://localhost:5173"
+#: The installing admin's linked Discord account: owner of every guild the fake Discord reports.
+ADMIN_DISCORD_ID = "523456789012345678"  # gitleaks:allow - fake snowflake
 
 
 class FakeRedis:
@@ -147,6 +150,12 @@ def community_id(adal: AsyncDAL) -> int:
         "VALUES ('acme-corp', 'Acme', false, true) RETURNING id",
     )
     pg.q(dal, "INSERT INTO hub_users (id, username) VALUES (1, 'admin1')")
+    pg.q(
+        dal,
+        "INSERT INTO hub_user_identities (hub_user_id, platform, platform_user_id) "
+        "VALUES (1, 'discord', %s)",
+        [ADMIN_DISCORD_ID],
+    )
     return int(
         pg.scalar(
             dal, "INSERT INTO communities (name, tenant_id) VALUES ('c1', %s) RETURNING id", [tid]
@@ -175,7 +184,9 @@ def discord_edge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         match = re.search(r"/guilds/(\d+)$", request.url.path)
         if match:
             if match.group(1) in edge["member_of"]:
-                return httpx.Response(200, json={"id": match.group(1)})
+                return httpx.Response(
+                    200, json={"id": match.group(1), "owner_id": ADMIN_DISCORD_ID}
+                )
             return httpx.Response(403, json={"code": 50001, "message": "Missing Access"})
         return httpx.Response(404)
 
@@ -194,6 +205,10 @@ def discord_edge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(svc, "_install_redis_client", lambda: edge["redis"])
     monkeypatch.setattr(svc, "DefaultCredentialResolver", FakeResolver)
     monkeypatch.setattr(roles_svc, "DefaultCredentialResolver", FakeResolver)
+    # Manual pairing also proves the actor administers the guild (role-sync S3,
+    # `guild_ownership.verify_guild_control`): same fake tenant app + fake Discord HTTP, real code.
+    monkeypatch.setattr(ownership_svc, "httpx", fake_httpx)
+    monkeypatch.setattr(ownership_svc, "DefaultCredentialResolver", FakeResolver)
     return edge
 
 
@@ -462,6 +477,34 @@ class TestManualPairById:
         response = await self._post(client, auth_headers, community_id, OTHER_GUILD)
         assert response.status_code == 201
         assert _pairings(adal.dal, community_id) == [(OTHER_GUILD, "discord_to_twitch", True, 1)]
+
+    async def test_pairing_records_verified_ownership(
+        self, client: Any, auth_headers: Any, adal: AsyncDAL, community_id: int
+    ) -> None:
+        tid = pg.scalar(adal.dal, "SELECT tenant_id FROM communities WHERE id=%s", [community_id])
+        _grant(adal.dal, int(tid), community_id, OTHER_GUILD)
+        assert (
+            await self._post(client, auth_headers, community_id, OTHER_GUILD)
+        ).status_code == 201
+        verified = pg.scalar(
+            adal.dal,
+            "SELECT ownership_verified_at IS NOT NULL FROM guild_tenant_pairings "
+            "WHERE community_id=%s",
+            [community_id],
+        )
+        assert verified is True
+
+    async def test_actor_without_linked_discord_account_is_403(
+        self, client: Any, auth_headers: Any, adal: AsyncDAL, community_id: int
+    ) -> None:
+        """An install grant alone is not enough: the actor must prove they administer the guild."""
+        tid = pg.scalar(adal.dal, "SELECT tenant_id FROM communities WHERE id=%s", [community_id])
+        _grant(adal.dal, int(tid), community_id, OTHER_GUILD)
+        pg.q(adal.dal, "DELETE FROM hub_user_identities WHERE hub_user_id=1")
+        response = await self._post(client, auth_headers, community_id, OTHER_GUILD)
+        assert response.status_code == 403
+        assert (await response.get_json())["error"]["code"] == "guild_control_unlinked"
+        assert _pairings(adal.dal, community_id) == []
 
     async def test_bot_not_in_guild(
         self, client: Any, auth_headers: Any, adal: AsyncDAL, community_id: int, discord_edge: Any

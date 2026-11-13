@@ -41,6 +41,7 @@ _CHART_DIR = Path(__file__).resolve().parents[3] / "k8s" / "helm" / "waddlebot"
 _SVC_INGEST = "spiffe://penguintech.io/alpha/svc-ingest"
 _SCOPE = "connections:resolve"
 _LIST_SCOPE = "connections:list"
+_STREAM_DEK_SCOPE = "key:stream-dek:read"
 
 
 def _bound_headers(issuer: ServiceJwtIssuer, community_id: int) -> dict[str, str]:
@@ -125,9 +126,11 @@ def test_chart_grants_svc_ingest_exactly_connections_resolve_on_the_system_tenan
 ) -> None:
     identity = chart_identities[_SVC_INGEST]
     # Minimum: the data-plane scopes (connections, scope resolver, platform-user detokenizer,
-    # slash-command registry, per-user active context, bundle-schedule reconcile).
+    # slash-command registry, per-user active context, bundle-schedule reconcile) plus the
+    # always-rendered stream-DEK scope (#442: svc-ingest encrypts identity fields before publish).
     assert identity.allowed_scopes == frozenset(
         {
+            _STREAM_DEK_SCOPE,
             _SCOPE,
             _LIST_SCOPE,
             "dataplane:resolve-scope",
@@ -294,15 +297,16 @@ async def test_an_admin_disabled_binding_is_hidden_until_re_enabled(
 def test_svc_ingest_grant_is_absent_when_dynamic_connections_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F4: with svcIngest.dynamicConnections.enabled=false (beta/prod default) no svc-ingest identity exists."""
+    """F4: with dynamicConnections off (beta/prod default) svc-ingest keeps only the DEK scope."""
     env = _render_identities_env(
         "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false"
     )
     monkeypatch.setenv("SERVICE_JWT_IDENTITIES", env)
     identities = load_identities_from_env(env="alpha")
     assert len(identities) >= 3, "other identities must still render"  # denominator
-    ids = {identity.service_id for identity in identities}
-    assert _SVC_INGEST not in ids
+    by_id = {identity.service_id: identity for identity in identities}
+    assert _SVC_INGEST in by_id, "svc-ingest always renders (it needs the stream-DEK scope)"
+    assert by_id[_SVC_INGEST].allowed_scopes == frozenset({_STREAM_DEK_SCOPE})
     # Both flags off: no identity carries any connections:* scope at all.
     env_off = _render_identities_env(
         "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false",

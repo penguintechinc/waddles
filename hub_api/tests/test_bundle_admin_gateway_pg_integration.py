@@ -49,6 +49,8 @@ _RING = tt.parse_key_ring("k1:" + "ef" * 16, "k1")
 _USER = "0b1e2f30-0000-4000-8000-000000000001"
 APP = "waddles.socials.demo.default"
 REP = "waddles.core.service.reputation"
+#: Service bundles the reputation manifest requests `<platform>.moderation.ban` from.
+_BAN_TARGETS = tuple(f"waddles.core.service.{p}" for p in ("twitch", "discord", "youtube"))
 
 ADMIN = CommunityMembership("admin", frozenset({"community:manage_members"}), True, False)
 MOD = CommunityMembership("mod", frozenset({"community:manage_channels"}), False, False)
@@ -199,21 +201,22 @@ async def _setup(pg_dal: Any, run_id: int) -> tuple[int, int]:
         await conn.execute(
             text("INSERT INTO hub_users (id) VALUES (1) ON CONFLICT (id) DO NOTHING")
         )
-        for app_id in (APP, REP):
+        for app_id in (APP, REP, *_BAN_TARGETS):
             await conn.execute(
                 text(
                     "INSERT INTO app_catalog (app_id) VALUES (:a) ON CONFLICT (app_id) DO NOTHING"
                 ),
                 {"a": app_id},
             )
-        await conn.execute(
-            text("UPDATE app_catalog SET kind = 'service' WHERE app_id = :a"), {"a": REP}
-        )
+        for app_id in (REP, *_BAN_TARGETS):
+            await conn.execute(
+                text("UPDATE app_catalog SET kind = 'service' WHERE app_id = :a"), {"a": app_id}
+            )
     return tenant, community
 
 
-async def _activate(pg_dal: Any, tenant: int, community: int, manifest: dict[str, Any]) -> None:
-    """Install (once per app/version across the module's shared DB) and activate for a community."""
+async def _install_available(pg_dal: Any, tenant: int, manifest: dict[str, Any]) -> None:
+    """Install (once per app/version across the shared DB) and make available to `tenant`."""
     async with pg_dal.engine.connect() as conn:
         exists = (
             await conn.execute(
@@ -227,6 +230,27 @@ async def _activate(pg_dal: Any, tenant: int, community: int, manifest: dict[str
         from services.tenant_app_availability_service import set_available
 
         await set_available(pg_dal, tenant_id=tenant, app_id=manifest["app_id"], updated_by=1)
+
+
+async def _activate(pg_dal: Any, tenant: int, community: int, manifest: dict[str, Any]) -> None:
+    """Install and activate for a community, first installing every requested tool target.
+
+    Activation refuses a `requested_tools` target that is not an installed, tenant-available
+    SERVICE bundle (`tool_target_not_found`), so a manifest that requests other bundles' tools
+    (the reputation service's `<platform>.moderation.ban` floor-ban targets) gets the REAL
+    manifests of those targets installed first -- no catalog stand-ins.
+    """
+    for req in manifest.get("requested_tools") or []:
+        target = req["target_app_id"]
+        if target in (REP, APP):
+            continue
+        slug = target.rsplit(".", 1)[1]
+        target_manifest = dict(
+            yaml.safe_load((REPO / f"bundles/rust/{slug}/hub-manifest.yaml").read_text())
+        )
+        assert target_manifest["app_id"] == target, f"{slug} manifest is not {target}"
+        await _install_available(pg_dal, tenant, target_manifest)
+    await _install_available(pg_dal, tenant, manifest)
     await activate_for_community_with_warnings(
         pg_dal,
         tenant_id=tenant,
@@ -245,7 +269,12 @@ async def test_real_reputation_tools_through_real_pg(pg_dal: Any, run_id: int) -
     bundle = await svc.load_active_bundle(
         pg_dal, tenant_id=tenant, community_id=community, app_id=REP
     )
-    assert {t.name for t in bundle.manifest.admin_tools} == {"leaderboard", "override"}
+    assert {t.name for t in bundle.manifest.admin_tools} == {
+        "leaderboard",
+        "override",
+        "at_risk",
+        "set_policy",
+    }
 
     view = await svc.read_data_view(
         pg_dal,

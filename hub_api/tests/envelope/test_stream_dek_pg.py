@@ -56,6 +56,12 @@ pytestmark = pytest.mark.skipif(
 INGEST = "spiffe://penguintech.io/alpha/svc-ingest"
 
 
+@pytest.fixture(autouse=True)
+def _spiffe_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the deployment's SPIFFE env segment (production reads `SPIFFE_ENV`; unset denies all)."""
+    monkeypatch.setenv("SPIFFE_ENV", "alpha")
+
+
 @pytest.fixture(scope="module")
 def pg_db() -> Iterator[PgTestDatabase]:
     """One real Postgres container migrated to head (includes 0054 + 0101)."""
