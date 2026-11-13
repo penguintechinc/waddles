@@ -194,6 +194,13 @@ pipeline:
     # once its key is provisioned. Never put license-tier flags here.
     extraEnv:
       FLAG_WADDLES_TENANT_DISCORD_INSTALL: "true"
+      # Alpha capacity stopgap: svc-process shares one per-identity internal gRPC bucket (default
+      # 50 rps / burst 100, hub_api/grpc_internal/server.py:125-126). Each Discord message fans out
+      # to ~160 per-app consumers that each call identity resolution, which tripped
+      # RESOURCE_EXHAUSTED on alpha 2026-11-13 and dead-lettered every message. Real fix (identity
+      # resolution off the per-message hub-api path, once per message) is tracked separately.
+      GRPC_RATE_LIMIT_RPS: "500"
+      GRPC_RATE_LIMIT_BURST: "1000"
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }
