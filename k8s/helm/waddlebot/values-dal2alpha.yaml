@@ -194,6 +194,8 @@ pipeline:
     # once its key is provisioned. Never put license-tier flags here.
     extraEnv:
       FLAG_WADDLES_TENANT_DISCORD_INSTALL: "true"
+      # Reserved catch-all tenant slug, explicit (see values-alpha.yaml); mirrors defaultTenantId.
+      DEFAULT_TENANT_SLUG: "default"
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }

@@ -54,3 +54,10 @@ def test_default_values_omit_flag() -> None:
     """
     env = _hub_api_env(["values-alpha.yaml"])
     assert _FLAG not in env
+
+
+def test_alpha_overlays_set_default_tenant_slug_to_reserved_default() -> None:
+    """Alpha is explicit: DEFAULT_TENANT_SLUG=default (never the retired `global`) on hub-api."""
+    for values in (["values-alpha.yaml"], ["values-alpha.yaml", "values-dal2alpha.yaml"]):
+        env = _hub_api_env(values)
+        assert env.get("DEFAULT_TENANT_SLUG") == "default", values
