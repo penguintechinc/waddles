@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { adminApi } from '../../services/api';
-import { FormModalBuilder } from '@penguintechinc/react-libs';
+import { FormModalBuilder } from '../../components/FormModal';
 import { getPlatformIcon, getPlatformColor } from '../../utils/platformConfig';
 import { WADDLES_COLORS } from '../../theme/waddlebotTheme';
 
