@@ -21,7 +21,7 @@ requires_docker = pytest.mark.skipif(
     not DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
 )
 
-PREVIOUS_REVISION = "0099_discord_role_mirror"
+PREVIOUS_REVISION = "0101_svc_ingest_display_names"
 
 
 @pytest.fixture(scope="module")

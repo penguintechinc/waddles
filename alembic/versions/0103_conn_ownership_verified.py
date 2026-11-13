@@ -7,11 +7,11 @@ svc-ingest's dedup then dropped BOTH claimants. hub-api now proves ownership at 
 be bound to many communities across tenants (N:M, user decision 2026-11-12), so there is NO global
 unique constraint: uniqueness stays per (tenant, platform, resource) + per-community grant.
 
-RECHAIN NEEDED: written against head 0099_discord_role_mirror while PRs #1241/#1246/#1249 hold
+RECHAIN NEEDED: written against head 0101_svc_ingest_display_names while PRs #1241/#1246/#1249 hold
 0100-0102 open; whichever merges first, re-point ``down_revision`` at the then-current head.
 
 Revision ID: 0103_conn_ownership_verified
-Revises: 0099_discord_role_mirror
+Revises: 0101_svc_ingest_display_names
 Create Date: 2026-11-12
 """
 
@@ -20,7 +20,7 @@ from __future__ import annotations
 from alembic import op
 
 revision = "0103_conn_ownership_verified"
-down_revision = "0099_discord_role_mirror"
+down_revision = "0101_svc_ingest_display_names"
 branch_labels = None
 depends_on = None
 
@@ -34,5 +34,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the column (back to 0099_discord_role_mirror)."""
+    """Drop the column (back to 0101_svc_ingest_display_names)."""
     op.execute("ALTER TABLE platform_connections DROP COLUMN IF EXISTS ownership_verified")
