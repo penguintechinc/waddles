@@ -22,6 +22,12 @@
 # https://github.com/penguintechinc/waddles/issues/521 -- do not silently re-add pyping here
 # without first closing that issue.
 #
+# Policy (2026-11-13): the core-bundle-seeder's byte-identical digest check is enforced for
+# COMPILED bundles only (Rust/C#) -- exactly what this gate proves reproducible. Python
+# (componentize-py) bundles are NOT byte-checked by the seeder (a mismatch is a logged, counted
+# no-op, see hub_api/cli/seed_core_bundles.py SCRIPTED_LANGUAGES). Signature + hash checks for
+# all packages are deferred to v3.2.x.
+#
 # This script builds the FULL final image (not just one stage) so it also exercises the
 # hub-deps-builder stage and the final COPY layout exactly as the seeder image is actually
 # shipped -- this is the CI regression gate (.github/workflows/core-bundles-reproducible.yml),

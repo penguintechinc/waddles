@@ -7,10 +7,11 @@ equivalent of `bundles/rust/ping` (Rust) and `bundles/csharp/csping` (C#). First
 
 It exists as the smallest end-to-end proof that a Python bundle compiles to a WASI 0.2
 component against `wit/waddle-bundle/stage.wit`, loads in the bundle executor, and round-trips a
-chat message (the `!ping` / `!pyping` / `!csping` "big three" language check). It is also the
-**input of the core-bundle reproducible-build gate**
-(`.github/workflows/core-bundles-reproducible.yml`; see gh-521 for the
-`componentize-py` snapshot non-determinism it tracks), so keep it deliberately tiny.
+chat message (the `!ping` / `!pyping` / `!csping` "big three" language check). It is
+**excluded** from the core-bundle reproducible-build gate
+(`.github/workflows/core-bundles-reproducible.yml`; see gh-521 for the `componentize-py`
+snapshot non-determinism), and the core-bundle seeder does not byte-check Python bundles
+(compiled Rust/C# only; signature + hash checks arrive in v3.2.x). Keep it deliberately tiny.
 
 ## Commands
 

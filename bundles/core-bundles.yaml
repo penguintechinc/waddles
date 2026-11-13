@@ -77,7 +77,7 @@ bundles:
       - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.pyping
-    version: "1.0.3"
+    version: "1.0.2"
     language: python
     source_dir: python/pyping
     manifest_path: pyping.manifest.yaml
@@ -125,7 +125,7 @@ bundles:
   # fresh publish+activate. Mirrors bundles/csharp/csping/hub-manifest.yaml's own 1.0.0/1.0.1
   # retirement (fix/csping-version-bump, #575).
   - app_id: waddles.core.example.eightball
-    version: "1.0.7"
+    version: "1.0.6"
     language: python
     source_dir: python/eightball
     manifest_path: eightball.manifest.yaml
@@ -134,7 +134,7 @@ bundles:
       - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.roll
-    version: "1.0.7"
+    version: "1.0.6"
     language: python
     source_dir: python/roll
     manifest_path: roll.manifest.yaml

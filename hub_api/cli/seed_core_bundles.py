@@ -35,7 +35,11 @@ the existing version_id is reused; per activation target, if `app_active_version
 points at that same `version_id`, activation is skipped too (a true no-op, logged, no new
 `app_install_approvals` row). A different digest under the SAME version string is a data
 integrity conflict (app_versions has its own `UNIQUE(app_id, version)`) -- refused, not
-overwritten; bump the catalog's `version` field alongside the artifact.
+overwritten; bump the catalog's `version` field alongside the artifact. **That byte check is
+enforced for COMPILED bundles only (`language: rust|csharp`).** `componentize-py` (python)
+builds are not byte-reproducible, so by policy a python digest mismatch is a logged, counted
+no-op (`digest_drift_not_enforced` in the summary) that keeps the existing row; signature +
+hash verification for all packages is deferred to v3.2.x.
 
 **Platform connections** (`bundles/core-bundles.yaml`'s own `platform_connections:` section,
 extended by the `CORE_BUNDLES_PLATFORM_CONNECTIONS` env var -- a JSON array, populated by
@@ -144,22 +148,26 @@ _PLATFORM_CONNECTIONS_ENV = "CORE_BUNDLES_PLATFORM_CONNECTIONS"
 #: used one). Deliberately ASCII-only -- see `_guard_core_namespace()`'s own docstring.
 _APP_ID_CHARSET_RE = re.compile(r"^[a-z0-9]+(\.[a-z0-9-]+)+$")
 
+#: Catalog `language` values whose artifact is a deterministic COMPILED build (cargo-component /
+#: .NET). The byte-identical digest check (`app_versions` immutable per version string) is
+#: enforced for these ONLY -- a mismatch is a hard `digest_conflict` (see below).
+COMPILED_LANGUAGES = frozenset({"rust", "csharp"})
+
+#: Catalog `language` values built by `componentize-py` (a wizened CPython snapshot). Those
+#: builds are NOT byte-reproducible (same source, same pinned container -> a different sha256
+#: every build; issue #521), so by policy (2026-11-13) the byte check is NOT enforced for them:
+#: a digest mismatch at the same `(app_id, version)` is a logged, counted no-op that keeps the
+#: existing row. Signature + hash verification for ALL packages is deferred to v3.2.x.
+SCRIPTED_LANGUAGES = frozenset({"python"})
+
 #: `ApiError.code` values that must NOT abort the whole Helm hook (gh-576: "seeder fails
 #: whole hook on one conflict"). Today this is exactly `digest_conflict` --
-#: `_resolve_or_publish_version()`'s own immutable-version guard -- which recurs
-#: indefinitely for `language: python` bundles specifically: `componentize-py` is a KNOWN,
-#: pre-approved non-reproducible build (see this repo's own mem0 note
-#: "python-bundle-snapshot-fallback" / `scripts/verify-core-bundles-reproducible.sh`'s
-#: Rust-only repro gate) -- an unrelated image rebuild (e.g. a different bundle's Dockerfile
-#: stage changing) can legitimately produce new `pyping.wasm` bytes under an UNCHANGED
-#: `core-bundles.yaml` version string, 409-ing forever against the one row that already
-#: published successfully. The already-published row keeps serving correctly either way --
-#: there is nothing an operator can act on except "bump the version", which does not even
-#: fix the underlying non-reproducibility for the NEXT rebuild. Treating this one code as a
-#: WARNING + skip (never a hard failure) stops a cosmetic artifact-byte drift from blocking
-#: every subsequent `helm upgrade` indefinitely; every OTHER `ApiError` code (tenant_not_
-#: found, stalled_core_bundle_upload, ...) still fails the run -- those genuinely need a
-#: human to intervene before the row they describe can ever resolve itself.
+#: `_resolve_or_publish_version()`'s own immutable-version guard, which now only fires for
+#: COMPILED bundles (`COMPILED_LANGUAGES`): a compiled bundle whose source changed without a
+#: version bump. The already-published row keeps serving, so it is a WARNING + skip, never a
+#: hard failure, and is always surfaced in the run summary; every OTHER `ApiError` code
+#: (tenant_not_found, stalled_core_bundle_upload, ...) still fails the run -- those genuinely
+#: need a human to intervene before the row they describe can ever resolve itself.
 RECOVERABLE_API_ERROR_CODES = frozenset({"digest_conflict"})
 
 #: Env var: how old (seconds) an orphaned `waddles.core.*` `app_version_uploads` row's own
@@ -716,14 +724,30 @@ async def _resolve_or_publish_version(
     publish_tenant_id: int,
     publish_tenant_slug: str,
     valkey_client: Any | None = None,
+    digest_drift: list[str] | None = None,
 ) -> int:
     """The `app_versions.id` for `(entry.app_id, entry.version)`, publishing it if not yet present.
 
-    Raises `ApiError` 409 `digest_conflict` if this exact `(app_id, version)` is already
-    published with a DIFFERENT digest (`app_versions` is immutable per version string, spec
-    Sec6.10) -- the catalog's `version` field must be bumped alongside the artifact, never
-    silently republished under the same version string.
+    For a COMPILED bundle (`COMPILED_LANGUAGES`), raises `ApiError` 409 `digest_conflict` if
+    this exact `(app_id, version)` is already published with a DIFFERENT digest
+    (`app_versions` is immutable per version string, spec Sec6.10) -- the catalog's `version`
+    must be bumped alongside the artifact, never silently republished under the same string.
+
+    For a SCRIPTED bundle (`SCRIPTED_LANGUAGES`, componentize-py -- not byte-reproducible),
+    the byte check is NOT enforced (policy): a mismatch is logged at WARNING with both digest
+    prefixes, appended to `digest_drift` (when given) so the run summary counts it, and the
+    existing row is kept. An unknown `entry.language` raises `CoreBundleSeederError`.
     """
+    if entry.language in COMPILED_LANGUAGES:
+        enforce_digest = True
+    elif entry.language in SCRIPTED_LANGUAGES:
+        enforce_digest = False
+    else:
+        raise CoreBundleSeederError(
+            f"{entry.app_id}@{entry.version}: unknown catalog language {entry.language!r}; "
+            "cannot decide whether the byte-identical digest check applies "
+            f"(compiled={sorted(COMPILED_LANGUAGES)}, scripted={sorted(SCRIPTED_LANGUAGES)})"
+        )
     existing = await install_dal(
         (install_dal.app_versions.app_id == entry.app_id)
         & (install_dal.app_versions.version == entry.version)
@@ -736,7 +760,26 @@ async def _resolve_or_publish_version(
     # happy_path's identical `expected_digest`.
     expected_digest = digest_hex
     if existing_row is not None:
-        if existing_row.artifact_digest != expected_digest:
+        if existing_row.artifact_digest != expected_digest and not enforce_digest:
+            detail = (
+                f"{entry.app_id}@{entry.version} existing={existing_row.artifact_digest[:12]} "
+                f"this_build={expected_digest[:12]}"
+            )
+            logger.warning(
+                f"core-bundle-seeder: digest differs at the same version ({detail}); "
+                f"{entry.language} bundle: byte-check not enforced (policy) -- keeping the "
+                "existing row",
+                extra={
+                    "app_id": entry.app_id,
+                    "version": entry.version,
+                    "language": entry.language,
+                    "existing_digest_prefix": existing_row.artifact_digest[:12],
+                    "this_build_digest_prefix": expected_digest[:12],
+                },
+            )
+            if digest_drift is not None:
+                digest_drift.append(detail)
+        elif existing_row.artifact_digest != expected_digest:
             raise ApiError(
                 f"core-bundle-seeder: refusing to seed {entry.app_id}@{entry.version} -- "
                 f"app_versions already has this exact (app_id, version) published with a "
@@ -1021,6 +1064,7 @@ async def seed_one(
     *,
     valkey_client: Any | None = None,
     connection_scopes: Mapping[str, TenantConnectionScope] | None = None,
+    digest_drift: list[str] | None = None,
 ) -> list[SeedResult]:
     """Seed one catalog entry: publish (if new) + activate for every resolved target.
 
@@ -1072,6 +1116,7 @@ async def seed_one(
         publish_tenant_id=publish_tenant_id,
         publish_tenant_slug=publish_target.tenant_slug,
         valkey_client=valkey_client,
+        digest_drift=digest_drift,
     )
 
     already_installed = await _already_installed_globally(
@@ -1617,6 +1662,9 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
     #: never counted in `failures` (see that constant's own docstring), but always surfaced in
     #: the final summary log so an operator/dashboard sees it without the Job failing.
     skipped_conflicts: list[str] = []
+    #: Scripted (componentize-py) bundles whose digest differed at the same version -- a policy
+    #: no-op (`SCRIPTED_LANGUAGES`), counted + surfaced in the summary, never a conflict/failure.
+    digest_drift: list[str] = []
     try:
         entries = load_catalog(catalog_path)
         connections = load_platform_connections(catalog_path)
@@ -1727,9 +1775,16 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
 
         for entry in order_services_first(entries, bundles_dir):
             try:
+                drift_before = len(digest_drift)
                 results = await seed_one(
-                    install_dal, entry, bundles_dir, connection_scopes=connection_scopes
+                    install_dal,
+                    entry,
+                    bundles_dir,
+                    connection_scopes=connection_scopes,
+                    digest_drift=digest_drift,
                 )
+                if len(digest_drift) > drift_before:
+                    counter.add(1, {"app_id": entry.app_id, "outcome": "digest_drift_not_enforced"})
             except CoreBundleSeederError as exc:
                 logger.error(
                     f"core-bundle-seeder: refused ({entry.app_id}@{entry.version}): {exc}",
@@ -1891,6 +1946,7 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
             "core-bundle-seeder: summary "
             f"(examined={len(connections) + len(entries)}, results={seeded}, "
             f"failures={failures}, skipped_conflicts={skipped_conflicts}, "
+            f"digest_drift_not_enforced={digest_drift}, "
             f"reconcile_uninstalled={len(reconcile_results)})",
             extra={
                 "connections_examined": len(connections),
@@ -1898,6 +1954,7 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                 "results": seeded,
                 "failures": failures,
                 "skipped_conflicts": skipped_conflicts,
+                "digest_drift_not_enforced": digest_drift,
                 "reconcile_uninstalled": len(reconcile_results),
             },
         )
