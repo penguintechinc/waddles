@@ -1,0 +1,20 @@
+# ClusterIP only: no NodePort/HostPort/externalIPs. Ollama's HTTP API is an approved third-party
+# exception to the in-cluster gRPC rule (see README).
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/component: server
+    app.kubernetes.io/part-of: waddleai
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/component: server
+  ports:
+    - name: http
+      port: 11434
+      targetPort: http
+      protocol: TCP

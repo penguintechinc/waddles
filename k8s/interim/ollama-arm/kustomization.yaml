@@ -1,0 +1,11 @@
+# Interim Ollama (arm64) on k8s3-worker for dal2alpha. See README.md.
+# Namespace `waddleai` already exists (PSA `restricted` enforced) and is NOT managed here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: waddleai
+resources:
+  - networkpolicy.yaml
+  - tracingpolicy.yaml
+  - service.yaml
+  - statefulset.yaml
+  - job-pull-model.yaml

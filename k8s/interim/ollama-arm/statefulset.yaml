@@ -1,0 +1,124 @@
+# STATEFUL EXCEPTION (approved): model weights cache. Rebuildable by re-running the pull Job,
+# but ~7-10 GB, so it persists on a PVC instead of re-downloading on every restart.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ollama
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/component: server
+    app.kubernetes.io/part-of: waddleai
+spec:
+  replicas: 1
+  serviceName: ollama
+  podManagementPolicy: OrderedReady
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ollama
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ollama
+        app.kubernetes.io/component: server
+        app.kubernetes.io/part-of: waddleai
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      # k8s3-worker is the arm64 node; it is tainted kubernetes.io/arch=arm64:NoSchedule.
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      tolerations:
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ollama
+          # ollama/ollama 0.40.13 (>= 0.20 required for Gemma 4), multi-arch index digest;
+          # linux/arm64 manifest verified with `docker buildx imagetools inspect`.
+          image: docker.io/ollama/ollama:0.40.13@sha256:b2f0122c476bc9fe7ce679d8bb4bd555351e25e2554eefb156f61cb0a89cf429
+          imagePullPolicy: IfNotPresent
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: 11434
+              protocol: TCP
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:11434"
+            - name: OLLAMA_NUM_PARALLEL
+              value: "1"
+            - name: OLLAMA_NO_CLOUD   # no calls to ollama.com (egress is registry-only anyway)
+              value: "1"
+            - name: OLLAMA_MAX_LOADED_MODELS
+              value: "1"
+            - name: OLLAMA_KEEP_ALIVE
+              value: "30m"
+            # Non-root + read-only rootfs: keep every writable path on the PVC or an emptyDir.
+            - name: HOME
+              value: /data
+            - name: OLLAMA_MODELS
+              value: /data/models
+            - name: TMPDIR
+              value: /tmp
+          resources:
+            # k8s3-worker allocatable: cpu 12 / mem ~60Gi. gemma4:e4b ~10 GB + context; the rest is
+            # headroom for kubelet/system.
+            requests:
+              cpu: "4"
+              memory: 12Gi
+            limits:
+              cpu: "10"
+              memory: 20Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          startupProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 2Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: ollama
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 25Gi
