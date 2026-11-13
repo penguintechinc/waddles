@@ -1690,7 +1690,7 @@ bundles:
     manifest_path: reputation-accrual.manifest.yaml
     artifact_path: reputation-accrual.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # SoundCloud music SERVICE (Rust `kind: service`, world stage-tools): music.soundcloud.{search,

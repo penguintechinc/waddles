@@ -1288,7 +1288,7 @@ async def _ensure_sentinel_community(install_dal: AsyncDB, *, tenant_id: int) ->
     0041) but tenant-wide grants use the `TENANT_WIDE_COMMUNITY_SENTINEL` (0) scope, and
     `communities.id` is a SERIAL starting at 1 -- so without this row every tenant-wide
     grant insert raised an FK IntegrityError (36/40 core bundles failed to grant on a
-    fresh DB, #480 kind-e2e). The row is owned by the `global` tenant when it exists
+    fresh DB, #480 kind-e2e). The row is owned by the `default` tenant when it exists
     (so deleting an ordinary tenant never cascades away every tenant's grants), else by
     the granting tenant; inactive + non-public so it never surfaces in community listings.
     Inserting an explicit id leaves the SERIAL sequence untouched.
