@@ -1039,6 +1039,8 @@ def _parse_consumes(
 _MAX_JUSTIFICATION_LEN = 280
 _MAX_OVERLAY_DURATION_S = 30
 _MAX_REPUTATION_DELTA = 5
+#: Mirrors `core/bundle_host_reputation/src/scale.rs` `MODERATION_CAP`.
+_MAX_MODERATION_DELTA = 200
 #: Mirrors the Rust catalog's `economy.wager`/`economy.transfer`
 #: `per_call_abs_max` (`core/bundle_capability_gate/src/permission.rs`); the
 #: gate re-clamps a declared bound to it, this is the approval-time check.
@@ -1190,6 +1192,15 @@ def parse_permission_declarations(
             _require(bool(reason_codes), "missing_reason_codes", f"{permission_id!r}")
             for code in reason_codes:
                 _require(bool(_REASON_CODE_RE.match(code)), "invalid_reason_code", f"{code!r}")
+
+        if permission_id == "reputation.moderation.write":
+            delta_min = int(params.get("delta_min", 0))
+            delta_max = int(params.get("delta_max", 0))
+            _require(
+                -_MAX_MODERATION_DELTA <= delta_min <= 0 <= delta_max <= _MAX_MODERATION_DELTA,
+                "delta_out_of_bounds",
+                f"delta_min={delta_min} delta_max={delta_max}",
+            )
 
         if permission_id in _ECONOMY_BOUND_PARAM:
             bound_param = _ECONOMY_BOUND_PARAM[permission_id]

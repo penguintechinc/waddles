@@ -7,6 +7,7 @@ import { LoadingState, ServedFeature } from './components/ui';
 // bundle, each page loads on demand behind the layout's <RouteOutlet />.
 const TenantBundleCatalog = lazy(() => import('./pages/tenant/TenantBundleCatalog'));
 const AdminCommunityBundles = lazy(() => import('./pages/admin/AdminCommunityBundles'));
+const AdminBundleSettings = lazy(() => import('./pages/admin/AdminBundleSettings'));
 const SuperAdminSuperCommunities = lazy(() => import('./pages/superadmin/SuperAdminSuperCommunities'));
 const SecretPullPage = lazy(() => import('./pages/secret/SecretPullPage'));
 const AdminRoleSyncMapping = lazy(() => import('./pages/admin/AdminRoleSyncMapping'));
@@ -389,6 +390,8 @@ function App() {
         <Route path="/admin/:communityId/ai-knowledge" element={<ServedFeature feature="ai-knowledge"><AdminAIKnowledge /></ServedFeature>} />
         {/* Wave-1 stub: community bundles slice */}
         <Route path="/admin/:communityId/bundles" element={<AdminCommunityBundles />} />
+        <Route path="/admin/:communityId/settings" element={<AdminBundleSettings />} />
+        <Route path="/admin/:communityId/settings/:appId" element={<AdminBundleSettings />} />
         <Route path="/admin/:communityId/role-sync" element={<AdminRoleSyncMapping />} />
       </Route>
 

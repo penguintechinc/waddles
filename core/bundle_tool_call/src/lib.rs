@@ -545,7 +545,8 @@ impl AuthorizedCall {
         if let Some(required) = &self.required_scope {
             if !actor.has_scope(required) {
                 return Err(ToolRefusal::Forbidden(
-                    "scope_denied: the verified actor lacks the scope this tool requires".to_string(),
+                    "scope_denied: the verified actor lacks the scope this tool requires"
+                        .to_string(),
                 ));
             }
         }

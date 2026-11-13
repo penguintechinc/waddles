@@ -3582,4 +3582,270 @@ mod tests {
             Err(SlotError::Refused("no_connection"))
         ));
     }
+
+    /// Real Postgres + real Valkey proof of the direct-DB egress detokenizer.
+    mod real_db_detokenize {
+        use super::*;
+        use crate::display_names::PgDisplayNameResolver;
+        use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
+
+        const TENANT_A: i64 = 7;
+        const TENANT_B: i64 = 8;
+        const ALICE: &str = "0b9f2c1e-7d3a-4c58-9a1e-5f6d7e8a9b0c";
+        const BOB_OTHER_TENANT: &str = "1c8e3d2f-6e4b-4d69-8b2f-6a7e8f9a0b1d";
+        const ERASED: &str = "2d7f4e3a-5f5c-4e7a-9c3a-7b8f9a0b1c2e";
+        const PSEUDO: &str = "3e6a5f4b-4a6d-4f8b-8d4b-8c9a0b1c2d3f";
+
+        /// `TEST_DATABASE_URL` (owner credential; CI starts the container). Unset FAILS.
+        fn admin_url() -> String {
+            std::env::var("TEST_DATABASE_URL").expect(
+                "TEST_DATABASE_URL must be set: this test needs a REAL Postgres (no silent skip)",
+            )
+        }
+
+        /// Creates an isolated schema with the identity tables, seeds it, and a LOGIN role
+        /// holding EXACTLY alembic 0100's column grants. Returns the role's URL (search_path
+        /// pinned to the schema) and the admin connection.
+        async fn fixture() -> (String, DatabaseConnection, String) {
+            let n = OP_SEQ.fetch_add(1, Ordering::SeqCst);
+            let schema = format!("detok_{}_{n}", std::process::id());
+            let role = format!("detok_ro_{}_{n}", std::process::id());
+            let admin = Database::connect(admin_url()).await.expect("admin connect");
+            let sql = format!(
+                r#"
+DROP SCHEMA IF EXISTS {schema} CASCADE;
+CREATE SCHEMA {schema};
+SET search_path = {schema};
+CREATE TABLE tenants (id BIGINT PRIMARY KEY);
+CREATE TABLE communities (id BIGINT PRIMARY KEY, tenant_id BIGINT NOT NULL, name TEXT);
+CREATE TABLE hub_users (id BIGINT PRIMARY KEY, uuid UUID UNIQUE NOT NULL,
+    display_name TEXT, email TEXT, password_hash TEXT);
+CREATE TABLE community_members (id BIGSERIAL PRIMARY KEY, community_id BIGINT NOT NULL,
+    user_uuid UUID, user_id TEXT, display_name TEXT, bio TEXT);
+CREATE TABLE ephemeral_pseudonyms (tenant_id BIGINT NOT NULL, pseudonym UUID NOT NULL,
+    handle TEXT, platform_user_id TEXT);
+INSERT INTO tenants VALUES ({TENANT_A}), ({TENANT_B});
+INSERT INTO communities VALUES (70, {TENANT_A}, 'a'), (80, {TENANT_B}, 'b');
+INSERT INTO hub_users VALUES (1, '{ALICE}', 'Alice', 'a@example.invalid', 'x'),
+    (2, '{BOB_OTHER_TENANT}', 'Bob', 'b@example.invalid', 'x'),
+    (3, '{ERASED}', NULL, 'deleted_3@example.invalid', NULL);
+INSERT INTO community_members (community_id, user_uuid, display_name)
+    VALUES (70, '{ALICE}', 'alice-nick'), (80, '{BOB_OTHER_TENANT}', 'bob-nick');
+INSERT INTO ephemeral_pseudonyms VALUES ({TENANT_A}, '{PSEUDO}', 'Pseudo', 'p-1');
+CREATE ROLE {role} LOGIN PASSWORD 'ci-only-pass';
+GRANT USAGE ON SCHEMA {schema} TO {role};
+GRANT SELECT (id, uuid, display_name) ON hub_users TO {role};
+GRANT SELECT (id, community_id, user_uuid, user_id, display_name) ON community_members TO {role};
+GRANT SELECT (id, tenant_id) ON communities TO {role};
+GRANT SELECT (tenant_id, pseudonym, handle) ON ephemeral_pseudonyms TO {role};
+"#
+            );
+            admin.execute_unprepared(&sql).await.expect("seed schema");
+            let mut url = reqwest::Url::parse(&admin_url()).expect("url");
+            url.set_username(&role).expect("user");
+            url.set_password(Some("ci-only-pass")).expect("pass");
+            url.set_query(Some(&format!("options=-c%20search_path%3D{schema}")));
+            (url.to_string(), admin, role)
+        }
+
+        async fn teardown(admin: &DatabaseConnection, url: &str, role: &str) {
+            let schema = url
+                .rsplit("search_path%3D")
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            let _ = admin
+                .execute_unprepared(&format!(
+                    "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP OWNED BY {role}; DROP ROLE IF EXISTS {role};"
+                ))
+                .await;
+        }
+
+        fn egress_over(url: String) -> Egress {
+            Egress::new(
+                std::sync::Arc::new(PgDisplayNameResolver::new(url, Duration::from_secs(3))),
+                crate::egress::KillSwitch::Fixed(true),
+            )
+        }
+
+        /// Runs ONE entry through the real Discord drain: real Valkey list queue + replay
+        /// guard, the resolver under test, a local Discord REST double. Returns the body text.
+        async fn drain_one(egress: &Egress, text: &str, tenant: i64) -> String {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/channels/1/messages"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+                .mount(&server)
+                .await;
+            let rest = rest_for(&server);
+            let sender = DiscordSender::new(&rest);
+            let url = std::env::var("VALKEY_URL")
+                .expect("VALKEY_URL must be set: this test needs a REAL Valkey (no silent skip)");
+            let client = redis::Client::open(url).expect("valkey url");
+            let key: &'static str = Box::leak(
+                format!(
+                    "outbound:test:detok-{}-{}",
+                    std::process::id(),
+                    OP_SEQ.fetch_add(1, Ordering::SeqCst)
+                )
+                .into_boxed_str(),
+            );
+            let mut push = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("valkey");
+            let op_id = format!("detok-{}", OP_SEQ.fetch_add(1, Ordering::SeqCst));
+            let entry = serde_json::json!({
+                "v": 1, "op": "chat.send", "platform": "discord", "channel": "1",
+                "origin_channel": "1", "text": text, "op_id": op_id, "tenant_id": tenant,
+            });
+            let _: () =
+                redis::AsyncCommands::lpush(&mut push, key, stamp_for_test(&entry.to_string()))
+                    .await
+                    .expect("lpush");
+            let queue = ListQueue {
+                conn: connect_with_response_timeout(&client, BLOCKING_CONN_RESPONSE_TIMEOUT)
+                    .await
+                    .expect("valkey"),
+                key,
+            };
+            let guard = ValkeyReplayGuard::new(
+                client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .expect("valkey"),
+            );
+            let ctl = FakeCtl::default();
+            let (tx, rx) = oneshot::channel();
+            let pins = test_pin_keys();
+            let run = discord_drain_loop_with(
+                queue,
+                &sender,
+                None::<&NoExecutor>,
+                &ctl,
+                &guard,
+                egress,
+                Some(&pins),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            );
+            let wait = async {
+                for _ in 0..100 {
+                    if !server
+                        .received_requests()
+                        .await
+                        .unwrap_or_default()
+                        .is_empty()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                let _ = tx.send(());
+            };
+            let _ =
+                tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(run, wait) })
+                    .await;
+            let reqs = server.received_requests().await.expect("recorded");
+            assert_eq!(
+                reqs.len(),
+                1,
+                "exactly one platform request; acks: {:?}",
+                ctl.acks.lock().unwrap()
+            );
+            let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).expect("json");
+            body["content"].as_str().expect("content").to_string()
+        }
+
+        #[tokio::test]
+        async fn drain_resolves_names_from_the_database() {
+            let (url, admin, role) = fixture().await;
+            let egress = egress_over(url.clone());
+            let out = drain_one(
+                &egress,
+                &format!("hi {{user:{ALICE}}} and {{user:{PSEUDO}}}"),
+                TENANT_A,
+            )
+            .await;
+            teardown(&admin, &url, &role).await;
+            assert_eq!(out, "hi Alice and Pseudo");
+        }
+
+        #[tokio::test]
+        async fn cross_tenant_uuid_does_not_resolve() {
+            let (url, admin, role) = fixture().await;
+            let egress = egress_over(url.clone());
+            let out = drain_one(
+                &egress,
+                &format!("hi {{user:{BOB_OTHER_TENANT}}}"),
+                TENANT_A,
+            )
+            .await;
+            // Same UUID under its own tenant DOES resolve (proves the row exists).
+            let own = drain_one(
+                &egress,
+                &format!("hi {{user:{BOB_OTHER_TENANT}}}"),
+                TENANT_B,
+            )
+            .await;
+            // Pseudonym of tenant A never resolves under tenant B.
+            let pseudo = drain_one(&egress, &format!("hi {{user:{PSEUDO}}}"), TENANT_B).await;
+            teardown(&admin, &url, &role).await;
+            assert_eq!(out, "hi Unknown User");
+            assert_eq!(own, "hi Bob");
+            assert_eq!(pseudo, "hi Unknown User");
+        }
+
+        #[tokio::test]
+        async fn erased_user_resolves_to_unknown_user() {
+            let (url, admin, role) = fixture().await;
+            let egress = egress_over(url.clone());
+            let before = drain_one(&egress, &format!("hi {{user:{ALICE}}}"), TENANT_A).await;
+            // Erasure (hub_api data_privacy_service) deletes membership rows and scrubs the user.
+            let schema = url
+                .rsplit("search_path%3D")
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            admin
+                .execute_unprepared(&format!(
+                    "DELETE FROM {schema}.community_members WHERE user_uuid = '{ALICE}'; \
+                     UPDATE {schema}.hub_users SET display_name = NULL WHERE uuid = '{ALICE}';"
+                ))
+                .await
+                .expect("erase");
+            let after = drain_one(&egress, &format!("hi {{user:{ALICE}}}"), TENANT_A).await;
+            let never = drain_one(&egress, &format!("hi {{user:{ERASED}}}"), TENANT_A).await;
+            teardown(&admin, &url, &role).await;
+            assert_eq!(before, "hi Alice");
+            assert_eq!(after, "hi Unknown User");
+            assert_eq!(never, "hi Unknown User");
+        }
+
+        #[tokio::test]
+        async fn database_down_sends_tokens_unchanged_with_a_metric() {
+            let before = crate::display_names::db_error_count();
+            // Valid role URL shape, but nothing listens on the port.
+            let egress = egress_over("postgresql://nobody:x@127.0.0.1:1/none".into());
+            let text = format!("hi {{user:{ALICE}}}");
+            let out = drain_one(&egress, &text, TENANT_A).await;
+            assert_eq!(out, text);
+            assert!(crate::display_names::db_error_count() > before);
+        }
+
+        #[tokio::test]
+        async fn the_role_cannot_read_any_other_column() {
+            let (url, admin, role) = fixture().await;
+            let ro = Database::connect(url.clone()).await.expect("role connect");
+            let denied = ro.execute_unprepared("SELECT email FROM hub_users").await;
+            let allowed = ro
+                .execute_unprepared("SELECT uuid, display_name FROM hub_users")
+                .await;
+            teardown(&admin, &url, &role).await;
+            assert!(denied.is_err(), "email must be unreadable");
+            assert!(allowed.is_ok());
+        }
+    }
 }

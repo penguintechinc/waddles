@@ -47,6 +47,11 @@ on:
         type: boolean
         default: false
         description: 'Start a real Valkey container and export VALKEY_URL for the crate tests (lease/real-socket tests fail loudly without it, by design)'
+      postgres:
+        required: false
+        type: boolean
+        default: false
+        description: 'Start a real Postgres container and export TEST_DATABASE_URL (owner credential, CI-only) for the crate tests; they fail loudly without it'
 
 permissions:
   contents: read
@@ -164,6 +169,26 @@ jobs:
             sleep 1
           done
           echo "valkey did not become ready" >&2
+          exit 1
+
+      # A REAL Postgres for crates with real-DB tests (svc-ingest's egress display-name
+      # resolver). The tests FAIL (never skip) when TEST_DATABASE_URL is unset. Throwaway CI-only
+      # credential on a loopback-bound container.
+      - name: Start Postgres (TEST_DATABASE_URL for crate tests)
+        if: inputs.postgres
+        run: |
+          set -euo pipefail
+          docker run -d --name ci-postgres -p 127.0.0.1:5432:5432 \
+            -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=ci \
+            postgres:17-bookworm@sha256:639ab7ceb90e13123085b741fb31ef493fba25463002f6da665352e7b534b652
+          for i in $(seq 1 60); do
+            if docker exec ci-postgres pg_isready -h 127.0.0.1 -U ci -d ci >/dev/null 2>&1; then
+              echo "TEST_DATABASE_URL=postgresql://ci:ci@127.0.0.1:5432/ci" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "postgres did not become ready" >&2
           exit 1
 
       - name: cargo fmt --check

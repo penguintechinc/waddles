@@ -66,6 +66,8 @@ jobs:
       working_directory: core/svc_ingest
       # The lease + real-socket + live-hub tests fail loudly without a real Valkey.
       valkey: true
+      # Egress display-name resolver tests run against a real Postgres (fail loudly without it).
+      postgres: true
       # protoc is needed by hub_client's build.rs (tonic-prost-build), a path dependency
       # for the Discord platform-user detokenizer.
       extra_apt_packages: protobuf-compiler

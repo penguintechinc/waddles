@@ -115,8 +115,8 @@ def test_svc_ingest_identity_gets_list_and_resolve_not_static(
     scopes = _identities(enabled)["svc-ingest"]["allowed_scopes"]
     assert {"connections:resolve", "connections:list"} <= set(scopes)
     assert "connections:resolve:static" not in scopes
-    # svc-ingest's outbound drain is the sole platform egress and detokenizes there.
-    assert "identity:displayname:read" in scopes
+    # Egress detokenization reads Postgres directly (no hub-api hop): no display-name scope.
+    assert "identity:displayname:read" not in scopes
 
 
 def test_no_other_identity_holds_any_connections_scope(
@@ -148,8 +148,8 @@ def test_identities_absent_when_feature_disabled(
     disabled: list[dict[str, Any]],
 ) -> None:
     identities = _identities(disabled)
-    # egress detokenization is independent of dynamicConnections: only its scope remains.
-    assert identities["svc-ingest"]["allowed_scopes"] == ["identity:displayname:read"]
+    # svc-ingest keeps ONLY the tenant stream-DEK scope (it cannot publish without it).
+    assert identities["svc-ingest"]["allowed_scopes"] == ["key:stream-dek:read"]
     assert len(identities) >= 3, identities.keys()
     for name, entry in identities.items():
         assert not [
@@ -163,7 +163,7 @@ def test_each_flag_gates_only_its_own_grant() -> None:
     only_action = _identities(
         _render("pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false")
     )
-    assert only_action["svc-ingest"]["allowed_scopes"] == ["identity:displayname:read"]
+    assert only_action["svc-ingest"]["allowed_scopes"] == ["key:stream-dek:read"]
     assert "connections:resolve:static" in only_action["svc-action"]["allowed_scopes"]
     only_ingest = _identities(
         _render("pipeline.rustDataPlane.svcAction.dynamicConnections.enabled=false")

@@ -122,7 +122,7 @@ bundle transform() / action dispatch   — UUIDs only, never raw handle or displ
   ▼
 svc_action relay            — queues the text TOKENIZED (`{user:<uuid>}` unchanged; no resolver)
   ▼
-svc_ingest outbound drain   ── ResolveDisplayNames ──►  hub-api   (per send, nothing cached; flag-gated)
+svc_ingest outbound drain   ── 1 batched SELECT ──►  Postgres (read-only role; nothing cached; flag-gated)
   ▼                           detokenize immediately before the platform request
 platform send
 ```
@@ -137,7 +137,7 @@ platform send
 | Mint failure → event dead-lettered; no fallback pseudonym | `pii_tokenize.rs` (fail-closed) |
 | Reputation/economy target must parse as UUID (else `invalid`) | `reputation`/`economy` WIT docs |
 | True PII (names, handles) exists only in the gateway (`svc-ingest` outbound drain) and `svc-presentation`; every other service handles UUID tokens only | `core/svc_ingest/src/egress.rs`; `core/svc_presentation/src/overlay/detok.rs`; gate `scripts/ci/check-pii-egress-boundary.sh` (`make check-pii-egress`) |
-| Display names resolved at the platform send only, via hub-api, per send, never cached; kill switch / resolver outage / missing tenant sends the tokens | `core/svc_ingest/src/egress.rs`; `core/egress_detokenizer/src/lib.rs` (`DetokenizedText`: the only text type platform sink send fns accept) |
+| Display names resolved at the platform send only, by a direct read-only DB query (`waddles_svc_ingest`, column-scoped), per message, never cached; kill switch / resolver outage / missing tenant sends the tokens | `core/svc_ingest/src/egress.rs`, `core/svc_ingest/src/display_names.rs`; `core/egress_detokenizer/src/lib.rs` (`DetokenizedText`: the only text type platform sink send fns accept) |
 | Raw PII in interaction inputs is filtered unless `interaction.pii.receive` granted | `permission.rs` (`InteractionPiiReceive`, default NO) — enforcement separate work |
 
 ### Identity PR Status

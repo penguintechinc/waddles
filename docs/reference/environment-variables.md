@@ -30,7 +30,7 @@ This document provides a comprehensive reference for environment variables used 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DISCORD_BOT_TOKEN` | — (required for Discord) | Discord bot token for the gateway receiver and outbound REST sends. Injected from the chart Secret (`secretKeyRef`), never a CLI arg or values literal. |
-| `PII_DETOKENIZATION_ENABLED` | unset (= enabled) | Plain env off-switch for egress detokenization, independent of the `waddles.core.disable-pii-detokenization` PostHog kill-switch. `false` sends `{user:<token>}` placeholders unchanged (dev/air-gapped escape hatch; never in a production tenant). The chart renders `false` only when `pipeline.piiTokenization.enabled=false`. Detokenization needs `HUB_API_GRPC_ENDPOINT` + `SERVICE_JWT_TOKEN_ENDPOINT`, which the chart renders regardless of `svcIngest.dynamicConnections.enabled`. |
+| `PII_DETOKENIZATION_ENABLED` | unset (= enabled) | Plain env off-switch for egress detokenization, independent of the `waddles.core.disable-pii-detokenization` PostHog kill-switch. `false` sends `{user:<token>}` placeholders unchanged (dev/air-gapped escape hatch; never in a production tenant). The chart renders `false` only when `pipeline.piiTokenization.enabled=false`. Detokenization reads display names directly from Postgres via `DATABASE_URL` (the pod's own read-only `waddles_svc_ingest` role, rendered by `waddlebot.dbEnv`); no hub-api call. |
 
 ---
 

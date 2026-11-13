@@ -201,11 +201,11 @@ placeholders (svc-action never resolves them); `Egress::prepare` substitutes the
 
 | Property | Behaviour |
 |---|---|
-| Lookup | one hub-api `IdentityService.ResolveDisplayNames` per send (gRPC, machine JWT scope `identity:displayname:read`), under the entry's MAC-bound numeric `tenant_id`; hub client connects lazily and retries after a failure |
+| Lookup | ONE batched read-only Postgres query per message (`src/display_names.rs`) under svc-ingest's own column-scoped role `waddles_svc_ingest` (`DATABASE_URL`; grants in `config/postgres/service-roles.yaml` + alembic `0100`) -- hub-api (control-plane writer) is not in the send path. Scoped to the entry's MAC-bound numeric `tenant_id`: a hub user resolves only while a member of one of that tenant's communities, a pseudonym only in its tenant; erasure deletes membership so an erased user resolves to `Unknown User`. Pool connects lazily and retries after a failure |
 | Caching | none -- names live in the `DetokenizedAction` for that one send |
 | Escaping | per sink (`egress_detokenizer::Sink`: Discord markdown/mention escaping, Twitch/other control-char strip) |
 | Type gate | platform sink send fns (`IrcOutbound::send`, `PlatformSender::send_*`, `DiscordRestClient::send_message`/`send_dm*`) accept only `egress_detokenizer::DetokenizedText`; executors take `DetokenizedAction` |
-| Fail-safe | kill switch `waddles.core.disable-pii-detokenization` ON, `PII_DETOKENIZATION_ENABLED=false`, no hub endpoint, no tenant on the entry, or a resolver error => the tokens are sent unchanged, never a guessed name; a token the hub does not know becomes `Unknown User` |
+| Fail-safe | kill switch `waddles.core.disable-pii-detokenization` ON, `PII_DETOKENIZATION_ENABLED=false`, no `DATABASE_URL`, no tenant on the entry, or a database error (WARN + `svc_ingest_egress_display_name_db_errors_total`) => the tokens are sent unchanged, never a guessed name; a token the database does not resolve becomes `Unknown User` |
 | Telemetry | `svc_ingest_egress_detokenize_total{outcome}` (`resolved`, `tokens_sent`, `no_tokens`, `no_resolver`, `kill_switch`, `no_tenant`); no names/tokens in logs |
 | Boundary gate | `make check-pii-egress` (`scripts/ci/check-pii-egress-boundary.sh`): no crate outside svc-ingest's drain/sender_exec and svc-presentation may reference `egress_detokenizer` |
 

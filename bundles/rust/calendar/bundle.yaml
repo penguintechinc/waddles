@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.app.calendar
 name: Calendar Bundle (Rust)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.app
 module: core
 provider: builtin

@@ -42,6 +42,13 @@ def test_set_fields_inserts_author_after_provider_and_adds_collection() -> None:
     assert out.startswith("version: 2.3.5\n")
 
 
+def test_target_for_superpenguin_ports_and_first_party() -> None:
+    assert _mod.target_for("csharp/superpenguin-alias") == ("github/psychoboy", "superpenguintv")
+    assert _mod.target_for("csharp/superpenguin-roll") == ("github/psychoboy", "superpenguintv")
+    assert _mod.target_for("rust/kick") == ("github:penguintechinc", None)
+    assert _mod.target_for("csharp/other") == ("github:penguintechinc", None)
+
+
 def test_set_fields_requires_a_provider_anchor() -> None:
     with pytest.raises(SystemExit):
         _mod.set_fields("version: 1.0.0\n", "github:x", None, "1.0.1")
@@ -54,10 +61,9 @@ def test_every_bundle_has_the_target_author_and_catalog_versions_match() -> None
     for hub in sorted((_ROOT / "bundles").glob("*/*/hub-manifest.yaml")):
         raw = yaml.safe_load(hub.read_text())
         rel = f"{hub.parent.parent.name}/{hub.parent.name}"
-        psycho = rel == "csharp/superpenguin-roll"
-        assert raw["author"] == (
-            "github/psychoboy" if psycho else "github:penguintechinc"
-        ), rel
+        author, collection = _mod.target_for(rel)
+        assert raw["author"] == author, rel
+        assert raw.get("collection") == collection, rel
         examined += 1
         if raw["app_id"] in catalog_versions:
             assert str(raw["version"]) == catalog_versions[raw["app_id"]], rel

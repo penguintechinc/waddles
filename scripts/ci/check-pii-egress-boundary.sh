@@ -20,6 +20,7 @@ allowed=(
   "core/egress_detokenizer/"
   "core/svc_presentation/"
   "core/svc_ingest/src/egress.rs"
+  "core/svc_ingest/src/display_names.rs"   # the egress pass's direct-DB resolver
   "core/svc_ingest/src/outbound"
   "core/svc_ingest/src/connector/sender_exec/"
   "core/svc_ingest/src/discord_rest.rs"

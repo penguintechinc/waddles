@@ -34,14 +34,16 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any, cast
+from urllib.parse import urlencode
 
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
-from quart import Blueprint, after_this_request, current_app, request
+from quart import Blueprint, after_this_request, current_app, redirect, request
 from quart_schema import validate_response
 
+from services import discord_server_install as server_install_svc
 from services import install_state_binding as binding
 from services.current_user import get_current_user_id
 from services.discord_install_service import (
@@ -177,6 +179,8 @@ async def install_callback() -> InstallCallbackResponse | tuple[dict[str, object
     """
     code = request.args.get("code", "")
     state = request.args.get("state", "")
+    if state.startswith(server_install_svc.STATE_PREFIX):
+        return await _server_install_callback(code, state)
 
     @after_this_request
     def _clear_binding(response: Any) -> Any:
@@ -239,6 +243,56 @@ async def install_status() -> InstallStatusResponse | tuple[dict[str, object], i
         updated_at=status.updated_at,
         redirect_uri=_redirect_uri(),
     )
+
+
+#: Must match `blueprints.v1.guild_pairing.SERVER_INSTALL_BINDING_COOKIE`.
+SERVER_INSTALL_BINDING_COOKIE = binding.cookie_name("dc_server_install")
+
+
+async def _server_install_callback(code: str, state: str) -> Any:
+    """Add-Discord-server leg of the shared callback: record install + pair, then redirect.
+
+    Always redirects the browser back to the webui (never a JSON page): success lands on the
+    community's role-sync page with `discord_server=paired`, failures carry a fixed reason code.
+    """
+    cfg = current_app.config.get("HUB_API_CONFIG")
+    origin = str(getattr(cfg, "frontend_origin", "") or "").rstrip("/")
+    nonce = request.cookies.get(SERVER_INSTALL_BINDING_COOKIE)
+    if request.args.get("error"):
+        # User cancelled on Discord: burn the state (if ours) to learn where to send them.
+        try:
+            pending = await server_install_svc.consume_server_state(state, nonce)
+            target = f"{origin}/admin/{pending.community_id}/role-sync"
+        except Exception:  # noqa: BLE001 - any state failure still returns the browser home
+            target = f"{origin}/dashboard"
+        return redirect(f"{target}?{urlencode({'discord_server': 'error', 'reason': 'cancelled'})}")
+    try:
+        result = await server_install_svc.complete_server_install(
+            _dal(),
+            code=code,
+            state=state,
+            guild_id_param=request.args.get("guild_id") or None,
+            binding_nonce=nonce,
+        )
+    except server_install_svc.ServerInstallError as exc:
+        logger.warning("discord server install callback failed: code=%s", exc.code)
+        target = (
+            f"{origin}/admin/{exc.community_id}/role-sync"
+            if exc.community_id is not None
+            else f"{origin}/dashboard"
+        )
+        return redirect(f"{target}?{urlencode({'discord_server': 'error', 'reason': exc.code})}")
+    except ApiError as exc:
+        logger.warning("discord server install callback failed: code=%s", exc.code)
+        return redirect(
+            f"{origin}/dashboard?{urlencode({'discord_server': 'error', 'reason': exc.code})}"
+        )
+    page = redirect(
+        f"{origin}/admin/{result.community_id}/role-sync?"
+        + urlencode({"discord_server": "paired", "guild_id": result.guild_id})
+    )
+    binding.clear_binding_cookie(page, SERVER_INSTALL_BINDING_COOKIE)
+    return page
 
 
 BLUEPRINTS: list[Blueprint] = [tenant_discord_install_bp]

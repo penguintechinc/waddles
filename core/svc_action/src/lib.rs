@@ -872,7 +872,7 @@ async fn try_build_db_wiring(
 ) -> Option<capabilities::DbWiring> {
     let Some(password) = password else {
         tracing::info!(
-            "BUNDLE_DB_PASSWORD not set; db capability not wired (every db host-call will \
+            "BUNDLE_DB_PASSWORD not set; db capability unconfigured (every db host-call will \
              report not_implemented until BUNDLE_DB_PASSWORD is provisioned)"
         );
         return None;
