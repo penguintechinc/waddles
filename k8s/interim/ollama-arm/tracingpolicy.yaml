@@ -1,0 +1,50 @@
+# Tetragon exec allowlist (enforced, Sigkill) for every ollama-labelled pod (server + pull job).
+# ollama re-execs itself (/bin/ollama == /usr/bin/ollama) and execs /usr/lib/ollama/llama-server
+# (GPU discovery + the model runner in 0.40.x); both paths verified against the pinned arm64 image.
+# Second selector: runc memfd re-exec (/proc/self/fd/*) only from runc, so `kubectl exec` works
+# (same shape as the waddlebot policies on this cluster).
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: ollama-exec-allowlist
+  labels:
+    app.kubernetes.io/name: ollama
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ollama
+  kprobes:
+    - call: sys_execve
+      syscall: true
+      args:
+        - index: 0
+          type: string
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: NotEqual
+              values:
+                - /bin/ollama
+                - /usr/bin/ollama
+                - /usr/lib/ollama/llama-server
+            - index: 0
+              operator: NotPrefix
+              values:
+                - /proc/self/fd/
+          matchActions:
+            - action: Sigkill
+        - matchArgs:
+            - index: 0
+              operator: Prefix
+              values:
+                - /proc/self/fd/
+          matchBinaries:
+            - operator: NotIn
+              followChildren: false
+              values:
+                - /usr/bin/runc
+                - /usr/sbin/runc
+                - /usr/local/sbin/runc
+                - /usr/local/bin/runc
+          matchActions:
+            - action: Sigkill

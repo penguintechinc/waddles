@@ -1,0 +1,63 @@
+# One-shot, idempotent model pull. `ollama pull` skips layers already on the PVC, so re-running is
+# cheap. Pod specs are immutable: re-run with `kubectl -n waddleai delete job ollama-pull-gemma4-e4b`
+# then re-apply. Progress: `kubectl -n waddleai logs job/ollama-pull-gemma4-e4b`.
+# Model policy: gemma4:e4b is the approved JSON-capable model. Never Qwen/PRC models.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ollama-pull-gemma4-e4b
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/component: model-pull
+    app.kubernetes.io/part-of: waddleai
+spec:
+  backoffLimit: 8   # absorbs the race while the server is still starting
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ollama
+        app.kubernetes.io/component: model-pull
+        app.kubernetes.io/part-of: waddleai
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      tolerations:
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pull
+          image: docker.io/ollama/ollama:0.40.13@sha256:b2f0122c476bc9fe7ce679d8bb4bd555351e25e2554eefb156f61cb0a89cf429
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/ollama", "pull", "gemma4:e4b"]
+          env:
+            - name: OLLAMA_HOST
+              value: "http://ollama.waddleai.svc:11434"
+            - name: HOME
+              value: /tmp
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

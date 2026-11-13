@@ -1,0 +1,84 @@
+# Namespace default-deny (Cilium convention on this cluster: an empty rule selects every endpoint
+# and allows nothing) + per-workload allows. CiliumNetworkPolicy only, never plain NetworkPolicy.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  endpointSelector: {}
+  ingress:
+    - {}
+  egress:
+    - {}
+---
+# Server: ingress 11434 only from namespaces waddlebot + waddleai; egress DNS + the registry hosts.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ollama-server-allow
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: ollama
+      app.kubernetes.io/component: server
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": waddlebot
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": waddleai
+      toPorts:
+        - ports:
+            - port: "11434"
+              protocol: TCP
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"   # search-domain lookups must resolve; egress itself is FQDN-scoped below
+    # toFQDNs must be its own egress block (cannot share a block with other L3 selectors).
+    - toFQDNs:
+        - matchName: registry.ollama.ai
+        - matchName: dd20bb891979d25aebc8bec07b2b3bbc.r2.cloudflarestorage.com
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+---
+# Pull job: talks only to the ollama Service (same namespace) and DNS. The server does the download.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ollama-pull-allow
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: ollama
+      app.kubernetes.io/component: model-pull
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: ollama
+            app.kubernetes.io/component: server
+      toPorts:
+        - ports:
+            - port: "11434"
+              protocol: TCP
