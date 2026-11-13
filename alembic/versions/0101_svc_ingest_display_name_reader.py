@@ -26,8 +26,8 @@ The same grants are declared in `config/postgres/service-roles.yaml` (`waddles_s
 immediately. Idempotent and order-independent: a missing role or table is a no-op (the
 minimal CI chain does not create every table).
 
-Revision ID: 0100_svc_ingest_display_names
-Revises: 0099_discord_role_mirror
+Revision ID: 0101_svc_ingest_display_names
+Revises: 0100_stream_dek_issuances
 Create Date: 2026-11-12
 """
 
@@ -35,8 +35,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0100_svc_ingest_display_names"
-down_revision = "0099_discord_role_mirror"
+revision = "0101_svc_ingest_display_names"
+down_revision = "0100_stream_dek_issuances"
 branch_labels = None
 depends_on = None
 

@@ -145,7 +145,7 @@ roles:
     description: svc-ingest (owns no relational state; read-only display names for egress detokenization)
     workloads: [svc-ingest-rust, svc-ingest]
     member_of: [svc_ingest]
-    # Egress detokenizer (core/svc_ingest/src/display_names.rs, alembic 0100): one batched
+    # Egress detokenizer (core/svc_ingest/src/display_names.rs, alembic 0101): one batched
     # SELECT per outbound message; tenant-gated via communities.tenant_id membership, erased
     # users have no membership rows -> "Unknown User". Column-scoped SELECT only.
     columns:

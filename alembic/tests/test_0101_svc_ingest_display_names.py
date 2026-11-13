@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0100_svc_ingest_display_names (egress detokenizer read role).
+"""Real-Postgres tests for 0101_svc_ingest_display_names (egress detokenizer read role).
 
 Column grants can only be proven by a live session as the role: it must be able to run the
 exact resolver queries (`core/svc_ingest/src/display_names.rs`) and must NOT read any other
@@ -26,7 +26,7 @@ requires_docker = pytest.mark.skipif(
 _MIGRATION = (
     Path(__file__).resolve().parent.parent
     / "versions"
-    / "0100_svc_ingest_display_name_reader.py"
+    / "0101_svc_ingest_display_name_reader.py"
 )
 _ROLE = "waddles_svc_ingest"
 
@@ -144,8 +144,8 @@ def _role_conn(db: PgTestDatabase) -> psycopg2.extensions.connection:
 @requires_docker
 def test_metadata_is_single_head_off_0099() -> None:
     m = _load()
-    assert m.revision == "0100_svc_ingest_display_names"
-    assert m.down_revision == "0099_discord_role_mirror"
+    assert m.revision == "0101_svc_ingest_display_names"
+    assert m.down_revision == "0100_stream_dek_issuances"
     assert len(m.revision) <= 32
 
 
