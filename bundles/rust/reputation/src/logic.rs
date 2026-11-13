@@ -1,4 +1,4 @@
-//! Host-independent reputation SERVICE tool logic (v1.1.0).
+//! Host-independent reputation SERVICE tool logic (v1.1.1).
 //!
 //! The service owns the STORE, the TOOLS and the I/O: apply/adjust, reads,
 //! history, soft-ban state, caps/idempotency/ledger/audit (all enforced by the
