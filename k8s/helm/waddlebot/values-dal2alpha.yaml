@@ -435,9 +435,12 @@ pipeline:
       maxConcurrentCompiles: 2
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
+      # Alpha executor was OOMKilled at 16Gi and took ~1h to compile ~160 bundles at 2 CPU after
+      # restart. Raised for alpha only (gamma/beta/prod unchanged). Issue #1304 tracks lazy-load +
+      # compiled cache; horizontal sharding is the long-term direction.
       resources:
-        requests: { cpu: "500m", memory: "1Gi" }
-        limits: { cpu: "2000m", memory: "16Gi" }
+        requests: { cpu: "2000m", memory: "8Gi" }
+        limits: { cpu: "8000m", memory: "24Gi" }
 
 presentation:
   # Rust svc-presentation (overlay + image surface). Overlay view/SSE port reachable on-host at
