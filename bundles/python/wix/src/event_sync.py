@@ -1,4 +1,4 @@
-"""Feature module: Wix events -> Discord scheduled events (`!wix enable events`), default OFF.
+"""Feature module: Wix events -> Discord scheduled events (event-only, runs on bundle activation).
 
 The trigger is the Wix webhook connector's normalized `event.{created,updated,canceled}` events
 (payload `{wix_event_id, title, starts_at, ends_at, timezone, location, status}`). They are mirrored
@@ -7,7 +7,7 @@ approved `tool.call:` grants -- never direct Discord HTTP. The Wix event id -> D
 lives in community kv (`wix.evmap.<wix_event_id>`), which also makes redelivery idempotent: a second
 `event.created` for a mapped event is a no-op. (Outbound Wix writes are the separate `wix.event.*`
 service tools, consumed by the calendar app, not by this module.) Failures are loud
-(`toolcall.record_fault`, shown by `!wix modules`).
+(`toolcall.record_fault`, kv `wix.fault.events`).
 """
 
 from __future__ import annotations

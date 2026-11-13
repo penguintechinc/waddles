@@ -2184,6 +2184,9 @@ components:
         id:
           title: Id
           type: integer
+        propagate_moderators:
+          title: Propagate Moderators
+          type: boolean
         role_name_prefix:
           title: Role Name Prefix
           type: string
@@ -2203,6 +2206,7 @@ components:
       - sync_enabled
       - role_name_prefix
       - event_sync_enabled
+      - propagate_moderators
       - created_by_user_id
       - created_at
       - updated_at
@@ -3620,6 +3624,9 @@ components:
           additionalProperties: true
           title: Metadata
           type: object
+        ownershipVerified:
+          title: Ownershipverified
+          type: boolean
         provider:
           title: Provider
           type: string
@@ -3662,6 +3669,7 @@ components:
       - shared
       - hasRefreshToken
       - hasApiCredential
+      - ownershipVerified
       - expiresAt
       - capabilities
       - metadata

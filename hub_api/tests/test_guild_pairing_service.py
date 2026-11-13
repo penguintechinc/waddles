@@ -300,10 +300,10 @@ class TestCommunityRoleBindings:
             pairing_id,
             sync_scope="community_role",
             discord_role_id="901",
-            community_role="moderator",
+            community_role="vip",
         )
         assert binding.sync_scope == "community_role"
-        assert binding.community_role == "moderator"
+        assert binding.community_role == "vip"
         assert binding.subscriber_tier is None
 
     def test_community_role_requires_role_value(
@@ -330,6 +330,25 @@ class TestCommunityRoleBindings:
                 community_role="community-owner",
             )
         assert excinfo.value.status_code == 400
+
+    @pytest.mark.parametrize("role", ["community-admin", "moderator"])
+    def test_privileged_inbound_target_is_refused_422(
+        self, guild_pairing_db: Any, pairing_id: int, role: str
+    ) -> None:
+        """S1: a Discord role may never promote anyone to a privileged Waddles role."""
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
+        with pytest.raises(ApiError) as excinfo:
+            svc.create_binding(
+                dal,
+                community_id,
+                pairing_id,
+                sync_scope="community_role",
+                discord_role_id="1",
+                community_role=role,
+            )
+        assert excinfo.value.status_code == 422
+        assert excinfo.value.code == "privileged_target_role"
+        assert svc.list_bindings(dal, community_id, pairing_id) == []
 
     def test_community_role_rejects_tier_value(
         self, guild_pairing_db: Any, pairing_id: int
@@ -365,12 +384,12 @@ class TestCommunityRoleBindings:
             pairing_id,
             sync_scope="community_role",
             discord_role_id="2",
-            community_role="community-admin",
+            community_role="vip",
         )
         result = svc.list_bindings(dal, community_id, pairing_id)
         assert {(b.discord_role_id, b.community_role) for b in result} == {
             ("1", "member"),
-            ("2", "community-admin"),
+            ("2", "vip"),
         }
 
     def test_duplicate_discord_role_as_community_role_is_conflict(

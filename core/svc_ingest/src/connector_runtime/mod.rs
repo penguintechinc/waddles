@@ -29,6 +29,7 @@ pub mod supervisor;
 pub mod tenant;
 #[cfg(test)]
 pub(crate) mod testkit;
+pub mod unverified_gate;
 pub mod webhook_boot;
 
 pub use feed::{

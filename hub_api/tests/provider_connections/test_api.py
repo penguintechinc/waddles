@@ -20,7 +20,7 @@ from tests.provider_connections.conftest import (
     FakeClock,
     admin_headers,
 )
-from tests.provider_connections.fake_twitch import FakeTwitch
+from tests.provider_connections.fake_twitch import FakeAccount, FakeTwitch
 from tests.provider_connections.support import raw_rows, set_column
 from tests.sso.conftest import Entitlements
 
@@ -38,6 +38,7 @@ ADMIN_FIELDS = {
     "shared",
     "hasRefreshToken",
     "hasApiCredential",
+    "ownershipVerified",
     "expiresAt",
     "capabilities",
     "metadata",
@@ -716,7 +717,8 @@ class TestInternalApi:
         for n in range(3):
             login = f"chan{n}x"
             fake_twitch.channels[login] = f"90{n}"
-            tokens = fake_twitch.mint(account=BOT)
+            # The broadcaster's own token proves ownership of each extra channel.
+            tokens = fake_twitch.mint(account=FakeAccount(user_id=f"90{n}", login=login))
             assert (
                 await _create(client, pc_db, tokens, metadata={"channel_login": login})
             ).status_code == 201

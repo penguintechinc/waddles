@@ -168,6 +168,8 @@ infrastructure:
 # skeleton) and svcRtc is additionally gated on modules.social.enabled; neither
 # is part of this fix's scope.
 pipeline:
+  # Default tenant id (slug `default`, is_global) -- see values.yaml pipeline.defaultTenantId.
+  defaultTenantId: 1
   # Monday-demo (881ac8dd): role-sync reconcile CronJob ON, 1-min cadence.
   # demotePairingIds left empty (grant-only); demoteBaselineRole = member fallback.
   roleSync:
@@ -188,6 +190,10 @@ pipeline:
   hubApi:
     aiEnabled: false
     replicas: 1
+    # Demo fallback (user-approved 2026-11-12): free-tier flag env baseline; PostHog overrides
+    # once its key is provisioned. Never put license-tier flags here.
+    extraEnv:
+      FLAG_WADDLES_TENANT_DISCORD_INSTALL: "true"
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }

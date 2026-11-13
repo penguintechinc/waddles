@@ -26,6 +26,19 @@ for _lib in ("flask_core", "waddle_transports"):
     if str(_lib_dir) not in sys.path:
         sys.path.append(str(_lib_dir))
 
+# Generated internal-gRPC stubs import as top-level `waddles.hub.internal.v1.*`. Importing the
+# `grpc_internal` package puts its `pb/` root on sys.path (the same bootstrap the app uses), so
+# test modules that import the stubs directly collect regardless of import order.
+import grpc_internal  # noqa: E402,F401
+
+# Shared real-Postgres harness (`pg_docker`) lives beside the alembic tests; several hub_api
+# integration modules import it at top level, so expose it once here instead of per module.
+_ALEMBIC_TESTS_DIR = _HUB_API_DIR.parent / "alembic" / "tests"
+if not (_ALEMBIC_TESTS_DIR / "pg_docker.py").is_file():
+    raise RuntimeError(f"pg_docker harness missing: {_ALEMBIC_TESTS_DIR / 'pg_docker.py'}")
+if str(_ALEMBIC_TESTS_DIR) not in sys.path:
+    sys.path.append(str(_ALEMBIC_TESTS_DIR))
+
 #: Fixtures for the tamper-evident audit-log tests (`tests/audit_support.py`): registered as a
 #: plugin so test modules use `audit_dal` / `audit_service` / `gate` by name, without importing
 #: fixtures into their own namespace.

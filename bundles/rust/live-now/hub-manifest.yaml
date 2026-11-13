@@ -6,7 +6,7 @@
 schema_version: 2
 app_id: waddles.core.app.live-now
 name: Live Now (Rust)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.app
 module: core
 provider: builtin
@@ -74,26 +74,61 @@ requested_tools:
   - tool: discord.live.channels
     access: read
     target_app_id: waddles.core.service.discord
-config_schema:
+community_config_schema:
   type: object
   additionalProperties: false
   properties:
     platforms:
       type: array
-      items: {type: string, enum: [twitch, youtube, discord, kick]}
+      items:
+        type: string
+        enum:
+        - twitch
+        - youtube
+        - discord
+        - kick
       minItems: 1
       uniqueItems: true
-    include_linked: {type: boolean}
+      default:
+      - twitch
+      - youtube
+      - discord
+    include_linked:
+      type: boolean
+      default: false
     announce_targets:
       type: array
       maxItems: 10
       items:
         type: object
         additionalProperties: false
-        required: [platform, channel_id]
+        required:
+        - platform
+        - channel_id
         properties:
-          platform: {type: string, enum: [discord, twitch, youtube]}
-          channel_id: {type: string, minLength: 1, maxLength: 128}
-    template: {type: string, minLength: 1, maxLength: 300}
-    cooldown_seconds: {type: integer, minimum: 60, maximum: 86400}
-    max_age_seconds: {type: integer, minimum: 60, maximum: 3600}
+          platform:
+            type: string
+            enum:
+            - discord
+            - twitch
+            - youtube
+          channel_id:
+            type: string
+            minLength: 1
+            maxLength: 128
+      default: []
+    template:
+      type: string
+      minLength: 1
+      maxLength: 300
+      default: '{name} is live on {platform}: {title}'
+    cooldown_seconds:
+      type: integer
+      minimum: 60
+      maximum: 86400
+      default: 1800
+    max_age_seconds:
+      type: integer
+      minimum: 60
+      maximum: 3600
+      default: 900
