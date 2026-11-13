@@ -78,6 +78,9 @@ jobs:
             bundles/**
             core/svc_ingest/**
             sdk/waddle-sdk/**
+            scripts/ci/**
+            scripts/backfill_bundle_author.py
+            scripts/gen-music-manifest-tools.py
             wit/**
             core/bundle_executor/**
             core/svc_process/**
@@ -100,10 +103,10 @@ jobs:
         with:
           python-version: '3.13'
 
-      # Exact pins (critical-rules.md Dependency Pinning), same versions the
-      # no-stubs gate and the alembic unit-test step already use.
-      - name: Install PyYAML + pytest
-        run: pip install --disable-pip-version-check --no-cache-dir "pyyaml==6.0.3" "pytest==9.1.1"
+      # Hash-locked (critical-rules.md Dependency Pinning): the same lock the
+      # gate-integrity job uses, plus PyYAML + defusedxml for the full suite below.
+      - name: Install gate-test deps (hash-locked)
+        run: python3 -m pip install --disable-pip-version-check --no-cache-dir --require-hashes -r scripts/ci/tests/requirements-gate-test.txt
 
       # A gate that cannot fail is not a gate: this proves, on every run, that
       # each rule still exits non-zero on a planted violation (and stays quiet
@@ -166,3 +169,9 @@ jobs:
       # Asserts its own denominators (>=100 bundles and triggers).
       - name: No two bundles answer the same command trigger
         run: python3 -m pytest scripts/ci/tests/test_bundle_command_collisions.py -v -p no:cacheprovider
+
+      # The whole scripts/ci/tests pytest suite (contract drift, author/catalog versions, music
+      # contract, superpenguin manifests, ...). Collection errors fail the step (no
+      # --continue-on-collection-errors); the shell-based tests run in pr-validation.
+      - name: Full scripts/ci/tests pytest suite
+        run: python3 -m pytest scripts/ci/tests -q -p no:cacheprovider
