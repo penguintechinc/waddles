@@ -42,11 +42,15 @@ from tests.conftest import make_user_token, seed_community, seed_membership
 ROOM = "0b6f3e1a-8f5e-4d0a-9a43-6a1d5f7c2e10"
 PARTICIPANT = "5d1f2e3a-1111-4a2b-8c3d-9e8f7a6b5c4d"
 
-_SCOPE_BY_RPC: dict[str, str] = {
-    **dict.fromkeys(("ListRooms", "GetRoom", "ListParticipants", "ListHands"), "read"),
+_SCOPES_BY_RPC: dict[str, tuple[str, ...]] = {
+    **dict.fromkeys(("ListRooms", "GetRoom", "ListParticipants"), ("read",)),
+    # ListHands: read = the actor's own entry; moderate = the whole queue for room staff.
+    "ListHands": ("read", "moderate"),
     **dict.fromkeys(
-        ("CreateRoom", "DeleteRoom", "JoinRoom", "LeaveRoom", "RaiseHand", "LowerHand"), "write"
+        ("CreateRoom", "DeleteRoom", "LeaveRoom", "RaiseHand", "LowerHand"), ("write",)
     ),
+    # JoinRoom: a moderate-scope token additionally registers the participant as room STAFF.
+    "JoinRoom": ("write", "moderate"),
     **dict.fromkeys(
         (
             "KickParticipant",
@@ -58,9 +62,14 @@ _SCOPE_BY_RPC: dict[str, str] = {
             "AcknowledgeHand",
             "ResetHands",
         ),
-        "moderate",
+        ("moderate",),
     ),
 }
+#: The kick/mute/lock family still authorises by the request's `actor_role`; the hand RPCs use
+#: the server-side member table (joined / staff) instead and ignore `actor_role`.
+_ROLE_CHECKED = frozenset(
+    ("KickParticipant", "MuteParticipant", "UnmuteParticipant", "MuteAll", "LockRoom", "UnlockRoom")
+)
 _MODERATOR_ROLES = (rooms_pb2.ROOM_ROLE_MODERATOR, rooms_pb2.ROOM_ROLE_ADMIN)
 
 
@@ -109,6 +118,7 @@ class FakeRooms(rooms_pb2_grpc.RoomsServiceServicer):
             "created_at": created_at,
             "members": {},
             "hands": [],
+            "staff": set(),
             "empty_timeout_secs": 300,
         }
 
@@ -125,22 +135,39 @@ class FakeRooms(rooms_pb2_grpc.RoomsServiceServicer):
         self._clock += 1
         return self._clock
 
-    async def _guard(self, rpc: str, request: Any, context: Any) -> None:
-        """Record the call and enforce api_version, scope, role and scripted failures."""
+    async def _guard(self, rpc: str, request: Any, context: Any) -> str:
+        """Record the call; enforce api_version, scope, role and scripted failures.
+
+        Returns the scope the verified token carried (`read` / `write` / `moderate`).
+        """
         metadata = dict(context.invocation_metadata())
         self.calls.append((rpc, request, metadata))
         if request.api_version != "v1":
             await context.abort(
                 grpc.StatusCode.UNIMPLEMENTED, f"api_version {request.api_version} not supported"
             )
-        needed = f"streaming.rooms:{_SCOPE_BY_RPC[rpc]}"
-        if metadata.get("authorization") != f"Bearer jwt-for-{needed}":
+        prefix = "Bearer jwt-for-streaming.rooms:"
+        header = metadata.get("authorization", "")
+        scope = header.removeprefix(prefix) if header.startswith(prefix) else ""
+        if scope not in _SCOPES_BY_RPC[rpc]:
             await context.abort(grpc.StatusCode.PERMISSION_DENIED, "scope not permitted")
-        if _SCOPE_BY_RPC[rpc] == "moderate" and request.actor_role not in _MODERATOR_ROLES:
+        if rpc in _ROLE_CHECKED and request.actor_role not in _MODERATOR_ROLES:
             await context.abort(grpc.StatusCode.PERMISSION_DENIED, "forbidden: moderator required")
         if rpc in self.fail:
             code, message = self.fail[rpc]
             await context.abort(code, message)
+        return scope
+
+    async def _require_joined(self, state: dict[str, Any], actor: str, context: Any) -> None:
+        """The actor must be in the room's member table (they joined)."""
+        if actor not in state["members"]:
+            await context.abort(grpc.StatusCode.PERMISSION_DENIED, "actor has not joined the room")
+
+    async def _require_staff(self, state: dict[str, Any], actor: str, context: Any) -> None:
+        """The actor must be joined AND recorded as staff (joined with a moderate-scope token)."""
+        await self._require_joined(state, actor, context)
+        if actor not in state["staff"]:
+            await context.abort(grpc.StatusCode.PERMISSION_DENIED, "forbidden: staff required")
 
     async def _room(self, request: Any, context: Any) -> dict[str, Any]:
         """The `(community, room)` state, creating the shared test ROOM on first touch.
@@ -236,11 +263,13 @@ class FakeRooms(rooms_pb2_grpc.RoomsServiceServicer):
         return rooms_pb2.DeleteRoomResponse(room=msg)
 
     async def JoinRoom(self, request: Any, context: Any) -> Any:  # noqa: N802
-        await self._guard("JoinRoom", request, context)
+        scope = await self._guard("JoinRoom", request, context)
         state = await self._room(request, context)
         if state["locked"]:
             await context.abort(grpc.StatusCode.PERMISSION_DENIED, "forbidden: room is locked")
         state["members"][request.participant_id] = {"muted": False, "joined_at": self._tick()}
+        if scope == "moderate":
+            state["staff"].add(request.participant_id)
         return rooms_pb2.JoinRoomResponse(
             token="room-token",
             token_id=str(uuid.uuid4()),
@@ -301,15 +330,29 @@ class FakeRooms(rooms_pb2_grpc.RoomsServiceServicer):
         return rooms_pb2.UnlockRoomResponse(room_id=request.room_id, locked=False)
 
     async def ListHands(self, request: Any, context: Any) -> Any:  # noqa: N802
-        await self._guard("ListHands", request, context)
+        scope = await self._guard("ListHands", request, context)
         state = await self._room(request, context)
-        return rooms_pb2.ListHandsResponse(
-            room_id=request.room_id, hands=[self._hand(h) for h in state["hands"]]
+        await self._require_joined(state, request.actor_id, context)
+        queue = state["hands"]
+        if scope == "moderate":
+            await self._require_staff(state, request.actor_id, context)
+            visible = queue
+        else:
+            visible = [h for h in queue if h["pid"] == request.actor_id]
+        resp = rooms_pb2.ListHandsResponse(
+            room_id=request.room_id, hands=[self._hand(h) for h in visible], count=len(queue)
         )
+        for position, h in enumerate(queue, start=1):
+            if h["pid"] == request.actor_id:
+                resp.position = position
+        return resp
 
     async def RaiseHand(self, request: Any, context: Any) -> Any:  # noqa: N802
         await self._guard("RaiseHand", request, context)
         state = await self._room(request, context)
+        if request.actor_id != request.participant_id:
+            await context.abort(grpc.StatusCode.PERMISSION_DENIED, "actor must be the participant")
+        await self._require_joined(state, request.actor_id, context)
         existing = next((h for h in state["hands"] if h["pid"] == request.participant_id), None)
         if existing is None:
             existing = {"pid": request.participant_id, "raised_at": self._tick()}
@@ -319,10 +362,9 @@ class FakeRooms(rooms_pb2_grpc.RoomsServiceServicer):
     async def LowerHand(self, request: Any, context: Any) -> Any:  # noqa: N802
         await self._guard("LowerHand", request, context)
         state = await self._room(request, context)
-        if request.actor_id != request.participant_id and (
-            request.actor_role not in _MODERATOR_ROLES
-        ):
-            await context.abort(grpc.StatusCode.PERMISSION_DENIED, "forbidden: moderator required")
+        await self._require_joined(state, request.actor_id, context)
+        if request.actor_id != request.participant_id:
+            await self._require_staff(state, request.actor_id, context)
         before = len(state["hands"])
         state["hands"] = [h for h in state["hands"] if h["pid"] != request.participant_id]
         return rooms_pb2.LowerHandResponse(
@@ -334,6 +376,7 @@ class FakeRooms(rooms_pb2_grpc.RoomsServiceServicer):
     async def ResetHands(self, request: Any, context: Any) -> Any:  # noqa: N802
         await self._guard("ResetHands", request, context)
         state = await self._room(request, context)
+        await self._require_staff(state, request.actor_id, context)
         cleared = len(state["hands"])
         state["hands"] = []
         return rooms_pb2.ResetHandsResponse(room_id=request.room_id, cleared=cleared)
@@ -341,6 +384,7 @@ class FakeRooms(rooms_pb2_grpc.RoomsServiceServicer):
     async def AcknowledgeHand(self, request: Any, context: Any) -> Any:  # noqa: N802
         await self._guard("AcknowledgeHand", request, context)
         state = await self._room(request, context)
+        await self._require_staff(state, request.actor_id, context)
         hand = next((h for h in state["hands"] if h["pid"] == request.participant_id), None)
         if hand is None:
             await context.abort(grpc.StatusCode.NOT_FOUND, "hand not raised")
@@ -429,3 +473,12 @@ def user_headers(
     seed_user(overlay_db, user_id, display_name=display_name)
     seed_membership(overlay_db, community_id=cid, user_id=user_id, role=role)
     return {"Authorization": f"Bearer {make_user_token(user_id=user_id, scope=scope)}"}, cid
+
+
+async def join(client: Any, community_id: int, headers: dict[str, str], room: str = ROOM) -> Any:
+    """Join `room` through the real join route (admins register as staff via the moderate token)."""
+    response = await client.post(
+        f"/api/v1/community/{community_id}/interact/voice/rooms/{room}/join", headers=headers
+    )
+    assert response.status_code == 200, await response.get_json()
+    return response

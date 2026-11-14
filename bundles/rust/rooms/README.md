@@ -39,8 +39,10 @@ AuthZ is the per-room ACL role (`acl.set`); a moderator cannot act on an equal o
 Interim: this migrates to the SDK `caller_can` check once it lands, at which point the
 `actor_role` argument sent to the service is dropped. The raised-hand queue is NOT kept here:
 it is authoritative in svc-streaming and reached through the webrtc tools `room.hand.raise|lower|
-list|ack|reset` (member / moderator scopes declared in the webrtc manifest); there is no
-`hands.*` kv key, the server clears a hand on leave/kick, and a member's `hand list` shows only
+list` (member scope, own hand only) and `room.hand.lower_other|list_all|ack|reset` (moderate scope,
+verified by the host before dispatch). The app sends NO actor or role argument: the webrtc tool
+takes the host-verified actor, and the tool the app picks (by the ACL role) is gated by scope. There
+is no `hands.*` kv key, the server clears a hand on leave/kick, and a member's `hand list` shows only
 their own place in the queue (moderators see every UUID). The rest of moderation fronts
 `room.list|participants|leave|kick|mute|unmute|mute_all|lock|unlock`, which forward to
 svc-streaming's moderation host API (`core/svc_streaming/docs/rooms-moderation-host-api.md`; the

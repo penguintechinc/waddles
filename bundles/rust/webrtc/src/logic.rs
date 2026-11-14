@@ -19,7 +19,7 @@ use waddle_sdk::tool::{ToolContext, ToolError, ToolRegistry};
 use crate::grants::{GrantRole, HandOp};
 
 /// Every tool name this bundle exposes (also the only labels ever logged).
-pub const TOOL_NAMES: [&str; 26] = [
+pub const TOOL_NAMES: [&str; 28] = [
     "room.create",
     "room.get",
     "room.close",
@@ -43,7 +43,9 @@ pub const TOOL_NAMES: [&str; 26] = [
     "room.unlock",
     "room.hand.raise",
     "room.hand.lower",
+    "room.hand.lower_other",
     "room.hand.list",
+    "room.hand.list_all",
     "room.hand.ack",
     "room.hand.reset",
 ];
@@ -466,20 +468,36 @@ fn api_version_arg(o: &Map<String, Value>) -> Result<(), ToolError> {
     }
 }
 
-/// Parses the acting participant of a hand tool and enforces the contract's
-/// minimum role for `op` BEFORE any host call (the host re-checks, and the
-/// manifest `required_scope` is verified by the host before dispatch).
-fn hand_actor(o: &Map<String, Value>, op: HandOp) -> Result<(String, GrantRole), ToolError> {
-    let id = uuid_arg(o, "actor_id", true)?.ok_or_else(|| bad("actor_id required"))?;
-    let role = match o.get("actor_role") {
-        Some(Value::String(r)) => GrantRole::parse(r),
-        _ => None,
-    }
-    .ok_or_else(|| bad("actor_role must be guest|member|moderator|admin"))?;
-    if role < op.min_role() {
+/// The acting participant of a hand call: the HOST-VERIFIED actor of the tool
+/// context and the role its host-derived scopes imply -- never anything the caller
+/// put in the arguments (receiver-gated: the receiver decides who is asking).
+struct Actor {
+    id: String,
+    role: GrantRole,
+}
+
+/// Resolves the verified actor for `op`. No verified actor is `forbidden`; an actor
+/// whose host-derived scopes do not include the scope `op` declares is refused here
+/// too (the host already refused it before dispatch, this is defence in depth on
+/// verified data).
+fn verified_actor(ctx: &ToolContext, op: HandOp) -> Result<Actor, ToolError> {
+    let id = ctx
+        .actor
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .filter(|a| is_uuid(a))
+        .ok_or(ToolError::Forbidden)?;
+    if !ctx.has_scope(op.scope()) {
         return Err(ToolError::NotGranted);
     }
-    Ok((id, role))
+    let role = if ctx.has_scope("community:admin") {
+        GrantRole::Admin
+    } else if ctx.has_scope("community:moderate") {
+        GrantRole::Moderator
+    } else {
+        GrantRole::Member
+    };
+    Ok(Actor { id, role })
 }
 
 /// The closed wire form of a role (what the host's `actor_role` expects).
@@ -490,6 +508,20 @@ fn role_wire(r: GrantRole) -> &'static str {
         GrantRole::Moderator => "moderator",
         GrantRole::Admin => "admin",
     }
+}
+
+/// The host request of one hand op. `actor_id` and `actor_role` ride on EVERY op
+/// (derived from the verified context) so svc-streaming can bind the actor to the
+/// authenticated call and re-check it itself instead of trusting this bundle.
+fn host_req(room: &Option<String>, actor: &Actor, participant: Option<&str>) -> Value {
+    let mut req = json!({
+        "api_version": API_VERSION, "room_id": room,
+        "actor_id": actor.id, "actor_role": role_wire(actor.role),
+    });
+    if let Some(p) = participant {
+        req["participant_id"] = json!(p);
+    }
+    req
 }
 
 /// One queue entry rebuilt from a field whitelist; a host entry without a
@@ -510,117 +542,95 @@ fn hand_view(v: &Value) -> Result<Value, ToolError> {
     Ok(h)
 }
 
-/// `room.hand.raise`: the actor raises THEIR OWN hand (idempotent host-side).
-fn hand_raise(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
-    let o = object(&args, &["api_version", "room_id", "actor_id", "actor_role"])?;
-    api_version_arg(o)?;
-    let (actor, _) = hand_actor(o, HandOp::Raise)?;
-    let room = uuid_arg(o, "room_id", true)?;
-    let req = json!({"api_version": API_VERSION, "room_id": room, "participant_id": actor});
-    let out = m.call(HandOp::Raise.tool(), &req).map_err(tool_err)?;
-    let hand = hand_view(out.get("hand").ok_or(ToolError::TargetUnavailable)?)?;
-    Ok(json!({"room_id": room, "hand": hand}))
-}
-
-/// `room.hand.lower`: members lower their own hand; lowering another participant's
-/// needs a moderator role (refused here before the host sees it).
-fn hand_lower(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
-    let o = object(
-        &args,
-        &[
-            "api_version",
-            "room_id",
-            "participant_id",
-            "actor_id",
-            "actor_role",
-        ],
-    )?;
-    api_version_arg(o)?;
-    let (actor, role) = hand_actor(o, HandOp::Lower)?;
-    let participant =
-        uuid_arg(o, "participant_id", true)?.ok_or_else(|| bad("participant_id required"))?;
-    if participant != actor && !role.is_staff() {
-        return Err(ToolError::NotGranted);
+/// Runs one raised-hand tool. Arguments are only `room_id` (+ `participant_id` for
+/// `lower_other`/`ack`) and an optional `api_version`; `actor_id`/`actor_role` are
+/// refused outright -- the actor is the host-verified context, and which tool was
+/// called (hence which scope the host verified) decides what is allowed.
+fn hand_call(
+    op: HandOp,
+    m: &dyn Media,
+    ctx: &ToolContext,
+    args: Value,
+) -> Result<Value, ToolError> {
+    if let Some(o) = args.as_object()
+        && (o.contains_key("actor_id") || o.contains_key("actor_role"))
+    {
+        return Err(bad(
+            "actor is derived by the host and is not accepted as an argument",
+        ));
     }
-    let room = uuid_arg(o, "room_id", true)?;
-    let req = json!({
-        "api_version": API_VERSION, "room_id": room, "participant_id": participant,
-        "actor_id": actor, "actor_role": role_wire(role),
-    });
-    let out = m.call(HandOp::Lower.tool(), &req).map_err(tool_err)?;
-    let lowered = out
-        .get("lowered")
-        .and_then(Value::as_bool)
-        .ok_or(ToolError::TargetUnavailable)?;
-    Ok(json!({"room_id": room, "participant_id": participant, "lowered": lowered}))
-}
-
-/// `room.hand.list`: staff see the whole ordered queue; members see only their own
-/// entry (with its position) plus the queue length.
-fn hand_list(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
-    let o = object(&args, &["api_version", "room_id", "actor_id", "actor_role"])?;
+    let allowed: &[&str] = match op {
+        HandOp::LowerOther | HandOp::Ack => &["api_version", "room_id", "participant_id"],
+        _ => &["api_version", "room_id"],
+    };
+    let o = object(&args, allowed)?;
     api_version_arg(o)?;
-    let (actor, role) = hand_actor(o, HandOp::List)?;
     let room = uuid_arg(o, "room_id", true)?;
-    let req = json!({"api_version": API_VERSION, "room_id": room});
-    let out = m.call(HandOp::List.tool(), &req).map_err(tool_err)?;
-    let queue = out
-        .get("hands")
-        .and_then(Value::as_array)
-        .ok_or(ToolError::TargetUnavailable)?;
-    let mut hands = Vec::with_capacity(queue.len());
-    for (i, h) in queue.iter().enumerate() {
-        let mut v = hand_view(h)?;
-        let mine = v.get("participant_id").and_then(Value::as_str) == Some(actor.as_str());
-        if role.is_staff() || mine {
-            v["position"] = json!(i + 1);
-            hands.push(v);
+    let target = match op {
+        HandOp::LowerOther | HandOp::Ack => Some(
+            uuid_arg(o, "participant_id", true)?.ok_or_else(|| bad("participant_id required"))?,
+        ),
+        _ => None,
+    };
+    let actor = verified_actor(ctx, op)?;
+    let host = op.host_op();
+    match op {
+        HandOp::Raise => {
+            let out = m
+                .call(host, &host_req(&room, &actor, Some(&actor.id)))
+                .map_err(tool_err)?;
+            let hand = hand_view(out.get("hand").ok_or(ToolError::TargetUnavailable)?)?;
+            Ok(json!({"room_id": room, "hand": hand}))
+        }
+        HandOp::Lower | HandOp::LowerOther => {
+            let who = target.unwrap_or_else(|| actor.id.clone());
+            let out = m
+                .call(host, &host_req(&room, &actor, Some(&who)))
+                .map_err(tool_err)?;
+            let lowered = out
+                .get("lowered")
+                .and_then(Value::as_bool)
+                .ok_or(ToolError::TargetUnavailable)?;
+            Ok(json!({"room_id": room, "participant_id": who, "lowered": lowered}))
+        }
+        HandOp::List | HandOp::ListAll => {
+            let out = m
+                .call(host, &host_req(&room, &actor, None))
+                .map_err(tool_err)?;
+            let queue = out
+                .get("hands")
+                .and_then(Value::as_array)
+                .ok_or(ToolError::TargetUnavailable)?;
+            let mut hands = Vec::with_capacity(queue.len());
+            for (i, h) in queue.iter().enumerate() {
+                let mut v = hand_view(h)?;
+                let mine =
+                    v.get("participant_id").and_then(Value::as_str) == Some(actor.id.as_str());
+                if op == HandOp::ListAll || mine {
+                    v["position"] = json!(i + 1);
+                    hands.push(v);
+                }
+            }
+            Ok(json!({"room_id": room, "count": queue.len(), "hands": hands}))
+        }
+        HandOp::Ack => {
+            let out = m
+                .call(host, &host_req(&room, &actor, target.as_deref()))
+                .map_err(tool_err)?;
+            let hand = hand_view(out.get("hand").ok_or(ToolError::TargetUnavailable)?)?;
+            Ok(json!({"room_id": room, "hand": hand}))
+        }
+        HandOp::Reset => {
+            let out = m
+                .call(host, &host_req(&room, &actor, None))
+                .map_err(tool_err)?;
+            let cleared = out
+                .get("cleared")
+                .and_then(Value::as_u64)
+                .ok_or(ToolError::TargetUnavailable)?;
+            Ok(json!({"room_id": room, "cleared": cleared}))
         }
     }
-    Ok(json!({"room_id": room, "count": queue.len(), "hands": hands}))
-}
-
-/// `room.hand.ack`: a moderator marks one raised hand acknowledged.
-fn hand_ack(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
-    let o = object(
-        &args,
-        &[
-            "api_version",
-            "room_id",
-            "participant_id",
-            "actor_id",
-            "actor_role",
-        ],
-    )?;
-    api_version_arg(o)?;
-    let (actor, role) = hand_actor(o, HandOp::Ack)?;
-    let room = uuid_arg(o, "room_id", true)?;
-    let req = json!({
-        "api_version": API_VERSION, "room_id": room,
-        "participant_id": uuid_arg(o, "participant_id", true)?,
-        "actor_id": actor, "actor_role": role_wire(role),
-    });
-    let out = m.call(HandOp::Ack.tool(), &req).map_err(tool_err)?;
-    let hand = hand_view(out.get("hand").ok_or(ToolError::TargetUnavailable)?)?;
-    Ok(json!({"room_id": room, "hand": hand}))
-}
-
-/// `room.hand.reset`: a moderator clears the whole queue; returns how many.
-fn hand_reset(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
-    let o = object(&args, &["api_version", "room_id", "actor_id", "actor_role"])?;
-    api_version_arg(o)?;
-    let (actor, role) = hand_actor(o, HandOp::Reset)?;
-    let room = uuid_arg(o, "room_id", true)?;
-    let req = json!({
-        "api_version": API_VERSION, "room_id": room,
-        "actor_id": actor, "actor_role": role_wire(role),
-    });
-    let out = m.call(HandOp::Reset.tool(), &req).map_err(tool_err)?;
-    let cleared = out
-        .get("cleared")
-        .and_then(Value::as_u64)
-        .ok_or(ToolError::TargetUnavailable)?;
-    Ok(json!({"room_id": room, "cleared": cleared}))
 }
 
 fn strip_nulls(v: &mut Value) {
@@ -710,11 +720,13 @@ pub fn build_registry(media: Arc<dyn Media>) -> ToolRegistry {
         "room.unlock",
         Box::new(room_mod_op("room.unlock", &["room_id", "locked"])),
     );
-    reg(&mut r, HandOp::Raise.tool(), Box::new(hand_raise));
-    reg(&mut r, HandOp::Lower.tool(), Box::new(hand_lower));
-    reg(&mut r, HandOp::List.tool(), Box::new(hand_list));
-    reg(&mut r, HandOp::Ack.tool(), Box::new(hand_ack));
-    reg(&mut r, HandOp::Reset.tool(), Box::new(hand_reset));
+    for op in HandOp::ALL {
+        reg(
+            &mut r,
+            op.tool(),
+            Box::new(move |m, ctx, args| hand_call(op, m, ctx, args)),
+        );
+    }
     r
 }
 
@@ -1094,6 +1106,24 @@ mod tests {
     }
 
     const OTHER: &str = "44444444-4444-4444-4444-444444444444";
+    const MEMBER_SCOPES: [&str; 1] = ["community:member"];
+    const MOD_SCOPES: [&str; 2] = ["community:member", "community:moderate"];
+    const ADMIN_SCOPES: [&str; 3] = ["community:member", "community:moderate", "community:admin"];
+
+    /// `args` as the host would deliver them: with the verified actor and its
+    /// host-derived scopes injected under the reserved context key.
+    fn ctx(who: &str, scopes: &[&str], mut args: Value) -> Value {
+        args["__ctx"] = json!({"actor": who, "scopes": scopes});
+        args
+    }
+
+    fn room_args() -> Value {
+        json!({"room_id": ROOM})
+    }
+
+    fn with_participant(p: &str) -> Value {
+        json!({"room_id": ROOM, "participant_id": p})
+    }
 
     /// A host queue of two hands (USER first, OTHER second, OTHER acknowledged).
     fn queue_json() -> Value {
@@ -1102,14 +1132,30 @@ mod tests {
             {"participant_id": OTHER, "raised_at": 11, "acknowledged_at": 12, "acknowledged_by": MOD}]})
     }
 
-    fn actor(who: &str, role: &str) -> Value {
-        json!({"room_id": ROOM, "actor_id": who, "actor_role": role})
+    /// A host answer good enough for every hand op.
+    fn any_hand_answer() -> Value {
+        json!({"room_id": ROOM, "participant_id": USER, "lowered": true, "cleared": 2,
+               "hand": {"participant_id": USER, "raised_at": 1},
+               "hands": [{"participant_id": USER, "raised_at": 1}]})
+    }
+
+    /// Valid args per hand tool (no actor fields, ever).
+    fn good_args(op: HandOp) -> Value {
+        match op {
+            HandOp::LowerOther | HandOp::Ack => with_participant(OTHER),
+            _ => room_args(),
+        }
     }
 
     #[test]
-    fn raise_forwards_v1_with_the_actor_as_participant_and_whitelists() {
+    fn raise_forwards_v1_and_the_verified_actor_never_an_arg() {
         let f = Fake::ok(json!({"hand": {"participant_id": USER, "raised_at": 10, "leak": 1}}));
-        let out = call(&f, "room.hand.raise", actor(USER, "member")).unwrap();
+        let out = call(
+            &f,
+            "room.hand.raise",
+            ctx(USER, &MEMBER_SCOPES, room_args()),
+        )
+        .unwrap();
         assert_eq!(
             out,
             json!({"room_id": ROOM, "hand": {"participant_id": USER, "raised_at": 10}})
@@ -1118,139 +1164,244 @@ mod tests {
             f.calls(),
             vec![(
                 "room.hand.raise".to_string(),
-                json!({"api_version": "v1", "room_id": ROOM, "participant_id": USER})
+                json!({"api_version": "v1", "room_id": ROOM, "participant_id": USER,
+                       "actor_id": USER, "actor_role": "member"})
             )]
         );
     }
 
     #[test]
-    fn lower_self_is_member_level_and_lowering_others_needs_staff() {
-        let f = Fake::ok(json!({"room_id": ROOM, "participant_id": USER, "lowered": true}));
-        let mut own = actor(USER, "member");
-        own["participant_id"] = json!(USER);
-        let out = call(&f, "room.hand.lower", own).unwrap();
-        assert_eq!(
-            out,
-            json!({"room_id": ROOM, "participant_id": USER, "lowered": true})
-        );
-        assert_eq!(
-            f.calls()[0].1,
-            json!({"api_version": "v1", "room_id": ROOM, "participant_id": USER,
-                   "actor_id": USER, "actor_role": "member"})
-        );
-        let mut other = actor(USER, "member");
-        other["participant_id"] = json!(OTHER);
-        assert!(matches!(
-            call(&f, "room.hand.lower", other.clone()),
-            Err(ToolError::NotGranted)
-        ));
-        assert_eq!(f.calls().len(), 1, "refusal never reached the host");
-        other["actor_id"] = json!(MOD);
-        other["actor_role"] = json!("moderator");
-        assert!(call(&f, "room.hand.lower", other).is_ok());
-        // `lowered: false` (no hand) is a no-op answer, not an error.
-        let f = Fake::ok(json!({"lowered": false}));
-        let mut own = actor(USER, "member");
-        own["participant_id"] = json!(USER);
-        assert_eq!(call(&f, "room.hand.lower", own).unwrap()["lowered"], false);
-    }
-
-    #[test]
-    fn list_shows_staff_the_queue_and_members_only_their_own_entry() {
-        let f = Fake::ok(queue_json());
-        let staff = call(&f, "room.hand.list", actor(MOD, "moderator")).unwrap();
-        assert_eq!(staff["count"], 2);
-        assert_eq!(staff["hands"].as_array().unwrap().len(), 2);
-        assert_eq!(staff["hands"][1]["position"], 2);
-        assert_eq!(staff["hands"][1]["acknowledged_by"], MOD);
-        assert!(staff["hands"][0].get("leak").is_none());
-        let mine = call(&f, "room.hand.list", actor(OTHER, "member")).unwrap();
-        assert_eq!(mine["count"], 2, "queue length is visible");
-        assert_eq!(mine["hands"].as_array().unwrap().len(), 1);
-        assert_eq!(mine["hands"][0]["participant_id"], OTHER);
-        assert_eq!(mine["hands"][0]["position"], 2);
-        let none = call(&f, "room.hand.list", actor(MOD, "member")).unwrap();
-        assert!(none["hands"].as_array().unwrap().is_empty());
-        assert_eq!(
-            f.calls()[0],
-            (
-                "room.hand.list".to_string(),
-                json!({"api_version": "v1", "room_id": ROOM})
-            )
-        );
-    }
-
-    #[test]
-    fn ack_and_reset_are_moderator_only_and_forward_the_role() {
-        let f = Fake::ok(json!({"hand": {"participant_id": USER, "raised_at": 1,
-            "acknowledged_at": 2, "acknowledged_by": MOD}, "cleared": 3}));
-        let mut ack = actor(MOD, "moderator");
-        ack["participant_id"] = json!(USER);
-        let out = call(&f, "room.hand.ack", ack.clone()).unwrap();
-        assert_eq!(out["hand"]["acknowledged_by"], MOD);
-        assert_eq!(
-            f.calls()[0].1,
-            json!({"api_version": "v1", "room_id": ROOM, "participant_id": USER,
-                   "actor_id": MOD, "actor_role": "moderator"})
-        );
-        let out = call(&f, "room.hand.reset", actor(MOD, "admin")).unwrap();
-        assert_eq!(out, json!({"room_id": ROOM, "cleared": 3}));
-        let n = f.calls().len();
-        ack["actor_role"] = json!("member");
-        for (tool, args) in [
-            ("room.hand.ack", ack),
-            ("room.hand.reset", actor(USER, "member")),
-            ("room.hand.reset", actor(USER, "guest")),
+    fn every_hand_call_forwards_the_verified_actor_id_and_scope_derived_role() {
+        for (who, scopes, role) in [
+            (USER, &MEMBER_SCOPES[..], "member"),
+            (MOD, &MOD_SCOPES[..], "moderator"),
+            (MOD, &ADMIN_SCOPES[..], "admin"),
         ] {
-            assert!(
-                matches!(call(&f, tool, args), Err(ToolError::NotGranted)),
-                "{tool}"
-            );
+            for op in HandOp::ALL {
+                if op.min_role() > GrantRole::Member && scopes == &MEMBER_SCOPES[..] {
+                    continue;
+                }
+                let f = Fake::ok(any_hand_answer());
+                call(&f, op.tool(), ctx(who, scopes, good_args(op))).unwrap();
+                let calls = f.calls();
+                assert_eq!(calls.len(), 1, "{}", op.tool());
+                assert_eq!(calls[0].0, op.host_op(), "{}", op.tool());
+                assert_eq!(calls[0].1["actor_id"], who, "{} actor_id", op.tool());
+                assert_eq!(calls[0].1["actor_role"], role, "{} actor_role", op.tool());
+                assert_eq!(calls[0].1["api_version"], "v1", "{}", op.tool());
+            }
         }
-        assert_eq!(f.calls().len(), n, "role refusals never reach the host");
     }
 
     #[test]
-    fn guests_cannot_use_any_hand_tool() {
-        let f = Fake::ok(queue_json());
-        for tool in ["room.hand.raise", "room.hand.list"] {
-            assert!(matches!(
-                call(&f, tool, actor(USER, "guest")),
-                Err(ToolError::NotGranted)
-            ));
+    fn a_member_cannot_forge_a_role_or_actor_through_the_arguments() {
+        let f = Fake::ok(any_hand_answer());
+        for op in HandOp::ALL {
+            for forged in [
+                json!({"actor_role": "moderator"}),
+                json!({"actor_role": "admin", "actor_id": MOD}),
+                json!({"actor_id": MOD}),
+                json!({"actor_id": USER}),
+            ] {
+                let mut args = good_args(op);
+                for (k, v) in forged.as_object().unwrap() {
+                    args[k] = v.clone();
+                }
+                let got = call(&f, op.tool(), ctx(USER, &MEMBER_SCOPES, args.clone()));
+                assert!(
+                    matches!(got, Err(ToolError::InvalidArgs(ref m)) if m.contains("derived by the host")),
+                    "{} {args}: {got:?}",
+                    op.tool()
+                );
+            }
+        }
+        assert!(
+            f.calls().is_empty(),
+            "a forged actor never reaches the host"
+        );
+    }
+
+    #[test]
+    fn member_scope_cannot_reach_any_moderator_hand_tool() {
+        let f = Fake::ok(any_hand_answer());
+        for op in [
+            HandOp::LowerOther,
+            HandOp::ListAll,
+            HandOp::Ack,
+            HandOp::Reset,
+        ] {
+            let got = call(&f, op.tool(), ctx(USER, &MEMBER_SCOPES, good_args(op)));
+            assert!(matches!(got, Err(ToolError::NotGranted)), "{}", op.tool());
+        }
+        assert!(f.calls().is_empty(), "scope refusals never reach the host");
+        // The same calls succeed with the moderate scope: the scope is the gate.
+        for op in [
+            HandOp::LowerOther,
+            HandOp::ListAll,
+            HandOp::Ack,
+            HandOp::Reset,
+        ] {
+            call(&f, op.tool(), ctx(MOD, &MOD_SCOPES, good_args(op))).unwrap();
+        }
+        assert_eq!(f.calls().len(), 4);
+    }
+
+    #[test]
+    fn no_verified_actor_or_scope_means_no_hand_call() {
+        let f = Fake::ok(any_hand_answer());
+        for op in HandOp::ALL {
+            // No host context at all.
+            assert!(
+                matches!(
+                    call(&f, op.tool(), good_args(op)),
+                    Err(ToolError::Forbidden)
+                ),
+                "{} without context",
+                op.tool()
+            );
+            // An actor id that is not a UUID is not a verified participant.
+            assert!(
+                matches!(
+                    call(&f, op.tool(), ctx("alice", &ADMIN_SCOPES, good_args(op))),
+                    Err(ToolError::Forbidden)
+                ),
+                "{} non-uuid actor",
+                op.tool()
+            );
+            // A verified actor with no community scope at all (e.g. a guest).
+            assert!(
+                matches!(
+                    call(&f, op.tool(), ctx(USER, &[], good_args(op))),
+                    Err(ToolError::NotGranted)
+                ),
+                "{} no scopes",
+                op.tool()
+            );
         }
         assert!(f.calls().is_empty());
     }
 
     #[test]
+    fn own_hand_tools_act_only_on_the_actor() {
+        let f = Fake::ok(json!({"lowered": true}));
+        let out = call(
+            &f,
+            "room.hand.lower",
+            ctx(USER, &MEMBER_SCOPES, room_args()),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            json!({"room_id": ROOM, "participant_id": USER, "lowered": true})
+        );
+        assert_eq!(f.calls()[0].1["participant_id"], USER);
+        // `lower` has no participant argument: naming someone else is rejected.
+        assert!(matches!(
+            call(
+                &f,
+                "room.hand.lower",
+                ctx(USER, &MEMBER_SCOPES, with_participant(OTHER))
+            ),
+            Err(ToolError::InvalidArgs(_))
+        ));
+        assert_eq!(f.calls().len(), 1);
+        // Moderators lower another participant's hand via `lower_other`.
+        let out = call(
+            &f,
+            "room.hand.lower_other",
+            ctx(MOD, &MOD_SCOPES, with_participant(OTHER)),
+        )
+        .unwrap();
+        assert_eq!(out["participant_id"], OTHER);
+        assert_eq!(f.calls()[1].1["participant_id"], OTHER);
+        assert_eq!(f.calls()[1].1["actor_id"], MOD);
+        // `lowered: false` (no hand) is a no-op answer, not an error.
+        let f = Fake::ok(json!({"lowered": false}));
+        let out = call(
+            &f,
+            "room.hand.lower",
+            ctx(USER, &MEMBER_SCOPES, room_args()),
+        )
+        .unwrap();
+        assert_eq!(out["lowered"], false);
+    }
+
+    #[test]
+    fn list_shows_members_only_their_own_entry_and_list_all_shows_moderators_the_queue() {
+        let f = Fake::ok(queue_json());
+        let mine = call(
+            &f,
+            "room.hand.list",
+            ctx(OTHER, &MEMBER_SCOPES, room_args()),
+        )
+        .unwrap();
+        assert_eq!(mine["count"], 2, "queue length is visible");
+        assert_eq!(mine["hands"].as_array().unwrap().len(), 1);
+        assert_eq!(mine["hands"][0]["participant_id"], OTHER);
+        assert_eq!(mine["hands"][0]["position"], 2);
+        // Even a moderator calling the own-view tool only sees their own entry.
+        let none = call(&f, "room.hand.list", ctx(MOD, &MOD_SCOPES, room_args())).unwrap();
+        assert!(none["hands"].as_array().unwrap().is_empty());
+        assert_eq!(none["count"], 2);
+        let all = call(&f, "room.hand.list_all", ctx(MOD, &MOD_SCOPES, room_args())).unwrap();
+        assert_eq!(all["hands"].as_array().unwrap().len(), 2);
+        assert_eq!(all["hands"][1]["position"], 2);
+        assert_eq!(all["hands"][1]["acknowledged_by"], MOD);
+        assert!(all["hands"][0].get("leak").is_none());
+        assert_eq!(
+            f.calls()[0],
+            (
+                "room.hand.list".to_string(),
+                json!({"api_version": "v1", "room_id": ROOM, "actor_id": OTHER,
+                       "actor_role": "member"})
+            )
+        );
+    }
+
+    #[test]
+    fn ack_and_reset_whitelist_results() {
+        let f = Fake::ok(json!({"hand": {"participant_id": USER, "raised_at": 1,
+            "acknowledged_at": 2, "acknowledged_by": MOD, "leak": 1}, "cleared": 3}));
+        let out = call(
+            &f,
+            "room.hand.ack",
+            ctx(MOD, &MOD_SCOPES, with_participant(USER)),
+        )
+        .unwrap();
+        assert_eq!(out["hand"]["acknowledged_by"], MOD);
+        assert!(out["hand"].get("leak").is_none());
+        assert_eq!(
+            f.calls()[0].1,
+            json!({"api_version": "v1", "room_id": ROOM, "participant_id": USER,
+                   "actor_id": MOD, "actor_role": "moderator"})
+        );
+        let out = call(&f, "room.hand.reset", ctx(MOD, &ADMIN_SCOPES, room_args())).unwrap();
+        assert_eq!(out, json!({"room_id": ROOM, "cleared": 3}));
+    }
+
+    #[test]
     fn invalid_hand_args_never_reach_the_host() {
         let f = Fake::ok(queue_json());
-        let mut v2 = actor(USER, "member");
-        v2["api_version"] = json!("v2");
-        let mut extra = actor(MOD, "moderator");
-        extra["community_id"] = json!("7");
-        let mut name = actor(USER, "member");
-        name["name"] = json!("alice");
-        let mut bad_participant = actor(MOD, "moderator");
-        bad_participant["participant_id"] = json!("alice");
         for (tool, args) in [
-            ("room.hand.raise", v2),
-            ("room.hand.list", extra),
-            ("room.hand.raise", name),
-            ("room.hand.ack", bad_participant.clone()),
-            ("room.hand.lower", bad_participant),
-            ("room.hand.ack", actor(MOD, "moderator")),
             (
                 "room.hand.raise",
-                json!({"room_id": "x", "actor_id": USER, "actor_role": "member"}),
+                json!({"room_id": ROOM, "api_version": "v2"}),
             ),
-            ("room.hand.raise", actor("bob", "member")),
-            ("room.hand.reset", actor(MOD, "root")),
-            ("room.hand.reset", json!({"room_id": ROOM, "actor_id": MOD})),
+            (
+                "room.hand.list",
+                json!({"room_id": ROOM, "community_id": "7"}),
+            ),
+            ("room.hand.raise", json!({"room_id": ROOM, "name": "alice"})),
+            ("room.hand.ack", with_participant("alice")),
+            ("room.hand.lower_other", with_participant("alice")),
+            ("room.hand.ack", room_args()),
+            ("room.hand.raise", json!({"room_id": "x"})),
+            ("room.hand.reset", json!({})),
         ] {
+            let got = call(&f, tool, ctx(MOD, &ADMIN_SCOPES, args.clone()));
             assert!(
-                matches!(call(&f, tool, args.clone()), Err(ToolError::InvalidArgs(_))),
-                "{tool} {args}"
+                matches!(got, Err(ToolError::InvalidArgs(_))),
+                "{tool} {args}: {got:?}"
             );
         }
         assert!(f.calls().is_empty(), "no invalid call may reach the host");
@@ -1258,43 +1409,38 @@ mod tests {
 
     #[test]
     fn hand_host_failures_are_typed_and_malformed_results_fail_loud() {
+        let member = || ctx(USER, &MEMBER_SCOPES, room_args());
+        let staff = || ctx(MOD, &MOD_SCOPES, room_args());
         let f = Fake::err(HostError::Denied("forbidden".into()));
         assert!(matches!(
-            call(&f, "room.hand.raise", actor(USER, "member")),
+            call(&f, "room.hand.raise", member()),
             Err(ToolError::NotGranted)
         ));
         let f = Fake::err(HostError::NotFound);
         assert!(matches!(
-            call(&f, "room.hand.list", actor(USER, "member")),
+            call(&f, "room.hand.list", member()),
             Err(ToolError::InvalidArgs(_))
         ));
         let f = Fake::err(HostError::Unavailable("x".into()));
         assert!(matches!(
-            call(&f, "room.hand.reset", actor(MOD, "admin")),
+            call(&f, "room.hand.reset", staff()),
             Err(ToolError::TargetUnavailable)
         ));
         for (tool, args, bad_host) in [
-            ("room.hand.raise", actor(USER, "member"), json!({})),
+            ("room.hand.raise", member(), json!({})),
             (
                 "room.hand.raise",
-                actor(USER, "member"),
+                member(),
                 json!({"hand": {"raised_at": 1}}),
             ),
+            ("room.hand.list", member(), json!({"hands": "nope"})),
             (
-                "room.hand.list",
-                actor(MOD, "admin"),
-                json!({"hands": "nope"}),
-            ),
-            (
-                "room.hand.list",
-                actor(MOD, "admin"),
+                "room.hand.list_all",
+                staff(),
                 json!({"hands": [{"raised_at": 1}]}),
             ),
-            (
-                "room.hand.reset",
-                actor(MOD, "admin"),
-                json!({"cleared": "many"}),
-            ),
+            ("room.hand.reset", staff(), json!({"cleared": "many"})),
+            ("room.hand.lower", member(), json!({"room_id": ROOM})),
         ] {
             let f = Fake::ok(bad_host);
             assert!(
@@ -1302,13 +1448,6 @@ mod tests {
                 "{tool}"
             );
         }
-        let mut lower = actor(USER, "member");
-        lower["participant_id"] = json!(USER);
-        let f = Fake::ok(json!({"room_id": ROOM}));
-        assert!(matches!(
-            call(&f, "room.hand.lower", lower),
-            Err(ToolError::TargetUnavailable)
-        ));
     }
 
     #[test]
@@ -1316,5 +1455,6 @@ mod tests {
         for op in HandOp::ALL {
             assert!(TOOL_NAMES.contains(&op.tool()), "{}", op.tool());
         }
+        assert_eq!(TOOL_NAMES.len(), 21 + HandOp::ALL.len());
     }
 }

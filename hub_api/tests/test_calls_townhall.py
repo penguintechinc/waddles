@@ -19,6 +19,7 @@ from tests.test_calls_support import (  # noqa: F401  (fixtures are consumed by 
     app,
     client,
     fake,
+    join,
     user_headers,
     user_uuid,
 )
@@ -44,6 +45,7 @@ def _member(overlay_db: Any, *, user_id: int = 700, cid: int | None = None) -> t
 class TestMyHand:
     async def test_no_hand_raised(self, client: Any, overlay_db: Any, fake: FakeRooms) -> None:
         headers, cid = _member(overlay_db)
+        await join(client, cid, headers)
         response = await client.get(_mine(cid), headers=headers)
         assert response.status_code == 200
         assert await response.get_json() == {
@@ -52,6 +54,8 @@ class TestMyHand:
             "acknowledged": False,
             "raised_at": None,
             "acknowledged_at": None,
+            "position": None,
+            "queue_length": 0,
             "success": True,
         }
         rpc, request, metadata = fake.calls[-1]
@@ -63,12 +67,15 @@ class TestMyHand:
     ) -> None:
         mine, cid = _member(overlay_db, user_id=701)
         other, _ = _member(overlay_db, user_id=702, cid=cid)
+        await join(client, cid, mine)
+        await join(client, cid, other)
         base = f"/api/v1/community/{cid}/interact/voice/rooms/{ROOM}"
         await client.post(f"{base}/raise-hand", headers=other)  # someone else's hand
         await client.post(f"{base}/raise-hand", headers=mine)
         body = await (await client.get(_mine(cid), headers=mine)).get_json()
         assert (body["raised"], body["acknowledged"]) == (True, False)
         assert body["raised_at"] is not None and body["acknowledged_at"] is None
+        assert (body["position"], body["queue_length"]) == (2, 2)  # counts only, never who
         # Acknowledge as the moderator side (straight into the fake: the admin route is covered
         # in test_calls_hands.py).
         hand = next(h for h in fake.rooms[(str(cid), ROOM)]["hands"] if h["pid"] == user_uuid(701))
@@ -83,6 +90,8 @@ class TestMyHand:
             "acknowledged",
             "raised_at",
             "acknowledged_at",
+            "position",
+            "queue_length",
             "success",
         }
         assert user_uuid(702) not in str(body) and user_uuid(799) not in str(body)

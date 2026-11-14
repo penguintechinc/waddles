@@ -55,6 +55,12 @@ carries no token: call `join` right before connecting.
 ## Hands
 
 - Member: `POST .../voice/rooms/{room}/raise-hand`, `.../lower-hand`,
-  `GET /api/v1/communities/{id}/calls/rooms/{room}/hands/mine` (own state only).
+  `GET /api/v1/communities/{id}/calls/rooms/{room}/hands/mine` (own state, queue length and
+  position only). svc-streaming authorises every hand RPC by actor: the caller must have joined
+  the room (call `join` first), and nobody can raise or lower for someone else.
 - Admin (`streaming.calls:admin` + community-admin gate): `GET .../raised-hands`,
   `POST .../acknowledge-hand` (`{"user_id": "<participant uuid>"}`), `POST .../reset-hands`.
+  The whole queue, acknowledge and reset need the actor to be recorded as room STAFF
+  server-side. That happens only when the admin has joined the room through `join`: hub-api then
+  mints the join token with the moderate-scope service JWT. A moderation UI must therefore join
+  the room before it lists or acknowledges hands; otherwise svc-streaming answers 403.

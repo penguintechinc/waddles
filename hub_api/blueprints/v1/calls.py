@@ -269,6 +269,8 @@ class MyHandResponse:
     acknowledged: bool
     raised_at: int | None
     acknowledged_at: int | None
+    position: int | None
+    queue_length: int
     success: bool = True
 
 
@@ -694,11 +696,15 @@ async def get_raised_hands(community_id: int, room_name: str) -> Any:
     """The room's raised-hand queue, oldest first, with display names (admin)."""
 
     async def op() -> Any:
-        await _gated_admin(community_id)
-        hands = await _client.list_hands(community_id, _room_id(room_name))
-        names = await _names(community_id, [h.participant_id for h in hands])
+        # The whole queue needs the moderate scope AND an actor recorded as room staff, which
+        # svc-streaming only does for a participant who joined with the staff token (`join`).
+        actor = await _admin_actor(community_id)
+        listed = await _client.list_hands(
+            community_id, _room_id(room_name), actor_id=actor, staff=True
+        )
+        names = await _names(community_id, [h.participant_id for h in listed.hands])
         return RaisedHandsResponse(
-            raised_hands=[_hand_dto(h, names) for h in hands], count=len(hands)
+            raised_hands=[_hand_dto(h, names) for h in listed.hands], count=len(listed.hands)
         )
 
     return await _run(op)
@@ -810,6 +816,7 @@ async def _join(community_id: int, room_id: str) -> JoinResponse:
         publish=grants.publish,
         subscribe=grants.subscribe,
         ttl_secs=call_access.JOIN_TTL_SECS,
+        staff=staff,
     )
 
     @after_this_request  # type: ignore[untyped-decorator,unused-ignore]
@@ -926,13 +933,16 @@ async def get_my_hand(community_id: int, room_id: str) -> Any:
 
     async def op() -> Any:
         participant = await _member_actor(community_id)
-        hand = await _client.my_hand(community_id, _room_id(room_id), participant)
+        mine = await _client.my_hand(community_id, _room_id(room_id), participant)
+        hand = mine.hand
         return MyHandResponse(
             participant_id=participant,
             raised=hand is not None,
             acknowledged=bool(hand and hand.acknowledged_at is not None),
             raised_at=hand.raised_at if hand else None,
             acknowledged_at=hand.acknowledged_at if hand else None,
+            position=mine.position,
+            queue_length=mine.queue_length,
         )
 
     return await _run(op)

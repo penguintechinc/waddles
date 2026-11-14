@@ -73,12 +73,20 @@ def test_every_proto_rpc_is_routed_or_explicitly_unrouted() -> None:
 
 
 def test_client_has_a_method_for_every_routed_rpc() -> None:
-    called = set(re.findall(r'"([A-Z][A-Za-z]+)",\s*\n?\s*SCOPE_', inspect.getsource(RoomsClient)))
+    called = set(
+        re.findall(
+            r'"([A-Z][A-Za-z]+)",\s*\n?\s*(?:SCOPE_|scope\b)', inspect.getsource(RoomsClient)
+        )
+    )
     assert set(ROUTE_RPCS.values()) <= called, set(ROUTE_RPCS.values()) - called
 
 
 def test_client_only_calls_rpcs_that_exist() -> None:
-    called = set(re.findall(r'"([A-Z][A-Za-z]+)",\s*\n?\s*SCOPE_', inspect.getsource(RoomsClient)))
+    called = set(
+        re.findall(
+            r'"([A-Z][A-Za-z]+)",\s*\n?\s*(?:SCOPE_|scope\b)', inspect.getsource(RoomsClient)
+        )
+    )
     assert called, "no RPC calls found -- the scan itself is broken"
     assert called <= _descriptor_rpcs(), called - _descriptor_rpcs()
 

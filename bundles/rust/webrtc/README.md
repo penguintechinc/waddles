@@ -18,28 +18,40 @@ calls the `webrtc` host capability (`wit/waddle-bundle/webrtc.wit`).
 | `recording.start/stop {room_id}` | write | fails loud: no room recording path yet |
 | `room.list`, `room.participants {room_id}` | read | live rooms / participants (UUIDs + media flags only) |
 | `room.leave|kick|mute|unmute {room_id, participant_id, actor_id, actor_role}`, `room.mute_all|lock|unlock {room_id, actor_id, actor_role}` | write | moderation; kick/mute/unmute/mute_all/lock/unlock are moderator-only and carry `required_scope: community:moderate`, `room.leave` is self-service. `mute_all` never mutes `actor_id` |
-| `room.hand.raise {room_id, actor_id, actor_role, api_version?}` | write, `community:member` | the actor raises their OWN hand (idempotent) |
-| `room.hand.lower {room_id, participant_id, actor_id, actor_role}` | write, `community:member` | lower your own hand; lowering someone else's needs a moderator role |
-| `room.hand.list {room_id, actor_id, actor_role}` | read, `community:member` | moderators/admins get the ordered queue; members get only their own entry (+ `position`) and the queue `count` |
-| `room.hand.ack {room_id, participant_id, actor_id, actor_role}` | write, `community:moderate` | acknowledge one raised hand |
-| `room.hand.reset {room_id, actor_id, actor_role}` | write, `community:moderate` | clear the whole queue; returns `cleared` |
+| `room.hand.raise {room_id, api_version?}` | write, `community:member` | the verified caller raises their OWN hand (idempotent) |
+| `room.hand.lower {room_id, api_version?}` | write, `community:member` | the verified caller lowers their OWN hand |
+| `room.hand.list {room_id, api_version?}` | read, `community:member` | the caller's own entry (+ `position`) and the queue `count` -- never other participants |
+| `room.hand.lower_other {room_id, participant_id, api_version?}` | write, `community:moderate` | lower another participant's hand |
+| `room.hand.list_all {room_id, api_version?}` | read, `community:moderate` | the whole ordered queue |
+| `room.hand.ack {room_id, participant_id, api_version?}` | write, `community:moderate` | acknowledge one raised hand |
+| `room.hand.reset {room_id, api_version?}` | write, `community:moderate` | clear the whole queue; returns `cleared` |
 
 ## Raised hands
 
 The queue is AUTHORITATIVE in svc-streaming's `RoomService` (gRPC `RaiseHand`/`LowerHand`/
 `ListHands`/`AcknowledgeHand`/`ResetHands`); neither this bundle nor the rooms app keeps a copy.
-The server clears a participant's hand when they leave, are kicked or the room is deleted. Each
-hand tool validates its args (lowercase UUIDs, `api_version` absent or `"v1"`, unknown fields
-rejected), enforces the contract's minimum role BEFORE the host call (the host re-checks, and the
-manifest `required_scope` is verified by the host before dispatch), then calls the host op of the
-SAME name (`POST /host/v1/webrtc/room.hand.*`, always stating `api_version: "v1"`). Host op shapes
-the server must serve (UUID participant ids; `participant_id` of `raise` is the actor):
+The server clears a participant's hand when they leave, are kicked or the room is deleted.
+
+**Receiver-gated authorization.** A hand tool NEVER takes the actor or a role from its arguments:
+`actor_id` / `actor_role` are refused outright. The actor is the HOST-VERIFIED tool context
+(`ToolContext.actor`, a community user UUID) and the role is derived from its host-derived scopes.
+What the caller may do is decided by WHICH tool it calls: the manifest `required_scope`
+(`community:member` for the own-hand tools, `community:moderate` for `lower_other`, `list_all`,
+`ack`, `reset`) is verified by the host before dispatch, and the tool re-checks the scope on the
+verified context. Each tool also validates its args (lowercase UUIDs, `api_version` absent or
+`"v1"`, unknown fields rejected) and forwards to a host op (`POST /host/v1/webrtc/room.hand.*`,
+always stating `api_version: "v1"`) carrying `actor_id` (the verified actor) and `actor_role`
+(derived from the verified scopes) on EVERY op, so svc-streaming can bind the actor to the
+authenticated call and re-check it against its own room state instead of trusting this bundle.
+`lower_other` / `list_all` use the host op of their own-hand sibling; the host MUST decide by the
+forwarded actor, never by the tool name: a non-staff `actor_role` may lower only its own hand and
+`room.hand.list` must return only the actor's own entry for it.
 
 | Host op | Request | Response |
 |---|---|---|
-| `room.hand.raise` | `{api_version, room_id, participant_id}` | `{room_id, hand:{participant_id, raised_at, acknowledged_at?, acknowledged_by?}}` |
+| `room.hand.raise` | `{api_version, room_id, participant_id (= actor_id), actor_id, actor_role}` | `{room_id, hand:{participant_id, raised_at, acknowledged_at?, acknowledged_by?}}` |
 | `room.hand.lower` | `{api_version, room_id, participant_id, actor_id, actor_role}` | `{room_id, participant_id, lowered}` (`false` = no hand, not an error) |
-| `room.hand.list` | `{api_version, room_id}` | `{room_id, hands:[hand...]}` oldest first |
+| `room.hand.list` | `{api_version, room_id, actor_id, actor_role}` | `{room_id, hands:[hand...]}` oldest first |
 | `room.hand.ack` | `{api_version, room_id, participant_id, actor_id, actor_role}` | `{room_id, hand}`; `not_found` when no such hand |
 | `room.hand.reset` | `{api_version, room_id, actor_id, actor_role}` | `{room_id, cleared}` |
 
