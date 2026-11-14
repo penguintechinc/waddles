@@ -41,6 +41,7 @@ from quart import Quart, request
 from quart_schema import Info, QuartSchema
 from werkzeug.exceptions import HTTPException
 
+import telemetry as hub_telemetry
 from blueprints import register_blueprints
 from bootstrap import BootstrapState, BootstrapStatus, run_bootstrap_loop
 from config import HubAPIConfig
@@ -193,6 +194,12 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     app = Quart(__name__)
     app.config["HUB_API_CONFIG"] = cfg
     app.secret_key = cfg.secret_key
+    # OpenTelemetry request hooks + late-bound ASGI middleware shim (telemetry.py). Registered
+    # FIRST so its before_request runs before every other hook (the rate limiter can short-circuit
+    # later ones) and its after_request runs last, seeing the final status. Providers/exporters
+    # are built in startup() below; until then (and whenever telemetry is disabled) this is a
+    # passthrough.
+    hub_telemetry.install(app)
     # security.md Input Validation -- this app never set its own cap, so
     # Quart's built-in default (16 MiB) was the only thing standing between
     # a request and unbounded memory use, and it happens to sit exactly at
@@ -284,6 +291,11 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
 
         Also binds reference tables.
         """
+        # Telemetry first: SQLAlchemy/gRPC instrumentation must be installed before the DAL
+        # engines and the internal gRPC server are created below. Never raises; a missing
+        # endpoint, the `waddles.disable-hub-api-otel` kill switch or a bad config just leaves it
+        # a logged no-op.
+        app.config["telemetry_runtime"] = await hub_telemetry.start(app, cfg)
         logger.system("Starting hub-api", action="startup", extra={"port": cfg.module_port})
         # Fired as a background task, not awaited to completion: a fresh/behind
         # schema can legitimately take longer than any reasonable startup
@@ -515,6 +527,11 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             except Exception as exc:  # noqa: BLE001 - shutdown must not raise
                 logger.warning(f"Error stopping internal gRPC server on shutdown: {exc}")
         logger.system("hub-api shutdown complete", action="shutdown", result="SUCCESS")
+        telemetry_runtime = app.config.get("telemetry_runtime")
+        if telemetry_runtime is not None:
+            # Last, so every shutdown log/span above is still exported; bounded flush (a dead
+            # collector cannot hold shutdown).
+            await telemetry_runtime.shutdown()
 
     return app
 

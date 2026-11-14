@@ -45,7 +45,7 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-COPY hub_api/app.py hub_api/config.py hub_api/bootstrap.py ./
+COPY hub_api/app.py hub_api/config.py hub_api/bootstrap.py hub_api/telemetry.py ./
 COPY hub_api/blueprints ./blueprints
 COPY hub_api/routers ./routers
 COPY hub_api/openapi ./openapi

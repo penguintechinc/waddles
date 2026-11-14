@@ -56,6 +56,21 @@ cryptography>=44.0.1,<51.0.0
 # convention for httpx/redis/cryptography above.
 grpcio>=1.83.0,<1.84.0
 opentelemetry-instrumentation-grpc==0.66b2
+# fix/hub-api-otel-sdk (owner requirement 2026-11-14: every service emits traces + metrics + logs
+# through OpenTelemetry to SigNoz). hub_api/telemetry.py builds the Tracer/Meter/LoggerProvider and
+# the OTLP/gRPC exporters from the standard OTEL_* env vars only. Exact pins matching the versions
+# libs/flask_core/requirements.txt already locks (sdk + exporter) and the contrib family already
+# pinned above (grpc 0.66b2); only the ASGI + SQLAlchemy instrumentations are net-new packages.
+# OTLP/gRPC only (exporter-otlp-proto-grpc, not the exporter-otlp meta-package that also drags in
+# the unused http exporter).
+opentelemetry-sdk==1.45.2
+opentelemetry-exporter-otlp-proto-grpc==1.45.2
+opentelemetry-instrumentation-asgi==0.66b2
+opentelemetry-instrumentation-sqlalchemy==0.66b2
+# Same range libs/flask_core/requirements.in pins (CVE floor; the Dockerfile's later
+# `pip install libs/flask_core` would otherwise downgrade a >=7 resolution to <7 anyway, and the
+# generated grpc_internal/pb stubs + opentelemetry-proto both target the 5.x/6.x runtime).
+protobuf>=5.29.6,<7.0
 
 # M2b workstreams/usage-metering group (spec Sec5.11/Sec5.12, D30/D31):
 # penguin-dal (R52 coordinator ruling, "we aren't using pydal anymore for
