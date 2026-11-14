@@ -174,6 +174,10 @@ convention = "google"
 # `block_anonymization`) from `tests/test_data_privacy_erasure.py`; a pytest fixture used as a
 # test parameter is, to ruff, a redefinition of the imported name.
 "tests/test_ban_suppression.py" = ["F811"]
+# Calls (RTC) suites import the shared in-process RoomsService fixtures (`fake`, `app`,
+# `client`) from `tests/test_calls_support.py`; same F811 rationale as the entry above.
+"tests/test_calls_*.py" = ["F811"]
+"tests/test_v1_calls_blueprint.py" = ["F811"]
 # Provider/connection framework (migration 0058) -- request/response DTO fields are camelCase to
 # match every other v1 blueprint's JSON contract (security.md Output Validation: the JSON key IS
 # the field name); S101 is the standard tenant_middleware postcondition assert.
