@@ -560,48 +560,60 @@ class UnlockRoomResponse(_message.Message):
     def __init__(self, room_id: _Optional[str] = ..., locked: _Optional[bool] = ...) -> None: ...
 
 class ListHandsRequest(_message.Message):
-    __slots__ = ("api_version", "community_id", "room_id")
+    __slots__ = ("api_version", "community_id", "room_id", "actor_id")
     API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
+    ACTOR_ID_FIELD_NUMBER: _ClassVar[int]
     api_version: str
     community_id: str
     room_id: str
+    actor_id: str
     def __init__(
         self,
         api_version: _Optional[str] = ...,
         community_id: _Optional[str] = ...,
         room_id: _Optional[str] = ...,
+        actor_id: _Optional[str] = ...,
     ) -> None: ...
 
 class ListHandsResponse(_message.Message):
-    __slots__ = ("room_id", "hands")
+    __slots__ = ("room_id", "hands", "count", "position")
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
     HANDS_FIELD_NUMBER: _ClassVar[int]
+    COUNT_FIELD_NUMBER: _ClassVar[int]
+    POSITION_FIELD_NUMBER: _ClassVar[int]
     room_id: str
     hands: _containers.RepeatedCompositeFieldContainer[RaisedHand]
+    count: int
+    position: int
     def __init__(
         self,
         room_id: _Optional[str] = ...,
         hands: _Optional[_Iterable[_Union[RaisedHand, _Mapping]]] = ...,
+        count: _Optional[int] = ...,
+        position: _Optional[int] = ...,
     ) -> None: ...
 
 class RaiseHandRequest(_message.Message):
-    __slots__ = ("api_version", "community_id", "room_id", "participant_id")
+    __slots__ = ("api_version", "community_id", "room_id", "participant_id", "actor_id")
     API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
     PARTICIPANT_ID_FIELD_NUMBER: _ClassVar[int]
+    ACTOR_ID_FIELD_NUMBER: _ClassVar[int]
     api_version: str
     community_id: str
     room_id: str
     participant_id: str
+    actor_id: str
     def __init__(
         self,
         api_version: _Optional[str] = ...,
         community_id: _Optional[str] = ...,
         room_id: _Optional[str] = ...,
         participant_id: _Optional[str] = ...,
+        actor_id: _Optional[str] = ...,
     ) -> None: ...
 
 class RaiseHandResponse(_message.Message):
