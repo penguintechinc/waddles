@@ -96,39 +96,25 @@ disables AOT (ERROR at startup, every load falls back). Rotation: the key set is
 `key_id → public key`; configure the new and previous ids together, re-publish, then drop the old id.
 Logs and errors carry key ids and paths only, never key material.
 
-### Owner: provision the precompile signing keypair
+### Precompile signing keypair: what exists today
 
-The keypair is NEW (separate from the bundle-approval key). Nothing in CI or an agent generates it.
-On `alpha`/`local` (`global.deploymentTier`) the chart's `auto-provision-keys` Job generates it if the
-Secret is missing — no action needed. On beta/gamma/prod (or to pin your own key on alpha) the owner runs:
+The keypair is NEW and separate from the bundle-approval key. This change adds no new generation
+mechanism: key provisioning is whatever the chart already does, and the platform secret-store design
+(auto-generate on first run, persisted outside the chart) is pending owner decisions. As it stands:
 
-```bash
-# 1. generate + install (private Secret for the publisher, public ConfigMap for executors).
-#    Private key lives only in a 0600 temp file, shredded on exit; only the public key is printed.
-make generate-precompile-signing-key KEY_ID=<key-id> \
-     KUBE_CONTEXT=<ctx> NAMESPACE=waddlebot FULLNAME=<helm fullname, e.g. waddlebot>
-#   writes Secret      <fullname>-executor-precompile-signing         (PRECOMPILE_SIGNING_PRIVATE_KEY, PRECOMPILE_SIGNING_KEY_ID)
-#   writes ConfigMap   <fullname>-executor-precompile-signing-public  (PRECOMPILE_SIGNING_PUBLIC_KEYS = {"<id>":"<pub>"})
-#   existing ids in the ConfigMap are kept, so a re-run is a rotation (new + previous accepted)
+| Piece | Where | Who/what creates it |
+|---|---|---|
+| Private seed (`PRECOMPILE_SIGNING_PRIVATE_KEY`, base64 32 bytes) + `PRECOMPILE_SIGNING_KEY_ID` | Secret `<fullname>-executor-precompile-signing`, mounted as a FILE into the `executor-precompile` sign step only | chart `auto-provision-keys` Job on alpha/local (`global.deploymentTier`); beta/gamma/prod must pre-create it and set `autoProvisionedKeys.precompileSigning.externalSecret: true` |
+| Public keys (`PRECOMPILE_SIGNING_PUBLIC_KEYS` = `{"<key_id>": "<base64 public key>"}`) | ConfigMap `<fullname>-executor-precompile-signing-public` | derived from the Secret by the same Job (re-derived on every run) |
+| Executor consumption | env `PRECOMPILE_SIGNING_PUBLIC_KEYS` on `svc-bundles-executor` (Helm #1248 wires the ConfigMap) | — |
+| Bucket write identity | `svc-bundles-precompiler` (`PRECOMPILER_S3_*`), Write only under `precompiled/` | chart secrets |
 
-# 2. values (env values file): stop the chart auto-generating, pin the id
-#    autoProvisionedKeys.precompileSigning.externalSecret: true
-#    autoProvisionedKeys.precompileSigning.keyId: <key-id>
-
-# 3. executors must read the public ConfigMap as PRECOMPILE_SIGNING_PUBLIC_KEYS
-#    (Helm: configMapKeyRef <fullname>-executor-precompile-signing-public / PRECOMPILE_SIGNING_PUBLIC_KEYS)
-
-# 4. publish artifacts under the new key: helm upgrade (backfill hook), then watch
-kubectl -n waddlebot logs job/<fullname>-executor-precompile-backfill
-#    verify: executor_precompile_fallback_total stops increasing; executor_load_duration_seconds{source="aot"} appears
-
-# 5. after a rotation, remove the previous id once every artifact has been re-signed:
-kubectl -n waddlebot edit configmap <fullname>-executor-precompile-signing-public
-```
-
-Caveat for the Helm owner: the chart's auto-provision Job re-derives and rewrites the public
-ConfigMap from the Secret's private key on every run, which drops extra (previous) ids; keep the
-Job out of the way (`externalSecret: true`) while a rotation window is open.
+Owner checklist: (1) on alpha nothing to do once #1248's executor env lands; (2) elsewhere, supply the
+Secret/ConfigMap above via the environment's secret mechanism; (3) let the backfill hook run, then confirm
+`executor_precompile_fallback_total` stops increasing and `executor_load_duration_seconds{source="aot"}`
+appears. Rotation: configure the new and previous `key_id` together in the public-key map, re-publish,
+then drop the old id. Caveat for the Helm owner: the auto-provision Job re-derives the public ConfigMap from
+the current private key on every run, which would drop a retained previous id.
 
 ## Bounds (nothing grows without a cap)
 

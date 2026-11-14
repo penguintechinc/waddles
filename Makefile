@@ -5,7 +5,7 @@
         build-superpenguin-roll-bundle test-superpenguin-roll-e2e test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs check-pii-egress check-bundle-hygiene generate-bundle-signing-key generate-precompile-signing-key test-ollama-realpath \
+        check-no-stubs check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
         test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
@@ -250,17 +250,6 @@ generate-bundle-signing-key:
 	@test -n "$(KUBE_CONTEXT)" || { echo "KUBE_CONTEXT is required" >&2; exit 1; }
 	@test -n "$(NAMESPACE)" || { echo "NAMESPACE is required" >&2; exit 1; }
 	@bash scripts/generate-bundle-signing-key.sh "$(KEY_ID)" "$(KUBE_CONTEXT)" "$(NAMESPACE)" $(SECRET_NAME)
-
-# Generates a fresh DEDICATED Ed25519 precompile (.cwasm) signing keypair: private Secret for the
-# executor-precompile publisher + public-key ConfigMap for executors. OWNER-run (secret-store
-# write); see scripts/generate-precompile-signing-key.sh and docs/operations/executor-precompile.md.
-# Usage: make generate-precompile-signing-key KEY_ID=<key-id> KUBE_CONTEXT=dal2alpha NAMESPACE=waddlebot FULLNAME=waddlebot
-generate-precompile-signing-key:
-	@test -n "$(KEY_ID)" || { echo "KEY_ID is required" >&2; exit 1; }
-	@test -n "$(KUBE_CONTEXT)" || { echo "KUBE_CONTEXT is required" >&2; exit 1; }
-	@test -n "$(NAMESPACE)" || { echo "NAMESPACE is required" >&2; exit 1; }
-	@test -n "$(FULLNAME)" || { echo "FULLNAME is required" >&2; exit 1; }
-	@bash scripts/generate-precompile-signing-key.sh "$(KEY_ID)" "$(KUBE_CONTEXT)" "$(NAMESPACE)" "$(FULLNAME)"
 
 # C#-toolchain spike (spec S18 R13), now ported onto waddle-sdk-cs: rebuilds
 # bundles/csharp/csping from source in its pinned, checksum-verified,
