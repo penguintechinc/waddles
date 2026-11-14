@@ -49,9 +49,8 @@ pub mod pb {
     tonic::include_proto!("waddles.hub.internal.v1");
 }
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use pb::distribution_service_client::DistributionServiceClient;
 use pb::identity_service_client::IdentityServiceClient;
@@ -66,7 +65,7 @@ use pb::{
 use service_auth::{HttpTimeouts, HubChannel, MachineJwtClient, ServiceAuthError};
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Status};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Server-side ceiling is 5s (`hub_api/grpc_internal/interceptors.py::
 /// MAX_RPC_DEADLINE_SECONDS`) -- stay comfortably under it so a client
@@ -92,67 +91,152 @@ pub enum HubClientError {
     },
 }
 
+/// Default consecutive-failure threshold of every breaker this client owns.
+///
+/// One failed *call* is at most `1 + max_retries` (= 3) attempt failures, so a single failed
+/// -- and, via the single-flight layers, coalesced -- call can never open a breaker on its
+/// own; it takes two fully failed calls, or five failed attempts spread over distinct calls.
+pub const BREAKER_FAILURE_THRESHOLD: u32 = 5;
+
+/// How long an open breaker sheds calls before admitting its single half-open probe.
+pub const BREAKER_RESET_AFTER: Duration = Duration::from_secs(30);
+
+/// Mutable state of a [`CircuitBreaker`], guarded by one short-lived `std::sync::Mutex`
+/// (never held across an `.await`).
+#[derive(Default)]
+struct BreakerState {
+    consecutive_failures: u32,
+    /// `Some` while open (or half-open): when the current open window started.
+    opened_at: Option<Instant>,
+    /// `Some` while a half-open probe is in flight: when its lease was granted.
+    probe_started: Option<Instant>,
+    /// Bumped on every open / re-open / close transition. A failure from a call admitted in an
+    /// earlier generation (a straggler that was already in flight when the breaker tripped)
+    /// is ignored, so a burst of N concurrent failures counts once toward opening and can
+    /// neither re-stamp the open window nor re-log the transition.
+    generation: u64,
+}
+
 /// Three-state (closed/open/half-open) circuit breaker shared across every
-/// RPC this client makes. Opens after `failure_threshold` consecutive
-/// failures; after `reset_after`, allows exactly one probe call
-/// (half-open) whose outcome flips it fully closed (success) or back open
-/// (failure) -- the standard breaker state machine, sized small here since
-/// this client's only job is protecting itself from a wedged hub-api, not
-/// coordinating cluster-wide load shedding.
+/// RPC this client makes.
+///
+/// - **Closed -> open:** after `failure_threshold` consecutive failures (default
+///   [`BREAKER_FAILURE_THRESHOLD`]); the transition happens **once** and is logged once.
+/// - **Open:** every call is shed ([`HubClientError::CircuitOpen`]) for `reset_after`
+///   (default [`BREAKER_RESET_AFTER`]). Failures of calls that were already in flight when it
+///   opened are ignored (they carry an older generation) -- they neither extend the window nor
+///   log again.
+/// - **Half-open:** after `reset_after`, **exactly one** caller is admitted as the probe
+///   (a lease that lapses after another `reset_after` if the probe is cancelled); every other
+///   caller keeps being shed until the probe resolves. A successful probe closes the breaker,
+///   a failed one re-opens it for a fresh window, a caller-error probe
+///   ([`CircuitBreaker::record_neutral`]) releases the lease so the next caller probes.
+///
+/// Sized small on purpose: this client's only job is protecting itself from a wedged hub-api,
+/// not coordinating cluster-wide load shedding.
 pub struct CircuitBreaker {
     failure_threshold: u32,
     reset_after: Duration,
-    consecutive_failures: AtomicU32,
-    opened_at_epoch_ms: AtomicU64,
+    state: Mutex<BreakerState>,
 }
 
 impl CircuitBreaker {
+    /// A closed breaker opening after `failure_threshold` consecutive failures and shedding
+    /// calls for `reset_after` before its half-open probe.
     pub fn new(failure_threshold: u32, reset_after: Duration) -> Self {
         Self {
             failure_threshold,
             reset_after,
-            consecutive_failures: AtomicU32::new(0),
-            opened_at_epoch_ms: AtomicU64::new(0),
+            state: Mutex::new(BreakerState::default()),
         }
     }
 
-    /// Returns `true` if a call may proceed right now (closed, or
-    /// half-open and this is the one allowed probe).
+    /// Locks the state, recovering a poisoned lock (plain counters, nothing torn).
+    fn lock(&self) -> MutexGuard<'_, BreakerState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Returns `true` if a call may proceed right now (closed, or half-open and this is the
+    /// one allowed probe).
     fn allow(&self) -> bool {
-        let opened_at = self.opened_at_epoch_ms.load(Ordering::Acquire);
-        if opened_at == 0 {
-            return true; // closed
-        }
-        let now = now_ms();
-        if now.saturating_sub(opened_at) >= self.reset_after.as_millis() as u64 {
-            // Half-open: let exactly one probe through by optimistically
-            // clearing `opened_at` here; a losing race just means two
-            // probes instead of one, which is harmless.
-            self.opened_at_epoch_ms.store(0, Ordering::Release);
-            return true;
-        }
-        false
+        self.admit().is_some()
     }
 
+    /// Admission with the generation the caller must hand back to
+    /// [`CircuitBreaker::record_failure_from`]; `None` when the call must be shed.
+    fn admit(&self) -> Option<u64> {
+        let mut state = self.lock();
+        let Some(opened_at) = state.opened_at else {
+            return Some(state.generation); // closed
+        };
+        let now = Instant::now();
+        if now.saturating_duration_since(opened_at) < self.reset_after {
+            return None; // open
+        }
+        let lease_free = state
+            .probe_started
+            .is_none_or(|t| now.saturating_duration_since(t) >= self.reset_after);
+        if lease_free {
+            state.probe_started = Some(now);
+            debug!("hub_client.circuit_half_open_probe");
+            Some(state.generation)
+        } else {
+            None // half-open, the one probe is already in flight
+        }
+    }
+
+    /// A call succeeded: closes the breaker and clears the failure count.
     fn record_success(&self) {
-        self.consecutive_failures.store(0, Ordering::Release);
-        self.opened_at_epoch_ms.store(0, Ordering::Release);
+        let mut state = self.lock();
+        if state.opened_at.is_some() {
+            state.generation += 1;
+            info!("hub_client.circuit_closed");
+        }
+        state.consecutive_failures = 0;
+        state.opened_at = None;
+        state.probe_started = None;
     }
 
+    /// A call failed (server-health failure), attributed to the current generation.
     fn record_failure(&self) {
-        let failures = self.consecutive_failures.fetch_add(1, Ordering::AcqRel) + 1;
-        if failures >= self.failure_threshold {
-            self.opened_at_epoch_ms.store(now_ms(), Ordering::Release);
-            warn!(failures, "hub_client.circuit_opened");
+        let generation = self.lock().generation;
+        self.record_failure_from(generation);
+    }
+
+    /// A call admitted under `generation` failed. Ignored if the breaker has changed state
+    /// since (the call was a straggler of an already-tripped burst).
+    fn record_failure_from(&self, generation: u64) {
+        let mut state = self.lock();
+        if state.generation != generation {
+            debug!("hub_client.circuit_stale_failure_ignored");
+            return;
+        }
+        if state.opened_at.is_some() {
+            // The half-open probe failed: a fresh open window.
+            state.opened_at = Some(Instant::now());
+            state.probe_started = None;
+            state.generation += 1;
+            warn!("hub_client.circuit_reopened");
+            return;
+        }
+        state.consecutive_failures += 1;
+        if state.consecutive_failures >= self.failure_threshold {
+            state.opened_at = Some(Instant::now());
+            state.probe_started = None;
+            state.generation += 1;
+            warn!(
+                failures = state.consecutive_failures,
+                "hub_client.circuit_opened"
+            );
         }
     }
-}
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_millis() as u64
+    /// A call was answered-and-declined (caller error): proves reachability, not health, so
+    /// the failure count and open/closed state are untouched -- but a half-open probe lease
+    /// is released so the next caller probes instead of waiting out the lease.
+    fn record_neutral(&self) {
+        self.lock().probe_started = None;
+    }
 }
 
 /// Whether a transient gRPC failure is safe to retry -- `UNAVAILABLE`
@@ -348,7 +432,7 @@ impl HubClient {
                 sa_token_path,
                 scope,
             )),
-            circuits: Circuits::new(5, Duration::from_secs(30)),
+            circuits: Circuits::new(BREAKER_FAILURE_THRESHOLD, BREAKER_RESET_AFTER),
             deadline: DEFAULT_RPC_DEADLINE,
             max_retries: 2,
         })
@@ -390,7 +474,7 @@ impl HubClient {
             key: KeyServiceClient::new(channel.clone()),
             distribution: DistributionServiceClient::new(channel),
             token_client,
-            circuits: Circuits::new(5, Duration::from_secs(30)),
+            circuits: Circuits::new(BREAKER_FAILURE_THRESHOLD, BREAKER_RESET_AFTER),
             deadline: DEFAULT_RPC_DEADLINE,
             max_retries: 2,
         }
@@ -616,9 +700,9 @@ impl HubClient {
     {
         let mut attempt = 0;
         loop {
-            if !circuit.allow() {
+            let Some(generation) = circuit.admit() else {
                 return Err(HubClientError::CircuitOpen);
-            }
+            };
             match make_call().await {
                 Ok(value) => {
                     circuit.record_success();
@@ -627,7 +711,7 @@ impl HubClient {
                 Err(HubClientError::Grpc(status))
                     if is_retryable(&status) && attempt < max_retries =>
                 {
-                    circuit.record_failure();
+                    circuit.record_failure_from(generation);
                     attempt += 1;
                     let backoff = Duration::from_millis(50 * 2u64.pow(attempt));
                     debug!(attempt, code = ?status.code(), "hub_client.retrying");
@@ -635,10 +719,11 @@ impl HubClient {
                 }
                 Err(HubClientError::Grpc(status)) if is_caller_error(&status) => {
                     debug!(code = ?status.code(), "hub_client.caller_error_breaker_neutral");
+                    circuit.record_neutral();
                     return Err(HubClientError::Grpc(status));
                 }
                 Err(other) => {
-                    circuit.record_failure();
+                    circuit.record_failure_from(generation);
                     return Err(other);
                 }
             }
@@ -649,6 +734,7 @@ impl HubClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn circuit_breaker_opens_after_threshold_and_half_opens_after_reset() {
@@ -706,7 +792,7 @@ mod tests {
                 "/nonexistent/sa-token",
                 "identity:handle:resolve",
             )),
-            circuits: Circuits::new(5, Duration::from_secs(30)),
+            circuits: Circuits::new(BREAKER_FAILURE_THRESHOLD, BREAKER_RESET_AFTER),
             deadline: DEFAULT_RPC_DEADLINE,
             max_retries: 2,
         }
@@ -976,7 +1062,7 @@ mod client_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use service_auth::test_support::{MintReply, MockHub};
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const DEAD_ENDPOINT: &str = "http://127.0.0.1:1";
 
@@ -1065,11 +1151,6 @@ mod client_tests {
         assert!(!breaker.allow(), "still open until reset_after elapses");
         breaker.record_success();
         assert!(breaker.allow(), "success closes the breaker");
-    }
-
-    #[test]
-    fn now_ms_is_nonzero() {
-        assert!(now_ms() > 0);
     }
 
     #[tokio::test]
@@ -1250,6 +1331,88 @@ mod client_tests {
             .unwrap_err();
         assert!(matches!(err, HubClientError::Auth(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_burst_of_in_flight_failures_opens_the_breaker_once_and_never_extends_the_window() {
+        // 5 calls admitted while closed, all failing after the 3rd tripped the breaker: only
+        // the first 3 count; the 2 stragglers carry a stale generation and are ignored, so
+        // they neither re-stamp the open window nor re-log the transition.
+        let breaker = CircuitBreaker::new(3, Duration::from_millis(120));
+        let admitted: Vec<u64> = (0..5)
+            .map(|_| breaker.admit().expect("closed admits"))
+            .collect();
+        for generation in &admitted[..3] {
+            breaker.record_failure_from(*generation);
+        }
+        assert!(!breaker.allow(), "opened by the third failure");
+        std::thread::sleep(Duration::from_millis(70));
+        for generation in &admitted[3..] {
+            breaker.record_failure_from(*generation);
+        }
+        std::thread::sleep(Duration::from_millis(70));
+        assert!(
+            breaker.allow(),
+            "stale failures must not have re-stamped the window: 140 ms > 120 ms since it opened"
+        );
+    }
+
+    #[test]
+    fn half_open_admits_exactly_one_probe_and_a_failed_probe_reopens() {
+        let breaker = CircuitBreaker::new(1, Duration::from_millis(30));
+        breaker.record_failure();
+        assert!(!breaker.allow());
+        std::thread::sleep(Duration::from_millis(40));
+        let probes: Vec<Option<u64>> = (0..10).map(|_| breaker.admit()).collect();
+        assert_eq!(
+            probes.iter().filter(|p| p.is_some()).count(),
+            1,
+            "ten concurrent callers at half-open: exactly one probe, nine shed"
+        );
+        let probe_generation = probes.into_iter().flatten().next().expect("one probe");
+        breaker.record_failure_from(probe_generation);
+        assert!(!breaker.allow(), "a failed probe re-opens a fresh window");
+        std::thread::sleep(Duration::from_millis(40));
+        let probe = breaker.admit().expect("next window probes again");
+        breaker.record_success();
+        assert!(breaker.allow(), "a successful probe closes the breaker");
+        // A late failure from the closed-out generation must not re-open it.
+        breaker.record_failure_from(probe);
+        assert!(breaker.allow());
+    }
+
+    #[test]
+    fn a_caller_error_probe_releases_the_lease_without_closing_the_breaker() {
+        let breaker = CircuitBreaker::new(1, Duration::from_millis(30));
+        breaker.record_failure();
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(breaker.admit().is_some(), "the probe");
+        assert!(breaker.admit().is_none(), "lease held");
+        breaker.record_neutral();
+        assert!(
+            breaker.admit().is_some(),
+            "neutral outcome frees the lease so the next caller probes"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_failed_call_with_all_its_retries_cannot_open_a_default_breaker() {
+        let client = client_with("http://t", "/sa", 2);
+        let breaker = CircuitBreaker::new(BREAKER_FAILURE_THRESHOLD, BREAKER_RESET_AFTER);
+        let calls = AtomicUsize::new(0);
+        let err = client
+            .call_with_retry(&breaker, client.max_retries, || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(HubClientError::Grpc(Status::unavailable("down")))
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HubClientError::Grpc(_)));
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "1 try + 2 retries");
+        assert!(
+            breaker.allow(),
+            "3 attempt failures < threshold {BREAKER_FAILURE_THRESHOLD}: one failed call is not an outage"
+        );
     }
 
     #[tokio::test]
