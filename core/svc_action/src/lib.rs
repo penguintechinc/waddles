@@ -2127,13 +2127,8 @@ mod tests {
         // SAFETY: serialized by ENV_LOCK; no other test reads OTEL env.
         unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT") };
         let mut config = ephemeral_config();
-        config.cli = CliConfig::parse_from([
-            "svc-action",
-            "--http-port",
-            "0",
-            "--metrics-port",
-            "0",
-        ]);
+        config.cli =
+            CliConfig::parse_from(["svc-action", "--http-port", "0", "--metrics-port", "0"]);
         // Shutdown futures resolve immediately, so the servers bind, log,
         // and drain right away instead of blocking on a real OS signal.
         let result =
