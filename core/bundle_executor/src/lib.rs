@@ -266,6 +266,13 @@ pub async fn run() -> Result<(), ExecutorError> {
     crate::signing::PlatformPublicKeys::from_cli_required(&cfg)?;
     cfg.validate_host_api_tls()?;
     cfg.validate_executor_id()?;
+    match cfg.validate_memory_budget()? {
+        Some(warning) => tracing::warn!(%warning, "memory budget check"),
+        None => tracing::info!(
+            memory_budget_mb = cfg.executor_memory_budget_mb,
+            "memory budget fits inside the container limit"
+        ),
+    }
 
     init_telemetry();
     // Metrics pipeline (OTLP export only when `OTEL_EXPORTER_OTLP_ENDPOINT` is

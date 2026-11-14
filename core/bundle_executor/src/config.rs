@@ -255,6 +255,15 @@ pub struct CliConfig {
     #[arg(long, env = "EXECUTOR_MEMORY_BUDGET_MB", default_value_t = 8192)]
     pub executor_memory_budget_mb: u64,
 
+    /// The container's memory limit in MiB, used ONLY to validate
+    /// `EXECUTOR_MEMORY_BUDGET_MB` at startup (the budget must leave room for
+    /// linear memories, Cranelift state and the runtime inside the limit).
+    /// Unset = auto-detected from the cgroup (`memory.max`); when neither is
+    /// known the check is skipped with a WARN. Set it explicitly under gVisor,
+    /// where the cgroup file may not reflect the pod limit.
+    #[arg(long, env = "EXECUTOR_CONTAINER_MEMORY_LIMIT_MB")]
+    pub executor_container_memory_limit_mb: Option<u64>,
+
     /// JSON map `{key_id: base64 Ed25519 public key}` of the DEDICATED
     /// precompiler signing key(s) (ConfigMap
     /// `<fullname>-executor-precompile-signing-public`). The ONLY keys a
@@ -425,6 +434,68 @@ pub struct CliConfig {
     pub connector_pin_digest_spectrum: Option<String>,
 }
 
+/// Share of the container limit above which a budget is flagged as tight.
+const BUDGET_WARN_PERCENT: u64 = 70;
+
+/// Pure budget-vs-limit rule: a budget at or above the container limit can only
+/// end in an OOM kill, so it refuses to start; a budget above
+/// [`BUDGET_WARN_PERCENT`] of the limit, an unlimited budget (`0`) under a
+/// known limit, or an unknown limit each return a warning string.
+pub fn check_memory_budget(
+    budget_mb: u64,
+    container_limit_mb: Option<u64>,
+) -> Result<Option<String>, ExecutorError> {
+    let Some(limit) = container_limit_mb else {
+        return Ok(Some(
+            "container memory limit unknown (no EXECUTOR_CONTAINER_MEMORY_LIMIT_MB, no readable \
+             cgroup limit); EXECUTOR_MEMORY_BUDGET_MB was not validated"
+                .to_string(),
+        ));
+    };
+    if budget_mb == 0 {
+        return Ok(Some(format!(
+            "EXECUTOR_MEMORY_BUDGET_MB=0 (unlimited) under a {limit} MiB container limit: \
+             resident compiled modules are unbounded"
+        )));
+    }
+    if budget_mb >= limit {
+        return Err(ExecutorError::Config(format!(
+            "EXECUTOR_MEMORY_BUDGET_MB={budget_mb} must be below the container memory limit \
+             ({limit} MiB): compiled modules share the limit with linear memories and compile \
+             state"
+        )));
+    }
+    if budget_mb.saturating_mul(100) > limit.saturating_mul(BUDGET_WARN_PERCENT) {
+        return Ok(Some(format!(
+            "EXECUTOR_MEMORY_BUDGET_MB={budget_mb} is above {BUDGET_WARN_PERCENT}% of the \
+             {limit} MiB container limit; little headroom remains for instances and compiles"
+        )));
+    }
+    Ok(None)
+}
+
+/// Reads the container memory limit (MiB) from the cgroup v2 `memory.max` or v1
+/// `memory.limit_in_bytes`; `None` when unlimited or unreadable.
+fn cgroup_memory_limit_mb() -> Option<u64> {
+    [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ]
+    .iter()
+    .find_map(|path| std::fs::read_to_string(path).ok())
+    .and_then(|raw| parse_cgroup_limit_mb(&raw))
+}
+
+/// Parses one cgroup limit file body into MiB (`max`/huge v1 sentinel = none).
+fn parse_cgroup_limit_mb(raw: &str) -> Option<u64> {
+    let bytes: u64 = raw.trim().parse().ok()?;
+    // cgroup v1 reports "unlimited" as a value near i64::MAX.
+    if bytes == 0 || bytes >= (1 << 60) {
+        return None;
+    }
+    Some(bytes / (1024 * 1024))
+}
+
 impl CliConfig {
     /// Resolved compile-concurrency cap: the explicit value when >= 1,
     /// else `min(4, available CPUs)`. Kept small because each in-flight
@@ -471,6 +542,25 @@ impl CliConfig {
         self.executor_memory_budget_mb.saturating_mul(1024 * 1024)
     }
 
+    /// The container memory limit in MiB: the explicit
+    /// `EXECUTOR_CONTAINER_MEMORY_LIMIT_MB`, else the cgroup limit, else `None`.
+    #[must_use]
+    pub fn container_memory_limit_mb(&self) -> Option<u64> {
+        self.executor_container_memory_limit_mb
+            .filter(|v| *v > 0)
+            .or_else(cgroup_memory_limit_mb)
+    }
+
+    /// Startup validation of `EXECUTOR_MEMORY_BUDGET_MB` against the container
+    /// limit (see [`check_memory_budget`]). `Ok(Some(msg))` is a warning the
+    /// caller must log; `Err` refuses to start.
+    pub fn validate_memory_budget(&self) -> Result<Option<String>, ExecutorError> {
+        check_memory_budget(
+            self.executor_memory_budget_mb,
+            self.container_memory_limit_mb(),
+        )
+    }
+
     /// A config good enough to build the wasmtime `Engine`/`Linker` with
     /// but nothing else -- used only by `run_healthcheck`, which probes
     /// exactly that (this process has no HTTP surface to probe, spec
@@ -508,6 +598,7 @@ impl CliConfig {
             bundle_max_component_bytes: 33_554_432,
             bundle_max_precompiled_bytes: 268_435_456,
             executor_memory_budget_mb: 8192,
+            executor_container_memory_limit_mb: None,
             flag_disable_aot_precompile: false,
             precompile_signing_public_keys: None,
             executor_id: None,
@@ -869,6 +960,38 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn memory_budget_must_be_below_the_container_limit() {
+        // at or above the limit: refuse to start
+        assert!(check_memory_budget(12_288, Some(12_288)).is_err());
+        assert!(check_memory_budget(16_384, Some(12_288)).is_err());
+        // default budget under the shipped 12Gi limit: fine, no warning
+        assert_eq!(check_memory_budget(8192, Some(12_288)).unwrap(), None);
+        // tight (>70%): starts, warns
+        assert!(check_memory_budget(10_000, Some(12_288)).unwrap().is_some());
+        // unlimited budget under a known limit, or unknown limit: warns
+        assert!(check_memory_budget(0, Some(12_288)).unwrap().is_some());
+        assert!(check_memory_budget(8192, None).unwrap().is_some());
+    }
+
+    #[test]
+    fn explicit_container_limit_overrides_and_is_validated() {
+        let mut cfg = CliConfig::for_healthcheck();
+        cfg.executor_memory_budget_mb = 4096;
+        cfg.executor_container_memory_limit_mb = Some(4096);
+        assert!(cfg.validate_memory_budget().is_err());
+        cfg.executor_container_memory_limit_mb = Some(6144);
+        assert_eq!(cfg.validate_memory_budget().unwrap(), None);
+    }
+
+    #[test]
+    fn cgroup_limit_parsing_handles_max_and_v1_sentinel() {
+        assert_eq!(parse_cgroup_limit_mb("max\n"), None);
+        assert_eq!(parse_cgroup_limit_mb("9223372036854771712\n"), None);
+        assert_eq!(parse_cgroup_limit_mb("12884901888\n"), Some(12_288));
+        assert_eq!(parse_cgroup_limit_mb("garbage"), None);
+    }
 
     #[test]
     fn for_healthcheck_produces_a_valid_config() -> Result<(), ExecutorError> {

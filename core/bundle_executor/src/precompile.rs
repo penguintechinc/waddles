@@ -1488,4 +1488,80 @@ mod tests {
         assert!(PrecompileSigner::from_seed("bad id/", [0u8; 32]).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// `verify_precompiled` is the gate before the unsafe deserialize: every
+    /// malformed, mismatched, truncated, foreign-key or tampered input fails
+    /// closed, and only the exact signed tuple passes. Also proves rotation
+    /// (current + previous key) and key-id binding.
+    #[test]
+    fn verify_precompiled_fails_closed_on_every_negative_input() {
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let fp = "c".repeat(64);
+        let cwasm = b"pretend native code".to_vec();
+        let current = PrecompileSigner::from_seed("pc1", [2u8; 32]).unwrap();
+        let previous = PrecompileSigner::from_seed("pc0", [1u8; 32]).unwrap();
+        let sig = current.sign(&digest, &fp, &cwasm).unwrap();
+        let keys = current.own_key_set();
+        assert!(verify_precompiled(&cwasm, &sig, &keys, &digest, &fp).is_ok());
+
+        // artifact tampered (one byte) / truncated
+        let mut tampered = cwasm.clone();
+        tampered[0] ^= 1;
+        assert!(verify_precompiled(&tampered, &sig, &keys, &digest, &fp).is_err());
+        assert!(verify_precompiled(&cwasm[..4], &sig, &keys, &digest, &fp).is_err());
+        // wrong engine fingerprint / wrong digest (replayed artifact)
+        assert!(verify_precompiled(&cwasm, &sig, &keys, &digest, &"d".repeat(64)).is_err());
+        assert!(verify_precompiled(
+            &cwasm,
+            &sig,
+            &keys,
+            &format!("sha256:{}", "cd".repeat(32)),
+            &fp
+        )
+        .is_err());
+        // truncated / empty / garbage signature document
+        assert!(verify_precompiled(&cwasm, &sig[..sig.len() / 2], &keys, &digest, &fp).is_err());
+        assert!(verify_precompiled(&cwasm, b"", &keys, &digest, &fp).is_err());
+        // 63-byte signature
+        let mut doc: serde_json::Value = serde_json::from_slice(&sig).unwrap();
+        let raw = BASE64.decode(doc["signature"].as_str().unwrap()).unwrap();
+        doc["signature"] = serde_json::json!(BASE64.encode(&raw[..63]));
+        let short = serde_json::to_vec(&doc).unwrap();
+        assert!(verify_precompiled(&cwasm, &short, &keys, &digest, &fp).is_err());
+        // wrong algorithm
+        doc["signature"] = serde_json::json!(BASE64.encode(&raw));
+        doc["algorithm"] = serde_json::json!("rsa");
+        let rsa = serde_json::to_vec(&doc).unwrap();
+        assert!(verify_precompiled(&cwasm, &rsa, &keys, &digest, &fp).is_err());
+        // empty key set (no PRECOMPILE_SIGNING_PUBLIC_KEYS) can verify nothing
+        assert!(verify_precompiled(
+            &cwasm,
+            &sig,
+            &PlatformPublicKeys::from_keys(HashMap::new()),
+            &digest,
+            &fp
+        )
+        .is_err());
+        // a key id bound to a DIFFERENT public key does not verify
+        let mut swapped = HashMap::new();
+        swapped.insert("pc1".to_string(), previous.verifying_key());
+        assert!(verify_precompiled(
+            &cwasm,
+            &sig,
+            &PlatformPublicKeys::from_keys(swapped),
+            &digest,
+            &fp
+        )
+        .is_err());
+        // rotation: previous + current both configured -> both verify
+        let mut both = HashMap::new();
+        both.insert("pc0".to_string(), previous.verifying_key());
+        both.insert("pc1".to_string(), current.verifying_key());
+        let both = PlatformPublicKeys::from_keys(both);
+        let old_sig = previous.sign(&digest, &fp, &cwasm).unwrap();
+        assert!(verify_precompiled(&cwasm, &old_sig, &both, &digest, &fp).is_ok());
+        assert!(verify_precompiled(&cwasm, &sig, &both, &digest, &fp).is_ok());
+        // domain separation: a bundle-approval payload is not a cwasm payload
+        assert_ne!(CWASM_DOMAIN_SEPARATOR, crate::signing::DOMAIN_SEPARATOR);
+    }
 }

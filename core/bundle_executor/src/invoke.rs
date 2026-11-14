@@ -428,6 +428,12 @@ pub struct SharedRuntime {
     metrics: Arc<ExecutorMetrics>,
     /// Lifetime count of JIT compiles performed (tests + diagnostics).
     compiles_total: AtomicU64,
+    /// Test seam: milliseconds [`SharedRuntime::acquire`] pauses between a
+    /// resolved attempt and inserting it into the cache -- exactly the window
+    /// the duplicate-load race lived in -- so a test can land a second load in it
+    /// deterministically.
+    #[cfg(test)]
+    resolve_gap_ms: AtomicU64,
     /// Lifetime count of verified `.cwasm` deserializations.
     aot_loads_total: AtomicU64,
     /// Lifetime count of AOT misses that fell back to a compile.
@@ -456,15 +462,14 @@ impl SharedRuntime {
         let epoch_ticker = crate::engine::spawn_epoch_ticker(&engine);
         let max_compiles = cfg.effective_max_concurrent_compiles();
         let aot_enabled = !cfg.flag_disable_aot_precompile;
-        let precompile_keys = match cfg
-            .precompile_signing_public_keys
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            Some(raw) => PlatformPublicKeys::from_json(raw)?,
-            None => PlatformPublicKeys::default(),
-        };
-        if aot_enabled && precompile_keys.is_empty() {
+        let (precompile_keys, precompile_key_problem) = resolve_precompile_keys(cfg);
+        if let Some(problem) = &precompile_key_problem {
+            error!(
+                %problem,
+                "PRECOMPILE_SIGNING_PUBLIC_KEYS is unusable; AOT is disabled and every load \
+                 falls back (loudly) to a JIT compile from the signed source"
+            );
+        } else if aot_enabled && precompile_keys.is_empty() {
             warn!(
                 "PRECOMPILE_SIGNING_PUBLIC_KEYS unset: every load will fall back (loudly) to \
                  a JIT compile"
@@ -489,6 +494,8 @@ impl SharedRuntime {
             resolving: tokio::sync::Mutex::new(HashMap::new()),
             metrics,
             compiles_total: AtomicU64::new(0),
+            #[cfg(test)]
+            resolve_gap_ms: AtomicU64::new(0),
             aot_loads_total: AtomicU64::new(0),
             aot_fallbacks_total: AtomicU64::new(0),
             epoch_ticker,
@@ -605,6 +612,17 @@ impl SharedRuntime {
         }
         let cell = {
             let mut resolving = self.resolving.lock().await;
+            if !resolving.contains_key(&req.digest) {
+                // Re-check the cache under the `resolving` lock. A winner
+                // inserts into the cache BEFORE it removes its cell (see
+                // below), so "no cell" + "not resident" here can only mean a
+                // genuinely cold (or since-evicted) digest. Without this a
+                // caller that missed the fast path just before the winner
+                // finished would see no cell and compile the digest again.
+                if let Some(pre) = self.lock_cache()?.get_pinned(&req.digest) {
+                    return Ok(ModuleLease::new(Arc::clone(self), req.digest.clone(), pre));
+                }
+            }
             Arc::clone(
                 resolving
                     .entry(req.digest.clone())
@@ -624,30 +642,66 @@ impl SharedRuntime {
             })
             .await
             .cloned();
-        self.resolving.lock().await.remove(&req.digest);
-        let (pre, bytes) = resolved?;
-        let mut cache = self.lock_cache()?;
-        let (pre, outcome) = cache.insert_pinned(&req.digest, pre, bytes);
-        self.metrics.record_module_evictions(outcome.evicted.len());
-        if !outcome.evicted.is_empty() {
-            info!(
-                evicted = outcome.evicted.len(),
-                resident_bytes = cache.total_bytes(),
-                "evicted idle modules (LRU) to honour EXECUTOR_MEMORY_BUDGET_MB; \
-                 they reload on their next call"
-            );
+        let (pre, bytes) = match resolved {
+            Ok(done) => done,
+            Err(err) => {
+                // A failed attempt is not cached: drop this cell so the next
+                // request retries from scratch.
+                self.forget_cell(&req.digest, &cell).await;
+                return Err(err);
+            }
+        };
+        #[cfg(test)]
+        {
+            let gap = self.resolve_gap_ms.load(Ordering::SeqCst);
+            if gap > 0 {
+                tokio::time::sleep(Duration::from_millis(gap)).await;
+            }
         }
-        if outcome.over_budget {
-            warn!(
-                resident_bytes = cache.total_bytes(),
-                resident_modules = cache.len(),
-                "module cache above EXECUTOR_MEMORY_BUDGET_MB: every other resident module \
-                 is pinned by an in-flight invoke"
-            );
-        }
-        self.publish_gauges(&cache);
-        drop(cache);
+        // Insert into the cache BEFORE dropping the single-flight cell, so a
+        // caller arriving in between finds either the cell (and waits on it) or
+        // the resident entry -- never neither (which would recompile).
+        // (Scoped so the std mutex guard is provably dropped before the next
+        // `.await`; an explicit `drop` is not enough for the future's `Send` bound.)
+        let pre = {
+            let mut cache = self.lock_cache()?;
+            let (pre, outcome) = cache.insert_pinned(&req.digest, pre, bytes);
+            self.metrics.record_module_evictions(outcome.evicted.len());
+            if !outcome.evicted.is_empty() {
+                info!(
+                    evicted = outcome.evicted.len(),
+                    resident_bytes = cache.total_bytes(),
+                    "evicted idle modules (LRU) to honour EXECUTOR_MEMORY_BUDGET_MB; \
+                     they reload on their next call"
+                );
+            }
+            if outcome.over_budget {
+                warn!(
+                    resident_bytes = cache.total_bytes(),
+                    resident_modules = cache.len(),
+                    "module cache above EXECUTOR_MEMORY_BUDGET_MB: every other resident module \
+                     is pinned by an in-flight invoke"
+                );
+            }
+            self.publish_gauges(&cache);
+            pre
+        };
+        self.forget_cell(&req.digest, &cell).await;
         Ok(ModuleLease::new(Arc::clone(self), req.digest.clone(), pre))
+    }
+
+    /// Removes `cell` from the single-flight map, but only if it is still the
+    /// registered cell for `digest` -- a late waiter of an old attempt must not
+    /// remove a newer attempt's cell (e.g. after an LRU eviction re-resolves
+    /// the digest).
+    async fn forget_cell(&self, digest: &str, cell: &ResolvingCell) {
+        let mut resolving = self.resolving.lock().await;
+        if resolving
+            .get(digest)
+            .is_some_and(|current| Arc::ptr_eq(current, cell))
+        {
+            resolving.remove(digest);
+        }
     }
 
     /// Makes `req` resident: AOT first (unless the kill switch is on), LOUD
@@ -823,6 +877,38 @@ impl SharedRuntime {
 impl Drop for SharedRuntime {
     fn drop(&mut self) {
         self.epoch_ticker.abort();
+    }
+}
+
+/// Resolves `PRECOMPILE_SIGNING_PUBLIC_KEYS` into the key set `.cwasm`
+/// signatures are checked against, plus a human-readable problem when the
+/// configuration is unusable. FAIL-CLOSED: a malformed value, or a key set that
+/// reuses a bundle-approval public key (domain/key separation), yields an
+/// EMPTY set -- no artifact can then verify, so every load compiles from the
+/// signed source instead. Unset yields an empty set with no problem. Key
+/// material never appears in the returned text.
+fn resolve_precompile_keys(cfg: &CliConfig) -> (PlatformPublicKeys, Option<String>) {
+    let Some(raw) = cfg
+        .precompile_signing_public_keys
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return (PlatformPublicKeys::default(), None);
+    };
+    let parsed = match PlatformPublicKeys::from_json_named(raw, "PRECOMPILE_SIGNING_PUBLIC_KEYS") {
+        Ok(keys) => keys,
+        Err(e) => return (PlatformPublicKeys::default(), Some(e.to_string())),
+    };
+    match PlatformPublicKeys::from_cli(cfg) {
+        Ok(bundle_keys) if parsed.shares_key_with(&bundle_keys) => (
+            PlatformPublicKeys::default(),
+            Some(
+                "PRECOMPILE_SIGNING_PUBLIC_KEYS contains a key that is also in \
+                 BUNDLE_SIGNING_PUBLIC_KEYS; the precompile key must be a dedicated keypair"
+                    .to_string(),
+            ),
+        ),
+        _ => (parsed, None),
     }
 }
 
@@ -4920,6 +5006,344 @@ mod tests {
             assert_eq!(runtime.aot_loads_total(), 0);
             assert_eq!(runtime.aot_fallbacks_total(), 0);
             assert_eq!(runtime.compiles_total(), 1);
+            Ok(())
+        }
+
+        /// Runs one AOT load against `cfg` serving `cwasm` + `sig`, returning
+        /// the runtime and the metric harness. The load MUST succeed (JIT
+        /// fallback) -- the artifact is never trusted, never fatal.
+        async fn load_with_artifact(
+            cfg: &CliConfig,
+            cwasm: Vec<u8>,
+            sig: Vec<u8>,
+        ) -> Result<(Arc<SharedRuntime>, Harness), ExecutorError> {
+            let harness = Harness::new();
+            let metrics = Arc::new(ExecutorMetrics::new(&harness.meter()));
+            let runtime = SharedRuntime::with_metrics(cfg, Arc::clone(&metrics))?;
+            let source = AotSource {
+                wasm: FIXTURE_WASM.to_vec(),
+                cwasm: Some((cwasm, sig)),
+            };
+            let exec = Executor::with_runtime(cfg, source, Arc::clone(&runtime))?;
+            exec.on_load(load_body(FIXTURE_WASM, "a"))
+                .await
+                .expect("a bad artifact must fall back to a compile, never fail the load");
+            Ok((runtime, harness))
+        }
+
+        /// Asserts the load fell back: nothing deserialized, one loud fallback
+        /// counted with `reason`, exactly one source compile.
+        fn assert_fell_back(runtime: &SharedRuntime, harness: &Harness, reason: &str) {
+            assert_eq!(runtime.aot_loads_total(), 0, "unverified bytes were loaded");
+            assert_eq!(runtime.aot_fallbacks_total(), 1);
+            assert_eq!(runtime.compiles_total(), 1);
+            assert!(
+                harness.count("executor_precompile_fallback_total", &[("reason", reason)]) >= 1.0,
+                "fallback metric with reason {reason} missing"
+            );
+        }
+
+        /// A genuine signed artifact for the fixture under `signer`.
+        fn genuine(
+            cfg: &CliConfig,
+            signer: &crate::precompile::PrecompileSigner,
+        ) -> (Vec<u8>, Vec<u8>) {
+            let runtime = SharedRuntime::new(cfg).expect("runtime");
+            let cwasm = precompiled(&runtime, FIXTURE_WASM);
+            let sig = signer
+                .sign(&fixture_digest(), runtime.engine_fingerprint(), &cwasm)
+                .expect("sign");
+            (cwasm, sig)
+        }
+
+        /// Regression (duplicate-load race): 160 concurrent loads of ONE cold
+        /// digest, arriving before, during and after the winner finishes
+        /// resolving, compile it exactly once and leave one resident copy.
+        /// Before the fix the single-flight cell was dropped BEFORE the module
+        /// was inserted into the cache, so a load landing in that gap saw
+        /// neither and compiled the digest again.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+        async fn one_hundred_sixty_concurrent_loads_of_one_digest_compile_exactly_once(
+        ) -> Result<(), ExecutorError> {
+            let cfg = test_config();
+            let runtime = SharedRuntime::new(&cfg)?;
+            let exec = Arc::new(Executor::with_runtime(
+                &cfg,
+                FixtureSource,
+                Arc::clone(&runtime),
+            )?);
+            let mut tasks = Vec::new();
+            for i in 0..160u64 {
+                let exec = Arc::clone(&exec);
+                tasks.push(tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis((i % 40) * 4)).await;
+                    exec.on_load(fixture_load_body_scoped(
+                        "waddles.test.app",
+                        i32::try_from(i).unwrap_or(0) + 1,
+                        0,
+                    ))
+                    .await
+                }));
+            }
+            for task in tasks {
+                task.await.expect("task joined").expect("load succeeds");
+            }
+            assert_eq!(
+                runtime.compiles_total(),
+                1,
+                "160 concurrent loads of one digest must compile exactly once"
+            );
+            assert_eq!(runtime.residency()?.0, 1, "one resident copy");
+            assert!(
+                runtime.resolving.lock().await.is_empty(),
+                "single-flight map must drain"
+            );
+            Ok(())
+        }
+
+        /// Deterministic repro of the duplicate-load race: a second load that
+        /// arrives AFTER the winner finished compiling but BEFORE it inserted
+        /// the module into the cache (the window is widened to 300 ms) must
+        /// join the winner, not compile the digest again.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn load_landing_in_the_resolve_to_insert_window_does_not_recompile(
+        ) -> Result<(), ExecutorError> {
+            let cfg = test_config();
+            let runtime = SharedRuntime::new(&cfg)?;
+            runtime.resolve_gap_ms.store(300, Ordering::SeqCst);
+            let acquire = |runtime: Arc<SharedRuntime>| {
+                tokio::spawn(async move {
+                    let req = ModuleRequest::from_load(&load_body(FIXTURE_WASM, "a"));
+                    let metrics = Arc::clone(&runtime.metrics);
+                    runtime
+                        .acquire(
+                            &req,
+                            &FixtureSource,
+                            &PlatformPublicKeys::default(),
+                            &metrics,
+                        )
+                        .await
+                        .map(drop)
+                })
+            };
+            let first = acquire(Arc::clone(&runtime));
+            // Wait until the winner has compiled (it is now inside the gap).
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while runtime.compiles_total() == 0 {
+                assert!(Instant::now() < deadline, "compile never finished");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            let second = acquire(Arc::clone(&runtime));
+            first.await.expect("joined").expect("first acquire");
+            second.await.expect("joined").expect("second acquire");
+            assert_eq!(
+                runtime.compiles_total(),
+                1,
+                "a load arriving between resolve and insert recompiled the digest"
+            );
+            Ok(())
+        }
+
+        /// Same invariant at the `acquire` seam, hammered repeatedly across
+        /// eviction-free rounds so the cell-removal/insert window is crossed
+        /// many times: every round (new runtime, 64 racing acquires) compiles
+        /// once.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+        async fn racing_acquires_never_recompile_a_digest() -> Result<(), ExecutorError> {
+            let cfg = test_config();
+            for _ in 0..6 {
+                let runtime = SharedRuntime::new(&cfg)?;
+                let mut tasks = Vec::new();
+                for i in 0..64u64 {
+                    let runtime = Arc::clone(&runtime);
+                    tasks.push(tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(i % 8)).await;
+                        let req = ModuleRequest::from_load(&load_body(FIXTURE_WASM, "a"));
+                        let metrics = Arc::clone(&runtime.metrics);
+                        runtime
+                            .acquire(
+                                &req,
+                                &FixtureSource,
+                                &PlatformPublicKeys::default(),
+                                &metrics,
+                            )
+                            .await
+                            .map(drop)
+                    }));
+                }
+                for task in tasks {
+                    task.await.expect("joined").expect("acquire");
+                }
+                assert_eq!(runtime.compiles_total(), 1);
+            }
+            Ok(())
+        }
+
+        /// T5: with no `PRECOMPILE_SIGNING_PUBLIC_KEYS` the AOT path is
+        /// refused (never deserializes), logged + counted, and compiles.
+        #[tokio::test]
+        async fn missing_precompile_key_falls_back_loudly() -> Result<(), ExecutorError> {
+            let cfg = keyed_config();
+            let (cwasm, sig) = genuine(&cfg, &precompile_signer());
+            let mut no_keys = cfg.clone();
+            no_keys.precompile_signing_public_keys = None;
+            let (runtime, harness) = load_with_artifact(&no_keys, cwasm, sig).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+            Ok(())
+        }
+
+        /// T5: a malformed key variable does not crash the executor and does
+        /// not enable AOT -- it logs at ERROR and every load compiles.
+        #[tokio::test]
+        async fn malformed_precompile_key_config_disables_aot_not_the_executor(
+        ) -> Result<(), ExecutorError> {
+            let cfg = keyed_config();
+            let (cwasm, sig) = genuine(&cfg, &precompile_signer());
+            let mut bad = cfg.clone();
+            bad.precompile_signing_public_keys = Some("{not json".to_string());
+            let (runtime, harness) = load_with_artifact(&bad, cwasm.clone(), sig.clone()).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+            let mut short = cfg.clone();
+            short.precompile_signing_public_keys =
+                Some(json!({ "pc1": BASE64.encode([1u8; 7]) }).to_string());
+            let (runtime, harness) = load_with_artifact(&short, cwasm, sig).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+            Ok(())
+        }
+
+        /// T5: a precompile key set that REUSES a bundle-approval public key
+        /// is rejected as a whole (key separation), even for an artifact whose
+        /// signature would verify under it.
+        #[tokio::test]
+        async fn precompile_key_reusing_a_bundle_key_is_rejected() -> Result<(), ExecutorError> {
+            let mut cfg = keyed_config();
+            cfg.precompile_signing_public_keys = Some(
+                json!({ "pc-shared": BASE64.encode(key().verifying_key().to_bytes()) }).to_string(),
+            );
+            let shared = crate::precompile::PrecompileSigner::from_seed("pc-shared", [21u8; 32])
+                .expect("signer");
+            let (cwasm, sig) = genuine(&cfg, &shared);
+            let (runtime, harness) = load_with_artifact(&cfg, cwasm, sig).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+            Ok(())
+        }
+
+        /// T5: truncated / corrupted signature documents are refused.
+        #[tokio::test]
+        async fn truncated_and_corrupt_signatures_are_refused() -> Result<(), ExecutorError> {
+            let cfg = keyed_config();
+            let (cwasm, sig) = genuine(&cfg, &precompile_signer());
+
+            // (a) the .sig object cut in half: not JSON.
+            let half = sig[..sig.len() / 2].to_vec();
+            let (runtime, harness) = load_with_artifact(&cfg, cwasm.clone(), half).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+
+            // (b) empty .sig object.
+            let (runtime, harness) = load_with_artifact(&cfg, cwasm.clone(), Vec::new()).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+
+            // (c) valid JSON whose Ed25519 signature is 63 bytes (truncated).
+            let mut doc: serde_json::Value = serde_json::from_slice(&sig).expect("sig json");
+            let raw = BASE64
+                .decode(doc["signature"].as_str().expect("sig field"))
+                .expect("b64");
+            doc["signature"] = json!(BASE64.encode(&raw[..63]));
+            let short = serde_json::to_vec(&doc).expect("json");
+            let (runtime, harness) = load_with_artifact(&cfg, cwasm.clone(), short).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+
+            // (d) 64 bytes, one bit flipped.
+            let mut flipped = raw.clone();
+            flipped[0] ^= 0x01;
+            doc["signature"] = json!(BASE64.encode(&flipped));
+            let bad = serde_json::to_vec(&doc).expect("json");
+            let (runtime, harness) = load_with_artifact(&cfg, cwasm, bad).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+            Ok(())
+        }
+
+        /// T5: a signature naming a key id that is not configured is refused,
+        /// and one made for a DIFFERENT digest cannot be replayed.
+        #[tokio::test]
+        async fn unknown_key_id_and_swapped_digest_are_refused() -> Result<(), ExecutorError> {
+            let cfg = keyed_config();
+            let stranger =
+                crate::precompile::PrecompileSigner::from_seed("pc9", [44u8; 32]).expect("signer");
+            let (cwasm, sig) = genuine(&cfg, &stranger);
+            let (runtime, harness) = load_with_artifact(&cfg, cwasm.clone(), sig).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+
+            let engine_fp = SharedRuntime::new(&cfg)?.engine_fingerprint().to_string();
+            let other = precompile_signer()
+                .sign(&digest_of(V2_WASM), &engine_fp, &cwasm)
+                .expect("sign");
+            let (runtime, harness) = load_with_artifact(&cfg, cwasm, other).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+            Ok(())
+        }
+
+        /// T5 rotation: both the current and the previous precompile key are
+        /// accepted while both are configured; once the previous key is
+        /// removed, artifacts it signed fall back to a compile.
+        #[tokio::test]
+        async fn key_rotation_accepts_current_and_previous() -> Result<(), ExecutorError> {
+            let previous =
+                crate::precompile::PrecompileSigner::from_seed("pc0", [11u8; 32]).expect("signer");
+            let current = precompile_signer();
+            let mut cfg = keyed_config();
+            cfg.precompile_signing_public_keys = Some(
+                json!({ "pc0": previous.public_key_b64(), "pc1": current.public_key_b64() })
+                    .to_string(),
+            );
+            for signer in [&previous, &current] {
+                let (cwasm, sig) = genuine(&cfg, signer);
+                let (runtime, _h) = load_with_artifact(&cfg, cwasm, sig).await?;
+                assert_eq!(
+                    runtime.aot_loads_total(),
+                    1,
+                    "key {} accepted",
+                    signer.key_id()
+                );
+                assert_eq!(runtime.compiles_total(), 0);
+                assert_eq!(runtime.aot_fallbacks_total(), 0);
+            }
+            // rotation finished: only the new key remains configured
+            let mut rotated = cfg.clone();
+            rotated.precompile_signing_public_keys =
+                Some(json!({ "pc1": current.public_key_b64() }).to_string());
+            let (cwasm, sig) = genuine(&cfg, &previous);
+            let (runtime, harness) = load_with_artifact(&rotated, cwasm, sig).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+            Ok(())
+        }
+
+        /// T7: a module pinned by an in-flight invoke is never evicted, even
+        /// when the budget is exceeded; the cache goes over budget loudly
+        /// instead.
+        #[tokio::test]
+        async fn pinned_module_is_never_evicted_under_budget_pressure() -> Result<(), ExecutorError>
+        {
+            let cfg = test_config();
+            let runtime = SharedRuntime::new(&cfg)?;
+            runtime.set_budget_bytes(1);
+            let metrics = Arc::clone(&runtime.metrics);
+            let keys = PlatformPublicKeys::default();
+            let req_a = ModuleRequest::from_load(&load_body(FIXTURE_WASM, "a"));
+            let req_b = ModuleRequest::from_load(&load_body(V2_WASM, "b"));
+            let lease_a = runtime.acquire(&req_a, &TwoSource, &keys, &metrics).await?;
+            let lease_b = runtime.acquire(&req_b, &TwoSource, &keys, &metrics).await?;
+            assert!(
+                runtime.is_resident(&digest_of(FIXTURE_WASM))?,
+                "pinned A must survive B's insert"
+            );
+            assert_eq!(runtime.residency()?.0, 2, "over budget, nothing evictable");
+            drop(lease_b);
+            drop(lease_a);
+            // both idle now; the next insert may evict, but a hit never does
+            let again = runtime.acquire(&req_a, &TwoSource, &keys, &metrics).await?;
+            assert_eq!(runtime.compiles_total(), 2, "resident A is a cache hit");
+            drop(again);
             Ok(())
         }
 

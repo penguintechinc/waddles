@@ -197,6 +197,9 @@ impl BucketComponentSource {
     }
 }
 
+/// Body-size cap for a precompiled artifact's detached `.sig` document (64 KiB).
+const MAX_SIGNATURE_DOC_BYTES: u64 = 64 * 1024;
+
 /// Issues one bucket GET under `config.fetch_timeout`, wrapping a bare
 /// `tokio::time::timeout` so both call sites in [`BucketComponentSource
 /// ::fetch`] report which key timed out.
@@ -236,7 +239,15 @@ impl ComponentSource for BucketComponentSource {
     }
 
     async fn fetch_precompiled(&self, key: &str) -> Result<Vec<u8>, ExecutorError> {
-        timed_get_object_capped(&self.config, key, self.config.max_precompiled_bytes).await
+        // A detached signature document is a few hundred bytes; never let a
+        // hostile or misconfigured bucket make us buffer a `.cwasm`-sized body
+        // for it.
+        let cap = if key.ends_with(".sig") {
+            MAX_SIGNATURE_DOC_BYTES.min(self.config.max_precompiled_bytes)
+        } else {
+            self.config.max_precompiled_bytes
+        };
+        timed_get_object_capped(&self.config, key, cap).await
     }
 
     async fn fetch_object(&self, key: &str) -> Result<Vec<u8>, ExecutorError> {
