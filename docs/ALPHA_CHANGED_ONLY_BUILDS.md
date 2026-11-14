@@ -48,8 +48,10 @@ The remote-driver bootstrap in each job fails loudly if a chosen endpoint has no
 
 * Registry layer cache: exactly one ref per image, `ghcr.io/penguintechinc/waddles/buildcache/<image>:alpha`,
   `mode=max`, overwritten every build (never per-run tags).
-* BuildKit cache mounts (not in image layers): cargo registry/git (shared), one cargo `target/` per Rust
-  service (`waddles-target-<image>`), pip, npm. They live in the BuildKit pod and are capped by its GC
+* BuildKit cache mounts (not in image layers): per image, never shared between images --
+  `waddles-cargo-registry-<image>-v<epoch>`, `waddles-cargo-git-<image>-v<epoch>`,
+  `waddles-target-<image>-v<epoch>` (Rust), `waddles-pip-<image>-...`, `waddles-npm-<image>-...`, all
+  `sharing=locked`. They live in the BuildKit pod and are capped by its GC
   policy (`exec.cachemount` kept 6h, 40GB total; admin repo `k8s/dal2alpha/runners/20-buildkit.yaml`).
 * Seeder: one `bundle-<name>` stage per Rust bundle over a shared `rust-bundle-base`, so a bundle change
   rebuilds only that bundle.
@@ -89,3 +91,22 @@ key). Set the repo variable `ALPHA_CACHE_EPOCH` to a new number and dispatch `fo
 mounts are abandoned and garbage-collected. To reclaim immediately:
 `buildctl --addr tcp://buildkitd.buildkit.svc:1234 prune --filter type==exec.cachemount` (the existing
 `buildkitd-prune` cronjob already prunes hourly with `--keep-duration=24h`).
+
+## Failure mode: corrupted cargo git cache ("revision ... not found")
+
+Deploy run 43637937508 failed `Build svc-action` in 1.1s with `failed to fetch into
+/usr/local/cargo/git/db/penguin-libs-...` / `revision <sha> not found`, while the same revision had built
+fine before. Cause: the first version of the cache mounts used ONE registry/git cache id shared by all
+seven Rust images with `sharing=shared`; the parallel builds fetched the same `penguin-libs` git db at the
+same time. Cargo's package-cache lock (`$CARGO_HOME/.package-cache`) lives outside the mounted
+`registry/` and `git/` directories, so concurrent builds on one shared mount do not exclude each other and a
+partial fetch corrupts the db.
+
+Fix and rules (enforced by `scripts/ci/check-dockerfile-cache-mounts.py`, run in `scripts/ci/tests`):
+
+* every cache id is per image (`...-<image>-v${CACHE_EPOCH}`), no id is used by two Dockerfiles;
+* every cache mount is `sharing=locked`; `sharing=shared` and the default are rejected.
+
+Recovery if a cache is ever corrupted: set the repo variable `ALPHA_CACHE_EPOCH` to a new number and dispatch
+`deploy-dal2alpha` with `force_all=true` (a fresh empty cache per image is created; the old one is garbage
+collected), or flush now with `buildctl ... prune --filter type==exec.cachemount`.
