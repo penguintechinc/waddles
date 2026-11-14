@@ -177,6 +177,8 @@ jobs:
             --helm-values "${RUNNER_TEMP}/helm-values.json" \
             --endpoint-a "${BUILDKIT_HOST}" \
             --endpoint-b "${BUILDKIT_HOST_B}" \
+            --event "${GITHUB_EVENT_NAME}" \
+            --ref "${GITHUB_REF}" \
             --out "${RUNNER_TEMP}/plan.json"
 
   build:
@@ -225,6 +227,9 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ needs.prepare.outputs.tag }}${{ matrix.suffix }}
+          # Version salt baked into every cache-mount id (and the RUN cache key): bump the repo
+          # variable ALPHA_CACHE_EPOCH to abandon all cache mounts. Default 1.
+          build-args: CACHE_EPOCH=${{ vars.ALPHA_CACHE_EPOCH || '1' }}
           # The revision label is how the NEXT run finds this image's last-built commit.
           labels: org.opencontainers.image.revision=${{ github.sha }}
           # ONE fixed cache ref per image, overwritten every build (mode=max): the registry

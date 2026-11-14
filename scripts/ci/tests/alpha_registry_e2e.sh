@@ -56,7 +56,7 @@ done
 echo "pushed ${pushed} images (skipped ${SKIP_PUSH} to prove missing-image rebuild)"
 
 printf '{"global":{"imageTag":"%s"}}' "${OLD_TAG}" > "${WORK}/values.json"
-python3 scripts/ci/alpha_plan.py plan --head "${HEAD_SHA}" --tag "${NEW_TAG}" --registry "${REG}" \
+python3 scripts/ci/alpha_plan.py plan --local --head "${HEAD_SHA}" --tag "${NEW_TAG}" --registry "${REG}" \
   --helm-values "${WORK}/values.json" --endpoint-a tcp://buildkitd.example:1234 --endpoint-b "" \
   --out "${WORK}/plan.json"
 

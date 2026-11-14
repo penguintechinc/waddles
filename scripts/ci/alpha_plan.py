@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -240,8 +241,31 @@ def _emit_outputs(plan: dict[str, Any]) -> None:
         fh.write(f"plan={json.dumps(plan, separators=(',', ':'))}\n")
 
 
+TRUSTED_EVENTS = ("push", "workflow_dispatch")
+TRUSTED_REF = re.compile(r"^refs/heads/release/[A-Za-z0-9._-]+$")
+
+
+def check_trusted_context(event: str, ref: str) -> str | None:
+    """Return an error string unless this run may use the shared BuildKit cache mounts.
+
+    The cached build path (persistent BuildKit pod, cache mounts) may only run for release-branch
+    pushes and workflow_dispatch started from a release branch -- never for PR code. The workflow
+    already pins this; the plan re-asserts it so a future trigger/guard edit fails loudly.
+    """
+    if event not in TRUSTED_EVENTS:
+        return f"event {event!r} is not allowed to use the shared build cache (need {TRUSTED_EVENTS})"
+    if not TRUSTED_REF.match(ref):
+        return f"ref {ref!r} is not a release branch; refusing the cached build path"
+    return None
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     """`plan` subcommand."""
+    if not args.local:
+        err = check_trusted_context(args.event, args.ref)
+        if err:
+            print(f"::error::{err}", file=sys.stderr)
+            return 2
     imap = ci.load_map(args.map)
     head = subprocess.run(
         ["git", "rev-parse", args.head], check=True, capture_output=True, text=True
@@ -371,6 +395,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--force-all", action="store_true")
     p.add_argument("--endpoint-a", default=os.environ.get("BUILDKIT_HOST", ""))
     p.add_argument("--endpoint-b", default=os.environ.get("BUILDKIT_HOST_B", ""))
+    p.add_argument("--event", default=os.environ.get("GITHUB_EVENT_NAME", ""))
+    p.add_argument("--ref", default=os.environ.get("GITHUB_REF", ""))
+    p.add_argument(
+        "--local",
+        action="store_true",
+        help="skip the trusted-context check (local/e2e use only; never in CI)",
+    )
     p.add_argument("--out", required=True)
     p.set_defaults(fn=cmd_plan)
     r = sub.add_parser("retag")

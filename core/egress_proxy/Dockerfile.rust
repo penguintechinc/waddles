@@ -45,6 +45,9 @@ COPY egress_assertion ./egress_assertion
 # hadolint ignore=DL3022
 COPY --from=proto . /proto
 WORKDIR /build/egress_proxy
+# Bump CACHE_EPOCH (workflow build-arg, repo variable ALPHA_CACHE_EPOCH) to abandon every cache mount id
+# below and force a clean rebuild; the value is also part of the RUN layer cache key.
+ARG CACHE_EPOCH=1
 # BuildKit cache mounts (bounded, explicit ids; none of this reaches the image layers):
 #  - cargo registry/git: downloaded crates, shared by every Rust image on the same BuildKit pod.
 #    Content is checksum-verified against Cargo.lock, so it cannot change build output.
@@ -52,10 +55,12 @@ WORKDIR /build/egress_proxy
 #    the changed first-party crates, not every third-party dependency. Lives in the BuildKit
 #    pod's local store, which the pod's GC policy caps (exec.cachemount kept 6h, 40GB total).
 #    The binary is copied out inside the same RUN because cache mounts are not in the layer.
-# `--locked` stays: a stale/poisoned cache can never change the resolved dependency set.
-RUN --mount=type=cache,id=waddles-cargo-registry,target=/usr/local/cargo/registry,sharing=shared \
-    --mount=type=cache,id=waddles-cargo-git,target=/usr/local/cargo/git,sharing=shared \
-    --mount=type=cache,id=waddles-target-egress-proxy,target=/build/egress_proxy/target,sharing=locked \
+# `--locked` stays: a stale/poisoned cache can never change the resolved dependency set, and cargo
+# re-verifies every registry crate against the checksum in Cargo.lock. Trust boundary: only the
+# deploy-set runners (release pushes) can reach the BuildKit pod -- docs/ALPHA_CHANGED_ONLY_BUILDS.md.
+RUN --mount=type=cache,id=waddles-cargo-registry-v${CACHE_EPOCH},target=/usr/local/cargo/registry,sharing=shared \
+    --mount=type=cache,id=waddles-cargo-git-v${CACHE_EPOCH},target=/usr/local/cargo/git,sharing=shared \
+    --mount=type=cache,id=waddles-target-egress-proxy-v${CACHE_EPOCH},target=/build/egress_proxy/target,sharing=locked \
     cargo build --release --locked \
     && install -D -m 0755 target/release/egress-proxy /out/egress-proxy
 

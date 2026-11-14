@@ -59,3 +59,33 @@ The remote-driver bootstrap in each job fails loudly if a chosen endpoint has no
 `scripts/ci/prune_alpha_images.py` (`make prune-alpha-images`) is a DRY RUN unless `--apply`; `--apply`
 also needs `--deployed <plan.json>`. It keeps the newest N (default 10) alpha epochs per image plus anything
 deployed, never touches untagged versions, and is not scheduled anywhere (a schedule needs owner approval).
+
+## Cache trust boundary and flushing
+
+BuildKit cache mounts (cargo registry/git, per-image `target/`, pip, npm) persist on the shared BuildKit
+pod and are trusted by every later build that mounts the same id, so they are only used where poisoning
+needs a prerequisite we already control:
+
+* **Who can reach the pod:** only the deploy runner scale set `dal2-alpha` (CiliumNetworkPolicy
+  `buildkitd-access`, namespace `github-runners`) and the `buildkitd-prune` cronjob. PR-code runners
+  (`dal2-alpha-ci`) cannot, and `deploy-dal2alpha.yml` has no `pull_request*` trigger. `alpha_plan.py plan`
+  refuses to run unless the event is `push`/`workflow_dispatch` and the ref is `refs/heads/release/*`
+  (`test_cache_trust_boundary.py` also fails if any other workflow reaches the shared pod). One trust level:
+  release-branch code. buildkitd listens on plaintext `tcp://0.0.0.0:1234` today (no mTLS): keep
+  `buildkitd-access` restricted, and add client-cert mTLS (admin repo hand-off in the PR).
+* **What may enter a cache:** only integrity-verified installs. `scripts/ci/check-dockerfile-cache-mounts.py`
+  (run by `test_cache_trust_boundary.py`) fails any cache-mounted `pip install` without `--require-hashes`,
+  `npm install` (use `npm ci`), or cargo step without `--locked`. Cargo re-verifies every registry crate
+  against the checksum in `Cargo.lock`; `npm ci` checks lockfile integrity; pip checks hashes. The unhashed
+  `pip install /app/libs/flask_core` step in `hub_api/Dockerfile` is deliberately NOT cache-mounted
+  (`--no-cache-dir`). Known gap (pre-existing, not introduced here): that step resolves flask_core's declared
+  dependencies without hashes; hash-locking them is a follow-up.
+* **`target/` mounts:** the cargo fingerprint cache is not content-addressed, so it is the one cache whose
+  correctness rests on the single trust level above. Cost of dropping it: egress-proxy rebuild after a one-line
+  change 69s instead of 26s (measured), more for larger crates.
+
+**Flushing every cache:** every cache-mount id carries `-v${CACHE_EPOCH}` (also part of the RUN layer cache
+key). Set the repo variable `ALPHA_CACHE_EPOCH` to a new number and dispatch `force_all=true`; the old
+mounts are abandoned and garbage-collected. To reclaim immediately:
+`buildctl --addr tcp://buildkitd.buildkit.svc:1234 prune --filter type==exec.cachemount` (the existing
+`buildkitd-prune` cronjob already prunes hourly with `--keep-duration=24h`).

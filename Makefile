@@ -425,7 +425,7 @@ alpha-deploy:
 # --- Changed-only alpha image builds (deploy-dal2alpha) ---------------------------------------
 # scripts/ci/image-inputs.yaml is the reviewable input map; changed_images.py maps a diff to the
 # images that need a rebuild. Usage: make changed-images BASE=<sha> [HEAD=HEAD] [FORCE_ALL=true]
-.PHONY: changed-images changed-images-audit test-ci-image-plan check-alpha-image-pins test-alpha-registry-e2e prune-alpha-images
+.PHONY: changed-images changed-images-audit test-ci-image-plan check-alpha-image-pins check-dockerfile-cache-mounts test-alpha-registry-e2e prune-alpha-images
 changed-images:
 	@test -n "$(BASE)" || { echo "usage: make changed-images BASE=<sha> [HEAD=HEAD] [FORCE_ALL=true]" >&2; exit 2; }
 	@python3 scripts/ci/changed_images.py --base "$(BASE)" --head "$(or $(HEAD),HEAD)" --format names $(if $(filter true,$(FORCE_ALL)),--force-all)
@@ -434,8 +434,12 @@ changed-images:
 changed-images-audit:
 	@python3 scripts/ci/changed_images.py --audit
 
+# Cache-mounted installs must be hash/lock verified (build-cache poisoning guard).
+check-dockerfile-cache-mounts:
+	@python3 scripts/ci/check-dockerfile-cache-mounts.py
+
 test-ci-image-plan:
-	@python3 -m pytest scripts/ci/tests/test_changed_images.py scripts/ci/tests/test_image_inputs.py scripts/ci/tests/test_alpha_plan.py scripts/ci/tests/test_prune_alpha_images.py -q -p no:cacheprovider
+	@python3 -m pytest scripts/ci/tests/test_cache_trust_boundary.py scripts/ci/tests/test_changed_images.py scripts/ci/tests/test_image_inputs.py scripts/ci/tests/test_alpha_plan.py scripts/ci/tests/test_prune_alpha_images.py -q -p no:cacheprovider
 
 # Helm render proof: pinned images keep their pod template (no restart). Needs helm v3 on PATH.
 check-alpha-image-pins:
