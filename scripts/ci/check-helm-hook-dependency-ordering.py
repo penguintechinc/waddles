@@ -71,6 +71,7 @@ ALLOWLIST: dict[str, str] = {
 
 HOOK_ANNOTATION = "helm.sh/hook"
 WEIGHT_ANNOTATION = "helm.sh/hook-weight"
+PROVISIONS_ANNOTATION = "waddles.penguintech.io/provisions-secrets"
 PRE_HOOKS = {"pre-install", "pre-upgrade"}
 POST_HOOKS = {"post-install", "post-upgrade"}
 
@@ -133,10 +134,24 @@ def main() -> int:
         if kind and name:
             index[(kind, name)] = d
 
+    # Secrets created at RUNTIME by a pre-* hook Job (provision-secrets) are declared in that
+    # Job's PROVISIONS_ANNOTATION; they resolve exactly like a pre-* hook Secret at the Job's weight.
+    providers: dict[str, tuple[str, int]] = {}
+    for d in docs:
+        if d.get("kind") == "Job" and (hook_types(d) & PRE_HOOKS):
+            ann = (d.get("metadata") or {}).get("annotations") or {}
+            for n in filter(None, (x.strip() for x in ann.get(PROVISIONS_ANNOTATION, "").split(","))):
+                providers[n] = ((d.get("metadata") or {}).get("name", "?"), hook_weight(d))
+
     def resolves_pre(name: str, kinds: tuple[str, ...], max_weight: int) -> tuple[bool, str]:
         """Dependency check for a pre-install/pre-upgrade hook context."""
         if name in ALLOWLIST:
             return True, f"allowlisted ({ALLOWLIST[name]})"
+        if name in providers:
+            pname, pw = providers[name]
+            if pw < max_weight:
+                return True, f"Secret created at runtime by pre-* hook Job/{pname} at weight {pw} < {max_weight}"
+            return False, f"Secret created at runtime by Job/{pname} at weight {pw}, not < {max_weight}"
         for kind in kinds:
             dep = index.get((kind, name))
             if dep is None:
@@ -160,6 +175,8 @@ def main() -> int:
         """
         if name in ALLOWLIST:
             return True, f"allowlisted ({ALLOWLIST[name]})"
+        if name in providers:
+            return True, f"Secret created at runtime by pre-* hook Job/{providers[name][0]}, always before the post-* phase"
         for kind in kinds:
             dep = index.get((kind, name))
             if dep is None:

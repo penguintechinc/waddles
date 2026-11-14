@@ -2954,6 +2954,12 @@ serviceJwt:
 # has no Ed25519-pubkey-from-privkey primitive) + chart README "Self-provisioned
 # platform keys" section.
 autoProvisionedKeys:
+  # Hook image for BOTH runtime provisioning Jobs (templates/provision-secrets.yaml -- every
+  # internally generated symmetric Secret, all tiers -- and templates/auto-provisioned-keys-job.yaml
+  # -- the Ed25519/P-256 key pairs). bitnami/kubectl only publishes a mutable `latest` tag, so it is
+  # pinned by its immutable multi-arch (amd64+arm64) manifest-list digest; bumping it is a manual,
+  # reviewed change (mirror to ghcr.io/penguintechinc + cosign is the planned replacement).
+  hookImage: "bitnami/kubectl@sha256:ab90e1058e5a658cc94b4e7eb6d48e5758cfd6d77b5dd1869513aec3a3054673"
   # feature/seaweedfs-object-storage -- SeaweedFS S3 gateway SSE-S3 KEK (replaces
   # the former MinIO static-KMS key from PR #439; renamed off "minio" since the
   # backing store changed, secretName kept distinct from the old "minio-kms" so
