@@ -130,7 +130,8 @@ def test_webrtc_bundle_and_hub_manifests_agree_on_tools() -> None:
 # Rust unit tests (webrtc + rooms, which compile the same grants.rs) and checked here against
 # the manifests, the rooms fixture, svc-streaming's token and hub-api's REST join derivation.
 # Strict xfails mark KNOWN disagreements owned by another branch: when the owner fixes them the
-# strict xfail turns red and the marker must be deleted (a ratchet, not a skip).
+# strict xfail turns red and the marker must be deleted (a ratchet, not a skip). The hub-api join
+# disagreements were fixed by T4 (PR #1326) and their xfails removed.
 # ---------------------------------------------------------------------------------------------
 
 
@@ -227,16 +228,27 @@ def test_hand_tools_declare_the_contract_scopes_and_schema() -> None:
 def test_moderator_only_tools_need_the_moderate_scope_and_leave_stays_member_level() -> None:
     c, tools = _contract(), _tools()
     assert set(c["moderation"]["min_role"]) == set(MODERATOR_ONLY_TOOLS)
+    forbidden = set(c["moderation"]["args_forbidden"])
+    assert forbidden == {"actor_id", "actor_role"}
     for name in MODERATOR_ONLY_TOOLS:
         assert tools[name].get("required_scope") == c["moderation"]["scope_for_moderator_only"], name
-        assert "actor_role" in tools[name]["input_schema"]["required"], name
-    for name in c["moderation"]["self_service"]:
-        assert "required_scope" not in tools[name], f"{name} is self-service"
+    # Own participation only: `room.leave` is member-scope and has no participant argument.
+    assert c["moderation"]["self_service"] == ["room.leave"]
+    assert tools["room.leave"].get("required_scope") == c["moderation"]["leave_scope"] == "community:member"
+    assert "participant_id" not in tools["room.leave"]["input_schema"]["properties"]
+    # No moderation tool accepts a caller-asserted actor or role: the host-verified
+    # context is the actor and the declared scope is the gate.
+    for name in (*MODERATOR_ONLY_TOOLS, "room.leave"):
+        props = set(tools[name]["input_schema"]["properties"])
+        assert not forbidden & props, f"{name} accepts a caller-asserted actor {forbidden & props}"
+        assert tools[name]["input_schema"]["additionalProperties"] is False, name
 
 
 def test_mute_all_names_the_caller_so_the_server_can_exclude_them() -> None:
     assert _contract()["moderation"]["mute_all_excludes_actor"] is True
-    assert "actor_id" in _tools()["room.mute_all"]["input_schema"]["required"]
+    # The caller is the host-verified actor, forwarded by the tool on the host op; the
+    # tool itself takes no actor argument.
+    assert "actor_id" not in _tools()["room.mute_all"]["input_schema"]["properties"]
     proto = ROOMS_PROTO.read_text()
     body = re.search(r"message MuteAllRequest \{(.*?)\n\}", proto, re.S)
     assert body and "actor_id" in body.group(1), "MuteAllRequest lost actor_id"
@@ -245,7 +257,9 @@ def test_mute_all_names_the_caller_so_the_server_can_exclude_them() -> None:
     for call in sent:
         assert any(k.arg == "actor_id" for k in call.keywords), "hub-api mute-all must pass the caller"
     fixture = json.loads((ROOMS / "tests" / "contract_calls.json").read_text())
-    assert fixture["room.mute_all"]["actor_id"], "rooms mute-all must pass the caller"
+    assert not {"actor_id", "actor_role"} & set(fixture["room.mute_all"]), "rooms must not assert the caller"
+    for name in (*MODERATOR_ONLY_TOOLS, "room.leave"):
+        assert not {"actor_id", "actor_role"} & set(fixture[name]), f"rooms sends an actor to {name}"
 
 
 def test_token_tools_carry_short_ttl_bounds_and_no_display_name() -> None:
@@ -368,52 +382,82 @@ def test_hub_api_moderation_rpcs_use_the_moderate_scope() -> None:
         assert expect[rpc] == scope, (rpc, scope)
 
 
-def test_hub_api_member_join_matches_the_baseline_grant() -> None:
-    """A plain member joining a plain community room: publish+subscribe, as the contract says."""
-    call = _hub_join_request()
-    baseline = next(x for x in _contract()["cases"] if x["id"] == "community-member")["expect"]
-    assert _const_kwarg(call, "publish") is True and baseline["publish"] is True
-    assert _const_kwarg(call, "subscribe") is True and baseline["subscribe"] is True
+def _hub_call_access() -> Any:
+    """hub-api's `services/call_access.py`, loaded by path (it is pure: no hub-api deps needed)."""
+    import importlib.util
+    import sys
+
+    path = ROOT / "hub_api" / "services" / "call_access.py"
+    spec = importlib.util.spec_from_file_location("hub_api_call_access", path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod  # dataclass/enum resolution needs the module registered
+    spec.loader.exec_module(mod)
+    return mod
 
 
-def hub_api_grant_mismatches() -> list[str]:
-    """Contract cases (hub-api acts as MEMBER on the REST join) that hub-api's constant grant gets wrong."""
-    call = _hub_join_request()
-    pub, sub = _const_kwarg(call, "publish"), _const_kwarg(call, "subscribe")
+def hub_api_grant_mismatches(grants_for: Any = None) -> list[str]:
+    """Contract cases (every role) where hub-api's REST-join policy disagrees with the contract."""
+    mod = _hub_call_access()
+    grants_for = grants_for or mod.grants_for
     bad = []
     for x in _contract()["cases"]:
-        if x["role"] != "member":
-            continue
+        ctx = mod.GrantCtx(
+            closed=x.get("closed", False),
+            locked=x.get("locked", False),
+            allow_guests=x.get("allow_guests", False),
+            window=mod.Window(x.get("window", "none")),
+        )
         want = x["expect"]
-        got = {"publish": pub, "subscribe": sub}
-        if want.get("denied") or got != want:
-            bad.append(f"{x['id']}: contract {want}, hub-api sends publish={pub} subscribe={sub}")
+        try:
+            g = grants_for(mod.GrantKind(x["kind"]), mod.GrantRole[x["role"].upper()], ctx)
+            got: dict[str, Any] = {"publish": g.publish, "subscribe": g.subscribe}
+        except mod.AccessDeniedError as e:
+            got = {"denied": e.reason}
+        if got != want:
+            bad.append(f"{x['id']}: contract {want}, hub-api policy gives {got}")
     return bad
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="T4 (hub-api): REST join hardcodes publish=True/subscribe=True and never consults the room's "
-    "kind/ACL/lock/schedule, so a member can publish on a stage and enter a green room; derive grants "
-    "from the shared policy (rooms app / webrtc grants_for)",
-)
+def test_hub_api_member_join_derives_grants_from_the_policy_not_constants() -> None:
+    """The REST join passes policy-derived grants (no literal True/False) and no stale constant."""
+    call = _hub_join_request()
+    assert _const_kwarg(call, "publish") is None or _const_kwarg(call, "publish") is ...
+    assert _const_kwarg(call, "subscribe") is None or _const_kwarg(call, "subscribe") is ...
+    sent = {k.arg for k in call.keywords}
+    assert {"publish", "subscribe", "ttl_secs"} <= sent
+    baseline = next(x for x in _contract()["cases"] if x["id"] == "community-member")["expect"]
+    assert baseline == {"publish": True, "subscribe": True}
+
+
 def test_hub_api_join_grants_follow_the_shared_policy() -> None:
     assert hub_api_grant_mismatches() == []
 
 
 def test_hub_api_mismatch_detector_actually_examines_cases() -> None:
-    """Guards the xfail above: the detector must examine member cases and find the known gaps."""
-    members = [x for x in _contract()["cases"] if x["role"] == "member"]
-    assert len(members) >= 8, "detector examined too few member cases"
-    found = hub_api_grant_mismatches()
+    """Guards the check above: it must examine every case and catch a deliberately wrong policy."""
+    cases = _contract()["cases"]
+    assert len(cases) >= 20, "detector examined too few cases"
+    mod = _hub_call_access()
+
+    def constant_true(kind: Any, role: Any, ctx: Any) -> Any:
+        return mod.Grants(publish=True, subscribe=True)
+
+    found = hub_api_grant_mismatches(constant_true)  # the pre-fix hub-api behaviour
     assert any(m.startswith("stage-member-is-viewer") for m in found), found
     assert any(m.startswith("green-room-member-refused") for m in found), found
+    assert any(m.startswith("locked-member-refused") for m in found), found
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="T4 (hub-api): JoinRoomRequest omits ttl_secs, so REST join tokens take svc-streaming's 900 s "
-    "default instead of the contract's 60 s join TTL",
-)
 def test_hub_api_join_requests_the_contract_ttl() -> None:
-    assert _const_kwarg(_hub_join_request(), "ttl_secs") == _contract()["token"]["join_ttl_secs"]
+    mod = _hub_call_access()
+    token = _contract()["token"]
+    assert mod.JOIN_TTL_SECS == token["join_ttl_secs"]
+    assert mod.JOIN_TTL_MAX_SECS == token["join_ttl_max_secs"]
+    assert mod.JOIN_TTL_SECS <= mod.JOIN_TTL_MAX_SECS
+    # the blueprint passes the contract constant, and the proxy forwards it as ttl_secs
+    joins = _calls(ast.parse(HUB_CALLS.read_text()), "join_room")
+    assert len(joins) == 1, f"expected exactly one join_room call in calls.py, found {len(joins)}"
+    ttl = next(k.value for k in joins[0].keywords if k.arg == "ttl_secs")
+    assert isinstance(ttl, ast.Attribute) and ttl.attr == "JOIN_TTL_SECS"
+    assert _hub_join_request() and any(k.arg == "ttl_secs" for k in _hub_join_request().keywords)

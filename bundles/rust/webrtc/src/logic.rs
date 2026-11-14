@@ -16,7 +16,7 @@ use std::sync::Arc;
 use serde_json::{Map, Value, json};
 use waddle_sdk::tool::{ToolContext, ToolError, ToolRegistry};
 
-use crate::grants::{GrantRole, HandOp};
+use crate::grants::{GrantRole, HandOp, LEAVE_TOOL, moderation_scope};
 
 /// Every tool name this bundle exposes (also the only labels ever logged).
 pub const TOOL_NAMES: [&str; 28] = [
@@ -349,21 +349,6 @@ fn recording(
     }
 }
 
-/// Roles the rooms app may assert for the acting participant (host re-checks).
-const ACTOR_ROLES: [&str; 4] = ["guest", "member", "moderator", "admin"];
-
-/// Parses the `actor_id` / `actor_role` pair every moderation tool carries.
-/// The rooms app resolved the role from its per-room ACL; svc-streaming
-/// enforces it again as defense in depth (interim until the SDK `caller_can`
-/// check replaces `actor_role`).
-fn actor_args(o: &Map<String, Value>) -> Result<(String, String), ToolError> {
-    let id = uuid_arg(o, "actor_id", true)?.ok_or_else(|| bad("actor_id required"))?;
-    match o.get("actor_role") {
-        Some(Value::String(r)) if ACTOR_ROLES.contains(&r.as_str()) => Ok((id, r.clone())),
-        _ => Err(bad("actor_role must be guest|member|moderator|admin")),
-    }
-}
-
 /// Read-only `room.list`: live rooms of the invoking community, whitelisted.
 fn rooms_list(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
     object(&args, &[])?;
@@ -418,41 +403,62 @@ fn participants(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, To
     Ok(head)
 }
 
-/// Moderation on one participant (`leave|kick|mute|unmute`): validated args in,
-/// whitelisted result out.
-fn participant_op(
-    op: &'static str,
-    fields: &'static [&'static str],
-) -> impl Fn(&dyn Media, &ToolContext, Value) -> Result<Value, ToolError> {
-    move |m, _, args| {
-        let o = object(
-            &args,
-            &["room_id", "participant_id", "actor_id", "actor_role"],
-        )?;
-        let (actor_id, actor_role) = actor_args(o)?;
-        let req = json!({
-            "room_id": uuid_arg(o, "room_id", true)?,
-            "participant_id": uuid_arg(o, "participant_id", true)?,
-            "actor_id": actor_id, "actor_role": actor_role,
-        });
-        pick(&m.call(op, &req).map_err(tool_err)?, fields)
+/// Refuses `actor_id` / `actor_role` in the arguments of any actor-bound tool: the
+/// actor is the host-verified context, so nothing the caller sends can name or
+/// upgrade it.
+fn reject_actor_args(args: &Value) -> Result<(), ToolError> {
+    if let Some(o) = args.as_object()
+        && (o.contains_key("actor_id") || o.contains_key("actor_role"))
+    {
+        return Err(bad(
+            "actor is derived by the host and is not accepted as an argument",
+        ));
     }
+    Ok(())
 }
 
-/// Moderation on a whole room (`mute_all|lock|unlock`).
-fn room_mod_op(
-    op: &'static str,
+/// Runs one moderation tool (`leave|kick|mute|unmute|mute_all|lock|unlock`).
+///
+/// The actor is the host-verified context and its role comes from its host-derived
+/// scopes; `actor_id`/`actor_role` arguments are refused. Which scope is required
+/// follows from the tool (see [`moderation_scope`]): `room.leave` removes only the
+/// verified caller (member scope), everything else needs `community:moderate`,
+/// verified by the host before dispatch and again here on the verified context.
+/// `actor_id` and the scope-derived `actor_role` ride on every host op so
+/// svc-streaming can bind and re-check them.
+fn moderation_call(
+    tool: &'static str,
+    with_participant: bool,
     fields: &'static [&'static str],
-) -> impl Fn(&dyn Media, &ToolContext, Value) -> Result<Value, ToolError> {
-    move |m, _, args| {
-        let o = object(&args, &["room_id", "actor_id", "actor_role"])?;
-        let (actor_id, actor_role) = actor_args(o)?;
-        let req = json!({
-            "room_id": uuid_arg(o, "room_id", true)?,
-            "actor_id": actor_id, "actor_role": actor_role,
-        });
-        pick(&m.call(op, &req).map_err(tool_err)?, fields)
+    m: &dyn Media,
+    ctx: &ToolContext,
+    args: Value,
+) -> Result<Value, ToolError> {
+    reject_actor_args(&args)?;
+    let allowed: &[&str] = if with_participant {
+        &["room_id", "participant_id"]
+    } else {
+        &["room_id"]
+    };
+    let o = object(&args, allowed)?;
+    let room = uuid_arg(o, "room_id", true)?;
+    let target = if with_participant {
+        Some(uuid_arg(o, "participant_id", true)?.ok_or_else(|| bad("participant_id required"))?)
+    } else {
+        None
+    };
+    let scope = moderation_scope(tool).ok_or(ToolError::Forbidden)?;
+    let actor = verified_actor_scope(ctx, scope)?;
+    let mut req = json!({
+        "room_id": room, "actor_id": actor.id, "actor_role": role_wire(actor.role),
+    });
+    // `room.leave` acts on the verified caller only; the others name their target.
+    match (&target, tool == LEAVE_TOOL) {
+        (Some(t), _) => req["participant_id"] = json!(t),
+        (None, true) => req["participant_id"] = json!(actor.id),
+        (None, false) => {}
     }
+    pick(&m.call(tool, &req).map_err(tool_err)?, fields)
 }
 
 /// The only contract version the hand tools (and the host ops behind them) speak.
@@ -481,13 +487,18 @@ struct Actor {
 /// too (the host already refused it before dispatch, this is defence in depth on
 /// verified data).
 fn verified_actor(ctx: &ToolContext, op: HandOp) -> Result<Actor, ToolError> {
+    verified_actor_scope(ctx, op.scope())
+}
+
+/// [`verified_actor`] for any tool, given the scope it declares in its manifest.
+fn verified_actor_scope(ctx: &ToolContext, scope: &str) -> Result<Actor, ToolError> {
     let id = ctx
         .actor
         .as_deref()
         .map(str::to_ascii_lowercase)
         .filter(|a| is_uuid(a))
         .ok_or(ToolError::Forbidden)?;
-    if !ctx.has_scope(op.scope()) {
+    if !ctx.has_scope(scope) {
         return Err(ToolError::NotGranted);
     }
     let role = if ctx.has_scope("community:admin") {
@@ -552,13 +563,7 @@ fn hand_call(
     ctx: &ToolContext,
     args: Value,
 ) -> Result<Value, ToolError> {
-    if let Some(o) = args.as_object()
-        && (o.contains_key("actor_id") || o.contains_key("actor_role"))
-    {
-        return Err(bad(
-            "actor is derived by the host and is not accepted as an argument",
-        ));
-    }
+    reject_actor_args(&args)?;
     let allowed: &[&str] = match op {
         HandOp::LowerOther | HandOp::Ack => &["api_version", "room_id", "participant_id"],
         _ => &["api_version", "room_id"],
@@ -683,43 +688,26 @@ pub fn build_registry(media: Arc<dyn Media>) -> ToolRegistry {
     reg(&mut r, "admin.verify", Box::new(admin_verify));
     reg(&mut r, "room.list", Box::new(rooms_list));
     reg(&mut r, "room.participants", Box::new(participants));
-    let gone: &[&str] = &["room_id", "participant_id", "sessions_closed"];
-    let muted: &[&str] = &["room_id", "participant_id", "muted"];
-    reg(
-        &mut r,
-        "room.leave",
-        Box::new(participant_op("room.leave", gone)),
-    );
-    reg(
-        &mut r,
-        "room.kick",
-        Box::new(participant_op("room.kick", gone)),
-    );
-    reg(
-        &mut r,
-        "room.mute",
-        Box::new(participant_op("room.mute", muted)),
-    );
-    reg(
-        &mut r,
-        "room.unmute",
-        Box::new(participant_op("room.unmute", muted)),
-    );
-    reg(
-        &mut r,
-        "room.mute_all",
-        Box::new(room_mod_op("room.mute_all", &["room_id", "muted"])),
-    );
-    reg(
-        &mut r,
-        "room.lock",
-        Box::new(room_mod_op("room.lock", &["room_id", "locked"])),
-    );
-    reg(
-        &mut r,
-        "room.unlock",
-        Box::new(room_mod_op("room.unlock", &["room_id", "locked"])),
-    );
+    let gone: &'static [&'static str] = &["room_id", "participant_id", "sessions_closed"];
+    let muted: &'static [&'static str] = &["room_id", "participant_id", "muted"];
+    let moderation: [(&'static str, bool, &'static [&'static str]); 7] = [
+        ("room.leave", false, gone),
+        ("room.kick", true, gone),
+        ("room.mute", true, muted),
+        ("room.unmute", true, muted),
+        ("room.mute_all", false, &["room_id", "muted"]),
+        ("room.lock", false, &["room_id", "locked"]),
+        ("room.unlock", false, &["room_id", "locked"]),
+    ];
+    for (tool, with_participant, fields) in moderation {
+        reg(
+            &mut r,
+            tool,
+            Box::new(move |m, ctx, args| {
+                moderation_call(tool, with_participant, fields, m, ctx, args)
+            }),
+        );
+    }
     for op in HandOp::ALL {
         reg(
             &mut r,
@@ -989,17 +977,37 @@ mod tests {
 
     const MOD: &str = "33333333-3333-3333-3333-333333333333";
 
+    /// The moderation tools and whether they take a `participant_id`.
+    const MOD_TOOLS: [(&str, bool); 7] = [
+        ("room.leave", false),
+        ("room.kick", true),
+        ("room.mute", true),
+        ("room.unmute", true),
+        ("room.mute_all", false),
+        ("room.lock", false),
+        ("room.unlock", false),
+    ];
+
+    /// A host answer good enough for every moderation tool.
+    fn any_moderation_answer() -> Value {
+        json!({"room_id": ROOM, "participant_id": USER, "sessions_closed": 1,
+               "muted": 1, "locked": true, "leak": 1})
+    }
+
+    fn mod_args(takes_participant: bool) -> Value {
+        if takes_participant {
+            json!({"room_id": ROOM, "participant_id": USER})
+        } else {
+            json!({"room_id": ROOM})
+        }
+    }
+
     #[test]
-    fn moderation_tools_forward_actor_and_whitelist_results() {
+    fn moderation_tools_forward_the_verified_actor_and_whitelist_results() {
         let f = Fake::ok(
             json!({"room_id": ROOM, "participant_id": USER, "sessions_closed": 2, "leak": 1}),
         );
-        let out = call(
-            &f,
-            "room.kick",
-            json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD, "actor_role": "moderator"}),
-        )
-        .unwrap();
+        let out = call(&f, "room.kick", ctx(MOD, &MOD_SCOPES, mod_args(true))).unwrap();
         assert_eq!(
             out,
             json!({"room_id": ROOM, "participant_id": USER, "sessions_closed": 2})
@@ -1008,50 +1016,179 @@ mod tests {
             f.calls()[0],
             (
                 "room.kick".to_string(),
-                json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD, "actor_role": "moderator"})
+                json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD,
+                       "actor_role": "moderator"})
             )
         );
         let f = Fake::ok(json!({"room_id": ROOM, "muted": 3, "x": 1}));
         let out = call(
             &f,
             "room.mute_all",
-            json!({"room_id": ROOM, "actor_id": MOD, "actor_role": "admin"}),
+            ctx(MOD, &ADMIN_SCOPES, mod_args(false)),
         )
         .unwrap();
         assert_eq!(out, json!({"room_id": ROOM, "muted": 3}));
+        assert_eq!(
+            f.calls()[0].1,
+            json!({"room_id": ROOM, "actor_id": MOD, "actor_role": "admin"}),
+            "mute_all names the caller so the server can exclude them"
+        );
         let f = Fake::ok(json!({"room_id": ROOM, "locked": true}));
         for t in ["room.lock", "room.unlock"] {
-            call(
-                &f,
-                t,
-                json!({"room_id": ROOM, "actor_id": MOD, "actor_role": "moderator"}),
-            )
-            .unwrap();
+            call(&f, t, ctx(MOD, &MOD_SCOPES, mod_args(false))).unwrap();
         }
         assert_eq!(f.calls().len(), 2);
     }
 
     #[test]
-    fn moderation_tools_reject_bad_actor_or_extra_args_before_the_host() {
-        let f = Fake::ok(json!({}));
-        for args in [
-            json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD}),
-            json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD, "actor_role": "root"}),
-            json!({"room_id": ROOM, "participant_id": USER, "actor_id": "bob", "actor_role": "admin"}),
-            json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD, "actor_role": "admin", "community_id": "7"}),
-            json!({"room_id": ROOM, "participant_id": "alice", "actor_id": MOD, "actor_role": "admin"}),
-        ] {
-            for t in ["room.kick", "room.mute", "room.unmute", "room.leave"] {
+    fn leave_removes_only_the_verified_caller_with_member_scope() {
+        let f = Fake::ok(json!({"room_id": ROOM, "participant_id": USER, "sessions_closed": 1}));
+        let out = call(&f, "room.leave", ctx(USER, &MEMBER_SCOPES, mod_args(false))).unwrap();
+        assert_eq!(out["participant_id"], USER);
+        assert_eq!(
+            f.calls()[0].1,
+            json!({"room_id": ROOM, "participant_id": USER, "actor_id": USER,
+                   "actor_role": "member"})
+        );
+        // There is no participant argument: removing someone else is `room.kick`.
+        assert!(matches!(
+            call(
+                &f,
+                "room.leave",
+                ctx(USER, &MEMBER_SCOPES, with_participant(OTHER))
+            ),
+            Err(ToolError::InvalidArgs(_))
+        ));
+        assert_eq!(f.calls().len(), 1);
+    }
+
+    #[test]
+    fn moderation_tools_refuse_a_forged_actor_or_role_in_the_arguments() {
+        let f = Fake::ok(any_moderation_answer());
+        for (tool, takes) in MOD_TOOLS {
+            for forged in [
+                json!({"actor_role": "moderator"}),
+                json!({"actor_role": "admin", "actor_id": MOD}),
+                json!({"actor_id": MOD}),
+                json!({"actor_id": USER}),
+            ] {
+                let mut args = mod_args(takes);
+                for (k, v) in forged.as_object().unwrap() {
+                    args[k] = v.clone();
+                }
+                let got = call(&f, tool, ctx(USER, &MEMBER_SCOPES, args.clone()));
                 assert!(
-                    matches!(call(&f, t, args.clone()), Err(ToolError::InvalidArgs(_))),
-                    "{t} {args}"
+                    matches!(got, Err(ToolError::InvalidArgs(ref m)) if m.contains("derived by the host")),
+                    "{tool} {args}: {got:?}"
                 );
             }
         }
-        assert!(matches!(
-            call(&f, "room.lock", json!({"room_id": ROOM, "actor_id": MOD})),
-            Err(ToolError::InvalidArgs(_))
-        ));
+        assert!(
+            f.calls().is_empty(),
+            "a forged actor never reaches the host"
+        );
+    }
+
+    #[test]
+    fn member_scope_cannot_reach_any_moderator_tool_and_the_scope_is_the_gate() {
+        let f = Fake::ok(any_moderation_answer());
+        for (tool, takes) in MOD_TOOLS {
+            let member = call(&f, tool, ctx(USER, &MEMBER_SCOPES, mod_args(takes)));
+            if tool == "room.leave" {
+                assert!(member.is_ok(), "leave is member-level");
+            } else {
+                assert!(
+                    matches!(member, Err(ToolError::NotGranted)),
+                    "{tool} must need community:moderate"
+                );
+            }
+        }
+        assert_eq!(
+            f.calls().len(),
+            1,
+            "only the member-level leave reached the host"
+        );
+        for (tool, takes) in MOD_TOOLS {
+            call(&f, tool, ctx(MOD, &MOD_SCOPES, mod_args(takes))).unwrap();
+        }
+        assert_eq!(f.calls().len(), 1 + MOD_TOOLS.len());
+    }
+
+    #[test]
+    fn no_verified_actor_or_scope_means_no_moderation_call() {
+        let f = Fake::ok(any_moderation_answer());
+        for (tool, takes) in MOD_TOOLS {
+            let args = || mod_args(takes);
+            assert!(
+                matches!(call(&f, tool, args()), Err(ToolError::Forbidden)),
+                "{tool} without context"
+            );
+            assert!(
+                matches!(
+                    call(&f, tool, ctx("alice", &ADMIN_SCOPES, args())),
+                    Err(ToolError::Forbidden)
+                ),
+                "{tool} non-uuid actor"
+            );
+            assert!(
+                matches!(
+                    call(&f, tool, ctx(USER, &[], args())),
+                    Err(ToolError::NotGranted)
+                ),
+                "{tool} no scopes"
+            );
+        }
+        assert!(f.calls().is_empty());
+    }
+
+    #[test]
+    fn every_moderation_host_call_carries_the_verified_actor_and_scope_derived_role() {
+        for (who, scopes, role) in [
+            (USER, &MEMBER_SCOPES[..], "member"),
+            (MOD, &MOD_SCOPES[..], "moderator"),
+            (MOD, &ADMIN_SCOPES[..], "admin"),
+        ] {
+            for (tool, takes) in MOD_TOOLS {
+                if tool != "room.leave" && scopes == &MEMBER_SCOPES[..] {
+                    continue;
+                }
+                let f = Fake::ok(any_moderation_answer());
+                call(&f, tool, ctx(who, scopes, mod_args(takes))).unwrap();
+                let calls = f.calls();
+                assert_eq!(calls.len(), 1, "{tool}");
+                assert_eq!(calls[0].0, tool);
+                assert_eq!(calls[0].1["actor_id"], who, "{tool} actor_id");
+                assert_eq!(calls[0].1["actor_role"], role, "{tool} actor_role");
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_moderation_args_never_reach_the_host() {
+        let f = Fake::ok(json!({}));
+        for (tool, args) in [
+            (
+                "room.kick",
+                json!({"room_id": ROOM, "participant_id": "alice"}),
+            ),
+            ("room.kick", json!({"room_id": ROOM})),
+            (
+                "room.mute",
+                json!({"room_id": ROOM, "participant_id": USER, "community_id": "7"}),
+            ),
+            ("room.lock", json!({"room_id": "x"})),
+            ("room.unlock", json!({})),
+            (
+                "room.mute_all",
+                json!({"room_id": ROOM, "participant_id": USER}),
+            ),
+        ] {
+            let got = call(&f, tool, ctx(MOD, &ADMIN_SCOPES, args.clone()));
+            assert!(
+                matches!(got, Err(ToolError::InvalidArgs(_))),
+                "{tool} {args}: {got:?}"
+            );
+        }
         assert!(f.calls().is_empty(), "invalid args never reach the host");
     }
 
@@ -1086,22 +1223,12 @@ mod tests {
     #[test]
     fn moderation_host_refusals_are_typed_errors() {
         let f = Fake::err(HostError::Denied("forbidden".into()));
-        let e = call(
-            &f,
-            "room.kick",
-            json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD, "actor_role": "member"}),
-        )
-        .unwrap_err();
+        let e = call(&f, "room.kick", ctx(MOD, &MOD_SCOPES, mod_args(true))).unwrap_err();
         assert!(matches!(e, ToolError::NotGranted));
         let f = Fake::err(HostError::NotImplemented(
             "feature rooms.moderation is disabled".into(),
         ));
-        let e = call(
-            &f,
-            "room.lock",
-            json!({"room_id": ROOM, "actor_id": MOD, "actor_role": "admin"}),
-        )
-        .unwrap_err();
+        let e = call(&f, "room.lock", ctx(MOD, &ADMIN_SCOPES, mod_args(false))).unwrap_err();
         assert!(matches!(e, ToolError::InvalidArgs(m) if m.contains("disabled")));
     }
 

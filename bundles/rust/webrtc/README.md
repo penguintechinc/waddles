@@ -17,7 +17,9 @@ calls the `webrtc` host capability (`wit/waddle-bundle/webrtc.wit`).
 | `track.route {room_id, mode}` | write | `sfu` (local fan-out); `relay` fails loud (unsupported) |
 | `recording.start/stop {room_id}` | write | fails loud: no room recording path yet |
 | `room.list`, `room.participants {room_id}` | read | live rooms / participants (UUIDs + media flags only) |
-| `room.leave|kick|mute|unmute {room_id, participant_id, actor_id, actor_role}`, `room.mute_all|lock|unlock {room_id, actor_id, actor_role}` | write | moderation; kick/mute/unmute/mute_all/lock/unlock are moderator-only and carry `required_scope: community:moderate`, `room.leave` is self-service. `mute_all` never mutes `actor_id` |
+| `room.leave {room_id}` | write, `community:member` | removes only the verified caller from the room (no participant argument) |
+| `room.kick|mute|unmute {room_id, participant_id}` | write, `community:moderate` | moderate another participant; kick closes sessions and blocks rejoin |
+| `room.mute_all|lock|unlock {room_id}` | write, `community:moderate` | `mute_all` never mutes the verified caller (the server excludes `actor_id`) |
 | `room.hand.raise {room_id, api_version?}` | write, `community:member` | the verified caller raises their OWN hand (idempotent) |
 | `room.hand.lower {room_id, api_version?}` | write, `community:member` | the verified caller lowers their OWN hand |
 | `room.hand.list {room_id, api_version?}` | read, `community:member` | the caller's own entry (+ `position`) and the queue `count` -- never other participants |
@@ -25,6 +27,16 @@ calls the `webrtc` host capability (`wit/waddle-bundle/webrtc.wit`).
 | `room.hand.list_all {room_id, api_version?}` | read, `community:moderate` | the whole ordered queue |
 | `room.hand.ack {room_id, participant_id, api_version?}` | write, `community:moderate` | acknowledge one raised hand |
 | `room.hand.reset {room_id, api_version?}` | write, `community:moderate` | clear the whole queue; returns `cleared` |
+
+## Verified actor (all actor-bound tools)
+
+`room.leave|kick|mute|unmute|mute_all|lock|unlock` and every `room.hand.*` tool take the actor from
+the HOST-VERIFIED tool context (`ToolContext.actor`, role derived from its host-derived scopes);
+`actor_id` / `actor_role` arguments are refused. The manifest `required_scope` (member for
+`room.leave` and the own-hand tools, moderate for everything else) is verified by the host before
+dispatch and re-checked in the tool. Every host op carries `actor_id` and the scope-derived
+`actor_role` (for `room.leave`, `participant_id` is the actor too) so svc-streaming can bind them to
+the authenticated call and re-check them itself.
 
 ## Raised hands
 

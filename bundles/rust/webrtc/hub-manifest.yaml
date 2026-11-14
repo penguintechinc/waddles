@@ -471,23 +471,8 @@ exported_tools:
       room_id:
         type: string
         format: uuid
-      participant_id:
-        type: string
-        format: uuid
-      actor_id:
-        type: string
-        format: uuid
-      actor_role:
-        enum:
-        - guest
-        - member
-        - moderator
-        - admin
     required:
     - room_id
-    - participant_id
-    - actor_id
-    - actor_role
     additionalProperties: false
   output_schema:
     type: object
@@ -500,6 +485,7 @@ exported_tools:
         format: uuid
       sessions_closed:
         type: integer
+  required_scope: community:member
 - name: room.kick
   access: write
   risk: dangerous
@@ -512,20 +498,9 @@ exported_tools:
       participant_id:
         type: string
         format: uuid
-      actor_id:
-        type: string
-        format: uuid
-      actor_role:
-        enum:
-        - guest
-        - member
-        - moderator
-        - admin
     required:
     - room_id
     - participant_id
-    - actor_id
-    - actor_role
     additionalProperties: false
   output_schema:
     type: object
@@ -551,20 +526,9 @@ exported_tools:
       participant_id:
         type: string
         format: uuid
-      actor_id:
-        type: string
-        format: uuid
-      actor_role:
-        enum:
-        - guest
-        - member
-        - moderator
-        - admin
     required:
     - room_id
     - participant_id
-    - actor_id
-    - actor_role
     additionalProperties: false
   output_schema:
     type: object
@@ -590,20 +554,9 @@ exported_tools:
       participant_id:
         type: string
         format: uuid
-      actor_id:
-        type: string
-        format: uuid
-      actor_role:
-        enum:
-        - guest
-        - member
-        - moderator
-        - admin
     required:
     - room_id
     - participant_id
-    - actor_id
-    - actor_role
     additionalProperties: false
   output_schema:
     type: object
@@ -626,19 +579,8 @@ exported_tools:
       room_id:
         type: string
         format: uuid
-      actor_id:
-        type: string
-        format: uuid
-      actor_role:
-        enum:
-        - guest
-        - member
-        - moderator
-        - admin
     required:
     - room_id
-    - actor_id
-    - actor_role
     additionalProperties: false
   output_schema:
     type: object
@@ -658,19 +600,8 @@ exported_tools:
       room_id:
         type: string
         format: uuid
-      actor_id:
-        type: string
-        format: uuid
-      actor_role:
-        enum:
-        - guest
-        - member
-        - moderator
-        - admin
     required:
     - room_id
-    - actor_id
-    - actor_role
     additionalProperties: false
   output_schema:
     type: object
@@ -690,19 +621,8 @@ exported_tools:
       room_id:
         type: string
         format: uuid
-      actor_id:
-        type: string
-        format: uuid
-      actor_role:
-        enum:
-        - guest
-        - member
-        - moderator
-        - admin
     required:
     - room_id
-    - actor_id
-    - actor_role
     additionalProperties: false
   output_schema:
     type: object
