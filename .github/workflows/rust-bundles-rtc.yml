@@ -1,0 +1,136 @@
+name: Rust RTC bundles (rooms + webrtc)
+
+# CI for the two RTC bundle crates: bundles/rust/webrtc (service bundle over svc-streaming
+# rooms/SFU) and bundles/rust/rooms (app bundle). Per crate: cargo fmt --check, clippy -D warnings,
+# host cargo test (executed-test count printed; zero fails), and the wasm32-wasip2 component build
+# with the same cargo-component / wasm-tools pins as bundles/Dockerfile.core-bundles.
+# Contract test (scripts/ci/tests/test_rooms_webrtc_contract.py) is NOT wired here yet: the file
+# lands with plan task T3; wiring it before it exists would be a zero-examined failure.
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'bundles/rust/rooms/**'
+      - 'bundles/rust/webrtc/**'
+      - 'wit/waddle-bundle/**'
+      - 'sdk/waddle-sdk-rs/**'
+      - '.github/workflows/rust-bundles-rtc.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'bundles/rust/rooms/**'
+      - 'bundles/rust/webrtc/**'
+      - 'wit/waddle-bundle/**'
+      - 'sdk/waddle-sdk-rs/**'
+      - '.github/workflows/rust-bundles-rtc.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rtc-bundle:
+    name: "${{ matrix.bundle }}: fmt + clippy + test + wasm32-wasip2 component"
+    # Canonical runner-routing expression (github-actions-workflows skill). Non-main = dal2alpha.
+    runs-on: ${{ fromJSON((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'release' || github.base_ref == 'main') && '"ubuntu-24.04"' || '{"group":"dal2alpha"}') }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bundle: rooms
+            wasm: waddle_bundle_rooms.wasm
+          - bundle: webrtc
+            wasm: waddle_bundle_webrtc_service.wasm
+    defaults:
+      run:
+        working-directory: bundles/rust/${{ matrix.bundle }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Verifies preinstalled C toolchain (host test binaries link with cc); no apt, fails loud.
+      - name: Setup build deps (C toolchain)
+        uses: ./.github/actions/setup-build-deps
+        with:
+          packages: 'build-essential'
+
+      - name: Install Rust 1.97.1 (rustfmt, clippy, wasm32-wasip2 + wasip1)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
+        with:
+          toolchain: "1.97.1"
+          targets: wasm32-wasip2,wasm32-wasip1
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + git + target
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4  # zizmor: ignore[cache-poisoning]
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            bundles/rust/${{ matrix.bundle }}/target
+          key: cargo-bundle-${{ matrix.bundle }}-1.97.1-${{ runner.os }}-${{ hashFiles(format('bundles/rust/{0}/Cargo.lock', matrix.bundle)) }}
+          restore-keys: |
+            cargo-bundle-${{ matrix.bundle }}-1.97.1-${{ runner.os }}-
+
+      - name: Cache cargo-component + wasm-tools binaries
+        id: tools-cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4  # zizmor: ignore[cache-poisoning]
+        with:
+          path: |
+            ~/.cargo/bin/cargo-component
+            ~/.cargo/bin/wasm-tools
+          key: cargo-tools-cargo-component-0.21.1-wasm-tools-1.259.0-${{ runner.os }}
+
+      # Exact pins as in bundles/Dockerfile.core-bundles; --locked resolves transitive deps.
+      - name: Install cargo-component 0.21.1 + wasm-tools 1.259.0 (if not cached)
+        run: |
+          set -euo pipefail
+          if ! cargo component --version 2>/dev/null | grep -q ' 0\.21\.1$'; then
+            cargo install cargo-component --version 0.21.1 --locked
+          fi
+          if ! wasm-tools --version 2>/dev/null | grep -q '^wasm-tools 1\.259\.0 '; then
+            cargo install wasm-tools --version 1.259.0 --locked
+          fi
+          cargo component --version
+          wasm-tools --version
+
+      # Must run first: cargo-component generates src/bindings.rs (gitignored, bundles/rust/*/src/bindings.rs)
+      # that lib.rs `mod bindings;` needs, so clippy and cargo test cannot compile before this step.
+      - name: wasm32-wasip2 component build (generates bindings; cargo component, --locked)
+        run: |
+          set -euo pipefail
+          cargo component build --release --target wasm32-wasip2 --locked
+          artifact="target/wasm32-wasip2/release/${{ matrix.wasm }}"
+          if [ ! -s "$artifact" ]; then
+            echo "::error::expected component artifact missing or empty: ${artifact}" >&2
+            exit 1
+          fi
+          echo "component artifact: ${artifact} ($(wc -c < "$artifact") bytes; examined 1)"
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      # Counted: fails on any failing test (pipefail) and on zero passing tests.
+      - name: cargo test --locked (counted)
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP}/bundle-test.log"
+          cargo test --locked 2>&1 | tee "$log"
+          passed="$(grep '^test result: ok\.' "$log" | sed -E 's/^test result: ok\. ([0-9]+) passed.*/\1/' | awk '{s+=$1} END {print s+0}')"
+          echo "bundle ${{ matrix.bundle }}: passed=${passed} (expect >0)"
+          if [ "$passed" -le 0 ]; then
+            echo "::error::${{ matrix.bundle }}: zero tests passed; a gate that examined nothing fails" >&2
+            exit 1
+          fi

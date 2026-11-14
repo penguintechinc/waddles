@@ -7,6 +7,7 @@
 //! process-stage does the work (identity + tools run there, as in the other
 //! tool-calling apps) and emits a reply event; action-stage only relays it.
 #[allow(warnings)]
+#[rustfmt::skip]
 mod bindings;
 mod logic;
 mod moderation;

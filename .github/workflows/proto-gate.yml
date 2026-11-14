@@ -1,0 +1,93 @@
+name: Proto gate (buf lint + buf breaking + stub drift)
+
+# Proto contract gate for proto/waddles/** and the hub-api Python gRPC stubs. Runs
+# `make check-proto` (scripts/ci/check-proto-gate.sh): buf lint, buf breaking against
+# origin/release/v3.0.X, and descriptor-level stub drift (scripts/ci/check_proto_stub_drift.py).
+# The script prints how many .proto files it examined; zero examined fails the job.
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'proto/**'
+      - 'hub_api/grpc_internal/pb/**'
+      - 'scripts/ci/check-proto-gate.sh'
+      - 'scripts/ci/check_proto_stub_drift.py'
+      - 'scripts/compile_protos_v1.sh'
+      - 'scripts/requirements-protoc.txt'
+      - 'Makefile'
+      - '.github/workflows/proto-gate.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'proto/**'
+      - 'hub_api/grpc_internal/pb/**'
+      - 'scripts/ci/check-proto-gate.sh'
+      - 'scripts/ci/check_proto_stub_drift.py'
+      - 'scripts/compile_protos_v1.sh'
+      - 'scripts/requirements-protoc.txt'
+      - 'Makefile'
+      - '.github/workflows/proto-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  proto-gate:
+    name: buf lint + buf breaking + stub drift
+    # Canonical runner-routing expression (github-actions-workflows skill): hosted only for main / tags / release.
+    runs-on: ${{ fromJSON((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'release' || github.base_ref == 'main') && '"ubuntu-24.04"' || '{"group":"dal2alpha"}') }}
+    timeout-minutes: 20
+    env:
+      # buf release pinned by exact version; the binary is verified against its upstream SHA256.
+      BUF_VERSION: '1.57.2'
+      BUF_SHA256_LINUX_AMD64: '644e6fa4a62afc2b0d425d3ac9538d2f512947c0f2e82fc95c41a5eab6729414'
+      # Breaking-change baseline (scripts/ci/check-proto-gate.sh default); must resolve or the gate fails.
+      PROTO_BREAKING_AGAINST: 'origin/release/v3.0.X'
+    steps:
+      # fetch-depth 0: buf breaking compares against the release branch, which must exist locally.
+      - name: Checkout code (full history for the breaking-change baseline)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Verify breaking-change baseline ref exists
+        run: |
+          set -euo pipefail
+          if ! git rev-parse --verify --quiet "${PROTO_BREAKING_AGAINST}^{commit}" >/dev/null; then
+            echo "::error::proto-gate: baseline ${PROTO_BREAKING_AGAINST} not present after checkout; refusing to skip buf breaking" >&2
+            exit 1
+          fi
+          echo "proto-gate: baseline ${PROTO_BREAKING_AGAINST} = $(git rev-parse --short "${PROTO_BREAKING_AGAINST}")"
+
+      - name: Install buf (pinned version, SHA256 verified)
+        run: |
+          set -euo pipefail
+          bindir="${RUNNER_TEMP}/buf-bin"
+          mkdir -p "$bindir"
+          curl -fsSL --retry 3 --retry-delay 2 -o "$bindir/buf" \
+            "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-x86_64"
+          actual="$(sha256sum "$bindir/buf" | cut -d' ' -f1)"
+          if [ "$actual" != "$BUF_SHA256_LINUX_AMD64" ]; then
+            echo "::error::buf SHA256 mismatch (expected ${BUF_SHA256_LINUX_AMD64}, got ${actual})" >&2
+            exit 1
+          fi
+          chmod +x "$bindir/buf"
+          echo "$bindir" >> "$GITHUB_PATH"
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Install protoc toolchain (hash-locked)
+        run: python3 -m pip install --no-cache-dir --require-hashes -r scripts/requirements-protoc.txt
+
+      - name: make check-proto (buf lint, buf breaking, stub drift)
+        run: make check-proto

@@ -1,0 +1,71 @@
+name: RTC parity gate (route consistency + parity matrix)
+
+# Plan L5/L6 gate for the Rust RTC replacement of core/module_rtc. The checker scripts and the
+# machine parity matrix are created by plan task T8; until then the wiring marker reports
+# "NOT YET WIRED" (exit 0) while core/module_rtc exists, and FAILS once module_rtc is deleted
+# (T10) without them. Each guarded step runs only when its artifact exists; the marker is what
+# keeps a missing artifact from passing silently.
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'proto/**'
+      - 'hub_api/blueprints/v1/calls.py'
+      - 'hub_api/services/calls_proxy.py'
+      - 'hub_api/services/call_participants.py'
+      - 'hub_api/tests/test_calls*.py'
+      - 'core/svc_streaming/src/rooms/**'
+      - 'core/svc_streaming/tests/rtc_*.rs'
+      - 'core/module_rtc/**'
+      - 'docs/rtc-parity-matrix.json'
+      - 'scripts/ci/rtc_*.py'
+      - 'scripts/ci/rtc_parity_wiring.sh'
+      - '.github/workflows/rtc-parity-gate.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'proto/**'
+      - 'hub_api/blueprints/v1/calls.py'
+      - 'hub_api/services/calls_proxy.py'
+      - 'hub_api/services/call_participants.py'
+      - 'hub_api/tests/test_calls*.py'
+      - 'core/svc_streaming/src/rooms/**'
+      - 'core/svc_streaming/tests/rtc_*.rs'
+      - 'core/module_rtc/**'
+      - 'docs/rtc-parity-matrix.json'
+      - 'scripts/ci/rtc_*.py'
+      - 'scripts/ci/rtc_parity_wiring.sh'
+      - '.github/workflows/rtc-parity-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rtc-parity:
+    name: rtc parity gate (L5 route consistency, L6 parity matrix)
+    # Canonical runner-routing expression (github-actions-workflows skill).
+    runs-on: ${{ fromJSON((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'release' || github.base_ref == 'main') && '"ubuntu-24.04"' || '{"group":"dal2alpha"}') }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Always runs: reports wired / not-yet-wired, and fails after module_rtc deletion without T8.
+      - name: Wiring marker (T8 artifacts present, or module_rtc still present)
+        run: bash scripts/ci/rtc_parity_wiring.sh
+
+      - name: L5 route consistency (scripts/ci/rtc_route_consistency.py)
+        if: ${{ hashFiles('scripts/ci/rtc_route_consistency.py') != '' }}
+        run: python3 scripts/ci/rtc_route_consistency.py
+
+      - name: L6 parity matrix check (scripts/ci/rtc_parity_check.py)
+        if: ${{ hashFiles('scripts/ci/rtc_parity_check.py') != '' && hashFiles('docs/rtc-parity-matrix.json') != '' }}
+        run: python3 scripts/ci/rtc_parity_check.py
