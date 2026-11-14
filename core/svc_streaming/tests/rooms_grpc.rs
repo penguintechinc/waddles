@@ -507,9 +507,10 @@ async fn invalid_ids_are_invalid_argument() {
 async fn bad_tokens_are_refused_before_any_work() {
     let mut h = harness(42200, true).await;
     let k = h.signing_pem.clone();
-    let list = |t: String| async {
-        let mut c = h.client.clone();
-        c.list_rooms(req(ListRoomsRequest { community_id: "7".into() }, &t)).await
+    let base_client = h.client.clone();
+    let list = |t: String| {
+        let mut c = base_client.clone();
+        async move { c.list_rooms(req(ListRoomsRequest { community_id: "7".into() }, &t)).await }
     };
     // Sanity: a good token works.
     assert!(list(jwt(&k, SCOPE_READ, |_| {})).await.is_ok());
