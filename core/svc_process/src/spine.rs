@@ -879,6 +879,12 @@ pub struct ProcessDeps<S: SpineOps> {
     ///
     /// [`pii_gate`]: ProcessDeps::pii_gate
     pub pii_minter: Option<Arc<dyn crate::pii_tokenize::IdentityMinter>>,
+    /// The process-wide single-flight memo that makes ONE ingest message
+    /// tokenize (one hub-api mint) once per process rather than once per
+    /// consuming app -- see `crate::tokenize_memo`. ONE instance is shared by
+    /// every consumer (`SupervisorDeps::tokenize_memo`); a per-consumer memo
+    /// would defeat it.
+    pub tokenize_memo: Arc<crate::tokenize_memo::TokenizeMemo>,
     /// The `db` host capability's production wiring
     /// (`crate::capabilities::StageCapabilities::with_db`), built once at
     /// startup (`crate::lib::try_build_db_wiring`) and cloned -- cheap,
@@ -1283,12 +1289,14 @@ async fn handle_delivered_inner<S: SpineOps>(
     ) = if deps.pii_gate.enabled().await {
         match &deps.pii_minter {
             Some(minter) => {
-                match crate::pii_tokenize::tokenize_event_with_mentions(
-                    &raw_event,
-                    &d.env.tenant,
-                    minter.as_ref(),
-                )
-                .await
+                // Once per message per process (`crate::tokenize_memo`): every
+                // per-app consumer of this entry shares one tokenization / one
+                // hub-api mint; failures are shared with in-flight waiters and
+                // never cached, so the fail-closed arm below is unchanged.
+                match deps
+                    .tokenize_memo
+                    .tokenize_delivered(d, &raw_event, &d.env.tenant, minter.as_ref())
+                    .await
                 {
                     Ok(tokenized) => (tokenized.event, Some(tokenized.mentions)),
                     Err(reason) => {
@@ -2660,6 +2668,7 @@ mod tests {
             // ON behavior.
             pii_gate: Arc::new(crate::license::test_support::FixedGate(false)),
             pii_minter: None,
+            tokenize_memo: Arc::new(crate::tokenize_memo::TokenizeMemo::default()),
             // No live Postgres connection in this module's unit tests --
             // every `db` host-call a fixture invokes sees `not_implemented`,
             // exercised directly by `capabilities`'s own test suite instead.
@@ -2823,6 +2832,129 @@ mod tests {
         let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
         assert_eq!(dead_lettered.len(), 1);
         assert_eq!(dead_lettered[0].1, DlqErrorKind::BundleError);
+    }
+
+    /// A minter that counts hub-api calls, optionally sleeping (so concurrent
+    /// consumers overlap in flight) and optionally failing.
+    struct CountingMinterFixture {
+        calls: std::sync::atomic::AtomicUsize,
+        delay_ms: u64,
+        fail: bool,
+    }
+
+    impl crate::pii_tokenize::IdentityMinter for CountingMinterFixture {
+        fn mint_many<'a>(
+            &'a self,
+            _tenant_id: &'a str,
+            items: Vec<crate::pii_tokenize::MintItem>,
+        ) -> crate::pii_tokenize::MintResult<'a> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+                if self.fail {
+                    return Err(crate::pii_tokenize::TokenizeError::ResolutionUnavailable(
+                        "simulated hub-api outage".to_string(),
+                    ));
+                }
+                Ok(items
+                    .into_iter()
+                    .map(|i| (i.platform_user_id, "pseud-0001".to_string()))
+                    .collect())
+            })
+        }
+    }
+
+    /// Many per-app consumers handling the SAME entry through the real
+    /// `handle_delivered` share ONE tokenization / ONE hub-api mint, and every
+    /// one of them still reaches `invoke_transform` and acks.
+    #[tokio::test]
+    async fn handle_delivered_many_consumers_of_one_entry_mint_once() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let minter = Arc::new(CountingMinterFixture {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            delay_ms: 100,
+            fail: false,
+        });
+        let memo = Arc::new(crate::tokenize_memo::TokenizeMemo::default());
+        let mut all = Vec::new();
+        for _ in 0..12 {
+            let connections = connected_registry_with_fake_executor(serde_json::json!(null)).await;
+            let mut deps = test_deps(FakeSpineOps::default(), connections);
+            deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(true));
+            deps.pii_minter = Some(minter.clone());
+            deps.tokenize_memo = Arc::clone(&memo);
+            all.push(deps);
+        }
+        let results =
+            futures_util::future::join_all(all.iter().map(|deps| handle_delivered(&d, deps))).await;
+
+        assert_eq!(results.len(), 12, "examined 12 consumers");
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(
+            minter.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one hub-api mint for one message, not one per consuming app"
+        );
+        for deps in &all {
+            assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+            assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+        }
+    }
+
+    /// Fail-closed through the memo: when the single shared mint fails, EVERY
+    /// consumer dead-letters (none forwards raw PII or acks), the failure
+    /// costs one hub-api call rather than one per consumer, and the next
+    /// delivery of the entry retries normally and succeeds.
+    #[tokio::test]
+    async fn handle_delivered_shared_mint_failure_dead_letters_all_then_retries() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let failing = Arc::new(CountingMinterFixture {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            delay_ms: 100,
+            fail: true,
+        });
+        let memo = Arc::new(crate::tokenize_memo::TokenizeMemo::default());
+        let mut all = Vec::new();
+        for _ in 0..12 {
+            let mut deps = test_deps(FakeSpineOps::default(), Arc::new(ConnectionRegistry::new()));
+            deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(true));
+            deps.pii_minter = Some(failing.clone());
+            deps.tokenize_memo = Arc::clone(&memo);
+            all.push(deps);
+        }
+        let results =
+            futures_util::future::join_all(all.iter().map(|deps| handle_delivered(&d, deps))).await;
+
+        assert_eq!(results.len(), 12, "examined 12 consumers");
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(failing.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        for deps in &all {
+            assert!(
+                deps.spine.acked.lock().unwrap().is_empty(),
+                "never acked on failure"
+            );
+            let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+            assert_eq!(dead_lettered.len(), 1);
+            assert_eq!(dead_lettered[0].1, DlqErrorKind::BundleError);
+        }
+
+        // Redelivery after hub-api recovers: not served from a cached failure.
+        let healthy = Arc::new(CountingMinterFixture {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            delay_ms: 0,
+            fail: false,
+        });
+        let connections = connected_registry_with_fake_executor(serde_json::json!(null)).await;
+        let mut deps = test_deps(FakeSpineOps::default(), connections);
+        deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(true));
+        deps.pii_minter = Some(healthy.clone());
+        deps.tokenize_memo = Arc::clone(&memo);
+        handle_delivered(&d, &deps).await.unwrap();
+        assert_eq!(healthy.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
     }
 
     /// Kill-switch regression test: with the opt-out flag ON (tokenization
@@ -5483,7 +5615,8 @@ mod tests {
         }
 
         /// Fail closed on a broker outage: dead-lettered (not acked-and-dropped), counted, and
-        /// recovers once the broker is back -- the failure is not cached.
+        /// recovers once the broker is back -- the failure is only negative-cached for one short
+        /// jittered backoff window (<= 312 ms by default), never beyond it.
         #[tokio::test]
         async fn a_key_broker_outage_dead_letters_visibly_and_recovers() {
             let ring = test_ring();
@@ -5504,6 +5637,9 @@ mod tests {
             assert_eq!(failures("dek_unavailable") - before, 1.0);
 
             fake.state.lock().unwrap().down = false;
+            // Inside the negative window the failure is replayed (no retry stampede); past its
+            // jittered upper bound (250 ms base * 1.25) the broker is asked again.
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             let mut deps2 = test_deps(
                 FakeSpineOps::default(),
                 registry_capturing_invoke(pong()).await.0,

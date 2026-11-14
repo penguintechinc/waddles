@@ -61,6 +61,7 @@ pub mod source_supervisor;
 pub mod spine;
 pub mod stage_metrics;
 pub mod telemetry;
+pub mod tokenize_memo;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -1650,6 +1651,9 @@ fn try_start_process_loop(
         // source's own guest-fault history, so a breaker trip must survive
         // across it (connector spec SS0 condition 5).
         let breaker = Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics));
+        // Same lifetime as the breaker: shared across reconnects so an
+        // in-flight/recent tokenization survives a transport reconnect.
+        let tokenize_memo = Arc::new(tokenize_memo::TokenizeMemo::from_env());
         loop {
             attempt += 1;
             drain_loop_metrics
@@ -1730,6 +1734,7 @@ fn try_start_process_loop(
                 // enabled and the connect failed), and passes it down
                 // unconditionally from here.
                 pii_minter: hub_minter.clone(),
+                tokenize_memo: Arc::clone(&tokenize_memo),
                 dek_provider: identity_dek.clone(),
                 db_wiring: db_wiring.clone(),
                 reputation_wiring: reputation_wiring.clone(),
@@ -2493,6 +2498,9 @@ async fn build_source_supervisor_deps(
         active_digests,
         pii_gate,
         pii_minter,
+        // ONE memo for the whole supervisor so every per-app consumer of a
+        // message shares a single tokenization (`tokenize_memo` module doc).
+        tokenize_memo: Arc::new(tokenize_memo::TokenizeMemo::from_env()),
         // Same "opened async inside the spawned task, this function stays
         // synchronous/no-I/O" placement as `kv_conn` above -- see
         // `try_start_changelog_consumer`'s own spawned block.

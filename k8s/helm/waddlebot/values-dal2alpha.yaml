@@ -194,6 +194,13 @@ pipeline:
     # once its key is provisioned. Never put license-tier flags here.
     extraEnv:
       FLAG_WADDLES_TENANT_DISCORD_INSTALL: "true"
+      # Alpha capacity stopgap: svc-process shares one per-identity internal gRPC bucket (default
+      # 50 rps / burst 100, hub_api/grpc_internal/server.py:125-126). Each Discord message fans out
+      # to ~160 per-app consumers that each call identity resolution, which tripped
+      # RESOURCE_EXHAUSTED on alpha 2026-11-13 and dead-lettered every message. Real fix (identity
+      # resolution off the per-message hub-api path, once per message) is tracked separately.
+      GRPC_RATE_LIMIT_RPS: "500"
+      GRPC_RATE_LIMIT_BURST: "1000"
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }
@@ -435,9 +442,12 @@ pipeline:
       maxConcurrentCompiles: 2
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
+      # Alpha executor was OOMKilled at 16Gi and took ~1h to compile ~160 bundles at 2 CPU after
+      # restart. Raised for alpha only (gamma/beta/prod unchanged). Issue #1304 tracks lazy-load +
+      # compiled cache; horizontal sharding is the long-term direction.
       resources:
-        requests: { cpu: "500m", memory: "1Gi" }
-        limits: { cpu: "2000m", memory: "16Gi" }
+        requests: { cpu: "2000m", memory: "8Gi" }
+        limits: { cpu: "8000m", memory: "24Gi" }
 
 presentation:
   # Rust svc-presentation (overlay + image surface). Overlay view/SSE port reachable on-host at

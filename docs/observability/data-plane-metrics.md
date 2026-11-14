@@ -67,6 +67,10 @@ Guest op strings are folded through an allow-list (`KNOWN_OPS`, else `other`); t
 | `waddles_spine_dlq_total` | counter | `stage, reason` | dead-letter writes by the record's `error.kind` |
 | `waddles_tenant_boundary_violations_total` | counter | `stage, reason` | §5.11 hop-verification failures |
 | `waddles_identity_decrypt_failures_total` | counter | `stage, reason` | inbound identity-field decrypt failures (`dek_unavailable`, `dek_unconfigured`, `aead`, `bad_envelope`, `not_an_envelope`); the event is dead-lettered (`IDENTITY_DECRYPT_FAILED`), never dropped |
+| `waddles_process_tokenize_memo_total` | counter | `stage, result` | **process only** — per-message PII-tokenization memo lookups (`core/svc_process/src/tokenize_memo.rs`). `result`: `miss` (this consumer ran the tokenization and the hub-api mint), `hit` (reused a completed entry), `inflight_wait` (joined another consumer's in-flight tokenization), `bypass` (memo skipped, tokenized directly). Healthy: `miss` ≈ distinct messages, `hit + inflight_wait` ≈ messages × (consuming apps − 1) |
+| `waddles_process_tokenize_mint_calls_total` | counter | `stage, outcome` | **process only** — hub-api `MintEphemeralPseudonyms` calls issued by the tokenization pass; `outcome`: `ok`, `error`. Mint calls per message = this ÷ `waddles_process_tokenize_memo_total{result="miss"}` (must be ≤ 1) |
+| `waddles_hub_dek_cache_total` | counter | `result` | **shared by svc-ingest and svc-process** (`core/hub_client/src/dek.rs`, no `stage` label — emitted from the shared client) — every tenant stream-DEK resolution. `result`: `hit` (served from the `(tenant, key version)` cache), `miss` (this caller was the single-flight leader and made the hub-api `KeyService.GetStreamDek` call), `inflight_wait` (waited behind a leader and was served its fresh key), `negative` (answered with a recent failure — own or shared — inside the jittered backoff window, no broker call). Healthy steady state: ~all `hit`; `miss` ≈ tenants × TTL windows (not × consumers); a cold start with N concurrent consumers is 1 `miss` + N−1 `inflight_wait`. A rising `negative` with flat `miss` is a hub-api outage being absorbed without a retry stampede (`waddles_identity_decrypt_failures_total{reason="dek_unavailable"}` shows the dead-letters) |
+| `waddles_hub_service_jwt_total` | counter | `result, scope` | **shared by every service using `service_auth::MachineJwtClient`** — machine-JWT acquisitions per hub-api scope (a handful of configured scopes, e.g. `key:stream-dek:read`). `result`: `reuse` (cache hit — the steady state, ≈ every call), `refresh` (a `MintServiceToken` round trip succeeded: expect ~1 per scope per 12 min at the 900 s token TTL, refreshed at 80% of lifetime), `refresh_failed` (mint failed; callers got the old still-valid token, or the shared error). `refresh` ≈ hub-api `service_jwt.issue` audit lines for that scope — if it tracks request rate, single-flight is broken |
 | `waddles_consumer_skipped_total` | counter | `stage, app_id, reason` | read + acked without an executor call (e.g. `route_denied`) |
 | `waddles_stream_trimmed_total` | counter | `stage` | `XADD` observed the stream at its approximate `MAXLEN` |
 | `waddles_stream_claimed_total` | counter | `stage, app_id` | `XAUTOCLAIM` recoveries |
@@ -122,6 +126,19 @@ Notes:
 The executor never creates spans (spec §13.2) and every number is measured by trusted host code around the guest, so a
 hostile bundle cannot forge a series. Its view differs from the stage's `waddles_executor_call_seconds` by exactly the wire
 round trip; both are kept.
+
+## hub-api call protection (stampede control)
+
+Every per-app consumer shares one process-wide stream-DEK provider and one machine-JWT client per scope, so N
+concurrent consumers cost **one** hub-api call, not N:
+
+| Layer | Behaviour | Tunables (code constants) |
+|---|---|---|
+| Machine JWT (`service_auth::MachineJwtClient`) | cached per scope; refreshed at 80% of lifetime (or `exp − 30 s`); one in-flight refresh, waiters share it; a failed refresh is replayed for a jittered ~500 ms (old token served if still valid) | `TOKEN_REFRESH_PERCENT`, `TOKEN_REFRESH_FAILURE_BACKOFF` |
+| Stream DEK (`hub_client::dek::CachedDekProvider`) | TTL cache keyed `(tenant, key version)` (bounded, ≤ 4096 keys); single-flight per key; failures negative-cached with jittered exponential backoff (250 ms → 5 s) and shared by all waiters; an `invalidate` racing a fetch is served but never cached | `NEGATIVE_BACKOFF_BASE/CAP`, `DEK_CACHE_MAX_ENTRIES` |
+| Circuit breaker (`hub_client::CircuitBreaker`, one per RPC class) | opens after 5 consecutive failed *attempts* (`BREAKER_FAILURE_THRESHOLD`; one failed call is ≤ 3 attempts, so a single coalesced failure never opens it); sheds for 30 s (`BREAKER_RESET_AFTER`); then exactly **one** half-open probe; failures of calls already in flight when it opened are ignored (no window extension, one `hub_client.circuit_opened` log per open) | threshold / reset passed to `CircuitBreaker::new` |
+
+Fail-closed is unchanged: no key / no token means the event is dead-lettered, never forwarded as ciphertext or raw PII.
 
 ## How tests prove emission (not just definition)
 
