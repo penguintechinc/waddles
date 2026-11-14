@@ -335,9 +335,7 @@ mod tests {
 
     #[test]
     fn e2e_records_histogram_and_flags_over_budget() {
-        let _g = crate::switch::tests::SWITCH_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::switch::tests::SWITCH_LOCK.blocking_lock();
         crate::switch::set_disabled(false);
         let (provider, exporter) = provider();
         let m = CommandMetrics::new(&opentelemetry::metrics::MeterProvider::meter(
@@ -373,9 +371,7 @@ mod tests {
 
     #[test]
     fn kill_switch_makes_every_recorder_a_noop() {
-        let _g = crate::switch::tests::SWITCH_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::switch::tests::SWITCH_LOCK.blocking_lock();
         let (provider, exporter) = provider();
         let m = CommandMetrics::new(&opentelemetry::metrics::MeterProvider::meter(
             &provider, "t",

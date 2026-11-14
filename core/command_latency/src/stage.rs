@@ -258,9 +258,7 @@ mod tests {
 
     #[test]
     fn process_handoff_carries_stamps_command_and_foreign_members() {
-        let _g = crate::switch::tests::SWITCH_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::switch::tests::SWITCH_LOCK.blocking_lock();
         crate::switch::set_disabled(false);
         let inbound = Stamps {
             t0_ms: Some(10_000),
@@ -287,9 +285,7 @@ mod tests {
 
     #[test]
     fn unstamped_inbound_is_passed_through_untouched() {
-        let _g = crate::switch::tests::SWITCH_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::switch::tests::SWITCH_LOCK.blocking_lock();
         crate::switch::set_disabled(false);
         assert_eq!(
             process_handoff_tracestate(Some("vendor=1"), "1-0", 1, 2, None).as_deref(),
@@ -301,9 +297,7 @@ mod tests {
 
     #[test]
     fn disabled_switch_changes_nothing_anywhere() {
-        let _g = crate::switch::tests::SWITCH_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::switch::tests::SWITCH_LOCK.blocking_lock();
         crate::switch::set_disabled(true);
         let ts = stamped(Some("ping"));
         assert_eq!(
@@ -333,9 +327,7 @@ mod tests {
 
     #[test]
     fn queue_wait_refuses_a_forged_future_entry_id() {
-        let _g = crate::switch::tests::SWITCH_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::switch::tests::SWITCH_LOCK.blocking_lock();
         crate::switch::set_disabled(false);
         assert_eq!(record_queue_wait(Hop::QueueWait, "1000-0", 1_080), Some(80));
         assert_eq!(
@@ -347,9 +339,7 @@ mod tests {
 
     #[test]
     fn over_budget_confirm_emits_one_warn_with_the_breakdown_and_no_text() {
-        let _g = crate::switch::tests::SWITCH_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::switch::tests::SWITCH_LOCK.blocking_lock();
         crate::switch::set_disabled(false);
         let cap = Captured::default();
         let sub = tracing_subscriber::registry().with(cap.clone());
@@ -396,9 +386,7 @@ mod tests {
 
     #[test]
     fn under_budget_confirm_emits_no_warn_and_reports_false() {
-        let _g = crate::switch::tests::SWITCH_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::switch::tests::SWITCH_LOCK.blocking_lock();
         crate::switch::set_disabled(false);
         let cap = Captured::default();
         let sub = tracing_subscriber::registry().with(cap.clone());
@@ -428,9 +416,7 @@ mod tests {
 
     #[test]
     fn missing_or_forged_first_door_yields_no_sample() {
-        let _g = crate::switch::tests::SWITCH_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::switch::tests::SWITCH_LOCK.blocking_lock();
         crate::switch::set_disabled(false);
         assert_eq!(
             report_confirmed(Kind::User, None, "a", 1, 1, Outcome::Ok, 5, 6),

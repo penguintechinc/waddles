@@ -22,8 +22,9 @@ fn stages_join_one_trace_and_errors_are_recorded_on_the_span() {
     let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())
         .build();
-    let subscriber = tracing_subscriber::registry()
-        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("trace-propagation-test")));
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_opentelemetry::layer().with_tracer(provider.tracer("trace-propagation-test")),
+    );
 
     tracing::subscriber::with_default(subscriber, || {
         // ---- ingest: the publish span's own ids become the envelope traceparent ------------
@@ -43,7 +44,11 @@ fn stages_join_one_trace_and_errors_are_recorded_on_the_span() {
             let tokenize = tracing::info_span!("process.tokenize");
             drop(tokenize);
         }
-        record_error(&process, "DeadLettered", "entry dead-lettered by the process stage");
+        record_error(
+            &process,
+            "DeadLettered",
+            "entry dead-lettered by the process stage",
+        );
         drop(process);
 
         // ---- action: same remote parent ----------------------------------------------------
@@ -56,8 +61,16 @@ fn stages_join_one_trace_and_errors_are_recorded_on_the_span() {
     let spans = exporter.get_finished_spans().unwrap();
     let names: Vec<_> = spans.iter().map(|s| s.name.to_string()).collect();
     eprintln!("exported spans: {names:?}");
-    for want in ["ingest.publish", "process.consume", "process.tokenize", "action.dispatch"] {
-        assert!(names.iter().any(|n| n == want), "span {want} not exported: {names:?}");
+    for want in [
+        "ingest.publish",
+        "process.consume",
+        "process.tokenize",
+        "action.dispatch",
+    ] {
+        assert!(
+            names.iter().any(|n| n == want),
+            "span {want} not exported: {names:?}"
+        );
     }
     let by = |n: &str| spans.iter().find(|s| s.name == n).unwrap();
 
@@ -87,11 +100,16 @@ fn stages_join_one_trace_and_errors_are_recorded_on_the_span() {
 
     // Errors: type + message attributes and an error status; healthy spans stay unset.
     let failed = by("process.consume");
-    assert_eq!(attr(failed, "exception.type").as_deref(), Some("DeadLettered"));
-    assert!(attr(failed, "exception.message")
-        .is_some_and(|m| m.contains("dead-lettered")));
+    assert_eq!(
+        attr(failed, "exception.type").as_deref(),
+        Some("DeadLettered")
+    );
+    assert!(attr(failed, "exception.message").is_some_and(|m| m.contains("dead-lettered")));
     assert!(matches!(failed.status, Status::Error { .. }));
-    assert!(!matches!(by("action.dispatch").status, Status::Error { .. }));
+    assert!(!matches!(
+        by("action.dispatch").status,
+        Status::Error { .. }
+    ));
 
     // Attributes stay bounded and non-PII: numeric ids and slugs only.
     assert_eq!(attr(ingest, "tenant_id").as_deref(), Some("7"));

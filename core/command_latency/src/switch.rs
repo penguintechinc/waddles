@@ -73,14 +73,13 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     /// The switch and the environment are process-global; serialize the tests that touch them.
-    pub(crate) static SWITCH_LOCK: Mutex<()> = Mutex::new(());
+    pub(crate) static SWITCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn default_is_enabled_and_env_baseline_opts_out() {
-        let _g = SWITCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = SWITCH_LOCK.blocking_lock();
         std::env::remove_var(ENV_BASELINE);
         init_from_env();
         assert!(!is_disabled(), "unseen flag leaves the mechanism ON");
@@ -97,7 +96,7 @@ pub(crate) mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn refresher_applies_a_live_flag_flip() {
-        let _g = SWITCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = SWITCH_LOCK.lock().await;
         set_disabled(false);
         let want = std::sync::Arc::new(AtomicBool::new(true));
         let w = want.clone();
