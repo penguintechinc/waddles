@@ -1,19 +1,19 @@
-# Claude Code Context (.claude/ supplement)
+# Claude Code Context
 
-**This file supplements the root `/CLAUDE.md`.** It contains only rules and configuration unique to the `.claude/` directory context. For project overview, structure, commands, standards references, CI/CD, and all other shared context, see the root `CLAUDE.md`.
+**Repo-specific context for Claude Code in this repo.** Holds repo rules, MCP notes and setup pointers. Standard rules and skills are provided globally (see below).
 
-## 🚫 DO NOT MODIFY THIS FILE OR `.claude/` STANDARDS
+## Repo-Owned Files
 
-**These are centralized template files that will be overwritten when standards are updated.**
+**These files are owned by this repo and edited directly via PR:**
 
-- ❌ **NEVER edit** `CLAUDE.md`, `.claude/*.md`, `docs/STANDARDS.md`, or `docs/standards/*.md`
+- ✅ **EDIT DIRECTLY** `CLAUDE.md`, `.claude/*.md`, `docs/STANDARDS.md`, `docs/standards/*.md`
 - ✅ **CREATE NEW FILES** for app-specific context:
   - `docs/APP_STANDARDS.md` - App-specific architecture, requirements, context
   - `.claude/{subject}.local.md` - Project-specific overrides (e.g., `architecture.local.md`, `python.local.md`)
 
 **App-Specific Addendums to Standardized Files:**
 
-If your app needs to add exceptions, clarifications, or context to standardized `.claude/` files (e.g., `react.md`, `python.md`, `testing.md`), **DO NOT edit those files**. Instead, create a `.local` variant:
+If your app needs to add exceptions, clarifications, or context to standardized `.claude/` files (e.g., `react.md`, `python.md`, `testing.md`), either edit those files directly via PR or create a `.local` variant:
 
 - `react.md` (standardized) → Create `react.local.md` for app-specific React patterns
 - `python.md` (standardized) → Create `python.local.md` for app-specific Python decisions
@@ -47,16 +47,16 @@ The `update_standards.sh` script copies rules/skills from `~/code/.claude/` to `
 
 ## Setup Script
 
-This repo includes `setup.sh` which configures the local Claude Code environment:
+Environment setup is provided by `setup.sh` in the `admin` repo (`~/code/admin/.claude/setup.sh`), not shipped in this repo. It configures the local Claude Code environment:
 
 ```bash
-.claude/setup.sh              # Full setup (statusline + mem0 + settings)
-.claude/setup.sh statusline   # Statusline only
-.claude/setup.sh mem0         # mem0 + Qdrant only
-.claude/setup.sh settings     # Settings update only
+~/code/admin/.claude/setup.sh              # Full setup (statusline + mem0 + settings)
+~/code/admin/.claude/setup.sh statusline   # Statusline only
+~/code/admin/.claude/setup.sh mem0         # mem0 + Qdrant only
+~/code/admin/.claude/setup.sh settings     # Settings update only
 ```
 
-At session start, verify the environment is configured. If `~/.claude/statusline-command.sh` or `~/.claude/mcp/mem0/mcp-server.py` does not exist, run `setup.sh` from this repo.
+At session start, verify the environment is configured. If `~/.claude/statusline-command.sh` or `~/.claude/mcp/mem0/mcp-server.py` does not exist, run `~/code/admin/.claude/setup.sh`.
 
 ### Status Line
 
@@ -64,7 +64,7 @@ The setup script symlinks `statusline-command.sh` to `~/.claude/` and configures
 
 ### mem0 (Local Persistent Memory)
 
-The setup script deploys a local Qdrant container for vector storage and configures a mem0 MCP server using Ollama for embeddings (`nomic-embed-text`) and LLM (`llama3.2:3b`). All memory operations are fully local — no external API calls.
+The setup script deploys a local Qdrant container for vector storage and configures a mem0 MCP server using Ollama for embeddings (`nomic-embed-text:latest`, 768 dims) and LLM (default `gemma4:e4b`). Ollama host selection is remote-first via `OLLAMA_BASE_URL`, with a local fallback; `gemma4:e2b` is used only on weak hosts. Selection logic: `~/.claude/mcp/mem0/ollama_select.py`. No third-party API calls.
 
 **Manage Qdrant:**
 ```bash
