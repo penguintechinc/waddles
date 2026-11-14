@@ -7,12 +7,22 @@ FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803
 WORKDIR /app
 
 COPY hub_api/requirements.txt .
-RUN pip install --no-cache-dir --require-hashes -r requirements.txt
+# pip download cache mount (id waddles-pip-v<CACHE_EPOCH>): used ONLY for this `--require-hashes`
+# install, so every wheel that can enter the shared cache is hash-verified. Bump CACHE_EPOCH
+# (workflow build-arg, repo variable ALPHA_CACHE_EPOCH) to abandon the cache.
+ARG CACHE_EPOCH=1
+# (DL3042 below: the pip cache is a BuildKit cache mount, used only with --require-hashes)
+# hadolint ignore=DL3042
+RUN --mount=type=cache,id=waddles-pip-v${CACHE_EPOCH},target=/root/.cache/pip,sharing=shared \
+    pip install --require-hashes -r requirements.txt
 
 # flask_core (libs/flask_core) is a real installable package (setup.py) --
 # pip install it directly rather than sys.path surgery at runtime; its own
 # requirements.in is the source of truth for its transitive deps.
 COPY libs/flask_core /app/libs/flask_core
+# NOT cache-mounted: flask_core's declared dependencies (libs/flask_core/requirements.in) are
+# resolved from the network WITHOUT hashes, so this step must never read or write the shared pip
+# cache (scripts/ci/check-dockerfile-cache-mounts.py enforces it). Follow-up: hash-lock those deps.
 RUN pip install --no-cache-dir /app/libs/flask_core
 
 # wasm-tools -- `services/bundle_component_validator.py`'s WIT world
