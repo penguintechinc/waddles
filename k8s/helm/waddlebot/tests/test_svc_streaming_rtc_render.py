@@ -42,15 +42,28 @@ _TEMPLATE = _CHART_DIR / "templates" / "svc-streaming.yaml"
 
 # env -> (values file, media Service type, bound UDP port, ingress CNPs rendered, CNP entities)
 _ENVS: dict[str, dict[str, Any]] = {
-    "local": dict(type="NodePort", udp=31400, cnp=False, entities=None),
-    "alpha": dict(type="NodePort", udp=31400, cnp=False, entities=None),
-    "dal2alpha": dict(
-        type="NodePort", udp=31400, cnp=True, entities=["world", "host", "remote-node"]
-    ),
-    "beta": dict(type="LoadBalancer", udp=40000, cnp=True, entities=["world"]),
-    "gamma": dict(type="LoadBalancer", udp=40000, cnp=True, entities=["world"]),
-    "production": dict(type="LoadBalancer", udp=40000, cnp=True, entities=["world"]),
-    "ci": dict(type=None, udp=None, cnp=False, entities=None),  # svc-streaming disabled
+    "local": {"type": "NodePort", "udp": 31400, "cnp": False, "entities": None},
+    "alpha": {"type": "NodePort", "udp": 31400, "cnp": False, "entities": None},
+    "dal2alpha": {
+        "type": "NodePort",
+        "udp": 31400,
+        "cnp": True,
+        "entities": ["world", "host", "remote-node"],
+    },
+    "beta": {"type": "LoadBalancer", "udp": 40000, "cnp": True, "entities": ["world"]},
+    "gamma": {"type": "LoadBalancer", "udp": 40000, "cnp": True, "entities": ["world"]},
+    "production": {
+        "type": "LoadBalancer",
+        "udp": 40000,
+        "cnp": True,
+        "entities": ["world"],
+    },
+    "ci": {
+        "type": None,
+        "udp": None,
+        "cnp": False,
+        "entities": None,
+    },  # svc-streaming disabled
 }
 _ENABLED_ENVS = [e for e, c in _ENVS.items() if c["type"]]
 _SHIPPING = ("beta", "gamma", "production")
@@ -71,7 +84,7 @@ def _find_helm() -> dict[str, str]:
         path = shutil.which(name.strip())
         if not path:
             continue
-        out = subprocess.run(  # noqa: S603 -- fixed argv, test-only
+        out = subprocess.run(
             [path, "version", "--short"], capture_output=True, text=True, check=False
         ).stdout.strip()
         if out.startswith("v") and out.split(".")[0][1:].isdigit():
@@ -82,8 +95,10 @@ def _find_helm() -> dict[str, str]:
 _HELMS = _find_helm()
 
 
-@functools.lru_cache(maxsize=None)
-def _render(helm: str, env: str, extra: tuple[str, ...] = ()) -> tuple[dict[str, Any], ...]:
+@functools.cache
+def _render(
+    helm: str, env: str, extra: tuple[str, ...] = ()
+) -> tuple[dict[str, Any], ...]:
     """helm-template one environment (the same `deploymentTier=alpha` override the other render
     suites use so shipping overlays do not trip the unrelated secret-provisioning guards)."""
     args = [
@@ -93,11 +108,15 @@ def _render(helm: str, env: str, extra: tuple[str, ...] = ()) -> tuple[dict[str,
     ]  # fmt: skip
     for kv in extra:
         args += ["--set", kv]
-    result = subprocess.run(args, capture_output=True, text=True, check=False)  # noqa: S603
+    result = subprocess.run(args, capture_output=True, text=True, check=False)
     if result.returncode != 0:
-        pytest.fail(f"{helm} template failed for {env} {extra}:\n{result.stderr[-1500:]}")
+        pytest.fail(
+            f"{helm} template failed for {env} {extra}:\n{result.stderr[-1500:]}"
+        )
     docs = tuple(d for d in yaml.safe_load_all(result.stdout) if d)
-    assert docs, f"{helm} template produced zero documents for {env} -- cannot be a pass"
+    assert docs, (
+        f"{helm} template produced zero documents for {env} -- cannot be a pass"
+    )
     return docs
 
 
@@ -111,7 +130,7 @@ def _render_fails(helm: str, env: str, extra: list[str], tier: str = "alpha") ->
     for kv in extra:
         # "json:k=v" entries go through --set-json (needed to pass an empty list).
         args += ["--set-json", kv[5:]] if kv.startswith("json:") else ["--set", kv]
-    result = subprocess.run(args, capture_output=True, text=True, check=False)  # noqa: S603
+    result = subprocess.run(args, capture_output=True, text=True, check=False)
     assert result.returncode != 0, f"expected a render failure for {env} {extra}"
     return result.stderr
 
@@ -125,12 +144,18 @@ def _streaming_deployment(docs: tuple[dict[str, Any], ...]) -> dict[str, Any]:
         d for d in docs
         if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("-svc-streaming")
     ]  # fmt: skip
-    assert len(found) == 1, f"expected exactly one svc-streaming Deployment, got {len(found)}"
+    assert len(found) == 1, (
+        f"expected exactly one svc-streaming Deployment, got {len(found)}"
+    )
     return found[0]
 
 
 def _container(dep: dict[str, Any]) -> dict[str, Any]:
-    cs = [c for c in dep["spec"]["template"]["spec"]["containers"] if c["name"] == "svc-streaming"]
+    cs = [
+        c
+        for c in dep["spec"]["template"]["spec"]["containers"]
+        if c["name"] == "svc-streaming"
+    ]
     assert len(cs) == 1
     return cs[0]
 
@@ -140,7 +165,11 @@ def _env(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _services(docs: tuple[dict[str, Any], ...], suffix: str) -> list[dict[str, Any]]:
-    return [d for d in docs if d["kind"] == "Service" and d["metadata"]["name"].endswith(suffix)]
+    return [
+        d
+        for d in docs
+        if d["kind"] == "Service" and d["metadata"]["name"].endswith(suffix)
+    ]
 
 
 def _cnp(docs: tuple[dict[str, Any], ...], suffix: str) -> list[dict[str, Any]]:
@@ -177,10 +206,14 @@ def test_container_ports_are_declared_exactly(helm: str, env: str) -> None:
     assert got == expected, f"{env}: {got ^ expected}"
     assert len(c["ports"]) == len(expected), "duplicate containerPort entries"
     assert not any("hostPort" in p for p in c["ports"]), "hostPort is forbidden"
-    assert not pod.get("hostNetwork") and not pod.get("hostPID") and not pod.get("hostIPC")
+    assert (
+        not pod.get("hostNetwork") and not pod.get("hostPID") and not pod.get("hostIPC")
+    )
     envs = _env(c)
     port = _ENVS[env]["udp"]
-    assert envs["WEBRTC_UDP_RANGE"]["value"] == f"{port}-{port}", "single mux port, not a range"
+    assert envs["WEBRTC_UDP_RANGE"]["value"] == f"{port}-{port}", (
+        "single mux port, not a range"
+    )
     assert "WEBRTC_ICE_TCP_PORT" not in envs, "ICE-TCP is opt-in"
     print(f"{env}: {len(got)} container ports, UDP mux {port}")
 
@@ -201,16 +234,22 @@ def test_media_service_is_scoped_to_the_single_port(helm: str, env: str) -> None
     sel = spec["selector"]
     assert sel["app.kubernetes.io/component"] == "svc-streaming"
     if want["type"] == "NodePort":
-        assert spec["ports"][0]["nodePort"] == want["udp"], "nodePort must equal the bound port"
+        assert spec["ports"][0]["nodePort"] == want["udp"], (
+            "nodePort must equal the bound port"
+        )
         assert spec["externalTrafficPolicy"] == "Cluster"
     else:
         assert "nodePort" not in spec["ports"][0]
         assert spec["externalTrafficPolicy"] == "Local"
-        assert "loadBalancerSourceRanges" not in spec, "open by default (browsers anywhere)"
+        assert "loadBalancerSourceRanges" not in spec, (
+            "open by default (browsers anywhere)"
+        )
 
 
 @pytest.mark.parametrize("env", _SHIPPING)
-def test_shipping_envs_expose_no_nodeport_hostport_or_external_ips(helm: str, env: str) -> None:
+def test_shipping_envs_expose_no_nodeport_hostport_or_external_ips(
+    helm: str, env: str
+) -> None:
     docs = _render(helm, env)
     targeting = [
         d for d in docs
@@ -218,12 +257,16 @@ def test_shipping_envs_expose_no_nodeport_hostport_or_external_ips(helm: str, en
             "app.kubernetes.io/component"
         ) == "svc-streaming"
     ]  # fmt: skip
-    assert len(targeting) == 2, f"{env}: expected ClusterIP + media LB, got {len(targeting)}"
+    assert len(targeting) == 2, (
+        f"{env}: expected ClusterIP + media LB, got {len(targeting)}"
+    )
     for svc in targeting:
         assert svc["spec"].get("type", "ClusterIP") in ("ClusterIP", "LoadBalancer")
         assert "externalIPs" not in svc["spec"]
         for p in svc["spec"]["ports"]:
-            assert "nodePort" not in p, f"{env}: {svc['metadata']['name']} sets a nodePort"
+            assert "nodePort" not in p, (
+                f"{env}: {svc['metadata']['name']} sets a nodePort"
+            )
     assert [s["spec"]["type"] for s in targeting].count("LoadBalancer") == 1
     pods = [d for d in docs if d["kind"] in ("Deployment", "StatefulSet", "DaemonSet")]
     for w in pods:
@@ -232,15 +275,19 @@ def test_shipping_envs_expose_no_nodeport_hostport_or_external_ips(helm: str, en
             continue  # the SPIRE subchart's approved agent exception, covered by its own suite
         assert not spec.get("hostNetwork"), w["metadata"]["name"]
         for c in spec.get("containers", []):
-            assert not any(
-                "hostPort" in p for p in c.get("ports", [])
-            ), f"{env}: {w['metadata']['name']}/{c['name']} declares a hostPort"
-    print(f"{env}: {len(targeting)} svc-streaming Services, {len(pods)} workloads, no external ports")
+            assert not any("hostPort" in p for p in c.get("ports", [])), (
+                f"{env}: {w['metadata']['name']}/{c['name']} declares a hostPort"
+            )
+    print(
+        f"{env}: {len(targeting)} svc-streaming Services, {len(pods)} workloads, no external ports"
+    )
 
 
 def test_ci_renders_no_svc_streaming(helm: str) -> None:
     docs = _render(helm, "ci")
-    leftovers = [d["metadata"]["name"] for d in docs if "svc-streaming" in d["metadata"]["name"]]
+    leftovers = [
+        d["metadata"]["name"] for d in docs if "svc-streaming" in d["metadata"]["name"]
+    ]
     assert not leftovers, leftovers
     hub = [d for d in docs if d["kind"] == "Deployment" and _comp(d) == "hub-api"]
     assert len(hub) == 1
@@ -255,7 +302,11 @@ def test_cnp_rules_are_exact(helm: str, env: str) -> None:
     grpc = _cnp(docs, "-svc-streaming-grpc")
     media = _cnp(docs, "-svc-streaming-media")
     policy = _cnp(docs, "-svc-streaming-policy")
-    assert (len(grpc), len(media), len(policy)) == (1, 1, 1), (len(grpc), len(media), len(policy))
+    assert (len(grpc), len(media), len(policy)) == (1, 1, 1), (
+        len(grpc),
+        len(media),
+        len(policy),
+    )
     # gRPC <- hub-api pods only, on 50208/TCP only.
     ing = grpc[0]["spec"]["ingress"]
     assert len(ing) == 1 and _ports(ing[0]) == ["50208/TCP"]
@@ -273,16 +324,20 @@ def test_cnp_rules_are_exact(helm: str, env: str) -> None:
     # default-deny egress profile unchanged (`world` carve-outs): DNS + namespace + CIDR set.
     assert "egress" in policy[0]["spec"]
     for c in (grpc[0], media[0]):
-        assert c["spec"]["endpointSelector"]["matchLabels"]["app.kubernetes.io/component"] == (
-            "svc-streaming"
-        )
+        assert c["spec"]["endpointSelector"]["matchLabels"][
+            "app.kubernetes.io/component"
+        ] == ("svc-streaming")
         assert "egress" not in c["spec"], "dedicated CNPs must not alter egress"
 
 
 @pytest.mark.parametrize("env", ["local", "alpha"])
-def test_alpha_without_network_policy_renders_no_dedicated_cnps(helm: str, env: str) -> None:
+def test_alpha_without_network_policy_renders_no_dedicated_cnps(
+    helm: str, env: str
+) -> None:
     docs = _render(helm, env)
-    assert not _cnp(docs, "-svc-streaming-grpc") and not _cnp(docs, "-svc-streaming-media")
+    assert not _cnp(docs, "-svc-streaming-grpc") and not _cnp(
+        docs, "-svc-streaming-media"
+    )
 
 
 def test_ice_tcp_is_opt_in_and_scoped(helm: str) -> None:
@@ -309,7 +364,9 @@ def test_ice_tcp_is_opt_in_and_scoped(helm: str) -> None:
          "pipeline.svcStreaming.webrtc.media.service.nodePort.tcp=31401"),
     )  # fmt: skip
     (amedia,) = _services(adocs, "-svc-streaming-rtc-media")
-    assert {(p["protocol"], p["port"], p["nodePort"]) for p in amedia["spec"]["ports"]} == {
+    assert {
+        (p["protocol"], p["port"], p["nodePort"]) for p in amedia["spec"]["ports"]
+    } == {
         ("UDP", 31400, 31400),
         ("TCP", 31401, 31401),
     }
@@ -370,7 +427,9 @@ def _cert_sans(docs: tuple[dict[str, Any], ...]) -> set[str]:
     """DNS SANs of the shared host-api-tls certificate (cert-manager Certificate, or decoded
     from the chart-generated Secret on alpha/local)."""
     for d in docs:
-        if d["kind"] == "Certificate" and d["metadata"]["name"].endswith("-host-api-tls"):
+        if d["kind"] == "Certificate" and d["metadata"]["name"].endswith(
+            "-host-api-tls"
+        ):
             return set(d["spec"]["dnsNames"])
     for d in docs:
         if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-host-api-tls"):
@@ -379,7 +438,7 @@ def _cert_sans(docs: tuple[dict[str, Any], ...]) -> set[str]:
             with tempfile.NamedTemporaryFile(suffix=".pem") as f:
                 f.write(pem)
                 f.flush()
-                out = subprocess.run(  # noqa: S603, S607 -- fixed argv, test-only
+                out = subprocess.run(
                     ["openssl", "x509", "-in", f.name, "-noout", "-ext", "subjectAltName"],
                     capture_output=True, text=True, check=True,
                 ).stdout  # fmt: skip
@@ -475,7 +534,9 @@ def test_probes_resources_and_rollout(helm: str, env: str) -> None:
 
 def test_probe_exception_is_documented_in_the_template() -> None:
     text = _TEMPLATE.read_text()
-    assert text.count("# EXCEPTION (approved)") >= 3, "startup/liveness/readiness each carry it"
+    assert text.count("# EXCEPTION (approved)") >= 3, (
+        "startup/liveness/readiness each carry it"
+    )
     assert "grpc.health.v1" in text
 
 
@@ -486,8 +547,12 @@ def test_pod_security_baseline(helm: str, env: str) -> None:
     c = _container(dep)
     sc = c["securityContext"]
     assert sc["runAsNonRoot"] is True and sc["readOnlyRootFilesystem"] is True
-    assert sc["allowPrivilegeEscalation"] is False and sc["capabilities"]["drop"] == ["ALL"]
-    assert "runtimeClassName" not in dep["spec"]["template"]["spec"], "no code executes here"
+    assert sc["allowPrivilegeEscalation"] is False and sc["capabilities"]["drop"] == [
+        "ALL"
+    ]
+    assert "runtimeClassName" not in dep["spec"]["template"]["spec"], (
+        "no code executes here"
+    )
     pol = [
         d for d in docs
         if d["kind"] == "TracingPolicyNamespaced"
@@ -506,16 +571,25 @@ def test_pod_security_baseline(helm: str, env: str) -> None:
 
 def test_room_token_key_is_a_secret_reference_only(helm: str) -> None:
     default = _env(_container(_streaming_deployment(_render(helm, "beta"))))
-    assert "WEBRTC_ROOM_TOKEN_SECRET" not in default, "no env (and no value) unless a Secret is named"
-    docs = _render(helm, "beta", ("pipeline.svcStreaming.rooms.roomToken.existingSecret=room-token",))
+    assert "WEBRTC_ROOM_TOKEN_SECRET" not in default, (
+        "no env (and no value) unless a Secret is named"
+    )
+    docs = _render(
+        helm,
+        "beta",
+        ("pipeline.svcStreaming.rooms.roomToken.existingSecret=room-token",),
+    )
     e = _env(_container(_streaming_deployment(docs)))["WEBRTC_ROOM_TOKEN_SECRET"]
     assert "value" not in e
-    assert e["valueFrom"]["secretKeyRef"] == {"name": "room-token", "key": "WEBRTC_ROOM_TOKEN_SECRET"}
+    assert e["valueFrom"]["secretKeyRef"] == {
+        "name": "room-token",
+        "key": "WEBRTC_ROOM_TOKEN_SECRET",
+    }
 
 
 @pytest.mark.parametrize("env", list(_ENVS))
 def test_helm_lint(helm: str, env: str) -> None:
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(
         [helm, "lint", str(_CHART_DIR), "--values", str(_CHART_DIR / f"values-{env}.yaml"),
          "--set", "global.deploymentTier=alpha"],
         capture_output=True, text=True, check=False,
@@ -524,18 +598,22 @@ def test_helm_lint(helm: str, env: str) -> None:
     assert "0 chart(s) failed" in result.stdout, result.stdout[-500:]
 
 
-@pytest.mark.skipif(shutil.which("kubeconform") is None, reason="kubeconform not installed")
+@pytest.mark.skipif(
+    shutil.which("kubeconform") is None, reason="kubeconform not installed"
+)
 @pytest.mark.parametrize("env", list(_ENVS))
 def test_kubeconform(helm: str, env: str) -> None:
     docs = _render(helm, env)
     payload = yaml.safe_dump_all(docs)
-    result = subprocess.run(  # noqa: S603, S607
+    result = subprocess.run(
         ["kubeconform", "-ignore-missing-schemas", "-kubernetes-version", "1.30.0", "-summary",
          "-output", "json", "-"],
         input=payload, capture_output=True, text=True, check=False,
     )  # fmt: skip
     assert result.returncode == 0, result.stdout[-1500:] + result.stderr[-500:]
     summary = json.loads(result.stdout)["summary"]
-    assert summary["valid"] + summary["skipped"] == len(docs) and summary["valid"] > 0, summary
+    assert (
+        summary["valid"] + summary["skipped"] == len(docs) and summary["valid"] > 0
+    ), summary
     assert summary["invalid"] == 0 and summary["errors"] == 0, summary
     print(f"{env}: kubeconform valid={summary['valid']} skipped={summary['skipped']}")
