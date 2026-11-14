@@ -126,19 +126,33 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.metricsPort | quote }}
         - name: RUNNER_TENANT_SLUG
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
+        {{- if .Values.pipeline.defaultTenantId }}
+        - name: DEFAULT_TENANT_ID
+          value: {{ .Values.pipeline.defaultTenantId | quote }}
+        {{- end }}
         - name: HUB_API_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
-        {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
-        # Machine-JWT bootstrap for hub-api's internal provider-connections routes. The endpoint
-        # defaults to hub-api's own in-cluster Service (same default as svc-action/svc-process).
-        # The audience-scoped projected token is mounted below -- NOT the generic k8s SA token
-        # path (wrong audience; hub-api's TokenReview would reject it).
+        # Machine-JWT bootstrap + hub-api's internal gRPC, ALWAYS rendered: every tenant's
+        # identity-field DEK is fetched from hub-api's KeyService (scope key:stream-dek:read,
+        # serviceJwt.identities.svc-ingest) before an event can be encrypted and published, so
+        # svc-ingest cannot run without them. The endpoint defaults to hub-api's own in-cluster
+        # Service (same default as svc-action/svc-process). The audience-scoped projected token is
+        # mounted below -- NOT the generic k8s SA token path (wrong audience; hub-api's
+        # TokenReview would reject it). The mint is gRPC (TLS 1.3, pinned CA via
+        # HUB_API_GRPC_CA_FILE).
         - name: SERVICE_JWT_TOKEN_ENDPOINT
           value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: SERVICE_JWT_SA_TOKEN_PATH
           value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
-        # The machine-JWT mint is gRPC (TLS 1.3, pinned CA): hub-api's gRPC CA env is declared once,
-        # with HUB_API_GRPC_ENDPOINT, in the dynamic-connections block below.
+        # This pod's own SPIFFE id (the same one hub-api authenticates it as). svc-ingest derives
+        # the stream-DEK seal-context service name from its last segment, so a rename stays in
+        # lock-step with hub-api; boot fails loud if it is missing or malformed.
+        - name: SPIFFE_ID
+          value: {{ tpl (index .Values.serviceJwt.identities "svc-ingest").spiffeId . | quote }}
+        - name: HUB_API_GRPC_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+        {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
+        {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         # waddles.ingest-dynamic-connections env baseline: svc-ingest resolves each event's
         # guild/channel to a numeric scope via hub-api and stamps schema-v3 envelopes (an
         # unresolvable source is dropped, never defaulted). Rendered only with the grant above.
@@ -154,14 +168,20 @@ spec:
         - name: TWITCH_RESOLVE_TIMEOUT_SECS
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.twitchResolveTimeoutSecs | default 10 | quote }}
         {{- end }}
-        {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
-        # hub-api internal gRPC (TLS, pinned to the internal CA): IdentityService.ResolvePlatformUser
-        # (scope identity:platform-user:resolve) and the connection resolver's
-        # ProviderConnectionService.ListBindings/ResolveConnection (connections:list /
-        # connections:resolve[:static]) -- intra-cluster calls are gRPC, never REST.
-        - name: HUB_API_GRPC_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
-        {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
+        # hub-api internal gRPC (TLS, pinned to the internal CA; HUB_API_GRPC_ENDPOINT above) also
+        # serves IdentityService.ResolvePlatformUser (scope identity:platform-user:resolve) and the
+        # connection resolver's ProviderConnectionService.ListBindings/ResolveConnection
+        # (connections:list / connections:resolve[:static]) -- intra-cluster calls are gRPC,
+        # never REST.
+        # Egress detokenization (svc-ingest's outbound drain is the only platform egress) reads
+        # display names straight from Postgres under this pod's own read-only role
+        # (waddles_svc_ingest, column-scoped SELECT -- config/postgres/service-roles.yaml); no
+        # hub-api call in the send path. Plain env off-switch independent of the
+        # waddles.core.disable-pii-detokenization PostHog kill-switch; rendered only when
+        # pipeline.piiTokenization.enabled is false, omitted otherwise.
+        {{- if not .Values.pipeline.piiTokenization.enabled }}
+        - name: PII_DETOKENIZATION_ENABLED
+          value: "false"
         {{- end }}
         # P6a T6: dedicated outbound pin key (NOT the shared envFrom Secret) -- templates/outbound-pin-secret.yaml.
         - name: OUTBOUND_PIN_KEYS
@@ -347,33 +367,25 @@ spec:
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
-        {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
-        {{- end }}
         {{- if $ct.enabled }}
         - name: svc-ingest-host-api-tls
           mountPath: /etc/waddlebot/svc-ingest-host-api-tls
           readOnly: true
         {{- end }}
-        {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
-        {{- end }}
       volumes:
       {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
       - name: tmp
         emptyDir: {}
-      {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
-      {{- end }}
       {{- if $ct.enabled }}
       - name: svc-ingest-host-api-tls
         secret:
           secretName: {{ include "waddlebot.svcIngestHostApiTlsSecretName" . }}
           defaultMode: 0440
       {{- end }}
-      {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
       {{- include "waddlebot.hubApiGrpcCaVolume" . | nindent 6 }}
-      {{- end }}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}

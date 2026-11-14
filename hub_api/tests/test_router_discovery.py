@@ -111,6 +111,25 @@ class TestRealPackageDiscovery:
         # @validate_request rejects the empty body), not 404. Was 501 (the pre-M1 stub).
         assert response.status_code == 400
 
+    async def test_register_v1_mounts_bundle_admin_gateway(self) -> None:
+        """The webui bundle-settings page depends on the gateway being live, not just defined."""
+        app = Quart(__name__)
+        QuartSchema(app)
+        register_v1(app)
+        rules = {
+            (rule.rule, method)
+            for rule in app.url_map.iter_rules()
+            for method in rule.methods or ()
+        }
+        prefix = "/api/v1/apps/community/<int:community_id>/bundles/<app_id>"
+        for path, method in [
+            ("/admin", "GET"),
+            ("/config", "GET"),
+            ("/config", "PUT"),
+            ("/config/history", "GET"),
+        ]:
+            assert (prefix + path, method) in rules, f"{method} {path} not mounted"
+
     async def test_register_v2_mounts_the_real_platform_group(self, tenant_db: Any) -> None:
         app = Quart(__name__)
         app.config["dal"] = tenant_db

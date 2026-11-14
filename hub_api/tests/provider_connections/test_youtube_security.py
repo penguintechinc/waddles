@@ -15,6 +15,7 @@ import json
 from typing import Any
 
 import pytest
+from flask_core.auth import DEFAULT_TENANT_SLUG
 
 from tests.provider_connections.conftest import admin_headers
 from tests.provider_connections.fake_google import APP_CLIENT_ID, APP_CLIENT_SECRET, FakeGoogle
@@ -100,7 +101,9 @@ class TestTenantApp:
         assert self._row(yt_db).credentials_ciphertext != before
 
     async def test_the_global_tenant_cannot_store_an_app(self, yt_client: Any, yt_db: Any) -> None:
-        headers = self._tenant_admin(yt_db, tenant="global", user_id=yt_db.global_admin_id)
+        headers = self._tenant_admin(
+            yt_db, tenant=DEFAULT_TENANT_SLUG, user_id=yt_db.global_admin_id
+        )
         response = await self._put(yt_client, headers, OWN_APP)
         assert response.status_code == 422
         assert self._row(yt_db, yt_db.global_tenant_id) is None

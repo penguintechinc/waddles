@@ -254,7 +254,8 @@ async def _member(
     assert row[1] is not None
     if display:
         await adal.executesql_async(
-            "UPDATE ephemeral_pseudonyms SET handle = %s WHERE pseudonym = %s::uuid",
+            "UPDATE ephemeral_pseudonyms SET handle = %s, handle_seen_at = now() "
+            "WHERE pseudonym = %s::uuid",
             [display, row[1]],
         )
     return int(row[0]), str(row[1])

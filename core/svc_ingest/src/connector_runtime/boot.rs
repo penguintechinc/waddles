@@ -514,6 +514,8 @@ pub type BootedRuntime<A, D> = ConnectorRuntime<
     ConnectorValkeyLease,
 >;
 
+use super::unverified_gate::LicenseUnverifiedGate;
+
 /// Builds the profile-specific feed for `platform`.
 fn feed_for<R: ConnectionResolve + 'static>(
     platform: &'static str,
@@ -539,7 +541,8 @@ fn feed_for<R: ConnectionResolve + 'static>(
                 FEED_CALL_TIMEOUT,
             )
             .with_metrics(metrics.clone())
-            .with_self_echo(self_echo.clone()),
+            .with_self_echo(self_echo.clone())
+            .with_unverified_gate(Arc::new(LicenseUnverifiedGate)),
         )
     }
     match platform {
@@ -573,7 +576,8 @@ fn feed_for<R: ConnectionResolve + 'static>(
                 FEED_CALL_TIMEOUT,
             )
             .with_metrics(metrics.clone())
-            .with_self_echo(self_echo.clone());
+            .with_self_echo(self_echo.clone())
+            .with_unverified_gate(Arc::new(LicenseUnverifiedGate));
             if kick_route_keys.is_some() {
                 // The webhook lane's broadcaster comes from editable metadata: it is only
                 // planned once proven to be the owner of the community's own token.
@@ -907,9 +911,7 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
     redis_client: &redis::Client,
     spine_cfg: penguin_spine::SpineConfig,
     metrics: Arc<crate::telemetry::IngestMetrics>,
-    dek: crate::identity_crypto::ConfiguredDekProvider<
-        crate::identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek: crate::identity_crypto::ConfiguredDekProvider,
     registry: prometheus::Registry,
     tokenizer: Arc<dyn IdentityTokenizer>,
 ) -> anyhow::Result<Started> {
@@ -945,13 +947,15 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
     // Same gate as the interaction tap: routing exists exactly when Discord is ON, and a
     // missing dependency is a boot error here (never a ContextSink-less Discord runtime).
     let interaction_routing = if settings.platforms.contains(&"discord") {
-        Some(InteractionRouting::from_config(
-            cli,
-            crate::interaction_store::InteractionStore::new(lease_conn.clone()),
-            &registry,
-            tokenizer,
+        Some(
+            InteractionRouting::from_config(
+                cli,
+                crate::interaction_store::InteractionStore::new(lease_conn.clone()),
+                &registry,
+                tokenizer,
+            )
+            .await?,
         )
-        .await?)
     } else {
         None
     };
@@ -1006,9 +1010,7 @@ pub async fn start_connector(
     webhook_env: &Arc<WebhookEnv>,
     state: &mut crate::http::AppState,
     metrics: Arc<crate::telemetry::IngestMetrics>,
-    dek: crate::identity_crypto::ConfiguredDekProvider<
-        crate::identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek: crate::identity_crypto::ConfiguredDekProvider,
 ) -> anyhow::Result<Started> {
     let lookup = |k: &str| std::env::var(k).ok();
     let scope: Arc<dyn ScopeLookup> = crate::publish::installed_scope_resolver()
@@ -1056,9 +1058,7 @@ pub async fn start_connector_with<R: ConnectionResolve + 'static>(
     webhook_env: &Arc<WebhookEnv>,
     state: &mut crate::http::AppState,
     metrics: Arc<crate::telemetry::IngestMetrics>,
-    dek: crate::identity_crypto::ConfiguredDekProvider<
-        crate::identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek: crate::identity_crypto::ConfiguredDekProvider,
     deps: ConnectorDeps<'_, R>,
 ) -> anyhow::Result<Started> {
     let cli = &config.cli;
@@ -1517,7 +1517,7 @@ mod tests {
     impl DekProvider for FixedDek {
         async fn get_dek(
             &self,
-            _t: &str,
+            _t: i64,
         ) -> Result<(crate::identity_crypto::Dek, u32), crate::identity_crypto::DekUnavailableError>
         {
             Ok((zeroize::Zeroizing::new([1u8; 32]), 1))
@@ -1687,7 +1687,10 @@ mod tests {
             .await
             .err()
             .expect("duplicate registration must fail");
-        assert!(e.to_string().contains("metrics"), "duplicate metric registration is a boot error: {e}");
+        assert!(
+            e.to_string().contains("metrics"),
+            "duplicate metric registration is a boot error: {e}"
+        );
     }
 
     /// `assemble` builds a runtime that reconciles every enabled platform's feed
@@ -1844,7 +1847,7 @@ mod tests {
             .await
             .is_err());
         assert!(NoScope.lookup("twitch", "x").await.is_err());
-        assert!(FixedDek.get_dek("t").await.is_ok());
+        assert!(FixedDek.get_dek(1).await.is_ok());
     }
 
     #[tokio::test]

@@ -90,7 +90,7 @@ impl EventAppender for Rec {
 struct FakeDek;
 
 impl DekProvider for FakeDek {
-    async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
+    async fn get_dek(&self, _tenant_id: i64) -> Result<(Dek, u32), DekUnavailableError> {
         Ok((zeroize::Zeroizing::new([9u8; 32]), 1))
     }
 }

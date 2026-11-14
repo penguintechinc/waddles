@@ -5,7 +5,7 @@
 schema_version: 2
 app_id: waddles.core.service.kick
 name: Kick Platform Connector (Rust)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -75,7 +75,8 @@ exported_tools:
         type: integer
         minimum: 1
         maximum: 100
-    required: []
+    required:
+    - scope
     additionalProperties: false
   output_schema:
     type: object
@@ -87,28 +88,51 @@ exported_tools:
           properties:
             channel_ref:
               type: string
+              minLength: 1
+              maxLength: 256
             display_name:
               type: string
+              minLength: 1
+              maxLength: 100
             is_live:
               type: boolean
             title:
-              type: string
+              type:
+              - string
+              - 'null'
+              maxLength: 300
             category:
-              type: string
+              type:
+              - string
+              - 'null'
+              maxLength: 100
             viewers:
-              type: integer
+              type:
+              - integer
+              - 'null'
+              minimum: 0
             started_at:
-              type: string
+              type:
+              - string
+              - 'null'
+              maxLength: 40
             thumbnail_ref:
-              type: string
+              type:
+              - string
+              - 'null'
+              maxLength: 512
           required:
           - channel_ref
           - display_name
           - is_live
       cursor:
-        type: string
+        type:
+        - string
+        - 'null'
+        maxLength: 512
       as_of:
         type: string
+        maxLength: 40
     required:
     - channels
     - as_of

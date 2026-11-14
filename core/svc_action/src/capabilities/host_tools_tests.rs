@@ -1724,7 +1724,11 @@ async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() 
             checked += 1;
         }
     }
-    assert_eq!(checked, 3 + 4 + 4 + 3, "denominator: moderation ops attempted");
+    assert_eq!(
+        checked,
+        3 + 4 + 4 + 3,
+        "denominator: moderation ops attempted"
+    );
     // A platform that is not a relay provider is refused outright, never queued.
     let c = caps(FakeRelayQueue::with_live_drain());
     let err = c

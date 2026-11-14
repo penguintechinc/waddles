@@ -586,7 +586,11 @@ async fn an_app_without_elevated_grants_cannot_mint_debit_others_or_transfer_fro
     let w = EconomyWorld::new_full(&[], &[]).await;
     fund(&w, BOB, 60).await;
     for (name, args, key) in [
-        ("adjust_balance", json!({"user":ACTOR_UUID,"delta":10}), "e-mint"),
+        (
+            "adjust_balance",
+            json!({"user":ACTOR_UUID,"delta":10}),
+            "e-mint",
+        ),
         ("adjust_balance", json!({"user":BOB,"delta":-5}), "e-burn"),
         (
             "transfer_from",
@@ -610,13 +614,18 @@ async fn transfer_from_moves_a_non_actors_funds_once_under_the_callers_grant_and
     let w = EconomyWorld::new_full(&[], &["economy.transfer_from"]).await;
     fund(&w, BOB, 60).await;
     let steal = json!({"from":BOB,"to":ACTOR_UUID,"amount":25,"reason":"steal"});
-    let first = w.call("transfer_from", steal.clone(), "steal-once", "1001").await;
+    let first = w
+        .call("transfer_from", steal.clone(), "steal-once", "1001")
+        .await;
     assert_eq!(first["ok"]["from_balance"], 35, "{first:?}");
     assert_eq!(first["ok"]["to_balance"], 25, "{first:?}");
     // The retry of the same call (same key) replays: nothing moves a second time.
     let replay = w.call("transfer_from", steal, "steal-once", "1001").await;
     assert_eq!(replay["ok"]["from_balance"], 35, "{replay:?}");
-    assert_eq!((w.balance(BOB).await, w.balance(ACTOR_UUID).await), (35, 25));
+    assert_eq!(
+        (w.balance(BOB).await, w.balance(ACTOR_UUID).await),
+        (35, 25)
+    );
     // Above the admin-set per-call cap (100): refused, nothing moves.
     fund(&w, BOB, 1_000).await;
     let big = w
@@ -641,21 +650,20 @@ async fn transfer_from_moves_a_non_actors_funds_once_under_the_callers_grant_and
     assert_eq!(mint["tool_error"], "NotGranted", "{mint:?}");
     // One audit row (the applied steal): calling app + approving admin recorded.
     assert_eq!(audit_rows(&w).await, 1);
-    let approved: i64 = w
-        .db
-        .admin
-        .query_one_raw(sea_orm::Statement::from_string(
-            sea_orm::DbBackend::Postgres,
-            format!(
-                "SELECT COUNT(*) FROM economy_elevated_audit WHERE caller_app_id = '{CALLER}' \
+    let approved: i64 =
+        w.db.admin
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Postgres,
+                format!(
+                    "SELECT COUNT(*) FROM economy_elevated_audit WHERE caller_app_id = '{CALLER}' \
                  AND service_app_id = '{SERVICE}' AND approved_by = 41 AND amount = 25 \
                  AND reason = 'steal' AND status = 2"
-            ),
-        ))
-        .await
-        .unwrap()
-        .unwrap()
-        .try_get_by_index(0)
-        .unwrap();
+                ),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by_index(0)
+            .unwrap();
     assert_eq!(approved, 1);
 }

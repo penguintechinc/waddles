@@ -116,6 +116,12 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_action") | nindent 8 }}
+        # Live per-community bundle config is read straight from the read-only replica (issue
+        # #1306), column-scoped under the SAME role (alembic 0107); hub-api is not on this path.
+        # Rendered only with infrastructure.postgresql.readReplicas.host; unset -> the stage uses
+        # DATABASE_URL above (primary) and logs a WARN. Kill switch (PostHog, opt-out):
+        # waddles.disable-db-bundle-config-reads ON = legacy hub-api gRPC path.
+{{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_action") | nindent 8 }}
 {{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         {{- include "waddlebot.rustOtelEnv" (dict "root" $ "service" "svc-action") | nindent 8 }}
         - name: MODULE_PORT
@@ -168,28 +174,6 @@ spec:
         # it with "missing required audience").
         - name: SERVICE_JWT_SA_TOKEN_PATH
           value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
-        # fix/pii-tokenization-env-override -- plain env off-switch, independent of the
-        # waddles.core.disable-pii-detokenization PostHog kill-switch (unusable in an
-        # environment with no in-cluster PostHog, e.g. alpha). Only rendered when
-        # pipeline.piiTokenization.enabled is false (see values.yaml's own comment);
-        # omitted entirely otherwise, so the default PostHog-gated behavior is unchanged.
-        {{- if not .Values.pipeline.piiTokenization.enabled }}
-        - name: PII_DETOKENIZATION_ENABLED
-          value: "false"
-        {{- end }}
-        # fix/helm-platform-credentials -- core/svc_action/src/config.rs reads
-        # this directly (`std::env::var("DISCORD_BOT_TOKEN").ok()`) and already
-        # degrades gracefully (relay provider disabled, clear log line) when
-        # absent -- see capabilities.rs/lib.rs. Sourced from the
-        # operator-managed platform-credentials Secret, never the
-        # chart-rendered `-secrets` Secret; `optional: true` so an
-        # unconfigured community starts without this var.
-        - name: DISCORD_BOT_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
-              key: DISCORD_BOT_TOKEN
-              optional: true
         - name: WADDLES_SANDBOX_GVISOR
           value: {{ .Values.pipeline.rustDataPlane.svcAction.sandboxGvisor | quote }}
         # Per-call wall-clock budget handed to the executor on every `invoke` -- kept in

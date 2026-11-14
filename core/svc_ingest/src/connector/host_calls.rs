@@ -124,7 +124,9 @@ pub const CONNECTORS: &[Connector] = &[
     Connector {
         platform: "wix",
         app_id: "waddles.core.service.wix",
-        grants: &[Grant::PiiRead],
+        // Events-only since #1264: the manifest declares no `connector.pii.read`, so the
+        // host honors no grants (least privilege; the manifest is the source of truth).
+        grants: &[],
     },
     Connector {
         platform: "spectrum",

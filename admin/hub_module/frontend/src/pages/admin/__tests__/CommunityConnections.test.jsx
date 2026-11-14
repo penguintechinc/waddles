@@ -27,6 +27,11 @@ vi.mock('../../../lib/useFeatureFlag', () => ({
   useFeatureFlag: vi.fn().mockReturnValue(false),
 }));
 
+vi.mock('../../../services/roleSyncApi', async () => {
+  const actual = await vi.importActual('../../../services/roleSyncApi');
+  return { ...actual, roleSyncApi: { startServerInstall: vi.fn(), createPairing: vi.fn() } };
+});
+
 const EMPTY_RESPONSE = { data: { connections: [], callback_base: 'https://hub.example/api/v1' } };
 
 function connectionsResponse(overrides = []) {
@@ -65,6 +70,13 @@ afterEach(() => {
 });
 
 describe('CommunityConnections', () => {
+  it('embeds the Add Discord server panel for community admins', async () => {
+    adminApi.listCommunityConnections.mockResolvedValue(EMPTY_RESPONSE);
+    mount();
+    expect(await screen.findByRole('button', { name: 'Add Discord server' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Discord server ID')).toBeInTheDocument();
+  });
+
   it('renders all six providers with connected/not-connected states', async () => {
     adminApi.listCommunityConnections.mockResolvedValue(
       connectionsResponse([

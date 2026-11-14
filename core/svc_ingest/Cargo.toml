@@ -41,9 +41,10 @@ path = "src/main.rs"
 # the old rev -- only `Cargo.toml`/`Cargo.lock` changed.
 #
 # Slack/YouTube/Kick receivers, the generic webhook/JWT intake surfaces,
-# and `penguin-licensing` remain `// TODO(M5)` -- see `src/lib.rs`. No
-# `sea-orm`: ingest has no database, matching today's Python service and
-# the spec's S4.1 dependency list.
+# and `penguin-licensing` remain `// TODO(M5)` -- see `src/lib.rs`.
+# `sea-orm` is used for ONE read-only path: the egress detokenizer's batched
+# display-name lookup (`src/display_names.rs`) under the column-scoped
+# `waddles_svc_ingest` role -- ingest still owns no relational state.
 #
 # THE penguin-libs DEPENDENCY PATTERN -- copied verbatim from
 # `core/svc_process/Cargo.toml` (established there, M4). Three ways to
@@ -240,6 +241,14 @@ connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
 # exact pin hub_client/svc_process use (status-code classification).
 hub_client = { path = "../hub_client", version = "=0.1.0" }
 tonic = { version = "=0.14.6", default-features = false }
+# Egress detokenizer (`src/egress.rs`): svc-ingest's outbound drain is the ONLY platform
+# egress, so it substitutes `{user:<token>}` with display names immediately before each
+# send (per-send hub-api lookup, nothing cached). Same-repo path dependency.
+egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
+# Egress detokenizer reads display names straight from Postgres (read-only,
+# column-scoped role; no hub-api hop in the send path). Same exact pin and
+# feature set as core/bundle_host_storage.
+sea-orm = { version = "=2.0.2", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "postgres-array"] }
 
 # Discord `allowed_mentions` mass-mention backstop stamped onto every
 # create-message body `src/discord_rest.rs` sends -- one definition shared with
@@ -282,6 +291,8 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 wiremock = "=0.6.5"
 # The machine-JWT mint is gRPC: tests serve it from a real in-process `ServiceAuthService`.
 service_auth = { path = "../service_auth", version = "=0.1.0", features = ["test-support"] }
+# In-process KeyService fake (the sealed-DEK contract) for the real-path encryption tests.
+hub_client = { path = "../hub_client", version = "=0.1.0", features = ["test-support"] }
 # Ephemeral CA/leaf certs for the host-API mTLS listener tests (no key material in git).
 rcgen = "=0.14.10"
 # Real tonic server on loopback for the `platform_users` tests (the generated

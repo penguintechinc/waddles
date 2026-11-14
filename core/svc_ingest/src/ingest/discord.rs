@@ -654,6 +654,16 @@ async fn run_loop<C, A, M, P, Dk>(
                             "resolved discord permissions"
                         );
                         let event = crate::normalize::normalize_discord(&msg, &perms);
+                        // The env-token gateway is the default tenant's app only.
+                        if !crate::tenant_discord::env_gateway_event_allowed(
+                            crate::publish::installed_scope_resolver().as_deref(),
+                            &event,
+                            crate::tenant_discord::default_tenant_id(),
+                        )
+                        .await
+                        {
+                            continue;
+                        }
                         if let Err(err) = publish_event(
                             appender,
                             metrics,
@@ -861,7 +871,7 @@ mod tests {
     impl crate::identity_crypto::DekProvider for FakeDekProvider {
         async fn get_dek(
             &self,
-            _tenant_id: &str,
+            _tenant_id: i64,
         ) -> Result<(crate::identity_crypto::Dek, u32), crate::identity_crypto::DekUnavailableError>
         {
             Ok((zeroize::Zeroizing::new([9u8; 32]), 1))

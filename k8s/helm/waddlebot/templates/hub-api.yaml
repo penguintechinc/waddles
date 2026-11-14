@@ -182,6 +182,11 @@ spec:
         # hub-api trusts the peer-identity header below as a verified SVID, so the edge MUST
         # strip it on non-mTLS traffic and a per-identity community allow-list must exist first
         # (X-Connection-Community is NOT an entitlement check) -- docs/PROVIDER_CONNECTIONS.md.
+        # This deployment's SPIFFE env segment (spiffe://penguintech.io/<env>/<svc>): the stream
+        # DEK broker (hub_api/services/stream_dek_broker.py) pins callers to it and fails closed
+        # when unset, so an empty value is a render failure, never a silently-broken broker.
+        - name: SPIFFE_ENV
+          value: {{ required "spire.environment is required (SPIFFE env segment for hub-api SPIFFE_ENV)" .Values.spire.environment | quote }}
         - name: SPIFFE_PEER_TRUST
           value: {{ .Values.pipeline.hubApi.spiffePeerTrust | default false | quote }}
         - name: SPIFFE_PEER_ID_HEADER
@@ -323,6 +328,13 @@ spec:
         {{- if .Values.modules.marketing.enabled }}
         - name: MODULE_LOAD_MARKETING
           value: "true"
+        {{- end }}
+        # Per-environment env baseline (e.g. FLAG_<KEY> feature-flag fallbacks honoured by
+        # flask_core when PostHog is unresolved). Free-tier flags only -- license flags are
+        # never env-bypassable. Rendered last so an explicit entry here wins on collision.
+        {{- range $key, $value := .Values.pipeline.hubApi.extraEnv }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
         {{- end }}
         {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/ready" "port" "http") | nindent 8 }}
         livenessProbe:

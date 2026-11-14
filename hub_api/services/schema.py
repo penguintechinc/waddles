@@ -1553,6 +1553,38 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
     )
 
 
+def bind_reference_tenants_table(dal: Any) -> None:
+    """Bind the shared `tenants` read table (schema owned by SQL migration 058).
+
+    Single definition used by `app.py::_bind_reference_tables` and by standalone CLIs
+    (`cli/refresh_landing_stats.py`) that never run `create_app()` -- `tenants` can only be
+    `define_table()`-d once per DAL, so it lives here, never re-declared per caller.
+    """
+    if "tenants" in dal.tables:
+        return
+    dal.define_table(
+        "tenants",
+        Field("slug", "string", length=100),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
+        Field("display_name", "string", length=255),
+        Field("logo_url", "text"),
+        Field("is_global", "boolean", default=False),
+        Field("is_active", "boolean", default=True),
+        Field("config", "json"),
+        migrate=False,
+    )
+
+
+def bind_landing_stats_tables(dal: Any) -> None:
+    """Bind every table `public_service` stats reads, for processes without `create_app()`.
+
+    Regression (landing-stats-refresh CronJob): the CLI's bare `init_database()` DAL had no
+    tables bound, so `resolve_default_tenant` raised `'DAL' object has no attribute 'tenants'`.
+    """
+    bind_reference_tenants_table(dal)
+    bind_platform_tables(dal)
+
+
 def bind_platform_tables(dal: Any, *, migrate: bool = False) -> None:
     """Define every table the M3 Platform-admin/Public group queries.
 
@@ -2977,6 +3009,13 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         #: role-sync `sync_enabled` column above; gates
         #: `event_discord_sync_service.py`'s push engine per pairing.
         Field("event_sync_enabled", "boolean", notnull=True, default=False),
+        #: migration 0104 -- opt-in Twitch moderator -> Discord moderator propagation.
+        Field("propagate_moderators", "boolean", notnull=True, default=False),
+        #: migration 0104 -- NULL = grandfathered pre-0104 pairing (never ownership-proven).
+        Field("ownership_verified_at", "datetime"),
+        #: migration 0104 -- TRUE only for rows that existed at upgrade time (bounded).
+        Field("grandfathered", "boolean", notnull=True, default=False),
+        Field("discord_grants_backfilled_at", "datetime"),
         Field("created_by_user_id", "integer"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
@@ -3017,6 +3056,47 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
     dal.define_table(
         "discord_role_mirror_grants",
         Field("mapping_id", "integer", notnull=True),
+        Field("platform", "string", length=50, notnull=True, default="discord"),
+        Field("platform_user_id", "string", length=255, notnull=True),
+        Field("granted_at", "datetime"),
+        migrate=migrate,
+    )
+    # migration 0104_role_sync_priv_harden -- role-sync grant ledgers (remove only own grants).
+    dal.define_table(
+        "role_sync_community_grants",
+        Field("pairing_id", "integer", notnull=True),
+        Field("community_id", "integer", notnull=True),
+        Field("hub_user_id", "integer", notnull=True),
+        Field("granted_role", "string", length=20, notnull=True),
+        Field("prior_role", "string", length=20),
+        Field("granted_at", "datetime"),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "role_sync_purged_bindings",
+        Field("pairing_id", "integer", notnull=True),
+        Field("community_id", "integer", notnull=True),
+        Field("discord_role_id", "string", length=255, notnull=True),
+        Field("community_role", "string", length=20, notnull=True),
+        Field("purged_at", "datetime"),
+        migrate=migrate,
+    )
+    #: status: 0 pending review, 1 demoted to baseline, 2 dismissed.
+    dal.define_table(
+        "role_sync_remediation_queue",
+        Field("purged_binding_id", "integer", notnull=True),
+        Field("community_id", "integer", notnull=True),
+        Field("hub_user_id", "integer", notnull=True),
+        Field("role_at_review", "string", length=20, notnull=True),
+        Field("status", "integer", notnull=True, default=0),
+        Field("created_at", "datetime"),
+        Field("resolved_at", "datetime"),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "role_sync_discord_grants",
+        Field("pairing_id", "integer", notnull=True),
+        Field("discord_role_id", "string", length=255, notnull=True),
         Field("platform", "string", length=50, notnull=True, default="discord"),
         Field("platform_user_id", "string", length=255, notnull=True),
         Field("granted_at", "datetime"),

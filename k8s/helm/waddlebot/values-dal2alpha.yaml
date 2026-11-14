@@ -168,6 +168,8 @@ infrastructure:
 # skeleton) and svcRtc is additionally gated on modules.social.enabled; neither
 # is part of this fix's scope.
 pipeline:
+  # Default tenant id (slug `default`, is_global) -- see values.yaml pipeline.defaultTenantId.
+  defaultTenantId: 1
   # Monday-demo (881ac8dd): role-sync reconcile CronJob ON, 1-min cadence.
   # demotePairingIds left empty (grant-only); demoteBaselineRole = member fallback.
   roleSync:
@@ -188,6 +190,17 @@ pipeline:
   hubApi:
     aiEnabled: false
     replicas: 1
+    # Demo fallback (user-approved 2026-11-12): free-tier flag env baseline; PostHog overrides
+    # once its key is provisioned. Never put license-tier flags here.
+    extraEnv:
+      FLAG_WADDLES_TENANT_DISCORD_INSTALL: "true"
+      # Alpha capacity stopgap: svc-process shares one per-identity internal gRPC bucket (default
+      # 50 rps / burst 100, hub_api/grpc_internal/server.py:125-126). Each Discord message fans out
+      # to ~160 per-app consumers that each call identity resolution, which tripped
+      # RESOURCE_EXHAUSTED on alpha 2026-11-13 and dead-lettered every message. Real fix (identity
+      # resolution off the per-message hub-api path, once per message) is tracked separately.
+      GRPC_RATE_LIMIT_RPS: "500"
+      GRPC_RATE_LIMIT_BURST: "1000"
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }
@@ -428,15 +441,21 @@ pipeline:
     # collector (checked 2026-11-11) -> autoscaling.mode none, fixed 2 replicas.
     bundleExecutor:
       replicas: 2
-      # 4-CPU limit: compile 2 at a time (connectors + apps share it); AOT makes compiles rare.
+      # 8-CPU limit per pod: compile 2 at a time (connectors + apps share it); AOT makes compiles rare.
       maxConcurrentCompiles: 2
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
-      # 2 x 8Gi = the previous single pod's 16Gi ceiling; LRU budget ~5/8 of the limit.
-      memoryBudgetMb: 5120
+      # Per-POD sizing reconciled with release (#1305 alpha sizing, issue #1304): the alpha executor
+      # was OOMKilled at 16Gi and took ~1h to compile ~160 bundles at 2 CPU after a restart, so the
+      # 8 CPU / 24Gi limit applies to EACH of the 2 StatefulSet pods (not split across them).
+      # Worst case 2 x 24Gi = 48Gi, placeable: dal2alpha workers have 46-61Gi allocatable and each
+      # pod only requests 8Gi. Gamma/beta/prod are unchanged by this block.
+      # LRU budget = 15360 MB (5/8 of the 24Gi limit, the same ratio the phase-1 budget used);
+      # the render check requires EXECUTOR_MEMORY_BUDGET_MB < the memory limit.
+      memoryBudgetMb: 15360
       resources:
-        requests: { cpu: "500m", memory: "2Gi" }
-        limits: { cpu: "4000m", memory: "8Gi" }
+        requests: { cpu: "2000m", memory: "8Gi" }
+        limits: { cpu: "8000m", memory: "24Gi" }
       autoscaling:
         mode: none
 

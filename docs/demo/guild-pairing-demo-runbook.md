@@ -32,13 +32,13 @@ Twitch channel `penguinzplays`. Run top to bottom after the deploy lands.
 # DATABASE_URL = hub DB DSN (from the secret; never typed into shell history)
 export DEMO_DISCORD_USER_ID=<demo member's Discord user id>     # Discord: right-click > Copy User ID
 export DEMO_DISCORD_ROLE_ID=<real role id to sync>         # Server Settings > Roles > Copy Role ID
-# optional: DEMO_COMMUNITY_ROLE=moderator (vip|member|community-admin), DEMO_BASELINE_ROLE=member
+# optional: DEMO_COMMUNITY_ROLE=vip (vip|member only -- privileged targets refused, migration 0104), DEMO_BASELINE_ROLE=member
 make seed-demo-prelink
 ```
 
 Expected final log line: `seed_demo_prelink.done ... pairing_id=N`. Put `N` in `demotePairingIds` (pre-req 5) and apply. Re-running is safe and also resets the demo member to the baseline role (rehearsal reset). It fails loudly if any table/column, the community, or the baseline role row is missing.
 
-The seed sets: pairing `sync_enabled=true`, `event_sync_enabled=true`, `direction=discord_to_twitch` (the direction that runs the Discord -> Waddles pass); binding `sync_scope=community_role`, Discord role -> `moderator` by default.
+The seed sets: pairing `sync_enabled=true`, `event_sync_enabled=true`, `direction=discord_to_twitch` (the direction that runs the Discord -> Waddles pass); binding `sync_scope=community_role`, Discord role -> `vip` by default. Since migration 0104 an inbound binding can never target `moderator`/`community-admin` (DB CHECK + API 422), sync is grant-only, and a demote only reverts grants sync itself recorded in `role_sync_community_grants`.
 
 ## 2. EVENT SYNC (Waddles -> Discord)
 
@@ -78,7 +78,7 @@ Triage: `sync_status=sync_error` or hub-api event-sync errors mean check MANAGE_
 **3a. Promote**
 1. In Discord, assign the synced role (`DEMO_DISCORD_ROLE_ID`) to the pre-linked demo member.
 2. Wait up to ~1 min (next `*/1` run; `kubectl get jobs -w`).
-3. Verify in the web UI (Community > Members) that the member's role is `moderator` (or the configured role), or:
+3. Verify in the web UI (Community > Members) that the member's role is `vip` (or the configured role), or:
 ```sql
 SELECT role FROM community_members
  WHERE community_id=1 AND platform='discord' AND platform_user_id='<id>';

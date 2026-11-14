@@ -4,7 +4,7 @@ name: Pronouns Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !pronouns / set <text> / @user / clear. Self-only set (NOT
 # mod-gated). See src/app.py's own module docstring for full scope.
 # 1.0.1: activation-gated only -- removed the in-bundle waddles.command-pronouns feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.3
+version: 1.0.4
 feature: waddles.core.example
 module: core
 provider: builtin
