@@ -459,29 +459,7 @@ export const adminApi = {
   getStreamStatus: (communityId) =>
     api.get(`/api/v1/admin/${communityId}/streams/status`),
 
-  // ===== Community Calls (WebRTC) =====
-  getCallRooms: (communityId) =>
-    api.get(`/api/v1/admin/${communityId}/calls/rooms`),
-  getCallRoom: (communityId, roomName) =>
-    api.get(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}`),
-  createCallRoom: (communityId, data) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms`, data),
-  deleteCallRoom: (communityId, roomName) =>
-    api.delete(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}`),
-  lockCallRoom: (communityId, roomName) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/lock`),
-  unlockCallRoom: (communityId, roomName) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/unlock`),
-  getCallParticipants: (communityId, roomName) =>
-    api.get(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/participants`),
-  kickCallParticipant: (communityId, roomName, identity) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/kick`, { identity }),
-  muteAllCallParticipants: (communityId, roomName) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/mute-all`),
-  getRaisedHands: (communityId, roomName) =>
-    api.get(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/raised-hands`),
-  acknowledgeHand: (communityId, roomName, userId) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/acknowledge-hand`, { user_id: userId }),
+  // Community calls (admin) moved to the typed `services/callsApi.ts` (UUID room ids, hands, mute).
 
   // ===== Polls =====
   getPolls: (communityId) =>
@@ -940,15 +918,7 @@ export const interactionApi = {
   deleteReply: (communityId, replyId) =>
     api.delete(`/api/v1/admin/${communityId}/interaction/forum/replies/${replyId}`),
 
-  // Voice rooms (hub-api calls controller -> svc-streaming RoomsService over gRPC)
-  getVoiceRooms: (communityId) =>
-    api.get(`/api/v1/community/${communityId}/interact/voice/rooms`),
-  joinVoiceRoom: (communityId, roomName) =>
-    api.post(`/api/v1/community/${communityId}/interact/voice/rooms/${encodeURIComponent(roomName)}/join`),
-  leaveVoiceRoom: (communityId, roomName) =>
-    api.post(`/api/v1/community/${communityId}/interact/voice/rooms/${encodeURIComponent(roomName)}/leave`),
-  createAdHocVoiceRoom: (communityId, data) =>
-    api.post(`/api/v1/community/${communityId}/interact/voice/rooms`, data),
+  // Member voice rooms moved to the typed `services/callsApi.ts`.
 };
 
 // ─── Server Manager (RCON / Voice) API ──────────────────────────────────────

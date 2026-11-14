@@ -44,6 +44,12 @@ export default defineConfig({
         'src/pages/dashboard/{DashboardHome,CommunityDashboard,CommunityLeaderboard,CommunityMembers,CreateCommunity}.tsx',
         'src/pages/community/LiveActivity.tsx',
         'src/pages/admin/AdminJoinRequests.tsx',
+        // RTC calls: typed hub-api client, query hooks, moderator/member views.
+        'src/services/callsApi.ts',
+        'src/hooks/useCalls.ts',
+        'src/components/calls/**/*.{ts,tsx}',
+        'src/components/interaction/VoiceView.tsx',
+        'src/pages/admin/AdminCommunityCalls.tsx',
         // Contract re-points: typed AI-knowledge client, the gap-check route matcher, gated/re-pointed pages.
         'scripts/lib/backend-routes.mjs',
         'src/pages/admin/AdminHome.jsx',

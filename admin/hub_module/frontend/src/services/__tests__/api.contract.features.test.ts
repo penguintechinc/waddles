@@ -147,10 +147,6 @@ const INTERACTIONAPI_ROWS: readonly ContractRow[] = [
   ['createForumReply(communityId, postId, data)', 'POST /api/v1/community/{communityId}/interact/forum/posts/{postId}/replies', { body: '@data' }],
   ['moderatePost(communityId, postId, data)', 'PUT /api/v1/admin/{communityId}/interaction/forum/posts/{postId}', { body: '@data' }],
   ['deleteReply(communityId, replyId)', 'DELETE /api/v1/admin/{communityId}/interaction/forum/replies/{replyId}'],
-  ['getVoiceRooms(communityId)', 'GET /api/v1/community/{communityId}/interact/voice/rooms'],
-  ['joinVoiceRoom(communityId, roomName)', 'POST /api/v1/community/{communityId}/interact/voice/rooms/{roomName|enc}/join'],
-  ['leaveVoiceRoom(communityId, roomName)', 'POST /api/v1/community/{communityId}/interact/voice/rooms/{roomName|enc}/leave'],
-  ['createAdHocVoiceRoom(communityId, data)', 'POST /api/v1/community/{communityId}/interact/voice/rooms', { body: '@data' }],
 ];
 
 const RCONAPI_ROWS: readonly ContractRow[] = [
