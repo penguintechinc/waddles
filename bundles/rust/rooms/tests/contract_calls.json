@@ -8,11 +8,45 @@
   },
   "whip.endpoint": {
     "room_id": "00000000-0000-0000-0000-000000000001",
-    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "ttl_secs": 60
   },
   "whep.endpoint": {
     "room_id": "00000000-0000-0000-0000-000000000001",
-    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "ttl_secs": 60
+  },
+  "room.hand.raise": {
+    "api_version": "v1",
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "actor_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "actor_role": "member"
+  },
+  "room.hand.lower": {
+    "api_version": "v1",
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "actor_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "actor_role": "member"
+  },
+  "room.hand.list": {
+    "api_version": "v1",
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "actor_role": "admin"
+  },
+  "room.hand.ack": {
+    "api_version": "v1",
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "actor_role": "admin"
+  },
+  "room.hand.reset": {
+    "api_version": "v1",
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "actor_role": "admin"
   },
   "room.list": {},
   "room.participants": {
