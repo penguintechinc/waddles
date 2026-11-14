@@ -1,0 +1,225 @@
+// RoomsService: hub-api -> svc-streaming control plane for A/V call rooms
+// (create/get/list/delete, join, leave, participants and moderation). Replaces
+// the retired REST proxy (`/api/v1/rooms*`, ex `core/module_rtc`): in-cluster
+// service-to-service is gRPC over HTTP/2 + mTLS, never REST. The semantics are
+// those of the svc-streaming host-API ops (docs/rooms-moderation-host-api.md);
+// the server delegates to the same `RoomService` they use.
+//
+// Auth: every call carries a hub-api-issued ES256 machine JWT
+// (`authorization: Bearer ...`). Required scope per RPC is noted below.
+// `community_id` is derived by hub-api from the CALLER'S verified JWT, never
+// from a request body. Identities are UUIDs only (no usernames, no PII).
+syntax = "proto3";
+
+package waddles.streaming.internal.v1;
+
+option go_package = "github.com/penguintechinc/waddles/gen/go/waddles/streaming/internal/v1;streaminginternalv1";
+
+service RoomsService {
+  // Scope "streaming.rooms:read".
+  rpc ListRooms(ListRoomsRequest) returns (ListRoomsResponse);
+  rpc GetRoom(GetRoomRequest) returns (GetRoomResponse);
+  rpc ListParticipants(ListParticipantsRequest) returns (ListParticipantsResponse);
+
+  // Scope "streaming.rooms:write" (member-level actions).
+  rpc CreateRoom(CreateRoomRequest) returns (CreateRoomResponse);
+  rpc DeleteRoom(DeleteRoomRequest) returns (DeleteRoomResponse);
+  rpc JoinRoom(JoinRoomRequest) returns (JoinRoomResponse);
+  rpc LeaveRoom(LeaveRoomRequest) returns (LeaveRoomResponse);
+
+  // Scope "streaming.rooms:moderate" (also gated by flag rooms.moderation and
+  // the actor role: moderator or admin).
+  rpc KickParticipant(KickParticipantRequest) returns (KickParticipantResponse);
+  rpc MuteParticipant(MuteParticipantRequest) returns (MuteParticipantResponse);
+  rpc UnmuteParticipant(UnmuteParticipantRequest) returns (UnmuteParticipantResponse);
+  rpc MuteAll(MuteAllRequest) returns (MuteAllResponse);
+  rpc LockRoom(LockRoomRequest) returns (LockRoomResponse);
+  rpc UnlockRoom(UnlockRoomRequest) returns (UnlockRoomResponse);
+}
+
+// The acting participant's room role, resolved by the caller (hub-api: admin
+// routes act as ROOM_ROLE_ADMIN, member routes as ROOM_ROLE_MEMBER).
+enum RoomRole {
+  ROOM_ROLE_UNSPECIFIED = 0;
+  ROOM_ROLE_GUEST = 1;
+  ROOM_ROLE_MEMBER = 2;
+  ROOM_ROLE_MODERATOR = 3;
+  ROOM_ROLE_ADMIN = 4;
+}
+
+message Room {
+  string room_id = 1;
+  string community_id = 2;
+  optional string label = 3;
+  uint32 max_publishers = 4;
+  int64 created_at = 5;
+  repeated string publisher_ids = 6;
+  uint32 subscriber_count = 7;
+  bool locked = 8;
+}
+
+message Participant {
+  string participant_id = 1;
+  bool publisher = 2;
+  bool subscriber = 3;
+  bool muted = 4;
+}
+
+message ListRoomsRequest {
+  string community_id = 1;
+}
+
+message ListRoomsResponse {
+  repeated Room rooms = 1;
+}
+
+message GetRoomRequest {
+  string community_id = 1;
+  string room_id = 2;
+}
+
+message GetRoomResponse {
+  Room room = 1;
+}
+
+message ListParticipantsRequest {
+  string community_id = 1;
+  string room_id = 2;
+}
+
+message ListParticipantsResponse {
+  string room_id = 1;
+  bool locked = 2;
+  repeated Participant participants = 3;
+}
+
+message CreateRoomRequest {
+  string community_id = 1;
+  optional string label = 2;
+  optional uint32 max_publishers = 3;
+}
+
+message CreateRoomResponse {
+  Room room = 1;
+}
+
+message DeleteRoomRequest {
+  string community_id = 1;
+  string room_id = 2;
+}
+
+message DeleteRoomResponse {
+  Room room = 1;
+}
+
+message JoinRoomRequest {
+  string community_id = 1;
+  string room_id = 2;
+  // The joining participant's UUID (hub-api derives it from the verified user).
+  string participant_id = 3;
+  bool publish = 4;
+  bool subscribe = 5;
+  optional int64 ttl_secs = 6;
+}
+
+message JoinRoomResponse {
+  string token = 1;
+  string token_id = 2;
+  string participant_id = 3;
+  int64 expires_at = 4;
+  // WHIP/WHEP endpoints for this room (the token is the bearer credential).
+  string whip_url = 5;
+  string whep_url = 6;
+}
+
+message LeaveRoomRequest {
+  string community_id = 1;
+  string room_id = 2;
+  string participant_id = 3;
+  string actor_id = 4;
+  RoomRole actor_role = 5;
+}
+
+message LeaveRoomResponse {
+  string room_id = 1;
+  string participant_id = 2;
+  uint32 sessions_closed = 3;
+}
+
+message KickParticipantRequest {
+  string community_id = 1;
+  string room_id = 2;
+  string participant_id = 3;
+  string actor_id = 4;
+  RoomRole actor_role = 5;
+}
+
+message KickParticipantResponse {
+  string room_id = 1;
+  string participant_id = 2;
+  uint32 sessions_closed = 3;
+}
+
+message MuteParticipantRequest {
+  string community_id = 1;
+  string room_id = 2;
+  string participant_id = 3;
+  string actor_id = 4;
+  RoomRole actor_role = 5;
+}
+
+message MuteParticipantResponse {
+  string room_id = 1;
+  string participant_id = 2;
+  bool muted = 3;
+}
+
+message UnmuteParticipantRequest {
+  string community_id = 1;
+  string room_id = 2;
+  string participant_id = 3;
+  string actor_id = 4;
+  RoomRole actor_role = 5;
+}
+
+message UnmuteParticipantResponse {
+  string room_id = 1;
+  string participant_id = 2;
+  bool muted = 3;
+}
+
+message MuteAllRequest {
+  string community_id = 1;
+  string room_id = 2;
+  string actor_id = 3;
+  RoomRole actor_role = 4;
+}
+
+message MuteAllResponse {
+  string room_id = 1;
+  uint32 muted = 2;
+}
+
+message LockRoomRequest {
+  string community_id = 1;
+  string room_id = 2;
+  string actor_id = 3;
+  RoomRole actor_role = 4;
+}
+
+message LockRoomResponse {
+  string room_id = 1;
+  bool locked = 2;
+}
+
+message UnlockRoomRequest {
+  string community_id = 1;
+  string room_id = 2;
+  string actor_id = 3;
+  RoomRole actor_role = 4;
+}
+
+message UnlockRoomResponse {
+  string room_id = 1;
+  bool locked = 2;
+}
