@@ -438,13 +438,28 @@ pipeline:
     # compiles the active set via Cranelift: the OOM finding that sized these still applies).
     bundleExecutor:
       replicas: 1
-      # 2-CPU limit on alpha: compile 2 at a time (connectors + apps share it).
-      maxConcurrentCompiles: 2
+      # Owner decision 2026-11-14 (alpha): raise compile concurrency 2 -> 6 and the pool wait
+      # 500 -> 2000 ms (measured on alpha: 2 concurrent compiles + pool_exhausted starved
+      # everything). Alpha overlay ONLY; beta/gamma/prod keep the chart defaults.
+      maxConcurrentCompiles: 6
+      poolWaitMs: 2000
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
       # Alpha executor was OOMKilled at 16Gi and took ~1h to compile ~160 bundles at 2 CPU after
       # restart. Raised for alpha only (gamma/beta/prod unchanged). Issue #1304 tracks lazy-load +
       # compiled cache; horizontal sharding is the long-term direction.
+      resources:
+        requests: { cpu: "2000m", memory: "8Gi" }
+        limits: { cpu: "8000m", memory: "24Gi" }
+    # Owner decision 2026-11-14: compiled and scripted bundles run on SEPARATE executors
+    # permanently (the chart default; stated here for clarity). This primary is the COMPILED
+    # executor; svc-bundles-executor-scripted (EXECUTOR_PROFILE=scripted) hosts python.
+    # Kata is NOT enabled (alpha nodes are LXD containers; Kata needs /dev/kvm + vhost).
+    bundleExecutorScripted:
+      enabled: true
+      replicas: 1
+      maxConcurrentCompiles: 6
+      poolWaitMs: 2000
       resources:
         requests: { cpu: "2000m", memory: "8Gi" }
         limits: { cpu: "8000m", memory: "24Gi" }

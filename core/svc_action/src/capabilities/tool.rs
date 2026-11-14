@@ -197,9 +197,17 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
 
         // 6. Nested invoke on the active executor connection.
         let deadline = bundle_tool_call::nested_deadline(scope.deadline_at)?;
-        let conn = wiring.connections.active().ok_or_else(|| {
-            ToolRefusal::TargetUnavailable("no executor connection is active".to_string())
-        })?;
+        // Language-partitioned executors: the nested invoke must land on a
+        // session that may host the TARGET's language, never just the newest.
+        let target_language = wiring.snapshot.language_for_version_id(plan.target_version);
+        let conn = wiring
+            .connections
+            .active_for(target_language.as_deref())
+            .ok_or_else(|| {
+                ToolRefusal::TargetUnavailable(
+                    "no executor connection accepting the target's language is active".to_string(),
+                )
+            })?;
         let target_scope = InvokeScope {
             tenant: scope.tenant.clone(),
             community: scope.community.clone(),

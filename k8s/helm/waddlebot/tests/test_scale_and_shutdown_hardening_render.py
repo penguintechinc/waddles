@@ -188,7 +188,13 @@ class TestAutoscalingAndPdb:
         self, values: str, extra: list[str], min_replicas: int, max_replicas: int, has_pdb: bool
     ) -> None:
         docs = _render(values, extra)
-        deps = [d for d in _of_kind(docs, "Deployment") if "executor" in d["metadata"]["name"]]
+        # The PRIMARY executor only: dal2alpha also renders the python twin
+        # (svc-bundles-executor-scripted), covered by test_executor_profile_render.py.
+        deps = [
+            d
+            for d in _of_kind(docs, "Deployment")
+            if "executor" in d["metadata"]["name"] and not d["metadata"]["name"].endswith("-scripted")
+        ]
         assert [d["metadata"]["name"] for d in deps] == ["waddlebot-svc-bundles-executor"]
         # HPA owns the replica count -> the Deployment must not pin it.
         assert "replicas" not in deps[0]["spec"]

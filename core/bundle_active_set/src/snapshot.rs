@@ -29,6 +29,7 @@ use crate::tools::ToolManifestInfo;
 struct ActiveEntry {
     digest: String,
     version_id: i64,
+    language: String,
     tools: ToolManifestInfo,
 }
 
@@ -63,6 +64,7 @@ fn entry_of(row: &ActiveBundleRow) -> ActiveEntry {
     ActiveEntry {
         digest: row.digest.clone(),
         version_id: row.version_id,
+        language: row.language.clone(),
         tools: row.tools.clone(),
     }
 }
@@ -134,6 +136,36 @@ impl ActiveVersionSnapshot {
         let map = self.read_lock();
         map.get(app_id)
             .and_then(|e| (e.digest == digest).then_some(e.version_id))
+    }
+
+    /// The manifest language (`app_versions.language`) of `app_id`'s active
+    /// version, ONLY if its digest matches `digest` -- the input the stages'
+    /// invoke path uses to pick a language-compatible executor session. `None`
+    /// when unresolvable (superseded digest, legacy env-pinned bundle, or not
+    /// active): callers must then restrict themselves to `all`-profile
+    /// sessions, never guess a language.
+    pub fn language_for_digest(&self, app_id: &str, digest: &str) -> Option<String> {
+        let map = self.read_lock();
+        map.get(app_id)
+            .and_then(|e| (e.digest == digest).then(|| e.language.clone()))
+    }
+
+    /// The manifest language of the active version whose `app_versions.id` is
+    /// `version_id`, searched across every scope -- used by `tool.invoke`,
+    /// whose plan names the target by `target_version`. `None` when no active
+    /// scope holds that version.
+    pub fn language_for_version_id(&self, version_id: i64) -> Option<String> {
+        let guard = match self.scoped.read() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(error = %e, "ActiveVersionSnapshot scoped lock poisoned -- recovering");
+                e.into_inner()
+            }
+        };
+        guard
+            .values()
+            .find(|e| e.version_id == version_id)
+            .map(|e| e.language.clone())
     }
 
     /// Resolves `app_id`'s current `app_versions.id` regardless of digest --
@@ -242,6 +274,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
             declared_capabilities: Vec::new(),
             egress: Vec::new(),
             egress_rps: None,

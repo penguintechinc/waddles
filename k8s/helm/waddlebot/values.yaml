@@ -1980,6 +1980,17 @@ pipeline:
     bundleExecutor:
       enabled: true
       replicas: 1
+      # EXECUTOR_PROFILE of this primary when bundleExecutorScripted is DISABLED (local/dev only):
+      # all (default; accepts every language) | compiled | scripted. Forced to `compiled` while the
+      # scripted executor is enabled (the default).
+      profile: "all"
+      # Marks `all` as an intentional local/dev single-executor install (renders
+      # EXECUTOR_ALLOW_ALL_PROFILE=true, silencing the executor's startup WARN). Leave false
+      # everywhere else: `all` outside dev logs a WARN.
+      allowAllProfile: false
+      # Optional Kata isolation for the COMPILED executor (default empty = runc; never enabled by
+      # default). Same convention as bundleExecutorScripted.runtimeClassName above.
+      runtimeClassName: ""
       # Stage host-API listeners every replica dials -- `target` is the short Service-name
       # suffix (prefixed with the release fullname by the template), `port` its host-API
       # port (spec SS6.6/SS7.1). One independent dial loop, bundle registry and metrics
@@ -2037,6 +2048,43 @@ pipeline:
         limits:
           cpu: "1000m"
           memory: "2560Mi"
+
+    # SCRIPTED-language executor (templates/svc-bundles-executor-scripted.yaml), the twin of
+    # bundleExecutor above, which becomes the COMPILED executor (EXECUTOR_PROFILE=compiled).
+    # Compiled bundles (rust/csharp) and scripted bundles (python / componentize-py) are
+    # INTENTIONALLY, permanently on separate executors because they must be handled completely
+    # differently: compiled = deterministic build, strict artifact-digest check, small fast loads,
+    # compile cache; scripted = non-reproducible componentize-py snapshots, no byte check
+    # (source-hash change detection: #1320, v3.1.x), huge components that take minutes each to
+    # compile, a large per-executor cache, different resources. ON by default in every real
+    # environment (beta/gamma/production/dal2alpha); ONLY the local/dev overlays (values-local,
+    # values-ci, values-alpha) set enabled=false and run ONE `all` executor. Routing is by the
+    # profile each executor announces in the host-api hello -- svc-process/svc-action load/invoke a
+    # bundle only on a session whose profile accepts its language. Reuses the primary's image,
+    # stages and mTLS identity; no connector link (connectors stay on the compiled executor); its
+    # own compile cache volume (precompile-cache-scripted, <precompileDir>/scripted). Keys left
+    # unset fall back to the primary's value.
+    #
+    # runtimeClassName: optional Kata isolation for THIS Deployment only (scripted code is the more
+    # dynamic family), independent of bundleExecutor.runtimeClassName. Default empty = runc, and NO
+    # environment enables Kata by default (alpha nodes are LXD containers: Kata needs /dev/kvm +
+    # vhost). When set (e.g. kata-clh) the pod renders spec.runtimeClassName, the Tetragon exec
+    # allowlist is OMITTED for it (Kata policy instead), the CiliumNetworkPolicy default-deny stays,
+    # and RuntimeClass overhead is charged on top of requests -- raise `resources.requests` by the
+    # class overhead. The compile-cache emptyDir still mounts (virtiofs: slower cache I/O).
+    bundleExecutorScripted:
+      enabled: true
+      runtimeClassName: ""
+      replicas: 1
+      maxConcurrentCompiles: 6
+      poolWaitMs: 2000
+      resources:
+        requests:
+          cpu: "2000m"
+          memory: "8Gi"
+        limits:
+          cpu: "8000m"
+          memory: "24Gi"
 
   # fix/pii-tokenization-env-override -- plain env/values off-switch for PII
   # tokenization/detokenization, independent of PostHog

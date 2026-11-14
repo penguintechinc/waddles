@@ -422,7 +422,7 @@ Tests: `tests/test_scale_and_shutdown_hardening_render.py`.
 | `autoscaling.services.<key>.*` | Per-service override (field-by-field over `defaults`); production enables it for hub-api, hub-webui, svc-{action,process}-rust, the single svc-bundles-executor, reputation | `{}` |
 | `podDisruptionBudget.enabled` / `.minAvailable` / `.maxUnavailable` | PDB for every registered service that effectively runs >1 replica (`services.<key>` overrides) | `true` / `1` / `""` |
 
-- HPA keys: `hubApi hubWebui svcCore svcProcess svcAction svcProcessRust svcActionRust bundleExecutor reputation router`. PDB-only (never an HPA): `svcIngest svcIngestRust egressProxy`. Needs metrics-server + container resource requests.
+- HPA keys: `hubApi hubWebui svcCore svcProcess svcAction svcProcessRust svcActionRust bundleExecutor bundleExecutorScripted reputation router`. PDB-only (never an HPA): `svcIngest svcIngestRust egressProxy`. Needs metrics-server + container resource requests.
 - When a service's HPA is enabled its Deployment omits `spec.replicas`, so `helm upgrade` never resets the autoscaler.
 - A PDB is skipped for a single effective replica (it would block node drains), so alpha/beta/gamma render none.
 - **Singletons are never autoscaled or budgeted:** `svc-streaming` (stateful RTMP/SRT + stream dir, `strategy: Recreate`, replicas 1, 60s grace) and `svc-presentation` (overlay fan-out is in-process).

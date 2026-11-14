@@ -22,6 +22,7 @@ egress-proxy is fixed-size by design (sized for the egress allowlist, not load).
   (dict "key" "svcActionRust" "name" "svc-action-rust" "component" "svc-action-rust" "on" (not (not (and $rdp.enabled $rdp.svcAction.enabled))) "replicas" (int $rdp.svcAction.replicas) "hpa" true)
   (dict "key" "svcIngestRust" "name" "svc-ingest-rust" "component" "svc-ingest-rust" "on" (not (not (and $rdp.enabled $rdp.svcIngest.enabled))) "replicas" (int $rdp.svcIngest.replicas) "hpa" false)
   (dict "key" "bundleExecutor" "name" "svc-bundles-executor" "component" "svc-bundles-executor" "on" (not (not (and $rdp.enabled $rdp.bundleExecutor.enabled))) "replicas" (int $rdp.bundleExecutor.replicas) "hpa" true)
+  (dict "key" "bundleExecutorScripted" "name" "svc-bundles-executor-scripted" "component" "svc-bundles-executor-scripted" "on" (not (not (and $rdp.enabled $rdp.bundleExecutor.enabled $rdp.bundleExecutorScripted.enabled))) "replicas" (int $rdp.bundleExecutorScripted.replicas) "hpa" true)
   (dict "key" "egressProxy" "name" "egress-proxy" "component" "egress-proxy" "on" (not (not $v.egressProxy.enabled)) "replicas" (int $v.egressProxy.replicas) "hpa" false)
 -}}
 {{- $targets | toJson -}}

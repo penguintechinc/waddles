@@ -264,6 +264,19 @@ pub async fn run() -> Result<(), ExecutorError> {
     cfg.validate_host_api_tls()?;
 
     init_telemetry();
+    if cfg.executor_profile == config::ExecutorProfile::All {
+        if cfg.executor_allow_all_profile {
+            info!("EXECUTOR_PROFILE=all (explicitly allowed: local/dev single-executor install)");
+        } else {
+            warn!(
+                "EXECUTOR_PROFILE=all is for local/dev single-executor installs only: compiled and \
+                 scripted bundles belong on SEPARATE executors (EXECUTOR_PROFILE=compiled|scripted); \
+                 set EXECUTOR_ALLOW_ALL_PROFILE=true to silence this in dev"
+            );
+        }
+    } else {
+        info!(profile = cfg.executor_profile.as_str(), "executor profile");
+    }
     // Metrics pipeline (OTLP export only when `OTEL_EXPORTER_OTLP_ENDPOINT` is
     // set -- see `crate::telemetry`). Held for the life of `run` so the final
     // export interval is flushed on an orderly stop, and built strictly
@@ -530,10 +543,13 @@ async fn connect_and_serve<S: ComponentSource>(
     };
     info!(link = link.label(), peer = %peer, attempt, "host-api connecting");
 
-    let hello = executor.hello(
+    let mut hello = executor.hello(
         cfg.sandbox_gvisor,
         if cfg.sandbox_gvisor { "gvisor" } else { "runc" },
     );
+    // Announce the profile to the stage (language-partitioned executors); `all`
+    // leaves `executor_version` untouched.
+    hello.executor_version = cfg.executor_profile.hello_version(&hello.executor_version);
     let probe_file = match link {
         Link::Stage => cfg.executor_probe_file.clone(),
         Link::Connector => connector_probe_file(&cfg.executor_probe_file),

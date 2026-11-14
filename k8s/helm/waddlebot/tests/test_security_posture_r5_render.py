@@ -43,7 +43,7 @@ _ALL_ENVS = (*_SHIPPING, "values-alpha.yaml", "values-local.yaml", "values-ci.ya
 _RESTRICTED_ENVS = (*_SHIPPING, "values-alpha.yaml", "values-ci.yaml")
 # Workloads whose egress/ingress is governed by a dedicated, pre-existing CNP rather than the
 # generic per-workload one (the svc-bundles-executor has no listener and an explicit deny-all ingress).
-_OWN_CNP_COMPONENTS = ("svc-bundles-executor",)
+_OWN_CNP_COMPONENTS = ("svc-bundles-executor", "svc-bundles-executor-scripted")
 _RFC1918_AND_METADATA = (
     "10.0.0.0/8",
     "172.16.0.0/12",

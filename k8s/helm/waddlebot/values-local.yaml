@@ -314,6 +314,11 @@ pipeline:
     svcIngest:
       connectorRuntime:
         identifyBudgetReady: true
+    # LOCAL/DEV: one `all` executor (the compiled/scripted split is ON in every real environment).
+    bundleExecutor:
+      allowAllProfile: true
+    bundleExecutorScripted:
+      enabled: false
 
 # chore/presentation-beta-slice -- local/MicroK8s runs the Rust svc-presentation (the overlay
 # beta path), exactly like alpha/dal2alpha. templates/svc-presentation-rust.yaml is the only

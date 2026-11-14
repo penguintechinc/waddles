@@ -162,6 +162,25 @@ impl SessionBundleSink for RegistrySink {
             let Some(connection) = self.registry.get(session) else {
                 return Err(InvokeError::NoExecutor);
             };
+            let profile = connection.profile();
+            if !profile.accepts(&row.language) {
+                tracing::error!(
+                    session,
+                    profile = profile.as_str(),
+                    language = %row.language,
+                    app_id = %row.app_id,
+                    "refusing to load a bundle onto an executor session whose profile does not accept its language"
+                );
+                crate::stage_metrics::stage_metrics().record_profile_mismatch(
+                    "mismatch",
+                    profile.as_str(),
+                    &row.language,
+                );
+                return Err(InvokeError::ProfileMismatch {
+                    profile: profile.as_str(),
+                    language: row.language.clone(),
+                });
+            }
             crate::spine::ensure_loaded(
                 &connection,
                 tenant_id,
@@ -418,6 +437,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
             declared_capabilities: Vec::new(),
             egress: Vec::new(),
             egress_rps: None,
@@ -926,6 +946,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
         }
     }
 
@@ -950,6 +971,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
         }
     }
 

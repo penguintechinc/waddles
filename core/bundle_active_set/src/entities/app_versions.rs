@@ -49,6 +49,10 @@ pub struct Model {
     pub artifact_signature: Option<String>,
     pub artifact_signature_key_id: Option<String>,
     pub artifact_signed_approval_id: Option<i64>,
+    /// `app_versions.language` (migration 0022, `NOT NULL`) -- the manifest's
+    /// `language` (`python|rust|javascript|typescript|csharp|other`); the
+    /// authoritative input for language-partitioned executor routing.
+    pub language: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

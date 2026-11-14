@@ -217,6 +217,10 @@ pub struct Connection {
     /// events are metriced; `OnceLock` so the many bare
     /// `Connection::new` test call sites need no metrics plumbing.
     metrics: std::sync::OnceLock<crate::telemetry::HostApiMetrics>,
+    /// The executor profile announced in this connection's `hello`
+    /// (`bundle_active_set::ExecutorProfile`); set exactly once by the
+    /// handshake. Unset (tests building a bare `Connection`) reads as `all`.
+    profile: std::sync::OnceLock<bundle_active_set::ExecutorProfile>,
 }
 
 /// Drop guard for one in-flight [`Connection::invoke`]: removes its per-invoke
@@ -262,6 +266,7 @@ impl Connection {
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scopes: std::sync::Mutex::new(std::collections::HashMap::new()),
             metrics: std::sync::OnceLock::new(),
+            profile: std::sync::OnceLock::new(),
         })
     }
 
@@ -398,6 +403,17 @@ impl Connection {
 
     fn deliver(&self, frame: Frame) -> Result<(), CorrelationError> {
         self.pending.complete(frame)
+    }
+
+    /// The profile this executor announced at `hello` (`all` for an old
+    /// executor that announced none, and for a bare test `Connection`).
+    pub fn profile(&self) -> bundle_active_set::ExecutorProfile {
+        self.profile.get().copied().unwrap_or_default()
+    }
+
+    /// Records the announced profile -- called once by the handshake.
+    pub(crate) fn set_profile(&self, profile: bundle_active_set::ExecutorProfile) {
+        let _ = self.profile.set(profile);
     }
 
     /// True once the read loop has observed EOF/a fatal error and this
@@ -556,6 +572,40 @@ where
             message,
         });
     }
+    // Language-partitioned executors: the profile rides in the informational
+    // `executor_version` (build metadata). No marker (an old executor) => `all`;
+    // a marker with an unknown value REFUSES the connection -- never a quiet
+    // widen to `all` that would let a typo'd python executor take native work.
+    let profile = match bundle_active_set::ExecutorProfile::from_hello_version(
+        &hello.executor_version,
+    ) {
+        Ok(profile) => profile,
+        Err(e) => {
+            let message = format!("unsupported executor profile in hello: {e}");
+            tracing::error!(
+                executor_version = %hello.executor_version,
+                error = %e,
+                "host-api hello refused: unknown executor profile"
+            );
+            connection
+                .send(Frame::new(
+                    hello_frame.id,
+                    Message::Error(ErrorBody {
+                        code: ErrorCode::ProtocolVersion,
+                        message: message.clone(),
+                        detail: Some("unknown_executor_profile".to_string()),
+                    }),
+                ))
+                .await?;
+            drop(connection);
+            let _ = writer_task.await;
+            return Err(HostApiError::PeerError {
+                code: ErrorCode::ProtocolVersion,
+                message,
+            });
+        }
+    };
+    connection.set_profile(profile);
     let executor_gvisor = hello.sandbox.runtime == "gvisor";
     if expected_sandbox_gvisor && !executor_gvisor {
         connection
@@ -580,7 +630,12 @@ where
             message: "executor sandbox posture mismatch".to_string(),
         });
     }
-    debug!(?hello, "host-api hello accepted");
+    info!(
+        profile = profile.as_str(),
+        executor_version = %hello.executor_version,
+        "host-api hello accepted"
+    );
+    debug!(?hello, "host-api hello accepted (full hello)");
     connection
         .send(Frame::new(hello_frame.id, Message::HelloOk(hello_ok)))
         .await?;
@@ -960,6 +1015,63 @@ impl ConnectionRegistry {
             .collect()
     }
 
+    /// Every live session id together with its announced profile, taken from
+    /// ONE snapshot so a session can never appear live without its profile
+    /// (a missing profile would read as `all`). The planner/divergence/ZERO
+    /// inputs for language-partitioned routing; with every executor `all`
+    /// (or none announcing) routing is exactly as before.
+    pub fn live_sessions_with_profiles(
+        &self,
+    ) -> (
+        Vec<u64>,
+        bundle_active_set::SessionProfiles,
+    ) {
+        let live = self.prune_and_snapshot();
+        let ids = live.iter().map(|(id, _)| *id).collect();
+        let profiles = bundle_active_set::SessionProfiles::from_pairs(
+            live.iter().map(|(id, conn)| (*id, conn.profile())),
+        );
+        (ids, profiles)
+    }
+
+    /// Picks a live session whose profile accepts `language`, round-robin
+    /// among the eligible ones. `language = None` (legacy env-pinned bundle,
+    /// unresolvable digest) is eligible ONLY on `all`-profile sessions -- a
+    /// partitioned executor is never handed a bundle whose language is not
+    /// known. `Err` names why no session qualifies so callers dead-letter
+    /// loudly instead of invoking the wrong executor.
+    pub fn pick_dispatch_for(
+        &self,
+        language: Option<&str>,
+    ) -> Result<Arc<Connection>, DispatchPickError> {
+        let mut live = self.prune_and_snapshot();
+        live.sort_by_key(|(id, _)| *id);
+        self.track_zero_since(!live.is_empty());
+        if live.is_empty() {
+            return Err(DispatchPickError::NoExecutor);
+        }
+        let eligible: Vec<_> = live
+            .into_iter()
+            .filter(|(_, conn)| match language {
+                Some(lang) => conn.profile().accepts(lang),
+                None => conn.profile() == bundle_active_set::ExecutorProfile::All,
+            })
+            .collect();
+        let count = u64::try_from(eligible.len()).ok().filter(|c| *c > 0);
+        let Some(count) = count else {
+            return Err(DispatchPickError::NoMatchingProfile {
+                language: language.map(str::to_string),
+            });
+        };
+        let turn = self.dispatch_rotation.fetch_add(1, Ordering::Relaxed);
+        let index = usize::try_from(turn % count).unwrap_or(0);
+        eligible
+            .into_iter()
+            .nth(index)
+            .map(|(_, conn)| conn)
+            .ok_or(DispatchPickError::NoExecutor)
+    }
+
     /// The live connection for exactly `id`, or `None` if it was never
     /// registered, already removed, or has since reported closed -- the
     /// per-session dispatch target [`crate::bundle_loader::RegistrySink`]
@@ -988,6 +1100,27 @@ impl ConnectionRegistry {
             .map(|(_, conn)| conn);
         self.track_zero_since(active.is_some());
         active
+    }
+
+    /// [`Self::active`] restricted to sessions whose profile accepts
+    /// `language` (newest eligible wins) -- the profile-aware fallback for
+    /// invoke paths that have no per-digest session tracking (legacy env-pinned
+    /// bundles, nested `tool.invoke`). `language = None` (unresolvable) is
+    /// eligible ONLY on `all` sessions: a partitioned executor is never handed
+    /// a bundle of unknown language. With every session `all` this is exactly
+    /// [`Self::active`].
+    pub fn active_for(&self, language: Option<&str>) -> Option<Arc<Connection>> {
+        let live = self.prune_and_snapshot();
+        let picked = live
+            .into_iter()
+            .filter(|(_, conn)| match language {
+                Some(lang) => conn.profile().accepts(lang),
+                None => conn.profile() == bundle_active_set::ExecutorProfile::All,
+            })
+            .max_by_key(|(id, _)| *id)
+            .map(|(_, conn)| conn);
+        self.track_zero_since(picked.is_some() || self.live_count() > 0);
+        picked
     }
 
     /// Records whether a live executor was just observed, driving
@@ -1048,6 +1181,19 @@ impl ConnectionRegistry {
             counter.inc();
         }
     }
+}
+
+/// Why [`ConnectionRegistry::pick_dispatch_for`] found no session.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DispatchPickError {
+    /// No live executor session at all.
+    #[error("no executor connection available")]
+    NoExecutor,
+    /// Executors are connected but none has a profile accepting the language
+    /// (e.g. the python executor is still restarting). `None` language means
+    /// the bundle's language could not be resolved and no `all` session exists.
+    #[error("no live executor session accepts language {language:?}")]
+    NoMatchingProfile { language: Option<String> },
 }
 
 /// Fixed cadence for [`run_zero_executor_watchdog`]'s periodic ERROR log --
@@ -3058,5 +3204,177 @@ mod tests {
 
         drop(io);
         let _ = tokio::time::timeout(Duration::from_secs(2), read_loop).await;
+    }
+
+    // ---- language-partitioned executors: profile negotiation + routing ----
+
+    /// Completes a REAL hello/hello-ok handshake whose `executor_version`
+    /// carries `version`, registers the connection and keeps the executor's IO
+    /// half alive (so the session stays live). Returns the registry session id.
+    async fn connect_executor(registry: &ConnectionRegistry, version: &str) -> u64 {
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        let mut hello = hello_body("runc");
+        hello.executor_version = version.to_string();
+        let executor = tokio::spawn(async move {
+            write_frame(&mut executor_io, &Frame::new(1, Message::Hello(hello)))
+                .await
+                .expect("write hello");
+            let reply = read_frame(&mut executor_io).await.expect("hello-ok");
+            assert!(matches!(reply.message, Message::HelloOk(_)), "{reply:?}");
+            // Hold the executor half open for the rest of the test.
+            std::future::pending::<()>().await;
+        });
+        let (connection, read_loop) = run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: test_limits(),
+            },
+            false,
+            Arc::new(DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+        // Keep the executor task alive (and abort-on-drop is not needed: the
+        // runtime tears it down with the test).
+        std::mem::drop(executor);
+        registry.register(connection)
+    }
+
+    /// The profile in the hello's `executor_version` is parsed and stored: an
+    /// OLD executor (no marker) is `all`; `+profile=scripted|compiled` is honoured.
+    #[tokio::test]
+    async fn handshake_records_the_announced_profile_and_old_executors_are_all() {
+        use bundle_active_set::ExecutorProfile;
+        let registry = ConnectionRegistry::new();
+        let old = connect_executor(&registry, "0.1.0").await;
+        let py = connect_executor(&registry, "0.1.0+profile=scripted").await;
+        let native = connect_executor(&registry, "0.1.0+profile=compiled").await;
+        let all = connect_executor(&registry, "0.1.0+profile=all").await;
+
+        let (mut ids, profiles) = registry.live_sessions_with_profiles();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![old, py, native, all], "examined 4 live sessions");
+        assert_eq!(profiles.get(old), ExecutorProfile::All, "old executor => all");
+        assert_eq!(profiles.get(py), ExecutorProfile::Scripted);
+        assert_eq!(profiles.get(native), ExecutorProfile::Compiled);
+        assert_eq!(profiles.get(all), ExecutorProfile::All);
+        assert_eq!(registry.get(py).expect("live").profile(), ExecutorProfile::Scripted);
+    }
+
+    /// A hello announcing an unknown profile REFUSES the connection loudly --
+    /// never a quiet widen to `all` that lets a typo'd executor take any work.
+    #[tokio::test]
+    async fn handshake_refuses_an_unknown_profile_loudly() {
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        let mut hello = hello_body("runc");
+        hello.executor_version = "0.1.0+profile=pyton".to_string();
+        let executor = tokio::spawn(async move {
+            write_frame(&mut executor_io, &Frame::new(1, Message::Hello(hello)))
+                .await
+                .expect("write hello");
+            read_frame(&mut executor_io).await.expect("error reply")
+        });
+        let result = run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: test_limits(),
+            },
+            false,
+            Arc::new(DenyAllCapabilities),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(HostApiError::PeerError { .. })),
+            "unknown profile must refuse the connection"
+        );
+        let reply = executor.await.expect("executor task");
+        match reply.message {
+            Message::Error(body) => {
+                assert_eq!(body.detail.as_deref(), Some("unknown_executor_profile"));
+            }
+            other => panic!("expected an error reply, got {other:?}"),
+        }
+    }
+
+    /// `pick_dispatch_for`/`active_for` only ever return a session whose
+    /// profile accepts the language: python -> the python session, rust -> the
+    /// native one, `all` accepts both, unknown/None language -> `all` only, and
+    /// the typed errors name why nothing qualified.
+    #[tokio::test]
+    async fn dispatch_picks_only_a_profile_compatible_session() {
+        use bundle_active_set::ExecutorProfile;
+        let registry = ConnectionRegistry::new();
+        assert_eq!(
+            registry.pick_dispatch_for(Some("python")).err(),
+            Some(DispatchPickError::NoExecutor)
+        );
+        let py = connect_executor(&registry, "0.1.0+profile=scripted").await;
+        let native = connect_executor(&registry, "0.1.0+profile=compiled").await;
+
+        for _ in 0..4 {
+            let c = registry.pick_dispatch_for(Some("python")).expect("python session");
+            assert_eq!(c.profile(), ExecutorProfile::Scripted);
+            assert!(Arc::ptr_eq(&c, &registry.get(py).expect("live")));
+            let c = registry.pick_dispatch_for(Some("rust")).expect("native session");
+            assert_eq!(c.profile(), ExecutorProfile::Compiled);
+            assert!(Arc::ptr_eq(&c, &registry.get(native).expect("live")));
+        }
+        assert!(Arc::ptr_eq(
+            &registry.active_for(Some("python")).expect("python"),
+            &registry.get(py).expect("live")
+        ));
+        assert!(Arc::ptr_eq(
+            &registry.active_for(Some("csharp")).expect("native"),
+            &registry.get(native).expect("live")
+        ));
+        // Unknown language / None on partitioned-only executors: LOUD, never guessed.
+        assert_eq!(
+            registry.pick_dispatch_for(Some("cobol")).err(),
+            Some(DispatchPickError::NoMatchingProfile {
+                language: Some("cobol".to_string())
+            })
+        );
+        assert_eq!(
+            registry.pick_dispatch_for(None).err(),
+            Some(DispatchPickError::NoMatchingProfile { language: None })
+        );
+        assert!(registry.active_for(None).is_none());
+
+        // Add an `all` executor: it now accepts everything, including unknown.
+        let all = connect_executor(&registry, "0.1.0").await;
+        assert!(Arc::ptr_eq(
+            &registry.active_for(None).expect("all accepts unknown"),
+            &registry.get(all).expect("live")
+        ));
+        assert!(registry.pick_dispatch_for(Some("cobol")).is_ok());
+
+        // The python executor dies: python work has only the `all` session left
+        // (never the native one).
+        registry.remove(py);
+        for _ in 0..4 {
+            let c = registry.pick_dispatch_for(Some("python")).expect("all session");
+            assert_eq!(c.profile(), ExecutorProfile::All);
+        }
+    }
+
+    /// Single-executor deployments (one `all` session, i.e. every session an old
+    /// executor) behave exactly as before: `active_for` == `active`.
+    #[tokio::test]
+    async fn single_all_executor_behaves_exactly_as_before() {
+        let registry = ConnectionRegistry::new();
+        let only = connect_executor(&registry, "0.1.0").await;
+        let active = registry.active().expect("active");
+        for lang in [Some("python"), Some("rust"), Some("cobol"), None] {
+            assert!(Arc::ptr_eq(&registry.active_for(lang).expect("picked"), &active));
+            assert!(Arc::ptr_eq(
+                &registry.pick_dispatch_for(lang).expect("picked"),
+                &registry.get(only).expect("live")
+            ));
+        }
     }
 }

@@ -18,6 +18,61 @@ pub struct StageTarget {
     pub addr: String,
 }
 
+/// The executor profile (`EXECUTOR_PROFILE`). Mirrors
+/// `bundle_active_set::ExecutorProfile` on the stage side -- duplicated here
+/// because this crate cannot depend on `bundle-active-set` (it would pull
+/// `sea-orm` into the executor's `cargo deny` scope, the same reason
+/// `canonical_digest` is duplicated). The WIRE encoding is pinned by
+/// `hello_version_matches_the_stage_side_literals` below and by the stage-side
+/// test of the same literals. Compiled and scripted bundles intentionally live
+/// on SEPARATE executors permanently (strict digest check + small fast loads +
+/// compile cache vs componentize-py: huge, slow, no byte check).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecutorProfile {
+    /// Accepts every bundle. LOCAL/DEV single-executor installs only (also what
+    /// a stage assumes for an old executor that announces nothing).
+    #[default]
+    All,
+    /// Compiled-language bundles only (rust, csharp, ...).
+    Compiled,
+    /// Scripted-language bundles only (python / componentize-py).
+    Scripted,
+}
+
+impl ExecutorProfile {
+    /// Stable lowercase name: env value, log field and wire marker value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExecutorProfile::All => "all",
+            ExecutorProfile::Compiled => "compiled",
+            ExecutorProfile::Scripted => "scripted",
+        }
+    }
+
+    /// Renders the `hello` `executor_version` carrying this profile as
+    /// SemVer-style build metadata (`0.1.0+profile=scripted`). `All` appends
+    /// nothing so an unprofiled executor's hello is byte-identical to before.
+    pub fn hello_version(self, version: &str) -> String {
+        match self {
+            ExecutorProfile::All => version.to_string(),
+            other => format!("{version}+profile={}", other.as_str()),
+        }
+    }
+}
+
+/// clap value parser for `EXECUTOR_PROFILE`: `all|compiled|scripted`
+/// (case-insensitive); anything else is a startup error.
+pub fn parse_executor_profile(raw: &str) -> Result<ExecutorProfile, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "all" => Ok(ExecutorProfile::All),
+        "compiled" => Ok(ExecutorProfile::Compiled),
+        "scripted" => Ok(ExecutorProfile::Scripted),
+        _ => Err(format!(
+            "unknown EXECUTOR_PROFILE {raw:?}: expected one of all, compiled, scripted"
+        )),
+    }
+}
+
 /// CLI/env configuration surface. `clap`'s `env` feature reads the SS12.7
 /// variable of the same name when the flag is not passed explicitly --
 /// this binary is started by its Deployment with env vars only, never
@@ -305,6 +360,27 @@ pub struct CliConfig {
     #[arg(long, env = "EXECUTOR_MAX_CONCURRENT_COMPILES", default_value_t = 0)]
     pub executor_max_concurrent_compiles: u32,
 
+    /// Which bundles this replica is willing to host (language-partitioned
+    /// executors): `compiled` (rust/csharp...), `scripted` (python /
+    /// componentize-py) or `all` (accepts everything -- LOCAL/DEV single-executor
+    /// installs only; logged at WARN outside dev, see `executor_allow_all_profile`). Announced to the
+    /// stages in the host-api `hello` (see [`ExecutorProfile::hello_version`])
+    /// so `svc_process`/`svc_action` route loads and invokes accordingly. An
+    /// unknown value fails startup (clap rejects it) -- never a silent `all`.
+    #[arg(
+        long,
+        env = "EXECUTOR_PROFILE",
+        default_value = "all",
+        value_parser = parse_executor_profile
+    )]
+    pub executor_profile: ExecutorProfile,
+
+    /// Marks `EXECUTOR_PROFILE=all` as intentional (local/dev single-executor
+    /// install). Without it, running `all` logs a WARN at startup: outside dev the
+    /// compiled and scripted families belong on separate executors.
+    #[arg(long, env = "EXECUTOR_ALLOW_ALL_PROFILE", default_value_t = false)]
+    pub executor_allow_all_profile: bool,
+
     /// On SIGTERM/SIGINT: how long to wait for in-flight invokes/compiles to
     /// drain before exiting 0 anyway. Keep below the pod's
     /// `terminationGracePeriodSeconds` (Kubernetes default 30s) so a rollout
@@ -422,6 +498,8 @@ impl CliConfig {
             executor_probe_file: PathBuf::from("/tmp/executor-live"),
             executor_grace_secs: 60,
             executor_max_concurrent_compiles: 0,
+            executor_profile: ExecutorProfile::All,
+            executor_allow_all_profile: false,
             executor_shutdown_drain_secs: 25,
             connector_host_api_addr: None,
             connector_host_api_identity: None,
@@ -772,6 +850,53 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use clap::Parser;
+
+    /// `EXECUTOR_PROFILE` defaults to `all` (today's behavior) and parses the
+    /// three documented values; an unknown value fails startup.
+    #[test]
+    fn executor_profile_defaults_to_all_and_rejects_unknown_values() {
+        let cfg = CliConfig::try_parse_from(base_args()).expect("base args parse");
+        assert_eq!(cfg.executor_profile, ExecutorProfile::All);
+        let mut py = base_args();
+        py.extend_from_slice(&["--executor-profile", "scripted"]);
+        assert_eq!(
+            CliConfig::try_parse_from(py).expect("scripted parses").executor_profile,
+            ExecutorProfile::Scripted
+        );
+        for (raw, want) in [
+            ("scripted", ExecutorProfile::Scripted),
+            ("COMPILED", ExecutorProfile::Compiled),
+            ("all", ExecutorProfile::All),
+        ] {
+            assert_eq!(parse_executor_profile(raw), Ok(want), "{raw}");
+        }
+        assert!(parse_executor_profile("python").is_err() && parse_executor_profile("native").is_err());
+        assert!(parse_executor_profile("").is_err());
+        assert!(
+            {
+                let mut bad = base_args();
+                bad.extend_from_slice(&["--executor-profile", "bogus"]);
+                CliConfig::try_parse_from(bad).is_err()
+            },
+            "an unknown profile must be a startup error, never a silent `all`"
+        );
+    }
+
+    /// The hello wire literals are pinned against
+    /// `bundle_active_set::ExecutorProfile::hello_version`'s own test: `all` is
+    /// byte-identical to today, the others carry `+profile=<name>`.
+    #[test]
+    fn hello_version_matches_the_stage_side_literals() {
+        assert_eq!(ExecutorProfile::All.hello_version("0.1.0"), "0.1.0");
+        assert_eq!(
+            ExecutorProfile::Scripted.hello_version("0.1.0"),
+            "0.1.0+profile=scripted"
+        );
+        assert_eq!(
+            ExecutorProfile::Compiled.hello_version("0.1.0"),
+            "0.1.0+profile=compiled"
+        );
+    }
 
     #[test]
     fn for_healthcheck_produces_a_valid_config() -> Result<(), ExecutorError> {

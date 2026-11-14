@@ -60,6 +60,10 @@ pipeline:
     # it's the only image reference that can't be satisfied at all right now.
     bundleExecutor:
       enabled: false
+      allowAllProfile: true
+    # CI/dev: no executor image is kind-loaded; the split is ON in every real environment.
+    bundleExecutorScripted:
+      enabled: false
   migrationsJob:
     enabled: true
   coreBundleSeeder:

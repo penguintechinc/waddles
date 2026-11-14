@@ -63,6 +63,7 @@ pub mod bindings;
 pub mod changelog;
 pub mod diff;
 pub mod entities;
+pub mod executor_profile;
 pub mod full_sync;
 pub mod multi_tenant;
 pub mod query;
@@ -79,8 +80,14 @@ pub use changelog::{
 };
 pub use diff::{plan, plan_scoped, DiffPlan, ScopedDiffPlan};
 pub use full_sync::{
-    any_session_diverged, digest_prefix, loaded_state_diverged, session_loaded_state_diverged,
-    should_send_full_sync, FullSyncReason,
+    any_session_diverged, any_session_diverged_with_profiles, digest_prefix,
+    loaded_state_diverged, session_loaded_state_diverged,
+    session_loaded_state_diverged_for_profile, should_send_full_sync, FullSyncReason,
+};
+pub use executor_profile::{
+    language_class, placement_gaps, ExecutorProfile, LanguageClass, ParseProfileError,
+    PlacementGap, PlacementGapKind, ProfileDecision, SessionProfiles, HELLO_PROFILE_MARKER,
+    LANGUAGE_CLASS_TABLE,
 };
 pub use multi_tenant::{
     read_active_set_all, read_source_bindings_all, scoped_active_rows, tenant_active_app_counts,
@@ -94,7 +101,8 @@ pub use query::{
 pub use reader::ReaderConfig;
 pub use scope::{resolve_scope, ResolvedScope};
 pub use session_sync::{
-    pick_session_with_digest, plan_sessions, SessionId, SessionLoaded, SessionSyncPlan,
+    pick_session_with_digest, plan_sessions, plan_sessions_eligible, SessionId, SessionLoaded,
+    SessionSyncPlan,
 };
 pub use snapshot::{ActiveVersionSnapshot, ToolTargetEntry};
 pub use tools::{

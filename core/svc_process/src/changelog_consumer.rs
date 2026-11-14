@@ -178,6 +178,10 @@ pub struct ConsumerState {
     /// received it has died. See `bundle_active_set::session_sync`'s own
     /// module doc.
     loaded: bundle_active_set::SessionLoaded<AppScope>,
+    /// Announced profile of every live executor session as of this tick
+    /// (refreshed with `live_sessions_with_profiles`); empty = every session
+    /// is `all`, i.e. exactly the pre-partitioning behavior.
+    session_profiles: bundle_active_set::SessionProfiles,
     running_consumers: RunningConsumers,
     tracker: ChangeLogTracker,
     /// Last time each scope's active-set re-read succeeded -- the basis for
@@ -232,6 +236,7 @@ impl ConsumerState {
             bindings_by_scope: HashMap::new(),
             resolved_scopes: HashMap::new(),
             loaded: bundle_active_set::SessionLoaded::new(),
+            session_profiles: bundle_active_set::SessionProfiles::new(),
             running_consumers: HashMap::new(),
             tracker: ChangeLogTracker::new(initial_seq),
             scope_last_success: HashMap::new(),
@@ -321,6 +326,7 @@ pub async fn initial_state(
         bindings_by_scope,
         resolved_scopes: HashMap::new(),
         loaded: bundle_active_set::SessionLoaded::new(),
+        session_profiles: bundle_active_set::SessionProfiles::new(),
         running_consumers: HashMap::new(),
         tracker: ChangeLogTracker::new(safe_seq),
         scope_last_success,
@@ -523,9 +529,19 @@ async fn apply_active_set(
         );
     }
 
-    let plan = bundle_active_set::plan_sessions(&state.loaded, &active, live_sessions, |row| {
-        row.digest.as_str()
-    });
+    // Language-partitioned executors: a `Load` goes ONLY to a session whose
+    // announced profile accepts the bundle's language (`app_versions.language`);
+    // with every session `all` this is exactly the unpartitioned plan.
+    report_placement_gaps(&active, live_sessions, &state.session_profiles);
+    refresh_session_gauges(live_sessions, &state.session_profiles);
+    let profiles = state.session_profiles.clone();
+    let plan = bundle_active_set::plan_sessions_eligible(
+        &state.loaded,
+        &active,
+        live_sessions,
+        |row| row.digest.as_str(),
+        |session, _scope, row| profiles.get(session).accepts(&row.language),
+    );
 
     if let Some(reason) = full_sync_reason {
         // Over-log by design (user rule: never silent) -- one INFO line per
@@ -600,6 +616,8 @@ async fn apply_active_set(
                     .bundle_loads_total
                     .with_label_values(&["success"])
                     .inc();
+                crate::stage_metrics::stage_metrics()
+                    .record_profile_load(profiles.get(*session).as_str(), "success");
                 // Mark loaded ONLY on this confirmed `Ok` reply -- never
                 // optimistically ahead of it.
                 state
@@ -629,6 +647,8 @@ async fn apply_active_set(
                     .bundle_loads_total
                     .with_label_values(&["failure"])
                     .inc();
+                crate::stage_metrics::stage_metrics()
+                    .record_profile_load(profiles.get(*session).as_str(), "failure");
             }
             Err(_timed_out) => {
                 // regression: svc-process sequential no-timeout load starved
@@ -651,6 +671,8 @@ async fn apply_active_set(
                     .bundle_loads_total
                     .with_label_values(&["timeout"])
                     .inc();
+                crate::stage_metrics::stage_metrics()
+                    .record_profile_load(profiles.get(*session).as_str(), "timeout");
             }
         }
     }
@@ -726,6 +748,52 @@ async fn apply_active_set(
     metrics
         .bundles_loaded
         .set(state.loaded.total_entries() as i64);
+}
+
+/// Logs (ERROR) and counts every ACTIVE bundle that no live executor session
+/// may host (language-partitioned executors). Such a bundle is loaded
+/// NOWHERE -- never on a wrong-profile executor -- so this is the loud signal
+/// (`waddles_executor_profile_mismatch_total{reason}`) that an executor of the
+/// needed profile is missing or a manifest carries an unclassifiable language.
+fn report_placement_gaps(
+    active: &HashMap<AppScope, bundle_active_set::ActiveBundleRow>,
+    live_sessions: &[bundle_active_set::SessionId],
+    profiles: &bundle_active_set::SessionProfiles,
+) {
+    let gaps = bundle_active_set::placement_gaps(active, live_sessions, profiles, |row| {
+        row.language.as_str()
+    });
+    let metrics = crate::stage_metrics::stage_metrics();
+    for gap in gaps {
+        tracing::error!(
+            tenant_id = gap.key.0, community_id = gap.key.1, app_id = %gap.key.2,
+            language = %gap.language,
+            reason = gap.kind.as_str(),
+            live_sessions = live_sessions.len(),
+            "changelog consumer: active bundle cannot be placed on any live executor session \
+             (language-partitioned executors); it is loaded nowhere until a matching executor \
+             connects or its language is fixed"
+        );
+        metrics.record_profile_mismatch(gap.kind.as_str(), "none", &gap.language);
+    }
+}
+
+/// Refreshes `waddles_executor_sessions{profile}` for every profile (zero
+/// included, so a profile that lost its last session reads 0, not stale).
+fn refresh_session_gauges(
+    live_sessions: &[bundle_active_set::SessionId],
+    profiles: &bundle_active_set::SessionProfiles,
+) {
+    let counts = profiles.counts(live_sessions);
+    let metrics = crate::stage_metrics::stage_metrics();
+    for profile in [
+        bundle_active_set::ExecutorProfile::All,
+        bundle_active_set::ExecutorProfile::Scripted,
+        bundle_active_set::ExecutorProfile::Compiled,
+    ] {
+        let n = counts.get(&profile).copied().unwrap_or(0);
+        metrics.set_executor_sessions(profile.as_str(), u64::try_from(n).unwrap_or(u64::MAX));
+    }
 }
 
 fn update_tenant_gauges(state: &ConsumerState, metrics: &ChangelogConsumerMetrics) {
@@ -818,7 +886,12 @@ pub async fn run_incremental_tick(
         // check compares per session, alpha 2026-10-03 follow-up): a single
         // out-of-sync live session is enough to force a resync, even if
         // another live session is already correct.
-        if bundle_active_set::any_session_diverged(&state.by_scope, &state.loaded, live_sessions) {
+        if bundle_active_set::any_session_diverged_with_profiles(
+            &state.by_scope,
+            &state.loaded,
+            live_sessions,
+            &state.session_profiles,
+        ) {
             apply_active_set(
                 state,
                 sink,
@@ -1344,7 +1417,8 @@ pub async fn run(
     // A no-op (flag stays pending) if no connection exists yet -- the loop's
     // own per-iteration call below retries it as soon as one appears.
     {
-        let live_sessions = connections.live_session_ids();
+        let (live_sessions, session_profiles) = connections.live_sessions_with_profiles();
+        state.session_profiles = session_profiles;
         known_sessions = live_sessions.iter().copied().collect();
         let sink = (!live_sessions.is_empty()).then(|| crate::bundle_loader::RegistrySink {
             registry: Arc::clone(&connections),
@@ -1368,7 +1442,8 @@ pub async fn run(
     }
 
     loop {
-        let live_sessions = connections.live_session_ids();
+        let (live_sessions, session_profiles) = connections.live_sessions_with_profiles();
+        state.session_profiles = session_profiles;
         let live_set: std::collections::HashSet<bundle_active_set::SessionId> =
             live_sessions.iter().copied().collect();
         let diff = diff_sessions(&known_sessions, &live_set);
@@ -1548,6 +1623,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
         }
     }
 
@@ -2850,6 +2926,7 @@ mod tests {
                     artifact_signature: None,
                     artifact_signature_key_id: None,
                     artifact_signed_approval_id: None,
+                    language: "rust".to_string(),
                     declared_capabilities: Vec::new(),
                     egress: Vec::new(),
                     egress_rps: None,
@@ -3067,6 +3144,7 @@ mod tests {
                     artifact_signature: None,
                     artifact_signature_key_id: None,
                     artifact_signed_approval_id: None,
+                    language: "rust".to_string(),
                     declared_capabilities: Vec::new(),
                     egress: Vec::new(),
                     egress_rps: None,

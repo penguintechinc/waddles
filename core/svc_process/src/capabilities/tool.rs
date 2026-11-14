@@ -333,9 +333,17 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
         plan: &bundle_tool_call::ToolPlan,
     ) -> Result<serde_json::Value, ToolRefusal> {
         let deadline = bundle_tool_call::nested_deadline(ctx.deadline)?;
-        let conn = ctx.connections.active().ok_or_else(|| {
-            ToolRefusal::TargetUnavailable("no executor connection is active".to_string())
-        })?;
+        // Language-partitioned executors: the nested invoke must land on a
+        // session that may host the TARGET's language, never just the newest.
+        let target_language = ctx.snapshot.language_for_version_id(plan.target_version);
+        let conn = ctx
+            .connections
+            .active_for(target_language.as_deref())
+            .ok_or_else(|| {
+                ToolRefusal::TargetUnavailable(
+                    "no executor connection accepting the target's language is active".to_string(),
+                )
+            })?;
         let nested_ctx = ToolContext {
             chain: plan.next_chain.clone(),
             deadline: Some(Instant::now() + deadline),

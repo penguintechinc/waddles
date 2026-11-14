@@ -401,11 +401,16 @@ pipeline:
     # compiles the active set via Cranelift: the OOM finding that sized these still applies).
     bundleExecutor:
       replicas: 1
+      # Pre-alpha LOCAL K8s (localhost:32000 registry, small node): ONE `all` executor. The
+      # compiled/scripted split is ON in dal2alpha/beta/gamma/production.
+      allowAllProfile: true
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
       resources:
         requests: { cpu: "500m", memory: "1Gi" }
         limits: { cpu: "2000m", memory: "2560Mi" }
+    bundleExecutorScripted:
+      enabled: false
 
 presentation:
   # Rust svc-presentation (overlay + image surface). Overlay view/SSE port reachable on-host at

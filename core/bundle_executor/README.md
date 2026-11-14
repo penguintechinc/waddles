@@ -23,6 +23,7 @@ be able to starve the others. Three mechanisms enforce that:
 | `EXECUTOR_INSTANCES_PER_BUNDLE` | `4` | Ceiling on in-flight invokes of ONE bundle digest (per-bundle semaphore). |
 | `EXECUTOR_POOL_WAIT_MS` | `500` | How long an invoke queues for a free per-bundle AND global slot. On expiry it fails `EXECUTOR_DEADLINE` with `detail = "pool_exhausted"` (the pinned wire crate has no dedicated code). |
 | `EXECUTOR_MAX_CONCURRENT_COMPILES` | `2` | Concurrent JIT compiles. |
+| `EXECUTOR_PROFILE` | `all` | Which bundles this replica hosts: `compiled` (rust/csharp), `scripted` (python / componentize-py) or `all` (local/dev single-executor only; WARN at startup unless `EXECUTOR_ALLOW_ALL_PROFILE=true`). Announced to the stages in the host-api `hello` as `executor_version` build metadata (`0.1.0+profile=scripted`; `all` announces nothing). An unknown value fails startup. See `docs/architecture/language-partitioned-executors.md`. |
 | `EXECUTOR_SHUTDOWN_DRAIN_SECONDS` | `25` | Drain deadline on SIGTERM. Keep below the pod's `terminationGracePeriodSeconds` (default 30) so rollouts never reach SIGKILL. On expiry the executor logs what was abandoned and still exits 0. |
 
 All four counts must be `>= 1`; `validate()` rejects `0` at startup.

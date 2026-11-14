@@ -76,6 +76,14 @@ preserving the executor's fail-closed posture without a template-render-time
 guess.
 */}}
 {{- $bsepCmName := .Values.autoProvisionedKeys.bundleSigning.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" (include "waddlebot.fullname" .)) }}
+{{- /* Language-partitioned executors: compiled and scripted bundles live on SEPARATE Deployments
+(strict digest check + small fast loads + compile cache vs componentize-py: huge, slow, no byte
+check). With the scripted twin enabled (default) this primary is the COMPILED executor; `all`
+(accepts everything) is for local/dev single-executor installs only. */}}
+{{- $scriptedOn := not (not .Values.pipeline.rustDataPlane.bundleExecutorScripted.enabled) }}
+{{- $profile := ternary "compiled" (.Values.pipeline.rustDataPlane.bundleExecutor.profile | default "all") $scriptedOn }}
+{{- $cacheDir := printf "%s/%s" .Values.pipeline.rustDataPlane.bundleExecutor.precompileDir $profile }}
+{{- $kata := .Values.pipeline.rustDataPlane.bundleExecutor.runtimeClassName | default "" }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -110,6 +118,13 @@ spec:
         app.kubernetes.io/component: svc-bundles-executor
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      {{- if $kata }}
+      # Optional Kata isolation for THIS executor only (default empty = runc). A Kata pod gets NO
+      # Tetragon exec-allowlist (host eBPF cannot see inside the guest VM; the Kata policy is the
+      # control) but keeps the CiliumNetworkPolicy default-deny, rootless, read-only rootfs.
+      # RuntimeClass overhead is charged ON TOP of resources.requests -- size requests accordingly.
+      runtimeClassName: {{ $kata | quote }}
+      {{- end }}
       automountServiceAccountToken: false
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -142,6 +157,16 @@ spec:
             drop:
             - ALL
         env:
+        # Language-partitioned executors: with the scripted twin Deployment enabled (default) this
+        # primary is the COMPILED executor (rust/csharp/...). Announced to the stages in the
+        # host-api hello (core/bundle_active_set/src/executor_profile.rs).
+        - name: EXECUTOR_PROFILE
+          value: {{ $profile | quote }}
+        {{- if and (eq $profile "all") .Values.pipeline.rustDataPlane.bundleExecutor.allowAllProfile }}
+        # `all` is intentional here (local/dev single-executor install): silences the startup WARN.
+        - name: EXECUTOR_ALLOW_ALL_PROFILE
+          value: "true"
+        {{- end }}
         # Comma-separated list: one dial loop per stage (core/bundle_executor/src/config.rs
         # stage_targets). Every stage shares the HOST_API_* mTLS material + identity below.
         - name: STAGE_HOST_API_ADDR
@@ -164,8 +189,10 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.maxConcurrentCompiles | default 0 | quote }}
         - name: EXECUTOR_POOL_WAIT_MS
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.poolWaitMs | quote }}
+        # Per-PROFILE cache subdir (never shared between executors; the compile-cache PVC work
+        # names its volumes by profile too).
         - name: EXECUTOR_PRECOMPILE_DIR
-          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.precompileDir | quote }}
+          value: {{ $cacheDir | quote }}
         - name: EXECUTOR_WASM_COLLECTOR
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.wasmCollector | quote }}
         - name: WADDLES_SANDBOX_GVISOR
@@ -275,8 +302,8 @@ spec:
         - name: tmp
           mountPath: /tmp
         {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
-        - name: precompile-cache
-          mountPath: {{ .Values.pipeline.rustDataPlane.bundleExecutor.precompileDir }}
+        - name: precompile-cache-{{ $profile }}
+          mountPath: {{ $cacheDir }}
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
         {{- end }}
@@ -298,7 +325,7 @@ spec:
       # emptyDir (not persistent): every `load` JIT-compiles fresh in this pass anyway
       # (core/bundle_executor/src/lib.rs's own "Scaffolded with a TODO" list -- precompiled
       # .cwasm caching isn't wired yet), so there is no cache to lose on pod restart today.
-      - name: precompile-cache
+      - name: precompile-cache-{{ $profile }}
         emptyDir: {}
       {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
@@ -314,5 +341,5 @@ spec:
           defaultMode: 0440
       {{- end }}
 # R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
-{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-bundles-executor" "ports" (list ) "runtime" "rust" "binaries" (list "/app/bundle-executor") "cnp" false) }}
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-bundles-executor" "ports" (list ) "runtime" "rust" "binaries" (list "/app/bundle-executor") "cnp" false "tetragon" (not $kata)) }}
 {{- end }}

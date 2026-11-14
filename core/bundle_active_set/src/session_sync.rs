@@ -206,11 +206,35 @@ where
     K: Eq + Hash + Clone,
     Row: Clone,
 {
+    plan_sessions_eligible(loaded, active, live_sessions, digest_of, |_, _, _| true)
+}
+
+/// [`plan_sessions`] restricted by `eligible(session, key, row)`: a `Load`
+/// is planned ONLY for a live session that is eligible to host that bundle
+/// (language-partitioned executors -- see [`crate::executor_profile`]). An
+/// ineligible session is never sent the bundle, and a session that somehow
+/// still holds a scope it is no longer eligible for gets an `Unload` (never
+/// left silently holding a bundle the partition says it must not).
+/// `eligible` always-true reproduces [`plan_sessions`] exactly.
+pub fn plan_sessions_eligible<K, Row>(
+    loaded: &SessionLoaded<K>,
+    active: &HashMap<K, Row>,
+    live_sessions: &[SessionId],
+    digest_of: impl Fn(&Row) -> &str,
+    eligible: impl Fn(SessionId, &K, &Row) -> bool,
+) -> SessionSyncPlan<K, Row>
+where
+    K: Eq + Hash + Clone,
+    Row: Clone,
+{
     let mut plan = SessionSyncPlan::default();
 
     for (key, row) in active {
         let want_digest = digest_of(row);
         for &session in live_sessions {
+            if !eligible(session, key, row) {
+                continue;
+            }
             match loaded.digest_for(session, key) {
                 Some(have) if have == want_digest => {}
                 _ => plan.to_load.push((session, key.clone(), row.clone())),
@@ -220,7 +244,11 @@ where
 
     let live: HashSet<SessionId> = live_sessions.iter().copied().collect();
     for (session, key, digest) in loaded.iter() {
-        if live.contains(&session) && !active.contains_key(key) {
+        if !live.contains(&session) {
+            continue;
+        }
+        let keep = active.get(key).is_some_and(|row| eligible(session, key, row));
+        if !keep {
             plan.to_unload
                 .push((session, key.clone(), digest.to_string()));
         }
@@ -508,4 +536,177 @@ mod tests {
             );
         }
     }
+
+    // ---- language-partitioned executors (profile-aware planning) ----
+
+    use crate::executor_profile::{ExecutorProfile, SessionProfiles};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct LangRow {
+        digest: String,
+        language: String,
+    }
+
+    fn lrow(digest: &str, language: &str) -> LangRow {
+        LangRow {
+            digest: digest.to_string(),
+            language: language.to_string(),
+        }
+    }
+
+    fn plan_with(
+        loaded: &SessionLoaded<Scope>,
+        active: &HashMap<Scope, LangRow>,
+        live: &[SessionId],
+        profiles: &SessionProfiles,
+    ) -> SessionSyncPlan<Scope, LangRow> {
+        plan_sessions_eligible(
+            loaded,
+            active,
+            live,
+            |r| r.digest.as_str(),
+            |session, _key, row| profiles.get(session).accepts(&row.language),
+        )
+    }
+
+    /// A Python bundle is NEVER planned onto a native session and a native
+    /// bundle never onto a python session -- the whole point of partitioning.
+    #[test]
+    fn python_never_loads_on_native_and_vice_versa() {
+        let profiles = SessionProfiles::from_pairs([
+            (1, ExecutorProfile::Compiled),
+            (2, ExecutorProfile::Scripted),
+        ]);
+        let mut active = HashMap::new();
+        active.insert(scope("py"), lrow("sha256:py", "python"));
+        active.insert(scope("rs"), lrow("sha256:rs", "rust"));
+        active.insert(scope("cs"), lrow("sha256:cs", "csharp"));
+
+        let plan = plan_with(&SessionLoaded::new(), &active, &[1, 2], &profiles);
+        let mut loads: Vec<(SessionId, String)> = plan
+            .to_load
+            .iter()
+            .map(|(s, k, _)| (*s, k.2.clone()))
+            .collect();
+        loads.sort();
+        assert_eq!(
+            loads,
+            vec![
+                (1, "cs".to_string()),
+                (1, "rs".to_string()),
+                (2, "py".to_string()),
+            ],
+            "native(1) gets rust+csharp only, python(2) gets python only: {plan:?}"
+        );
+    }
+
+    /// `all` accepts both languages (single-executor deployments unchanged),
+    /// and a session with NO recorded profile (an old executor) is `all`.
+    #[test]
+    fn all_profile_and_missing_profile_accept_everything() {
+        let mut active = HashMap::new();
+        active.insert(scope("py"), lrow("sha256:py", "python"));
+        active.insert(scope("rs"), lrow("sha256:rs", "rust"));
+        active.insert(scope("odd"), lrow("sha256:odd", "cobol"));
+
+        let all = SessionProfiles::from_pairs([(1, ExecutorProfile::All)]);
+        let none = SessionProfiles::new();
+        for profiles in [&all, &none] {
+            let plan = plan_with(&SessionLoaded::new(), &active, &[1], profiles);
+            assert_eq!(plan.to_load.len(), 3, "all/unknown-profile loads everything: {plan:?}");
+        }
+        // And identical to the unpartitioned planner.
+        let legacy = plan_sessions(&SessionLoaded::new(), &active, &[1], |r| r.digest.as_str());
+        assert_eq!(legacy.to_load.len(), 3);
+    }
+
+    /// Unknown language on a partitioned executor: never loaded anywhere.
+    #[test]
+    fn unknown_language_is_never_planned_on_a_partitioned_session() {
+        let profiles = SessionProfiles::from_pairs([
+            (1, ExecutorProfile::Compiled),
+            (2, ExecutorProfile::Scripted),
+        ]);
+        let mut active = HashMap::new();
+        active.insert(scope("odd"), lrow("sha256:odd", "cobol"));
+        let plan = plan_with(&SessionLoaded::new(), &active, &[1, 2], &profiles);
+        assert!(plan.to_load.is_empty(), "{plan:?}");
+    }
+
+    /// Session death: the python executor dies and a fresh python executor
+    /// connects -> the python bundle reloads ONLY onto the new python session;
+    /// the native session is never touched.
+    #[test]
+    fn dead_python_session_reloads_only_onto_a_matching_live_session() {
+        let mut loaded = SessionLoaded::new();
+        loaded.mark_loaded(1, scope("rs"), "sha256:rs".to_string()); // native, healthy
+        loaded.mark_loaded(2, scope("py"), "sha256:py".to_string()); // python, about to die
+        let mut active = HashMap::new();
+        active.insert(scope("py"), lrow("sha256:py", "python"));
+        active.insert(scope("rs"), lrow("sha256:rs", "rust"));
+
+        // Session 2 dies.
+        loaded.on_session_removed(2);
+        // Only the native session is live: the python bundle has nowhere to go
+        // (it must NOT spill onto native) and nothing else is planned.
+        let native_only = SessionProfiles::from_pairs([(1, ExecutorProfile::Compiled)]);
+        let plan = plan_with(&loaded, &active, &[1], &native_only);
+        assert!(plan.is_empty(), "python must not fall back onto native: {plan:?}");
+        assert_eq!(loaded.loaded_count(&scope("py")), 0);
+
+        // A new python executor (session 3) connects.
+        let both = SessionProfiles::from_pairs([
+            (1, ExecutorProfile::Compiled),
+            (3, ExecutorProfile::Scripted),
+        ]);
+        let plan = plan_with(&loaded, &active, &[1, 3], &both);
+        assert_eq!(plan.to_load.len(), 1, "{plan:?}");
+        assert_eq!(plan.to_load[0].0, 3);
+        assert_eq!(plan.to_load[0].1, scope("py"));
+        assert!(plan.to_unload.is_empty());
+    }
+
+    /// A session still holding a scope its profile does not accept (stale
+    /// state, e.g. a profile change) is told to Unload it.
+    #[test]
+    fn a_session_holding_an_ineligible_scope_is_unloaded() {
+        let mut loaded = SessionLoaded::new();
+        loaded.mark_loaded(1, scope("py"), "sha256:py".to_string());
+        let mut active = HashMap::new();
+        active.insert(scope("py"), lrow("sha256:py", "python"));
+        let native = SessionProfiles::from_pairs([(1, ExecutorProfile::Compiled)]);
+        let plan = plan_with(&loaded, &active, &[1], &native);
+        assert_eq!(plan.to_unload, vec![(1, scope("py"), "sha256:py".to_string())]);
+        assert!(plan.to_load.is_empty());
+    }
+
+    /// Dispatch routing: invokes pick only a session HOLDING the digest, and
+    /// holders are only ever eligible sessions, so a Python digest can never
+    /// resolve to the native session.
+    #[test]
+    fn invoke_routing_resolves_only_to_the_matching_executor() {
+        let profiles = SessionProfiles::from_pairs([
+            (1, ExecutorProfile::Compiled),
+            (2, ExecutorProfile::Scripted),
+        ]);
+        let mut active = HashMap::new();
+        active.insert(scope("py"), lrow("sha256:py", "python"));
+        active.insert(scope("rs"), lrow("sha256:rs", "rust"));
+        let mut loaded = SessionLoaded::new();
+        let plan = plan_with(&loaded, &active, &[1, 2], &profiles);
+        for (session, key, row) in &plan.to_load {
+            loaded.mark_loaded(*session, key.clone(), row.digest.clone());
+        }
+        for rotation in 0..4 {
+            assert_eq!(
+                pick_session_with_digest(&loaded, &scope("py"), "sha256:py", rotation),
+                Some(2)
+            );
+            assert_eq!(
+                pick_session_with_digest(&loaded, &scope("rs"), "sha256:rs", rotation),
+                Some(1)
+            );
+        }
+    }
 }
+

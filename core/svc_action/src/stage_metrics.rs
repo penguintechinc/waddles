@@ -278,6 +278,9 @@ pub struct StageMetrics {
     group_pending: Histogram<u64>,
     insecure_transport: Gauge<u64>,
     boundary_violations: Counter<u64>,
+    executor_profile_mismatch: Counter<u64>,
+    executor_profile_loads: Counter<u64>,
+    executor_sessions: Gauge<u64>,
 }
 
 impl StageMetrics {
@@ -385,7 +388,77 @@ impl StageMetrics {
                 "waddles_tenant_boundary_violations_total",
                 "Hop-verification (tenant boundary) failures, by stage and reason",
             ),
+            executor_profile_mismatch: counter(
+                "waddles_executor_profile_mismatch_total",
+                "A bundle that could not be placed on a language-partitioned executor \
+                 session, by reason (mismatch = guard refused a wrong-profile load/invoke, \
+                 unknown_language = partitioned profile met an unclassifiable language, \
+                 no_matching_session = no live session accepts the language)",
+            ),
+            executor_profile_loads: counter(
+                "waddles_executor_profile_loads_total",
+                "Bundle loads onto an executor session, by that session's profile and result",
+            ),
+            executor_sessions: meter
+                .u64_gauge(instrument_name("waddles_executor_sessions"))
+                .with_description("Live executor sessions connected to this stage, by profile")
+                .build(),
         }
+    }
+
+    /// Counts one bundle that could not be placed on a language-partitioned
+    /// executor (`waddles_executor_profile_mismatch_total`). `reason` is a
+    /// fixed set (`mismatch`/`unknown_language`/`no_matching_session`);
+    /// `language` is folded to a known name or `unrecognized` so a typo'd
+    /// manifest value can never mint a new series.
+    pub fn record_profile_mismatch(
+        &self,
+        reason: &'static str,
+        profile: &'static str,
+        language: &str,
+    ) {
+        let lang = language.trim().to_ascii_lowercase();
+        let language = if bundle_active_set::language_class(&lang).is_some() {
+            lang
+        } else {
+            "unrecognized".to_string()
+        };
+        self.executor_profile_mismatch.add(
+            1,
+            &[
+                KeyValue::new("stage", STAGE),
+                KeyValue::new("reason", reason),
+                KeyValue::new("profile", profile),
+                KeyValue::new("language", language),
+            ],
+        );
+    }
+
+    /// Counts one load outcome against a session of `profile`
+    /// (`waddles_executor_profile_loads_total`); `result` is `success`,
+    /// `failure` or `timeout`.
+    pub fn record_profile_load(&self, profile: &'static str, result: &'static str) {
+        self.executor_profile_loads.add(
+            1,
+            &[
+                KeyValue::new("stage", STAGE),
+                KeyValue::new("profile", profile),
+                KeyValue::new("result", result),
+            ],
+        );
+    }
+
+    /// Sets the live-session count for one `profile`
+    /// (`waddles_executor_sessions`). Callers set every profile on each
+    /// refresh (zero included) so a profile that lost its last session reads 0.
+    pub fn set_executor_sessions(&self, profile: &'static str, count: u64) {
+        self.executor_sessions.record(
+            count,
+            &[
+                KeyValue::new("stage", STAGE),
+                KeyValue::new("profile", profile),
+            ],
+        );
     }
 
     /// Records one delivered entry's total handling time and terminal

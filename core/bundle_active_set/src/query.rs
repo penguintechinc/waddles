@@ -61,6 +61,11 @@ pub struct ActiveBundleRow {
     pub artifact_signature: Option<String>,
     pub artifact_signature_key_id: Option<String>,
     pub artifact_signed_approval_id: Option<i64>,
+    /// `app_versions.language` -- the manifest language this version was
+    /// published with. Routes the bundle to a profile-compatible executor
+    /// session (`crate::executor_profile`); raw, never normalized away, so an
+    /// unknown value stays visible and fails loud on a partitioned executor.
+    pub language: String,
     /// The install-time consent summary's derived `"capabilities"` array
     /// (`app_install_approvals.summary_json`, `crate::entities::
     /// app_install_approvals`'s doc) -- e.g. `["context","kv","flags",
@@ -598,6 +603,7 @@ pub(crate) fn assemble_active_set(
             artifact_signature: version_row.artifact_signature.clone(),
             artifact_signature_key_id: version_row.artifact_signature_key_id.clone(),
             artifact_signed_approval_id: version_row.artifact_signed_approval_id,
+            language: version_row.language.clone(),
             declared_capabilities,
             egress,
             egress_rps,
@@ -913,6 +919,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             }]])
             .append_query_results([Vec::<app_install_approvals::Model>::new()])
             .into_connection();
@@ -955,6 +962,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -1015,6 +1023,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -1069,6 +1078,7 @@ mod tests {
                 artifact_signature: Some("c2lnbmF0dXJl".to_string()),
                 artifact_signature_key_id: Some("platform-2026-09".to_string()),
                 artifact_signed_approval_id: Some(42),
+                language: "rust".to_string(),
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 42,
@@ -1121,6 +1131,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -1167,6 +1178,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -1217,6 +1229,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             }]])
             // Approval belongs to tenant 2, not tenant 1 -- same app_id/
             // version/community sentinel otherwise.
@@ -1262,6 +1275,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -1368,6 +1382,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -1431,6 +1446,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 2,
@@ -1481,6 +1497,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             },
         );
         versions_by_id.insert(
@@ -1496,6 +1513,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             },
         );
         let approval_rows = vec![app_install_approvals::Model {
@@ -1539,6 +1557,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -1653,6 +1672,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -1699,6 +1719,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -1748,6 +1769,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,

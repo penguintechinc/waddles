@@ -1,0 +1,203 @@
+# svc-bundles-executor-scripted: the SCRIPTED-language executor (python / componentize-py), the
+# twin of templates/svc-bundles-executor.yaml (same image + binary, EXECUTOR_PROFILE=scripted).
+#
+# WHY SEPARATE, PERMANENTLY (owner decision 2026-11-14): compiled bundles (rust/csharp) and scripted
+# bundles (python) must be handled completely differently --
+#   compiled: deterministic build, strict artifact-digest (byte) check, small fast loads,
+#             meaningful compile cache, modest resources;
+#   scripted: componentize-py snapshot (NOT byte-reproducible, no byte check; source-hash change
+#             detection planned in #1320 for v3.1.x), large components that take minutes each to
+#             JIT-compile (pyping: 880 s), a huge per-executor compile cache, different resources.
+# Sharing one executor let the scripted compiles starve everything else (alpha 2026-11-14: ~160
+# bundles, pool_exhausted, 120 s load timeouts).
+#
+# HOW ROUTING WORKS (no Service, no chart-side wiring): each executor announces its profile in
+# the host-api `hello`; svc-process / svc-action route load/unload + invokes to sessions whose
+# profile accepts the bundle's language (`app_versions.language`) -- see
+# core/bundle_active_set/src/executor_profile.rs.
+#
+# Deliberately a LEANER copy of the primary pod:
+#   - dials the same stages (pipeline.rustDataPlane.bundleExecutor.stages) with the SAME
+#     global.hostApiTls client identity -- the profile is routing metadata, NOT an authorization
+#     boundary (one trust domain).
+#   - NO connector link: it never dials svc-ingest and pins no connector digests, so
+#     svc-ingest's round-robin never hands it a connector call (connectors stay on the primary).
+#   - its OWN compile cache volume `precompile-cache-scripted` mounted at
+#     <precompileDir>/scripted (per-profile subdir; never shared with the compiled executor).
+#   - same credential-less posture, probes, securityContext as the primary.
+# Optional Kata (`runtimeClassName`, default empty = runc): scripted code is the more dynamic of the
+# two, so Kata can be switched on for THIS Deployment independently of the compiled one. A Kata pod
+# gets NO Tetragon exec-allowlist (the Kata policy is the control) but keeps the CiliumNetworkPolicy.
+# Own component label (`svc-bundles-executor-scripted`) so the two Deployments' selectors are
+# disjoint -- an overlapping selector would make the controllers fight over each other's pods.
+# Gated on pipeline.rustDataPlane.enabled + bundleExecutor.enabled + bundleExecutorScripted.enabled
+# (default TRUE; false only in the local/dev overlays, which run ONE `all` executor).
+{{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutor.enabled .Values.pipeline.rustDataPlane.bundleExecutorScripted.enabled }}
+{{- $py := .Values.pipeline.rustDataPlane.bundleExecutorScripted }}
+{{- $base := .Values.pipeline.rustDataPlane.bundleExecutor }}
+{{- $cacheDir := printf "%s/scripted" $base.precompileDir }}
+{{- $kata := $py.runtimeClassName | default "" }}
+{{- $bsepCmName := .Values.autoProvisionedKeys.bundleSigning.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" (include "waddlebot.fullname" .)) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-bundles-executor-scripted
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-bundles-executor-scripted
+spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "bundleExecutorScripted")) }}
+  replicas: {{ $py.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-bundles-executor-scripted
+  template:
+    metadata:
+      annotations:
+        # Rolls every pod when the desired host-api-tls identity/SANs change (same as the primary).
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        checksum/host-api-tls: {{ include "waddlebot.hostApiTlsPodChecksum" . | quote }}
+        {{- end }}
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: svc-bundles-executor-scripted
+    spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      {{- if $kata }}
+      # Optional Kata isolation (default empty = runc). NO Tetragon exec-allowlist on a Kata pod
+      # (host eBPF cannot see inside the guest VM); CNP default-deny, rootless, read-only rootfs
+      # all still apply. RuntimeClass overhead is charged ON TOP of resources.requests.
+      runtimeClassName: {{ $kata | quote }}
+      {{- end }}
+      automountServiceAccountToken: false
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
+      containers:
+      - name: svc-bundles-executor
+        image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag | toString }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        env:
+        - name: EXECUTOR_PROFILE
+          value: "scripted"
+        - name: STAGE_HOST_API_ADDR
+          value: {{ include "waddlebot.bundleExecutorStageAddrs" . | quote }}
+        - name: EXECUTOR_STAGE_CONNECTIONS
+          value: {{ $base.stageConnections | quote }}
+        - name: EXECUTOR_CALL_TIMEOUT_MS
+          value: {{ $py.callTimeoutMs | default $base.callTimeoutMs | quote }}
+        - name: EXECUTOR_MAX_CALL_TIMEOUT_MS
+          value: {{ $py.maxCallTimeoutMs | default $base.maxCallTimeoutMs | quote }}
+        - name: EXECUTOR_MEMORY_LIMIT_MB
+          value: {{ $py.memoryLimitMb | default $base.memoryLimitMb | quote }}
+        - name: EXECUTOR_MAX_MEMORY_LIMIT_MB
+          value: {{ $py.maxMemoryLimitMb | default $base.maxMemoryLimitMb | quote }}
+        - name: EXECUTOR_INSTANCES_PER_BUNDLE
+          value: {{ $base.instancesPerBundle | quote }}
+        - name: EXECUTOR_MAX_CONCURRENT_CALLS
+          value: {{ $base.maxConcurrentCalls | quote }}
+        - name: EXECUTOR_MAX_CONCURRENT_COMPILES
+          value: {{ $py.maxConcurrentCompiles | default 0 | quote }}
+        - name: EXECUTOR_POOL_WAIT_MS
+          value: {{ $py.poolWaitMs | default $base.poolWaitMs | quote }}
+        - name: EXECUTOR_PRECOMPILE_DIR
+          value: {{ $cacheDir | quote }}
+        - name: EXECUTOR_WASM_COLLECTOR
+          value: {{ $base.wasmCollector | quote }}
+        - name: WADDLES_SANDBOX_GVISOR
+          value: {{ $base.sandboxGvisor | quote }}
+        {{- if .Values.pipeline.rustDataPlane.bundleSigningPublicKeys }}
+        - name: BUNDLE_SIGNING_PUBLIC_KEYS
+          value: {{ .Values.pipeline.rustDataPlane.bundleSigningPublicKeys | toJson | quote }}
+        {{- else }}
+        - name: BUNDLE_SIGNING_PUBLIC_KEYS
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $bsepCmName }}
+              key: BUNDLE_SIGNING_PUBLIC_KEYS
+        {{- end }}
+        - name: BUNDLE_BUCKET_ENDPOINT
+          value: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
+        - name: BUNDLE_BUCKET_CA_FILE
+          value: {{ include "waddlebot.transitTls.caPath" . | quote }}
+        - name: BUNDLE_BUCKET_NAME
+          value: {{ $base.bucketName | quote }}
+        - name: BUNDLE_BUCKET_REGION
+          value: {{ $base.bucketRegion | quote }}
+        - name: BUNDLE_BUCKET_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: DATAPLANE_S3_ACCESS_KEY_ID
+        - name: BUNDLE_BUCKET_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: DATAPLANE_S3_SECRET_ACCESS_KEY
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.hostApiTlsClientEnv" . | nindent 8 }}
+        {{- end }}
+        startupProbe:
+          # Same budget as the primary (~5.5 min): a cold load JIT-compiling a 21MB CPython
+          # component is exactly this pod's job, so it must not be killed before it finishes.
+          exec:
+            command: ["/app/bundle-executor", "--healthcheck"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 65
+        livenessProbe:
+          exec:
+            command: ["/app/bundle-executor", "--healthcheck=session", "--max-age", "60"]
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command: ["/app/bundle-executor", "--healthcheck=session", "--max-age", "20"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          {{- toYaml $py.resources | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
+        - name: precompile-cache-scripted
+          mountPath: {{ $cacheDir }}
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
+        {{- end }}
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
+      # This executor's OWN compile cache (never shared with the compiled executor): emptyDir today,
+      # lost on restart -- persistence (a per-profile PVC) is a separate item. On a Kata pod an
+      # emptyDir is served over virtiofs: expect slower cache I/O than runc.
+      - name: precompile-cache-scripted
+        emptyDir: {}
+      {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
+      {{- end }}
+# R5 posture: ingress scoped to declared ports (none), default-deny egress, enforced Tetragon exec
+# allowlist -- the allowlist is OMITTED when a Kata runtimeClassName is set (Kata policy instead).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-bundles-executor-scripted" "ports" (list ) "runtime" "rust" "binaries" (list "/app/bundle-executor") "cnp" false "tetragon" (not $kata)) }}
+{{- end }}

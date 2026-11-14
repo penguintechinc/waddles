@@ -143,6 +143,16 @@ fn carry_inbound_source(event_out: &mut PlatformEvent, inbound: &PlatformEvent) 
 pub enum InvokeError {
     #[error("no executor connection available")]
     NoExecutor,
+    /// Defense in depth for language-partitioned executors: the planner never
+    /// targets a session whose profile does not accept the bundle's language,
+    /// so reaching this means a routing bug or a stale profile -- refused
+    /// loudly (never loaded onto the wrong executor) and counted in
+    /// `waddles_executor_profile_mismatch_total{reason="mismatch"}`.
+    #[error("executor session profile {profile:?} does not accept bundle language {language:?}")]
+    ProfileMismatch {
+        profile: &'static str,
+        language: String,
+    },
     #[error("host-api error: {0}")]
     HostApi(#[from] HostApiError),
     #[error("executor reported error {code:?}: {message}")]
@@ -1408,7 +1418,47 @@ async fn handle_delivered_inner<S: SpineOps>(
             0
         });
 
-    let Some(connection) = deps.connections.pick_dispatch() else {
+    // Language-partitioned executors: pick ONLY a session whose profile accepts
+    // this bundle's language (`app_versions.language`, via the active-version
+    // snapshot). This path lazily `ensure_loaded`s onto the picked session, so a
+    // wrong pick would JIT-compile a Python bundle on the native executor --
+    // exactly what partitioning exists to prevent. `all` sessions accept
+    // everything, so single-executor deployments pick exactly as before.
+    let bundle_language = deps
+        .app_version_snapshot
+        .language_for_digest(&deps.app_id, &digest);
+    let picked = match deps.connections.pick_dispatch_for(bundle_language.as_deref()) {
+        Ok(connection) => Some(connection),
+        Err(crate::host_api::DispatchPickError::NoExecutor) => None,
+        Err(crate::host_api::DispatchPickError::NoMatchingProfile { language }) => {
+            let language_label = language.clone().unwrap_or_default();
+            tracing::error!(
+                app_id = %deps.app_id,
+                language = ?language,
+                "no live executor session accepts this bundle's language \
+                 (language-partitioned executors); dead-lettering for redelivery"
+            );
+            crate::stage_metrics::stage_metrics().record_profile_mismatch(
+                "no_matching_session",
+                "none",
+                &language_label,
+            );
+            let err = DlqError {
+                kind: DlqErrorKind::ExecutorUnavailable,
+                code: "EXECUTOR_PROFILE_UNAVAILABLE".to_string(),
+                message: "no live executor session accepts the bundle's language".to_string(),
+                detail: None,
+                artifact_digest: Some(digest.clone()),
+                consumer_id: deps.consumer_id.clone(),
+            };
+            return deps
+                .spine
+                .dead_letter(d, &err)
+                .await
+                .map(|()| StageResult::DeadLettered);
+        }
+    };
+    let Some(connection) = picked else {
         // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
         // 2026-10-02 incident: svc-process/svc-action were rolled and each
         // bundle-executor stayed bound to its old, terminated pod; the new
@@ -2594,6 +2644,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
             declared_capabilities: Vec::new(),
             egress: Vec::new(),
             egress_rps: None,
@@ -3433,6 +3484,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,
@@ -3492,6 +3544,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,
@@ -3599,6 +3652,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,
@@ -3661,6 +3715,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,

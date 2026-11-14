@@ -201,6 +201,16 @@ pub struct RetryPolicy {
 pub enum InvokeError {
     #[error("no executor connection available")]
     NoExecutor,
+    /// Defense in depth for language-partitioned executors: the planner never
+    /// targets a session whose profile does not accept the bundle's language,
+    /// so reaching this means a routing bug or a stale profile -- refused
+    /// loudly (never loaded onto the wrong executor) and counted in
+    /// `waddles_executor_profile_mismatch_total{reason="mismatch"}`.
+    #[error("executor session profile {profile:?} does not accept bundle language {language:?}")]
+    ProfileMismatch {
+        profile: &'static str,
+        language: String,
+    },
     #[error("host-api error: {0}")]
     HostApi(#[from] HostApiError),
     #[error("executor reported error {code:?}: {message}")]
@@ -1053,7 +1063,13 @@ async fn handle_delivered_inner<A: AuditSink, T: TenantResolver, S: SpineOps>(
     } else {
         match deps.digest_source.session_for_digest(&digest) {
             Some(session_id) => deps.connections.get(session_id),
-            None => deps.connections.active(),
+            // Static (legacy env-pinned) path: profile-aware newest session --
+            // identical to `active()` unless executors are language-partitioned.
+            None => deps.connections.active_for(
+                deps.app_version_snapshot
+                    .language_for_digest(&deps.app_id, &digest)
+                    .as_deref(),
+            ),
         }
     };
 
@@ -2131,6 +2147,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
             declared_capabilities: Vec::new(),
             egress: Vec::new(),
             egress_rps: None,
@@ -2588,6 +2605,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,

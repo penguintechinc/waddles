@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::multi_tenant::{scoped_active_rows, AppScope, ScopeKey};
+use crate::executor_profile::SessionProfiles;
 use crate::query::ActiveSetRead;
 use crate::session_sync::{SessionId, SessionLoaded};
 
@@ -133,6 +134,38 @@ pub fn any_session_diverged(
         .any(|&session| session_loaded_state_diverged(by_scope, loaded, session))
 }
 
+/// Profile-aware [`session_loaded_state_diverged`]: only bundles `session`'s
+/// profile accepts count -- a `native` session never "diverges" for lacking a
+/// Python bundle it must not hold (that would force a full resync every tick
+/// forever). A bundle whose language the partitioned profile cannot classify
+/// is skipped here too; the planner reports it loudly instead.
+pub fn session_loaded_state_diverged_for_profile(
+    by_scope: &HashMap<ScopeKey, ActiveSetRead>,
+    loaded: &SessionLoaded<AppScope>,
+    session: SessionId,
+    profiles: &SessionProfiles,
+) -> bool {
+    let profile = profiles.get(session);
+    let active = scoped_active_rows(by_scope);
+    active.iter().any(|(scope, row)| {
+        profile.accepts(&row.language)
+            && loaded.digest_for(session, scope) != Some(row.digest.as_str())
+    })
+}
+
+/// Profile-aware [`any_session_diverged`] -- same "no live sessions is never
+/// diverged" contract; with every session `all` it is identical to it.
+pub fn any_session_diverged_with_profiles(
+    by_scope: &HashMap<ScopeKey, ActiveSetRead>,
+    loaded: &SessionLoaded<AppScope>,
+    live_sessions: &[SessionId],
+    profiles: &SessionProfiles,
+) -> bool {
+    live_sessions.iter().any(|&session| {
+        session_loaded_state_diverged_for_profile(by_scope, loaded, session, profiles)
+    })
+}
+
 /// A short, stable-length prefix of a bundle digest for log lines -- never
 /// the full digest (noisy, and the full value is already available via
 /// `grep` against the per-bundle structured field when needed). Safe on any
@@ -160,6 +193,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
             declared_capabilities: Vec::new(),
             egress: Vec::new(),
             egress_rps: None,
@@ -297,4 +331,63 @@ mod tests {
     fn digest_prefix_returns_the_whole_string_when_shorter_than_the_prefix() {
         assert_eq!(digest_prefix("short"), "short");
     }
+
+    // ---- language-partitioned executors ----
+
+    use crate::executor_profile::{ExecutorProfile, SessionProfiles};
+    use crate::multi_tenant::{AppScope, ScopeKey};
+
+    fn lang_row(app_id: &str, digest: &str, language: &str) -> ActiveBundleRow {
+        let mut r = row(app_id, digest);
+        r.language = language.to_string();
+        r
+    }
+
+    /// A native session is NOT "diverged" for lacking a Python bundle it must
+    /// never hold (that would force a full resync on every poll tick forever);
+    /// but it IS diverged when missing a native bundle.
+    #[test]
+    fn a_native_session_is_not_diverged_for_a_python_bundle_it_must_not_hold() {
+        let mut by_scope: HashMap<ScopeKey, ActiveSetRead> = HashMap::new();
+        by_scope.insert(
+            (1, 0),
+            active_set(vec![lang_row("py", "sha256:py", "python")]),
+        );
+        let loaded = SessionLoaded::<AppScope>::new();
+        let profiles = SessionProfiles::from_pairs([
+            (1, ExecutorProfile::Compiled),
+            (2, ExecutorProfile::Scripted),
+        ]);
+        assert!(
+            !session_loaded_state_diverged_for_profile(&by_scope, &loaded, 1, &profiles),
+            "native session must not diverge on a python-only active set"
+        );
+        assert!(
+            session_loaded_state_diverged_for_profile(&by_scope, &loaded, 2, &profiles),
+            "the python session IS missing the python bundle"
+        );
+        assert!(any_session_diverged_with_profiles(&by_scope, &loaded, &[1, 2], &profiles));
+        assert!(!any_session_diverged_with_profiles(&by_scope, &loaded, &[1], &profiles));
+        // No live sessions is never diverged (unchanged contract).
+        assert!(!any_session_diverged_with_profiles(&by_scope, &loaded, &[], &profiles));
+    }
+
+    /// With every session `all` (or no profile recorded) the profile-aware check
+    /// equals the legacy per-session check.
+    #[test]
+    fn all_profile_divergence_equals_the_legacy_check() {
+        let mut by_scope: HashMap<ScopeKey, ActiveSetRead> = HashMap::new();
+        by_scope.insert(
+            (1, 0),
+            active_set(vec![lang_row("py", "sha256:py", "python")]),
+        );
+        let loaded = SessionLoaded::<AppScope>::new();
+        let profiles = SessionProfiles::new();
+        assert_eq!(
+            any_session_diverged_with_profiles(&by_scope, &loaded, &[1], &profiles),
+            any_session_diverged(&by_scope, &loaded, &[1])
+        );
+        assert!(any_session_diverged(&by_scope, &loaded, &[1]));
+    }
 }
+
