@@ -7,10 +7,11 @@
 //! entry, and the real canary result list. The stage functions called are exactly the ones
 //! `svc_ingest::publish`, `svc_process::spine` and `svc_action::{dispatch,capabilities}` call.
 //!
-//! Needs a Valkey at `COMMAND_LATENCY_VALKEY_URL` (default `redis://127.0.0.1:6379/`); when none
-//! answers the test is SKIPPED LOUDLY on stderr (CI provides one). Run against a throwaway container:
+//! Needs a REAL Valkey: `VALKEY_URL` (CI exports it via `rust-crate-ci.yml`'s `valkey: true`) or
+//! `COMMAND_LATENCY_VALKEY_URL`. The test FAILS, never skips, without one (a silently skipped real-path
+//! test proves nothing). Run against a throwaway container:
 //! `docker run --rm -d -p 127.0.0.1:16379:6379 valkey/valkey:8` +
-//! `COMMAND_LATENCY_VALKEY_URL=redis://127.0.0.1:16379/ cargo test --test valkey_pipeline`.
+//! `VALKEY_URL=redis://127.0.0.1:16379/ cargo test --test valkey_pipeline`.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -22,17 +23,18 @@ use command_latency::{Hop, Outcome};
 use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
 use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 
-async fn connect() -> Option<redis::aio::MultiplexedConnection> {
-    let url = std::env::var("COMMAND_LATENCY_VALKEY_URL")
-        .unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
-    let client = redis::Client::open(url).ok()?;
+async fn connect() -> redis::aio::MultiplexedConnection {
+    let url = std::env::var("VALKEY_URL")
+        .or_else(|_| std::env::var("COMMAND_LATENCY_VALKEY_URL"))
+        .expect("VALKEY_URL must be set: this test needs a REAL Valkey (no silent skip)");
+    let client = redis::Client::open(url).expect("valid valkey url");
     tokio::time::timeout(
-        Duration::from_secs(2),
+        Duration::from_secs(5),
         client.get_multiplexed_async_connection(),
     )
     .await
-    .ok()?
-    .ok()
+    .expect("valkey connect timed out")
+    .expect("valkey connect failed")
 }
 
 /// `XADD stream * tracestate <ts>` and return the real entry id.
@@ -145,10 +147,7 @@ fn histogram_counts(exporter: &InMemoryMetricExporter) -> HashMap<(String, Strin
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delivered_command_records_every_hop_and_the_e2e_across_real_stream_hops() {
-    let Some(mut conn) = connect().await else {
-        eprintln!("SKIPPED (not a pass): no Valkey reachable; set COMMAND_LATENCY_VALKEY_URL");
-        return;
-    };
+    let mut conn = connect().await;
     command_latency::switch::set_disabled(false);
     let exporter = InMemoryMetricExporter::default();
     let provider = SdkMeterProvider::builder()

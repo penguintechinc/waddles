@@ -86,3 +86,6 @@ jobs:
       # bundle_config_db's reader tests (tests/bundle_config_db_pg.rs) need a real Postgres via
       # TEST_DATABASE_URL and fail loudly without one.
       postgres: ${{ matrix.crate == 'bundle_config_db' }}
+      # command_latency's tests/valkey_pipeline.rs drives real XADD entry ids + consumer groups and
+      # fails loudly without a real Valkey (VALKEY_URL).
+      valkey: ${{ matrix.crate == 'command_latency' }}
