@@ -17,13 +17,18 @@ RUN --mount=type=cache,id=waddles-pip-v${CACHE_EPOCH},target=/root/.cache/pip,sh
     pip install --require-hashes -r requirements.txt
 
 # flask_core (libs/flask_core) is a real installable package (setup.py) --
-# pip install it directly rather than sys.path surgery at runtime; its own
-# requirements.in is the source of truth for its transitive deps.
+# pip install it directly rather than sys.path surgery at runtime. Every one of its runtime
+# dependencies (libs/flask_core/requirements.in) is already in hub_api/requirements.txt and was
+# installed above with --require-hashes, so flask_core itself goes in with --no-deps (nothing is
+# resolved from the network) and --no-build-isolation (isolation would fetch setuptools
+# unhashed). setuptools comes from the hash-locked hub_api/build-tools/requirements.txt and is
+# removed again so it never ships. scripts/ci/check-dockerfile-pip-hashes.py enforces all of it.
+COPY hub_api/build-tools/requirements.txt /tmp/build-tools-requirements.txt
 COPY libs/flask_core /app/libs/flask_core
-# NOT cache-mounted: flask_core's declared dependencies (libs/flask_core/requirements.in) are
-# resolved from the network WITHOUT hashes, so this step must never read or write the shared pip
-# cache (scripts/ci/check-dockerfile-cache-mounts.py enforces it). Follow-up: hash-lock those deps.
-RUN pip install --no-cache-dir /app/libs/flask_core
+RUN pip install --no-cache-dir --require-hashes -r /tmp/build-tools-requirements.txt && \
+    pip install --no-cache-dir --no-deps --no-build-isolation /app/libs/flask_core && \
+    pip uninstall -y setuptools && \
+    rm -f /tmp/build-tools-requirements.txt
 
 # wasm-tools -- `services/bundle_component_validator.py`'s WIT world
 # conformance check (`wasm-tools component wit --json`) on every vendor
