@@ -49,7 +49,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, cast
 
 from flask_core.authz import require_scope
@@ -64,7 +64,14 @@ import grpc_internal  # noqa: F401  (puts the generated pb/ tree on sys.path)
 # isort: split
 from waddles.streaming.internal.v1 import rooms_pb2
 
-from services import call_access, call_ice, call_participants, call_town_hall, community_access
+from services import (
+    call_access,
+    call_ice,
+    call_participants,
+    call_rooms,
+    call_town_hall,
+    community_access,
+)
 from services.calls_proxy import (
     HandInfo,
     RoomInfo,
@@ -156,6 +163,31 @@ class ParticipantDTO:
     subscriber: bool
     muted: bool
     joined_at: int | None
+
+
+@dataclass(slots=True, frozen=True)
+class MemberParticipantDTO:
+    """A participant as a non-staff member sees them: same fields as `ParticipantDTO` + `is_self`.
+
+    Ids are per-community pseudonyms; there are no publisher lists, hand internals or global ids.
+    """
+
+    participant_id: str
+    display_name: str
+    publisher: bool
+    subscriber: bool
+    muted: bool
+    joined_at: int | None
+    is_self: bool
+
+
+@dataclass(slots=True, frozen=True)
+class MemberParticipantsResponse:
+    """`GET /communities/{id}/calls/rooms/{room}/participants` (member)."""
+
+    participants: list[MemberParticipantDTO]
+    locked: bool
+    success: bool = True
 
 
 @dataclass(slots=True, frozen=True)
@@ -415,58 +447,92 @@ async def _gated_member(community_id: int) -> int:
     return user_id
 
 
-async def _identity(user_id: int) -> str:
-    """The caller's participant/actor UUID (`hub_users.uuid`)."""
-    async_dal, dal = _dal()
-    return await call_participants.identity_uuid(async_dal, dal, user_id=user_id)
+def _tenant_slug() -> str:
+    """The verified tenant of this request (set by `tenant_middleware`)."""
+    ctx = get_tenant_context(request)
+    assert ctx is not None  # nosec B101 - tenant_middleware already ran (outermost decorator)
+    return ctx.tenant_slug
 
 
-async def _admin_actor(community_id: int) -> str:
-    """Gated admin check; returns the admin's participant/actor UUID."""
-    return await _identity(await _gated_admin(community_id))
-
-
-async def _member_actor(community_id: int) -> str:
-    """Gated membership check; returns the caller's participant UUID."""
-    return await _identity(await _gated_member(community_id))
-
-
-async def _names(community_id: int, participant_ids: list[str]) -> dict[str, str]:
-    """Display names for `participant_ids` (community members only; others are "guest")."""
-    async_dal, dal = _dal()
-    return await call_participants.resolve_display_names(
-        async_dal, dal, community_id=community_id, participant_ids=participant_ids
+def _identity(community_id: int, user_id: int) -> str:
+    """The caller's PER-COMMUNITY participant/actor pseudonym (never the global user uuid)."""
+    return call_participants.identity_uuid(
+        tenant_slug=_tenant_slug(), community_id=community_id, user_id=user_id
     )
 
 
-def _hand_dto(hand: HandInfo, names: dict[str, str]) -> HandDTO:
-    """A `HandInfo` plus its resolved name as the response DTO."""
+async def _admin_actor(community_id: int) -> str:
+    """Gated admin check; returns the admin's participant/actor pseudonym."""
+    return _identity(community_id, await _gated_admin(community_id))
+
+
+async def _member_actor(community_id: int) -> str:
+    """Gated membership check; returns the caller's participant pseudonym."""
+    return _identity(community_id, await _gated_member(community_id))
+
+
+async def _names(community_id: int, participant_ids: list[str]) -> dict[str, str]:
+    """Display names for `participant_ids` (ACTIVE members only; others are "guest")."""
+    async_dal, dal = _dal()
+    return await call_participants.resolve_display_names(
+        async_dal,
+        dal,
+        tenant_slug=_tenant_slug(),
+        community_id=community_id,
+        participant_ids=participant_ids,
+    )
+
+
+def _hand_dto(hand: HandInfo, names: dict[str, str], *, staff: bool) -> HandDTO:
+    """A `HandInfo` plus its resolved name; `acknowledged_by` is staff-only."""
     return HandDTO(
         participant_id=hand.participant_id,
         display_name=names.get(hand.participant_id, call_participants.GUEST_LABEL),
         raised_at=hand.raised_at,
         acknowledged_at=hand.acknowledged_at,
-        acknowledged_by=hand.acknowledged_by,
+        acknowledged_by=hand.acknowledged_by if staff else None,
     )
 
 
-async def _hand_response(community_id: int, hand: HandInfo) -> HandResponse:
+async def _hand_response(community_id: int, hand: HandInfo, *, staff: bool) -> HandResponse:
     """Resolve the one participant's name and build the single-hand response."""
     names = await _names(community_id, [hand.participant_id])
-    return HandResponse(hand=_hand_dto(hand, names))
+    return HandResponse(hand=_hand_dto(hand, names, staff=staff))
 
 
-async def _list_rooms(community_id: int) -> RoomsListResponse:
-    """List the community's rooms (admin and member routes share this)."""
-    return RoomsListResponse(rooms=await _client.list_rooms(community_id))
+def _member_room(room: RoomInfo) -> RoomInfo:
+    """A room as a non-staff member may see it: no publisher ids (who is speaking)."""
+    return replace(room, publisher_ids=[])
+
+
+async def _list_rooms(community_id: int, *, staff: bool) -> RoomsListResponse:
+    """List the community's rooms; `publisher_ids` are returned to staff only."""
+    rooms = await _client.list_rooms(community_id)
+    return RoomsListResponse(rooms=rooms if staff else [_member_room(r) for r in rooms])
 
 
 async def _create_room(
-    community_id: int, *, room_name: str, max_participants: int | None
+    community_id: int, *, room_name: str, max_participants: int | None, staff: bool
 ) -> tuple[RoomResponse, int]:
-    """Create a room labelled `room_name` (admin and member routes share this)."""
+    """Create a room labelled `room_name`; the label "Town Hall" is reserved."""
+    if call_town_hall.is_reserved_label(room_name):
+        raise ApiError(
+            message='The room name "Town Hall" is reserved',
+            status_code=400,
+            code="RESERVED_ROOM_LABEL",
+        )
     room = await _client.create_room(community_id, label=room_name, max_publishers=max_participants)
-    return RoomResponse(**asdict(room)), 201
+    async_dal, dal = _dal()
+    try:
+        await call_rooms.record_room(
+            async_dal, dal, community_id=community_id, room_id=room.room_id
+        )
+    except Exception as exc:  # an unrecorded room would be unjoinable: fail loudly, undo our room
+        dal.rollback()
+        logger.error("could not record created room: %s", type(exc).__name__)
+        await _client.delete_room(community_id, room.room_id)  # only the room this call created
+        raise RoomsRpcError(503, "Room could not be recorded", "ROOM_RECORD_FAILED") from exc
+    return RoomResponse(**asdict(room if staff else _member_room(room))), 201
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +549,7 @@ async def get_call_rooms(community_id: int) -> Any:
 
     async def op() -> Any:
         await _gated_admin(community_id)
-        return await _list_rooms(community_id)
+        return await _list_rooms(community_id, staff=True)
 
     return await _run(op)
 
@@ -499,7 +565,10 @@ async def create_call_room(community_id: int, data: CreateCallRoomRequest) -> An
     async def op() -> Any:
         await _gated_admin(community_id)
         return await _create_room(
-            community_id, room_name=data.room_name, max_participants=data.max_participants
+            community_id,
+            room_name=data.room_name,
+            max_participants=data.max_participants,
+            staff=True,
         )
 
     return await _run(op)
@@ -529,7 +598,10 @@ async def delete_call_room(community_id: int, room_name: str) -> Any:
 
     async def op() -> Any:
         await _gated_admin(community_id)
-        await _client.delete_room(community_id, _room_id(room_name))
+        room_id = _room_id(room_name)
+        await _client.delete_room(community_id, room_id)
+        async_dal, dal = _dal()
+        await call_rooms.forget_room(async_dal, dal, community_id=community_id, room_id=room_id)
         return MessageResponse(message="Room deleted")
 
     return await _run(op)
@@ -704,7 +776,8 @@ async def get_raised_hands(community_id: int, room_name: str) -> Any:
         )
         names = await _names(community_id, [h.participant_id for h in listed.hands])
         return RaisedHandsResponse(
-            raised_hands=[_hand_dto(h, names) for h in listed.hands], count=len(listed.hands)
+            raised_hands=[_hand_dto(h, names, staff=True) for h in listed.hands],
+            count=len(listed.hands),
         )
 
     return await _run(op)
@@ -729,7 +802,7 @@ async def acknowledge_hand(community_id: int, room_name: str, data: AcknowledgeH
             actor_id=actor,
             actor_role=rooms_pb2.ROOM_ROLE_ADMIN,
         )
-        return await _hand_response(community_id, hand)
+        return await _hand_response(community_id, hand, staff=True)
 
     return await _run(op)
 
@@ -769,7 +842,7 @@ async def list_voice_rooms(community_id: int) -> Any:
 
     async def op() -> Any:
         await _gated_member(community_id)
-        return await _list_rooms(community_id)
+        return await _list_rooms(community_id, staff=False)
 
     return await _run(op)
 
@@ -785,7 +858,10 @@ async def create_ad_hoc_voice_room(community_id: int, data: CreateCallRoomReques
     async def op() -> Any:
         await _gated_member(community_id)
         return await _create_room(
-            community_id, room_name=data.room_name, max_participants=data.max_participants
+            community_id,
+            room_name=data.room_name,
+            max_participants=data.max_participants,
+            staff=False,
         )
 
     return await _run(op)
@@ -794,14 +870,28 @@ async def create_ad_hoc_voice_room(community_id: int, data: CreateCallRoomReques
 async def _join(community_id: int, room_id: str) -> JoinResponse:
     """Authorise, derive the grants from the shared policy, mint the token for ONE participant."""
     user_id = await _gated_member(community_id)
-    participant = await _identity(user_id)
+    participant = _identity(community_id, user_id)
     async_dal, dal = _dal()
     # Fail fast (and 404 across communities) before the policy: the room must exist here.
     room = await _client.get_room(community_id, room_id)
     staff = await call_participants.is_community_staff(
         async_dal, dal, community_id=community_id, user_id=user_id
     )
-    kind, ctx = call_access.facts_from_room(room)
+    recorded = await call_rooms.get_facts(
+        async_dal, dal, community_id=community_id, room_id=room_id
+    )
+    facts = call_access.facts_from_room(room, recorded)
+    if facts is None:
+        # hub-api never recorded this room, so its kind/closed/guest facts are unknown. Fail
+        # closed: only staff may join, under the plain community policy (still lock-aware).
+        if not staff:
+            raise ApiError(
+                message="room access cannot be verified",
+                status_code=403,
+                code="ROOM_ACCESS_DENIED",
+            )
+        facts = (call_access.GrantKind.COMMUNITY, call_access.GrantCtx(locked=room.locked))
+    kind, ctx = facts
     try:
         grants = call_access.grants_for(
             kind, call_access.GrantRole.ADMIN if staff else call_access.GrantRole.MEMBER, ctx
@@ -891,7 +981,7 @@ async def raise_voice_hand(community_id: int, room_name: str) -> Any:
     async def op() -> Any:
         participant = await _member_actor(community_id)
         hand = await _client.raise_hand(community_id, _room_id(room_name), participant)
-        return await _hand_response(community_id, hand)
+        return await _hand_response(community_id, hand, staff=False)
 
     return await _run(op)
 
@@ -948,9 +1038,10 @@ async def get_my_hand(community_id: int, room_id: str) -> Any:
     return await _run(op)
 
 
-async def _town_hall_response(community_id: int) -> TownHallResponse:
-    """Ensure the Town Hall exists and describe it (participant count is a live figure)."""
-    town_hall = await call_town_hall.ensure_town_hall(_client, community_id)
+async def _town_hall_response(
+    community_id: int, town_hall: call_town_hall.TownHall
+) -> TownHallResponse:
+    """Describe the Town Hall (participant count is a live figure; no internals)."""
     room = town_hall.room
     listed = await _client.list_participants(community_id, room.room_id)
     return TownHallResponse(
@@ -971,11 +1062,19 @@ async def _town_hall_response(community_id: int) -> TownHallResponse:
 @require_scope(SCOPE_READ)  # type: ignore[misc]
 @validate_response(TownHallResponse)
 async def get_town_hall(community_id: int) -> Any:
-    """The community's Town Hall (member); lazily created, idempotent, never expires."""
+    """The community's Town Hall (member). Read-only: 404 until a POST has created it."""
 
     async def op() -> Any:
         await _gated_member(community_id)
-        return await _town_hall_response(community_id)
+        async_dal, dal = _dal()
+        found = await call_town_hall.get_town_hall(_client, async_dal, dal, community_id)
+        if found is None:
+            raise ApiError(
+                message="This community has no Town Hall yet",
+                status_code=404,
+                code="TOWN_HALL_NOT_FOUND",
+            )
+        return await _town_hall_response(community_id, found)
 
     return await _run(op)
 
@@ -985,11 +1084,43 @@ async def get_town_hall(community_id: int) -> Any:
 @require_scope(SCOPE_WRITE)  # type: ignore[misc]
 @validate_response(TownHallResponse)
 async def post_town_hall(community_id: int) -> Any:
-    """Ensure the community's Town Hall exists (member); same result as the GET."""
+    """Ensure the community's Town Hall exists (member, write scope); idempotent."""
 
     async def op() -> Any:
         await _gated_member(community_id)
-        return await _town_hall_response(community_id)
+        async_dal, dal = _dal()
+        town_hall = await call_town_hall.ensure_town_hall(_client, async_dal, dal, community_id)
+        return await _town_hall_response(community_id, town_hall)
+
+    return await _run(op)
+
+
+@member_calls_bp.route("/<int:community_id>/calls/rooms/<room_id>/participants", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_READ)  # type: ignore[misc]
+@validate_response(MemberParticipantsResponse)
+async def get_room_participants_as_member(community_id: int, room_id: str) -> Any:
+    """Who is in a room (member): pseudonymous ids, display names, media state; no internals."""
+
+    async def op() -> Any:
+        me = await _member_actor(community_id)
+        listed = await _client.list_participants(community_id, _room_id(room_id))
+        names = await _names(community_id, [p.participant_id for p in listed.participants])
+        return MemberParticipantsResponse(
+            participants=[
+                MemberParticipantDTO(
+                    participant_id=p.participant_id,
+                    display_name=names.get(p.participant_id, call_participants.GUEST_LABEL),
+                    publisher=p.publisher,
+                    subscriber=p.subscriber,
+                    muted=p.muted,
+                    joined_at=p.joined_at,
+                    is_self=p.participant_id == me,
+                )
+                for p in listed.participants
+            ],
+            locked=listed.locked,
+        )
 
     return await _run(op)
 

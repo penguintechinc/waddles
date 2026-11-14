@@ -13,11 +13,11 @@ per room) can only subscribe; a stage lets only staff publish; everyone else pub
 subscribes. Staff (moderator/admin) are never refused by lock or window.
 
 What hub-api can actually see: svc-streaming's `Room` carries `locked` but not the kind,
-closed flag, schedule or guest opt-in -- those live in the `rooms` app bundle's records.
-`facts_from_room` therefore fills what is known and treats every other room as an open
-community room; a room whose extra facts hub-api cannot see is still guarded by svc-streaming's
-own lock check and by the rooms app's `join_token`. Exposing those facts on `Room` (so this
-adapter can read them) is the open follow-up recorded in the PR.
+closed flag or guest opt-in. hub-api therefore records every room it creates in `call_rooms`
+(`services/call_rooms.py`) and `facts_from_room` consumes ONLY that record plus the live
+`locked`: a room hub-api never recorded has unknown facts and is treated fail-closed (`None`;
+the join refuses non-staff). This function stays the single place facts enter the policy, so
+svc-streaming's own room facts can replace or cross-check the record later.
 """
 
 from __future__ import annotations
@@ -57,6 +57,16 @@ class GrantKind(enum.Enum):
     BREAKOUT = "breakout"
     STAGE = "stage"
     GREEN_ROOM = "green_room"
+
+
+#: Wire/DB int code of each kind (order matches `contract/grants.json` `kinds`).
+KIND_CODES: tuple[GrantKind, ...] = (
+    GrantKind.COMMUNITY,
+    GrantKind.EVENT,
+    GrantKind.BREAKOUT,
+    GrantKind.STAGE,
+    GrantKind.GREEN_ROOM,
+)
 
 
 class Window(enum.Enum):
@@ -114,6 +124,25 @@ def grants_for(kind: GrantKind, role: GrantRole, ctx: GrantCtx) -> Grants:
     return Grants(publish=True, subscribe=True)
 
 
-def facts_from_room(room: RoomInfo) -> tuple[GrantKind, GrantCtx]:
-    """The kind and context hub-api can derive from what svc-streaming reports about `room`."""
-    return GrantKind.COMMUNITY, GrantCtx(locked=room.locked)
+@dataclass(slots=True, frozen=True)
+class RoomFacts:
+    """What hub-api positively knows about a room it recorded (see `services/call_rooms.py`)."""
+
+    kind: GrantKind
+    closed: bool = False
+    allow_guests: bool = False
+    town_hall: bool = False
+
+
+def facts_from_room(
+    room: RoomInfo, recorded: RoomFacts | None
+) -> tuple[GrantKind, GrantCtx] | None:
+    """The kind and context for `room`, or None when hub-api does not know the room (fail closed).
+
+    `locked` is read live from svc-streaming; everything else comes from hub-api's own record.
+    """
+    if recorded is None:
+        return None
+    return recorded.kind, GrantCtx(
+        closed=recorded.closed, locked=room.locked, allow_guests=recorded.allow_guests
+    )

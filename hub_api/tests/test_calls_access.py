@@ -21,6 +21,7 @@ from services.call_access import (
     GrantCtx,
     GrantKind,
     GrantRole,
+    RoomFacts,
     Window,
     grants_for,
 )
@@ -32,6 +33,8 @@ from tests.test_calls_support import (  # noqa: F401  (fixtures are consumed by 
     app,
     client,
     fake,
+    pid,
+    record_room,
     user_headers,
     user_uuid,
 )
@@ -78,21 +81,33 @@ class TestPolicyMatchesTheSharedContract:
         assert {r.name.lower() for r in GrantRole} == set(CONTRACT["roles"])
         assert {k.value for k in GrantKind} == set(CONTRACT["kinds"])
 
-    def test_hub_api_sees_only_the_lock_of_a_room(self) -> None:
+    def test_facts_come_only_from_the_record_plus_the_live_lock(self) -> None:
         room = RoomInfo(ROOM, "1", "x", 16, 0, [], 0, True)
-        kind, ctx = call_access.facts_from_room(room)
-        assert kind is GrantKind.COMMUNITY
-        assert ctx == GrantCtx(locked=True)
+        recorded = RoomFacts(GrantKind.STAGE, closed=True, allow_guests=True)
+        assert call_access.facts_from_room(room, recorded) == (
+            GrantKind.STAGE,
+            GrantCtx(closed=True, locked=True, allow_guests=True),
+        )
+
+    def test_an_unrecorded_room_has_no_facts_fail_closed(self) -> None:
+        room = RoomInfo(ROOM, "1", "x", 16, 0, [], 0, False)
+        assert call_access.facts_from_room(room, None) is None
+
+    def test_kind_codes_match_the_contract_vocabulary_order(self) -> None:
+        assert [k.value for k in call_access.KIND_CODES] == CONTRACT["kinds"]
 
 
 def _join_url(community_id: int, room: str = ROOM) -> str:
     return f"/api/v1/community/{community_id}/interact/voice/rooms/{room}/join"
 
 
-def _member(overlay_db: Any, **kw: Any) -> tuple[dict[str, str], int]:
-    return user_headers(
+def _member(overlay_db: Any, *, recorded: bool = True, **kw: Any) -> tuple[dict[str, str], int]:
+    headers, cid = user_headers(
         overlay_db, scope=SCOPE_WRITE, role="community-member", user_id=kw.pop("user_id", 600), **kw
     )
+    if recorded:
+        record_room(overlay_db, cid)  # hub-api created ROOM as a plain community room
+    return headers, cid
 
 
 class TestJoinRoute:
@@ -106,7 +121,7 @@ class TestJoinRoute:
         join = next(r for name, r, _ in fake.calls if name == "JoinRoom")
         assert (join.publish, join.subscribe) == (True, True)
         assert join.HasField("ttl_secs") and join.ttl_secs == 60 <= call_access.JOIN_TTL_MAX_SECS
-        assert join.participant_id == user_uuid(600)
+        assert join.participant_id == pid(cid, 600)
         assert [name for name, _, _ in fake.calls] == ["GetRoom", "JoinRoom"]
         # What a browser WHIP/WHEP client needs:
         assert body["token_type"] == "Bearer"
@@ -148,6 +163,7 @@ class TestJoinRoute:
         headers, cid = user_headers(
             overlay_db, scope=SCOPE_WRITE, role="community-owner", user_id=601
         )
+        record_room(overlay_db, cid)
         fake.seed_room(cid, locked=True)
         response = await client.post(_join_url(cid), headers=headers)
         join = next(r for name, r, _ in fake.calls if name == "JoinRoom")  # the policy allowed it
@@ -235,3 +251,90 @@ class TestIceConfig:
     ) -> None:
         monkeypatch.setenv("STREAMING_RTC_ICE_SERVERS", raw)
         assert call_ice.ice_servers_from_env() == []
+
+
+class TestJoinFailsClosedOnRoomFacts:
+    """The join trusts only hub-api's `call_rooms` record (svc-streaming reports `locked`)."""
+
+    async def _try(
+        self, client: Any, overlay_db: Any, fake: FakeRooms, *, kind: int | None, **rec: Any
+    ) -> Any:
+        headers, cid = _member(overlay_db, recorded=False)
+        fake.seed_room(cid)
+        if kind is not None:
+            record_room(overlay_db, cid, kind=kind, **rec)
+        return await client.post(_join_url(cid), headers=headers), fake
+
+    async def test_a_plain_community_room_gets_the_normal_grants(
+        self, client: Any, overlay_db: Any, fake: FakeRooms
+    ) -> None:
+        response, _ = await self._try(client, overlay_db, fake, kind=0)
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert (body["publish"], body["subscribe"]) == (True, True)
+
+    async def test_a_recorded_town_hall_is_a_plain_room(
+        self, client: Any, overlay_db: Any, fake: FakeRooms
+    ) -> None:
+        response, _ = await self._try(client, overlay_db, fake, kind=0, town_hall=True)
+        assert response.status_code == 200
+
+    async def test_a_recorded_stage_room_is_subscribe_only_for_members(
+        self, client: Any, overlay_db: Any, fake: FakeRooms
+    ) -> None:
+        response, fake = await self._try(client, overlay_db, fake, kind=3)
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert (body["publish"], body["subscribe"]) == (False, True)
+        join = next(r for name, r, _ in fake.calls if name == "JoinRoom")
+        assert (join.publish, join.subscribe) == (False, True)
+
+    async def test_a_recorded_green_room_refuses_members_without_a_token(
+        self, client: Any, overlay_db: Any, fake: FakeRooms
+    ) -> None:
+        response, fake = await self._try(client, overlay_db, fake, kind=4)
+        assert response.status_code == 403
+        assert (await response.get_json())["error"]["message"] == "green room is for moderators"
+        assert "JoinRoom" not in [name for name, _, _ in fake.calls]
+
+    async def test_a_recorded_closed_room_refuses_everyone(
+        self, client: Any, overlay_db: Any, fake: FakeRooms
+    ) -> None:
+        response, fake = await self._try(client, overlay_db, fake, kind=0, closed=True)
+        assert response.status_code == 403
+        assert (await response.get_json())["error"]["message"] == "room is closed"
+        assert "JoinRoom" not in [name for name, _, _ in fake.calls]
+
+    async def test_an_unrecorded_room_is_refused_to_a_member_without_a_token(
+        self, client: Any, overlay_db: Any, fake: FakeRooms
+    ) -> None:
+        """The old code treated every unknown room as a plain community room (fail-open)."""
+        response, fake = await self._try(client, overlay_db, fake, kind=None)
+        assert response.status_code == 403
+        error = (await response.get_json())["error"]
+        assert (error["code"], error["message"]) == (
+            "ROOM_ACCESS_DENIED",
+            "room access cannot be verified",
+        )
+        assert "JoinRoom" not in [name for name, _, _ in fake.calls]
+
+    async def test_an_unrecorded_room_still_admits_staff_under_the_plain_policy(
+        self, client: Any, overlay_db: Any, fake: FakeRooms
+    ) -> None:
+        headers, cid = user_headers(
+            overlay_db, scope=SCOPE_WRITE, role="community-owner", user_id=640
+        )
+        fake.seed_room(cid)
+        response = await client.post(_join_url(cid), headers=headers)
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert (body["publish"], body["subscribe"]) == (True, True)
+
+    async def test_a_room_recorded_for_another_community_is_unknown_here(
+        self, client: Any, overlay_db: Any, fake: FakeRooms
+    ) -> None:
+        headers, cid = _member(overlay_db, recorded=False)
+        fake.seed_room(cid)
+        record_room(overlay_db, 999)  # same room id, recorded under a different community
+        response = await client.post(_join_url(cid), headers=headers)
+        assert response.status_code == 403

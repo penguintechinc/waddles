@@ -10,9 +10,14 @@ Spec: `openapi/v1.yaml` (`/calls/`, `/interact/voice/`, `/town-hall`). Code:
 - Flag `waddles.streaming.rtc` gates every route (checked after authz); OFF is `402`
   `FEATURE_NOT_ENABLED`. Default OFF.
 - Rooms are addressed by UUID only. `GET rooms` returns `label` for display.
-- Participant ids are `hub_users.uuid` (the id the `rooms` app bundle resolves). Display names are
-  resolved inside hub-api for members of the asked community only (`"guest"` otherwise) and never
-  reach svc-streaming or a log.
+- Participant ids are PER-COMMUNITY pseudonyms, `uuid5(tenant:community:user)`: one person has a
+  different id in every community, and the global `hub_users.uuid` is never sent to svc-streaming
+  or returned by REST. Display names are resolved inside hub-api for ACTIVE members of the asked
+  community only (former, deactivated and unknown ids render `"guest"`) and never reach
+  svc-streaming or a log. Non-staff members never receive `publisher_ids` or `acknowledged_by`.
+  (The `rooms` app bundle's actor is `community_members.user_uuid`, which for a hub-linked member
+  is the global uuid, so chat and REST moderation do not yet share an id: the bundle needs the
+  same per-community derivation.)
 - `community_id` always comes from the URL path after the membership check, never a body.
 - Errors use `{success:false, error:{code,message[,details]}}`. Upstream failures are explicit
   (404 / 403 / 429 / 503 `details.retryable` / 504); nothing is ever an empty success.
@@ -33,14 +38,20 @@ Spec: `openapi/v1.yaml` (`/calls/`, `/interact/voice/`, `/town-hall`). Code:
 Grants come from the shared policy (`bundles/rust/webrtc/contract/grants.json`, replayed by
 `hub_api/tests/test_calls_access.py` and `scripts/ci/tests/test_rooms_webrtc_contract.py`):
 a locked room refuses non-staff (`403 ROOM_ACCESS_DENIED`, `room is locked`); staff are never
-refused by hub-api's policy. Limits today: svc-streaming's `Room` exposes only `locked`, so
-stage / green-room / closed / scheduled-window facts held by the `rooms` app are not visible to
-hub-api, and svc-streaming itself still refuses every caller (staff included) on a locked room.
+refused by hub-api's policy.
+
+Room facts fail closed. svc-streaming's `Room` exposes only `locked`, so hub-api records every
+room it creates in `call_rooms` (alembic 0110: kind int code, closed, allow_guests, town_hall) and
+`call_access.facts_from_room` consumes only that record. A room hub-api did not record is
+unknown: non-staff are refused (`403`, `room access cannot be verified`, no token minted), staff
+join under the plain community policy. Known stage / green-room / closed rooms get their policy
+grants. svc-streaming still refuses every caller (staff included) on a locked room.
 
 ## Town Hall
 
-`GET` / `POST /api/v1/communities/{community_id}/town-hall` (member scope; read / write) return the
-community's persistent default room, creating it lazily (label `Town Hall`, never expires):
+`GET` / `POST /api/v1/communities/{community_id}/town-hall` (member scope; read / write).
+`GET` is READ-ONLY: it returns the Town Hall if one was created, else `404 TOWN_HALL_NOT_FOUND`.
+`POST` creates it lazily (label `Town Hall`, never expires) and is idempotent:
 
 ```json
 {"room_id": "<uuid>", "label": "Town Hall", "locked": false, "participant_count": 3,
@@ -48,9 +59,21 @@ community's persistent default room, creating it lazily (label `Town Hall`, neve
  "success": true}
 ```
 
-Idempotent under concurrency: callers converge on the oldest room labelled `Town Hall` (then the
-lowest room id) and delete empty duplicates (`hub_api/services/call_town_hall.py`). The response
-carries no token: call `join` right before connecting.
+The room id is recorded server-side in `call_rooms` (`town_hall = true`, partial unique index per
+community); it is never found by label. Creating any room named "Town Hall" (any case/spacing)
+through the room-create routes is refused (`400 RESERVED_ROOM_LABEL`). Concurrent POSTs race on
+the unique index: the loser deletes only the room it just created and returns the winner's. No
+code path deletes a room it did not create. The response carries no token: call `join` right
+before connecting.
+
+## Who is in a room (member)
+
+`GET /api/v1/communities/{community_id}/calls/rooms/{room}/participants` (member scope
+`streaming.calls:read`, membership + flag required, other community's room is 404). Per
+participant: per-community pseudonym `participant_id`, `display_name` (ACTIVE members only, else
+`"guest"`), `publisher` / `subscriber` / `muted`, `joined_at`, `is_self`. No publisher lists, no
+hand internals, no global ids. Camera state and other members' hands are not available to
+non-staff (svc-streaming returns only the actor's own hand to a read-scope call).
 
 ## Hands
 

@@ -29,6 +29,8 @@ from tests.test_calls_support import (  # noqa: F401  (fixtures are consumed by 
     client,
     fake,
     join,
+    pid,
+    record_room,
     seed_user,
     user_headers,
     user_uuid,
@@ -78,11 +80,11 @@ class TestStaffRegistration:
     async def test_admin_joins_with_the_moderate_token_and_members_with_write(
         self, client: Any, overlay_db: Any, fake: FakeRooms
     ) -> None:
-        await _room_with_people(client, overlay_db)
+        _, _, cid = await _room_with_people(client, overlay_db)
         join_tokens = [m["authorization"] for rpc, _, m in fake.calls if rpc == "JoinRoom"]
         assert [t.rsplit(":", 1)[1] for t in join_tokens] == ["moderate", "write"]
         state = next(iter(fake.rooms.values()))
-        assert state["staff"] == {user_uuid(ADMIN_ID)}
+        assert state["staff"] == {pid(cid, ADMIN_ID)}
 
 
 class TestMemberHands:
@@ -99,14 +101,14 @@ class TestMemberHands:
         assert response.status_code == 200
         body = await response.get_json()
         assert body["success"] is True
-        assert body["hand"]["participant_id"] == user_uuid(MEMBER_ID)
+        assert body["hand"]["participant_id"] == pid(cid, MEMBER_ID)
         assert body["hand"]["display_name"] == "Bob"
         assert body["hand"]["acknowledged_at"] is None
         rpc, request, metadata = fake.calls[-1]
         assert rpc == "RaiseHand"
         assert (request.api_version, request.community_id) == ("v1", str(cid))
         # the participant is the caller and the actor is the caller: nobody raises for others
-        assert request.participant_id == request.actor_id == user_uuid(MEMBER_ID)
+        assert request.participant_id == request.actor_id == pid(cid, MEMBER_ID)
         assert metadata["authorization"].endswith("streaming.rooms:write")
 
     async def test_raising_without_having_joined_is_refused_not_masked(
@@ -138,7 +140,7 @@ class TestMemberHands:
         again = await (await client.post(f"{member_base}/lower-hand", headers=member)).get_json()
         assert (first["lowered"], again["lowered"]) == (True, False)
         request = _rpcs(fake, "LowerHand")[0]
-        assert request.actor_id == request.participant_id == user_uuid(MEMBER_ID)
+        assert request.actor_id == request.participant_id == pid(cid, MEMBER_ID)
         assert request.actor_role == rooms_pb2.ROOM_ROLE_MEMBER
 
     async def test_leaving_clears_the_hand(
@@ -167,12 +169,12 @@ class TestModeratorHands:
         body = await response.get_json()
         assert body["count"] == 2
         assert [(h["participant_id"], h["display_name"]) for h in body["raised_hands"]] == [
-            (user_uuid(MEMBER_ID), "Bob"),
+            (pid(cid, MEMBER_ID), "Bob"),
             (stranger, "guest"),
         ]
         rpc, request, metadata = fake.calls[-1]
         assert rpc == "ListHands"
-        assert request.actor_id == user_uuid(ADMIN_ID)
+        assert request.actor_id == pid(cid, ADMIN_ID)
         assert metadata["authorization"].endswith("streaming.rooms:moderate")
 
     async def test_listing_needs_the_admin_to_have_joined_as_staff(
@@ -195,16 +197,16 @@ class TestModeratorHands:
         response = await client.post(
             f"{admin_base}/acknowledge-hand",
             headers=admin,
-            json={"user_id": user_uuid(MEMBER_ID)},
+            json={"user_id": pid(cid, MEMBER_ID)},
         )
         assert response.status_code == 200
         hand = (await response.get_json())["hand"]
-        assert hand["participant_id"] == user_uuid(MEMBER_ID)
-        assert hand["acknowledged_by"] == user_uuid(ADMIN_ID)
+        assert hand["participant_id"] == pid(cid, MEMBER_ID)
+        assert hand["acknowledged_by"] == pid(cid, ADMIN_ID)
         assert hand["acknowledged_at"] is not None
         rpc, request, metadata = fake.calls[-1]
         assert rpc == "AcknowledgeHand"
-        assert request.actor_id == user_uuid(ADMIN_ID)
+        assert request.actor_id == pid(cid, ADMIN_ID)
         assert request.actor_role == rooms_pb2.ROOM_ROLE_ADMIN
         assert metadata["authorization"].endswith("streaming.rooms:moderate")
 
@@ -214,7 +216,7 @@ class TestModeratorHands:
         _, admin, cid = await _room_with_people(client, overlay_db)
         _, admin_base = _base(cid)
         response = await client.post(
-            f"{admin_base}/acknowledge-hand", headers=admin, json={"user_id": user_uuid(MEMBER_ID)}
+            f"{admin_base}/acknowledge-hand", headers=admin, json={"user_id": pid(cid, MEMBER_ID)}
         )
         assert response.status_code == 404
         assert (await response.get_json())["error"]["code"] == "NOT_FOUND"
@@ -239,7 +241,7 @@ class TestModeratorHands:
         "method,suffix,body",
         [
             ("GET", "raised-hands", None),
-            ("POST", "acknowledge-hand", {"user_id": user_uuid(MEMBER_ID)}),
+            ("POST", "acknowledge-hand", {"user_id": "5d1f2e3a-1111-4a2b-8c3d-9e8f7a6b5c4d"}),
             ("POST", "reset-hands", None),
         ],
     )

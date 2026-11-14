@@ -46,6 +46,8 @@ from tests.test_calls_support import (  # noqa: F401  (fixtures are consumed by 
     app,
     client,
     fake,
+    pid,
+    record_room,
     seed_user,
     user_headers,
     user_uuid,
@@ -348,7 +350,7 @@ class TestAdminRoutes:
         )
         body = await response.get_json()
         assert (body["success"], body["muted"]) == (True, 2)
-        assert fake.calls[0][1].actor_id == user_uuid(701)
+        assert fake.calls[0][1].actor_id == pid(community_id, 701)
 
 
 class TestFeatureFlag:
@@ -470,8 +472,9 @@ class TestMemberVoiceRoutes:
     async def test_join_mints_token_for_jwt_user_not_request_body(
         self, client: Any, overlay_db: Any, fake: FakeRooms
     ) -> None:
-        """The participant UUID is the verified JWT user's `hub_users.uuid`, not the body's."""
+        """The participant UUID is the JWT user's per-community pseudonym, not the body's."""
         community_id = seed_community(overlay_db)
+        record_room(overlay_db, community_id)
         seed_user(overlay_db, 42)
         seed_membership(overlay_db, community_id=community_id, user_id=42, role="community-member")
         token = make_user_token(user_id=42, scope=SCOPE_WRITE)
@@ -485,7 +488,7 @@ class TestMemberVoiceRoutes:
         assert body["token"] == "room-token"
         assert body["url"] == f"https://svc/rtc/rooms/{ROOM}"
         request = next(r for name, r, _ in fake.calls if name == "JoinRoom")
-        assert request.participant_id == user_uuid(42)
+        assert request.participant_id == pid(community_id, 42)
         assert request.participant_id not in {PARTICIPANT, "9999-attacker-supplied", "42"}
         assert request.publish and request.subscribe
         assert request.community_id == str(community_id)
@@ -494,6 +497,7 @@ class TestMemberVoiceRoutes:
         self, client: Any, overlay_db: Any, fake: FakeRooms
     ) -> None:
         community_id = seed_community(overlay_db)
+        record_room(overlay_db, community_id)
         for uid in (42, 43):
             seed_user(overlay_db, uid)
             seed_membership(
@@ -509,26 +513,12 @@ class TestMemberVoiceRoutes:
             seen.append(fake.calls[-1][1].participant_id)
         assert seen[0] == seen[1] != seen[2]
 
-    async def test_user_without_identity_record_is_a_loud_401(
-        self, client: Any, overlay_db: Any, fake: FakeRooms
-    ) -> None:
-        """A valid token whose `hub_users` row is gone never gets a made-up participant id."""
-        community_id = seed_community(overlay_db)
-        seed_membership(overlay_db, community_id=community_id, user_id=77, role="community-member")
-        token = make_user_token(user_id=77, scope=SCOPE_WRITE)
-        response = await client.post(
-            f"/api/v1/community/{community_id}/interact/voice/rooms/{ROOM}/join",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        assert response.status_code == 401
-        assert (await response.get_json())["error"]["code"] == "UNKNOWN_USER"
-        assert fake.calls == []
-
     async def test_join_downstream_error(
         self, client: Any, overlay_db: Any, fake: FakeRooms
     ) -> None:
         fake.fail["JoinRoom"] = (grpc.StatusCode.PERMISSION_DENIED, "forbidden: room is locked")
         headers, community_id = _plain_member(overlay_db, scope=SCOPE_WRITE)
+        record_room(overlay_db, community_id)
         response = await client.post(
             f"/api/v1/community/{community_id}/interact/voice/rooms/{ROOM}/join", headers=headers
         )
@@ -544,7 +534,7 @@ class TestMemberVoiceRoutes:
         )
         assert response.status_code == 200
         _, request, _ = fake.calls[0]
-        assert request.actor_id == request.participant_id == user_uuid(702)
+        assert request.actor_id == request.participant_id == pid(community_id, 702)
         assert request.actor_role == rooms_pb2.ROOM_ROLE_MEMBER
 
 

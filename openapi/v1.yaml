@@ -3107,6 +3107,47 @@ components:
       - joinedAt
       title: MemberDTO
       type: object
+    MemberParticipantDTO:
+      description: 'A participant as a non-staff member sees them: same fields as
+        `ParticipantDTO` + `is_self`.
+
+
+        Ids are per-community pseudonyms; there are no publisher lists, hand internals
+        or global ids.'
+      properties:
+        display_name:
+          title: Display Name
+          type: string
+        is_self:
+          title: Is Self
+          type: boolean
+        joined_at:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Joined At
+        muted:
+          title: Muted
+          type: boolean
+        participant_id:
+          title: Participant Id
+          type: string
+        publisher:
+          title: Publisher
+          type: boolean
+        subscriber:
+          title: Subscriber
+          type: boolean
+      required:
+      - participant_id
+      - display_name
+      - publisher
+      - subscriber
+      - muted
+      - joined_at
+      - is_self
+      title: MemberParticipantDTO
+      type: object
     MetadataFieldDTO:
       description: One metadata input a provider takes.
       properties:
@@ -16583,6 +16624,49 @@ paths:
             about anyone else.'
       summary: 'The caller''s own raised-hand state (member): their own entry only,
         via `ListHands`.'
+  /api/v1/communities/{community_id}/calls/rooms/{room_id}/participants:
+    get:
+      description: ''
+      operationId: get_get_room_participants_as_member
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: room_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`GET /communities/{id}/calls/rooms/{room}/participants`
+                  (member).'
+                properties:
+                  locked:
+                    title: Locked
+                    type: boolean
+                  participants:
+                    items:
+                      $ref: '#/components/schemas/MemberParticipantDTO'
+                    title: Participants
+                    type: array
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - participants
+                - locked
+                title: MemberParticipantsResponse
+                type: object
+          description: '`GET /communities/{id}/calls/rooms/{room}/participants` (member).'
+      summary: 'Who is in a room (member): pseudonymous ids, display names, media
+        state; no internals.'
   /api/v1/communities/{community_id}/connections:
     get:
       description: ''
@@ -17837,8 +17921,8 @@ paths:
                 title: TownHallResponse
                 type: object
           description: The community's persistent Town Hall room.
-      summary: The community's Town Hall (member); lazily created, idempotent, never
-        expires.
+      summary: 'The community''s Town Hall (member). Read-only: 404 until a POST has
+        created it.'
     post:
       description: ''
       operationId: post_post_town_hall
@@ -17886,8 +17970,7 @@ paths:
                 title: TownHallResponse
                 type: object
           description: The community's persistent Town Hall room.
-      summary: Ensure the community's Town Hall exists (member); same result as the
-        GET.
+      summary: Ensure the community's Town Hall exists (member, write scope); idempotent.
   /api/v1/community/{community_id}/activity/my-stats:
     get:
       description: ''

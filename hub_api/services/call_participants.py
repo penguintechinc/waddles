@@ -2,24 +2,20 @@
 
 svc-streaming addresses every participant by UUID only. hub-api owns `hub_users` -- the PII
 boundary -- so it alone maps a participant id back to a human-readable name, and only for
-people who are members of the community being asked about. Names are never sent to
-svc-streaming and never logged.
+ACTIVE members of the community being asked about. Names are never sent to svc-streaming and
+never logged.
 
-**Identity derivation.** A participant's UUID is the user's `hub_users.uuid`: exactly what
-the data plane's identity resolver (`resolve_identity_uuid`, alembic 0048: an explicit hub
-user link resolves to `hub_users.uuid`) stores in `community_members.user_uuid` and exposes as
-`community_member_identities.user_uuid` -- the host-verified actor of the `rooms` app bundle.
-Using the same UUID on the REST path (hub-api join/kick/mute) and the chat path (`!room ...`)
-means a moderation action taken from either side targets the same participant. Deriving a
-separate `uuid5(tenant:community:user)` id here would give one human two identities (plan risk
-R5), so it is deliberately not done. Members with no hub account (platform-only chat users)
-carry an ephemeral-pseudonym `user_uuid`; they appear in a room only through the chat path and
-resolve by that `community_members.user_uuid` to the member row's own display name.
+**Identity derivation.** A participant's UUID is a PER-COMMUNITY pseudonym:
+`uuid5(NS, "<tenant>:<community_id>:<user_id>")`. The same person therefore has a different id
+in every community, so neither svc-streaming nor any REST response lets two communities (or a
+room and a platform identity) be linked. The global `hub_users.uuid` is never sent or returned.
+`community_members.user_uuid` is NOT used: for a hub-linked member it IS the global
+`hub_users.uuid` (alembic 0048), which would be linkable across communities.
 
-Resolution is tenant-safe because the caller has already been authorised for the community
-(`services.community_access`, which also verifies the community belongs to the caller's
-tenant) and a name is only returned for ids that are members of that community; any other id
-renders as `GUEST_LABEL`.
+Names are resolved by recomputing that pseudonym over the community's ACTIVE members
+(`community_members.is_active`); a former or deactivated member, a non-member and an unknown id
+all render as `GUEST_LABEL`. Platform-only chat members (no hub account) have no hub user id to
+derive from; they resolve by their (per-tenant) pseudonym `community_members.user_uuid`.
 """
 
 from __future__ import annotations
@@ -28,7 +24,8 @@ import uuid
 from collections.abc import Iterable
 from typing import Any
 
-from services.errors import ApiError
+#: Namespace of the per-community participant pseudonym (uuid5 of tenant + community + user).
+_PARTICIPANT_NS = uuid.UUID("6f3c1c1e-5b8e-4a67-9d3b-2f0c8f3f6a11")
 
 #: Rendered for an id that is not a known member of the community (guest, left, or erased).
 GUEST_LABEL = "guest"
@@ -43,22 +40,9 @@ async def _select(async_dal: Any, query: Any, *fields: Any) -> Any:
     return list(rows or [])
 
 
-async def identity_uuid(async_dal: Any, dal: Any, *, user_id: int) -> str:
-    """The `hub_users.uuid` of `user_id` -- the participant/actor UUID sent to svc-streaming.
-
-    Raises `ApiError(401, UNKNOWN_USER)` when no such user exists (a valid token for a deleted
-    user): loud, never a made-up id.
-    """
-    users = dal.hub_users
-    rows = await async_dal.select_async(dal(users.id == user_id), users.uuid)
-    row = rows[0] if rows else None
-    if row is None or not row.uuid:
-        raise ApiError(
-            message="Authenticated user has no identity record",
-            status_code=401,
-            code="UNKNOWN_USER",
-        )
-    return str(uuid.UUID(str(row.uuid)))
+def identity_uuid(*, tenant_slug: str, community_id: int, user_id: int) -> str:
+    """The caller's per-community participant/actor UUID (pure; the global user uuid is unused)."""
+    return str(uuid.uuid5(_PARTICIPANT_NS, f"{tenant_slug}:{community_id}:{user_id}"))
 
 
 async def is_community_staff(async_dal: Any, dal: Any, *, community_id: int, user_id: int) -> bool:
@@ -95,63 +79,77 @@ def _canonical(participant_id: str) -> str | None:
 
 
 async def resolve_display_names(
-    async_dal: Any, dal: Any, *, community_id: int, participant_ids: Iterable[str]
+    async_dal: Any,
+    dal: Any,
+    *,
+    tenant_slug: str,
+    community_id: int,
+    participant_ids: Iterable[str],
 ) -> dict[str, str]:
     """Map every id in `participant_ids` to a display name, `GUEST_LABEL` when unknown.
 
-    Only members of `community_id` resolve: an id is looked up over that community's
-    `community_members` rows (by `user_uuid`, and by the `hub_users.uuid` of hub-linked
-    members). The returned dict always has exactly one entry per distinct input id (keyed as
-    given) so callers never need a fallback of their own.
+    Only ACTIVE members of `community_id` resolve. The returned dict always has exactly one
+    entry per distinct input id (keyed as given) so callers never need a fallback of their own.
     """
     ids = list(dict.fromkeys(participant_ids))
     names = {pid: GUEST_LABEL for pid in ids}
     canonical = {pid: _canonical(pid) for pid in ids}
-    wanted = sorted({c for c in canonical.values() if c})
+    wanted = {c for c in canonical.values() if c}
     if not wanted:
         return names
 
     users = dal.hub_users
     members = dal.community_members
     by_uuid: dict[str, str] = {}
-    for start in range(0, len(wanted), _CHUNK):
-        chunk = wanted[start : start + _CHUNK]
-        # Members addressed by their data-plane identity (also the only path for platform-only
-        # members, whose uuid is a pseudonym with no hub_users row).
-        member_rows = await _select(
+
+    # Hub-linked members: recompute each ACTIVE member's pseudonym and keep the wanted ones.
+    active = await _select(
+        async_dal,
+        dal((members.community_id == community_id) & (members.is_active == True)),  # noqa: E712
+        members.user_id,
+    )
+    matched: dict[str, int] = {}
+    for m in active:
+        try:
+            uid = int(str(m.user_id))
+        except (TypeError, ValueError):
+            continue  # platform-only member: no hub user id to derive from
+        pseudonym = identity_uuid(tenant_slug=tenant_slug, community_id=community_id, user_id=uid)
+        if pseudonym in wanted:
+            matched[pseudonym] = uid
+    ordered = sorted(matched.items())
+    for start in range(0, len(ordered), _CHUNK):
+        chunk = ordered[start : start + _CHUNK]
+        rows = await _select(
             async_dal,
-            dal((members.community_id == community_id) & (members.user_uuid.belongs(chunk))),
+            dal(users.id.belongs([uid for _, uid in chunk])),
+            users.id,
+            users.display_name,
+            users.username,
+        )
+        by_id = {int(r.id): (r.display_name or r.username) for r in rows}
+        for pseudonym, uid in chunk:
+            if by_id.get(uid):
+                by_uuid[pseudonym] = str(by_id[uid])
+
+    # Platform-only chat members: addressed by their per-tenant pseudonym, ACTIVE rows only.
+    pseudo = sorted(wanted)
+    for start in range(0, len(pseudo), _CHUNK):
+        chunk_ids = pseudo[start : start + _CHUNK]
+        rows = await _select(
+            async_dal,
+            dal(
+                (members.community_id == community_id)
+                & (members.is_active == True)  # noqa: E712 - pydal query operator
+                & (members.user_uuid.belongs(chunk_ids))
+            ),
             members.user_id,
             members.user_uuid,
             members.display_name,
         )
-        for m in member_rows:
-            if m.user_uuid and m.display_name:
-                by_uuid[str(uuid.UUID(str(m.user_uuid)))] = str(m.display_name)
-        # Hub-linked members addressed by hub_users.uuid: hub_users' own name wins.
-        user_rows = await _select(
-            async_dal,
-            dal(users.uuid.belongs(chunk)),
-            users.id,
-            users.uuid,
-            users.display_name,
-            users.username,
-        )
-        if not user_rows:
-            continue
-        in_community = await _select(
-            async_dal,
-            dal(
-                (members.community_id == community_id)
-                & (members.user_id.belongs([str(r.id) for r in user_rows]))
-            ),
-            members.user_id,
-        )
-        member_ids = {str(m.user_id) for m in in_community}
-        for r in user_rows:
-            name = r.display_name or r.username
-            if str(r.id) in member_ids and name:
-                by_uuid[str(uuid.UUID(str(r.uuid)))] = str(name)
+        for m in rows:
+            if m.user_id is None and m.user_uuid and m.display_name:
+                by_uuid.setdefault(str(uuid.UUID(str(m.user_uuid))), str(m.display_name))
 
     for pid, canon in canonical.items():
         if canon is not None and canon in by_uuid:

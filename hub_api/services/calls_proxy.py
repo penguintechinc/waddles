@@ -98,6 +98,10 @@ ROUTE_RPCS: dict[tuple[str, str], str] = {
     ("POST", f"{_MEMBER}/<room_name>/leave"): "LeaveRoom",
     ("POST", f"{_MEMBER}/<room_name>/raise-hand"): "RaiseHand",
     ("POST", f"{_MEMBER}/<room_name>/lower-hand"): "LowerHand",
+    (
+        "GET",
+        f"{_COMMUNITIES}/<int:community_id>/calls/rooms/<room_id>/participants",
+    ): "ListParticipants",
     ("GET", f"{_COMMUNITIES}/<int:community_id>/calls/rooms/<room_id>/hands/mine"): "ListHands",
     ("GET", f"{_COMMUNITIES}/<int:community_id>/town-hall"): "ListRooms",
     ("POST", f"{_COMMUNITIES}/<int:community_id>/town-hall"): "CreateRoom",

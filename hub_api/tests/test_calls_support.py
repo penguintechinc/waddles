@@ -36,8 +36,15 @@ from waddles.streaming.internal.v1 import rooms_pb2, rooms_pb2_grpc
 
 import blueprints.v1.calls as calls_module
 from blueprints.v1.calls import calls_admin_bp, member_calls_bp, member_voice_bp
+from services.call_participants import identity_uuid
+from services.call_rooms import bind_call_rooms_table
 from services.calls_proxy import RoomsClient
-from tests.conftest import make_user_token, seed_community, seed_membership
+from tests.conftest import (
+    TENANT_SLUG,
+    make_user_token,
+    seed_community,
+    seed_membership,
+)
 
 ROOM = "0b6f3e1a-8f5e-4d0a-9a43-6a1d5f7c2e10"
 PARTICIPANT = "5d1f2e3a-1111-4a2b-8c3d-9e8f7a6b5c4d"
@@ -74,8 +81,37 @@ _MODERATOR_ROLES = (rooms_pb2.ROOM_ROLE_MODERATOR, rooms_pb2.ROOM_ROLE_ADMIN)
 
 
 def user_uuid(user_id: int) -> str:
-    """Deterministic `hub_users.uuid` for a seeded test user."""
+    """Deterministic GLOBAL `hub_users.uuid` of a seeded test user (never sent to svc-streaming)."""
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"test-hub-user-{user_id}"))
+
+
+def pid(community_id: int, user_id: int) -> str:
+    """The per-community participant pseudonym hub-api sends downstream for this user."""
+    return identity_uuid(tenant_slug=TENANT_SLUG, community_id=community_id, user_id=user_id)
+
+
+def record_room(
+    overlay_db: Any,
+    community_id: int,
+    room_id: str = ROOM,
+    *,
+    kind: int = 0,
+    closed: bool = False,
+    allow_guests: bool = False,
+    town_hall: bool = False,
+) -> None:
+    """Record a room in hub-api's `call_rooms` (what the REST join trusts for room facts)."""
+    dal = overlay_db.dal
+    bind_call_rooms_table(dal, migrate=True)
+    dal.call_rooms.insert(
+        community_id=community_id,
+        room_id=room_id,
+        kind=kind,
+        closed=closed,
+        allow_guests=allow_guests,
+        town_hall=town_hall,
+    )
+    dal.commit()
 
 
 def seed_user(overlay_db: Any, user_id: int, *, display_name: str | None = None) -> str:
@@ -442,6 +478,15 @@ def app(overlay_db: Any) -> Quart:
     quart_app.register_blueprint(member_calls_bp)
     quart_app.config["dal"] = overlay_db.dal
     quart_app.config["async_dal"] = overlay_db
+    dal = overlay_db.dal
+    bind_call_rooms_table(dal, migrate=True)
+    dal(dal.call_rooms).count()  # force table creation on this connection (as the other fixtures)
+    # the migration's partial unique index: at most one Town Hall per community
+    dal.executesql(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_call_rooms_one_town_hall "
+        "ON call_rooms (community_id) WHERE town_hall = 'T'"  # pydal sqlite booleans
+    )
+    dal.commit()
     return quart_app
 
 
@@ -476,7 +521,15 @@ def user_headers(
 
 
 async def join(client: Any, community_id: int, headers: dict[str, str], room: str = ROOM) -> Any:
-    """Join `room` through the real join route (admins register as staff via the moderate token)."""
+    """Join `room` through the real join route (admins register as staff via the moderate token).
+
+    A room hub-api has not recorded is refused to non-staff (fail closed), so the helper records
+    the room as a plain community room first when no record exists.
+    """
+    dal = client.app.config["dal"]
+    table = dal.call_rooms
+    if not dal((table.community_id == community_id) & (table.room_id == room)).count():
+        record_room(client.app.config["async_dal"], community_id, room)
     response = await client.post(
         f"/api/v1/community/{community_id}/interact/voice/rooms/{room}/join", headers=headers
     )
