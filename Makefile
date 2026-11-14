@@ -29,7 +29,7 @@ backfill-bundle-author:
 	@python3 scripts/backfill_bundle_author.py
 
 openapi-hubapi:
-	@python3 scripts/export-hubapi-openapi.py
+	@PYTHONPATH="$(CURDIR)/libs/flask_core:$(CURDIR)/libs:$(CURDIR)/hub_api" python3 scripts/export-hubapi-openapi.py
 	@spectral lint openapi/v1.yaml --fail-severity=error
 
 # Fails when the committed openapi/v1.yaml differs from a fresh regeneration

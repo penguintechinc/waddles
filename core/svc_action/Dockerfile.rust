@@ -61,6 +61,8 @@ COPY circuit_breaker ./circuit_breaker
 COPY discord_mentions ./discord_mentions
 COPY egress_assertion ./egress_assertion
 COPY hub_client ./hub_client
+# Live bundle-config DB reader (issue #1306): path dependency of this crate.
+COPY bundle_config_db ./bundle_config_db
 COPY service_auth ./service_auth
 # `hub_client`'s build.rs resolves protos at `CARGO_MANIFEST_DIR/../../
 # proto` -- for `/build/hub_client`, that's `/proto` (image root, NOT

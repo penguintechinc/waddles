@@ -793,16 +793,21 @@ async fn build_stage_capabilities(
         Some(client) => client.get_multiplexed_async_connection().await.ok(),
         None => None,
     };
-    let bundle_config = hub_client::bundle_config::connect_and_install(
+    // Read path (issue #1306): the read-only replica database directly (`DATABASE_REPLICA_URL`,
+    // primary `DATABASE_URL` fallback at WARN), never hub-api on the hot path; hub-api gRPC
+    // remains only behind the `waddles.disable-db-bundle-config-reads` kill switch.
+    let bundle_config = bundle_config_db::connect_and_install(
         &cli.hub_api_grpc_endpoint,
         &cli.service_jwt_token_endpoint,
         &cli.service_jwt_sa_token_path,
         (!cli.hub_api_grpc_ca_file.is_empty()).then_some(cli.hub_api_grpc_ca_file.as_str()),
         config_probe_conn,
+        &bundle_config_db::DbReadConfig::from_env(),
     )
     .await;
     if let Some(cache) = &bundle_config {
         cache.set_gate(Arc::new(flags::LiveBundleConfigGate(license.clone())));
+        cache.set_read_path_gate(Arc::new(flags::DbConfigReadsGate(license.clone())));
     }
     let caps = caps.with_bundle_config(bundle_config);
     // `db` host capability (v1 + v2 `db2.*`): see `try_build_db_wiring`'s doc for
@@ -2127,13 +2132,8 @@ mod tests {
         // SAFETY: serialized by ENV_LOCK; no other test reads OTEL env.
         unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT") };
         let mut config = ephemeral_config();
-        config.cli = CliConfig::parse_from([
-            "svc-action",
-            "--http-port",
-            "0",
-            "--metrics-port",
-            "0",
-        ]);
+        config.cli =
+            CliConfig::parse_from(["svc-action", "--http-port", "0", "--metrics-port", "0"]);
         // Shutdown futures resolve immediately, so the servers bind, log,
         // and drain right away instead of blocking on a real OS signal.
         let result =

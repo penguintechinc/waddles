@@ -308,8 +308,8 @@ jobs:
       # is a follow-up, tracked separately from this migration-chain gate.
       #
       # alembic/env.py imports `flask_core.models.db` (needed for
-      # `target_metadata`), which transitively needs flask-sqlalchemy +
-      # flask-security-too -- neither is in hub_api/requirements.txt (hub_api
+      # `target_metadata`), which transitively needs flask-sqlalchemy --
+      # not in hub_api/requirements.txt (hub_api
       # itself doesn't use flask_core). This is exactly the dependency set
       # migrations/Dockerfile already installs for the same reason; versions
       # pinned to match libs/flask_core/requirements.txt's own pins. First
@@ -325,7 +325,6 @@ jobs:
           pip install --disable-pip-version-check \
             "alembic==1.20.0" \
             "flask-sqlalchemy==3.1.1" \
-            "flask-security-too==5.8.2" \
             "PyYAML>=6.0.2,<7.0.0"
 
       # Legacy `config/postgres/migrations/NNN_*.sql` files reach an EXISTING database only

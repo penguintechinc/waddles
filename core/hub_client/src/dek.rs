@@ -34,7 +34,10 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
+use tracing::debug;
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -334,10 +337,61 @@ fn open_with_shared(
     Ok(Zeroizing::new(out))
 }
 
+/// Base of the per-key negative-cache backoff after a failed broker call (doubles per
+/// consecutive failure of the same key up to [`NEGATIVE_BACKOFF_CAP`], jittered +-25%).
+pub const NEGATIVE_BACKOFF_BASE: Duration = Duration::from_millis(250);
+
+/// Ceiling of the negative-cache backoff: short on purpose -- fail-closed callers dead-letter
+/// while it lasts, so it only needs to be long enough to stop a retry stampede.
+pub const NEGATIVE_BACKOFF_CAP: Duration = Duration::from_secs(5);
+
+/// How long an expired negative entry is remembered (for backoff escalation) before it is swept.
+const NEGATIVE_FORGET_AFTER: Duration = Duration::from_secs(60);
+
+/// Soft cap on cached `(tenant, version)` keys; past it the soonest-to-expire entry is evicted,
+/// so the cache is bounded in both lifetime (TTL) and size.
+pub const DEK_CACHE_MAX_ENTRIES: usize = 4096;
+
+/// Counter `waddles_hub_dek_cache{result}` (exposed as `..._total`): every stream-DEK
+/// resolution by outcome. `hit` = served from the cache, `miss` = this caller made the broker
+/// call (the single-flight leader), `inflight_wait` = waited behind a leader and was served its
+/// fresh key, `negative` = answered with a recent (own or shared) failure without a broker call.
+const METRIC_DEK_CACHE: &str = "waddles_hub_dek_cache";
+
+/// Records one cache outcome on the process-global meter (no-op until a provider is installed;
+/// telemetry never affects a key decision). `result` is a closed vocabulary -- never a tenant,
+/// version or key identifier.
+fn record_cache_result(result: &'static str) {
+    static COUNTER: std::sync::OnceLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::OnceLock::new();
+    COUNTER
+        .get_or_init(|| {
+            opentelemetry::global::meter("hub_client.dek")
+                .u64_counter(METRIC_DEK_CACHE)
+                .with_description(
+                    "Stream-DEK resolutions by result: hit, miss (broker call made), \
+                     inflight_wait (joined a single-flight leader), negative (recent failure).",
+                )
+                .build()
+        })
+        .add(1, &[opentelemetry::KeyValue::new("result", result)]);
+}
+
 struct CacheEntry {
     dek: Dek,
     expires_at: Instant,
 }
+
+/// A recent broker failure for one key, replayed to every caller inside its window.
+struct NegativeEntry {
+    until: Instant,
+    /// Consecutive failures of this key (drives the exponential backoff).
+    failures: u32,
+    error: DekUnavailableError,
+}
+
+/// `(numeric tenant id, key version)`; version 0 is the "current key" lookup.
+type FlightKey = (i64, u32);
 
 #[derive(Default)]
 struct CacheState {
@@ -346,17 +400,41 @@ struct CacheState {
     /// `tenant_id` -> `(current version, expiry of that "current" answer)`. Kept separate from
     /// `by_version` so an old, still-cached version can never be mistaken for the current one.
     current: HashMap<i64, (u32, Instant)>,
+    /// Recent failures per key, so a failed broker call does not trigger a retry stampede.
+    negative: HashMap<FlightKey, NegativeEntry>,
+    /// Per-tenant invalidation generation: a leader whose fetch raced an
+    /// [`DekInvalidate::invalidate`] must not write its (possibly pre-rotation) result back.
+    generations: HashMap<i64, u64>,
 }
 
 /// Wraps a [`DekBroker`] with a TTL cache keyed by `(numeric tenant id, key version)` --
-/// never a slug. A steady-state loop therefore calls the broker once per tenant per TTL
-/// window; the cache lifetime is the broker's grant clamped to `ttl` (default
-/// [`DEFAULT_DEK_CACHE_TTL`]), and a rotated key is picked up within one TTL or at once on
-/// [`DekInvalidate::invalidate`].
+/// never a slug -- plus a process-wide **single-flight** and a short **negative cache**.
+///
+/// - **Cache:** a steady-state loop calls the broker once per tenant per TTL window; the cache
+///   lifetime is the broker's grant clamped to `ttl` (default [`DEFAULT_DEK_CACHE_TTL`]) and the
+///   map is capped at [`DEK_CACHE_MAX_ENTRIES`]. A rotated key is picked up within one TTL, or
+///   at once on [`DekInvalidate::invalidate`]; a *new* version is simply a different key.
+/// - **Single-flight:** callers that miss the same `(tenant, version)` queue behind one broker
+///   call (the leader); the rest re-check the cache it filled. A cold start with hundreds of
+///   concurrent per-app consumers is therefore one broker call (and, upstream, one token
+///   mint), not hundreds. The cache is per provider -- i.e. per calling service identity
+///   (`svc-ingest` / `svc-process`, fixed in the broker's seal context) -- and the key carries
+///   the tenant, so tenants never share an entry or a flight.
+/// - **Negative cache:** a failed call is recorded for a short jittered window
+///   ([`NEGATIVE_BACKOFF_BASE`], doubling per consecutive failure up to
+///   [`NEGATIVE_BACKOFF_CAP`]) and replayed to every waiter and to callers arriving inside it:
+///   they all fail closed from **one** broker call and retry together only after the backoff.
+///   A failure is never cached beyond that window, and a success clears it.
+///
+/// Fail-closed is unchanged: every failure is a [`DekUnavailableError`], never a fallback key.
 pub struct CachedDekProvider<B: DekBroker> {
     broker: Arc<B>,
     ttl: Duration,
+    negative_base: Duration,
     state: Arc<Mutex<CacheState>>,
+    /// Per-key single-flight gates (held across the broker `.await`, hence tokio mutexes; the
+    /// map itself is only touched in short sync sections).
+    flights: Arc<Mutex<HashMap<FlightKey, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 // Manual `Clone`: a derive would add a spurious `B: Clone` bound.
@@ -365,7 +443,9 @@ impl<B: DekBroker> Clone for CachedDekProvider<B> {
         Self {
             broker: self.broker.clone(),
             ttl: self.ttl,
+            negative_base: self.negative_base,
             state: self.state.clone(),
+            flights: self.flights.clone(),
         }
     }
 }
@@ -376,8 +456,18 @@ impl<B: DekBroker> CachedDekProvider<B> {
         Self {
             broker: Arc::new(broker),
             ttl,
+            negative_base: NEGATIVE_BACKOFF_BASE,
             state: Arc::new(Mutex::new(CacheState::default())),
+            flights: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Replaces the negative-cache backoff base ([`NEGATIVE_BACKOFF_BASE`]); `Duration::ZERO`
+    /// disables the negative cache (single-flight still coalesces concurrent callers).
+    #[must_use]
+    pub fn with_negative_backoff(mut self, base: Duration) -> Self {
+        self.negative_base = base;
+        self
     }
 
     /// Locks the cache, recovering a poisoned lock: the map holds only keys that were fully
@@ -386,33 +476,89 @@ impl<B: DekBroker> CachedDekProvider<B> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn cached(&self, tenant_id: i64, version: u32) -> Option<Dek> {
+    /// The cached key for `(tenant, version)` (`version` 0 = the current key) with its
+    /// concrete version, if still fresh.
+    fn lookup(&self, tenant_id: i64, version: u32) -> Option<(Dek, u32)> {
         let state = self.lock();
+        let now = Instant::now();
+        if version == 0 {
+            let (current, until) = state.current.get(&tenant_id)?;
+            if *until <= now {
+                return None;
+            }
+            let entry = state.by_version.get(&(tenant_id, *current))?;
+            return (entry.expires_at > now).then(|| (entry.dek.clone(), *current));
+        }
         state
             .by_version
             .get(&(tenant_id, version))
-            .filter(|e| e.expires_at > Instant::now())
-            .map(|e| e.dek.clone())
+            .filter(|e| e.expires_at > now)
+            .map(|e| (e.dek.clone(), version))
     }
 
-    fn cached_current(&self, tenant_id: i64) -> Option<(Dek, u32)> {
+    /// The still-live negative entry for `key`, replayed as its original error.
+    fn negative(&self, key: FlightKey) -> Option<DekUnavailableError> {
         let state = self.lock();
-        let (version, until) = state.current.get(&tenant_id)?;
-        if *until <= Instant::now() {
-            return None;
-        }
-        let entry = state.by_version.get(&(tenant_id, *version))?;
-        (entry.expires_at > Instant::now()).then(|| (entry.dek.clone(), *version))
+        state
+            .negative
+            .get(&key)
+            .filter(|n| Instant::now() < n.until)
+            .map(|n| n.error.clone())
     }
 
-    fn store(&self, tenant_id: i64, fetched: &BrokeredDek, current: bool) {
+    /// Records a failed broker call for `key`: exponential, jittered, capped backoff.
+    fn record_failure(&self, key: FlightKey, error: &DekUnavailableError) {
+        if self.negative_base.is_zero() {
+            return;
+        }
+        let mut state = self.lock();
+        let now = Instant::now();
+        // Keep expired entries a while: their failure count drives the backoff escalation.
+        state
+            .negative
+            .retain(|_, n| n.until + NEGATIVE_FORGET_AFTER > now);
+        let failures = state
+            .negative
+            .get(&key)
+            .map_or(0, |n| n.failures)
+            .saturating_add(1);
+        let backoff = self
+            .negative_base
+            .saturating_mul(1u32 << failures.saturating_sub(1).min(16))
+            .min(NEGATIVE_BACKOFF_CAP);
+        state.negative.insert(
+            key,
+            NegativeEntry {
+                until: now + service_auth::jittered(backoff),
+                failures,
+                error: error.clone(),
+            },
+        );
+    }
+
+    /// The invalidation generation of `tenant_id` (0 = never invalidated).
+    fn generation(&self, tenant_id: i64) -> u64 {
+        self.lock()
+            .generations
+            .get(&tenant_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Caches `fetched` for `tenant_id` unless the tenant was invalidated since `generation`
+    /// was read (the fetch raced a rotation signal: serve it, never cache it).
+    fn store(&self, tenant_id: i64, generation: u64, fetched: &BrokeredDek, current: bool) {
         let ttl = fetched.ttl.min(self.ttl);
         if ttl.is_zero() {
             return;
         }
-        let expires_at = Instant::now() + ttl;
         let mut state = self.lock();
+        if state.generations.get(&tenant_id).copied().unwrap_or(0) != generation {
+            debug!(tenant_id, "dek.cache_store_skipped_invalidated_in_flight");
+            return;
+        }
         let now = Instant::now();
+        let expires_at = now + ttl;
         state.by_version.retain(|_, e| e.expires_at > now);
         state.current.retain(|_, (_, until)| *until > now);
         state.by_version.insert(
@@ -427,6 +573,125 @@ impl<B: DekBroker> CachedDekProvider<B> {
                 .current
                 .insert(tenant_id, (fetched.version, expires_at));
         }
+        while state.by_version.len() > DEK_CACHE_MAX_ENTRIES {
+            let Some(oldest) = state
+                .by_version
+                .iter()
+                .min_by_key(|(_, e)| e.expires_at)
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            state.by_version.remove(&oldest);
+        }
+    }
+
+    /// The gate of `key`, created on first use.
+    fn gate(&self, key: FlightKey) -> Arc<tokio::sync::Mutex<()>> {
+        let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
+        flights.entry(key).or_default().clone()
+    }
+
+    /// Drops `key`'s gate once nobody else holds it (only the map and `gate` remain).
+    fn release_gate(&self, key: FlightKey, gate: Arc<tokio::sync::Mutex<()>>) {
+        let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
+        if Arc::strong_count(&gate) <= 2 {
+            flights.remove(&key);
+        }
+    }
+
+    /// Validates a broker answer against the request (`version` 0 = current).
+    fn validate(
+        tenant_id: i64,
+        version: u32,
+        fetched: &BrokeredDek,
+    ) -> Result<(), DekUnavailableError> {
+        let pinned = (version != 0).then_some(version);
+        if fetched.version == 0 {
+            return Err(DekUnavailableError::new(
+                tenant_id,
+                pinned,
+                "broker returned unresolved version 0",
+            ));
+        }
+        if version != 0 && fetched.version != version {
+            return Err(DekUnavailableError::new(
+                tenant_id,
+                pinned,
+                format!(
+                    "broker returned version {} for pinned {version}",
+                    fetched.version
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolves `(tenant, version)` (`version` 0 = current): cache, then negative cache, then
+    /// exactly one broker call shared by every concurrent caller of the same key.
+    async fn resolve(
+        &self,
+        tenant_id: i64,
+        version: u32,
+    ) -> Result<(Dek, u32), DekUnavailableError> {
+        if let Some(hit) = self.lookup(tenant_id, version) {
+            record_cache_result("hit");
+            return Ok(hit);
+        }
+        let key = (tenant_id, version);
+        if let Some(err) = self.negative(key) {
+            record_cache_result("negative");
+            return Err(err);
+        }
+
+        let gate = self.gate(key);
+        // Uncontended -> this caller is the leader; contended -> it waits for the leader.
+        let (flight, waited) = match gate.try_lock() {
+            Ok(guard) => (guard, false),
+            Err(_) => (gate.lock().await, true),
+        };
+        let result = self.resolve_in_flight(tenant_id, version, waited).await;
+        drop(flight);
+        self.release_gate(key, gate);
+        result
+    }
+
+    /// The body of [`Self::resolve`] once this caller holds the key's flight gate: re-check
+    /// what a leader may have just stored, otherwise lead one broker call.
+    async fn resolve_in_flight(
+        &self,
+        tenant_id: i64,
+        version: u32,
+        waited: bool,
+    ) -> Result<(Dek, u32), DekUnavailableError> {
+        let key = (tenant_id, version);
+        if let Some(hit) = self.lookup(tenant_id, version) {
+            record_cache_result(if waited { "inflight_wait" } else { "hit" });
+            return Ok(hit);
+        }
+        if let Some(err) = self.negative(key) {
+            record_cache_result("negative");
+            return Err(err);
+        }
+
+        record_cache_result("miss");
+        let generation = self.generation(tenant_id);
+        let outcome = match self.broker.fetch(tenant_id, version).await {
+            Ok(fetched) => Self::validate(tenant_id, version, &fetched).map(|()| fetched),
+            Err(err) => Err(err),
+        };
+        match outcome {
+            Ok(fetched) => {
+                self.store(tenant_id, generation, &fetched, version == 0);
+                self.lock().negative.remove(&key);
+                Ok((fetched.dek, fetched.version))
+            }
+            Err(err) => {
+                debug!(tenant_id, version, "dek.broker_call_failed_negative_cached");
+                self.record_failure(key, &err);
+                Err(err)
+            }
+        }
     }
 }
 
@@ -435,24 +700,16 @@ impl<B: DekBroker> DekInvalidate for CachedDekProvider<B> {
         let mut state = self.lock();
         state.by_version.retain(|(t, _), _| *t != tenant_id);
         state.current.remove(&tenant_id);
+        state.negative.retain(|(t, _), _| *t != tenant_id);
+        // Bumped even for a non-resident tenant: an in-flight fetch of the key being rotated
+        // must not repopulate the cache with a pre-rotation answer.
+        *state.generations.entry(tenant_id).or_insert(0) += 1;
     }
 }
 
 impl<B: DekBroker> DekProvider for CachedDekProvider<B> {
     async fn get_dek(&self, tenant_id: i64) -> Result<(Dek, u32), DekUnavailableError> {
-        if let Some(hit) = self.cached_current(tenant_id) {
-            return Ok(hit);
-        }
-        let fetched = self.broker.fetch(tenant_id, 0).await?;
-        if fetched.version == 0 {
-            return Err(DekUnavailableError::new(
-                tenant_id,
-                None,
-                "broker returned unresolved version 0",
-            ));
-        }
-        self.store(tenant_id, &fetched, true);
-        Ok((fetched.dek, fetched.version))
+        self.resolve(tenant_id, 0).await
     }
 
     async fn get_dek_version(
@@ -467,22 +724,7 @@ impl<B: DekBroker> DekProvider for CachedDekProvider<B> {
                 "an envelope always names a concrete key version (>= 1)",
             ));
         }
-        if let Some(hit) = self.cached(tenant_id, version) {
-            return Ok(hit);
-        }
-        let fetched = self.broker.fetch(tenant_id, version).await?;
-        if fetched.version != version {
-            return Err(DekUnavailableError::new(
-                tenant_id,
-                Some(version),
-                format!(
-                    "broker returned version {} for pinned {version}",
-                    fetched.version
-                ),
-            ));
-        }
-        self.store(tenant_id, &fetched, false);
-        Ok(fetched.dek)
+        self.resolve(tenant_id, version).await.map(|(dek, _)| dek)
     }
 }
 
@@ -831,6 +1073,11 @@ pub mod testing {
         pub force_version: Option<u32>,
         /// The caller's service name the fake seals for (`svc-ingest` unless changed).
         pub service: String,
+        /// Every call that reached the fake and authenticated, accepted or refused -- the count
+        /// a stampede test asserts on (`calls` only records accepted ones).
+        pub attempts: usize,
+        /// Wait this long before answering, so concurrent callers genuinely overlap.
+        pub delay: std::time::Duration,
     }
 
     /// `KeyService` fake enforcing bearer token + scope-by-token, tenant numeric ids, and the
@@ -916,6 +1163,14 @@ pub mod testing {
                 return Err(Status::unauthenticated("unauthorized"));
             }
             let req = request.into_inner();
+            let delay = {
+                let mut state = self.state.lock().unwrap();
+                state.attempts += 1;
+                state.delay
+            };
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
             let tenant_id: i64 = req
                 .tenant_id
                 .parse()
@@ -1225,7 +1480,8 @@ mod tests {
         let cache = CachedDekProvider::new(
             HubDekBroker::new(client, "svc-ingest"),
             DEFAULT_DEK_CACHE_TTL,
-        );
+        )
+        .with_negative_backoff(Duration::ZERO);
         assert!(cache.get_dek(1).await.is_err());
         fake.state.lock().unwrap().down = false;
         assert!(
@@ -1417,5 +1673,310 @@ mod tests {
                 open_with_shared(shared.as_bytes(), &sealed, svc, tenant, &v.purpose, ver).is_err()
             );
         }
+    }
+}
+
+/// Real-path single-flight / negative-cache tests: an in-process tonic `KeyService` fake and a
+/// real `MachineJwtClient` against a counting `MockHub`, so every assertion is on calls that
+/// actually reached the wire (hub-api's two stampede amplifiers: DEK fetches and token mints).
+#[cfg(test)]
+mod single_flight_tests {
+    use std::time::Duration;
+
+    use service_auth::test_support::{MintReply, MockHub};
+    use service_auth::MachineJwtClient;
+    use tokio::task::JoinSet;
+
+    use super::testing::{test_key, FakeKeyService, FAKE_TOKEN, REQUIRED_SCOPE};
+    use super::*;
+    use crate::lazy_channel;
+
+    const SERVICE: &str = "svc-process";
+
+    /// One wired stack: provider -> `HubClient` -> (fake `KeyService`, counting mint hub).
+    struct Stack {
+        provider: CachedDekProvider<HubDekBroker>,
+        client: Arc<HubClient>,
+        fake: FakeKeyService,
+        mint: MockHub,
+    }
+
+    impl Stack {
+        /// `KeyService` calls that reached the fake (accepted or refused).
+        fn attempts(&self) -> usize {
+            self.fake.state.lock().unwrap().attempts
+        }
+    }
+
+    /// Builds a stack; `mint_reply` scripts the token endpoint, the delays make concurrent
+    /// callers genuinely overlap on the wire.
+    async fn stack(
+        tag: &str,
+        mint_reply: MintReply,
+        fake_delay: Duration,
+        mint_delay: Duration,
+        ttl: Duration,
+        negative: Duration,
+    ) -> Stack {
+        let fake = FakeKeyService::for_service(SERVICE);
+        fake.state.lock().unwrap().delay = fake_delay;
+        let endpoint = fake.serve().await;
+        let mint = MockHub::builder()
+            .mint(vec![mint_reply])
+            .delay(mint_delay)
+            .start()
+            .await;
+        let sa =
+            std::env::temp_dir().join(format!("hub-client-sf-sa-{tag}-{}", std::process::id()));
+        std::fs::write(&sa, "projected-sa-token").unwrap();
+        let tokens = Arc::new(MachineJwtClient::new(
+            mint.endpoint.clone(),
+            sa.to_string_lossy().to_string(),
+            STREAM_DEK_SCOPE,
+        ));
+        let client = Arc::new(HubClient::with_channel(
+            lazy_channel(&endpoint, None).unwrap(),
+            tokens,
+        ));
+        let provider = CachedDekProvider::new(HubDekBroker::new(client.clone(), SERVICE), ttl)
+            .with_negative_backoff(negative);
+        Stack {
+            provider,
+            client,
+            fake,
+            mint,
+        }
+    }
+
+    fn good_mint() -> MintReply {
+        MintReply::when(|c| c.scope == REQUIRED_SCOPE, FAKE_TOKEN, 3600)
+    }
+
+    /// `n` concurrent pinned-version decrypts of `(tenant, version)`.
+    async fn decrypt_all(
+        provider: &CachedDekProvider<HubDekBroker>,
+        n: usize,
+        tenant: i64,
+        version: u32,
+    ) -> Vec<Result<[u8; DEK_LEN], DekUnavailableError>> {
+        let mut set = JoinSet::new();
+        for _ in 0..n {
+            let provider = provider.clone();
+            set.spawn(async move {
+                provider
+                    .get_dek_version(tenant, version)
+                    .await
+                    .map(|dek| *dek)
+            });
+        }
+        let mut out = Vec::with_capacity(n);
+        while let Some(joined) = set.join_next().await {
+            out.push(joined.unwrap());
+        }
+        out
+    }
+
+    /// Jumps the tokio clock forward without letting auto-advance skip real I/O deadlines.
+    async fn skip(by: Duration) {
+        tokio::time::pause();
+        tokio::time::advance(by).await;
+        tokio::time::resume();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cold_start_stampede_is_one_broker_call_and_one_token_mint() {
+        let s = stack(
+            "cold",
+            good_mint(),
+            Duration::from_millis(150),
+            Duration::from_millis(150),
+            DEFAULT_DEK_CACHE_TTL,
+            NEGATIVE_BACKOFF_BASE,
+        )
+        .await;
+        let results = decrypt_all(&s.provider, 160, 7, 1).await;
+        assert_eq!(results.len(), 160);
+        for r in &results {
+            assert_eq!(
+                r.as_ref().unwrap(),
+                &test_key(7, 1),
+                "every waiter gets the key"
+            );
+        }
+        assert_eq!(
+            s.attempts(),
+            1,
+            "160 concurrent cold decrypts must be exactly one KeyService call"
+        );
+        assert_eq!(s.mint.mint_hits(), 1, "...and exactly one token mint");
+        assert!(s.client.circuits.key.allow());
+    }
+
+    #[tokio::test]
+    async fn sustained_load_costs_one_broker_call_per_ttl_window() {
+        let s = stack(
+            "sustained",
+            good_mint(),
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::from_secs(10),
+            NEGATIVE_BACKOFF_BASE,
+        )
+        .await;
+        let mut ok = 0;
+        for batch in [334usize, 333, 333] {
+            for r in decrypt_all(&s.provider, batch, 5, 1).await {
+                assert_eq!(r.unwrap(), test_key(5, 1));
+                ok += 1;
+            }
+            skip(Duration::from_secs(11)).await; // past the 10 s cache TTL
+        }
+        assert_eq!(ok, 1000);
+        assert_eq!(
+            s.attempts(),
+            3,
+            "1000 decrypts across 3 TTL windows = 3 broker calls"
+        );
+        assert_eq!(s.mint.mint_hits(), 1, "one token served all three windows");
+    }
+
+    #[tokio::test]
+    async fn a_new_key_version_is_refetched_and_tenants_never_share_flights() {
+        let s = stack(
+            "rotate",
+            good_mint(),
+            Duration::ZERO,
+            Duration::ZERO,
+            DEFAULT_DEK_CACHE_TTL,
+            NEGATIVE_BACKOFF_BASE,
+        )
+        .await;
+        assert_eq!(s.provider.get_dek(4).await.unwrap().1, 1);
+        // Rotation: version 2 is a different cache key, so a decrypt naming it must fetch.
+        s.fake.state.lock().unwrap().current.insert(4, 2);
+        assert_eq!(
+            *s.provider.get_dek_version(4, 2).await.unwrap(),
+            test_key(4, 2)
+        );
+        assert_eq!(s.attempts(), 2);
+        // The old version (cached by the first `get_dek`) is still served from memory.
+        assert_eq!(
+            *s.provider.get_dek_version(4, 1).await.unwrap(),
+            test_key(4, 1)
+        );
+        assert_eq!(s.attempts(), 2);
+        // Another tenant is its own key and its own flight.
+        let other = decrypt_all(&s.provider, 20, 6, 1).await;
+        assert!(other.iter().all(|r| r.as_ref().unwrap() == &test_key(6, 1)));
+        assert_eq!(s.attempts(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_invalidate_during_a_fetch_is_served_but_never_cached() {
+        let s = stack(
+            "race",
+            good_mint(),
+            Duration::from_millis(250),
+            Duration::ZERO,
+            DEFAULT_DEK_CACHE_TTL,
+            NEGATIVE_BACKOFF_BASE,
+        )
+        .await;
+        let p = s.provider.clone();
+        let inflight = tokio::spawn(async move { p.get_dek(9).await });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        s.provider.invalidate(9); // rotation signal lands mid-fetch
+        assert_eq!(
+            inflight.await.unwrap().unwrap().1,
+            1,
+            "the caller is still served"
+        );
+        s.fake.state.lock().unwrap().current.insert(9, 2);
+        assert_eq!(
+            s.provider.get_dek(9).await.unwrap().1,
+            2,
+            "the raced result was not cached: the next read re-resolves to the rotated key"
+        );
+    }
+
+    #[tokio::test]
+    async fn broker_failure_fails_every_waiter_from_one_call_then_retries_after_backoff() {
+        let s = stack(
+            "fail",
+            good_mint(),
+            Duration::from_millis(100),
+            Duration::ZERO,
+            DEFAULT_DEK_CACHE_TTL,
+            Duration::from_secs(2),
+        )
+        .await;
+        s.fake.state.lock().unwrap().down = true;
+
+        let first = decrypt_all(&s.provider, 160, 3, 1).await;
+        assert!(first.iter().all(Result::is_err), "all 160 fail closed");
+        let after_first = s.attempts();
+        assert_eq!(
+            after_first, 3,
+            "one leader call = 1 try + 2 retries; 159 waiters made no call"
+        );
+        assert!(
+            s.client.circuits.key.allow(),
+            "one coalesced failure (3 attempts < threshold 5) must not open the breaker"
+        );
+
+        // Inside the negative window: another 160 callers are shed without any wire traffic.
+        let second = decrypt_all(&s.provider, 160, 3, 1).await;
+        assert!(second.iter().all(Result::is_err));
+        assert_eq!(s.attempts(), after_first);
+
+        // After the backoff the hub is retried -- and a recovered hub is served again.
+        skip(Duration::from_secs(3)).await;
+        s.fake.state.lock().unwrap().down = false;
+        assert_eq!(
+            *s.provider.get_dek_version(3, 1).await.unwrap(),
+            test_key(3, 1)
+        );
+        assert_eq!(s.attempts(), after_first + 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failing_token_mint_is_one_mint_for_every_waiter_and_never_reaches_the_broker() {
+        let s = stack(
+            "mintfail",
+            MintReply::Reject(tonic::Code::Unavailable),
+            Duration::ZERO,
+            Duration::from_millis(100),
+            DEFAULT_DEK_CACHE_TTL,
+            NEGATIVE_BACKOFF_BASE,
+        )
+        .await;
+        let results = decrypt_all(&s.provider, 160, 2, 1).await;
+        assert!(results.iter().all(Result::is_err), "fail closed, no key");
+        assert_eq!(s.mint.mint_hits(), 1, "160 callers, one mint attempt");
+        assert_eq!(s.attempts(), 0, "no token, no KeyService call");
+        assert!(
+            s.client.circuits.key.allow(),
+            "a single coalesced failure never opens it"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_negative_backoff_disables_only_the_negative_cache() {
+        let s = stack(
+            "zero",
+            good_mint(),
+            Duration::ZERO,
+            Duration::ZERO,
+            DEFAULT_DEK_CACHE_TTL,
+            Duration::ZERO,
+        )
+        .await;
+        s.fake.state.lock().unwrap().denied.insert(8);
+        assert!(s.provider.get_dek_version(8, 1).await.is_err());
+        s.fake.state.lock().unwrap().denied.clear();
+        assert!(
+            s.provider.get_dek_version(8, 1).await.is_ok(),
+            "no negative window"
+        );
     }
 }
