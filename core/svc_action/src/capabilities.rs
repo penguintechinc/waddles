@@ -4022,7 +4022,13 @@ mod tests {
             BundleConfigCache, CacheConfig, ConfigKey, StaticConfigSource, StaticLiveGate,
         };
         let src = Arc::new(StaticConfigSource::new());
-        src.set(ConfigKey::new(10, 7, "waddles.bot.commands.default"), 3, r#"{"x":1}"#);
+        // Same numeric scope as `scope()` / `get_context_carries_live_community_config`
+        // (tenant 7, community 3) -- a mismatched key made the "live" arm load nothing.
+        src.set(
+            ConfigKey::new(7, 3, "waddles.bot.commands.default"),
+            3,
+            r#"{"x":1}"#,
+        );
         for (live, expect) in [(true, true), (false, false)] {
             let cache = Arc::new(BundleConfigCache::new(
                 Arc::clone(&src) as Arc<dyn hub_client::bundle_config::ConfigSource>,
@@ -4030,8 +4036,7 @@ mod tests {
                 CacheConfig::default(),
             ));
             cache.set_gate(Arc::new(StaticLiveGate(live)));
-            let h = caps(FakeRelayQueue::default())
-                .with_bundle_config(Some(Arc::clone(&cache)));
+            let h = caps(FakeRelayQueue::default()).with_bundle_config(Some(Arc::clone(&cache)));
             let mut ctx = h.handle_context(&scope()).expect("context");
             h.attach_config_json(&scope(), &mut ctx).await;
             assert_eq!(ctx.get("config_json").is_some(), expect);

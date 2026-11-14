@@ -68,6 +68,7 @@ jobs:
         crate:
           - bundle_active_set
           - bundle_capability_gate
+          - bundle_config_db
           - bundle_compiler
           - bundle_executor
           - bundle_host_credentials
