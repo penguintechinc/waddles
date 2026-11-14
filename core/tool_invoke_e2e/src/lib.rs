@@ -106,6 +106,7 @@ impl Rig {
                 runtime: "runc".to_string(),
                 verified: false,
             },
+            executor_id: None,
         };
         let mut tasks = Vec::new();
         tasks.push(tokio::spawn(async move {

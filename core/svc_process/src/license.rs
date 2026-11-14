@@ -156,6 +156,36 @@ impl FeatureGate for DbBundleConfigGate {
     }
 }
 
+/// Opt-out kill switch for executor slot sharding
+/// (`bundle_active_set::sharding`, executor scale-out phase 1): unseen /
+/// OFF / license server unreachable = sharding ON (each app loads only on
+/// its 2 owner executors); ON = legacy broadcast to every executor.
+pub const DISABLE_EXECUTOR_SHARDING_FLAG: &str = "waddles.disable-executor-sharding";
+
+/// Production [`FeatureGate`] for [`DISABLE_EXECUTOR_SHARDING_FLAG`]:
+/// `enabled()` answers "is sharding on?" (the negated raw flag), and a
+/// bypassed (PenguinTech-domain) client reads as sharding ON -- the same
+/// bypass-awareness [`DbBundleConfigGate`] needs, since bypass makes every
+/// raw flag read `true`.
+pub struct ExecutorShardingGate(Arc<LicenseClient>);
+
+impl ExecutorShardingGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for ExecutorShardingGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            if self.0.bypass_active() {
+                return true;
+            }
+            !self.0.flag_enabled(DISABLE_EXECUTOR_SHARDING_FLAG).await
+        })
+    }
+}
+
 /// Opt-out kill-switch for the multi-tenant, change-log-driven active-set
 /// loader (`crate::changelog_consumer`) -- dataplane scale design rev 4,
 /// §8 step 2: "Multi-tenant watermark polling ...
