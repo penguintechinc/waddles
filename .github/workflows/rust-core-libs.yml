@@ -11,6 +11,7 @@ on:
       - 'core/bundle_capability_gate/**'
       - 'core/bundle_tool_call/**'
       - 'core/circuit_breaker/**'
+      - 'core/command_latency/**'
       - 'core/egress_detokenizer/**'
       - 'core/hub_client/**'
       - 'core/bundle_config_db/**'
@@ -59,6 +60,7 @@ jobs:
             core/bundle_capability_gate/**
             core/bundle_tool_call/**
             core/circuit_breaker/**
+            core/command_latency/**
             core/egress_detokenizer/**
             core/hub_client/**
             core/bundle_config_db/**
@@ -73,7 +75,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [bundle_active_set, bundle_capability_gate, bundle_config_db, bundle_tool_call, circuit_breaker, egress_detokenizer, hub_client, overlay_auth]
+        crate: [bundle_active_set, bundle_capability_gate, bundle_config_db, bundle_tool_call, circuit_breaker, command_latency, egress_detokenizer, hub_client, overlay_auth]
     uses: ./.github/workflows/rust-crate-ci.yml
     with:
       crate_name: ${{ matrix.crate }}
