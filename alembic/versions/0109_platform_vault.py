@@ -264,6 +264,10 @@ BEGIN
         IF NEW.state < OLD.state THEN
             RAISE EXCEPTION 'platform secret state only moves forward' USING ERRCODE = '23000';
         END IF;
+        IF OLD.state = 1 AND NEW.state NOT IN (1, 2, 5) THEN
+            RAISE EXCEPTION 'a pending platform secret is activated or destroyed, never skipped ahead'
+                USING ERRCODE = '23000';
+        END IF;
         IF NEW.id <> OLD.id
             OR NEW.public_id <> OLD.public_id
             OR NEW.secret_type <> OLD.secret_type
