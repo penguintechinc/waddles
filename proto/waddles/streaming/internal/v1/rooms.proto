@@ -43,6 +43,8 @@ service RoomsService {
   rpc LockRoom(LockRoomRequest) returns (LockRoomResponse);
   rpc UnlockRoom(UnlockRoomRequest) returns (UnlockRoomResponse);
   rpc AcknowledgeHand(AcknowledgeHandRequest) returns (AcknowledgeHandResponse);
+  // Clears the whole raised-hand queue of a room (moderator/admin actor role).
+  rpc ResetHands(ResetHandsRequest) returns (ResetHandsResponse);
 }
 
 // The acting participant's room role, resolved by the caller (hub-api: admin
@@ -331,4 +333,19 @@ message AcknowledgeHandRequest {
 
 message AcknowledgeHandResponse {
   RaisedHand hand = 1;
+}
+
+message ResetHandsRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  string actor_id = 4;
+  RoomRole actor_role = 5;
+}
+
+message ResetHandsResponse {
+  string room_id = 1;
+  // Number of raised hands that were cleared (0 for an already-empty queue).
+  uint32 cleared = 2;
 }

@@ -692,3 +692,32 @@ class AcknowledgeHandResponse(_message.Message):
     HAND_FIELD_NUMBER: _ClassVar[int]
     hand: RaisedHand
     def __init__(self, hand: _Optional[_Union[RaisedHand, _Mapping]] = ...) -> None: ...
+
+class ResetHandsRequest(_message.Message):
+    __slots__ = ("api_version", "community_id", "room_id", "actor_id", "actor_role")
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
+    COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
+    ROOM_ID_FIELD_NUMBER: _ClassVar[int]
+    ACTOR_ID_FIELD_NUMBER: _ClassVar[int]
+    ACTOR_ROLE_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
+    community_id: str
+    room_id: str
+    actor_id: str
+    actor_role: RoomRole
+    def __init__(
+        self,
+        api_version: _Optional[str] = ...,
+        community_id: _Optional[str] = ...,
+        room_id: _Optional[str] = ...,
+        actor_id: _Optional[str] = ...,
+        actor_role: _Optional[_Union[RoomRole, str]] = ...,
+    ) -> None: ...
+
+class ResetHandsResponse(_message.Message):
+    __slots__ = ("room_id", "cleared")
+    ROOM_ID_FIELD_NUMBER: _ClassVar[int]
+    CLEARED_FIELD_NUMBER: _ClassVar[int]
+    room_id: str
+    cleared: int
+    def __init__(self, room_id: _Optional[str] = ..., cleared: _Optional[int] = ...) -> None: ...

@@ -139,6 +139,12 @@ class RoomsServiceStub:
             response_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandResponse.FromString,
             _registered_method=True,
         )
+        self.ResetHands = channel.unary_unary(
+            "/waddles.streaming.internal.v1.RoomsService/ResetHands",
+            request_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ResetHandsRequest.SerializeToString,
+            response_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ResetHandsResponse.FromString,
+            _registered_method=True,
+        )
 
 
 class RoomsServiceServicer:
@@ -252,6 +258,12 @@ class RoomsServiceServicer:
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
+    def ResetHands(self, request, context):
+        """Clears the whole raised-hand queue of a room (moderator/admin actor role)."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
 
 def add_RoomsServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -339,6 +351,11 @@ def add_RoomsServiceServicer_to_server(servicer, server):
             servicer.AcknowledgeHand,
             request_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandRequest.FromString,
             response_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandResponse.SerializeToString,
+        ),
+        "ResetHands": grpc.unary_unary_rpc_method_handler(
+            servicer.ResetHands,
+            request_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ResetHandsRequest.FromString,
+            response_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ResetHandsResponse.SerializeToString,
         ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -853,6 +870,36 @@ class RoomsService:
             "/waddles.streaming.internal.v1.RoomsService/AcknowledgeHand",
             waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandRequest.SerializeToString,
             waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def ResetHands(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/waddles.streaming.internal.v1.RoomsService/ResetHands",
+            waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ResetHandsRequest.SerializeToString,
+            waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ResetHandsResponse.FromString,
             options,
             channel_credentials,
             insecure,
