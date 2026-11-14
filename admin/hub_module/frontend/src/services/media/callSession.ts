@@ -189,6 +189,13 @@ export class CallSession {
 
     let publishing: CallSnapshot['publishing'] = null;
     let notice: string | null = null;
+    if (!joined.publish && local !== null) {
+      // The room policy did not grant publishing: honour it without even trying the WHIP endpoint.
+      stopStream(local);
+      local = null;
+      notice = 'You can listen in this room but not speak or share video.';
+    }
+    if (!joined.subscribe) notice = 'You are not allowed to listen in this room.';
     if (local !== null) {
       const publisher = new WhipPublisher({ url: joined.whipUrl, token: joined.token, iceServers: joined.iceServers, deps: this.#mediaDeps });
       try {
@@ -235,7 +242,7 @@ export class CallSession {
 
   /** Reconciles remote subscriptions with the participants currently publishing (self is ignored). */
   async syncRemotes(publisherIds: readonly string[]): Promise<void> {
-    if (this.#snapshot.phase !== 'connected' || this.#joined === null || this.#token === null) return;
+    if (this.#snapshot.phase !== 'connected' || this.#joined === null || this.#token === null || !this.#joined.subscribe) return;
     const wanted = new Set(publisherIds.filter((id) => id !== this.#snapshot.selfParticipantId));
     for (const [id, subscriber] of [...this.#subscribers]) {
       if (!wanted.has(id)) {

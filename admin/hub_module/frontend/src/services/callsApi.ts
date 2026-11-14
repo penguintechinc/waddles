@@ -137,8 +137,11 @@ export interface IceServer {
 /** What `join` returns. The room token is only for the media client (`CallSession`); it is never rendered or stored. */
 export interface JoinedRoom {
   token: string;
-  /** Optional in the API; defaults to none (host candidates only). */
+  /** STUN entries (hub-api sends STUN only for now; empty means host candidates only). */
   iceServers: IceServer[];
+  /** What the room policy granted this caller: false means "do not publish" / "do not subscribe". */
+  publish: boolean;
+  subscribe: boolean;
   url: string;
   whipUrl: string;
   whepUrl: string;
@@ -201,6 +204,13 @@ function parseHand(raw: unknown, what = 'raised_hands[]'): RaisedHand {
     acknowledgedAt: readOptNumber(row, 'acknowledged_at'),
     acknowledgedBy: readOptString(row, 'acknowledged_by'),
   };
+}
+
+/** A required boolean grant: anything but a real boolean is a shape error (never silently "granted" or "denied"). */
+function readGrant(body: WireRecord, key: string): boolean {
+  const value = body[key];
+  if (typeof value !== 'boolean') throw new WireShapeError('join', `"${key}" is not a boolean`);
+  return value;
 }
 
 /** `ice_servers` is optional; a malformed entry is an error (a silently dropped TURN server would look like a network bug). */
@@ -369,6 +379,8 @@ export function joinRoom(communityId: number, roomId: string): Promise<JoinedRoo
     return {
       token: readString(body, 'token', 'join'),
       iceServers: parseIceServers(body['ice_servers']),
+      publish: readGrant(body, 'publish'),
+      subscribe: readGrant(body, 'subscribe'),
       url: readString(body, 'url', 'join'),
       whipUrl: readString(body, 'whip_url', 'join'),
       whepUrl: readString(body, 'whep_url', 'join'),
@@ -405,57 +417,56 @@ export function lowerHand(communityId: number, roomId: string): Promise<boolean>
   });
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
-// PROVISIONAL routes: agreed with the hub-api owner for PR #1326's follow-up (T4) but NOT yet in `openapi/v1.yaml`.
-// Shapes below follow that agreement; `callsApi.openapi.contract.test.ts` validates each one against the spec the
-// moment it appears there, and `callsApi.provisional.test.ts` pins the agreed shapes until then. When T4 lands,
-// check the spec, move these into the main contract table and delete the "provisional" wording.
-// ---------------------------------------------------------------------------------------------------------------------
-
-/** The community's persistent default room ("Town Hall"). PROVISIONAL shape: `{ room_id, label, participant_count }`. */
+/** The community's persistent default room ("Town Hall"), lazily created by hub-api. */
 export interface TownHall {
   roomId: string;
-  label: string | null;
+  label: string;
+  locked: boolean;
   participantCount: number;
+  /** True when this very request created the room. */
+  created: boolean;
 }
 
 function parseTownHall(raw: unknown): TownHall {
   const body = expectRecord(raw, 'town hall');
   return {
     roomId: readString(body, 'room_id', 'town hall'),
-    label: readOptString(body, 'label'),
+    label: readString(body, 'label', 'town hall'),
+    locked: readBool(body, 'locked'),
     participantCount: readNumber(body, 'participant_count', 'town hall'),
+    created: readBool(body, 'created'),
   };
 }
 
-/** `GET /api/v1/communities/:id/town-hall` (PROVISIONAL): the community's Town Hall; 404 when it has not been opened. */
+/** `GET /api/v1/communities/:id/town-hall`: the Town Hall (member); lazily created, idempotent, never expires. */
 export function fetchTownHall(communityId: number): Promise<TownHall> {
   return run(async () => parseTownHall((await apiClient.get<unknown>(`/api/v1/communities/${communityId}/town-hall`)).data));
 }
 
-/** `POST /api/v1/communities/:id/town-hall` (PROVISIONAL, idempotent "ensure"): opens the Town Hall if needed. */
+/** `POST /api/v1/communities/:id/town-hall`: ensure the Town Hall exists; same result as the GET. */
 export function ensureTownHall(communityId: number): Promise<TownHall> {
   return run(async () => parseTownHall((await apiClient.post<unknown>(`/api/v1/communities/${communityId}/town-hall`)).data));
 }
 
-/** `GET /community/.../voice/rooms/:id/hands/mine` (PROVISIONAL): the caller's own hand and its acknowledgement, or null. */
-export function fetchMyHand(communityId: number, roomId: string): Promise<RaisedHand | null> {
-  return run(async () => {
-    const id = checkedRoomId(roomId);
-    const { data } = await apiClient.get<unknown>(`/api/v1/community/${communityId}/interact/voice/rooms/${id}/hands/mine`);
-    const hand = expectRecord(data, 'my hand')['hand'];
-    return hand === null || hand === undefined ? null : parseHand(hand, 'hand');
-  });
+/** The caller's OWN hand state (never anyone else's). */
+export interface MyHand {
+  raised: boolean;
+  acknowledged: boolean;
+  raisedAt: number | null;
+  acknowledgedAt: number | null;
 }
 
-/** `GET /community/.../voice/rooms/:id/participants` (PROVISIONAL member mirror of the admin route): names resolved by hub-api. */
-export function fetchMemberParticipants(communityId: number, roomId: string): Promise<CallParticipantList> {
+/** `GET /api/v1/communities/:id/calls/rooms/:room/hands/mine` (member): own hand and its acknowledgement. */
+export function fetchMyHand(communityId: number, roomId: string): Promise<MyHand> {
   return run(async () => {
     const id = checkedRoomId(roomId);
-    const body = expectRecord((await apiClient.get<unknown>(`/api/v1/community/${communityId}/interact/voice/rooms/${id}/participants`)).data, 'participants');
+    const { data } = await apiClient.get<unknown>(`/api/v1/communities/${communityId}/calls/rooms/${id}/hands/mine`);
+    const body = expectRecord(data, 'my hand');
     return {
-      participants: readArray(body, 'participants', 'participants').map(parseParticipant),
-      locked: readBool(body, 'locked'),
+      raised: readBool(body, 'raised'),
+      acknowledged: readBool(body, 'acknowledged'),
+      raisedAt: readOptNumber(body, 'raised_at'),
+      acknowledgedAt: readOptNumber(body, 'acknowledged_at'),
     };
   });
 }

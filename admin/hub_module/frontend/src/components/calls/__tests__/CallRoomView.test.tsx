@@ -8,11 +8,13 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { QueryClientProvider } from '@tanstack/react-query';
 import { CallRoomView } from '../CallRoomView';
 import { createTestQueryClient } from '../../../test/renderWithProviders';
-import { ADA, GRACE, ROOM_ID, envelope, handWire, httpError, participantWire, serve } from '../../../test/callsFixtures';
+import { ADA, GRACE, ROOM_ID, envelope, handWire, httpError, participantWire, roomWire, serve } from '../../../test/callsFixtures';
 import { FakePeerConnection, answerResponse, fakeDevices, fakeMediaDeps, resetFakeRtc } from '../../../test/fakeRtc';
 
 const TOKEN = 'room-token-SECRET-value';
 const MEMBER = `/api/v1/community/7/interact/voice/rooms/${ROOM_ID}`;
+const MEMBER_ROOMS = '/api/v1/community/7/interact/voice/rooms';
+const MY_HAND = `/api/v1/communities/7/calls/rooms/${ROOM_ID}/hands/mine`;
 const ADMIN = `/api/v1/admin/7/calls/rooms/${ROOM_ID}`;
 const SELF = '11111111-1111-4111-8111-111111111111';
 
@@ -23,9 +25,18 @@ const joinOk = {
   whip_url: 'https://media.example/rtc/rooms/r/whip',
   whep_url: 'https://media.example/rtc/rooms/r/whep',
   token_id: 'tok',
+  token_type: 'Bearer',
   participant_id: SELF,
   expires_at: 4_000_000_000,
+  publish: true,
+  subscribe: true,
+  ice_servers: [{ urls: ['stun:stun.example:3478'] }],
 };
+
+/** What hub-api tells a member: the room with publisher ids and head counts, no names. */
+const memberRoomList = { success: true, rooms: [roomWire({ room_id: ROOM_ID, publisher_ids: [SELF, ADA], subscriber_count: 1 })] };
+
+const myHand = (over: Record<string, unknown> = {}) => ({ success: true, participant_id: SELF, raised: false, acknowledged: false, raised_at: null, acknowledged_at: null, ...over });
 
 const roster = {
   success: true,
@@ -53,8 +64,8 @@ function memberRoutes(extra: Record<string, unknown> = {}) {
   return {
     [`POST ${MEMBER}/join`]: joinOk,
     [`POST ${MEMBER}/leave`]: { success: true, message: 'Left room' },
-    [`GET ${MEMBER}/participants`]: roster,
-    [`GET ${MEMBER}/hands/mine`]: { success: true, hand: null },
+    [`GET ${MEMBER_ROOMS}`]: memberRoomList,
+    [`GET ${MY_HAND}`]: myHand(),
     [`POST ${MEMBER}/raise-hand`]: { success: true, hand: handWire(SELF, 'Me Myself', 100) },
     [`POST ${MEMBER}/lower-hand`]: { success: true, lowered: true },
     ...extra,
@@ -97,7 +108,7 @@ describe('CallRoomView', () => {
   });
   afterEach(() => vi.restoreAllMocks());
 
-  it('shows the lobby first and joins with the microphone, publishing and subscribing to each remote publisher by name', async () => {
+  it('shows the lobby first and joins with the microphone, publishing and subscribing to each remote publisher', async () => {
     serve(memberRoutes());
     const { fetchImpl, container } = renderRoom();
     expect(await screen.findByTestId('call-lobby')).toHaveTextContent('Join with your microphone to talk');
@@ -107,10 +118,10 @@ describe('CallRoomView', () => {
     expect(posts(fetchImpl, '/whip')).toEqual(['https://media.example/rtc/rooms/r/whip']);
     await waitFor(() => expect(posts(fetchImpl, '/whep')).toEqual([`https://media.example/rtc/rooms/r/whep?source=${ADA}`]));
     const tiles = await within(connected).findAllByTestId('media-tile');
-    expect(tiles.map((t) => t.getAttribute('aria-label'))).toEqual(['You', 'Ada Lovelace']);
-    const roomRoster = within(connected).getByTestId('roster');
-    expect(within(roomRoster).getByText('Grace Hopper')).toBeInTheDocument();
-    expect(within(roomRoster).getByText('Muted')).toBeInTheDocument();
+    // Members get no names from hub-api (no member participants route): remote tiles are numbered, never an id.
+    expect(tiles.map((t) => t.getAttribute('aria-label'))).toEqual(['You', 'Participant 1']);
+    expect(within(connected).getByTestId('room-presence')).toHaveTextContent('3 people, 2 speaking');
+    expect(FakePeerConnection.instances[0]?.config).toEqual({ iceServers: [{ urls: ['stun:stun.example:3478'] }] });
     for (const secret of [TOKEN, SELF, ADA, GRACE, ROOM_ID]) expect(container.textContent).not.toContain(secret);
   });
 
@@ -146,16 +157,16 @@ describe('CallRoomView', () => {
   });
 
   it('member: raises and lowers their hand with server state, acknowledgement and live announcements; no moderator controls', async () => {
-    let hand: unknown = null;
+    let state = myHand();
     serve(
       memberRoutes({
-        [`GET ${MEMBER}/hands/mine`]: () => ({ success: true, hand }),
+        [`GET ${MY_HAND}`]: () => state,
         [`POST ${MEMBER}/raise-hand`]: () => {
-          hand = handWire(SELF, 'Me Myself', 100);
-          return { success: true, hand };
+          state = myHand({ raised: true, raised_at: 100 });
+          return { success: true, hand: handWire(SELF, 'Me Myself', 100) };
         },
         [`POST ${MEMBER}/lower-hand`]: () => {
-          hand = null;
+          state = myHand();
           return { success: true, lowered: true };
         },
       }),
@@ -171,7 +182,6 @@ describe('CallRoomView', () => {
     expect(within(mine).getByTestId('hand-state')).toHaveTextContent('Your hand is raised.');
     expect(within(mine).getByTestId('hand-live-region')).toHaveTextContent('You raised your hand.');
 
-    hand = handWire(SELF, 'Me Myself', 100, { acknowledged_at: 120, acknowledged_by: ADA });
     await act(async () => {
       fireEvent.click(lower);
     });
@@ -184,8 +194,7 @@ describe('CallRoomView', () => {
   });
 
   it('member: shows the acknowledgement a moderator gave and announces it', async () => {
-    const acknowledged = handWire(SELF, 'Me Myself', 100, { acknowledged_at: 120, acknowledged_by: ADA });
-    serve(memberRoutes({ [`GET ${MEMBER}/hands/mine`]: { success: true, hand: acknowledged } }));
+    serve(memberRoutes({ [`GET ${MY_HAND}`]: myHand({ raised: true, acknowledged: true, raised_at: 100, acknowledged_at: 120 }) }));
     renderRoom();
     const connected = await joinWithMic();
     const mine = within(connected).getByTestId('my-hand');
@@ -197,7 +206,7 @@ describe('CallRoomView', () => {
     serve(
       memberRoutes({
         [`POST ${MEMBER}/raise-hand`]: httpError(429, envelope('RATE_LIMITED', 'Slow down')),
-        [`GET ${MEMBER}/hands/mine`]: httpError(404, envelope('NOT_FOUND', 'No such route')),
+        [`GET ${MY_HAND}`]: httpError(404, envelope('NOT_FOUND', 'No such route')),
       }),
     );
     renderRoom();
@@ -220,6 +229,8 @@ describe('CallRoomView', () => {
     });
     renderRoom({ moderator: true });
     const connected = await joinWithMic();
+    // Moderators get display names from the admin participants route.
+    await waitFor(() => expect(within(connected).getAllByTestId('media-tile').map((t) => t.getAttribute('aria-label'))).toEqual(['You', 'Ada Lovelace']));
     expect(within(connected).queryByTestId('my-hand')).not.toBeInTheDocument();
     expect(await within(connected).findByTestId('hands-queue')).toHaveTextContent('Grace Hopper');
 
@@ -349,6 +360,24 @@ describe('CallRoomView', () => {
       expect(await within(connected).findByText(/Could not receive audio or video from 1 participant\. Retrying\./)).toBeInTheDocument();
     });
 
+    it('a room policy without the publish grant: the member listens, nothing is published, the microphone is released', async () => {
+      serve(memberRoutes({ [`POST ${MEMBER}/join`]: { ...joinOk, publish: false } }));
+      const { fetchImpl, devices } = renderRoom();
+      fireEvent.click(await screen.findByRole('button', { name: 'Join with microphone' }));
+      expect(await screen.findByText('You can listen in this room but not speak or share video.')).toBeInTheDocument();
+      expect(posts(fetchImpl, '/whip')).toEqual([]);
+      const opened = (await devices.getUserMedia.mock.results[0]?.value) as { getTracks: () => Array<{ readyState: string }> };
+      expect(opened.getTracks().every((t) => t.readyState === 'ended')).toBe(true);
+      expect(screen.queryByRole('button', { name: /microphone/i })).not.toBeInTheDocument();
+    });
+
+    it('a room that disappears from the list while connected is shown as an error, not an empty room', async () => {
+      serve(memberRoutes({ [`GET ${MEMBER_ROOMS}`]: { success: true, rooms: [] } }));
+      renderRoom();
+      const connected = await joinWithMic();
+      expect(await within(connected).findByTestId('calls-error')).toHaveTextContent('This room no longer exists.');
+    });
+
     it('without a publish grant (403) the member listens, with a notice', async () => {
       serve(memberRoutes());
       renderRoom({ fetchImpl: media({ whip: 403 }) });
@@ -356,16 +385,16 @@ describe('CallRoomView', () => {
       expect(await screen.findByText('You can listen in this room but not speak or share video.')).toBeInTheDocument();
     });
 
-    it('a failing participants read keeps the call up and shows the error with retry in the side panel', async () => {
+    it('a failing presence read keeps the call up and shows the error with retry in the side panel', async () => {
       let healthy = false;
-      serve(memberRoutes({ [`GET ${MEMBER}/participants`]: () => (healthy ? roster : httpError(503, envelope('UNAVAILABLE', 'Roster unavailable', { retryable: true }))) }));
+      serve(memberRoutes({ [`GET ${MEMBER_ROOMS}`]: () => (healthy ? memberRoomList : httpError(503, envelope('UNAVAILABLE', 'Roster unavailable', { retryable: true }))) }));
       renderRoom();
       const connected = await joinWithMic();
       const state = await within(connected).findByTestId('calls-unavailable');
       expect(state).toHaveTextContent('Roster unavailable');
       healthy = true;
       fireEvent.click(within(state).getByRole('button', { name: 'Try again' }));
-      expect(await within(connected).findByTestId('roster')).toHaveTextContent('Grace Hopper');
+      expect(await within(connected).findByTestId('room-presence')).toHaveTextContent('3 people, 2 speaking');
     });
   });
 });

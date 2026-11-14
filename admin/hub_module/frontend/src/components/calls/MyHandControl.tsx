@@ -22,8 +22,8 @@ export function MyHandControl({ communityId, roomId }: MyHandControlProps) {
   const [announcement, setAnnouncement] = useState('');
   const [error, setError] = useState<CallsApiError | null>(null);
 
-  const raised = mine.data !== undefined ? mine.data !== null : localRaised;
-  const acknowledged = mine.data?.acknowledgedAt != null;
+  const raised = mine.data !== undefined ? mine.data.raised : localRaised;
+  const acknowledged = mine.data?.acknowledged === true;
 
   const wasAcknowledged = useRef(false);
   useEffect(() => {

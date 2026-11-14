@@ -25,8 +25,12 @@ const joinOk = {
   whip_url: 'https://media.example/rtc/rooms/r/whip',
   whep_url: 'https://media.example/rtc/rooms/r/whep',
   token_id: 'tok-1',
+  token_type: 'Bearer',
   participant_id: SELF,
   expires_at: 1760003600,
+  publish: true,
+  subscribe: true,
+  ice_servers: [],
 };
 const roster = { success: true, locked: false, participants: [participantWire(SELF, 'Me Myself'), participantWire(ADA, 'Ada Lovelace')] };
 
@@ -34,8 +38,7 @@ const callRoutes = {
   [`GET ${BASE}`]: roomsOk,
   [`POST ${BASE}/${ROOM_ID}/join`]: joinOk,
   [`POST ${BASE}/${ROOM_ID}/leave`]: { success: true, message: 'Left room' },
-  [`GET ${BASE}/${ROOM_ID}/participants`]: roster,
-  [`GET ${BASE}/${ROOM_ID}/hands/mine`]: { success: true, hand: null },
+  [`GET /api/v1/communities/7/calls/rooms/${ROOM_ID}/hands/mine`]: { success: true, participant_id: SELF, raised: false, acknowledged: false, raised_at: null, acknowledged_at: null },
 };
 
 function renderView(channel: { communityId: number | string; name?: string; allowAdHocVoice?: boolean } = { communityId: '7', name: 'Voice lounge' }) {

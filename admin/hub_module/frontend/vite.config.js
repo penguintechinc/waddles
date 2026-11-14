@@ -50,11 +50,15 @@ export default defineConfig({
         'src/components/calls/**/*.{ts,tsx}',
         'src/components/interaction/VoiceView.tsx',
         'src/pages/admin/AdminCommunityCalls.tsx',
+        // Town Hall: browser WHIP/WHEP media client, call session state machine, call view and page.
+        'src/services/media/**/*.ts',
+        'src/hooks/{useCallSession,useCallPresence}.ts',
+        'src/pages/community/TownHall.tsx',
         // Contract re-points: typed AI-knowledge client, the gap-check route matcher, gated/re-pointed pages.
         'scripts/lib/backend-routes.mjs',
         'src/pages/admin/AdminHome.jsx',
       ],
-      exclude: ['src/components/ui/index.ts', 'src/components/ui/**/__tests__/**', 'src/components/**/__tests__/**'],
+      exclude: ['src/components/ui/index.ts', 'src/components/ui/**/__tests__/**', 'src/components/**/__tests__/**', 'src/services/media/__tests__/**'],
       thresholds: {
         statements: 90,
         branches: 90,

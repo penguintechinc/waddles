@@ -21,7 +21,6 @@ import {
   createRoom,
   deleteRoom,
   ensureTownHall,
-  fetchMemberParticipants,
   fetchMyHand,
   fetchParticipants,
   fetchTownHall,
@@ -79,21 +78,10 @@ const ROWS: readonly Row[] = [
   { name: 'leaveRoom', method: 'POST', template: `${MEMBER}/{room_name}/leave`, call: () => leaveRoom(COMMUNITY, ROOM) },
   { name: 'raiseHand', method: 'POST', template: `${MEMBER}/{room_name}/raise-hand`, call: () => raiseHand(COMMUNITY, ROOM) },
   { name: 'lowerHand', method: 'POST', template: `${MEMBER}/{room_name}/lower-hand`, call: () => lowerHand(COMMUNITY, ROOM) },
-];
-
-/**
- * PROVISIONAL rows: routes agreed with the hub-api owner but not yet published in the spec (T4 follow-up). Each is
- * validated against the spec the moment it appears there (full conformance, same as ROWS); until then it is reported
- * as provisional and covered by `callsApi.provisional.test.ts`. Promote a row to ROWS once it is in the spec.
- */
-const PROVISIONAL_ROWS: readonly Row[] = [
+  { name: 'fetchMyHand', method: 'GET', template: '/api/v1/communities/{community_id}/calls/rooms/{room_id}/hands/mine', call: () => fetchMyHand(COMMUNITY, ROOM) },
   { name: 'fetchTownHall', method: 'GET', template: '/api/v1/communities/{community_id}/town-hall', call: () => fetchTownHall(COMMUNITY) },
   { name: 'ensureTownHall', method: 'POST', template: '/api/v1/communities/{community_id}/town-hall', call: () => ensureTownHall(COMMUNITY) },
-  { name: 'fetchMyHand', method: 'GET', template: `${MEMBER}/{room_name}/hands/mine`, call: () => fetchMyHand(COMMUNITY, ROOM) },
-  { name: 'fetchMemberParticipants', method: 'GET', template: `${MEMBER}/{room_name}/participants`, call: () => fetchMemberParticipants(COMMUNITY, ROOM) },
 ];
-
-const inSpec = (row: Row): boolean => spec.paths[row.template]?.[row.method.toLowerCase()] !== undefined;
 
 /** Runs `call` once and returns the single request it emitted (a parse failure on the stub reply is ignored). */
 async function capture(call: () => Promise<unknown>) {
@@ -109,7 +97,7 @@ async function capture(call: () => Promise<unknown>) {
 describe('calls client conforms to openapi/v1.yaml', () => {
   it('examined a non-trivial spec and client surface (zero is a failure)', () => {
     expect(Object.keys(spec.paths).length).toBeGreaterThan(100);
-    expect(ROWS.length).toBeGreaterThanOrEqual(20);
+    expect(ROWS.length).toBeGreaterThanOrEqual(23);
   });
 
   describe.each(ROWS)('$name', (row) => {
@@ -133,37 +121,18 @@ describe('calls client conforms to openapi/v1.yaml', () => {
     });
   });
 
-  describe.each(PROVISIONAL_ROWS)('PROVISIONAL $name', (row) => {
-    it.runIf(inSpec(row))('is in the spec now: sends a documented request and parses a spec-generated response', async () => {
-      const sent = await capture(row.call);
-      const found = findOperation(spec, sent.method ?? '', sent.url ?? '');
-      expect(found?.template).toBe(row.template);
-      const body = typeof sent.data === 'string' ? (JSON.parse(sent.data) as unknown) : sent.data;
-      expect(checkRequestBody(spec, found?.operation ?? {}, body)).toEqual([]);
-      for (const all of [true, false]) {
-        rec.reply.data = sample(spec, responseSchema(spec, found?.operation ?? {}, successStatus(found?.operation ?? {})), all);
-        await expect(row.call()).resolves.not.toThrow();
-      }
-    });
-
-    it.skipIf(inSpec(row))('is not in the spec yet: shape pinned by callsApi.provisional.test.ts (promote this row when T4 lands)', () => {
-      expect(inSpec(row)).toBe(false);
-    });
-  });
-
   it('covers every calls/voice operation the spec documents, and nothing the spec lacks', () => {
     const documented = new Set<string>();
     for (const [template, item] of Object.entries(spec.paths)) {
-      if (!template.includes('/calls/rooms') && !template.includes('/interact/voice/rooms')) continue;
+      if (!template.includes('/calls/rooms') && !template.includes('/interact/voice/rooms') && !template.includes('/town-hall')) continue;
       for (const method of Object.keys(item)) {
         if (['get', 'post', 'put', 'patch', 'delete'].includes(method)) documented.add(`${method.toUpperCase()} ${template}`);
       }
     }
-    // Provisional rows that have reached the spec count as covered (their conformance test above runs for real).
-    const covered = new Set([...ROWS, ...PROVISIONAL_ROWS.filter(inSpec)].map((row) => `${row.method} ${row.template}`));
-    expect(documented.size).toBeGreaterThanOrEqual(20);
+    const covered = new Set(ROWS.map((row) => `${row.method} ${row.template}`));
+    expect(documented.size).toBeGreaterThanOrEqual(23);
     expect([...documented].filter((op) => !covered.has(op))).toEqual([]);
-    expect([...covered].filter((op) => !documented.has(op) && !op.includes('/town-hall'))).toEqual([]);
+    expect([...covered].filter((op) => !documented.has(op))).toEqual([]);
   });
 });
 

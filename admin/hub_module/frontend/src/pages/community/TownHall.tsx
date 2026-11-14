@@ -1,38 +1,19 @@
 import { useParams } from 'react-router-dom';
-import { VideoCameraIcon } from '@heroicons/react/24/outline';
-import { Button, EmptyState, ErrorState, LoadingState, PageHeader } from '../../components/ui';
+import { ErrorState, LoadingState, PageHeader } from '../../components/ui';
 import { useAuthView } from '../../contexts/authView';
 import { CallRoomView } from '../../components/calls/CallRoomView';
-import { CallsActionError, CallsErrorPanel } from '../../components/calls/CallsErrors';
-import { useEnsureTownHall, useTownHall } from '../../hooks/useCalls';
+import { CallsErrorPanel } from '../../components/calls/CallsErrors';
+import { useTownHall } from '../../hooks/useCalls';
 import type { SessionDeps } from '../../services/media/callSession';
 
 /** The community's persistent default room: members meet here with audio and video. */
 function TownHallRoom({ communityId, overrides }: { communityId: number; overrides: Pick<SessionDeps, 'devices' | 'media'> | undefined }) {
   const { isCommunityAdmin } = useAuthView();
   const townHall = useTownHall(communityId);
-  const ensure = useEnsureTownHall(communityId);
 
   let body;
   if (townHall.isPending) {
     body = <LoadingState label="Loading Town Hall" />;
-  } else if (townHall.isError && townHall.error.kind === 'not-found') {
-    body = (
-      <>
-        {ensure.isError ? <CallsActionError error={ensure.error} onDismiss={() => ensure.reset()} /> : null}
-        <EmptyState
-          icon={<VideoCameraIcon />}
-          title="The Town Hall has not been opened yet"
-          description="Open it to give your community a place to meet with audio and video."
-          testId="town-hall-not-opened"
-          action={
-            <Button variant="primary" loading={ensure.isPending} onClick={() => ensure.mutate(undefined)}>
-              Open Town Hall
-            </Button>
-          }
-        />
-      </>
-    );
   } else if (townHall.isError) {
     body = <CallsErrorPanel error={townHall.error} onRetry={() => void townHall.refetch()} />;
   } else {

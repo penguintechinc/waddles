@@ -16,6 +16,8 @@ const GRACE = '33333333-3333-4333-8333-333333333333';
 const joined = (over: Partial<JoinedRoom> = {}): JoinedRoom => ({
   token: TOKEN,
   iceServers: [],
+  publish: true,
+  subscribe: true,
   url: 'https://media.example/rtc/rooms/r',
   whipUrl: 'https://media.example/rtc/rooms/r/whip',
   whepUrl: 'https://media.example/rtc/rooms/r/whep',
@@ -113,6 +115,35 @@ describe('join', () => {
     await session.join(MIC);
     await session.join(MIC);
     expect(join).toHaveBeenCalledTimes(1);
+  });
+
+  it('honours a room policy that denies publishing: no WHIP attempt, microphone released, listening with a notice', async () => {
+    const { session, devices, fetchImpl } = setup({ join: async () => joined({ publish: false }) });
+    await session.join(MIC);
+    expect(methods(fetchImpl, 'POST')).toEqual([]);
+    expect(session.getSnapshot()).toMatchObject({ phase: 'connected', listenOnly: true, publishing: null, localStream: null });
+    expect(session.getSnapshot().notice).toContain('listen');
+    const opened = (await devices.getUserMedia.mock.results[0]?.value) as { getTracks: () => FakeTrack[] };
+    expect(opened.getTracks().every((t) => t.readyState === 'ended')).toBe(true);
+  });
+
+  it('honours a room policy that denies subscribing: no WHEP sessions, with a notice', async () => {
+    const { session, fetchImpl } = setup({ join: async () => joined({ subscribe: false }) });
+    await session.join(MIC);
+    await session.syncRemotes([ADA]);
+    expect(methods(fetchImpl, 'POST').filter((u) => u.includes('/whep'))).toEqual([]);
+    expect(session.getSnapshot().notice).toContain('not allowed to listen');
+    expect(session.getSnapshot().remotes).toEqual([]);
+  });
+
+  it('passes the ICE servers from the join response to every peer connection', async () => {
+    const { session } = setup({ join: async () => joined({ iceServers: [{ urls: ['stun:stun.example:3478'] }] }) });
+    await session.join(MIC);
+    await session.syncRemotes([ADA]);
+    expect(FakePeerConnection.instances.map((p) => p.config)).toEqual([
+      { iceServers: [{ urls: ['stun:stun.example:3478'] }] },
+      { iceServers: [{ urls: ['stun:stun.example:3478'] }] },
+    ]);
   });
 
   it('shares audio only, with a notice, when the browser cannot send video', async () => {

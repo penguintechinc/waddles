@@ -1,13 +1,13 @@
 /**
- * Town Hall page: the community's persistent room. Loading it (PROVISIONAL GET town-hall), opening it when it does not
- * exist (PROVISIONAL POST), the flag-off (402) / 503-retry / error states, role-based call controls, and the real
- * join flow on fakes. No "media join coming" placeholder remains.
+ * Town Hall page: the community's persistent room (hub-api creates it lazily, so a load never means "not opened"):
+ * the flag-off (402) / 503-retry / error states, role-based call controls, and the real join flow on fakes.
+ * No "media join coming" placeholder remains.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import TownHall from '../TownHall';
 import { renderWithProviders } from '../../../test/renderWithProviders';
-import { ADA, ROOM_ID, envelope, httpError, participantWire, serve } from '../../../test/callsFixtures';
+import { ADA, ROOM_ID, envelope, httpError, participantWire, roomWire, serve } from '../../../test/callsFixtures';
 import { answerResponse, fakeDevices, fakeMediaDeps, resetFakeRtc } from '../../../test/fakeRtc';
 
 const auth = vi.hoisted(() => ({ admin: false }));
@@ -16,7 +16,18 @@ vi.mock('../../../contexts/AuthContext', () => ({ useAuth: () => ({ isCommunityA
 const TOWN_HALL = '/api/v1/communities/7/town-hall';
 const MEMBER = `/api/v1/community/7/interact/voice/rooms/${ROOM_ID}`;
 const SELF = '11111111-1111-4111-8111-111111111111';
-const hall = { success: true, room_id: ROOM_ID, label: 'Town Hall', participant_count: 2 };
+const hall = {
+  success: true,
+  room_id: ROOM_ID,
+  label: 'Town Hall',
+  locked: false,
+  participant_count: 2,
+  created: false,
+  join: { method: 'POST', path: `/api/v1/community/7/interact/voice/rooms/${ROOM_ID}/join` },
+};
+const MEMBER_ROOMS = '/api/v1/community/7/interact/voice/rooms';
+const MY_HAND = `/api/v1/communities/7/calls/rooms/${ROOM_ID}/hands/mine`;
+const handIdle = { success: true, participant_id: SELF, raised: false, acknowledged: false, raised_at: null, acknowledged_at: null };
 const joinOk = {
   success: true,
   token: 'room-token-secret',
@@ -24,10 +35,15 @@ const joinOk = {
   whip_url: 'https://media.example/rtc/rooms/r/whip',
   whep_url: 'https://media.example/rtc/rooms/r/whep',
   token_id: 'tok',
+  token_type: 'Bearer',
   participant_id: SELF,
   expires_at: 4_000_000_000,
+  publish: true,
+  subscribe: true,
+  ice_servers: [],
 };
 const roster = { success: true, locked: false, participants: [participantWire(SELF, 'Me Myself'), participantWire(ADA, 'Ada Lovelace')] };
+const memberRooms = { success: true, rooms: [roomWire({ room_id: ROOM_ID, publisher_ids: [SELF, ADA], subscriber_count: 0 })] };
 
 function renderPage(route = '/community/7/town-hall') {
   const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => (init.method === 'DELETE' ? new Response(null, { status: 204 }) : answerResponse('/rtc/rooms/r/sessions/s')));
@@ -49,8 +65,8 @@ describe('TownHall', () => {
     serve({
       [`GET ${TOWN_HALL}`]: hall,
       [`POST ${MEMBER}/join`]: joinOk,
-      [`GET ${MEMBER}/participants`]: roster,
-      [`GET ${MEMBER}/hands/mine`]: { success: true, hand: null },
+      [`GET ${MEMBER_ROOMS}`]: memberRooms,
+      [`GET ${MY_HAND}`]: handIdle,
     });
     const { container } = renderPage();
     expect(await screen.findByRole('heading', { level: 1, name: 'Town Hall' })).toBeInTheDocument();
@@ -58,7 +74,7 @@ describe('TownHall', () => {
     expect(within(lobby).getByRole('heading', { name: 'Town Hall' })).toBeInTheDocument();
     fireEvent.click(within(lobby).getByRole('button', { name: 'Join with microphone' }));
     const connected = await screen.findByTestId('call-connected');
-    expect(await within(connected).findByTestId('roster')).toHaveTextContent('Ada Lovelace');
+    expect(await within(connected).findByTestId('room-presence')).toHaveTextContent('2 people, 2 speaking');
     expect(container.textContent).not.toMatch(/LiveKit|media join is coming|not available yet/i);
     expect(container.textContent).not.toContain(ROOM_ID);
   });
@@ -67,8 +83,8 @@ describe('TownHall', () => {
     serve({
       [`GET ${TOWN_HALL}`]: hall,
       [`POST ${MEMBER}/join`]: joinOk,
-      [`GET ${MEMBER}/participants`]: roster,
-      [`GET ${MEMBER}/hands/mine`]: { success: true, hand: null },
+      [`GET ${MEMBER_ROOMS}`]: memberRooms,
+      [`GET ${MY_HAND}`]: handIdle,
       [`GET /api/v1/admin/7/calls/rooms/${ROOM_ID}/participants`]: roster,
       [`GET /api/v1/admin/7/calls/rooms/${ROOM_ID}/raised-hands`]: { success: true, count: 0, raised_hands: [] },
     });
@@ -85,42 +101,12 @@ describe('TownHall', () => {
     expect(screen.queryByRole('button', { name: 'Raise hand' })).not.toBeInTheDocument();
   });
 
-  it('when the Town Hall does not exist yet, offers to open it and then shows it', async () => {
-    let opened = false;
-    const { post } = serve({
-      [`GET ${TOWN_HALL}`]: () => (opened ? hall : httpError(404, envelope('NOT_FOUND', 'No Town Hall'))),
-      [`POST ${TOWN_HALL}`]: () => {
-        opened = true;
-        return hall;
-      },
-    });
-    renderPage();
-    expect(await screen.findByTestId('town-hall-not-opened')).toHaveTextContent('has not been opened yet');
-    fireEvent.click(screen.getByRole('button', { name: 'Open Town Hall' }));
-    expect(await screen.findByTestId('call-lobby')).toBeInTheDocument();
-    expect(post).toHaveBeenCalledWith(TOWN_HALL);
-  });
-
-  it('shows why opening failed and keeps the offer', async () => {
-    serve({
-      [`GET ${TOWN_HALL}`]: httpError(404, envelope('NOT_FOUND', 'No Town Hall')),
-      [`POST ${TOWN_HALL}`]: httpError(403, envelope('FORBIDDEN', 'Only admins can open it')),
-    });
-    renderPage();
-    fireEvent.click(await screen.findByRole('button', { name: 'Open Town Hall' }));
-    expect(await screen.findByText('Only admins can open it')).toBeInTheDocument();
-    expect(screen.getByTestId('town-hall-not-opened')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Dismiss message' }));
-    await waitFor(() => expect(screen.queryByText('Only admins can open it')).not.toBeInTheDocument());
-  });
-
   describe('failure states', () => {
     it('flag off (402): "not enabled for this community", no retry', async () => {
       serve({ [`GET ${TOWN_HALL}`]: httpError(402, envelope('FEATURE_NOT_ENABLED', 'Calls / RTC is not enabled for this plan')) });
       renderPage();
       expect(await screen.findByTestId('calls-feature-disabled')).toHaveTextContent('Calls are not enabled for this community');
       expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
-      expect(screen.queryByTestId('town-hall-not-opened')).not.toBeInTheDocument();
     });
 
     it('503: shows the server message and a retry that recovers', async () => {
@@ -134,11 +120,11 @@ describe('TownHall', () => {
       expect(await screen.findByTestId('call-lobby')).toBeInTheDocument();
     });
 
-    it('other errors are error states, never "not opened yet"', async () => {
-      serve({ [`GET ${TOWN_HALL}`]: httpError(500, envelope('INTERNAL', 'Something broke')) });
+    it('other errors (404 included) are error states with the server message, never an empty room', async () => {
+      serve({ [`GET ${TOWN_HALL}`]: httpError(404, envelope('COMMUNITY_NOT_FOUND', 'Community not found')) });
       renderPage();
-      expect(await screen.findByTestId('calls-error')).toHaveTextContent('Something broke');
-      await waitFor(() => expect(screen.queryByTestId('town-hall-not-opened')).not.toBeInTheDocument());
+      expect(await screen.findByTestId('calls-error')).toHaveTextContent('Community not found');
+      await waitFor(() => expect(screen.queryByTestId('call-lobby')).not.toBeInTheDocument());
     });
   });
 

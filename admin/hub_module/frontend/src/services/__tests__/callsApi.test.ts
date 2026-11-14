@@ -13,7 +13,11 @@ import {
   fetchRaisedHands,
   fetchRooms,
   GUEST_LABEL,
+  ensureTownHall,
+  fetchMyHand,
+  fetchTownHall,
   joinRoom,
+  parseIceServers,
   lowerHand,
   muteAll,
   personName,
@@ -192,8 +196,77 @@ describe('parsing', () => {
 
   it('parses a join response', async () => {
     vi.spyOn(apiClient, 'post').mockResolvedValue(
-      ok({ success: true, token: 't', url: 'https://media.example/whip', whip_url: 'https://media.example/whip/r', whep_url: 'https://media.example/whep/r', token_id: 'k', participant_id: PERSON, expires_at: 99 }),
+      ok({ success: true, token: 't', url: 'https://media.example/whip', whip_url: 'https://media.example/whip/r', whep_url: 'https://media.example/whep/r', token_id: 'k', participant_id: PERSON, expires_at: 99, publish: true, subscribe: false, ice_servers: [{ urls: ['stun:stun.example:3478'] }] }),
     );
-    await expect(joinRoom(7, ROOM)).resolves.toMatchObject({ participantId: PERSON, expiresAt: 99, whepUrl: 'https://media.example/whep/r' });
+    await expect(joinRoom(7, ROOM)).resolves.toMatchObject({ participantId: PERSON, expiresAt: 99, whepUrl: 'https://media.example/whep/r', publish: true, subscribe: false, iceServers: [{ urls: ['stun:stun.example:3478'] }] });
+  });
+});
+
+describe('join grants and ICE servers', () => {
+  const joinWire = { success: true, token: 't', url: 'u', whip_url: 'w', whep_url: 'e', token_id: 'k', participant_id: PERSON, expires_at: 1, publish: true, subscribe: true };
+
+  it('defaults ice_servers to none when absent or null', async () => {
+    vi.spyOn(apiClient, 'post').mockResolvedValue(ok(joinWire));
+    await expect(joinRoom(7, ROOM)).resolves.toMatchObject({ iceServers: [] });
+    expect(parseIceServers(null)).toEqual([]);
+  });
+
+  it('parses STUN entries and TURN entries with credentials', () => {
+    expect(parseIceServers([{ urls: 'stun:a:3478' }, { urls: ['turn:b:3478'], username: 'u', credential: 'c' }])).toEqual([
+      { urls: 'stun:a:3478' },
+      { urls: ['turn:b:3478'], username: 'u', credential: 'c' },
+    ]);
+  });
+
+  it('rejects malformed ice_servers loudly instead of silently dropping a server', () => {
+    expect(() => parseIceServers('stun:x')).toThrow('not a list');
+    expect(() => parseIceServers([{ username: 'u' }])).toThrow('"urls"');
+    expect(() => parseIceServers([{ urls: [] }])).toThrow('"urls"');
+    expect(() => parseIceServers([{ urls: [1] }])).toThrow('"urls"');
+  });
+
+  it('requires real boolean publish/subscribe grants (never defaulting to "granted" or "denied")', async () => {
+    for (const bad of [{ publish: undefined }, { subscribe: 'yes' }]) {
+      vi.spyOn(apiClient, 'post').mockResolvedValueOnce(ok({ ...joinWire, ...bad }));
+      await expect(joinRoom(7, ROOM)).rejects.toMatchObject({ code: 'CLIENT_ERROR' });
+    }
+  });
+});
+
+describe('town hall and own hand', () => {
+  const hall = { success: true, room_id: ROOM, label: 'Town Hall', locked: false, participant_count: 4, created: true, join: { method: 'POST', path: `/api/v1/community/7/interact/voice/rooms/${ROOM}/join` } };
+
+  it('GET and POST (ensure) read the same Town Hall shape', async () => {
+    const get = vi.spyOn(apiClient, 'get').mockResolvedValue(ok(hall));
+    const post = vi.spyOn(apiClient, 'post').mockResolvedValue(ok(hall));
+    const expected = { roomId: ROOM, label: 'Town Hall', locked: false, participantCount: 4, created: true };
+    await expect(fetchTownHall(7)).resolves.toEqual(expected);
+    await expect(ensureTownHall(7)).resolves.toEqual(expected);
+    expect(get).toHaveBeenCalledWith('/api/v1/communities/7/town-hall');
+    expect(post).toHaveBeenCalledWith('/api/v1/communities/7/town-hall');
+  });
+
+  it('a failing or drifted Town Hall is an error: 402 flag off, 503 retryable, wrong shape', async () => {
+    vi.spyOn(apiClient, 'get').mockRejectedValueOnce(httpError(402, envelope('FEATURE_NOT_ENABLED', 'off')));
+    await expect(fetchTownHall(7)).rejects.toMatchObject({ kind: 'feature-disabled' });
+    vi.spyOn(apiClient, 'get').mockRejectedValueOnce(httpError(503, envelope('UNAVAILABLE', 'down', { retryable: true })));
+    await expect(fetchTownHall(7)).rejects.toMatchObject({ kind: 'unavailable', retryable: true });
+    vi.spyOn(apiClient, 'get').mockResolvedValueOnce(ok({ room: ROOM }));
+    await expect(fetchTownHall(7)).rejects.toMatchObject({ code: 'CLIENT_ERROR' });
+  });
+
+  it('reads the caller\'s own hand: raised, acknowledged and timestamps', async () => {
+    const get = vi.spyOn(apiClient, 'get');
+    get.mockResolvedValueOnce(ok({ success: true, participant_id: PERSON, raised: true, acknowledged: true, raised_at: 10, acknowledged_at: 12 }));
+    await expect(fetchMyHand(7, ROOM)).resolves.toEqual({ raised: true, acknowledged: true, raisedAt: 10, acknowledgedAt: 12 });
+    expect(get).toHaveBeenLastCalledWith(`/api/v1/communities/7/calls/rooms/${ROOM}/hands/mine`);
+    get.mockResolvedValueOnce(ok({ success: true, participant_id: PERSON, raised: false, acknowledged: false, raised_at: null, acknowledged_at: null }));
+    await expect(fetchMyHand(7, ROOM)).resolves.toEqual({ raised: false, acknowledged: false, raisedAt: null, acknowledgedAt: null });
+  });
+
+  it('refuses a non-UUID room id for the own-hand read before any request', async () => {
+    const get = vi.spyOn(apiClient, 'get');
+    await expect(fetchMyHand(7, 'town-hall')).rejects.toMatchObject({ code: 'INVALID_ROOM_ID' });
+    expect(get).not.toHaveBeenCalled();
   });
 });

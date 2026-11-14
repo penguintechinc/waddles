@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Alert, Badge, Card, CardBody, LoadingState } from '../ui';
 import { useCallSession } from '../../hooks/useCallSession';
-import { useCallParticipants } from '../../hooks/useCalls';
+import { useCallPresence } from '../../hooks/useCallPresence';
 import { roomTitle, type CallRoom, type CallsApiError } from '../../services/callsApi';
 import type { CallPhase, SessionDeps } from '../../services/media/callSession';
 import { CallControls } from './CallControls';
@@ -11,7 +11,7 @@ import { CallsActionError, CallsErrorPanel } from './CallsErrors';
 import { MediaTile } from './MediaTile';
 import { MyHandControl } from './MyHandControl';
 import { RoomDetail } from './RoomDetail';
-import { Roster } from './Roster';
+import { RoomPresence } from './RoomPresence';
 
 export interface CallRoomViewProps {
   communityId: number;
@@ -41,13 +41,12 @@ const PHASE_TEXT: Record<CallPhase, string> = {
 export function CallRoomView({ communityId, room, moderator, onLeft, overrides }: CallRoomViewProps) {
   const { session, snapshot } = useCallSession(communityId, room.roomId, overrides);
   const connected = snapshot.phase === 'connected';
-  const participants = useCallParticipants(communityId, room.roomId, moderator, connected);
+  const presence = useCallPresence(communityId, room.roomId, moderator, connected);
   const [modNotice, setModNotice] = useState<string | null>(null);
   const [modError, setModError] = useState<CallsApiError | null>(null);
 
-  const publishers = participants.data?.participants.filter((p) => p.publisher).map((p) => p.participantId);
-  const publisherKey = publishers?.join(',');
-  const updatedAt = participants.dataUpdatedAt;
+  const publisherKey = presence.publisherIds?.join(',');
+  const updatedAt = presence.updatedAt;
   useEffect(() => {
     if (session !== null && connected && publisherKey !== undefined) void session.syncRemotes(publisherKey === '' ? [] : publisherKey.split(','));
     // `updatedAt` re-runs the sync on every poll so a failed remote is retried.
@@ -55,7 +54,8 @@ export function CallRoomView({ communityId, room, moderator, onLeft, overrides }
 
   if (session === null) return <LoadingState label="Preparing" />;
 
-  const names = new Map((participants.data?.participants ?? []).map((p) => [p.participantId, p.displayName]));
+  const nameOf = (participantId: string, index: number): string =>
+    presence.names.get(participantId) ?? (moderator ? 'Guest' : `Participant ${index + 1}`);
   const title = roomTitle(room);
   const busy = snapshot.phase === 'requesting-media' || snapshot.phase === 'joining' || snapshot.phase === 'connecting';
   const leave = async (): Promise<void> => {
@@ -103,10 +103,10 @@ export function CallRoomView({ communityId, room, moderator, onLeft, overrides }
             ) : null}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" aria-label="Participants video">
               {snapshot.localStream ? <MediaTile name="You" stream={snapshot.localStream} local muted={snapshot.micMuted} /> : null}
-              {snapshot.remotes.map((remote) => (
+              {snapshot.remotes.map((remote, index) => (
                 <MediaTile
                   key={remote.participantId}
-                  name={names.get(remote.participantId) ?? 'Guest'}
+                  name={nameOf(remote.participantId, index)}
                   stream={remote.stream}
                   connecting={remote.state === 'connecting'}
                 />
@@ -145,10 +145,10 @@ export function CallRoomView({ communityId, room, moderator, onLeft, overrides }
               ) : (
                 <>
                   <MyHandControl communityId={communityId} roomId={room.roomId} />
-                  {participants.isError ? (
-                    <CallsErrorPanel error={participants.error} onRetry={() => void participants.refetch()} />
+                  {presence.error ? (
+                    <CallsErrorPanel error={presence.error} onRetry={presence.refetch} />
                   ) : (
-                    <Roster participants={participants.data?.participants ?? []} />
+                    <RoomPresence total={presence.total} speaking={presence.speaking} />
                   )}
                 </>
               )}

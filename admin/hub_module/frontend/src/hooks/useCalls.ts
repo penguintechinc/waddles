@@ -10,8 +10,6 @@ import {
   acknowledgeHand,
   createRoom,
   deleteRoom,
-  ensureTownHall,
-  fetchMemberParticipants,
   fetchMyHand,
   fetchParticipants,
   fetchTownHall,
@@ -32,6 +30,7 @@ import {
   type CallsApiError,
   type CallsScope,
   type JoinedRoom,
+  type MyHand,
   type RaisedHand,
   type TownHall,
 } from '../services/callsApi';
@@ -45,7 +44,6 @@ export const callKeys = {
   participants: (communityId: number, roomId: string) => ['calls', 'admin', communityId, 'rooms', roomId, 'participants'] as const,
   hands: (communityId: number, roomId: string) => ['calls', 'admin', communityId, 'rooms', roomId, 'hands'] as const,
   townHall: (communityId: number) => ['calls', 'member', communityId, 'town-hall'] as const,
-  memberParticipants: (communityId: number, roomId: string) => ['calls', 'member', communityId, 'rooms', roomId, 'participants'] as const,
   myHand: (communityId: number, roomId: string) => ['calls', 'member', communityId, 'rooms', roomId, 'my-hand'] as const,
 };
 
@@ -55,21 +53,22 @@ export function pollUnlessFailed(state: { status: string }): number | false {
 }
 
 /** Rooms of a community. Failures are an error state (never an empty list); no automatic retries, the UI offers one. */
-export function useCallRooms(scope: CallsScope, communityId: number): UseQueryResult<CallRoom[], CallsApiError> {
+export function useCallRooms(scope: CallsScope, communityId: number, enabled = true): UseQueryResult<CallRoom[], CallsApiError> {
   return useQuery<CallRoom[], CallsApiError>({
     queryKey: callKeys.rooms(scope, communityId),
     queryFn: () => fetchRooms(scope, communityId),
+    enabled,
     retry: false,
     refetchInterval: (query) => pollUnlessFailed(query.state),
   });
 }
 
 /** Participants of the selected room (moderator view), polled. */
-export function useRoomParticipants(communityId: number, roomId: string | null): UseQueryResult<CallParticipantList, CallsApiError> {
+export function useRoomParticipants(communityId: number, roomId: string | null, enabled = true): UseQueryResult<CallParticipantList, CallsApiError> {
   return useQuery<CallParticipantList, CallsApiError>({
     queryKey: callKeys.participants(communityId, roomId ?? ''),
     queryFn: () => fetchParticipants(communityId, roomId ?? ''),
-    enabled: roomId !== null,
+    enabled: roomId !== null && enabled,
     retry: false,
     refetchInterval: (query) => pollUnlessFailed(query.state),
   });
@@ -189,7 +188,7 @@ export function useLowerHand(communityId: number) {
   return useCallsMutation((roomId: string) => lowerHand(communityId, roomId), [['calls', 'member', communityId]]);
 }
 
-/** The community's Town Hall room (PROVISIONAL route, see `callsApi.ts`); a 404 means it has not been opened yet. */
+/** The community's Town Hall room (lazily created by hub-api, so a read never means "not opened yet"). */
 export function useTownHall(communityId: number): UseQueryResult<TownHall, CallsApiError> {
   return useQuery<TownHall, CallsApiError>({
     queryKey: callKeys.townHall(communityId),
@@ -198,33 +197,9 @@ export function useTownHall(communityId: number): UseQueryResult<TownHall, Calls
   });
 }
 
-/** Open (ensure) the Town Hall, then refresh it. */
-export function useEnsureTownHall(communityId: number) {
-  return useCallsMutation(() => ensureTownHall(communityId), [callKeys.townHall(communityId)]);
-}
-
-/**
- * Participants of a room for the call view, polled: the moderator (admin) route for moderators, the member route
- * (PROVISIONAL) for everyone else. `enabled` is false until the call is connected.
- */
-export function useCallParticipants(
-  communityId: number,
-  roomId: string,
-  moderator: boolean,
-  enabled: boolean,
-): UseQueryResult<CallParticipantList, CallsApiError> {
-  return useQuery<CallParticipantList, CallsApiError>({
-    queryKey: moderator ? callKeys.participants(communityId, roomId) : callKeys.memberParticipants(communityId, roomId),
-    queryFn: () => (moderator ? fetchParticipants(communityId, roomId) : fetchMemberParticipants(communityId, roomId)),
-    enabled,
-    retry: false,
-    refetchInterval: (query) => pollUnlessFailed(query.state),
-  });
-}
-
-/** The member's own hand and whether a moderator acknowledged it (PROVISIONAL route), polled while connected. */
-export function useMyHand(communityId: number, roomId: string, enabled: boolean): UseQueryResult<RaisedHand | null, CallsApiError> {
-  return useQuery<RaisedHand | null, CallsApiError>({
+/** The member's own hand and whether a moderator acknowledged it, polled while connected. */
+export function useMyHand(communityId: number, roomId: string, enabled: boolean): UseQueryResult<MyHand, CallsApiError> {
+  return useQuery<MyHand, CallsApiError>({
     queryKey: callKeys.myHand(communityId, roomId),
     queryFn: () => fetchMyHand(communityId, roomId),
     enabled,
