@@ -22,11 +22,20 @@ Configuration (all from the environment, rendered by the Helm chart into hub-api
 
 Every call mints a short-lived (60s) ES256 JWT for hub-api's own SPIFFE identity with the
 single scope the RPC needs (`streaming.rooms:read|write|moderate`) via the app's
-`ServiceJwtIssuer`; the downstream verifies it before parsing anything.
+`ServiceJwtIssuer`; the downstream verifies it before parsing anything. Every request carries
+`api_version="v1"`; the server refuses anything else.
 
-Raw gRPC failures are translated to `RoomsRpcError(http_status, message)` so the blueprint
-keeps its `{success: false, error}` envelope; `ROUTE_RPCS` is the route -> RPC table the
-contract test pins against the proto descriptor.
+Raw gRPC failures are translated to `RoomsRpcError(http_status, message, code)` -- an explicit
+HTTP status per failure class, never a masked success (an unknown room is 404, a refused scope
+403, an unreachable service 503) -- and every failure is logged at ERROR with the gRPC status
+and the downstream message (closed strings and UUIDs only, no PII) and counted in
+`waddles_rooms_upstream_failures_total`. `ROUTE_RPCS` is the route -> RPC table the contract
+test pins against the proto descriptor.
+
+Results are typed frozen dataclasses (`RoomInfo`, `ParticipantInfo`, `HandInfo`, `JoinInfo`),
+never raw protobuf messages or dicts of them, so only the listed fields can reach a response.
+Participant ids are UUIDs; display names are resolved by hub-api itself
+(`services/call_participants.py`) and never cross to svc-streaming.
 """
 
 from __future__ import annotations
@@ -40,6 +49,7 @@ from typing import Any
 import grpc
 from flask_core.service_jwt import ServiceJwtError, ServiceJwtIssuer, spiffe_id
 from google.protobuf.message import Message
+from opentelemetry import metrics
 
 # isort: split
 import grpc_internal  # noqa: F401  (puts the generated pb/ tree on sys.path)
@@ -59,61 +69,74 @@ SCOPE_READ = "streaming.rooms:read"
 SCOPE_WRITE = "streaming.rooms:write"
 SCOPE_MODERATE = "streaming.rooms:moderate"
 
-#: Sentinel for a `calls.py` route with no svc-streaming equivalent (explicit 501, never a
-#: silent no-op). Raise-hand state lives in the rooms app bundle's kv, which hub-api has no
-#: client for; svc-streaming only owns media and moderation state.
-NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
+_ADMIN = "/api/v1/admin/<int:community_id>/calls/rooms"
+_MEMBER = "/api/v1/community/<int:community_id>/interact/voice/rooms"
 
 #: (HTTP method, Quart rule) of every `blueprints/v1/calls.py` route -> `RoomsService` RPC.
 #: `tests/test_calls_rpc_contract.py` fails when a route is missing here, when a mapped RPC is
-#: absent from the proto descriptor, or when a `NOT_IMPLEMENTED` entry gains an RPC.
+#: absent from the proto descriptor, or when a proto RPC is neither mapped here nor listed (with
+#: a reason) in `UNROUTED_RPCS`.
 ROUTE_RPCS: dict[tuple[str, str], str] = {
-    ("GET", "/api/v1/admin/<int:community_id>/calls/rooms"): "ListRooms",
-    ("POST", "/api/v1/admin/<int:community_id>/calls/rooms"): "CreateRoom",
-    ("GET", "/api/v1/admin/<int:community_id>/calls/rooms/<room_name>"): "GetRoom",
-    ("DELETE", "/api/v1/admin/<int:community_id>/calls/rooms/<room_name>"): "DeleteRoom",
-    ("POST", "/api/v1/admin/<int:community_id>/calls/rooms/<room_name>/lock"): "LockRoom",
-    ("POST", "/api/v1/admin/<int:community_id>/calls/rooms/<room_name>/unlock"): "UnlockRoom",
-    (
-        "GET",
-        "/api/v1/admin/<int:community_id>/calls/rooms/<room_name>/participants",
-    ): "ListParticipants",
-    (
-        "POST",
-        "/api/v1/admin/<int:community_id>/calls/rooms/<room_name>/kick",
-    ): "KickParticipant",
-    ("POST", "/api/v1/admin/<int:community_id>/calls/rooms/<room_name>/mute-all"): "MuteAll",
-    (
-        "GET",
-        "/api/v1/admin/<int:community_id>/calls/rooms/<room_name>/raised-hands",
-    ): NOT_IMPLEMENTED,
-    (
-        "POST",
-        "/api/v1/admin/<int:community_id>/calls/rooms/<room_name>/acknowledge-hand",
-    ): NOT_IMPLEMENTED,
-    ("GET", "/api/v1/community/<int:community_id>/interact/voice/rooms"): "ListRooms",
-    ("POST", "/api/v1/community/<int:community_id>/interact/voice/rooms"): "CreateRoom",
-    (
-        "POST",
-        "/api/v1/community/<int:community_id>/interact/voice/rooms/<room_name>/join",
-    ): "JoinRoom",
-    (
-        "POST",
-        "/api/v1/community/<int:community_id>/interact/voice/rooms/<room_name>/leave",
-    ): "LeaveRoom",
+    ("GET", _ADMIN): "ListRooms",
+    ("POST", _ADMIN): "CreateRoom",
+    ("GET", f"{_ADMIN}/<room_name>"): "GetRoom",
+    ("DELETE", f"{_ADMIN}/<room_name>"): "DeleteRoom",
+    ("POST", f"{_ADMIN}/<room_name>/lock"): "LockRoom",
+    ("POST", f"{_ADMIN}/<room_name>/unlock"): "UnlockRoom",
+    ("GET", f"{_ADMIN}/<room_name>/participants"): "ListParticipants",
+    ("POST", f"{_ADMIN}/<room_name>/kick"): "KickParticipant",
+    ("POST", f"{_ADMIN}/<room_name>/mute"): "MuteParticipant",
+    ("POST", f"{_ADMIN}/<room_name>/unmute"): "UnmuteParticipant",
+    ("POST", f"{_ADMIN}/<room_name>/mute-all"): "MuteAll",
+    ("GET", f"{_ADMIN}/<room_name>/raised-hands"): "ListHands",
+    ("POST", f"{_ADMIN}/<room_name>/acknowledge-hand"): "AcknowledgeHand",
+    ("POST", f"{_ADMIN}/<room_name>/reset-hands"): "ResetHands",
+    ("GET", _MEMBER): "ListRooms",
+    ("POST", _MEMBER): "CreateRoom",
+    ("POST", f"{_MEMBER}/<room_name>/join"): "JoinRoom",
+    ("POST", f"{_MEMBER}/<room_name>/leave"): "LeaveRoom",
+    ("POST", f"{_MEMBER}/<room_name>/raise-hand"): "RaiseHand",
+    ("POST", f"{_MEMBER}/<room_name>/lower-hand"): "LowerHand",
 }
 
-#: gRPC status -> HTTP status surfaced to hub-api's caller.
-_HTTP_STATUS: dict[grpc.StatusCode, int] = {
-    grpc.StatusCode.NOT_FOUND: 404,
-    grpc.StatusCode.INVALID_ARGUMENT: 400,
-    grpc.StatusCode.RESOURCE_EXHAUSTED: 429,
-    grpc.StatusCode.PERMISSION_DENIED: 403,
-    grpc.StatusCode.UNIMPLEMENTED: 501,
-    grpc.StatusCode.DEADLINE_EXCEEDED: 504,
+#: Proto RPCs deliberately without a hub-api route, each with the reason. The contract test
+#: fails when a proto RPC is neither routed nor listed here, so a future RPC cannot be left
+#: unmapped silently.
+UNROUTED_RPCS: dict[str, str] = {}
+
+#: gRPC status -> (HTTP status, machine code) surfaced to hub-api's caller.
+_HTTP_STATUS: dict[grpc.StatusCode, tuple[int, str]] = {
+    grpc.StatusCode.NOT_FOUND: (404, "NOT_FOUND"),
+    grpc.StatusCode.INVALID_ARGUMENT: (400, "INVALID_ARGUMENT"),
+    grpc.StatusCode.RESOURCE_EXHAUSTED: (429, "RESOURCE_EXHAUSTED"),
+    grpc.StatusCode.PERMISSION_DENIED: (403, "FORBIDDEN"),
+    grpc.StatusCode.UNIMPLEMENTED: (501, "STREAMING_UNIMPLEMENTED"),
+    grpc.StatusCode.DEADLINE_EXCEEDED: (504, "STREAMING_TIMEOUT"),
+    grpc.StatusCode.UNAVAILABLE: (503, "STREAMING_UNAVAILABLE"),
     # hub-api's own credential was refused: not the caller's fault
-    grpc.StatusCode.UNAUTHENTICATED: 502,
+    grpc.StatusCode.UNAUTHENTICATED: (502, "STREAMING_AUTH_REFUSED"),
 }
+
+#: Statuses whose downstream message is relayed to the caller (closed strings and ids only,
+#: see grpc.rs); every other class gets a generic message so internals never leak.
+_RELAY_MESSAGE = frozenset(
+    {
+        grpc.StatusCode.NOT_FOUND,
+        grpc.StatusCode.INVALID_ARGUMENT,
+        grpc.StatusCode.RESOURCE_EXHAUSTED,
+        grpc.StatusCode.PERMISSION_DENIED,
+        grpc.StatusCode.UNIMPLEMENTED,
+    }
+)
+
+_meter = metrics.get_meter("waddles.hub_api.calls_proxy")
+_upstream_failures = _meter.create_counter(
+    "waddles_rooms_upstream_failures_total",
+    description=(
+        "Failed hub-api -> svc-streaming RoomsService calls, by rpc and gRPC status "
+        "(label values are closed sets: no ids, names or messages)."
+    ),
+)
 
 
 class StreamingTargetNotConfiguredError(RuntimeError):
@@ -187,18 +210,84 @@ class RoomsClientConfig:
 IssuerProvider = Callable[[], ServiceJwtIssuer | None]
 
 
-def _room_dict(room: rooms_pb2.Room) -> dict[str, Any]:
-    """A `Room` message as the JSON object hub-api returns (ids/counts only, no PII)."""
-    return {
-        "room_id": room.room_id,
-        "community_id": room.community_id,
-        "label": room.label if room.HasField("label") else None,
-        "max_publishers": room.max_publishers,
-        "created_at": room.created_at,
-        "publisher_ids": list(room.publisher_ids),
-        "subscriber_count": room.subscriber_count,
-        "locked": room.locked,
-    }
+@dataclass(slots=True, frozen=True)
+class RoomInfo:
+    """A call room: ids and counts only, no PII. `label` is the creator-supplied display name."""
+
+    room_id: str
+    community_id: str
+    label: str | None
+    max_publishers: int
+    created_at: int
+    publisher_ids: list[str]
+    subscriber_count: int
+    locked: bool
+
+
+@dataclass(slots=True, frozen=True)
+class ParticipantInfo:
+    """A room participant as svc-streaming knows it: a UUID plus media flags, never a name."""
+
+    participant_id: str
+    publisher: bool
+    subscriber: bool
+    muted: bool
+    joined_at: int | None
+
+
+@dataclass(slots=True, frozen=True)
+class ParticipantList:
+    """`ListParticipants` result."""
+
+    room_id: str
+    locked: bool
+    participants: list[ParticipantInfo]
+
+
+@dataclass(slots=True, frozen=True)
+class HandInfo:
+    """One raised hand: participant UUID plus queue timestamps (unix seconds)."""
+
+    participant_id: str
+    raised_at: int
+    acknowledged_at: int | None
+    acknowledged_by: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class JoinInfo:
+    """`JoinRoom` result: a room token for ONE participant plus the WHIP/WHEP endpoints."""
+
+    token: str
+    token_id: str
+    participant_id: str
+    expires_at: int
+    whip_url: str
+    whep_url: str
+
+
+def _room(room: rooms_pb2.Room) -> RoomInfo:
+    """A `Room` message as the explicit `RoomInfo` field set."""
+    return RoomInfo(
+        room_id=room.room_id,
+        community_id=room.community_id,
+        label=room.label if room.HasField("label") else None,
+        max_publishers=room.max_publishers,
+        created_at=room.created_at,
+        publisher_ids=list(room.publisher_ids),
+        subscriber_count=room.subscriber_count,
+        locked=room.locked,
+    )
+
+
+def _hand(hand: rooms_pb2.RaisedHand) -> HandInfo:
+    """A `RaisedHand` message as the explicit `HandInfo` field set (unset optionals -> None)."""
+    return HandInfo(
+        participant_id=hand.participant_id,
+        raised_at=hand.raised_at,
+        acknowledged_at=hand.acknowledged_at if hand.HasField("acknowledged_at") else None,
+        acknowledged_by=hand.acknowledged_by if hand.HasField("acknowledged_by") else None,
+    )
 
 
 class RoomsClient:
@@ -227,6 +316,7 @@ class RoomsClient:
         self._stub: rooms_pb2_grpc.RoomsServiceStub | None = None
 
     def _get_stub(self) -> tuple[rooms_pb2_grpc.RoomsServiceStub, float]:
+        """Build (once) the mTLS channel + stub and return it with the per-call deadline."""
         config = self._explicit_config
         if self._stub is None:
             if self._channel is None:
@@ -245,8 +335,10 @@ class RoomsClient:
         return self._stub, timeout
 
     def _token(self, scope: str) -> str:
+        """Mint hub-api's short-lived machine JWT for `scope`; fail loud when it cannot."""
         issuer = self._issuer_provider() if self._issuer_provider else None
         if issuer is None:
+            self._record_failure("(token)", "NOT_CONFIGURED", "service JWT issuer not configured")
             raise RoomsRpcError(
                 502, "Streaming service unavailable", "STREAMING_AUTH_NOT_CONFIGURED"
             )
@@ -254,16 +346,30 @@ class RoomsClient:
             service_id = os.getenv("STREAMING_RTC_SERVICE_ID", "").strip() or spiffe_id(
                 self._deployment_env(), HUB_API_SERVICE
             )
-            return issuer.issue(
-                service_id,
-                scope,
-                ttl_seconds=_TOKEN_TTL_SECONDS,
+            return str(
+                issuer.issue(
+                    service_id,
+                    scope,
+                    ttl_seconds=_TOKEN_TTL_SECONDS,
+                )
             )
         except ServiceJwtError as exc:
-            logger.error("rooms gRPC: cannot mint service JWT (%s): %s", scope, type(exc).__name__)
+            self._record_failure("(token)", type(exc).__name__, str(exc))
             raise RoomsRpcError(
                 502, "Streaming service unavailable", "STREAMING_AUTH_NOT_CONFIGURED"
             ) from exc
+
+    @staticmethod
+    def _record_failure(rpc: str, status: str, message: str, *, exc_info: bool = False) -> None:
+        """Log one upstream failure at ERROR (status + message, no PII) and count it."""
+        logger.error(
+            "rooms gRPC %s failed: %s: %s",
+            rpc,
+            status,
+            message,
+            exc_info=exc_info,
+        )
+        _upstream_failures.add(1, {"rpc": rpc, "status": status})
 
     async def _call(
         self,
@@ -278,26 +384,25 @@ class RoomsClient:
         try:
             return await method(request, timeout=timeout, metadata=metadata)
         except grpc.aio.AioRpcError as exc:
-            code = exc.code()
-            status = _HTTP_STATUS.get(code, 502)
-            logger.warning("rooms gRPC %s failed: %s", rpc, code.name)
-            if status == 502:
-                raise RoomsRpcError(
-                    502, "Streaming service unavailable", "STREAMING_UNAVAILABLE"
-                ) from exc
-            # Downstream messages are built from closed strings and ids only (see grpc.rs).
-            raise RoomsRpcError(status, exc.details() or code.name) from exc
+            grpc_code = exc.code()
+            status, code = _HTTP_STATUS.get(grpc_code, (502, "STREAMING_ERROR"))
+            details = exc.details() or grpc_code.name
+            self._record_failure(rpc, grpc_code.name, details, exc_info=status >= 500)
+            if grpc_code in _RELAY_MESSAGE:
+                # Downstream messages are built from closed strings and ids only (see grpc.rs).
+                raise RoomsRpcError(status, details, code) from exc
+            raise RoomsRpcError(status, "Streaming service unavailable", code) from exc
 
-    async def list_rooms(self, community_id: int) -> list[dict[str, Any]]:
+    async def list_rooms(self, community_id: int) -> list[RoomInfo]:
         """`ListRooms` -- every live room the community owns."""
         resp = await self._call(
             "ListRooms",
             SCOPE_READ,
             rooms_pb2.ListRoomsRequest(api_version=API_VERSION, community_id=str(community_id)),
         )
-        return [_room_dict(r) for r in resp.rooms]
+        return [_room(r) for r in resp.rooms]
 
-    async def get_room(self, community_id: int, room_id: str) -> dict[str, Any]:
+    async def get_room(self, community_id: int, room_id: str) -> RoomInfo:
         """`GetRoom` -- one room, community-scoped."""
         resp = await self._call(
             "GetRoom",
@@ -306,9 +411,9 @@ class RoomsClient:
                 api_version=API_VERSION, community_id=str(community_id), room_id=room_id
             ),
         )
-        return _room_dict(resp.room)
+        return _room(resp.room)
 
-    async def list_participants(self, community_id: int, room_id: str) -> dict[str, Any]:
+    async def list_participants(self, community_id: int, room_id: str) -> ParticipantList:
         """`ListParticipants` -- participants by UUID with publisher/subscriber/muted flags."""
         resp = await self._call(
             "ListParticipants",
@@ -317,23 +422,24 @@ class RoomsClient:
                 api_version=API_VERSION, community_id=str(community_id), room_id=room_id
             ),
         )
-        return {
-            "room_id": resp.room_id,
-            "locked": resp.locked,
-            "participants": [
-                {
-                    "participant_id": p.participant_id,
-                    "publisher": p.publisher,
-                    "subscriber": p.subscriber,
-                    "muted": p.muted,
-                }
+        return ParticipantList(
+            room_id=resp.room_id,
+            locked=resp.locked,
+            participants=[
+                ParticipantInfo(
+                    participant_id=p.participant_id,
+                    publisher=p.publisher,
+                    subscriber=p.subscriber,
+                    muted=p.muted,
+                    joined_at=p.joined_at if p.HasField("joined_at") else None,
+                )
                 for p in resp.participants
             ],
-        }
+        )
 
     async def create_room(
         self, community_id: int, *, label: str, max_publishers: int | None
-    ) -> dict[str, Any]:
+    ) -> RoomInfo:
         """`CreateRoom` -- `label` carries the caller-supplied room name."""
         resp = await self._call(
             "CreateRoom",
@@ -345,9 +451,9 @@ class RoomsClient:
                 max_publishers=max_publishers,
             ),
         )
-        return _room_dict(resp.room)
+        return _room(resp.room)
 
-    async def delete_room(self, community_id: int, room_id: str) -> dict[str, Any]:
+    async def delete_room(self, community_id: int, room_id: str) -> RoomInfo:
         """`DeleteRoom` -- closes the room."""
         resp = await self._call(
             "DeleteRoom",
@@ -356,11 +462,9 @@ class RoomsClient:
                 api_version=API_VERSION, community_id=str(community_id), room_id=room_id
             ),
         )
-        return _room_dict(resp.room)
+        return _room(resp.room)
 
-    async def join_room(
-        self, community_id: int, room_id: str, participant_id: str
-    ) -> dict[str, Any]:
+    async def join_room(self, community_id: int, room_id: str, participant_id: str) -> JoinInfo:
         """`JoinRoom` -- mints a publish+subscribe room token for ONE participant."""
         resp = await self._call(
             "JoinRoom",
@@ -374,14 +478,14 @@ class RoomsClient:
                 subscribe=True,
             ),
         )
-        return {
-            "token": resp.token,
-            "token_id": resp.token_id,
-            "participant_id": resp.participant_id,
-            "expires_at": resp.expires_at,
-            "whip_url": resp.whip_url,
-            "whep_url": resp.whep_url,
-        }
+        return JoinInfo(
+            token=resp.token,
+            token_id=resp.token_id,
+            participant_id=resp.participant_id,
+            expires_at=resp.expires_at,
+            whip_url=resp.whip_url,
+            whep_url=resp.whep_url,
+        )
 
     async def leave_room(
         self,
@@ -431,6 +535,45 @@ class RoomsClient:
         )
         return int(resp.sessions_closed)
 
+    async def set_participant_muted(
+        self,
+        community_id: int,
+        room_id: str,
+        participant_id: str,
+        muted: bool,
+        *,
+        actor_id: str,
+        actor_role: int,
+    ) -> bool:
+        """`MuteParticipant` / `UnmuteParticipant`; returns the participant's resulting state."""
+        if muted:
+            mute_resp = await self._call(
+                "MuteParticipant",
+                SCOPE_MODERATE,
+                rooms_pb2.MuteParticipantRequest(
+                    api_version=API_VERSION,
+                    community_id=str(community_id),
+                    room_id=room_id,
+                    participant_id=participant_id,
+                    actor_id=actor_id,
+                    actor_role=actor_role,
+                ),
+            )
+            return bool(mute_resp.muted)
+        unmute_resp = await self._call(
+            "UnmuteParticipant",
+            SCOPE_MODERATE,
+            rooms_pb2.UnmuteParticipantRequest(
+                api_version=API_VERSION,
+                community_id=str(community_id),
+                room_id=room_id,
+                participant_id=participant_id,
+                actor_id=actor_id,
+                actor_role=actor_role,
+            ),
+        )
+        return bool(unmute_resp.muted)
+
     async def mute_all(
         self, community_id: int, room_id: str, *, actor_id: str, actor_role: int
     ) -> int:
@@ -477,3 +620,93 @@ class RoomsClient:
                 ),
             )
         return bool(resp.locked)
+
+    async def list_hands(self, community_id: int, room_id: str) -> list[HandInfo]:
+        """`ListHands` -- the room's raised-hand queue, oldest first."""
+        resp = await self._call(
+            "ListHands",
+            SCOPE_READ,
+            rooms_pb2.ListHandsRequest(
+                api_version=API_VERSION, community_id=str(community_id), room_id=room_id
+            ),
+        )
+        return [_hand(h) for h in resp.hands]
+
+    async def raise_hand(self, community_id: int, room_id: str, participant_id: str) -> HandInfo:
+        """`RaiseHand` -- idempotent: raising twice keeps the original queue position."""
+        resp = await self._call(
+            "RaiseHand",
+            SCOPE_WRITE,
+            rooms_pb2.RaiseHandRequest(
+                api_version=API_VERSION,
+                community_id=str(community_id),
+                room_id=room_id,
+                participant_id=participant_id,
+            ),
+        )
+        return _hand(resp.hand)
+
+    async def lower_hand(
+        self,
+        community_id: int,
+        room_id: str,
+        participant_id: str,
+        *,
+        actor_id: str,
+        actor_role: int,
+    ) -> bool:
+        """`LowerHand` -- returns False when the participant had no raised hand (a no-op)."""
+        resp = await self._call(
+            "LowerHand",
+            SCOPE_WRITE,
+            rooms_pb2.LowerHandRequest(
+                api_version=API_VERSION,
+                community_id=str(community_id),
+                room_id=room_id,
+                participant_id=participant_id,
+                actor_id=actor_id,
+                actor_role=actor_role,
+            ),
+        )
+        return bool(resp.lowered)
+
+    async def acknowledge_hand(
+        self,
+        community_id: int,
+        room_id: str,
+        participant_id: str,
+        *,
+        actor_id: str,
+        actor_role: int,
+    ) -> HandInfo:
+        """`AcknowledgeHand` -- a moderator marks the participant's hand as seen."""
+        resp = await self._call(
+            "AcknowledgeHand",
+            SCOPE_MODERATE,
+            rooms_pb2.AcknowledgeHandRequest(
+                api_version=API_VERSION,
+                community_id=str(community_id),
+                room_id=room_id,
+                participant_id=participant_id,
+                actor_id=actor_id,
+                actor_role=actor_role,
+            ),
+        )
+        return _hand(resp.hand)
+
+    async def reset_hands(
+        self, community_id: int, room_id: str, *, actor_id: str, actor_role: int
+    ) -> int:
+        """`ResetHands` -- clears the whole queue; returns how many hands were cleared."""
+        resp = await self._call(
+            "ResetHands",
+            SCOPE_MODERATE,
+            rooms_pb2.ResetHandsRequest(
+                api_version=API_VERSION,
+                community_id=str(community_id),
+                room_id=room_id,
+                actor_id=actor_id,
+                actor_role=actor_role,
+            ),
+        )
+        return int(resp.cleared)

@@ -2482,12 +2482,6 @@
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/services/calls_proxy.py",
-      "line": 89,
-      "line_hash": "b0208ca08b409b06"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
       "path": "hub_api/services/community_announcements.py",
       "line": 382,
       "line_hash": "cfbf05a5c676ab33"
