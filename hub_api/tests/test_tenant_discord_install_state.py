@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 import pytest
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 
 from config import HubAPIConfig
@@ -72,7 +73,7 @@ def _test_hub_config() -> HubAPIConfig:
         db_retry_delay=1,
         secret_key="change-me-in-production",
         jwt_algorithm="HS256",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",

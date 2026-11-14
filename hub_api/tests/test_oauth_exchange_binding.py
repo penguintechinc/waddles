@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -37,7 +38,7 @@ def _cfg() -> HubAPIConfig:
         db_retry_delay=1,
         secret_key="change-me-in-production",  # noqa: S106
         jwt_algorithm="HS256",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="x",
         license_server_url="x",

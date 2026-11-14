@@ -64,8 +64,8 @@ logger = logging.getLogger(__name__)
 FLAG_DISABLE_FREE_TIER_CAPS = "waddles.disable-free-tier-entity-caps"
 SYSTEM_TENANT_SLUG = "system"
 # Only the operator-plane tenant is excluded from the tenant cap. The catch-all tenant
-# (slug `global`, `is_global=TRUE` per migration 058) COUNTS: a free deployment whose
-# only tenant is the catch-all is already at the cap (multi-tenancy is paid).
+# (slug `DEFAULT_TENANT_SLUG` = "default" since migration 0098, `is_global=TRUE`) COUNTS:
+# a free deployment whose only tenant is the catch-all is already at the cap.
 RESERVED_TENANT_SLUGS: frozenset[str] = frozenset({SYSTEM_TENANT_SLUG})
 FREE_TIER_CAP = 1
 CAP_ERROR_CODE = "FREE_TIER_CAP_REACHED"
