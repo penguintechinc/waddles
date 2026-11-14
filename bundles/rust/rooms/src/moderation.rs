@@ -1,13 +1,15 @@
 //! Room moderation: raise-hand queue plus moderator controls.
 //!
-//! Ported from the retired Go `module_rtc` call features. Two halves:
+//! Ported from the retired Go `module_rtc` call features. Everything here fronts
+//! the `webrtc` service tools, which forward to svc-streaming's host API
+//! (`core/svc_streaming/docs/rooms-moderation-host-api.md`):
 //!
-//! * the **hand queue** is app state -- an ordered list of participant UUIDs in
-//!   the community-scoped kv (`hands.<room>`, never a `:` in a key);
+//! * the **hand queue** is AUTHORITATIVE in svc-streaming's `RoomService`
+//!   (`room.hand.raise|lower|list|ack|reset`); this app keeps NO copy of it -- no
+//!   kv key, no cache -- and the server clears a participant's hand when they
+//!   leave, are kicked, or the room is deleted;
 //! * **moderation** (kick/leave/mute/unmute/mute-all/lock/unlock and the live
-//!   participant/room lists) fronts the `webrtc` service tools, which forward to
-//!   the svc-streaming moderation host API (`core/svc_streaming/docs/
-//!   rooms-moderation-host-api.md`).
+//!   participant/room lists) likewise forwards to the service tools.
 //!
 //! AuthZ is the existing per-room ACL role model (`guest < member < moderator <
 //! admin`, [`crate::logic::role_of`]); the role is also sent to the service as
@@ -22,46 +24,17 @@
 //! `mute disable <room> <member>` | `participants [list] <room>` |
 //! `participant remove <room> [<member>]` | `rooms [list]`.
 
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::logic::{
-    Ident, Role, Room, RoomsError, Store, ToolFail, Tools, idem_key, kv_json, load, need_uuid,
-    put_json, role_of, save, tool_err,
+    Ident, Role, Room, RoomsError, Store, ToolFail, Tools, idem_key, load, need_uuid, role_of,
+    save, tool_err,
 };
 
 /// Feature flag for every moderation command (defaults OFF until validated).
 pub const FLAG: &str = "rooms.moderation";
-/// Longest hand queue kept per room.
-pub const MAX_HANDS: usize = 256;
-
-/// One raised hand: who, and the moderator who acknowledged it (if any).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Hand {
-    /// Participant UUID (never a username).
-    pub member: String,
-    /// Moderator UUID that acknowledged the hand.
-    #[serde(default)]
-    pub acked_by: Option<String>,
-}
-
-/// The kv key of a room's hand queue.
-fn hands_key(room: &str) -> String {
-    format!("hands.{room}")
-}
-
-/// Loads a room's ordered hand queue (absent = nobody has raised a hand).
-fn hands(store: &dyn Store, room: &str) -> Result<Vec<Hand>, RoomsError> {
-    Ok(kv_json::<Vec<Hand>>(store, &hands_key(room))?.unwrap_or_default())
-}
-
-/// Persists the queue; an empty queue deletes the key.
-fn put_hands(store: &dyn Store, room: &str, h: &[Hand]) -> Result<(), RoomsError> {
-    if h.is_empty() {
-        return store.delete(&hands_key(room)).map_err(RoomsError::Store);
-    }
-    put_json(store, &hands_key(room), &h)
-}
+/// The contract version every hand tool call states explicitly.
+const API_VERSION: &str = "v1";
 
 /// The closed metrics/log label for a chat command, or `None` when the verb is
 /// not a moderation command. Never echoes user text.
@@ -116,15 +89,19 @@ pub fn run(
             .map_err(|_| RoomsError::Denied("could not verify you as a member".into()))
     };
     let out = match (verb, rest) {
-        ("hand", ["add", room]) => hand_add(store, room, &actor()?)?,
+        ("hand", ["add", room]) => hand_add(tools, store, msg, room, &actor()?)?,
         ("hand", ["remove", room]) => {
             let a = actor()?;
-            hand_remove(store, room, &a, &a)?
+            hand_remove(tools, store, msg, room, &a, &a)?
         }
-        ("hand", ["remove", room, member]) => hand_remove(store, room, &actor()?, member)?,
-        ("hand", ["set", "ack", room, member]) => hand_ack(store, room, &actor()?, member)?,
-        ("hand", ["reset", room]) => hand_reset(store, room, &actor()?)?,
-        ("hand", ["list", room] | [room]) => hand_list(store, room, &actor()?)?,
+        ("hand", ["remove", room, member]) => {
+            hand_remove(tools, store, msg, room, &actor()?, member)?
+        }
+        ("hand", ["set", "ack", room, member]) => {
+            hand_ack(tools, store, msg, room, &actor()?, member)?
+        }
+        ("hand", ["reset", room]) => hand_reset(tools, store, msg, room, &actor()?)?,
+        ("hand", ["list", room] | [room]) => hand_list(tools, store, room, &actor()?)?,
         ("lock", ["enable", room]) => lock(tools, store, msg, room, &actor()?, true)?,
         ("lock", ["disable", room]) => lock(tools, store, msg, room, &actor()?, false)?,
         ("lock", [room]) => lock_read(store, room, &actor()?)?,
@@ -197,30 +174,36 @@ fn outranks(
     Ok(())
 }
 
-/// Raises the actor's hand (idempotent; the queue keeps arrival order).
-fn hand_add(store: &dyn Store, room: &str, actor: &str) -> Result<String, RoomsError> {
-    authorize(store, room, actor, Role::Member)?;
-    let mut q = hands(store, room)?;
-    if let Some(pos) = q.iter().position(|h| h.member == actor) {
-        return Ok(format!(
-            "Your hand is already raised (position {}).",
-            pos + 1
-        ));
-    }
-    if q.len() >= MAX_HANDS {
-        return Err(RoomsError::Conflict("hand queue is full".into()));
-    }
-    q.push(Hand {
-        member: actor.to_string(),
-        acked_by: None,
-    });
-    put_hands(store, room, &q)?;
-    Ok(format!("Hand raised (position {}).", q.len()))
+/// The `actor_role` string the hand tools expect, as the ACL resolved it.
+fn role_json(role: Role) -> Value {
+    json!(role)
+}
+
+/// Raises the actor's own hand (idempotent in the service, which keeps arrival order).
+fn hand_add(
+    tools: &dyn Tools,
+    store: &dyn Store,
+    msg: &str,
+    room: &str,
+    actor: &str,
+) -> Result<String, RoomsError> {
+    let (_, role) = authorize(store, room, actor, Role::Member)?;
+    tools
+        .invoke(
+            "room.hand.raise",
+            &json!({"api_version": API_VERSION, "room_id": room, "actor_id": actor,
+                    "actor_role": role_json(role)}),
+            Some(&idem_key(&format!("{msg}|{room}"), "room.hand.raise")),
+        )
+        .map_err(tool_err)?;
+    Ok("Hand raised.".into())
 }
 
 /// Lowers `member`'s hand: always allowed for self, moderators for anyone.
 fn hand_remove(
+    tools: &dyn Tools,
     store: &dyn Store,
+    msg: &str,
     room: &str,
     actor: &str,
     member: &str,
@@ -231,61 +214,133 @@ fn hand_remove(
     } else {
         Role::Moderator
     };
-    authorize(store, room, actor, min)?;
-    let mut q = hands(store, room)?;
-    let before = q.len();
-    q.retain(|h| h.member != member);
-    if q.len() == before {
-        return Ok("No raised hand to lower.".into());
+    let (_, role) = authorize(store, room, actor, min)?;
+    let out = tools
+        .invoke(
+            "room.hand.lower",
+            &json!({"api_version": API_VERSION, "room_id": room, "participant_id": member,
+                    "actor_id": actor, "actor_role": role_json(role)}),
+            Some(&idem_key(
+                &format!("{msg}|{room}|{member}"),
+                "room.hand.lower",
+            )),
+        )
+        .map_err(tool_err)?;
+    match out.get("lowered").and_then(Value::as_bool) {
+        Some(true) => Ok("Hand lowered.".into()),
+        Some(false) => Ok("No raised hand to lower.".into()),
+        None => Err(RoomsError::Tool(ToolFail::Unavailable)),
     }
-    put_hands(store, room, &q)?;
-    Ok("Hand lowered.".into())
 }
 
 /// Moderator acknowledges a raised hand (kept in the queue, marked).
 fn hand_ack(
+    tools: &dyn Tools,
     store: &dyn Store,
+    msg: &str,
     room: &str,
     actor: &str,
     member: &str,
 ) -> Result<String, RoomsError> {
     need_uuid("member", member)?;
-    authorize(store, room, actor, Role::Moderator)?;
-    let mut q = hands(store, room)?;
-    let Some(h) = q.iter_mut().find(|h| h.member == member) else {
-        return Err(RoomsError::NotFound);
-    };
-    h.acked_by = Some(actor.to_string());
-    put_hands(store, room, &q)?;
+    let (_, role) = authorize(store, room, actor, Role::Moderator)?;
+    tools
+        .invoke(
+            "room.hand.ack",
+            &json!({"api_version": API_VERSION, "room_id": room, "participant_id": member,
+                    "actor_id": actor, "actor_role": role_json(role)}),
+            Some(&idem_key(
+                &format!("{msg}|{room}|{member}"),
+                "room.hand.ack",
+            )),
+        )
+        .map_err(|e| match e {
+            // The service answers "not found" for a participant without a raised hand.
+            ToolFail::InvalidArgs(m) if m.contains("not found") => {
+                RoomsError::Usage("That participant has no raised hand.".into())
+            }
+            other => tool_err(other),
+        })?;
     Ok("Hand acknowledged.".into())
 }
 
 /// Moderator clears the whole queue.
-fn hand_reset(store: &dyn Store, room: &str, actor: &str) -> Result<String, RoomsError> {
-    authorize(store, room, actor, Role::Moderator)?;
-    put_hands(store, room, &[])?;
-    Ok("All hands lowered.".into())
+fn hand_reset(
+    tools: &dyn Tools,
+    store: &dyn Store,
+    msg: &str,
+    room: &str,
+    actor: &str,
+) -> Result<String, RoomsError> {
+    let (_, role) = authorize(store, room, actor, Role::Moderator)?;
+    let out = tools
+        .invoke(
+            "room.hand.reset",
+            &json!({"api_version": API_VERSION, "room_id": room, "actor_id": actor,
+                    "actor_role": role_json(role)}),
+            Some(&idem_key(&format!("{msg}|{room}"), "room.hand.reset")),
+        )
+        .map_err(tool_err)?;
+    let n = out
+        .get("cleared")
+        .and_then(Value::as_u64)
+        .ok_or(RoomsError::Tool(ToolFail::Unavailable))?;
+    Ok(format!("All hands lowered ({n} cleared)."))
 }
 
-/// Lists the ordered queue (UUIDs only; `*` marks acknowledged hands).
-fn hand_list(store: &dyn Store, room: &str, actor: &str) -> Result<String, RoomsError> {
-    authorize(store, room, actor, Role::Member)?;
-    let q = hands(store, room)?;
-    if q.is_empty() {
+/// Lists the queue. Moderators see every UUID in order (`*` marks acknowledged
+/// hands); members only see their own place in it -- the tool filters, this just
+/// formats what it was given.
+fn hand_list(
+    tools: &dyn Tools,
+    store: &dyn Store,
+    room: &str,
+    actor: &str,
+) -> Result<String, RoomsError> {
+    let (_, role) = authorize(store, room, actor, Role::Member)?;
+    let out = tools
+        .invoke(
+            "room.hand.list",
+            &json!({"api_version": API_VERSION, "room_id": room, "actor_id": actor,
+                    "actor_role": role_json(role)}),
+            None,
+        )
+        .map_err(tool_err)?;
+    let count = out
+        .get("count")
+        .and_then(Value::as_u64)
+        .ok_or(RoomsError::Tool(ToolFail::Unavailable))?;
+    let hands = out
+        .get("hands")
+        .and_then(Value::as_array)
+        .ok_or(RoomsError::Tool(ToolFail::Unavailable))?;
+    if count == 0 {
         return Ok("No raised hands.".into());
     }
+    let unavailable = || RoomsError::Tool(ToolFail::Unavailable);
+    if role < Role::Moderator {
+        return Ok(match hands.first() {
+            Some(h) => format!(
+                "Your hand is raised (position {} of {count}).",
+                h.get("position")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(unavailable)?
+            ),
+            None => format!("Your hand is not raised ({count} in the queue)."),
+        });
+    }
+    let lines: Option<Vec<String>> = hands
+        .iter()
+        .map(|h| {
+            let who = h.get("participant_id")?.as_str()?;
+            let pos = h.get("position")?.as_u64()?;
+            let acked = h.get("acknowledged_at").is_some();
+            Some(format!("{pos}. {who}{}", if acked { " *" } else { "" }))
+        })
+        .collect();
     Ok(format!(
         "Raised hands: {}",
-        q.iter()
-            .enumerate()
-            .map(|(i, h)| format!(
-                "{}. {}{}",
-                i + 1,
-                h.member,
-                if h.acked_by.is_some() { " *" } else { "" }
-            ))
-            .collect::<Vec<_>>()
-            .join(", ")
+        lines.ok_or_else(unavailable)?.join(", ")
     ))
 }
 
@@ -458,8 +513,8 @@ fn muted_list(
     Ok(format!("Muted: {}", muted.join(", ")))
 }
 
-/// Leaves (`member == actor`) or kicks another participant; a kick also lowers
-/// the removed participant's hand.
+/// Leaves (`member == actor`) or kicks another participant; the server clears the
+/// removed participant's raised hand.
 fn remove_participant(
     tools: &dyn Tools,
     store: &dyn Store,
@@ -491,13 +546,9 @@ fn remove_participant(
             Some(&idem_key(&format!("{msg}|{room}|{member}"), op)),
         )
         .map_err(tool_err)?;
-    // The host already removed them; a stale hand must not outlive the session.
-    let mut q = hands(store, room)?;
-    let before = q.len();
-    q.retain(|h| h.member != member);
-    if q.len() != before {
-        put_hands(store, room, &q)?;
-    }
+    // No hand cleanup here on purpose: the queue lives in svc-streaming, which
+    // drops a participant's hand itself on leave/kick, so there is no second copy
+    // to keep in step.
     Ok(if selfie {
         "You left the room."
     } else {
@@ -540,7 +591,7 @@ fn rooms_list(tools: &dyn Tools, actor: &str) -> Result<String, RoomsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logic::{Kind, grants_for, handle_chat_ex};
+    use crate::logic::{Kind, grants_for, handle_chat_ex, put_json};
     use std::cell::RefCell;
     use std::collections::HashMap;
 
@@ -567,16 +618,100 @@ mod tests {
         }
     }
 
+    /// The webrtc service as the rooms app sees it. The raised-hand queue lives HERE
+    /// (as it does in svc-streaming's `RoomService`): same semantics as the tool
+    /// contract -- idempotent raise, role-gated lower/ack/reset, members see only
+    /// their own place in `list`, and leave/kick drop the participant's hand.
     #[derive(Default)]
     struct Svc {
         calls: RefCell<Vec<(String, Value)>>,
         fail: RefCell<Option<ToolFail>>,
+        /// (participant, acknowledged-by) in arrival order.
+        queue: RefCell<Vec<(String, Option<String>)>>,
+    }
+    impl Svc {
+        fn staff(args: &Value) -> bool {
+            matches!(args["actor_role"].as_str(), Some("moderator" | "admin"))
+        }
+        fn hand(m: &str, acked: &Option<String>) -> Value {
+            match acked {
+                None => json!({"participant_id": m, "raised_at": 1}),
+                Some(by) => json!({"participant_id": m, "raised_at": 1,
+                                   "acknowledged_at": 2, "acknowledged_by": by}),
+            }
+        }
+        fn hand_op(&self, tool: &str, args: &Value) -> Result<Value, ToolFail> {
+            assert_eq!(args["api_version"], "v1", "{tool} must state v1");
+            let mut q = self.queue.borrow_mut();
+            match tool {
+                "room.hand.raise" => {
+                    let who = args["actor_id"].as_str().unwrap();
+                    assert!(args.get("participant_id").is_none(), "raise is self-only");
+                    if !q.iter().any(|(m, _)| m == who) {
+                        q.push((who.into(), None));
+                    }
+                    Ok(json!({"room_id": ROOM, "hand": Self::hand(who, &None)}))
+                }
+                "room.hand.lower" => {
+                    let who = args["participant_id"].as_str().unwrap();
+                    if who != args["actor_id"] && !Self::staff(args) {
+                        return Err(ToolFail::NotGranted);
+                    }
+                    let before = q.len();
+                    q.retain(|(m, _)| m != who);
+                    Ok(
+                        json!({"room_id": ROOM, "participant_id": who, "lowered": q.len() != before}),
+                    )
+                }
+                "room.hand.list" => {
+                    let me = args["actor_id"].as_str().unwrap();
+                    let all: Vec<Value> = q
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (m, _))| Self::staff(args) || m == me)
+                        .map(|(i, (m, a))| {
+                            let mut h = Self::hand(m, a);
+                            h["position"] = json!(i + 1);
+                            h
+                        })
+                        .collect();
+                    Ok(json!({"room_id": ROOM, "count": q.len(), "hands": all}))
+                }
+                "room.hand.ack" | "room.hand.reset" if !Self::staff(args) => {
+                    Err(ToolFail::NotGranted)
+                }
+                "room.hand.ack" => {
+                    let who = args["participant_id"].as_str().unwrap();
+                    let by = args["actor_id"].as_str().unwrap();
+                    match q.iter_mut().find(|(m, _)| m == who) {
+                        Some(e) => {
+                            e.1 = Some(by.into());
+                            Ok(json!({"room_id": ROOM, "hand": Self::hand(who, &e.1)}))
+                        }
+                        None => Err(ToolFail::InvalidArgs("room or source not found".into())),
+                    }
+                }
+                _ => {
+                    let n = q.len();
+                    q.clear();
+                    Ok(json!({"room_id": ROOM, "cleared": n}))
+                }
+            }
+        }
     }
     impl Tools for Svc {
         fn invoke(&self, tool: &str, args: &Value, _: Option<&str>) -> Result<Value, ToolFail> {
             self.calls.borrow_mut().push((tool.into(), args.clone()));
             if let Some(f) = self.fail.borrow().clone() {
                 return Err(f);
+            }
+            if tool.starts_with("room.hand.") {
+                return self.hand_op(tool, args);
+            }
+            if matches!(tool, "room.leave" | "room.kick") {
+                // The server drops a leaving/kicked participant's hand itself.
+                let who = args["participant_id"].as_str().unwrap();
+                self.queue.borrow_mut().retain(|(m, _)| m != who);
             }
             Ok(match tool {
                 "room.participants" => json!({"participants": [
@@ -623,54 +758,173 @@ mod tests {
             .reply
     }
 
+    /// Every kv key currently stored (to prove the app keeps no hand state).
+    fn kv_keys(k: &Kv) -> Vec<String> {
+        let mut v: Vec<String> = k.0.borrow().keys().cloned().collect();
+        v.sort();
+        v
+    }
+
     #[test]
-    fn hand_queue_keeps_arrival_order_and_is_idempotent() {
+    fn hand_verbs_call_the_webrtc_hand_tools_with_v1_actor_and_role() {
         let (s, k) = world();
-        assert!(say(&format!("!room hand add {ROOM}"), USER, &s, &k).contains("position 1"));
-        assert!(say(&format!("!room hand add {ROOM}"), USER2, &s, &k).contains("position 2"));
-        assert!(say(&format!("!room hand add {ROOM}"), USER, &s, &k).contains("already raised"));
-        let l = say(&format!("!room hand list {ROOM}"), USER, &s, &k);
-        assert!(l.find(USER).unwrap() < l.find(USER2).unwrap(), "{l}");
+        let kv_before = kv_keys(&k);
+        let calls = |n: usize| s.calls.borrow()[n].clone();
         assert_eq!(
-            say(&format!("!room hand {ROOM}"), USER, &s, &k),
-            l,
-            "bare reads"
+            say(&format!("!room hand add {ROOM}"), USER, &s, &k),
+            "Hand raised."
         );
+        assert_eq!(
+            calls(0),
+            (
+                "room.hand.raise".to_string(),
+                json!({"api_version": "v1", "room_id": ROOM, "actor_id": USER,
+                       "actor_role": "member"})
+            )
+        );
+        say(&format!("!room hand add {ROOM}"), USER, &s, &k);
+        assert_eq!(s.queue.borrow().len(), 1, "raising twice is a no-op");
         assert_eq!(
             say(&format!("!room hand remove {ROOM}"), USER, &s, &k),
             "Hand lowered."
         );
+        assert_eq!(
+            calls(2),
+            (
+                "room.hand.lower".to_string(),
+                json!({"api_version": "v1", "room_id": ROOM, "participant_id": USER,
+                       "actor_id": USER, "actor_role": "member"})
+            )
+        );
         assert!(say(&format!("!room hand remove {ROOM}"), USER, &s, &k).contains("No raised hand"));
-        assert!(s.calls.borrow().is_empty(), "hands are app state only");
+        say(&format!("!room hand add {ROOM}"), USER, &s, &k);
+        say(&format!("!room hand set ack {ROOM} {USER}"), MOD, &s, &k);
+        assert_eq!(
+            s.calls.borrow().last().unwrap().1,
+            json!({"api_version": "v1", "room_id": ROOM, "participant_id": USER,
+                   "actor_id": MOD, "actor_role": "moderator"})
+        );
+        say(&format!("!room hand reset {ROOM}"), ADMIN, &s, &k);
+        let last = s.calls.borrow().last().unwrap().clone();
+        assert_eq!(last.0, "room.hand.reset");
+        assert_eq!(last.1["actor_role"], "admin");
+        assert_eq!(kv_keys(&k), kv_before, "hands never touch the app kv");
+    }
+
+    #[test]
+    fn the_app_keeps_no_second_copy_of_hand_state() {
+        let (s, k) = world();
+        let kv_before = kv_keys(&k);
+        for c in [
+            format!("!room hand add {ROOM}"),
+            format!("!room hand list {ROOM}"),
+            format!("!room hand set ack {ROOM} {USER}"),
+            format!("!room hand remove {ROOM} {USER}"),
+            format!("!room hand reset {ROOM}"),
+        ] {
+            say(
+                &c,
+                if c.contains("set ack") || c.contains("reset") {
+                    MOD
+                } else {
+                    USER
+                },
+                &s,
+                &k,
+            );
+        }
+        // Leave and kick: the server clears the hand, the app writes nothing and
+        // issues no extra `room.hand.*` call to do it.
+        say(&format!("!room hand add {ROOM}"), USER2, &s, &k);
+        say(&format!("!room hand add {ROOM}"), USER, &s, &k);
+        let n = s.calls.borrow().len();
+        say(&format!("!room participant remove {ROOM}"), USER, &s, &k);
+        say(
+            &format!("!room participant remove {ROOM} {USER2}"),
+            MOD,
+            &s,
+            &k,
+        );
+        let after: Vec<String> = s.calls.borrow()[n..].iter().map(|c| c.0.clone()).collect();
+        assert_eq!(
+            after,
+            ["room.leave", "room.kick"],
+            "no hand tool on leave/kick"
+        );
+        assert!(s.queue.borrow().is_empty(), "the server cleared both hands");
+        assert_eq!(kv_keys(&k), kv_before, "no kv write, no `hands.*` key");
+        assert!(kv_keys(&k).iter().all(|key| !key.starts_with("hands.")));
+    }
+
+    #[test]
+    fn list_gives_moderators_the_queue_and_members_only_their_own_place() {
+        let (s, k) = world();
+        say(&format!("!room hand add {ROOM}"), USER, &s, &k);
+        say(&format!("!room hand add {ROOM}"), USER2, &s, &k);
+        say(&format!("!room hand set ack {ROOM} {USER2}"), MOD, &s, &k);
+        let l = say(&format!("!room hand list {ROOM}"), MOD, &s, &k);
+        assert!(l.find(USER).unwrap() < l.find(USER2).unwrap(), "{l}");
+        assert!(l.contains(&format!("2. {USER2} *")), "{l}");
+        assert_eq!(
+            say(&format!("!room hand {ROOM}"), MOD, &s, &k),
+            l,
+            "bare reads"
+        );
+        let own = say(&format!("!room hand list {ROOM}"), USER2, &s, &k);
+        assert_eq!(own, "Your hand is raised (position 2 of 2).");
+        assert!(!own.contains(USER), "a member never sees other UUIDs");
+        say(&format!("!room hand remove {ROOM}"), USER2, &s, &k);
+        assert_eq!(
+            say(&format!("!room hand list {ROOM}"), USER2, &s, &k),
+            "Your hand is not raised (1 in the queue)."
+        );
+        say(&format!("!room hand reset {ROOM}"), MOD, &s, &k);
+        assert_eq!(
+            say(&format!("!room hand list {ROOM}"), MOD, &s, &k),
+            "No raised hands."
+        );
     }
 
     #[test]
     fn acknowledge_and_reset_need_a_moderator_and_members_cannot_lower_others() {
         let (s, k) = world();
         say(&format!("!room hand add {ROOM}"), USER, &s, &k);
+        let n = s.calls.borrow().len();
         let ack = format!("!room hand set ack {ROOM} {USER}");
         assert!(say(&ack, USER2, &s, &k).contains("moderator role required"));
-        assert_eq!(say(&ack, MOD, &s, &k), "Hand acknowledged.");
-        assert!(say(&format!("!room hand {ROOM}"), USER, &s, &k).ends_with(" *"));
         assert!(
             say(&format!("!room hand remove {ROOM} {USER}"), USER2, &s, &k).contains("moderator")
         );
+        assert!(say(&format!("!room hand reset {ROOM}"), USER, &s, &k).contains("moderator"));
+        assert_eq!(
+            s.calls.borrow().len(),
+            n,
+            "refusals never reach the service"
+        );
+        assert_eq!(say(&ack, MOD, &s, &k), "Hand acknowledged.");
         assert_eq!(
             say(&format!("!room hand remove {ROOM} {USER}"), MOD, &s, &k),
             "Hand lowered."
         );
-        say(&format!("!room hand add {ROOM}"), USER, &s, &k);
-        assert!(say(&format!("!room hand reset {ROOM}"), USER, &s, &k).contains("moderator"));
-        say(&format!("!room hand reset {ROOM}"), MOD, &s, &k);
-        assert_eq!(
-            say(&format!("!room hand {ROOM}"), MOD, &s, &k),
-            "No raised hands."
-        );
         assert!(
-            !k.0.borrow().contains_key(&hands_key(ROOM)),
-            "empty queue deletes the key"
+            say(&format!("!room hand set ack {ROOM} {USER}"), MOD, &s, &k)
+                .contains("no raised hand")
         );
-        assert!(say(&format!("!room hand set ack {ROOM} {USER}"), MOD, &s, &k).contains("No such"));
+        say(&format!("!room hand add {ROOM}"), USER, &s, &k);
+        assert_eq!(
+            say(&format!("!room hand reset {ROOM}"), MOD, &s, &k),
+            "All hands lowered (1 cleared)."
+        );
+    }
+
+    #[test]
+    fn hand_tool_failures_surface_as_closed_messages_and_never_succeed_silently() {
+        let (s, k) = world();
+        *s.fail.borrow_mut() = Some(ToolFail::Unavailable);
+        assert!(say(&format!("!room hand add {ROOM}"), USER, &s, &k).contains("unavailable"));
+        assert!(say(&format!("!room hand list {ROOM}"), USER, &s, &k).contains("unavailable"));
+        *s.fail.borrow_mut() = Some(ToolFail::Forbidden);
+        assert!(say(&format!("!room hand reset {ROOM}"), MOD, &s, &k).contains("refused"));
     }
 
     #[test]
@@ -756,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn leave_is_self_service_and_kick_lowers_the_hand() {
+    fn leave_is_self_service_and_the_server_clears_the_hand_on_kick() {
         let (s, k) = world();
         say(&format!("!room hand add {ROOM}"), USER, &s, &k);
         say(&format!("!room hand add {ROOM}"), USER2, &s, &k);
@@ -764,7 +1018,7 @@ mod tests {
             say(&format!("!room participant remove {ROOM}"), USER, &s, &k),
             "You left the room."
         );
-        assert_eq!(s.calls.borrow()[0].0, "room.leave");
+        assert_eq!(s.calls.borrow()[2].0, "room.leave");
         say(
             &format!("!room participant remove {ROOM} {USER2}"),
             MOD,
@@ -839,7 +1093,9 @@ mod tests {
             let o = handle_chat_ex(&c, "m", &s, &k, &Who(MOD), None, false).unwrap();
             assert!(!o.ok && o.reply.contains("not enabled"), "{c}: {}", o.reply);
         }
-        assert!(s.calls.borrow().is_empty() && !k.0.borrow().contains_key(&hands_key(ROOM)));
+        assert!(
+            s.calls.borrow().is_empty() && kv_keys(&k).iter().all(|x| !x.starts_with("hands."))
+        );
         // Legacy verbs are unaffected by the flag.
         assert!(
             handle_chat_ex("!room list", "m", &s, &k, &Who(USER), None, false)
@@ -889,18 +1145,5 @@ mod tests {
         k.set(&format!("room.{ROOM}"), legacy.to_string().as_bytes())
             .unwrap();
         assert!(!load(&k, ROOM).unwrap().locked);
-    }
-
-    #[test]
-    fn hand_queue_is_bounded() {
-        let (s, k) = world();
-        let full: Vec<Hand> = (0..MAX_HANDS)
-            .map(|i| Hand {
-                member: format!("{i:08x}-0000-0000-0000-000000000000"),
-                acked_by: None,
-            })
-            .collect();
-        put_hands(&k, ROOM, &full).unwrap();
-        assert!(say(&format!("!room hand add {ROOM}"), USER, &s, &k).contains("queue is full"));
     }
 }

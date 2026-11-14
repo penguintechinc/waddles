@@ -22,7 +22,7 @@ arguments are UUIDs only -- never usernames. With the flag off every verb below 
 
 | Command | Min role | Effect |
 |---|---|---|
-| `hand [list] <room>` | member | ordered raised-hand queue (`*` = acknowledged) |
+| `hand [list] <room>` | member | moderator: ordered queue (`*` = acknowledged); member: your own place in it |
 | `hand add <room>` / `hand remove <room>` | member | raise / lower your hand (idempotent) |
 | `hand remove <room> <member>` | moderator | lower someone else's hand |
 | `hand set ack <room> <member>` | moderator | acknowledge a hand |
@@ -37,10 +37,14 @@ arguments are UUIDs only -- never usernames. With the flag off every verb below 
 
 AuthZ is the per-room ACL role (`acl.set`); a moderator cannot act on an equal or higher role.
 Interim: this migrates to the SDK `caller_can` check once it lands, at which point the
-`actor_role` argument sent to the service is dropped. The hand queue is app state in kv
-(`hands.<room>`); moderation fronts the webrtc service tools `room.list|participants|leave|
-kick|mute|unmute|mute_all|lock|unlock`, which forward to svc-streaming's moderation host API
-(`core/svc_streaming/docs/rooms-moderation-host-api.md`; the host enforces role again).
+`actor_role` argument sent to the service is dropped. The raised-hand queue is NOT kept here:
+it is authoritative in svc-streaming and reached through the webrtc tools `room.hand.raise|lower|
+list|ack|reset` (member / moderator scopes declared in the webrtc manifest); there is no
+`hands.*` kv key, the server clears a hand on leave/kick, and a member's `hand list` shows only
+their own place in the queue (moderators see every UUID). The rest of moderation fronts
+`room.list|participants|leave|kick|mute|unmute|mute_all|lock|unlock`, which forward to
+svc-streaming's moderation host API (`core/svc_streaming/docs/rooms-moderation-host-api.md`; the
+host enforces the role again).
 Telemetry: counter `waddles_bundle_counter_rooms_ops` and histogram `rooms_op_seconds`
 (labels `op`, `outcome` only) plus one PII-free debug log per command; the stage supplies the span.
 
@@ -53,9 +57,12 @@ Delivered as an `admin.action` event `{op, args}` (the gateway has verified the 
 
 ## Access policy (`grants_for`)
 
-Closed/outside-schedule rooms refuse non-staff; green room = moderators/admins only; stage =
+Closed/outside-schedule/locked rooms refuse non-staff; green room = moderators/admins only; stage =
 only moderators/admins publish; guests (opt-in per room) can only subscribe; everyone else
-publish + subscribe. State is community-scoped kv (`room.<uuid>`, `acl.<room>.<actor>`,
+publish + subscribe. `grants_for` is an adapter over the webrtc bundle's canonical
+`src/grants.rs` (compiled in from the same file; contract: `../webrtc/contract/grants.json`);
+join tokens are requested with the contract's short TTL (60 s) and a UUID participant only.
+State is community-scoped kv (`room.<uuid>`, `acl.<room>.<actor>`,
 `event.<uuid>`, `rooms.index`; no `:` in keys).
 
 Contract with the service: `tests/contract_calls.json` is pinned by a unit test here and by
