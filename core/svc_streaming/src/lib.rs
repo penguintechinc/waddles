@@ -198,6 +198,9 @@ where
     rooms::host_api::spawn_from_env(config.cli.bind_addr, state.rooms.clone())
         .await
         .context("starting the webrtc rooms host-API listener")?;
+    rooms::grpc::spawn_from_env(config.cli.bind_addr, state.rooms.clone())
+        .await
+        .context("starting the rooms gRPC listener")?;
 
     // --- HTTP + metrics.
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);

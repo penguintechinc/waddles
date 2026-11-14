@@ -104,6 +104,13 @@ rustls = { version = "=0.23.46", default-features = false, features = ["ring", "
 tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
 rustls-pki-types = "=1.15.1"
 hyper-util = { version = "=0.1.20", features = ["server-auto", "tokio", "service"] }
+# Rooms gRPC control plane (`rooms::grpc`): hub-api -> svc-streaming RoomsService, served over
+# the same mTLS accept loop as the host-API. `transport` = tonic's `Routes`/server; stubs are
+# generated at build time from `proto/waddles/streaming/internal/v1/rooms.proto` (build.rs).
+# tonic/tonic-prost/prost are already resolved at these exact versions in Cargo.lock.
+tonic = { version = "=0.14.6", default-features = false, features = ["transport", "codegen", "router"] }
+tonic-prost = "=0.14.6"
+prost = "=0.14.4"
 ffmpeg-sidecar = "=2.7.0"
 hls_m3u8 = "=0.7.0"
 object_store = { version = "=0.14.1", features = ["aws"] }
@@ -118,6 +125,9 @@ object_store = { version = "=0.14.1", features = ["aws"] }
 [target.'cfg(unix)'.dependencies]
 nix = { version = "=0.31.3", default-features = false, features = ["signal"] }
 
+[build-dependencies]
+tonic-prost-build = "=0.14.6"
+
 [features]
 # Opt-in real-media end-to-end test (tests/e2e_real_media.rs): drives a real RTMP
 # publish through real ffmpeg. Needs SVC_STREAMING_REAL_FFMPEG/_FFPROBE/_WORKDIR;
@@ -131,6 +141,9 @@ required-features = ["real-media-e2e"]
 [dev-dependencies]
 # Test-only throwaway CA/certs for the host-API mTLS tests (no key material in git).
 rcgen = "=0.14.10"
+# Real-path rooms gRPC test: tonic client over mTLS (`tls-ring` = tonic's rustls/ring backend,
+# already in the graph via the host-API's rustls).
+tonic = { version = "=0.14.6", default-features = false, features = ["transport", "codegen", "router", "tls-ring"] }
 http-body-util = "=0.1.3"
 # `testing` (dev-only feature of the already-declared `opentelemetry_sdk`)
 # unlocks `InMemoryMetricExporter`/`InMemorySpanExporter`, which the

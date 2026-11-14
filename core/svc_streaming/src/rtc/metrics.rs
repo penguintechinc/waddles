@@ -11,7 +11,7 @@
 //! one-line follow-up (`rtc::metrics::RtcMetrics::register(&metrics)`
 //! alongside the existing `register_request_metrics` call) -- not done here.
 
-use prometheus::{IntCounter, IntCounterVec, IntGaugeVec, Opts, Registry};
+use prometheus::{HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGaugeVec, Opts, Registry};
 
 /// Registered WHIP/WHEP metric handles, cheap to clone (each inner type is
 /// itself a cheap `Arc`-backed handle per the `prometheus` crate).
@@ -29,6 +29,15 @@ pub struct RtcMetrics {
     pub packets_dropped_total: IntCounter,
     /// ICE/DTLS connection failures across both WHIP and WHEP sessions.
     pub ice_failures_total: IntCounter,
+    /// Room moderation operations, labeled `op` and `outcome` = `"ok"` | `"refused"`.
+    pub moderation_ops_total: IntCounterVec,
+    /// Live peer connections torn down by leave/kick/token-revoke.
+    pub moderation_sessions_closed_total: IntCounter,
+    /// RoomsService gRPC calls (`rooms::grpc`), labeled `rpc` and gRPC status `code`
+    /// (closed vocabulary: `ok`, `unauthenticated`, `permission_denied`, ...).
+    pub grpc_requests_total: IntCounterVec,
+    /// RoomsService gRPC call latency in seconds, labeled `rpc`.
+    pub grpc_request_seconds: HistogramVec,
 }
 
 impl RtcMetrics {
@@ -53,6 +62,35 @@ impl RtcMetrics {
             "WHIP/WHEP sessions that reached RTCPeerConnectionState::Failed",
         )?;
 
+        let moderation_ops_total = IntCounterVec::new(
+            Opts::new(
+                "rooms_moderation_ops_total",
+                "Room moderation operations by op and outcome",
+            ),
+            &["op", "outcome"],
+        )?;
+        let moderation_sessions_closed_total = IntCounter::new(
+            "rooms_moderation_sessions_closed_total",
+            "Live room peer connections closed by leave, kick or token revocation",
+        )?;
+        let grpc_requests_total = IntCounterVec::new(
+            Opts::new(
+                "rooms_grpc_requests_total",
+                "RoomsService gRPC calls by rpc and gRPC status code",
+            ),
+            &["rpc", "code"],
+        )?;
+        let grpc_request_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "rooms_grpc_request_seconds",
+                "RoomsService gRPC call latency in seconds by rpc",
+            ),
+            &["rpc"],
+        )?;
+        registry.register(Box::new(grpc_requests_total.clone()))?;
+        registry.register(Box::new(grpc_request_seconds.clone()))?;
+        registry.register(Box::new(moderation_ops_total.clone()))?;
+        registry.register(Box::new(moderation_sessions_closed_total.clone()))?;
         registry.register(Box::new(sessions_active.clone()))?;
         registry.register(Box::new(rtp_packets_total.clone()))?;
         registry.register(Box::new(packets_dropped_total.clone()))?;
@@ -63,6 +101,10 @@ impl RtcMetrics {
             rtp_packets_total,
             packets_dropped_total,
             ice_failures_total,
+            moderation_ops_total,
+            moderation_sessions_closed_total,
+            grpc_requests_total,
+            grpc_request_seconds,
         })
     }
 }

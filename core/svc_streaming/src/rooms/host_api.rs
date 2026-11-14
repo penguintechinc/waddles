@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 
-use super::{IssueRequest, RoomError, RoomService, RouteMode};
+use super::{ActorRole, IssueRequest, RoomError, RoomService, RouteMode};
 
 /// Errors building/running the listener.
 #[derive(Debug, thiserror::Error)]
@@ -203,6 +203,29 @@ struct RouteReq {
     mode: RouteMode,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommunityReq {
+    community_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParticipantActionReq {
+    community_id: String,
+    room_id: Uuid,
+    participant_id: Uuid,
+    actor_id: Uuid,
+    actor_role: ActorRole,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomActorReq {
+    community_id: String,
+    room_id: Uuid,
+    actor_id: Uuid,
+    actor_role: ActorRole,
+}
+
 fn parse<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T, RoomError> {
     serde_json::from_value(v).map_err(|e| RoomError::Invalid(format!("bad request body: {e}")))
 }
@@ -316,6 +339,49 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
                 )),
             }
         }
+        "room.list" => {
+            let r: CommunityReq = parse(body)?;
+            Ok(json!({"rooms": svc.list_rooms(&r.community_id).await?}))
+        }
+        "room.participants" => {
+            let r: RoomReq = parse(body)?;
+            let info = svc.get(&r.community_id, r.room_id).await?;
+            let participants = svc.participants(&r.community_id, r.room_id).await?;
+            Ok(json!({"room_id": r.room_id, "locked": info.locked,
+                      "count": participants.len(), "participants": participants}))
+        }
+        "room.leave" | "room.kick" => {
+            let r: ParticipantActionReq = parse(body)?;
+            let closed = if op == "room.leave" {
+                svc.leave(&r.community_id, r.room_id, r.participant_id, r.actor_id, r.actor_role)
+                    .await?
+            } else {
+                svc.kick(&r.community_id, r.room_id, r.participant_id, r.actor_id, r.actor_role)
+                    .await?
+            };
+            Ok(json!({"room_id": r.room_id, "participant_id": r.participant_id,
+                      "sessions_closed": closed}))
+        }
+        "room.mute" | "room.unmute" => {
+            let r: ParticipantActionReq = parse(body)?;
+            let muted = op == "room.mute";
+            svc.set_muted(&r.community_id, r.room_id, r.participant_id, muted, r.actor_role)
+                .await?;
+            Ok(json!({"room_id": r.room_id, "participant_id": r.participant_id, "muted": muted}))
+        }
+        "room.mute_all" => {
+            let r: RoomActorReq = parse(body)?;
+            let n = svc
+                .mute_all(&r.community_id, r.room_id, r.actor_id, r.actor_role)
+                .await?;
+            Ok(json!({"room_id": r.room_id, "muted": n}))
+        }
+        "room.lock" | "room.unlock" => {
+            let r: RoomActorReq = parse(body)?;
+            let locked = op == "room.lock";
+            svc.set_locked(&r.community_id, r.room_id, locked, r.actor_role).await?;
+            Ok(json!({"room_id": r.room_id, "locked": locked}))
+        }
         "recording.start" | "recording.stop" => Err(RoomError::Unsupported(
             "room recording is unavailable: room publishers have no ffmpeg bridge/RecordSink path yet"
                 .into(),
@@ -354,8 +420,20 @@ pub async fn serve(
     server_config: ServerConfig,
     svc: Arc<RoomService>,
 ) -> Result<(), HostApiError> {
+    serve_router(listener, server_config, router(svc), "webrtc host-api").await
+}
+
+/// The mTLS accept loop shared by the host-API and the rooms gRPC listener
+/// (`rooms::grpc`): handshake with `server_config` (client cert required), then
+/// serve `app` over HTTP/1 or HTTP/2 as negotiated. `label` only names the
+/// listener in logs.
+pub async fn serve_router(
+    listener: tokio::net::TcpListener,
+    server_config: ServerConfig,
+    app: Router,
+    label: &'static str,
+) -> Result<(), HostApiError> {
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
-    let app = router(svc);
     loop {
         let (tcp, peer) = listener.accept().await?;
         let acceptor = acceptor.clone();
@@ -369,11 +447,11 @@ pub async fn serve(
                         .serve_connection_with_upgrades(io, svc)
                         .await
                     {
-                        tracing::debug!(error = %e, "webrtc host-api connection ended");
+                        tracing::debug!(listener = label, error = %e, "connection ended");
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(%peer, error = %e, "webrtc host-api mTLS handshake refused")
+                    tracing::warn!(listener = label, %peer, error = %e, "mTLS handshake refused")
                 }
             }
         });

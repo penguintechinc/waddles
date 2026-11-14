@@ -159,7 +159,8 @@ impl AppState {
                 room_keys,
                 config.cli.public_base_url.clone(),
             )
-            .with_whep(whep_state.clone()),
+            .with_whep(whep_state.clone())
+            .with_moderation(moderation_flag_from_env()),
         );
         let engine: SharedEngine = Arc::new(crate::pipeline::StubSupervisor);
         let hls_router_state = HlsRouterState::new(
@@ -290,4 +291,12 @@ pub fn metrics_router(state: AppState) -> Router {
     Router::new()
         .route("/metrics", get(health::metrics))
         .with_state(state)
+}
+
+/// Resolves the `rooms.moderation` feature flag from its env baseline
+/// (`FEATURE_ROOMS_MODERATION`); unset or anything but true/1 means OFF.
+pub fn moderation_flag_from_env() -> bool {
+    std::env::var("FEATURE_ROOMS_MODERATION")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on"))
+        .unwrap_or(false)
 }

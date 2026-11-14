@@ -9,11 +9,13 @@
 //! Every lookup is community-scoped: a room is only visible to the community that
 //! created it (a mismatch is indistinguishable from "not found").
 
+pub mod grpc;
+pub mod grpc_auth;
 pub mod host_api;
 pub mod media;
 pub mod token;
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,6 +51,38 @@ pub const MAX_SUBSCRIBERS_PER_COMMUNITY: usize = 1_000;
 pub const MAX_SUBSCRIBERS_GLOBAL: usize = 5_000;
 /// Longest TTL of a WHEP pipeline viewer token (seconds).
 pub const MAX_PIPELINE_TOKEN_TTL_SECS: i64 = 300;
+
+/// Most participants one room may blocklist (kick) or hold muted.
+pub const MAX_MODERATED_PER_ROOM: usize = 1_024;
+
+/// The acting participant's room role as resolved by the rooms app from its
+/// per-room ACL (`bundles/rust/rooms` `Role`). Interim authorization input:
+/// migrates to the SDK `caller_can` check once that lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActorRole {
+    Guest,
+    Member,
+    Moderator,
+    Admin,
+}
+
+impl ActorRole {
+    /// True for the roles allowed to run moderator actions.
+    pub fn is_moderator(self) -> bool {
+        matches!(self, Self::Moderator | Self::Admin)
+    }
+}
+
+/// One participant of a room as listed by [`RoomService::participants`]: UUID
+/// and booleans only, never a name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParticipantInfo {
+    pub participant_id: Uuid,
+    pub publisher: bool,
+    pub subscriber: bool,
+    pub muted: bool,
+}
 
 /// How a room's publisher media reaches subscribers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +168,8 @@ struct PublisherEntry {
     ended: Arc<AtomicBool>,
     /// Token expiry: the session may not outlive the credential that opened it.
     expires_at: i64,
+    /// Token id the session was opened with (revocation tears the session down).
+    jti: Uuid,
 }
 
 struct SubscriberEntry {
@@ -141,6 +177,7 @@ struct SubscriberEntry {
     participant: Uuid,
     ended: Arc<AtomicBool>,
     expires_at: i64,
+    jti: Uuid,
 }
 
 struct Room {
@@ -153,6 +190,12 @@ struct Room {
     epoch: u64,
     publishers: HashMap<Uuid, PublisherEntry>,
     subscribers: HashMap<Uuid, SubscriberEntry>,
+    /// Locked rooms refuse token issuance and new joins.
+    locked: bool,
+    /// Participants server-side muted (applies again if they reconnect).
+    muted: HashSet<Uuid>,
+    /// Kicked participants: their tokens no longer authorize in this room.
+    kicked: HashSet<Uuid>,
 }
 
 /// Snapshot of a room for API responses. Carries ids and counts only.
@@ -166,6 +209,16 @@ pub struct RoomInfo {
     pub created_at: i64,
     pub publisher_ids: Vec<Uuid>,
     pub subscriber_count: usize,
+    #[serde(default)]
+    pub locked: bool,
+}
+
+/// The credential a live session was opened with: bounds its lifetime and lets
+/// token revocation find and close it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SessionGrant {
+    pub expires_at: i64,
+    pub jti: Uuid,
 }
 
 /// Parameters for [`RoomService::issue_token`].
@@ -200,6 +253,8 @@ pub struct RoomService {
     pub(crate) factory: Arc<PeerConnectionFactory>,
     pub(crate) metrics: RtcMetrics,
     public_base_url: String,
+    /// `rooms.moderation` flag (env baseline `FEATURE_ROOMS_MODERATION`), default OFF.
+    moderation_enabled: bool,
 }
 
 fn now() -> i64 {
@@ -224,7 +279,14 @@ impl RoomService {
             factory,
             metrics,
             public_base_url,
+            moderation_enabled: false,
         }
+    }
+
+    /// Turns the `rooms.moderation` feature (leave/kick/mute/lock ops) on or off.
+    pub fn with_moderation(mut self, enabled: bool) -> Self {
+        self.moderation_enabled = enabled;
+        self
     }
 
     /// Overrides the per-community subscriber cap (tests / operators).
@@ -283,6 +345,7 @@ impl RoomService {
             created_at: r.created_at,
             publisher_ids,
             subscriber_count: r.subscribers.len(),
+            locked: r.locked,
         }
     }
 
@@ -332,6 +395,9 @@ impl RoomService {
             epoch: 0,
             publishers: HashMap::new(),
             subscribers: HashMap::new(),
+            locked: false,
+            muted: HashSet::new(),
+            kicked: HashSet::new(),
         };
         let info = Self::info(id, &room);
         rooms.insert(id, room);
@@ -380,7 +446,12 @@ impl RoomService {
         let epoch = {
             let rooms = self.rooms.read().await;
             match rooms.get(&room_id) {
-                Some(r) if r.community_id == community_id => r.epoch,
+                Some(r) if r.community_id == community_id => {
+                    if r.locked {
+                        return Err(RoomError::Forbidden("room is locked"));
+                    }
+                    r.epoch
+                }
                 _ => return Err(RoomError::NotFound),
             }
         };
@@ -550,6 +621,11 @@ impl RoomService {
         }
         map.insert(token_id, (community_id.to_string(), exp));
         order.push_back(token_id);
+        drop(guard);
+        let closed = self.close_matching(room_id, |_, jti| jti == token_id).await;
+        if closed > 0 {
+            tracing::info!(%room_id, community_id, closed, "rooms: revoked token closed live sessions");
+        }
         Ok(())
     }
 
@@ -582,7 +658,13 @@ impl RoomService {
         }
         let rooms = self.rooms.read().await;
         match rooms.get(&room_id) {
-            Some(r) if r.community_id == claims.community && r.epoch == claims.epoch => Ok(claims),
+            Some(r)
+                if r.community_id == claims.community
+                    && r.epoch == claims.epoch
+                    && !Uuid::parse_str(&claims.sub).is_ok_and(|p| r.kicked.contains(&p)) =>
+            {
+                Ok(claims)
+            }
             _ => Err(RoomError::Unauthorized),
         }
     }
@@ -595,11 +677,15 @@ impl RoomService {
         fanouts: MediaFanouts,
         pc: Arc<dyn PeerConnection>,
         ended: Arc<AtomicBool>,
-        expires_at: i64,
+        grant: SessionGrant,
     ) -> Result<Uuid, RoomError> {
         let (session, stale) = {
             let mut rooms = self.rooms.write().await;
             let room = rooms.get_mut(&room_id).ok_or(RoomError::NotFound)?;
+            Self::join_allowed(room, participant)?;
+            if room.muted.contains(&participant) {
+                fanouts.set_muted(true);
+            }
             if !room.publishers.contains_key(&participant)
                 && room.publishers.len() >= room.max_publishers
             {
@@ -613,7 +699,8 @@ impl RoomService {
                     pc,
                     session,
                     ended,
-                    expires_at,
+                    expires_at: grant.expires_at,
+                    jti: grant.jti,
                 },
             );
             (session, stale)
@@ -633,7 +720,7 @@ impl RoomService {
         participant: Uuid,
         pc: Arc<dyn PeerConnection>,
         ended: Arc<AtomicBool>,
-        expires_at: i64,
+        grant: SessionGrant,
     ) -> Result<Uuid, RoomError> {
         let (session, stale) = {
             let mut rooms = self.rooms.write().await;
@@ -649,6 +736,7 @@ impl RoomService {
                 .map(|r| r.subscribers.len())
                 .sum();
             let room = rooms.get_mut(&room_id).ok_or(RoomError::NotFound)?;
+            Self::join_allowed(room, participant)?;
             let old: Vec<Uuid> = room
                 .subscribers
                 .iter()
@@ -676,7 +764,8 @@ impl RoomService {
                     pc,
                     participant,
                     ended,
-                    expires_at,
+                    expires_at: grant.expires_at,
+                    jti: grant.jti,
                 },
             );
             (session, stale)
@@ -840,6 +929,318 @@ impl RoomService {
 
     /// Time budget for ICE gathering on room signaling.
     pub(crate) const GATHER_TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+/// Moderation surface ported from Go `module_rtc` (`handlers.go`,
+/// `call_features.go`): participants/rooms listing, leave, kick, server-side
+/// mute and room lock, all community-scoped and gated by the `rooms.moderation`
+/// flag. Authorization is the interim `actor_role` model (see [`ActorRole`]).
+impl RoomService {
+    /// Counts a moderation op's outcome and logs it (ids only, never names).
+    fn observe<T>(&self, op: &'static str, r: Result<T, RoomError>) -> Result<T, RoomError> {
+        let outcome = if r.is_ok() { "ok" } else { "refused" };
+        self.metrics
+            .moderation_ops_total
+            .with_label_values(&[op, outcome])
+            .inc();
+        match &r {
+            Ok(_) => tracing::info!(op, "rooms: moderation op applied"),
+            Err(e) => tracing::info!(op, error = %e, "rooms: moderation op refused"),
+        }
+        r
+    }
+
+    /// Fails loud when `rooms.moderation` is OFF.
+    fn require_enabled(&self) -> Result<(), RoomError> {
+        if self.moderation_enabled {
+            Ok(())
+        } else {
+            Err(RoomError::Unsupported(
+                "feature rooms.moderation is disabled".into(),
+            ))
+        }
+    }
+
+    /// Flag check plus the moderator-role requirement for staff-only ops.
+    fn require_moderator(&self, role: ActorRole) -> Result<(), RoomError> {
+        self.require_enabled()?;
+        if role.is_moderator() {
+            Ok(())
+        } else {
+            Err(RoomError::Forbidden("moderator role required"))
+        }
+    }
+
+    /// Refuses a join into a locked room or by a kicked participant.
+    fn join_allowed(room: &Room, participant: Uuid) -> Result<(), RoomError> {
+        if room.locked {
+            return Err(RoomError::Forbidden("room is locked"));
+        }
+        if room.kicked.contains(&participant) {
+            return Err(RoomError::Forbidden(
+                "participant was removed from this room",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Removes every live session in `room_id` for which `pred(participant, jti)`
+    /// holds and closes its peer connection; returns how many were closed.
+    async fn close_matching(&self, room_id: Uuid, pred: impl Fn(Uuid, Uuid) -> bool) -> usize {
+        let doomed: Vec<(Arc<dyn PeerConnection>, &'static str)> = {
+            let mut rooms = self.rooms.write().await;
+            let Some(room) = rooms.get_mut(&room_id) else {
+                return 0;
+            };
+            let sub_keys: Vec<Uuid> = room
+                .subscribers
+                .iter()
+                .filter(|(_, s)| pred(s.participant, s.jti))
+                .map(|(k, _)| *k)
+                .collect();
+            let pub_keys: Vec<Uuid> = room
+                .publishers
+                .iter()
+                .filter(|(k, p)| pred(**k, p.jti))
+                .map(|(k, _)| *k)
+                .collect();
+            let mut v = Vec::new();
+            for k in sub_keys {
+                if let Some(s) = room.subscribers.remove(&k) {
+                    v.push((s.pc, "room_whep"));
+                }
+            }
+            for k in pub_keys {
+                if let Some(p) = room.publishers.remove(&k) {
+                    v.push((p.pc, "room_whip"));
+                }
+            }
+            v
+        };
+        let n = doomed.len();
+        for (pc, kind) in doomed {
+            self.metrics
+                .sessions_active
+                .with_label_values(&[kind])
+                .dec();
+            self.metrics.moderation_sessions_closed_total.inc();
+            let _ = pc.close().await;
+        }
+        n
+    }
+
+    /// Lists every live room `community_id` owns (ids and counts only).
+    #[tracing::instrument(skip_all, fields(op = "list", community_id))]
+    pub async fn list_rooms(&self, community_id: &str) -> Result<Vec<RoomInfo>, RoomError> {
+        let rooms = self.rooms.read().await;
+        let mut v: Vec<RoomInfo> = rooms
+            .iter()
+            .filter(|(_, r)| r.community_id == community_id)
+            .map(|(id, r)| Self::info(*id, r))
+            .collect();
+        v.sort_by_key(|r| (r.created_at, r.room_id));
+        self.observe("list", Ok(v))
+    }
+
+    /// Lists a room's participants by UUID (publisher/subscriber/muted flags).
+    #[tracing::instrument(skip_all, fields(op = "participants", %room_id, community_id))]
+    pub async fn participants(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+    ) -> Result<Vec<ParticipantInfo>, RoomError> {
+        let rooms = self.rooms.read().await;
+        let r = match rooms.get(&room_id) {
+            Some(r) if r.community_id == community_id => {
+                let mut m: BTreeMap<Uuid, ParticipantInfo> = BTreeMap::new();
+                for (id, p) in &r.publishers {
+                    m.insert(
+                        *id,
+                        ParticipantInfo {
+                            participant_id: *id,
+                            publisher: true,
+                            subscriber: false,
+                            muted: p.fanouts.is_muted() || r.muted.contains(id),
+                        },
+                    );
+                }
+                for s in r.subscribers.values() {
+                    m.entry(s.participant)
+                        .and_modify(|e| e.subscriber = true)
+                        .or_insert(ParticipantInfo {
+                            participant_id: s.participant,
+                            publisher: false,
+                            subscriber: true,
+                            muted: r.muted.contains(&s.participant),
+                        });
+                }
+                Ok(m.into_values().collect())
+            }
+            _ => Err(RoomError::NotFound),
+        };
+        self.observe("participants", r)
+    }
+
+    /// Ends a participant's live sessions. Self-service, or by a moderator
+    /// (`actor_id != participant`); does not blocklist. Returns sessions closed.
+    #[tracing::instrument(skip_all, fields(op = "leave", %room_id, community_id))]
+    pub async fn leave(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        participant: Uuid,
+        actor_id: Uuid,
+        actor_role: ActorRole,
+    ) -> Result<usize, RoomError> {
+        let r = async {
+            self.get(community_id, room_id).await?;
+            if actor_id != participant {
+                self.require_moderator(actor_role)?;
+            }
+            Ok(self.close_matching(room_id, |p, _| p == participant).await)
+        }
+        .await;
+        self.observe("leave", r)
+    }
+
+    /// Removes a participant: closes their live peers and blocklists them for
+    /// this room so their tokens stop authorizing. Moderator only; not self.
+    #[tracing::instrument(skip_all, fields(op = "kick", %room_id, community_id))]
+    pub async fn kick(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        participant: Uuid,
+        actor_id: Uuid,
+        actor_role: ActorRole,
+    ) -> Result<usize, RoomError> {
+        let r = async {
+            self.require_moderator(actor_role)?;
+            if actor_id == participant {
+                return Err(RoomError::Invalid(
+                    "a participant cannot kick themselves".into(),
+                ));
+            }
+            {
+                let mut rooms = self.rooms.write().await;
+                match rooms.get_mut(&room_id) {
+                    Some(room) if room.community_id == community_id => {
+                        if !room.kicked.contains(&participant)
+                            && room.kicked.len() >= MAX_MODERATED_PER_ROOM
+                        {
+                            return Err(RoomError::LimitReached(format!(
+                                "{MAX_MODERATED_PER_ROOM} kicked participants per room"
+                            )));
+                        }
+                        room.kicked.insert(participant);
+                        room.muted.remove(&participant);
+                    }
+                    _ => return Err(RoomError::NotFound),
+                }
+            }
+            Ok(self.close_matching(room_id, |p, _| p == participant).await)
+        }
+        .await;
+        self.observe("kick", r)
+    }
+
+    /// Server-side mutes (or unmutes) one participant: their fanout stops
+    /// forwarding, enforced in the SFU rather than trusting the client.
+    #[tracing::instrument(skip_all, fields(op = "mute", %room_id, community_id))]
+    pub async fn set_muted(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        participant: Uuid,
+        muted: bool,
+        actor_role: ActorRole,
+    ) -> Result<(), RoomError> {
+        let op = if muted { "mute" } else { "unmute" };
+        let r = async {
+            self.require_moderator(actor_role)?;
+            let mut rooms = self.rooms.write().await;
+            let room = match rooms.get_mut(&room_id) {
+                Some(r) if r.community_id == community_id => r,
+                _ => return Err(RoomError::NotFound),
+            };
+            if muted {
+                if !room.muted.contains(&participant) && room.muted.len() >= MAX_MODERATED_PER_ROOM
+                {
+                    return Err(RoomError::LimitReached(format!(
+                        "{MAX_MODERATED_PER_ROOM} muted participants per room"
+                    )));
+                }
+                room.muted.insert(participant);
+            } else {
+                room.muted.remove(&participant);
+            }
+            if let Some(p) = room.publishers.get(&participant) {
+                p.fanouts.set_muted(muted);
+            }
+            Ok(())
+        }
+        .await;
+        self.observe(op, r)
+    }
+
+    /// Mutes every current publisher except `actor_id`; returns how many.
+    #[tracing::instrument(skip_all, fields(op = "mute_all", %room_id, community_id))]
+    pub async fn mute_all(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        actor_id: Uuid,
+        actor_role: ActorRole,
+    ) -> Result<usize, RoomError> {
+        let r = async {
+            self.require_moderator(actor_role)?;
+            let mut rooms = self.rooms.write().await;
+            let room = match rooms.get_mut(&room_id) {
+                Some(r) if r.community_id == community_id => r,
+                _ => return Err(RoomError::NotFound),
+            };
+            let targets: Vec<Uuid> = room
+                .publishers
+                .keys()
+                .copied()
+                .filter(|p| *p != actor_id)
+                .collect();
+            for t in &targets {
+                room.muted.insert(*t);
+                if let Some(p) = room.publishers.get(t) {
+                    p.fanouts.set_muted(true);
+                }
+            }
+            Ok(targets.len())
+        }
+        .await;
+        self.observe("mute_all", r)
+    }
+
+    /// Locks or unlocks a room: locked refuses token issuance and new joins.
+    #[tracing::instrument(skip_all, fields(op = "lock", %room_id, community_id))]
+    pub async fn set_locked(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        locked: bool,
+        actor_role: ActorRole,
+    ) -> Result<(), RoomError> {
+        let op = if locked { "lock" } else { "unlock" };
+        let r = async {
+            self.require_moderator(actor_role)?;
+            let mut rooms = self.rooms.write().await;
+            match rooms.get_mut(&room_id) {
+                Some(room) if room.community_id == community_id => {
+                    room.locked = locked;
+                    Ok(())
+                }
+                _ => Err(RoomError::NotFound),
+            }
+        }
+        .await;
+        self.observe(op, r)
+    }
 }
 
 #[cfg(test)]

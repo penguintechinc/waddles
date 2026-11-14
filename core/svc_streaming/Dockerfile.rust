@@ -21,11 +21,10 @@
 # nvidia-container-toolkit injects the host-matched copies when the pod runs
 # with the NVIDIA runtime and `video` in NVIDIA_DRIVER_CAPABILITIES.
 #
-# Build (context = this directory, not the repo root -- no shared libs to
-# pull in for a Rust crate):
-#   docker build -f Dockerfile.rust --target cpu    -t <repo>/svc-streaming:<tag>-cpu    .
-#   docker build -f Dockerfile.rust --target amd    -t <repo>/svc-streaming:<tag>-amd    .
-#   docker build -f Dockerfile.rust --target nvidia -t <repo>/svc-streaming:<tag>-nvidia .
+# Build (context = this directory; the repo-root `proto/` tree is a named build context):
+#   docker build --build-context proto=../../proto -f Dockerfile.rust --target cpu    -t <repo>/svc-streaming:<tag>-cpu    .
+#   docker build --build-context proto=../../proto -f Dockerfile.rust --target amd    -t <repo>/svc-streaming:<tag>-amd    .
+#   docker build --build-context proto=../../proto -f Dockerfile.rust --target nvidia -t <repo>/svc-streaming:<tag>-nvidia .
 # Docker builds the LAST stage when --target is omitted, so `cpu` stays last.
 
 # ---------------------------------------------------------------------------
@@ -52,6 +51,14 @@ COPY Cargo.toml Cargo.lock ./
 # `cargo build`). Tests are not compiled by the release build.
 COPY tests ./tests
 COPY src ./src
+COPY build.rs ./build.rs
+# build.rs compiles `proto/waddles/streaming/internal/v1/rooms.proto` from
+# `CARGO_MANIFEST_DIR/../../proto` -- for `/build` that is `/proto`. The repo-root `proto/`
+# tree is outside this crate's build context, so it is supplied as the named `proto` build
+# context (`--build-context proto=./proto`; see build-svc-streaming.yml / deploy-dal2alpha.yml).
+# `proto` is a named build context (--build-context), not a FROM alias -> DL3022 false positive.
+# hadolint ignore=DL3022
+COPY --from=proto . /proto
 RUN cargo build --release --locked
 
 # ---------------------------------------------------------------------------
