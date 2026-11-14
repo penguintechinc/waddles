@@ -32,6 +32,7 @@ use penguin_connector_twitch::irc::TwitchIrcSender;
 use penguin_connector_twitch::TwitchError;
 use tokio::sync::oneshot;
 
+use crate::egress::Egress;
 use crate::ingest::Backoff;
 use crate::outbound_creds::{CredError, TwitchCredentialSource};
 use crate::outbound_ops::{
@@ -39,6 +40,7 @@ use crate::outbound_ops::{
     OutboundEntry, SenderError, TwitchSender,
 };
 use crate::outbound_pin::{PinKeys, VerifiedStamp};
+use egress_detokenizer::DetokenizedText;
 
 /// The queue key this module drains -- byte-identical to
 /// `core/svc_action/src/capabilities.rs::outbound_relay_queue_key("twitch")`,
@@ -172,7 +174,7 @@ pub trait IrcOutbound: Send + Sync {
         &self,
         community_id: Option<i64>,
         channel: &str,
-        text: &str,
+        text: &DetokenizedText,
     ) -> Result<(), IrcSendError>;
 }
 
@@ -197,7 +199,7 @@ impl<C: TwitchCredentialSource> IrcOutbound for RealIrcOutbound<C> {
         &self,
         community_id: Option<i64>,
         channel: &str,
-        text: &str,
+        text: &DetokenizedText,
     ) -> Result<(), IrcSendError> {
         let cred = self.creds.credential(community_id, channel).await?;
         let cfg = crate::ingest::twitch::irc_config(
@@ -208,7 +210,7 @@ impl<C: TwitchCredentialSource> IrcOutbound for RealIrcOutbound<C> {
             cred.oauth_token.expose(),
             self.endpoint.use_tls,
         );
-        Ok(TwitchIrcSender::new(cfg).send(text).await?)
+        Ok(TwitchIrcSender::new(cfg).send(text.as_str()).await?)
     }
 }
 
@@ -348,6 +350,7 @@ async fn drain_loop<Q, S>(
         sender,
         None::<&NoExecutor>,
         &tests::MemoryReplayGuard::default(),
+        &Egress::disabled(),
         pin,
         backoff,
         shutdown,
@@ -363,11 +366,13 @@ async fn drain_loop<Q, S>(
 /// consulted. `exec = None`: the legacy per-platform sender, unchanged.
 /// Retry/ack semantics are identical either way: a refused or failed entry
 /// is already popped, logged PII-free and dropped, never re-queued.
+#[allow(clippy::too_many_arguments)]
 async fn drain_loop_with<Q, S, X, G>(
     queue: Q,
     sender: &S,
     exec: Option<&X>,
     guard: &G,
+    egress: &Egress,
     pin: Option<&PinKeys>,
     backoff: Backoff,
     shutdown: oneshot::Receiver<()>,
@@ -377,7 +382,10 @@ async fn drain_loop_with<Q, S, X, G>(
     X: ActionExecutor,
     G: ReplayGuard,
 {
-    drain_platform_loop("twitch", queue, sender, exec, guard, pin, backoff, shutdown).await;
+    drain_platform_loop(
+        "twitch", queue, sender, exec, guard, egress, pin, backoff, shutdown,
+    )
+    .await;
 }
 
 /// The list-drain loop for one IRC-style platform queue. `platform` is the
@@ -391,6 +399,7 @@ async fn drain_platform_loop<Q, S, X, G>(
     sender: &S,
     exec: Option<&X>,
     guard: &G,
+    egress: &Egress,
     pin: Option<&PinKeys>,
     backoff: Backoff,
     shutdown: oneshot::Receiver<()>,
@@ -406,6 +415,7 @@ async fn drain_platform_loop<Q, S, X, G>(
         sender,
         exec,
         guard,
+        egress,
         None::<&NoAck>,
         pin,
         backoff,
@@ -444,6 +454,7 @@ async fn drain_platform_loop_acked<Q, S, X, G, C>(
     sender: &S,
     exec: Option<&X>,
     guard: &G,
+    egress: &Egress,
     ctl: Option<&C>,
     pin: Option<&PinKeys>,
     mut backoff: Backoff,
@@ -476,17 +487,21 @@ async fn drain_platform_loop_acked<Q, S, X, G, C>(
                             }
                             let result = match claim {
                                 Err(e) => Err(e),
-                                Ok(()) => match exec {
-                                    Some(x) => x.execute_action(platform, community_id, &action).await,
-                                    None if platform != "twitch" => Err(SenderError::Unsupported {
-                                        platform: platform.to_string(),
-                                        op: action.op(),
-                                    }),
-                                    None => {
-                                        let twitch = TwitchSender::new(sender, community_id);
-                                        route("twitch", &action, &twitch, &DiscordSender::unconfigured()).await.map(|()| None)
+                                // PII boundary: detokenize immediately before the send.
+                                Ok(()) => {
+                                    let prepared = egress.prepare(platform, action.clone()).await;
+                                    match exec {
+                                        Some(x) => x.execute_action(platform, community_id, &prepared).await,
+                                        None if platform != "twitch" => Err(SenderError::Unsupported {
+                                            platform: platform.to_string(),
+                                            op: action.op(),
+                                        }),
+                                        None => {
+                                            let twitch = TwitchSender::new(sender, community_id);
+                                            route("twitch", &prepared, &twitch, &DiscordSender::unconfigured()).await.map(|()| None)
+                                        }
                                     }
-                                },
+                                }
                             };
                             if let Err(err) = &result {
                                 match err {
@@ -550,6 +565,7 @@ pub async fn run<C: TwitchCredentialSource>(
         &sender,
         None::<&NoExecutor>,
         &guard,
+        &crate::egress::installed(),
         pin.as_ref(),
         backoff,
         shutdown,
@@ -587,6 +603,7 @@ pub async fn run_exec<X: ActionExecutor>(
         &NoIrc,
         Some(exec),
         &guard,
+        &crate::egress::installed(),
         Some(&ctl),
         pin.as_ref(),
         backoff,
@@ -632,6 +649,7 @@ pub async fn run_youtube_exec<X: ActionExecutor>(
         &NoIrc,
         Some(exec),
         &guard,
+        &crate::egress::installed(),
         Some(&ctl),
         pin.as_ref(),
         Backoff::new(Duration::from_secs(30)),
@@ -676,6 +694,7 @@ pub async fn run_kick_exec<X: ActionExecutor>(
         &NoIrc,
         Some(exec),
         &guard,
+        &crate::egress::installed(),
         Some(&ctl),
         pin.as_ref(),
         Backoff::new(Duration::from_secs(30)),
@@ -694,7 +713,7 @@ impl IrcOutbound for NoIrc {
         &self,
         _community_id: Option<i64>,
         _channel: &str,
-        _text: &str,
+        _text: &DetokenizedText,
     ) -> Result<(), IrcSendError> {
         Err(IrcSendError::Credential(CredError::NoBinding))
     }
@@ -854,6 +873,7 @@ async fn handle_discord_entry<C: DrainControl, X: ActionExecutor, G: ReplayGuard
     exec: Option<&X>,
     ctl: &C,
     guard: &G,
+    egress: &Egress,
     pin: Option<&PinKeys>,
 ) {
     let entry = match parse_outbound_entry(raw, "discord") {
@@ -892,13 +912,51 @@ async fn handle_discord_entry<C: DrainControl, X: ActionExecutor, G: ReplayGuard
     // exactly as on the legacy path -- never re-queued.
     let result = match claim {
         Err(e) => Err(e),
-        Ok(()) => match exec {
-            Some(x) => {
-                x.execute_action("discord", entry.community_id, &entry.action)
-                    .await
+        // The env-token sender is the DEFAULT tenant's application only: a
+        // non-default tenant's op is refused before anything is sent.
+        Ok(()) if exec.is_none() && !crate::tenant_discord::is_default_tenant(entry.tenant_id) => {
+            crate::tenant_discord::record_app_missing(
+                crate::tenant_discord::SURFACE_OUTBOUND_ENV,
+                op,
+                entry.tenant_id,
+            );
+            Err(SenderError::Rejected {
+                platform: "discord",
+                op,
+                reason: crate::tenant_discord::TENANT_DISCORD_APP_MISSING,
+            })
+        }
+        // PII boundary: detokenize immediately before the send.
+        Ok(()) => {
+            let prepared = egress.prepare("discord", entry.action.clone()).await;
+            match exec {
+                Some(x) => {
+                    match x
+                        .execute_action("discord", entry.community_id, &prepared)
+                        .await
+                    {
+                        // No binding for a non-default tenant: it has no app of its own.
+                        Err(SenderError::Rejected {
+                            reason: "no_connection",
+                            ..
+                        }) if !crate::tenant_discord::is_default_tenant(entry.tenant_id) => {
+                            crate::tenant_discord::record_app_missing(
+                                crate::tenant_discord::SURFACE_OUTBOUND_BINDING,
+                                op,
+                                entry.tenant_id,
+                            );
+                            Err(SenderError::Rejected {
+                                platform: "discord",
+                                op,
+                                reason: crate::tenant_discord::TENANT_DISCORD_APP_MISSING,
+                            })
+                        }
+                        other => other,
+                    }
+                }
+                None => dispatch_to(sender, &prepared).await.map(|()| None),
             }
-            None => dispatch_to(sender, &entry.action).await.map(|()| None),
-        },
+        }
     };
     match &result {
         Ok(_) => {}
@@ -943,6 +1001,7 @@ async fn discord_drain_loop<Q, C>(
         None::<&NoExecutor>,
         ctl,
         &tests::MemoryReplayGuard::default(),
+        &Egress::disabled(),
         pin,
         backoff,
         shutdown,
@@ -959,6 +1018,7 @@ async fn discord_drain_loop_with<Q, C, X, G>(
     exec: Option<&X>,
     ctl: &C,
     guard: &G,
+    egress: &Egress,
     pin: Option<&PinKeys>,
     mut backoff: Backoff,
     mut shutdown: oneshot::Receiver<()>,
@@ -974,7 +1034,7 @@ async fn discord_drain_loop_with<Q, C, X, G>(
             popped = queue.brpop_one() => match popped {
                 Ok(Some(raw)) => {
                     backoff.reset();
-                    handle_discord_entry(&raw, sender, exec, ctl, guard, pin).await;
+                    handle_discord_entry(&raw, sender, exec, ctl, guard, egress, pin).await;
                 }
                 Ok(None) => backoff.reset(),
                 Err(err) => {
@@ -1054,6 +1114,7 @@ async fn run_discord_inner<X: ActionExecutor>(
     let guard = ValkeyReplayGuard::new(
         connect_with_response_timeout(&client, CONTROL_CONN_RESPONSE_TIMEOUT).await?,
     );
+    let egress = crate::egress::installed();
     let queue = ListQueue {
         conn: list_conn,
         key: DISCORD_OUTBOUND_QUEUE_KEY,
@@ -1070,6 +1131,7 @@ async fn run_discord_inner<X: ActionExecutor>(
             exec,
             &ctl,
             &guard,
+            &egress,
             pin.as_ref(),
             Backoff::new(Duration::from_secs(30)),
             shutdown,
@@ -1264,7 +1326,7 @@ mod tests {
             &self,
             community_id: Option<i64>,
             channel: &str,
-            text: &str,
+            text: &DetokenizedText,
         ) -> Result<(), IrcSendError> {
             self.communities.lock().unwrap().push(community_id);
             if let Some(e) = self.cred_err {
@@ -1276,7 +1338,7 @@ mod tests {
             self.calls
                 .lock()
                 .unwrap()
-                .push((channel.to_string(), text.to_string()));
+                .push((channel.to_string(), text.as_str().to_string()));
             Ok(())
         }
     }
@@ -1824,6 +1886,7 @@ mod tests {
                 None::<&NoExecutor>,
                 ctl,
                 guard,
+                &Egress::disabled(),
                 Some(&test_pin_keys()),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -1951,6 +2014,7 @@ mod tests {
                         &sender,
                         None::<&NoExecutor>,
                         &guard,
+                        &Egress::disabled(),
                         Some(&test_pin_keys()),
                         Backoff::new(Duration::from_secs(30)),
                         rx,
@@ -2644,7 +2708,10 @@ mod tests {
             (Some(1), CredError::NoBinding),
             (None, CredError::NoCommunityScope),
         ] {
-            let err = real.send(c, "#c", "hi").await.unwrap_err();
+            let err = real
+                .send(c, "#c", &egress_detokenizer::tokens_unchanged("hi"))
+                .await
+                .unwrap_err();
             assert!(
                 matches!(err, IrcSendError::Credential(e) if e == want),
                 "{err}"
@@ -2658,7 +2725,10 @@ mod tests {
         // The legacy source still yields a credential (the connect then fails on port 1).
         let legacy =
             RealIrcOutbound::new(ep(), StaticCredentialSource::new("n".into(), "t".into()));
-        let err = legacy.send(None, "#c", "hi").await.unwrap_err();
+        let err = legacy
+            .send(None, "#c", &egress_detokenizer::tokens_unchanged("hi"))
+            .await
+            .unwrap_err();
         assert!(matches!(err, IrcSendError::Send(_)), "{err}");
     }
 
@@ -2688,7 +2758,7 @@ mod tests {
             &self,
             platform: &'static str,
             community_id: Option<i64>,
-            action: &OutboundAction,
+            action: &crate::egress::DetokenizedAction,
         ) -> Result<Option<String>, SenderError> {
             self.calls
                 .lock()
@@ -2715,6 +2785,7 @@ mod tests {
                 sender,
                 Some(exec),
                 &MemoryReplayGuard::default(),
+                &Egress::disabled(),
                 Some(&test_pin_keys()),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -2741,6 +2812,7 @@ mod tests {
                 Some(exec),
                 ctl,
                 &MemoryReplayGuard::default(),
+                &Egress::disabled(),
                 Some(&test_pin_keys()),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -2777,6 +2849,7 @@ mod tests {
                     &RecordingSender::default(),
                     Some(&exec),
                     &MemoryReplayGuard::default(),
+                    &Egress::disabled(),
                     Some(&ctl),
                     Some(&test_pin_keys()),
                     Backoff::new(Duration::from_secs(30)),
@@ -2827,6 +2900,7 @@ mod tests {
                 &RecordingSender::default(),
                 Some(&exec),
                 &MemoryReplayGuard::default(),
+                &Egress::disabled(),
                 Some(&ctl),
                 Some(&test_pin_keys()),
                 Backoff::new(Duration::from_secs(30)),
@@ -2923,6 +2997,7 @@ mod tests {
                 &NoIrc,
                 Some(&exec),
                 &MemoryReplayGuard::default(),
+                &Egress::disabled(),
                 Some(&test_pin_keys()),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -2954,6 +3029,7 @@ mod tests {
                 &sender,
                 None::<&NoExecutor>,
                 &MemoryReplayGuard::default(),
+                &Egress::disabled(),
                 Some(&test_pin_keys()),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -3218,12 +3294,558 @@ mod tests {
             channel: "#c".into(),
             text: "t".into(),
             origin_channel: Some("#c".into()),
+            tenant_id: None,
         };
         let e = NoExecutor
-            .execute_action("twitch", Some(1), &a)
+            .execute_action(
+                "twitch",
+                Some(1),
+                &crate::egress::DetokenizedAction::tokens_unchanged(a.clone()),
+            )
             .await
             .unwrap_err();
         assert!(matches!(e, SenderError::Unsupported { .. }));
         assert_eq!(e.ack_code(), "unsupported");
+    }
+
+    /// Resolver fixture: every token maps to one fixed display name.
+    struct FixedName(&'static str);
+
+    impl egress_detokenizer::DisplayNameResolver for FixedName {
+        fn resolve_many<'a>(
+            &'a self,
+            _tenant_id: &'a str,
+            tokens: Vec<String>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            std::collections::HashMap<String, String>,
+                            egress_detokenizer::DetokenizeError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let name = self.0;
+            Box::pin(async move { Ok(tokens.into_iter().map(|t| (t, name.to_string())).collect()) })
+        }
+    }
+
+    /// PII boundary: the REAL Discord REST request body carries the resolved, escaped display
+    /// name -- the detokenization happens in the drain, immediately before the platform send.
+    #[tokio::test]
+    async fn discord_drain_sends_the_escaped_display_name_in_the_platform_request() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        // Tenant 7 is the default tenant here, so the env-token sender serves it.
+        crate::tenant_discord::set_default_tenant_id(7);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/channels/1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let rest = rest_for(&server);
+        let sender = DiscordSender::new(&rest);
+        let egress = Egress::new(
+            std::sync::Arc::new(FixedName("a_b*c")),
+            crate::egress::KillSwitch::Fixed(true),
+        );
+        let ctl = FakeCtl::default();
+        let queue = FakeQueue {
+            payloads: vec![Ok(Some(
+                r#"{"v":1,"op":"chat.send","platform":"discord","channel":"1","origin_channel":"1","text":"hi {user:0b9f2c1e-7d3a-4c58-9a1e-5f6d7e8a9b0c}","op_id":"send-1","tenant_id":7}"#
+                    .to_string(),
+            ))],
+            idx: AtomicUsize::new(0),
+        };
+        let (_tx, rx) = oneshot::channel();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            discord_drain_loop_with(
+                queue,
+                &sender,
+                None::<&NoExecutor>,
+                &ctl,
+                &MemoryReplayGuard::default(),
+                &egress,
+                Some(&test_pin_keys()),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
+        )
+        .await;
+        let reqs = server.received_requests().await.expect("recorded");
+        assert_eq!(reqs.len(), 1, "exactly one platform request");
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).expect("json body");
+        assert_eq!(body["content"], "hi a\\_b\\*c");
+        assert_eq!(
+            ctl.acks.lock().unwrap().as_slice(),
+            &[("send-1".to_string(), r#"{"ok":true}"#.to_string())]
+        );
+    }
+
+    // ---- tenant-owned Discord application (tenant_discord) ----
+
+    use crate::tenant_discord::{
+        app_missing_count, SURFACE_OUTBOUND_BINDING, SURFACE_OUTBOUND_ENV,
+        TENANT_DISCORD_APP_MISSING,
+    };
+
+    /// Executor stand-in: no binding for the community (`reject`) or success;
+    /// records the communities it was asked to act for.
+    #[derive(Default)]
+    struct BindingExec {
+        reject: bool,
+        communities: Mutex<Vec<Option<i64>>>,
+    }
+
+    impl ActionExecutor for BindingExec {
+        async fn execute_action(
+            &self,
+            _platform: &'static str,
+            community_id: Option<i64>,
+            _action: &crate::egress::DetokenizedAction,
+        ) -> Result<Option<String>, SenderError> {
+            self.communities.lock().unwrap().push(community_id);
+            if self.reject {
+                return Err(SenderError::Rejected {
+                    platform: "discord",
+                    op: "chat.send",
+                    reason: "no_connection",
+                });
+            }
+            Ok(None)
+        }
+    }
+
+    fn send_entry(op_id: &str, tenant: Option<i64>, community: i64) -> String {
+        let t = tenant.map_or(String::new(), |t| format!(r#","tenant_id":{t}"#));
+        format!(
+            r#"{{"v":1,"op":"chat.send","platform":"discord","channel":"1","origin_channel":"1","text":"hi","op_id":"{op_id}","community_id":{community}{t}}}"#
+        )
+    }
+
+    /// Drives the Discord drain over `payloads` with the REAL Valkey replay guard.
+    async fn drive_real_guard<X: ActionExecutor>(
+        sender: &DiscordSender<'_>,
+        exec: Option<&X>,
+        ctl: &FakeCtl,
+        payloads: Vec<String>,
+    ) {
+        let url = std::env::var("VALKEY_URL")
+            .expect("VALKEY_URL must be set: this test needs a REAL Valkey (no silent skip)");
+        let client = redis::Client::open(url).unwrap();
+        let guard =
+            ValkeyReplayGuard::new(client.get_multiplexed_async_connection().await.unwrap());
+        let queue = FakeQueue {
+            payloads: payloads.into_iter().map(|p| Ok(Some(p))).collect(),
+            idx: AtomicUsize::new(0),
+        };
+        let (_tx, rx) = oneshot::channel();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            discord_drain_loop_with(
+                queue,
+                sender,
+                exec,
+                ctl,
+                &guard,
+                &Egress::disabled(),
+                Some(&test_pin_keys()),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
+        )
+        .await;
+    }
+
+    /// The env-token drain never sends for a non-default tenant (even though the
+    /// env token is configured) and serves the default tenant with it.
+    #[tokio::test]
+    async fn env_token_drain_serves_only_the_default_tenant_real_valkey() {
+        use wiremock::matchers::{header, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        // Only the default tenant's send may reach Discord, with the env token.
+        Mock::given(method("POST"))
+            .and(header("Authorization", "Bot tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"9"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let rest = rest_for(&server);
+        let ctl = FakeCtl::default();
+        let seq = OP_SEQ.fetch_add(1, Ordering::SeqCst);
+        let (foreign, own) = (format!("tdn-f-{seq}"), format!("tdn-d-{seq}"));
+        let before = app_missing_count(SURFACE_OUTBOUND_ENV);
+        drive_real_guard(
+            &DiscordSender::new(&rest),
+            None::<&NoExecutor>,
+            &ctl,
+            vec![
+                stamp_for_test(&send_entry(&foreign, Some(99), 3)),
+                stamp_for_test(&send_entry(&own, None, 4)),
+            ],
+        )
+        .await;
+        let acks = ctl.acks.lock().unwrap();
+        assert_eq!(acks.len(), 2, "both ops acked (denominator)");
+        let by = |id: &str| acks.iter().find(|(i, _)| i == id).unwrap().1.clone();
+        assert!(
+            by(&foreign).contains(TENANT_DISCORD_APP_MISSING),
+            "{}",
+            by(&foreign)
+        );
+        assert_eq!(by(&own), r#"{"ok":true}"#);
+        assert_eq!(app_missing_count(SURFACE_OUTBOUND_ENV), before + 1);
+    }
+
+    /// Executor path: a non-default tenant with no binding fails loud with the
+    /// stable code (no env fallback exists there); the default tenant keeps the
+    /// plain `no_connection`; tenant A's community never serves tenant B's.
+    #[tokio::test]
+    async fn executor_path_refuses_a_non_default_tenant_without_a_binding_real_valkey() {
+        let seq = OP_SEQ.fetch_add(1, Ordering::SeqCst);
+        let ctl = FakeCtl::default();
+        let exec = BindingExec {
+            reject: true,
+            ..BindingExec::default()
+        };
+        let (a, b) = (format!("tdn-a-{seq}"), format!("tdn-b-{seq}"));
+        let before = app_missing_count(SURFACE_OUTBOUND_BINDING);
+        drive_real_guard(
+            &DiscordSender::unconfigured(),
+            Some(&exec),
+            &ctl,
+            vec![
+                stamp_for_test(&send_entry(&a, Some(99), 3)),
+                stamp_for_test(&send_entry(&b, None, 4)),
+            ],
+        )
+        .await;
+        let acks = ctl.acks.lock().unwrap();
+        assert_eq!(acks.len(), 2);
+        let by = |id: &str| acks.iter().find(|(i, _)| i == id).unwrap().1.clone();
+        assert!(by(&a).contains(TENANT_DISCORD_APP_MISSING), "{}", by(&a));
+        assert!(by(&b).contains("no_connection") && !by(&b).contains(TENANT_DISCORD_APP_MISSING));
+        assert_eq!(app_missing_count(SURFACE_OUTBOUND_BINDING), before + 1);
+        assert_eq!(
+            exec.communities.lock().unwrap().as_slice(),
+            &[Some(3), Some(4)],
+            "each op resolved for its own community only"
+        );
+    }
+
+    /// Per-community binding isolation: community A's token is A's, B's is B's,
+    /// and a community with no binding never receives either (nor an env token).
+    #[tokio::test]
+    async fn slots_use_each_communitys_own_bot_token_and_never_another() {
+        use crate::connector::sender_exec::discord_slots::{DiscordSlots, BOT_HANDLE};
+        use crate::connector::sender_exec::{SlotError, SlotRequest, SlotSource};
+        use crate::outbound_creds_discord::{DiscordBinding, DiscordCredentialSource};
+        use std::collections::BTreeMap;
+
+        struct Creds;
+        impl DiscordCredentialSource for Creds {
+            async fn binding(&self, c: Option<i64>) -> Result<DiscordBinding, CredError> {
+                let tok = match c {
+                    Some(3) => "TOKEN-TENANT-A",
+                    Some(4) => "TOKEN-TENANT-B",
+                    _ => return Err(CredError::NoBinding),
+                };
+                Ok(DiscordBinding {
+                    bot_token: connection_resolver::SecretString::new(tok.to_string()),
+                    guild_id: "123456789012345678".into(),
+                    application_id: None,
+                    managed_roles: BTreeMap::new(),
+                })
+            }
+        }
+        let slots = DiscordSlots::new(Creds);
+        let req = |c: Option<i64>| SlotRequest {
+            platform: "discord",
+            community_id: c,
+            pinned_channel: None,
+            handles: &[BOT_HANDLE],
+            guild_scoped: true,
+        };
+        let a = slots.resolve(&req(Some(3))).await.unwrap();
+        let b = slots.resolve(&req(Some(4))).await.unwrap();
+        assert_eq!(a[BOT_HANDLE].expose(), "TOKEN-TENANT-A");
+        assert_eq!(b[BOT_HANDLE].expose(), "TOKEN-TENANT-B");
+        assert_ne!(a[BOT_HANDLE].expose(), b[BOT_HANDLE].expose());
+        assert!(matches!(
+            slots.resolve(&req(Some(5))).await,
+            Err(SlotError::Refused("no_connection"))
+        ));
+    }
+
+    /// Real Postgres + real Valkey proof of the direct-DB egress detokenizer.
+    mod real_db_detokenize {
+        use super::*;
+        use crate::display_names::PgDisplayNameResolver;
+        use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
+
+        const TENANT_A: i64 = 7;
+        const TENANT_B: i64 = 8;
+        const ALICE: &str = "0b9f2c1e-7d3a-4c58-9a1e-5f6d7e8a9b0c";
+        const BOB_OTHER_TENANT: &str = "1c8e3d2f-6e4b-4d69-8b2f-6a7e8f9a0b1d";
+        const ERASED: &str = "2d7f4e3a-5f5c-4e7a-9c3a-7b8f9a0b1c2e";
+        const PSEUDO: &str = "3e6a5f4b-4a6d-4f8b-8d4b-8c9a0b1c2d3f";
+
+        /// `TEST_DATABASE_URL` (owner credential; CI starts the container). Unset FAILS.
+        fn admin_url() -> String {
+            std::env::var("TEST_DATABASE_URL").expect(
+                "TEST_DATABASE_URL must be set: this test needs a REAL Postgres (no silent skip)",
+            )
+        }
+
+        /// Creates an isolated schema with the identity tables, seeds it, and a LOGIN role
+        /// holding EXACTLY alembic 0100's column grants. Returns the role's URL (search_path
+        /// pinned to the schema) and the admin connection.
+        async fn fixture() -> (String, DatabaseConnection, String) {
+            let n = OP_SEQ.fetch_add(1, Ordering::SeqCst);
+            let schema = format!("detok_{}_{n}", std::process::id());
+            let role = format!("detok_ro_{}_{n}", std::process::id());
+            let admin = Database::connect(admin_url()).await.expect("admin connect");
+            let sql = format!(
+                r#"
+DROP SCHEMA IF EXISTS {schema} CASCADE;
+CREATE SCHEMA {schema};
+SET search_path = {schema};
+CREATE TABLE tenants (id BIGINT PRIMARY KEY);
+CREATE TABLE communities (id BIGINT PRIMARY KEY, tenant_id BIGINT NOT NULL, name TEXT);
+CREATE TABLE hub_users (id BIGINT PRIMARY KEY, uuid UUID UNIQUE NOT NULL,
+    display_name TEXT, email TEXT, password_hash TEXT);
+CREATE TABLE community_members (id BIGSERIAL PRIMARY KEY, community_id BIGINT NOT NULL,
+    user_uuid UUID, user_id TEXT, display_name TEXT, bio TEXT);
+CREATE TABLE ephemeral_pseudonyms (tenant_id BIGINT NOT NULL, pseudonym UUID NOT NULL,
+    handle TEXT, platform_user_id TEXT);
+INSERT INTO tenants VALUES ({TENANT_A}), ({TENANT_B});
+INSERT INTO communities VALUES (70, {TENANT_A}, 'a'), (80, {TENANT_B}, 'b');
+INSERT INTO hub_users VALUES (1, '{ALICE}', 'Alice', 'a@example.invalid', 'x'),
+    (2, '{BOB_OTHER_TENANT}', 'Bob', 'b@example.invalid', 'x'),
+    (3, '{ERASED}', NULL, 'deleted_3@example.invalid', NULL);
+INSERT INTO community_members (community_id, user_uuid, display_name)
+    VALUES (70, '{ALICE}', 'alice-nick'), (80, '{BOB_OTHER_TENANT}', 'bob-nick');
+INSERT INTO ephemeral_pseudonyms VALUES ({TENANT_A}, '{PSEUDO}', 'Pseudo', 'p-1');
+CREATE ROLE {role} LOGIN PASSWORD 'ci-only-pass';
+GRANT USAGE ON SCHEMA {schema} TO {role};
+GRANT SELECT (id, uuid, display_name) ON hub_users TO {role};
+GRANT SELECT (id, community_id, user_uuid, user_id, display_name) ON community_members TO {role};
+GRANT SELECT (id, tenant_id) ON communities TO {role};
+GRANT SELECT (tenant_id, pseudonym, handle) ON ephemeral_pseudonyms TO {role};
+"#
+            );
+            admin.execute_unprepared(&sql).await.expect("seed schema");
+            let mut url = reqwest::Url::parse(&admin_url()).expect("url");
+            url.set_username(&role).expect("user");
+            url.set_password(Some("ci-only-pass")).expect("pass");
+            url.set_query(Some(&format!("options=-c%20search_path%3D{schema}")));
+            (url.to_string(), admin, role)
+        }
+
+        async fn teardown(admin: &DatabaseConnection, url: &str, role: &str) {
+            let schema = url
+                .rsplit("search_path%3D")
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            let _ = admin
+                .execute_unprepared(&format!(
+                    "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP OWNED BY {role}; DROP ROLE IF EXISTS {role};"
+                ))
+                .await;
+        }
+
+        fn egress_over(url: String) -> Egress {
+            Egress::new(
+                std::sync::Arc::new(PgDisplayNameResolver::new(url, Duration::from_secs(3))),
+                crate::egress::KillSwitch::Fixed(true),
+            )
+        }
+
+        /// Runs ONE entry through the real Discord drain: real Valkey list queue + replay
+        /// guard, the resolver under test, a local Discord REST double. Returns the body text.
+        async fn drain_one(egress: &Egress, text: &str, tenant: i64) -> String {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/channels/1/messages"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+                .mount(&server)
+                .await;
+            let rest = rest_for(&server);
+            let sender = DiscordSender::new(&rest);
+            let url = std::env::var("VALKEY_URL")
+                .expect("VALKEY_URL must be set: this test needs a REAL Valkey (no silent skip)");
+            let client = redis::Client::open(url).expect("valkey url");
+            let key: &'static str = Box::leak(
+                format!(
+                    "outbound:test:detok-{}-{}",
+                    std::process::id(),
+                    OP_SEQ.fetch_add(1, Ordering::SeqCst)
+                )
+                .into_boxed_str(),
+            );
+            let mut push = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("valkey");
+            let op_id = format!("detok-{}", OP_SEQ.fetch_add(1, Ordering::SeqCst));
+            let entry = serde_json::json!({
+                "v": 1, "op": "chat.send", "platform": "discord", "channel": "1",
+                "origin_channel": "1", "text": text, "op_id": op_id, "tenant_id": tenant,
+            });
+            let _: () =
+                redis::AsyncCommands::lpush(&mut push, key, stamp_for_test(&entry.to_string()))
+                    .await
+                    .expect("lpush");
+            let queue = ListQueue {
+                conn: connect_with_response_timeout(&client, BLOCKING_CONN_RESPONSE_TIMEOUT)
+                    .await
+                    .expect("valkey"),
+                key,
+            };
+            let guard = ValkeyReplayGuard::new(
+                client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .expect("valkey"),
+            );
+            let ctl = FakeCtl::default();
+            let (tx, rx) = oneshot::channel();
+            let pins = test_pin_keys();
+            let run = discord_drain_loop_with(
+                queue,
+                &sender,
+                None::<&NoExecutor>,
+                &ctl,
+                &guard,
+                egress,
+                Some(&pins),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            );
+            let wait = async {
+                for _ in 0..100 {
+                    if !server
+                        .received_requests()
+                        .await
+                        .unwrap_or_default()
+                        .is_empty()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                let _ = tx.send(());
+            };
+            let _ =
+                tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(run, wait) })
+                    .await;
+            let reqs = server.received_requests().await.expect("recorded");
+            assert_eq!(
+                reqs.len(),
+                1,
+                "exactly one platform request; acks: {:?}",
+                ctl.acks.lock().unwrap()
+            );
+            let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).expect("json");
+            body["content"].as_str().expect("content").to_string()
+        }
+
+        #[tokio::test]
+        async fn drain_resolves_names_from_the_database() {
+            let (url, admin, role) = fixture().await;
+            let egress = egress_over(url.clone());
+            let out = drain_one(
+                &egress,
+                &format!("hi {{user:{ALICE}}} and {{user:{PSEUDO}}}"),
+                TENANT_A,
+            )
+            .await;
+            teardown(&admin, &url, &role).await;
+            assert_eq!(out, "hi Alice and Pseudo");
+        }
+
+        #[tokio::test]
+        async fn cross_tenant_uuid_does_not_resolve() {
+            let (url, admin, role) = fixture().await;
+            let egress = egress_over(url.clone());
+            let out = drain_one(
+                &egress,
+                &format!("hi {{user:{BOB_OTHER_TENANT}}}"),
+                TENANT_A,
+            )
+            .await;
+            // Same UUID under its own tenant DOES resolve (proves the row exists).
+            let own = drain_one(
+                &egress,
+                &format!("hi {{user:{BOB_OTHER_TENANT}}}"),
+                TENANT_B,
+            )
+            .await;
+            // Pseudonym of tenant A never resolves under tenant B.
+            let pseudo = drain_one(&egress, &format!("hi {{user:{PSEUDO}}}"), TENANT_B).await;
+            teardown(&admin, &url, &role).await;
+            assert_eq!(out, "hi Unknown User");
+            assert_eq!(own, "hi Bob");
+            assert_eq!(pseudo, "hi Unknown User");
+        }
+
+        #[tokio::test]
+        async fn erased_user_resolves_to_unknown_user() {
+            let (url, admin, role) = fixture().await;
+            let egress = egress_over(url.clone());
+            let before = drain_one(&egress, &format!("hi {{user:{ALICE}}}"), TENANT_A).await;
+            // Erasure (hub_api data_privacy_service) deletes membership rows and scrubs the user.
+            let schema = url
+                .rsplit("search_path%3D")
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            admin
+                .execute_unprepared(&format!(
+                    "DELETE FROM {schema}.community_members WHERE user_uuid = '{ALICE}'; \
+                     UPDATE {schema}.hub_users SET display_name = NULL WHERE uuid = '{ALICE}';"
+                ))
+                .await
+                .expect("erase");
+            let after = drain_one(&egress, &format!("hi {{user:{ALICE}}}"), TENANT_A).await;
+            let never = drain_one(&egress, &format!("hi {{user:{ERASED}}}"), TENANT_A).await;
+            teardown(&admin, &url, &role).await;
+            assert_eq!(before, "hi Alice");
+            assert_eq!(after, "hi Unknown User");
+            assert_eq!(never, "hi Unknown User");
+        }
+
+        #[tokio::test]
+        async fn database_down_sends_tokens_unchanged_with_a_metric() {
+            let before = crate::display_names::db_error_count();
+            // Valid role URL shape, but nothing listens on the port.
+            let egress = egress_over("postgresql://nobody:x@127.0.0.1:1/none".into());
+            let text = format!("hi {{user:{ALICE}}}");
+            let out = drain_one(&egress, &text, TENANT_A).await;
+            assert_eq!(out, text);
+            assert!(crate::display_names::db_error_count() > before);
+        }
+
+        #[tokio::test]
+        async fn the_role_cannot_read_any_other_column() {
+            let (url, admin, role) = fixture().await;
+            let ro = Database::connect(url.clone()).await.expect("role connect");
+            let denied = ro.execute_unprepared("SELECT email FROM hub_users").await;
+            let allowed = ro
+                .execute_unprepared("SELECT uuid, display_name FROM hub_users")
+                .await;
+            teardown(&admin, &url, &role).await;
+            assert!(denied.is_err(), "email must be unreadable");
+            assert!(allowed.is_ok());
+        }
     }
 }

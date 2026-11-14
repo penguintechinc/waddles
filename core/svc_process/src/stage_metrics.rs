@@ -55,7 +55,7 @@ pub const COUNT_BUCKETS: [f64; 12] = [
 /// against the emitted data in tests and mirrored in
 /// `docs/observability/data-plane-metrics.md`, so a rename is a conscious,
 /// documented act.
-pub const METRIC_NAMES: [&str; 17] = [
+pub const METRIC_NAMES: [&str; 20] = [
     "waddles_stage_latency_seconds",
     "waddles_executor_call_seconds",
     "waddles_host_call_latency_seconds",
@@ -73,6 +73,9 @@ pub const METRIC_NAMES: [&str; 17] = [
     "waddles_group_pending",
     "waddles_insecure_transport",
     "waddles_tenant_boundary_violations_total",
+    "waddles_identity_decrypt_failures_total",
+    "waddles_process_tokenize_memo_total",
+    "waddles_process_tokenize_mint_calls_total",
 ];
 
 /// The OTel instrument name behind a documented (Prometheus-form) metric
@@ -266,6 +269,9 @@ pub struct StageMetrics {
     queue_wait: Histogram<f64>,
     pool_exhausted: Counter<u64>,
     slot_owner_changes: Counter<u64>,
+    identity_decrypt_failures: Counter<u64>,
+    tokenize_memo: Counter<u64>,
+    tokenize_mint_calls: Counter<u64>,
 }
 
 impl StageMetrics {
@@ -382,6 +388,18 @@ impl StageMetrics {
                 "executor_slot_owner_changes_total",
                 "Hash slots whose owner executor set changed after a membership change",
             ),
+            identity_decrypt_failures: counter(
+                "waddles_identity_decrypt_failures_total",
+                "Inbound identity-field decrypt failures (event dead-lettered, never dropped), by reason",
+            ),
+            tokenize_memo: counter(
+                "waddles_process_tokenize_memo_total",
+                "Per-message PII-tokenization memo lookups, by result (hit/miss/inflight_wait/bypass)",
+            ),
+            tokenize_mint_calls: counter(
+                "waddles_process_tokenize_mint_calls_total",
+                "hub-api MintEphemeralPseudonyms calls issued by the tokenization pass, by outcome",
+            ),
         }
     }
 
@@ -412,6 +430,48 @@ impl StageMetrics {
             self.slot_owner_changes
                 .add(changed, &[KeyValue::new("stage", STAGE)]);
         }
+    }
+
+    /// Counts one tokenization-memo lookup (`waddles_process_tokenize_memo_total`).
+    /// `result` is a closed vocabulary -- `hit` (served from a completed entry),
+    /// `miss` (this consumer ran the tokenization), `inflight_wait` (joined another
+    /// consumer's in-flight tokenization) or `bypass` (memo skipped, tokenized
+    /// directly) -- never a tenant, stream or message identifier.
+    pub fn tokenize_memo(&self, result: &'static str) {
+        self.tokenize_memo.add(
+            1,
+            &[
+                KeyValue::new("stage", STAGE),
+                KeyValue::new("result", result),
+            ],
+        );
+    }
+
+    /// Counts one hub-api mint call issued by the tokenization pass
+    /// (`waddles_process_tokenize_mint_calls_total`). With the memo working this
+    /// tracks distinct messages, not messages x consuming apps; `outcome` is `ok` or `error`.
+    pub fn tokenize_mint_call(&self, outcome: &'static str) {
+        self.tokenize_mint_calls.add(
+            1,
+            &[
+                KeyValue::new("stage", STAGE),
+                KeyValue::new("outcome", outcome),
+            ],
+        );
+    }
+
+    /// Records one inbound event whose identity fields could not be decrypted
+    /// (`waddles_identity_decrypt_failures_total`). `reason` is a closed,
+    /// PII-free vocabulary (`IdentityCryptoError::reason_label` plus
+    /// `dek_unconfigured`) -- never a tenant, stream or user.
+    pub fn identity_decrypt_failure(&self, reason: &'static str) {
+        self.identity_decrypt_failures.add(
+            1,
+            &[
+                KeyValue::new("stage", STAGE),
+                KeyValue::new("reason", reason),
+            ],
+        );
     }
 
     /// Records one delivered entry's total handling time and terminal
@@ -1168,6 +1228,9 @@ mod tests {
         m.group_pending("a", "s", 1);
         m.insecure_transport("valkey", "tls", false);
         m.tenant_boundary_violation("process", "unknown_kid");
+        m.identity_decrypt_failure("dek_unavailable");
+        m.tokenize_memo("hit");
+        m.tokenize_mint_call("ok");
 
         let exported: std::collections::BTreeSet<String> =
             h.points().into_iter().map(|p| p.name).collect();
@@ -1179,7 +1242,7 @@ mod tests {
             );
         }
         // Verification Integrity: report the denominator, and fail on zero.
-        assert_eq!(METRIC_NAMES.len(), 17);
+        assert_eq!(METRIC_NAMES.len(), 20);
         assert!(
             exported.len() >= METRIC_NAMES.len(),
             "examined {} exported series for {} documented names",

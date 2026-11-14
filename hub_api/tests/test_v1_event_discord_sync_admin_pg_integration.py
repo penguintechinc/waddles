@@ -248,13 +248,20 @@ async def test_4xx_api_error_is_logged_warning_without_traceback_and_returned(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A pairing deleted between list and update -> the REAL service raises 404 `not_found`."""
-    _first, second = _pair(adal.dal, community_id, n=2)
+    """A pairing deleted between list and update -> the REAL service raises 404 `not_found`.
+
+    The racing pairing is whichever one the route updates SECOND (by call order, not by id):
+    `list_pairings` orders newest-first and same-transaction `created_at` ties are unordered,
+    so keying the race on insertion order would be nondeterministic.
+    """
+    _pair(adal.dal, community_id, n=2)
     real_update = module.pairing_svc.update_pairing
+    calls: list[int] = []
 
     def racing_update(dal: Any, cid: int, pairing_id: int, **kw: Any) -> Any:
-        if pairing_id == second:
-            pg.q(dal, "DELETE FROM guild_tenant_pairings WHERE id=%s", [second])
+        calls.append(pairing_id)
+        if len(calls) == 2:
+            pg.q(dal, "DELETE FROM guild_tenant_pairings WHERE id=%s", [pairing_id])
         return real_update(dal, cid, pairing_id, **kw)
 
     monkeypatch.setattr(module.pairing_svc, "update_pairing", racing_update)
@@ -276,6 +283,7 @@ async def test_4xx_api_error_is_logged_warning_without_traceback_and_returned(
         assert field in msg
     assert GUILDS[0] not in msg and GUILDS[1] not in msg and "Bearer" not in msg
     # state is honest about the partial write: first pairing flipped, second gone
+    assert len(calls) == 2 and calls[0] != calls[1]
     assert _db_flags(adal.dal, community_id) == [True]
 
 

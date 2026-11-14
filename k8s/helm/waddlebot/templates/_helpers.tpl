@@ -230,6 +230,24 @@ Usage inside a container's `env:` list:
 {{- end }}
 
 {{/*
+Read-only REPLICA DSN for a data-plane workload's direct bundle-config reads (issue #1306;
+core/bundle_config_db/src/lib.rs). Renders `DATABASE_REPLICA_URL` ONLY when
+infrastructure.postgresql.readReplicas.host is set -- same role + `$(DB_PASSWORD)` expansion as
+waddlebot.dbEnv (NEVER the secret itself), so it MUST be included AFTER waddlebot.dbEnv in the
+container's `env:` list. Unset (alpha/local: no replica) renders nothing and the stage falls back
+to the primary `DATABASE_URL` with a WARN log; the SAME column-scoped role works on both.
+Usage: {{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
+*/}}
+{{- define "waddlebot.dbReplicaEnv" -}}
+{{- include "waddlebot.db.requireRole" . -}}
+{{- $host := .root.Values.infrastructure.postgresql.readReplicas.host | default "" -}}
+{{- if $host }}
+- name: DATABASE_REPLICA_URL
+  value: {{ printf "postgresql://%s:$(DB_PASSWORD)@%s:%v/%s" .role $host (include "waddlebot.postgres.port" .root) (include "waddlebot.postgres.database" .root) | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
 Redis connection URL
 Constructs the Redis connection URL from values.
 Supports both external and internal Redis instances.
@@ -278,6 +296,19 @@ Usage: {{ include "waddlebot.moduleImage" (dict "root" . "module" "router" "tag"
 {{- end }}
 
 {{/*
+Per-image tag resolution
+Precedence: explicit per-component tag > global.imageTags[<image>] > global.imageTag > "latest".
+global.imageTags (default empty) lets a deploy pin each image independently, so an image that
+was not rebuilt keeps its old tag string and its pods are NOT restarted. Unset = unchanged
+behaviour (every image reads global.imageTag).
+Usage: {{ include "waddlebot.resolveImageTag" (dict "root" . "image" "svc-ingest" "explicit" .Values.x.imageTag) }}
+*/}}
+{{- define "waddlebot.resolveImageTag" -}}
+{{- $per := get (.root.Values.global.imageTags | default dict) (.image | toString) | default "" -}}
+{{- .explicit | default $per | default .root.Values.global.imageTag | default "latest" | toString -}}
+{{- end }}
+
+{{/*
 Legacy Module Image (for templates still using global.imageRegistry concatenation)
 Builds image reference for legacy modules with correct registry handling.
 Same as moduleImage but kept separate for clarity in legacy template conversions.
@@ -286,7 +317,7 @@ Usage: {{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "action-
 {{- define "waddlebot.legacyModuleImage" -}}
 {{- $registry := .root.Values.global.imageRegistry | default "" }}
 {{- $repository := .module | required "module name is required" }}
-{{- $tag := .imageTag | default .root.Values.global.imageTag | default "latest" | toString }}
+{{- $tag := include "waddlebot.resolveImageTag" (dict "root" .root "image" $repository "explicit" .imageTag) }}
 {{- if $registry }}
 {{- printf "%s/%s:%s" $registry $repository $tag }}
 {{- else }}

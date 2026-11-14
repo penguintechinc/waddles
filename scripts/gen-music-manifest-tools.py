@@ -5,8 +5,10 @@ Usage: gen-music-manifest-tools.py <provider> [tool ...] [--check <manifest.yaml
 
 Reads bundles/contracts/music-tool-contract.v1.json, inlines its `$ref`s (manifest schemas
 carry no refs), prefixes each tool `music.<provider>.` and prints the block. With `--check`,
-fails (non-zero) unless each given manifest's `exported_tools` equals the generated block --
-so bundle.yaml / hub-manifest.yaml can never drift from the contract.
+fails (non-zero) unless each given manifest's contract tools equal the generated block --
+so bundle.yaml / hub-manifest.yaml can never drift from the contract. Tools whose suffix is not a
+contract tool (e.g. Spotify Connect `player.*`, behind `capability.playback: connect`) are
+provider extensions: they are exempt from the comparison but must follow the contract tools.
 """
 
 from __future__ import annotations
@@ -46,8 +48,31 @@ def build(provider: str, only: list[str]) -> list[dict]:
     return out
 
 
+def split(provider: str, got: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Splits a manifest's exported_tools into (contract tools, provider extensions).
+
+    Raises SystemExit when a tool lacks the `music.<provider>.` prefix or an extension precedes a
+    contract tool, so extensions can never shadow or reorder the portable surface.
+    """
+    tools = json.loads(CONTRACT.read_text())["tools"]
+    prefix = f"music.{provider}."
+    common: list[dict] = []
+    ext: list[dict] = []
+    for t in got:
+        name = t.get("name", "")
+        if not name.startswith(prefix):
+            raise SystemExit(f"tool {name!r} is not prefixed {prefix!r}")
+        if name.removeprefix(prefix) in tools:
+            if ext:
+                raise SystemExit(f"contract tool {name} follows a provider extension")
+            common.append(t)
+        else:
+            ext.append(t)
+    return common, ext
+
+
 class _NoAlias(yaml.SafeDumper):
-    def ignore_aliases(self, data):  # noqa: D401 - PyYAML hook
+    def ignore_aliases(self, data):
         return True
 
 
@@ -68,7 +93,7 @@ def main(argv: list[str]) -> int:
         return 0
     bad = 0
     for m in manifests:
-        got = yaml.safe_load(Path(m).read_text()).get("exported_tools")
+        got, _ext = split(args[0], yaml.safe_load(Path(m).read_text()).get("exported_tools") or [])
         if got != expected:
             print(f"DRIFT: {m} exported_tools != contract-derived block", file=sys.stderr)
             bad += 1

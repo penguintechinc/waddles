@@ -150,8 +150,10 @@ generic.
 | 400 | `BAD_REQUEST` / `UNKNOWN_PROVIDER` | schema/metadata/token-shape violation, unknown provider, unknown field |
 | 401 / 403 | -- | no/invalid token; missing `connections:admin`; not an admin of that community; wrong tenant |
 | 402 | `FEATURE_NOT_ENABLED` | flag off, or tenant below Professional |
+| 403 | `OWNERSHIP_NOT_PROVEN` | Twitch/Kick/YouTube: neither the token nor the installer's OAuth-linked account owns the channel (see [Channel ownership](#channel-ownership-proof-at-bind-time)) |
+| 403 | `LIVE_CHAT_NOT_OWNED` | YouTube: `live_chat_id` is not one of the connected channel's own broadcasts |
 | 404 | `NOT_FOUND` | no such connection in *your* community (same answer for "belongs to someone else") |
-| 409 | `CONFLICT` | resource already connected; shared link cannot be changed |
+| 409 | `CONFLICT` | resource already connected in this tenant/community; shared link cannot be changed |
 | 409 | `CONNECTION_NOT_USABLE` | `details.reason` says why (`disabled`, `pending_approval`, `refresh_rejected`, ...) |
 | 422 | `CREDENTIALS_REJECTED` / `INSUFFICIENT_SCOPES` / `RESOURCE_NOT_FOUND` | the provider refused the token, the token lacks a required scope, the channel does not exist |
 | 502 | `PROVIDER_UNAVAILABLE` | provider unreachable / 5xx -- nothing was changed, safe to retry |
@@ -177,6 +179,34 @@ generic.
 > deployed environment: bound parameters -- ciphertext and adapter metadata -- would be written to
 > the log. (A test-only driver, `aiosqlite`, logs parameters at DEBUG; production's `asyncpg` does
 > not.)
+
+## Channel ownership: proof at bind time
+
+Security finding (High, release @1e4d2ee34): binding a channel never proved ownership, so a free
+signup in another tenant could bind a victim's channel and svc-ingest's dedup then silenced both.
+
+| Provider | Proof required at create / re-target / credential swap |
+|---|---|
+| Twitch | token owner id == channel (broadcaster) id, **or** the installing hub user has OAuth-linked (`hub_user_identities`, platform `twitch`) the broadcaster's account |
+| Kick | token owner (`self_user_id`) == `broadcaster_user_id`, **or** a linked `kick` identity. No Kick account-linking flow exists yet, so in practice only the broadcaster's own token proves it |
+| YouTube | `channels.list?mine=true` is scoped to the token, so the token proves the channel; an admin-typed `live_chat_id` must be one of that channel's own `liveBroadcasts` (else `LIVE_CHAT_NOT_OWNED`) |
+| Discord | unchanged: bot-in-guild only (MANAGE_GUILD on the installer's linked account is NOT checked -- the login flow keeps no user token; follow-up) |
+| Static / Wix / Spectrum / gameserver | no ownership notion |
+
+- **Owner only.** A moderator is not an owner; the account-linking flow grants no moderated-channels scope to check it.
+- `platform_connections.ownership_verified` (migration `0103_conn_ownership_verified`) records the proof; the admin DTO shows `ownershipVerified`; the data plane gets `metadata.ownership_verified = "true"|"false"` for ownership providers.
+- **N:M is allowed.** One channel may be bound to many communities, across tenants (users pick context with `!community set context`). There is no global unique constraint; uniqueness stays `(tenant, platform, resource)` + one grant per community, so a duplicate in the same tenant/community is a 409.
+- **svc-ingest dedup** (`connector_runtime/feed.rs`): when any binding of a channel is verified, every verified community keeps it (lowest connection id per community) and unverified duplicates are dropped with a WARN and `feed_skipped_total{reason="unverified"}`. With no verified binding (legacy rows) the old rule holds: one community keeps it, several are all dropped (`reason="conflict"`).
+- **Legacy rows** stay `false` and keep routing (unless a verified binding of the same channel exists) until an owner edits the link, which re-proves and flags it. Alpha is disposable: no backfill.
+- **Kill-switch `waddles.disable-unverified-binding-routing`** (svc-ingest, `connector_runtime/unverified_gate.rs`; user decision 2026-11-12). Unverified bindings keep routing through the demo; afterwards flip this flag, no code change needed.
+
+  | Flag state | Unverified binding |
+  |---|---|
+  | unseen / OFF (default) | legacy rule above (a sole unverified claimant routes) |
+  | ON | never routes: one WARN per skipped binding (ids + claim hash, never the handle) and `feed_skipped_total{reason="unverified"}` +1 per binding |
+
+  Resolution: PostHog (when a snapshot exists) -> env baseline `FLAG_WADDLES_DISABLE_UNVERIFIED_BINDING_ROUTING=true|false` -> OFF. The `*.waddles.app` license bypass is ignored for this flag (bypass reads every flag ON, which would flip every environment at once). Re-read on every binding discovery, so a flip applies on the next reconcile.
+- Telemetry: `waddles_provider_connection_ownership_total{provider,outcome}` (`token_owner`, `linked_account`, `rejected`, `live_chat_rejected`) and a WARN `provider_connections.ownership_rejected` (no handles, no tokens).
 
 ## Token lifecycle and failure semantics
 

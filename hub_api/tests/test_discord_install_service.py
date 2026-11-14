@@ -21,7 +21,6 @@ from services import tenant_discord_install_state as state_module
 from services.credential_resolver import DefaultCredentialResolver, store_tenant_credentials
 from services.discord_install_service import (
     DiscordInstallError,
-    InstallResult,
     build_authorize_url,
     complete_install,
 )
@@ -44,6 +43,16 @@ def _pass_through_ssrf_guard(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 NONCE = "browser-nonce-0123456789"
+GUILD_ID = "123456789012345678"
+_TOKEN_PAYLOAD = {"access_token": "tok", "token_type": "Bearer", "guild": {"id": GUILD_ID}}
+
+
+@pytest.fixture(autouse=True)
+def _no_live_bot_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _ok(bot_token: str) -> None:
+        return None
+
+    monkeypatch.setattr(install_module, "_validate_bot_token", _ok)
 
 
 class FakeRedis:
@@ -80,7 +89,7 @@ class TestBuildAuthorizeUrl:
                 admin_user_id=1,
                 application_id="app-1",
                 client_secret="secret-1",
-                bot_token=None,
+                bot_token="bot-x",
                 redirect_uri="http://localhost/cb",
             )
         assert exc_info.value.status_code == 400
@@ -93,6 +102,20 @@ class TestBuildAuthorizeUrl:
                 is_global_tenant=False,
                 admin_user_id=1,
                 application_id="",
+                client_secret="secret-1",
+                bot_token="bot-x",
+                redirect_uri="http://localhost/cb",
+            )
+        assert exc_info.value.status_code == 400
+
+    async def test_missing_bot_token_is_rejected(self, fake_redis: FakeRedis) -> None:
+        with pytest.raises(ApiError) as exc_info:
+            await build_authorize_url(
+                binding_nonce=NONCE,
+                tenant_id=5,
+                is_global_tenant=False,
+                admin_user_id=1,
+                application_id="app-1",
                 client_secret="secret-1",
                 bot_token=None,
                 redirect_uri="http://localhost/cb",
@@ -108,7 +131,7 @@ class TestBuildAuthorizeUrl:
                 admin_user_id=1,
                 application_id="app-1",
                 client_secret="",
-                bot_token=None,
+                bot_token="bot-x",
                 redirect_uri="http://localhost/cb",
             )
         assert exc_info.value.status_code == 400
@@ -144,7 +167,7 @@ class TestBuildAuthorizeUrl:
             admin_user_id=9,
             application_id="app-42",
             client_secret="secret-42",
-            bot_token=None,
+            bot_token="bot-x",
             redirect_uri="http://localhost/cb",
             permissions=16,
         )
@@ -174,12 +197,12 @@ class TestCompleteInstall:
             admin_user_id=1,
             application_id="app-1",
             client_secret="secret-1",
-            bot_token=None,
+            bot_token="bot-x",
             redirect_uri="http://localhost/cb",
         )
         with patch(
             "services.discord_install_service._exchange_code",
-            new=AsyncMock(return_value={"access_token": "tok"}),
+            new=AsyncMock(return_value=_TOKEN_PAYLOAD),
         ):
             await complete_install(dal, code="auth-code", state=state, binding_nonce=NONCE)
 
@@ -202,13 +225,17 @@ class TestCompleteInstall:
 
         with patch(
             "services.discord_install_service._exchange_code",
-            new=AsyncMock(return_value={"access_token": "tok", "token_type": "Bearer"}),
+            new=AsyncMock(return_value=_TOKEN_PAYLOAD),
         ):
             result = await complete_install(dal, code="auth-code", state=state, binding_nonce=NONCE)
 
-        assert result == InstallResult(
-            tenant_id=tenant_id, platform="discord", installed_by_user_id=7
+        assert (result.tenant_id, result.platform, result.installed_by_user_id) == (
+            tenant_id,
+            "discord",
+            7,
         )
+        assert result.guild_id == GUILD_ID
+        assert result.connection_id is not None
 
         resolver = DefaultCredentialResolver()
         creds = await resolver.resolve(
@@ -230,7 +257,7 @@ class TestCompleteInstall:
             admin_user_id=7,
             application_id="app-fail",
             client_secret="secret-fail",
-            bot_token=None,
+            bot_token="bot-x",
             redirect_uri="http://localhost/cb",
         )
 
@@ -261,7 +288,7 @@ class TestCompleteInstall:
             admin_user_id=7,
             application_id="app-net",
             client_secret="secret-net",
-            bot_token=None,
+            bot_token="bot-x",
             redirect_uri="http://localhost/cb",
         )
 
@@ -282,7 +309,7 @@ class TestCompleteInstall:
             admin_user_id=7,
             application_id="app-bad",
             client_secret="secret-bad",
-            bot_token=None,
+            bot_token="bot-x",
             redirect_uri="http://localhost/cb",
         )
 

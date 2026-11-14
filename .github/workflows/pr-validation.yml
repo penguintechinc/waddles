@@ -139,6 +139,12 @@ jobs:
       - name: check-no-stubs
         run: make check-no-stubs
 
+      # PII boundary: only svc-ingest's outbound drain and svc-presentation may reference the
+      # egress detokenizer (svc-action used to detokenize into Valkey queues). Prints files
+      # examined; zero examined or any violation fails, and the negative test runs first.
+      - name: check-pii-egress
+        run: make check-pii-egress
+
   python-unit:
     name: Python unit tests
     needs: changes
@@ -302,8 +308,8 @@ jobs:
       # is a follow-up, tracked separately from this migration-chain gate.
       #
       # alembic/env.py imports `flask_core.models.db` (needed for
-      # `target_metadata`), which transitively needs flask-sqlalchemy +
-      # flask-security-too -- neither is in hub_api/requirements.txt (hub_api
+      # `target_metadata`), which transitively needs flask-sqlalchemy --
+      # not in hub_api/requirements.txt (hub_api
       # itself doesn't use flask_core). This is exactly the dependency set
       # migrations/Dockerfile already installs for the same reason; versions
       # pinned to match libs/flask_core/requirements.txt's own pins. First
@@ -319,7 +325,6 @@ jobs:
           pip install --disable-pip-version-check \
             "alembic==1.20.0" \
             "flask-sqlalchemy==3.1.1" \
-            "flask-security-too==5.8.2" \
             "PyYAML>=6.0.2,<7.0.0"
 
       # Legacy `config/postgres/migrations/NNN_*.sql` files reach an EXISTING database only
@@ -745,6 +750,12 @@ jobs:
       # exit code 5, never a silent pass -- critical-rules.md Verification Integrity.
       - name: Helm chart template tests (pytest)
         run: python3 -m pytest k8s/helm/waddlebot/tests/ -v
+
+      # changed-only alpha deploys pin each image via global.imageTags; this proves a pinned
+      # (unchanged) image keeps its pod template byte-identical, so it does NOT restart, and
+      # that a rebuilt image changes only its own workloads. Exits non-zero if helm renders 0.
+      - name: Alpha per-image pins restart only changed workloads
+        run: python3 scripts/ci/check-alpha-image-pins.py
 
       # fix/helm-hook-rbac-ordering -- helm.sh/hook-annotated Jobs run BEFORE any
       # regular (non-hook) chart resource. A pre-install/pre-upgrade Job whose
