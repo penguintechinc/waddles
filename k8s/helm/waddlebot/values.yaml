@@ -5,6 +5,8 @@
 # Webui Configuration
 webui:
   publicUrl: ""
+  # Public hostnames of THIS deployment; hub-webui forwards X-Forwarded-Host only for these.
+  publicHostnames: []
   # #320 Connections: OAuth redirect_uri base. Empty by default -- hub-api falls back
   # to publicUrl above when blank. See values-alpha.yaml for why this needs its own
   # override in some environments.
@@ -55,33 +57,6 @@ global:
   # closed); OVERRIDE REQUIRED via --set or an out-of-git values override / ExternalSecret
   # before hop verification will accept any envelope.
   envelopeBindingKeys: ""
-
-  # gRPC transport TLS (PR #264, A02 HIGH -- flask_core.grpc_tls / GRPC_TLS_* env vars).
-  # Every gRPC server (core-data, core-identity, interactive-productivity,
-  # action-serverless) and client (router) now fails closed at gRPC bind/dial time without
-  # this. See templates/grpc-tls-secret.yaml + templates/grpc-tls-certificate.yaml for the
-  # two ways the {{ fullname }}-grpc-tls Secret this wires gets populated.
-  grpcTls:
-    # Explicit, dev-only plaintext escape hatch -- flask_core refuses it outright under
-    # production posture even if left true by mistake. Only values-alpha.yaml sets this;
-    # never override to true in beta/gamma/production.
-    insecureDev: false
-    # Whether mTLS is enforced server-side (server-role Deployments only).
-    requireClientCert: true
-    certManager:
-      enabled: false
-      issuerKind: "ClusterIssuer"
-      issuerName: "waddlebot-internal-ca"
-      duration: "2160h"    # 90d
-      renewBefore: "360h"  # 15d
-    # Static dev/interim CA + identity cert, used when certManager.enabled=false (the
-    # default). OVERRIDE REQUIRED for beta/gamma/production -- NEVER a literal cert/key in
-    # git; populate via --set-file or an out-of-git values override / ExternalSecret.
-    ca:
-      crt: ""
-    tls:
-      crt: ""
-      key: ""
 
   # e2e-helm-rust-dataplane -- mTLS material for the svc-bundles-executor<->stage host-API wire
   # protocol (core/bundle_executor dialing svc-action's/svc-process's HOST_API_PORT, spec
@@ -367,10 +342,19 @@ global:
 # (Distinct from `pipeline.hubApi`, which holds hub-api's port/replicas/resources.)
 hubApi:
   imageTag: ""
+  # Trust X-Forwarded-Host (license bypass-domain check) from the in-cluster hub-webui proxy.
+  # Topology only, never a license switch. Rendering FAILS if true while any HTTPRoute/Ingress
+  # targets hub-api directly (only hub-webui may front it).
+  trustForwardedHost: false
+  # Peer CIDRs allowed to assert X-Forwarded-Host (required when trustForwardedHost is true).
+  trustedProxyCidrs: []
 
 # Namespace configuration
 namespace: waddlebot
 namespaceCreate: true  # Create namespace if it doesn't exist
+# Extra labels stamped on the chart-managed Namespace (only when namespaceCreate: true), alongside the
+# PSA labels. Used e.g. for a shared Gateway's allowedRoutes namespace selector (`gateway-access`).
+namespaceLabels: {}
 
 # fix/no-empty-kept-secrets -- test-only probe (templates/debug-helper-probe.yaml)
 # that renders waddlebot.secretKeyNonEmpty/waddlebot.tlsSecretComplete (_helpers.tpl)
@@ -548,6 +532,11 @@ infrastructure:
     readReplicas:
       enabled: false
       count: 2
+      # Read-only replica Service FQDN (inside the Postgres server cert's SANs) that the data plane
+      # (svc-process, svc-action) reads per-community bundle config from (issue #1306; env
+      # DATABASE_REPLICA_URL, same column-scoped per-service role as the primary). Empty = no
+      # replica: the stages fall back to the primary DATABASE_URL and log a WARN (alpha).
+      host: ""
 
   # Redis Cache & Sessions
   redis:
@@ -683,6 +672,8 @@ infrastructure:
     # buffers + client buffers live OUTSIDE maxmemory. At maxmemory writes fail LOUDLY (OOM
     # error) rather than evicting -- alert on used_memory/maxmemory > 0.8.
     maxMemory: "600mb"
+    # Liveness/readiness exec probe timeout (seconds); raise when the instance is CPU-starved by handshake bursts.
+    probeTimeoutSeconds: 5
     aof:
       # `everysec` = <=1s loss on host crash. `always` fsyncs every write (zero-loss for
       # acks/tokens) at a large throughput cost -- instance-wide, Valkey has no per-key fsync.
@@ -1186,6 +1177,12 @@ eventSyncRequest:
   existingSecret: ""
   activeKid: "r1"
 
+# Bundle-admin request integrity key (hub-api signs, svc-process verifies); a DEDICATED ring, see
+# templates/bundle-admin-request-secret.yaml. existingSecret key: BUNDLE_ADMIN_REQUEST_KEYS.
+bundleAdminRequest:
+  existingSecret: ""
+  activeKid: "b1"
+
 pipeline:
   pythonBaseImage: "python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb"
   nodeBaseImage: "node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0"
@@ -1195,7 +1192,12 @@ pipeline:
   # with a RUNNER_COMMUNITY_ID here (left unset in every template below) so the
   # runner stays tenant-wide rather than community-scoped -- see roadmap DATA-MODEL
   # GAPS "guild->community" shortcut (community_id=None, activated tenant-wide).
-  runnerTenantSlug: "global"
+  runnerTenantSlug: "default"
+  # Numeric id of the default (is_global) tenant -- the ONLY tenant the process-wide
+  # DISCORD_BOT_TOKEN application may serve. Rendered as DEFAULT_TENANT_ID on svc-ingest;
+  # svc-ingest refuses to start with DISCORD_BOT_TOKEN set and this unset/0. Every
+  # environment that runs the env Discord app MUST set it (alpha: 1).
+  defaultTenantId: ""
 
   # PR-H -- ONE source of truth for the pinned connector component digests
   # (sha256:<64 lowercase hex>; empty = unset). Rendered into svc-ingest
@@ -1246,7 +1248,7 @@ pipeline:
   # Activates first-party waddles.core.* App Bundles under the platform's SYSTEM identity at
   # deploy time (hub_api/cli/seed_core_bundles.py) -- no human global-admin approval, unlike a
   # third-party vendor bundle. `tenantSlugs` is a comma-separated CORE_BUNDLES_TENANT_SLUGS
-  # override (empty = every catalog entry's own declared activation_targets, "global" tenant-
+  # override (empty = every catalog entry's own declared activation_targets, "default" tenant-
   # wide by default -- see bundles/core-bundles.yaml).
   coreBundleSeeder:
     enabled: true
@@ -1267,7 +1269,7 @@ pipeline:
     # is belt-and-suspenders headroom in case CPU alone isn't sufficient on a
     # loaded alpha node.
     activeDeadlineSeconds: 3000
-    defaultTenantSlug: "global"
+    defaultTenantSlug: "default"
     tenantSlugs: ""
     # fix/preexisting-test-failures (2026-10-02): dedicated seeder-owned ingest-source
     # list, decoupled from rustDataPlane.svcProcess's legacy single-app PROCESS_INGEST_*
@@ -1359,14 +1361,13 @@ pipeline:
     enabled: true
     port: 8204
     grpcPort: 50204
-    # ANALYTICS_CORE_API_URL for hub-api's analytics proxy (gh-894). Empty = derive from the
-    # core-data Service ("http://<fullname>-core-data.<namespace>.svc:<modules.coreData.service.port>").
-    analyticsCoreUrl: ""
     # SPIFFE_PEER_TRUST / SPIFFE_PEER_ID_HEADER (hub_api/services/machine_auth.py). Default OFF.
     # Enable ONLY behind an mTLS terminator that strips the header from non-mTLS traffic AND
     # after a per-identity community allow-list exists -- see docs/PROVIDER_CONNECTIONS.md.
     spiffePeerTrust: false
     spiffePeerIdHeader: "X-Spiffe-Peer-Id"
+    # Extra plain env vars for hub-api (map NAME: value). Default empty.
+    extraEnv: {}
     replicas: 2
     # Maps to WADDLES_AI_ENABLED (hub_api/config.py) -- deploy-time
     # kill-switch for the whole services/ai_routing/ subsystem, so
@@ -1433,6 +1434,21 @@ pipeline:
         limits:
           cpu: "500m"
           memory: "512Mi"
+    # CronJob (hub_api/cli/refresh_landing_stats.py) computing the public landing-page stats
+    # into Valkey every 5 minutes; GET /api/v1/public/stats serves only that snapshot (503
+    # {"status":"warming"} until the first run). Disabling leaves the landing stats cold.
+    landingStatsRefresh:
+      enabled: true
+      schedule: "*/5 * * * *"
+      backoffLimit: 1
+      concurrencyPolicy: Forbid
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
 
   hubWebui:
     enabled: true
@@ -1805,6 +1821,12 @@ pipeline:
 
     svcProcess:
       enabled: true
+      # feature/host-gameserver-net -- renders svc-process's least-privilege
+      # `connections:resolve:gameserver` + `connections:list:gameserver` scopes (the `gameserver-net`
+      # host capability resolves admin-registered game servers; hub-api refuses these scopes for any
+      # other provider). Default OFF; also needs the waddles.bundle-gameserver-net flag ON.
+      gameserverNet:
+        enabled: false
       # fix/helm-alpha-self-provisioning -- see svcIngest.imageRepository's comment above.
       imageRepository: "svc-process"
       port: 8201
@@ -1819,8 +1841,8 @@ pipeline:
       # config.rs PROCESS_INGEST_PLATFORM/_SOURCE_ID, spec SS4.2/SS6.7). Both empty
       # (default) means an empty grant list -- the drain loop connects and blocks,
       # reading nothing (see lib.rs try_start_process_loop). Together they resolve the
-      # ONE ingest-source stream this pod's `Scope::new("global", None).source_stream(...)`
-      # reads: `waddles:t:global:c:_tenant:src:{platform}:{sourceId}:events`.
+      # ONE ingest-source stream this pod's `Scope::new("default", None).source_stream(...)`
+      # reads: `waddles:t:default:c:_tenant:src:{platform}:{sourceId}:events`.
       processIngestPlatform: ""
       processIngestSourceId: ""
       # PROCESS_BUNDLE_* (core/svc_process/src/config.rs) -- interim, env-driven
@@ -1972,6 +1994,10 @@ pipeline:
       maxMemoryLimitMb: 256
       instancesPerBundle: 4
       maxConcurrentCalls: 32
+      # Concurrent WASM JIT compiles (app bundles AND connectors share it).
+      # 0 = auto: min(4, CPUs). Each compile holds ~100s of MiB; an unbounded
+      # boot burst OOM-killed the pod at 16Gi.
+      maxConcurrentCompiles: 0
       poolWaitMs: 500
       precompileDir: "/var/cache/waddles/wasm"
       wasmCollector: "drc"
@@ -2026,7 +2052,7 @@ pipeline:
   # PostHog-gated, default-ENABLED, fail-loud-when-unreachable behavior is
   # unchanged. `false` renders `PII_TOKENIZATION_ENABLED=false` on
   # svc-process-rust and `PII_DETOKENIZATION_ENABLED=false` on
-  # svc-action-rust and svc-presentation-rust -- both gates short-circuit to disabled (no hub_client
+  # svc-ingest-rust (the outbound egress) and svc-presentation-rust -- both gates short-circuit to disabled (no hub_client
   # connect attempt, no fail-loud exit) and log a WARN naming the override.
   # SECURITY: ON by default in EVERY environment (alpha included) -- no
   # values-*.yaml may set this false. Opt-out is the PostHog kill-switch
@@ -2135,32 +2161,7 @@ bundleExecutor:
   nodeSelector: {}
   affinity: {}
 
-# Reputation service (Issue #310, core/reputation_module) -- standalone internal
-# HTTP+gRPC API, not a pipeline stage-runner. Own image (core/reputation_module/
-# Dockerfile already exists), so reputation.image.repository is a self-contained
-# full path per environment rather than global.imageRegistry concatenation --
-# see templates/reputation.yaml header. Resources match the hubApi/svcCore tier
-# above (lightweight internal API, not a heavy ingest/process/action stage).
-reputation:
-  enabled: true
-  replicas: 1
-  image:
-    repository: "docker.io/waddlebot/reputation-module"
-    tag: ""
-  port: 8021
-  grpcPort: 50021
-  env:
-    deploymentTier: "production"
-    workers: 2
-  resources:
-    requests:
-      cpu: "250m"
-      memory: "256Mi"
-    limits:
-      cpu: "1000m"
-      memory: "1Gi"
-
-# Processing Module
+# Module verticals + migrations image
 modules:
   # v3.0.x Task 0.5 — Module verticals (Bot/Social/Customer/Marketing) that load into the
   # pipeline containers above via modules.<name>.enabled. NOT per-module pods — see
@@ -2174,503 +2175,6 @@ modules:
     enabled: false
   marketing:
     enabled: false
-
-  # Processing Module - Router (UNCHANGED)
-  router:
-    enabled: true
-    name: router
-    image: router
-    imageTag: ""
-    port: 8000
-    service:
-      type: ClusterIP
-      port: 8000
-    replicas: 2
-    resourcePreset: large
-    # Autoscaling for the router is configured centrally: autoscaling.services.router
-    # (see the top-level `autoscaling:` block). The old per-module `autoscaling:` key was never
-    # consumed by any template.
-    env:
-      MODULE_NAME: "router_module"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8000"
-      LOG_LEVEL: "INFO"
-      WORKERS: "4"
-      THREADS_PER_WORKER: "10"
-      DATABASE_HOST: "infra-postgres"
-      DATABASE_PORT: "5432"
-      DATABASE_NAME: "waddlebot"
-      DATABASE_USER: "waddlebot"
-      READ_REPLICA_HOST: "infra-postgres-replica"
-      READ_REPLICA_PORT: "5432"
-      REDIS_HOST: "infra-redis"
-      REDIS_PORT: "6379"
-      REDIS_KEY_PREFIX: "router:"
-    resources:
-      requests:
-        cpu: "500m"
-        memory: "512Mi"
-      limits:
-        cpu: "2000m"
-        memory: "2Gi"
-
-  # Admin Modules (UNCHANGED)
-  hub:
-    enabled: true
-    name: hub-api
-    image: hub-api
-    imageTag: ""
-    port: 8060
-    replicas: 2
-    resourcePreset: large
-    service:
-      type: ClusterIP
-      port: 8060
-    env:
-      MODULE_NAME: "hub_module"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8060"
-      LOG_LEVEL: "INFO"
-      SESSION_TYPE: "redis"
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
-      limits:
-        cpu: "1000m"
-        memory: "1Gi"
-
-  hubWebui:
-    enabled: true
-    name: hub-webui
-    image: hub-webui
-    imageTag: ""
-    port: 80
-    replicas: 2
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 80
-    resources:
-      requests:
-        cpu: "100m"
-        memory: "128Mi"
-      limits:
-        cpu: "500m"
-        memory: "512Mi"
-
-  # Consolidated Core Modules
-  coreData:
-    enabled: true
-    name: core-data
-    image: core-data
-    imageTag: ""
-    port: 8040
-    replicas: 2
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 8040
-    env:
-      MODULE_NAME: "core_data"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8040"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
-      limits:
-        cpu: "1000m"
-        memory: "1Gi"
-
-  coreIdentity:
-    enabled: true
-    name: core-identity
-    image: core-identity
-    imageTag: ""
-    port: 8050
-    replicas: 2
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 8050
-    env:
-      MODULE_NAME: "core_identity"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8050"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
-      limits:
-        cpu: "1000m"
-        memory: "1Gi"
-
-  coreCommunity:
-    enabled: true
-    name: core-community
-    image: core-community
-    imageTag: ""
-    port: 8020
-    replicas: 2
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 8020
-    env:
-      MODULE_NAME: "core_community"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8020"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
-      limits:
-        cpu: "1000m"
-        memory: "1Gi"
-
-  # Consolidated Trigger Modules
-  triggerWebhooks:
-    enabled: true
-    name: trigger-webhooks
-    image: trigger-webhooks
-    imageTag: ""
-    port: 8100
-    replicas: 1
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 8100
-    env:
-      MODULE_NAME: "trigger_webhooks"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8100"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "100m"
-        memory: "128Mi"
-      limits:
-        cpu: "500m"
-        memory: "512Mi"
-
-  triggerStreaming:
-    enabled: true
-    name: trigger-streaming
-    image: trigger-streaming
-    imageTag: ""
-    port: 8101
-    replicas: 1
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 8101
-    env:
-      MODULE_NAME: "trigger_streaming"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8101"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "100m"
-        memory: "128Mi"
-      limits:
-        cpu: "500m"
-        memory: "512Mi"
-
-  # Consolidated Action Modules
-  actionPlatforms:
-    enabled: true
-    name: action-platforms
-    image: action-platforms
-    imageTag: ""
-    port: 8102
-    replicas: 2
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 8102
-    env:
-      MODULE_NAME: "action_platforms"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8102"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
-      limits:
-        cpu: "1000m"
-        memory: "1Gi"
-
-  actionServerless:
-    enabled: true
-    name: action-serverless
-    image: action-serverless
-    imageTag: ""
-    port: 8103
-    replicas: 1
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 8103
-    env:
-      MODULE_NAME: "action_serverless"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8103"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "100m"
-        memory: "128Mi"
-      limits:
-        cpu: "500m"
-        memory: "512Mi"
-
-  # Consolidated Interactive Modules
-  interactiveSocial:
-    enabled: true
-    name: interactive-social
-    image: interactive-social
-    imageTag: ""
-    port: 8010
-    replicas: 2
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 8010
-    env:
-      MODULE_NAME: "interactive_social"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8010"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
-      limits:
-        cpu: "1000m"
-        memory: "1Gi"
-
-  interactiveGaming:
-    enabled: true
-    name: interactive-gaming
-    image: interactive-gaming
-    imageTag: ""
-    port: 8104
-    replicas: 2
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 8104
-    env:
-      MODULE_NAME: "interactive_gaming"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8104"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
-      limits:
-        cpu: "1000m"
-        memory: "1Gi"
-
-  interactiveMedia:
-    enabled: true
-    name: interactive-media
-    image: interactive-media
-    imageTag: ""
-    port: 8105
-    replicas: 1
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 8105
-    env:
-      MODULE_NAME: "interactive_media"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8105"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "100m"
-        memory: "128Mi"
-      limits:
-        cpu: "500m"
-        memory: "512Mi"
-
-  interactiveProductivity:
-    enabled: true
-    name: interactive-productivity
-    image: interactive-productivity
-    imageTag: ""
-    port: 8030
-    replicas: 2
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 8030
-    env:
-      MODULE_NAME: "interactive_productivity"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8030"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
-      limits:
-        cpu: "1000m"
-        memory: "1Gi"
-
-  # Unchanged Enterprise Modules
-  aiResearcher:
-    enabled: true
-    name: ai-researcher
-    image: ai-researcher
-    imageTag: ""
-    port: 8070
-    service:
-      type: ClusterIP
-      port: 8070
-    replicas: 1
-    resourcePreset: large
-    env:
-      MODULE_NAME: "ai_researcher_module"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8070"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "500m"
-        memory: "512Mi"
-      limits:
-        cpu: "2000m"
-        memory: "2Gi"
-
-  triggerDiscord:
-    enabled: true
-    name: trigger-discord
-    image: trigger-discord
-    imageTag: ""
-    port: 8011
-    service:
-      type: ClusterIP
-      port: 8011
-    replicas: 2
-    resourcePreset: medium
-    env:
-      MODULE_NAME: "trigger_discord_module"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8011"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
-      limits:
-        cpu: "1000m"
-        memory: "1Gi"
-
-  actionDiscord:
-    enabled: true
-    name: action-discord
-    image: action-discord
-    imageTag: ""
-    port: 8012
-    service:
-      type: ClusterIP
-      port: 8012
-    replicas: 2
-    resourcePreset: medium
-    env:
-      MODULE_NAME: "action_discord_module"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8012"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
-      limits:
-        cpu: "1000m"
-        memory: "1Gi"
-
-  interactiveAi:
-    enabled: true
-    name: interactive-ai
-    image: interactive-ai
-    imageTag: ""
-    port: 8013
-    service:
-      type: ClusterIP
-      port: 8013
-    replicas: 1
-    resourcePreset: large
-    env:
-      MODULE_NAME: "interactive_ai_module"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8013"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "500m"
-        memory: "512Mi"
-      limits:
-        cpu: "2000m"
-        memory: "2Gi"
-
-  interactiveLoyalty:
-    enabled: true
-    name: interactive-loyalty
-    image: interactive-loyalty
-    imageTag: ""
-    port: 8014
-    service:
-      type: ClusterIP
-      port: 8014
-    replicas: 1
-    resourcePreset: medium
-    env:
-      MODULE_NAME: "interactive_loyalty_module"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8014"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
-      limits:
-        cpu: "1000m"
-        memory: "1Gi"
-
-  marketplace:
-    enabled: true
-    name: marketplace
-    image: marketplace
-    imageTag: ""
-    port: 8100
-    replicas: 2
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 8100
-    env:
-      MODULE_NAME: "marketplace_module"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8100"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
-      limits:
-        cpu: "1000m"
-        memory: "1Gi"
 
   migrations:
     enabled: true
@@ -2696,120 +2200,6 @@ modules:
         cpu: "500m"
         memory: "512Mi"
 
-  # Trigger Collectors (Webhook Receivers - Unchanged)
-  collectors:
-    discord:
-      enabled: true
-      image: trigger-discord
-      imageTag: ""
-      port: 8003
-      replicas: 1
-      resources:
-        requests:
-          cpu: "100m"
-          memory: "128Mi"
-        limits:
-          cpu: "500m"
-          memory: "512Mi"
-
-    twitch:
-      enabled: true
-      image: trigger-twitch
-      imageTag: ""
-      port: 8002
-      replicas: 1
-      resources:
-        requests:
-          cpu: "100m"
-          memory: "128Mi"
-        limits:
-          cpu: "500m"
-          memory: "512Mi"
-
-    slack:
-      enabled: true
-      image: trigger-slack
-      imageTag: ""
-      port: 8004
-      replicas: 1
-      resources:
-        requests:
-          cpu: "100m"
-          memory: "128Mi"
-        limits:
-          cpu: "500m"
-          memory: "512Mi"
-
-    youtubeLive:
-      enabled: true
-      image: trigger-youtube
-      imageTag: ""
-      port: 8005
-      replicas: 1
-      resources:
-        requests:
-          cpu: "100m"
-          memory: "128Mi"
-        limits:
-          cpu: "500m"
-          memory: "512Mi"
-
-    teams:
-      enabled: false
-      image: trigger-teams
-      imageTag: ""
-      port: 8006
-      replicas: 1
-      resources:
-        requests:
-          cpu: "100m"
-          memory: "128Mi"
-        limits:
-          cpu: "500m"
-          memory: "512Mi"
-
-    mattermost:
-      enabled: false
-      image: trigger-mattermost
-      imageTag: ""
-      port: 8007
-      replicas: 1
-      resources:
-        requests:
-          cpu: "100m"
-          memory: "128Mi"
-        limits:
-          cpu: "500m"
-          memory: "512Mi"
-
-    googlechat:
-      enabled: false
-      image: trigger-googlechat
-      imageTag: ""
-      port: 8008
-      replicas: 1
-      resources:
-        requests:
-          cpu: "100m"
-          memory: "128Mi"
-        limits:
-          cpu: "500m"
-          memory: "512Mi"
-
-    kick:
-      enabled: false
-      image: trigger-kick
-      imageTag: ""
-      port: 8009
-      replicas: 1
-      resources:
-        requests:
-          cpu: "100m"
-          memory: "128Mi"
-        limits:
-          cpu: "500m"
-          memory: "512Mi"
-
 # Ingress Configuration
 ingress:
   enabled: false
@@ -2825,129 +2215,8 @@ ingress:
       paths:
         - path: /
           pathType: Prefix
-          service: hub
-          port: 8060
-        - path: /api/router
-          pathType: Prefix
-          service: router
-          port: 8000
-        # Core Data consolidated routes (analytics, engagement, reputation, labels)
-        - path: /api/v1/analytics
-          pathType: Prefix
-          service: core-data
-          port: 8040
-        - path: /api/v1/engagement
-          pathType: Prefix
-          service: core-data
-          port: 8040
-        - path: /api/v1/reputation
-          pathType: Prefix
-          service: core-data
-          port: 8040
-        - path: /api/v1/labels
-          pathType: Prefix
-          service: core-data
-          port: 8040
-        # Core Identity consolidated routes (identity, security, credentials)
-        - path: /api/v1/identity
-          pathType: Prefix
-          service: core-identity
-          port: 8050
-        - path: /api/v1/security
-          pathType: Prefix
-          service: core-identity
-          port: 8050
-        - path: /api/v1/credentials
-          pathType: Prefix
-          service: core-identity
-          port: 8050
-        # Core Community consolidated routes (community, workflow, browser-source, stream, module-rtc)
-        - path: /api/v1/community-core
-          pathType: Prefix
-          service: core-community
-          port: 8020
-        - path: /api/v1/workflow
-          pathType: Prefix
-          service: core-community
-          port: 8020
-        - path: /api/v1/browser-source
-          pathType: Prefix
-          service: core-community
-          port: 8020
-        - path: /api/v1/stream
-          pathType: Prefix
-          service: core-community
-          port: 8020
-        # Interactive Social consolidated routes (alias, shoutout, presence, quote)
-        - path: /api/v1/alias
-          pathType: Prefix
-          service: interactive-social
-          port: 8010
-        - path: /api/v1/shoutout
-          pathType: Prefix
-          service: interactive-social
-          port: 8010
-        - path: /api/v1/presence
-          pathType: Prefix
-          service: interactive-social
-          port: 8010
-        - path: /api/v1/quotes
-          pathType: Prefix
-          service: interactive-social
-          port: 8010
-        # Interactive Gaming consolidated routes (lfg, inventory, server-manager, server-status)
-        - path: /api/v1/lfg
-          pathType: Prefix
-          service: interactive-gaming
-          port: 8104
-        - path: /api/v1/inventory
-          pathType: Prefix
-          service: interactive-gaming
-          port: 8104
-        - path: /api/v1/server-manager
-          pathType: Prefix
-          service: interactive-gaming
-          port: 8104
-        - path: /api/v1/server-status
-          pathType: Prefix
-          service: interactive-gaming
-          port: 8104
-        # Interactive Media consolidated routes (clip, spotify, youtube-music)
-        - path: /api/v1/clips
-          pathType: Prefix
-          service: interactive-media
-          port: 8105
-        - path: /api/v1/spotify
-          pathType: Prefix
-          service: interactive-media
-          port: 8105
-        - path: /api/v1/youtube-music
-          pathType: Prefix
-          service: interactive-media
-          port: 8105
-        # SECURITY: calendar routed through hub-api (NOT interactive-productivity
-        # directly) -- hub-api's scope-gated event_calendar_bp +
-        # EventCalendarProxyClient are the only legitimate JWT-validators/
-        # setters of the X-User-Context/X-API-Key headers
-        # calendar_interaction_module trusts (live authz bypass, fixed 2026-10).
-        - path: /api/v1/calendar
-          pathType: Prefix
-          service: hub
-          port: 8060
-        # Interactive Productivity consolidated routes (memories, translate)
-        - path: /api/v1/memories
-          pathType: Prefix
-          service: interactive-productivity
-          port: 8030
-        - path: /api/v1/translate
-          pathType: Prefix
-          service: interactive-productivity
-          port: 8030
-        # Unchanged services
-        - path: /api/v1/marketplace
-          pathType: Prefix
-          service: marketplace
-          port: 8100
+          service: hub-webui-v3
+          port: 8080
   tls:
     - secretName: waddlebot-tls
       hosts:
@@ -3033,6 +2302,9 @@ config:
   # ENV baseline for flag waddles.role_sync -> FLAG_WADDLES_ROLE_SYNC (default OFF;
   # PostHog overrides when connected). Also needs pipeline.roleSync.enabled for the reconcile CronJob.
   roleSyncEnabled: false
+  # ENV baselines for waddles.community.guild_pairing / waddles.webui.role_sync_mapping (default OFF).
+  guildPairingEnabled: false
+  webuiRoleSyncMappingEnabled: false
   spectrumOrgPollIntervalS: 300
   # A roster shrinking by more than this fraction in one poll is held back as an RSI glitch, not emitted
   spectrumRosterMaxDepartureRatio: 0.5
@@ -3081,11 +2353,7 @@ sharedEnv:
   QDRANT_PORT: "6333"
   QDRANT_GRPC_PORT: "6334"
 
-  # Router Configuration
-  ROUTER_URL: "http://router:8000"
 
-  # Hub Configuration
-  HUB_URL: "http://hub:8060"
 
   # Logging Configuration
   LOG_LEVEL: "INFO"
@@ -3140,8 +2408,8 @@ startupProbe:
 # NEVER get an HPA. Off by default everywhere; production enables it per service. When a
 # service's HPA is on, its Deployment omits spec.replicas so `helm upgrade` does not reset the
 # autoscaler. Needs metrics-server and container resource requests. Keys under `services:`:
-# hubApi hubWebui svcCore svcProcess svcAction svcProcessRust svcActionRust bundleExecutor
-# reputation router. A service entry overrides `defaults` field-by-field.
+# hubApi hubWebui svcCore svcProcess svcAction svcProcessRust svcActionRust bundleExecutor.
+# A service entry overrides `defaults` field-by-field.
 autoscaling:
   defaults:
     enabled: false
@@ -3299,13 +2567,8 @@ networkPolicy:
   # Components (app.kubernetes.io/component) that ALSO accept ingress-controller / Gateway-API
   # traffic on their declared ports. Everything else is reachable from inside the namespace only.
   externalIngressComponents:
-    - hub
     - hub-api
-    - hub-webui
     - hub-webui-v3
-    - router
-    - marketplace
-    - trigger-webhooks
     - svc-presentation
     - svc-streaming
     - svc-rtc
@@ -3361,6 +2624,18 @@ egressPolicy:
       - gateway.discord.gg
       - discord.com
       - cdn.discord.com
+  # Scoped Twitch egress (toFQDNs, 443/TCP only) for the data-plane Twitch callers.
+  twitch:
+    enabled: true
+    components:
+      - svc-ingest-rust
+      - svc-action
+      - svc-action-rust
+    fqdns:
+      - irc-ws.chat.twitch.tv
+      - id.twitch.tv
+      - api.twitch.tv
+      - eventsub.wss.twitch.tv
   # Components (app.kubernetes.io/component label values) subject to the
   # egress default-deny. Extend as more Rust dataplane Deployments land.
   dataPlaneComponents:
@@ -3548,6 +2823,19 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "identity:ephemeral:mint"
+        # KeyService.GetStreamDek (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES): svc-process
+        # decrypts every inbound event's identity fields (svc-ingest encrypts them before they
+        # touch the stream, outside the PII boundary) with the tenant stream DEK it fetches here,
+        # sealed to a per-call ephemeral key, through a third single-scope hub_client.
+        - "key:stream-dek:read"
+        # feature/host-gameserver-net -- the `gameserver-net` host capability resolves an
+        # admin-registered game-server connection (provider `gameserver`) per call:
+        # `connections:list:gameserver` finds the (community, server id) binding,
+        # `connections:resolve:gameserver` returns the sealed host/port/RCON password to the HOST
+        # only (never the guest). Both are refused by hub-api for any provider but `gameserver`,
+        # and render only when pipeline.rustDataPlane.svcProcess.gameserverNet.enabled.
+        - "connections:resolve:gameserver"
+        - "connections:list:gameserver"
         # bundle `identity` host capability (stage-next) -- svc-process resolves
         # a free-text @handle mention through IdentityService.ResolveHandle
         # (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES) with a second,
@@ -3563,18 +2851,18 @@ serviceJwt:
         # Granted to this identity alone; hub-api additionally allow-lists the caller by name.
         - "media:byok:resolve"
         - "media:tier:resolve"
+        # feature/bundle-community-config-live -- get-context().config_json: the live per-community
+        # bundle config (BundleConfigService, hub_api/grpc_internal/bundle_config_servicer.py).
+        # Read-only, ids only; hub-api additionally allow-lists the caller by name.
+        - "bundle-config:read"
     svc-action:
       spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-action"
       serviceAccount: svc-action
       tenant: system
       allowedScopes:
-        # feature/hub-grpc-env-wiring -- was "users:display-name:resolve", which does
-        # not match hub_api/grpc_internal/servicers.py REQUIRED_SCOPES's
-        # "identity:displayname:read" for ResolveDisplayNames (core/svc_action's
-        # HUB_IDENTITY_RESOLVE_SCOPE). The mismatch would have minted a machine JWT
-        # missing the scope the server's AuthInterceptor actually checks, so every
-        # ResolveDisplayNames call would 403 even with a working connection.
-        - "identity:displayname:read"
+        # svc-action holds NO display-name scope: it never detokenizes (PII boundary --
+        # only svc-ingest and svc-presentation may hold true PII); relay text is queued
+        # tokenized and svc-ingest's outbound drain substitutes at the platform send.
         - "egress:connect"
         # feature/edge-reshape-chunk2-conn-store (Task 8) -- svc-action is the per-send EGRESS
         # consumer of the connection store: `connections:resolve` mints a community-bound token
@@ -3591,6 +2879,9 @@ serviceJwt:
         # (never wider). Filtered out of the rendered allow-list unless presentation.rust.enabled
         # (waddlebot.svcActionOverlayPush); the Python svc-presentation was removed, Rust is the default.
         - "presentation.overlay:push"
+        # feature/bundle-community-config-live -- live per-community bundle config for
+        # get-context().config_json (hub_api BundleConfigService); read-only, ids only.
+        - "bundle-config:read"
     # Overlay detokenization (core/svc_presentation/src/overlay/detok.rs): resolves
     # `{user:<uuid>}` to display names via ResolveDisplayNames only -- never mints
     # pseudonyms or calls egress, so exactly one scope.
@@ -3616,13 +2907,16 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "connections:resolve"
+        # KeyService.GetStreamDek (#442) -- per-tenant stream identity-field DEK (encrypt side),
+        # sealed to a per-request X25519 key. Only svc-ingest + svc-process hold this scope;
+        # hub-api additionally allow-lists both by SPIFFE service name.
         # feature/edge-reshape-chunk2-conn-store (Task 8) -- unbound binding discovery
         # (GET /api/v1/internal/provider-connections) for the twitch OAuth kind. NOT the
         # `connections:resolve:static` scope: svc-ingest never resolves Lambda/GCP/HTTP secrets.
         - "connections:list"
         # feature/dataplane-scope-resolver (numeric-id migration, Slice A) -- svc-ingest has no DB;
         # it resolves (platform, guild/channel) -> numeric (tenant_id, community_id) through
-        # hub-api's GET /api/v1/internal/dataplane/resolve-scope. A SEPARATE scope from
+        # hub-api's internal gRPC DataplaneScopeService.ResolveScope. A SEPARATE scope from
         # connections:resolve (least privilege: this one returns ids only, never a token), granted
         # to this identity alone and, like the grant above, only rendered while
         # pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled is true.
@@ -3638,6 +2932,16 @@ serviceJwt:
         # user UUID to the raw platform user id through IdentityService.ResolvePlatformUser
         # (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES). Granted to this identity alone.
         - "identity:platform-user:resolve"
+        # feature/bundle-host-scheduling -- scheduled bundle reconcile: svc-ingest polls
+        # BundleScheduleService.ListBundleSchedules over internal gRPC (hub_api/grpc_internal/bundle_schedule_servicer.py) for the
+        # active (tenant, community, app) scopes to tick. Granted to this identity alone; hub-api
+        # additionally allow-lists the caller by name.
+        - "bundle-schedules:read"
+        # KeyService.GetStreamDek -- svc-ingest envelope-encrypts every identity field with the
+        # tenant stream DEK (fetched by NUMERIC tenant id, sealed to a per-call ephemeral key)
+        # before the event reaches the stream. Always rendered: no DEK, no events. Listed ONCE
+        # (a duplicate entry renders twice in the identity allow-list).
+        - "key:stream-dek:read"
   # Every calling pod projects its own ServiceAccount token bound to
   # `bootstrapAudience` -- this is the bootstrap credential, no shared
   # secret distributed to callers. Reusable via the
@@ -3881,3 +3185,23 @@ bundleStorage:
     # security.md: object storage holding sensitive data needs server-side encryption.
     # The operator MUST assert the external bucket has it enabled (render fails otherwise).
     serverSideEncryptionConfirmed: false
+
+# Bundle storage v2 (docs/bundle-storage-v2.md). Everything OFF by default. Passwords are NEVER set
+# here: create the Secret out-of-band (ExternalSecret/SealedSecret/kubectl) and reference it.
+bundleStorageV2:
+  # svc-process-rust + svc-action-rust only: BUNDLE_DB_HOST|PORT|NAME|USER + BUNDLE_DB_PASSWORD
+  # (role waddles_bundle_runtime). host/port/name default to the chart's Postgres service.
+  db:
+    enabled: false
+    existingSecret: ""          # Secret holding passwordKey (required when enabled)
+    passwordKey: BUNDLE_DB_PASSWORD
+    host: ""
+    port: ""
+    name: ""
+    user: ""                    # default waddles_bundle_runtime
+  # hub-api only: BUNDLE_MIGRATOR_PASSWORD (role waddles_bundle_migrator, DDL on app schemas).
+  migrator:
+    enabled: false
+    existingSecret: ""          # Secret holding passwordKey (required when enabled)
+    passwordKey: BUNDLE_MIGRATOR_PASSWORD
+    user: ""                    # unset -> hub-api default

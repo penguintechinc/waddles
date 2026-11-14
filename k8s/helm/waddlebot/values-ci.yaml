@@ -77,24 +77,6 @@ pipeline:
   hubWebui:
     enabled: false   # webui image isn't built by this workflow either
 
-modules:
-  # Pre-existing, PR-480-independent drift: modules.hub is the legacy admin-panel
-  # Deployment (values.yaml modules.hub.port: 8060, PORT=8060 env), but its image
-  # field ("waddlebot-hub-api") now resolves to the NEW hub_api Dockerfile/app,
-  # which hardcodes port 8204 and ignores $PORT entirely -- so modules.hub's
-  # readiness/liveness probes (port 8060) can never succeed against that image,
-  # crash-looping regardless of this PR's changes. templates/hub-api.yaml's own
-  # header comment ("Coexists with those 2 legacy Deployments; cutover is a later
-  # task") confirms this is a known, unreconciled migration-in-progress gap, not
-  # something introduced here -- disabling for this workflow's scope rather than
-  # guessing at the intended cutover.
-  hub:
-    enabled: false
-  router:
-    enabled: false     # not required for install/upgrade correctness; cuts one image build
-
-reputation:
-  enabled: false   # own image (docker.io/waddlebot/reputation-module), not in the kind-load list
 egressProxy:
   enabled: false   # values.yaml's own "SKELETON: no Dockerfile/CI image yet" -- allowlistSigning.secretName has no auto-provisioning wired up yet either (not in autoProvisionedKeys), so the pod can never reach Ready regardless of image availability
 posthog:

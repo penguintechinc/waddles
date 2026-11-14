@@ -169,6 +169,7 @@ fn chat_send(platform_channel: &str, origin: Option<&str>, text: &str) -> Outbou
         channel: platform_channel.to_string(),
         text: text.to_string(),
         origin_channel: origin.map(str::to_string),
+        tenant_id: None,
     }
 }
 
@@ -337,7 +338,13 @@ async fn youtube_chat_send_is_stamp_pinned_and_fills_the_live_chat_id_in_the_bod
         ("youtube.oauth", TOKEN),
         ("youtube.live_chat_id", "Cg0KC-live_ID"),
     ]);
-    let r = rig(PlatformPolicy::youtube(), youtube_send(), slots, true).await;
+    // The quota duty (`youtube_duties`) is covered in its own real-path tests; this one proves the
+    // template/pin/slot path with a duty-free executor.
+    let mut policy = PlatformPolicy::youtube();
+    for k in &mut policy.kinds {
+        k.needs_duty = false;
+    }
+    let r = rig(policy, youtube_send(), slots, true).await;
     let a = chat_send("Cg0KC-live_ID", Some("Cg0KC-live_ID"), "yo");
     r.exec.execute(&req("youtube", &a, Some(9))).await.unwrap();
     // No stamp -> refused before anything is resolved.
@@ -994,8 +1001,11 @@ async fn oversize_response_is_bounded_by_the_guard() {
 /// no `eventsub.*` kind may run on app credentials without a host-side broadcaster
 /// binding -- otherwise any community could list/delete another broadcaster's
 /// subscriptions. Refused with a stable code BEFORE any slot source is consulted.
+/// EventSub kinds are host duties (`needs_duty`): with no claiming hook (`eventsub.list` is
+/// claimed by none) the request fails closed with `host_duty_missing` before any slot source is
+/// consulted -- this is the first of two layers.
 #[tokio::test]
-async fn app_credential_eventsub_kinds_are_refused_before_any_slot_resolution() {
+async fn eventsub_kinds_without_a_claiming_duty_fail_closed_before_any_slot_resolution() {
     let pairs = |v: &[(&str, &str)]| -> Vec<(String, String)> {
         v.iter()
             .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
@@ -1030,9 +1040,80 @@ async fn app_credential_eventsub_kinds_are_refused_before_any_slot_resolution() 
             .execute(&req("twitch", &a, Some(7)))
             .await
             .unwrap_err(),
-        ExecError::Slot(SlotError::Refused(APP_KIND_UNBOUND_CODE))
+        ExecError::HostDutyMissing
     );
     assert!(sent(&r).await.is_empty(), "nothing reached the platform");
+}
+
+/// Claims every Twitch `eventsub.*` kind and approves it: stands in for a (future, buggy or
+/// over-broad) duty hook so the app-credential guard is proven to be a second, independent layer.
+struct ClaimEventsub;
+
+impl DutyHook for ClaimEventsub {
+    fn claims(&self, platform: &str, kind: &str) -> bool {
+        platform == "twitch" && kind.starts_with("eventsub.")
+    }
+    async fn gate(&self, _cx: &DutyCx<'_>) -> Result<(), ExecError> {
+        Ok(())
+    }
+    async fn payload(&self, _cx: &DutyCx<'_>) -> Result<String, ExecError> {
+        Ok("{}".to_string())
+    }
+    async fn dynamic_slot(
+        &self,
+        _cx: &DutyCx<'_>,
+        _slot: &str,
+        _c: &GuardedClient,
+    ) -> Result<SlotValue, ExecError> {
+        Err(ExecError::HostDutyMissing)
+    }
+}
+
+/// Regression (security review HIGH): even when a duty hook claims an `eventsub.*` kind, the APP
+/// token may not run it without a host-side broadcaster binding -- refused with a stable code
+/// BEFORE any slot source is consulted.
+#[tokio::test]
+async fn app_credential_eventsub_kinds_are_refused_even_when_a_duty_claims_them() {
+    let pairs = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+        v.iter()
+            .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
+            .collect()
+    };
+    let tpl = RequestTpl {
+        method: "GET".into(),
+        url: "https://api.twitch.tv/helix/eventsub/subscriptions".into(),
+        headers: pairs(&[
+            ("Authorization", "Bearer {{TWITCH_APP_TOKEN}}"),
+            ("Client-Id", "{{TWITCH_APP_CLIENT_ID}}"),
+        ]),
+        body: None,
+        secret_refs: pairs(&[
+            ("{{TWITCH_APP_TOKEN}}", "app.token"),
+            ("{{TWITCH_APP_CLIENT_ID}}", "app.client_id"),
+        ]),
+    };
+    let slots = MapSlots::with(&[("app.token", "apptok"), ("app.client_id", "cid")]);
+    let server = ok_server().await;
+    let policy = local(PlatformPolicy::twitch(), &server);
+    let builder = FixedBuilder::new(retarget(tpl, &server));
+    let exec = SenderExecutor::with_duties(builder, slots, Flag(true), ClaimEventsub, cfg(policy));
+    let a = OutboundAction::PolicyOp(crate::outbound_ops::PolicyOp {
+        op: "eventsub.list",
+        channel: None,
+        text: None,
+        message_id: None,
+        user_id: None,
+        origin_channel: None,
+        tenant_id: None,
+    });
+    assert_eq!(
+        exec.execute(&req("twitch", &a, Some(7))).await.unwrap_err(),
+        ExecError::Slot(SlotError::Refused(APP_KIND_UNBOUND_CODE))
+    );
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing reached the platform"
+    );
 }
 
 #[test]

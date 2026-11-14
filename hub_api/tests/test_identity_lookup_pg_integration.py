@@ -222,7 +222,8 @@ async def _member(
         # 0048); a pseudonym's handle arrives from the platform-asserted mint that
         # svc-process performs with the sender's name. Emulate that mint here.
         await adal.executesql_async(
-            "UPDATE ephemeral_pseudonyms SET handle = %s WHERE pseudonym = %s::uuid",
+            "UPDATE ephemeral_pseudonyms SET handle = %s, handle_seen_at = now() "
+            "WHERE pseudonym = %s::uuid",
             [display, value],
         )
     return None if value is None else str(value)
@@ -294,15 +295,23 @@ async def test_handle_collision_two_pseudonyms_fails_loud(adal: AsyncDAL) -> Non
 
 
 @pg_only
-async def test_handle_collision_pseudonym_vs_linked_user_fails_loud(adal: AsyncDAL) -> None:
+async def test_twitch_stale_linked_username_never_competes_with_fresh_ingest_handle(
+    adal: AsyncDAL,
+) -> None:
+    """A Twitch OAuth-time ``platform_username`` is never matched (renames make it stale).
+
+    Before alembic 0100 this was an ambiguity; now only the handle freshly asserted by ingest
+    for a numeric id counts, so the fresh holder (tw-1) wins and the linked user is not hit.
+    """
     t = await _tenant(adal, "acme")
     c = await _community(adal, t)
-    await _member(adal, c, platform="twitch", puid="tw-1", display="Sam")
-    hub_id, _ = await _hub_user(adal)
+    tw1 = await _member(adal, c, platform="twitch", puid="tw-1", display="Sam")
+    hub_id, linked_uuid = await _hub_user(adal)
     await _identity(adal, hub_id, "twitch", "tw-2", "sam")
     await _member(adal, c, platform="twitch", puid="tw-2")
-    with pytest.raises(AmbiguousHandleError):
-        await resolve_target(adal, "acme", "twitch", "sam")
+    got = await resolve_target(adal, "acme", "twitch", "sam")
+    assert str(got.uuid) != linked_uuid
+    assert str(got.uuid) == tw1
 
 
 @pg_only
@@ -627,7 +636,7 @@ async def test_reader_role_cannot_read_raw_handles_or_run_the_lookups(
     # ...cannot run the handle->uuid join or either display-name query as an oracle
     for sql, params in (
         (_svc._LINKED_LOGIN_CANDIDATES_SQL, ["discord", "x", t]),
-        (_svc._PSEUDONYM_LOGIN_CANDIDATES_SQL, [t, "twitch", "x"]),
+        (_svc._PSEUDONYM_LOGIN_CANDIDATES_SQL, [t, "twitch", "x", 30]),
         (_svc._MENTION_MEMBER_SQL, [t, "discord", "1", "discord", "1", "discord", "1"]),
     ):
         assert "permission denied" in _reader_denied(pg_db, sql, params)

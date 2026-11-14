@@ -45,6 +45,22 @@ enum ExtCall {
     },
     GetMany(ReputationScope, Vec<Uuid>),
     Leaderboard(ReputationScope, u32),
+    Apply {
+        scope: ReputationScope,
+        user: Uuid,
+        delta: i32,
+        class: bundle_host_reputation::ReasonClass,
+        source: String,
+        caps: ReputationCaps,
+        key: String,
+    },
+    GetTenant(ReputationScope, Uuid),
+    TenantPolicy(ReputationScope),
+    History(ReputationScope, Uuid, u32, Option<i64>),
+    Below(ReputationScope, i64, u32),
+    IsSoftBanned(ReputationScope, Uuid),
+    SoftBan(ReputationScope, Uuid, String),
+    LiftSoftBan(ReputationScope, Uuid, String),
 }
 
 /// Records every store call; answers with a canned result.
@@ -55,6 +71,13 @@ struct RecordingStore {
     ext: Mutex<Vec<ExtCall>>,
     next_unit: Mutex<Option<Result<(), ReputationError>>>,
     next_entries: Mutex<Option<Result<Vec<bundle_host_reputation::ScoreEntry>, ReputationError>>>,
+    /// When set, the next soft-ban call answers `RateLimited { cap }`.
+    toggle_cap: Mutex<Option<i64>>,
+    /// What `active_logic_app` answers: `None` = the test app itself (so
+    /// pre-exclusivity tests keep passing), `Some(x)` = exactly `x`.
+    active_logic: Mutex<Option<Option<String>>>,
+    /// Idempotency keys `adjust` was called with.
+    adjust_keys: Mutex<Vec<String>>,
 }
 
 impl RecordingStore {
@@ -79,6 +102,19 @@ impl RecordingStore {
 }
 
 impl ReputationStore for RecordingStore {
+    fn active_logic_app<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+    ) -> bundle_host_reputation::BoxFuture<'a, Result<Option<String>, ReputationError>> {
+        Box::pin(async move {
+            Ok(self
+                .active_logic
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| Some(APP_ID.to_string())))
+        })
+    }
     fn get<'a>(
         &'a self,
         scope: &'a ReputationScope,
@@ -99,8 +135,13 @@ impl ReputationStore for RecordingStore {
         delta: i32,
         reason: &'a str,
         caps: ReputationCaps,
+        key: &'a bundle_host_reputation::IdempotencyKey,
     ) -> bundle_host_reputation::BoxFuture<'a, Result<i64, ReputationError>> {
         Box::pin(async move {
+            self.adjust_keys
+                .lock()
+                .unwrap()
+                .push(key.as_str().to_string());
             self.calls.lock().unwrap().push((
                 "adjust".into(),
                 scope.clone(),
@@ -188,6 +229,164 @@ impl ReputationStore for RecordingStore {
                 .unwrap_or(Ok(vec![]))
         })
     }
+
+    fn apply<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        delta: i32,
+        class: bundle_host_reputation::ReasonClass,
+        source_event: &'a str,
+        caps: ReputationCaps,
+        key: &'a bundle_host_reputation::IdempotencyKey,
+    ) -> bundle_host_reputation::BoxFuture<
+        'a,
+        Result<bundle_host_reputation::ApplyOutcome, ReputationError>,
+    > {
+        Box::pin(async move {
+            self.ext.lock().unwrap().push(ExtCall::Apply {
+                scope: scope.clone(),
+                user,
+                delta,
+                class,
+                source: source_event.to_string(),
+                caps,
+                key: key.as_str().to_string(),
+            });
+            self.take()
+                .map(|new_score| bundle_host_reputation::ApplyOutcome {
+                    new_score,
+                    applied: true,
+                })
+        })
+    }
+    fn get_tenant<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+    ) -> bundle_host_reputation::BoxFuture<
+        'a,
+        Result<bundle_host_reputation::TenantScore, ReputationError>,
+    > {
+        Box::pin(async move {
+            self.ext
+                .lock()
+                .unwrap()
+                .push(ExtCall::GetTenant(scope.clone(), user));
+            self.take()
+                .map(|score| bundle_host_reputation::TenantScore {
+                    score,
+                    communities: 2,
+                })
+        })
+    }
+    fn tenant_policy<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+    ) -> bundle_host_reputation::BoxFuture<
+        'a,
+        Result<Option<bundle_host_reputation::TenantPolicy>, ReputationError>,
+    > {
+        Box::pin(async move {
+            self.ext
+                .lock()
+                .unwrap()
+                .push(ExtCall::TenantPolicy(scope.clone()));
+            Ok(Some(bundle_host_reputation::TenantPolicy {
+                auto_ban_enabled: false,
+                auto_ban_floor: 350,
+                at_risk_threshold: 450,
+            }))
+        })
+    }
+    fn history<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        limit: u32,
+        before: Option<i64>,
+    ) -> bundle_host_reputation::BoxFuture<
+        'a,
+        Result<Vec<bundle_host_reputation::HistoryEntry>, ReputationError>,
+    > {
+        Box::pin(async move {
+            self.ext
+                .lock()
+                .unwrap()
+                .push(ExtCall::History(scope.clone(), user, limit, before));
+            Ok(vec![bundle_host_reputation::HistoryEntry {
+                id: 9,
+                delta: -3,
+                reason_code: "activity:evt".into(),
+                kind: "adjust".into(),
+                balance_after: Some(597),
+                occurred_at: "2026-11-11T00:00:00Z".into(),
+            }])
+        })
+    }
+    fn below_threshold<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        threshold: i64,
+        limit: u32,
+    ) -> bundle_host_reputation::BoxFuture<
+        'a,
+        Result<Vec<bundle_host_reputation::ScoreEntry>, ReputationError>,
+    > {
+        Box::pin(async move {
+            self.ext
+                .lock()
+                .unwrap()
+                .push(ExtCall::Below(scope.clone(), threshold, limit));
+            Ok(vec![])
+        })
+    }
+    fn is_soft_banned<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+    ) -> bundle_host_reputation::BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async move {
+            self.ext
+                .lock()
+                .unwrap()
+                .push(ExtCall::IsSoftBanned(scope.clone(), user));
+            Ok(true)
+        })
+    }
+    fn soft_ban<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        reason: &'a str,
+    ) -> bundle_host_reputation::BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async move {
+            self.ext.lock().unwrap().push(ExtCall::SoftBan(
+                scope.clone(),
+                user,
+                reason.to_string(),
+            ));
+            Ok(true)
+        })
+    }
+    fn lift_soft_ban<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        only_reason: &'a str,
+    ) -> bundle_host_reputation::BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async move {
+            self.ext.lock().unwrap().push(ExtCall::LiftSoftBan(
+                scope.clone(),
+                user,
+                only_reason.to_string(),
+            ));
+            match self.toggle_cap.lock().unwrap().take() {
+                Some(cap) => Err(ReputationError::RateLimited { cap }),
+                None => Ok(true),
+            }
+        })
+    }
 }
 
 struct Fixture {
@@ -222,12 +421,23 @@ fn fixture_with(
     wired: bool,
     community: Option<(&str, i32)>,
 ) -> Fixture {
+    fixture_app(APP_ID, grant_set, flag_on, wired, community)
+}
+
+/// [`fixture_with`] for an arbitrary `app_id` (core vs third-party).
+fn fixture_app(
+    app_id: &str,
+    grant_set: GrantSet,
+    flag_on: bool,
+    wired: bool,
+    community: Option<(&str, i32)>,
+) -> Fixture {
     let snapshot = InMemoryGrantSnapshot::new();
     snapshot.set(
         GrantScopeKey {
             tenant_id: TENANT_ID,
             community_id: community.map_or(0, |c| c.1),
-            app_id: APP_ID.to_string(),
+            app_id: app_id.to_string(),
             app_version: VERSION,
         },
         grant_set,
@@ -266,13 +476,17 @@ fn fixture_with(
     let mut caps = StageCapabilities::new(
         "acme".to_string(),
         community.map(|c| c.0.to_string()),
-        APP_ID.to_string(),
+        app_id.to_string(),
         TENANT_ID,
         community.map_or(0, |c| c.1),
         VERSION,
         egress,
         gate,
     );
+    // Every write needs a replay-stable event id (the idempotency key's anchor).
+    caps.invocation_identity = Some(Arc::new(
+        InvocationIdentity::new("twitch", None, vec![]).with_event_id(EVENT_ID),
+    ));
     let store = Arc::new(RecordingStore::default());
     if wired {
         caps = caps.with_reputation(ReputationWiring {
@@ -346,7 +560,7 @@ async fn adjust_reaches_the_store_with_host_derived_scope_and_the_catalog_cap() 
         &ReputationScope {
             tenant_id: TENANT_ID,
             community_id: COMMUNITY_ID,
-            app_id: APP_ID.to_string()
+            app_id: APP_ID.to_string(),
         }
     );
     assert_eq!(*user, f.member);
@@ -706,162 +920,6 @@ fn rep_scope() -> ReputationScope {
         community_id: COMMUNITY_ID,
         app_id: APP_ID.to_string(),
     }
-}
-
-#[tokio::test]
-async fn override_needs_the_admin_grant_not_just_write() {
-    let f = ext_fixture(full_grants()); // read + community.write, NO admin
-    let args = serde_json::json!({
-        "user": f.member.to_string(), "absolute_score": 100, "reason": "admin.fix",
-    });
-    assert_eq!(
-        code_of(&f, "reputation.override", args).await,
-        "not_granted"
-    );
-    assert_eq!(f.store.ext_count(), 0);
-}
-
-#[tokio::test]
-async fn override_reaches_the_store_with_host_scope_and_an_event_derived_key() {
-    let f = ext_fixture(admin_grants());
-    f.store.answer(Ok(100));
-    let args = serde_json::json!({
-        "user": f.member.to_string(), "absolute_score": 100, "reason": "admin.fix",
-        "tenant_id": 999, "community_id": 999,
-    });
-    let out = f
-        .caps
-        .handle(rep_call("reputation.override", args.clone()))
-        .await
-        .unwrap();
-    assert_eq!(out, serde_json::json!({ "balance": 100 }));
-    // A second distinct override in the same invocation gets the next ordinal.
-    f.caps
-        .handle(rep_call("reputation.override", args))
-        .await
-        .unwrap();
-    let calls = f.store.ext_calls();
-    let key = |n: u32| format!("{EVENT_ID}:reputation_override:{n}");
-    assert_eq!(
-        calls,
-        vec![
-            ExtCall::Override {
-                scope: rep_scope(),
-                user: f.member,
-                absolute: 100,
-                reason: "admin.fix".into(),
-                key: key(0),
-            },
-            ExtCall::Override {
-                scope: rep_scope(),
-                user: f.member,
-                absolute: 100,
-                reason: "admin.fix".into(),
-                key: key(1),
-            },
-        ]
-    );
-}
-
-#[tokio::test]
-async fn override_is_gated_on_membership_and_validates_arguments() {
-    let f = ext_fixture(admin_grants());
-    assert_eq!(
-        code_of(
-            &f,
-            "reputation.override",
-            serde_json::json!({"user": Uuid::new_v4().to_string(), "absolute_score": 1, "reason": "r"})
-        )
-        .await,
-        "user_not_in_scope"
-    );
-    for args in [
-        serde_json::json!({"user": "nope", "absolute_score": 1, "reason": "r"}),
-        serde_json::json!({"user": f.member.to_string(), "absolute_score": "x", "reason": "r"}),
-        serde_json::json!({"user": f.member.to_string(), "absolute_score": 1, "reason": "Bad Reason"}),
-        serde_json::json!({"user": f.member.to_string(), "absolute_score": 1}),
-    ] {
-        assert_eq!(
-            code_of(&f, "reputation.override", args).await,
-            "invalid_args"
-        );
-    }
-    assert_eq!(f.store.ext_count(), 0);
-}
-
-#[tokio::test]
-async fn a_mutation_without_a_replay_stable_event_id_is_refused_not_unkeyed() {
-    // A verified admin actor, but an invocation with NO event id.
-    let Fixture {
-        caps,
-        store,
-        member,
-        other,
-    } = fixture_with(admin_grants(), true, true, Some(("main", COMMUNITY_ID)));
-    let f = Fixture {
-        caps: caps.with_identity(
-            crate::identity::IdentityWiring {
-                directory: Arc::new(RoleDirectory {
-                    role: Some("community-admin"),
-                }),
-                handles: None,
-                flag: Arc::new(FixedGate(true)),
-            },
-            Arc::new(InvocationIdentity::new(
-                "twitch",
-                Some("1001".to_string()),
-                vec![],
-            )),
-        ),
-        store,
-        member,
-        other,
-    };
-    let args = serde_json::json!({
-        "user": f.member.to_string(), "absolute_score": 1, "reason": "r",
-    });
-    assert_eq!(
-        code_of(&f, "reputation.override", args).await,
-        "not_implemented"
-    );
-    let args = serde_json::json!({
-        "adjustments": [{"user": f.member.to_string(), "delta": 1}], "reason": "r",
-    });
-    assert_eq!(
-        code_of(&f, "reputation.adjust_many", args).await,
-        "not_implemented"
-    );
-    assert_eq!(f.store.ext_count(), 0);
-}
-
-#[tokio::test]
-async fn a_backend_failure_gives_the_ordinal_back_so_a_retry_reuses_the_key() {
-    let f = ext_fixture(admin_grants());
-    let args = serde_json::json!({
-        "user": f.member.to_string(), "absolute_score": 5, "reason": "r",
-    });
-    f.store.answer(Err(ReputationError::Backend("boom".into())));
-    assert_eq!(
-        code_of(&f, "reputation.override", args.clone()).await,
-        "backend"
-    );
-    f.caps
-        .handle(rep_call("reputation.override", args))
-        .await
-        .unwrap();
-    let keys: Vec<String> = f
-        .store
-        .ext_calls()
-        .into_iter()
-        .map(|c| match c {
-            ExtCall::Override { key, .. } => key,
-            other => panic!("{other:?}"),
-        })
-        .collect();
-    assert_eq!(
-        keys[0], keys[1],
-        "the retry presents the same idempotency key"
-    );
 }
 
 #[tokio::test]
@@ -1228,21 +1286,6 @@ async fn extension_ops_fail_loud_on_flag_off_unwired_and_tenant_wide_activation(
     );
 }
 
-/// A store failure code maps onto the stable wire code (idempotency conflict
-/// reaches the guest as `denied(idempotency_conflict)`).
-#[tokio::test]
-async fn an_idempotency_conflict_surfaces_with_its_stable_code() {
-    let f = ext_fixture(admin_grants());
-    f.store.answer(Err(ReputationError::IdempotencyConflict));
-    let args = serde_json::json!({
-        "user": f.member.to_string(), "absolute_score": 1, "reason": "r",
-    });
-    assert_eq!(
-        code_of(&f, "reputation.override", args).await,
-        "idempotency_conflict"
-    );
-}
-
 // ---- review #983: caller scope enforced host-side on override ----
 
 fn override_args_for(user: Uuid) -> serde_json::Value {
@@ -1291,71 +1334,696 @@ async fn override_with_no_verified_actor_at_all_is_forbidden() {
     assert_eq!(f.store.ext_count(), 0);
 }
 
-#[tokio::test]
-async fn override_by_admin_and_owner_callers_is_allowed() {
-    for role in ["community-admin", "community-owner", "owner"] {
-        let f = ext_fixture_as(admin_grants(), Some(role));
-        f.store.answer(Ok(100));
-        f.caps
-            .handle(rep_call("reputation.override", override_args(&f)))
-            .await
-            .expect("admin/owner caller must be allowed");
-        assert_eq!(f.store.ext_count(), 1);
-    }
+/// A fixture whose invocation is SYSTEM-originated (a platform event such as a
+/// follow / the automatic floor evaluation): no human actor scope is required.
+fn sys_fixture(grant_set: GrantSet) -> Fixture {
+    let f = ext_fixture_as(grant_set, None);
+    let mut f = f;
+    f.caps.invocation_identity = Some(Arc::new(
+        InvocationIdentity::new("twitch", Some("1001".to_string()), vec![])
+            .with_event_id(EVENT_ID)
+            .with_system_originated(true),
+    ));
+    f
 }
 
-/// A refused (non-admin) caller never burns the admin quota: after a flood of
-/// forbidden attempts a real admin still gets all 10 calls of the window.
+fn v2_grants() -> GrantSet {
+    grants(&[
+        ("reputation.read", serde_json::json!({})),
+        (
+            "reputation.community.write",
+            serde_json::json!({"delta_min": -5, "delta_max": 5}),
+        ),
+        (
+            "reputation.moderation.write",
+            serde_json::json!({"delta_min": -200, "delta_max": 200}),
+        ),
+        ("reputation.history.read", serde_json::json!({})),
+        ("reputation.tenant.read", serde_json::json!({})),
+    ])
+}
+
 #[tokio::test]
-async fn forbidden_callers_do_not_consume_the_admin_quota() {
-    let f = ext_fixture_as(admin_grants(), Some("member"));
-    for _ in 0..25 {
+async fn apply_derives_the_activity_class_and_catalog_caps_on_the_host() {
+    let f = sys_fixture(v2_grants());
+    f.store.answer(Ok(605));
+    // A guest-supplied `class`/`tenant_id` field is ignored entirely.
+    let args = serde_json::json!({
+        "user": f.member.to_string(), "delta": 5, "reason": "activity.follow",
+        "class": "moderation", "tenant_id": 999,
+    });
+    let out = f
+        .caps
+        .handle(rep_call("reputation.apply", args))
+        .await
+        .unwrap();
+    assert_eq!(out, serde_json::json!({"new_score": 605, "applied": true}));
+    let caps = reputation_caps_for(PermissionFamily::ReputationCommunityWrite);
+    assert_eq!(
+        f.store.ext_calls(),
+        vec![ExtCall::Apply {
+            scope: rep_scope(),
+            user: f.member,
+            delta: 5,
+            class: bundle_host_reputation::ReasonClass::Activity,
+            source: "activity.follow".into(),
+            caps,
+            key: format!("{EVENT_ID}:reputation_apply:0"),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn apply_activity_is_bounded_to_five_and_moderation_needs_its_own_grant() {
+    let f = sys_fixture(v2_grants());
+    let mk =
+        |d: i64| serde_json::json!({"user": f.member.to_string(), "delta": d, "reason": "r.x"});
+    // Activity op: a moderation-sized delta is refused before the store.
+    assert_eq!(
+        code_of(&f, "reputation.apply", mk(-200)).await,
+        "invalid_args"
+    );
+    assert_eq!(f.store.ext_count(), 0);
+    // Moderation op: -200 passes with the grant and carries the moderation class + caps.
+    f.store.answer(Ok(400));
+    f.caps
+        .handle(rep_call("reputation.apply_moderation", mk(-200)))
+        .await
+        .unwrap();
+    let calls = f.store.ext_calls();
+    assert!(matches!(
+        &calls[0],
+        ExtCall::Apply { class: bundle_host_reputation::ReasonClass::Moderation, delta: -200, caps, .. }
+            if *caps == reputation_caps_for(PermissionFamily::ReputationModerationWrite)
+    ));
+    // Without `reputation.moderation.write` the same call is not_granted.
+    let g = ext_fixture(full_grants());
+    assert_eq!(
+        code_of(&g, "reputation.apply_moderation", mk(-200)).await,
+        "not_granted"
+    );
+    assert_eq!(g.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn core_only_ops_are_forbidden_for_a_third_party_app_even_when_granted() {
+    let f = fixture_app(
+        "acme.third-party",
+        v2_grants(),
+        true,
+        true,
+        Some(("main", COMMUNITY_ID)),
+    );
+    let u = f.member.to_string();
+    let cases = [
+        (
+            "reputation.history",
+            serde_json::json!({"user": u, "limit": 5}),
+        ),
+        ("reputation.get_tenant", serde_json::json!({"user": u})),
+        ("reputation.get_tenant_policy", serde_json::json!({})),
+        (
+            "reputation.soft_ban",
+            serde_json::json!({"user": u, "reason": "community_soft_floor"}),
+        ),
+        (
+            "reputation.lift_soft_ban",
+            serde_json::json!({"user": u, "only_reason": "community_soft_floor"}),
+        ),
+        (
+            "reputation.apply_moderation",
+            serde_json::json!({"user": u, "delta": -10, "reason": "m.x"}),
+        ),
+    ];
+    for (op, args) in cases {
+        assert_eq!(code_of(&f, op, args).await, "forbidden", "{op}");
+    }
+    assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn core_read_ops_need_their_grants_and_reach_the_store_with_host_scope() {
+    // Not granted: read-only grants cannot reach history / tenant reads.
+    let g = ext_fixture(full_grants());
+    let u = g.member.to_string();
+    assert_eq!(
+        code_of(
+            &g,
+            "reputation.history",
+            serde_json::json!({"user": u, "limit": 5})
+        )
+        .await,
+        "not_granted"
+    );
+    assert_eq!(
+        code_of(&g, "reputation.get_tenant", serde_json::json!({"user": u})).await,
+        "not_granted"
+    );
+    assert_eq!(g.store.ext_count(), 0);
+
+    let f = sys_fixture(v2_grants());
+    let u = f.member.to_string();
+    f.store.answer(Ok(512));
+    let out = f
+        .caps
+        .handle(rep_call(
+            "reputation.get_tenant",
+            serde_json::json!({"user": u}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(out, serde_json::json!({"score": 512, "communities": 2}));
+    let h = f
+        .caps
+        .handle(rep_call(
+            "reputation.history",
+            serde_json::json!({"user": u, "limit": 10, "before": 50}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(h["entries"][0]["id"], 9);
+    let p = f
+        .caps
+        .handle(rep_call(
+            "reputation.get_tenant_policy",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(p["policy"]["auto_ban_floor"], 350);
+    assert_eq!(
+        f.store.ext_calls(),
+        vec![
+            ExtCall::GetTenant(rep_scope(), f.member),
+            ExtCall::History(rep_scope(), f.member, 10, Some(50)),
+            ExtCall::TenantPolicy(rep_scope()),
+        ]
+    );
+    // Argument validation: limit bounds, non-positive cursor.
+    for args in [
+        serde_json::json!({"user": u, "limit": 0}),
+        serde_json::json!({"user": u, "limit": 101}),
+        serde_json::json!({"user": u, "limit": 5, "before": 0}),
+    ] {
         assert_eq!(
-            code_of(&f, "reputation.override", override_args(&f)).await,
-            "forbidden"
+            code_of(&f, "reputation.history", args).await,
+            "invalid_args"
         );
     }
-    // Same gate, same quota ledger: swap in an admin actor.
-    let caps = f.caps.with_identity(
-        crate::identity::IdentityWiring {
-            directory: Arc::new(RoleDirectory {
-                role: Some("community-admin"),
-            }),
-            handles: None,
-            flag: Arc::new(FixedGate(true)),
-        },
-        Arc::new(
-            InvocationIdentity::new("twitch", Some("1001".to_string()), vec![])
-                .with_event_id(EVENT_ID),
+}
+
+#[tokio::test]
+async fn community_tenant_isolation_a_non_member_target_is_refused_before_the_store() {
+    let f = sys_fixture(v2_grants());
+    let stranger = Uuid::new_v4().to_string();
+    for (op, args) in [
+        (
+            "reputation.get_tenant",
+            serde_json::json!({"user": stranger}),
         ),
+        (
+            "reputation.history",
+            serde_json::json!({"user": stranger, "limit": 5}),
+        ),
+        (
+            "reputation.is_soft_banned",
+            serde_json::json!({"user": stranger}),
+        ),
+    ] {
+        assert_eq!(code_of(&f, op, args).await, "user_not_in_scope", "{op}");
+    }
+    assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn soft_ban_ops_and_below_threshold_validate_and_route() {
+    let f = sys_fixture(v2_grants());
+    let u = f.member.to_string();
+    f.caps
+        .handle(rep_call(
+            "reputation.is_soft_banned",
+            serde_json::json!({"user": u}),
+        ))
+        .await
+        .unwrap();
+    f.caps
+        .handle(rep_call(
+            "reputation.soft_ban",
+            serde_json::json!({"user": u, "reason": "community_soft_floor"}),
+        ))
+        .await
+        .unwrap();
+    f.caps
+        .handle(rep_call(
+            "reputation.lift_soft_ban",
+            serde_json::json!({"user": u, "only_reason": "community_soft_floor"}),
+        ))
+        .await
+        .unwrap();
+    f.caps
+        .handle(rep_call(
+            "reputation.below_threshold",
+            serde_json::json!({"threshold": 450, "limit": 20}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store.ext_calls(),
+        vec![
+            ExtCall::IsSoftBanned(rep_scope(), f.member),
+            ExtCall::SoftBan(rep_scope(), f.member, "community_soft_floor".into()),
+            ExtCall::LiftSoftBan(rep_scope(), f.member, "community_soft_floor".into()),
+            ExtCall::Below(rep_scope(), 450, 20),
+        ]
     );
-    f.store.answer(Ok(1));
-    for _ in 0..10 {
-        caps.handle(rep_call("reputation.override", override_args_for(f.member)))
-            .await
-            .expect("real admin keeps the full window");
+    for args in [
+        serde_json::json!({"threshold": 299, "limit": 5}),
+        serde_json::json!({"threshold": 900, "limit": 5}),
+        serde_json::json!({"threshold": 450, "limit": 101}),
+    ] {
+        assert_eq!(
+            code_of(&f, "reputation.below_threshold", args).await,
+            "invalid_args"
+        );
+    }
+    // Bad reason (free text) rejected.
+    assert_eq!(
+        code_of(
+            &f,
+            "reputation.soft_ban",
+            serde_json::json!({"user": u, "reason": "Bad Reason"})
+        )
+        .await,
+        "invalid_args"
+    );
+}
+
+#[tokio::test]
+async fn every_write_requires_an_idempotency_key_typed_invalid_args() {
+    // No event id on the invocation -> invalid_args (never a random/unkeyed
+    // write that a retry would double-count), nothing reaches the store.
+    let mut f = fixture_with(v2_grants(), true, true, Some(("main", COMMUNITY_ID)));
+    f.caps.invocation_identity = None;
+    let u = f.member.to_string();
+    for (op, args) in [
+        (
+            "reputation.apply",
+            serde_json::json!({"user": u, "delta": 1, "reason": "r.x"}),
+        ),
+        (
+            "reputation.adjust",
+            serde_json::json!({"user": u, "delta": 1, "reason": "r.x"}),
+        ),
+        (
+            "reputation.adjust_many",
+            serde_json::json!({"adjustments": [{"user": u, "delta": 1}], "reason": "r.x"}),
+        ),
+    ] {
+        assert_eq!(code_of(&f, op, args).await, "invalid_args", "{op}");
+    }
+    assert_eq!(f.store.ext_count(), 0);
+    assert!(f.store.calls.lock().unwrap().is_empty());
+}
+
+fn human_fixture(role: Option<&'static str>) -> Fixture {
+    // Human-originated (chat command): `ext_fixture_as` builds a non-system invocation.
+    ext_fixture_as(v2_grants(), role)
+}
+
+fn mod_args(f: &Fixture) -> [(&'static str, serde_json::Value); 3] {
+    let u = f.member.to_string();
+    [
+        (
+            "reputation.apply_moderation",
+            serde_json::json!({"user": u, "delta": -50, "reason": "moderation.ban"}),
+        ),
+        (
+            "reputation.soft_ban",
+            serde_json::json!({"user": u, "reason": "community_soft_floor"}),
+        ),
+        (
+            "reputation.lift_soft_ban",
+            serde_json::json!({"user": u, "only_reason": "community_soft_floor"}),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn a_non_moderator_human_actor_is_denied_every_moderation_write() {
+    for role in [None, Some("member"), Some("vip")] {
+        let f = human_fixture(role);
+        for (op, args) in mod_args(&f) {
+            assert_eq!(code_of(&f, op, args).await, "forbidden", "{role:?} {op}");
+        }
+        assert_eq!(f.store.ext_count(), 0, "{role:?}");
     }
 }
 
-/// regression: #983 review -- the catalog's 10 calls / 60 s quota on
-/// `reputation.community.admin` is enforced on the host cap path.
 #[tokio::test]
-async fn override_is_rate_limited_to_ten_calls_per_window_on_the_cap_path() {
-    let f = ext_fixture(admin_grants());
-    f.store.answer(Ok(1));
-    for _ in 0..10 {
-        f.caps
-            .handle(rep_call("reputation.override", override_args(&f)))
-            .await
-            .expect("within the 10-call window");
+async fn a_moderator_or_admin_human_actor_may_make_moderation_writes() {
+    for role in [Some("moderator"), Some("community-admin")] {
+        let f = human_fixture(role);
+        f.store.answer(Ok(550));
+        for (op, args) in mod_args(&f) {
+            f.caps
+                .handle(rep_call(op, args))
+                .await
+                .unwrap_or_else(|e| panic!("{role:?} {op}: {e:?}"));
+        }
+        assert_eq!(f.store.ext_count(), 3, "{role:?}");
     }
+}
+
+#[tokio::test]
+async fn a_system_originated_invocation_needs_no_human_actor_scope() {
+    // The automatic floor evaluation / a moderation outcome: no human actor.
+    let f = sys_fixture(v2_grants());
+    f.store.answer(Ok(500));
+    for (op, args) in mod_args(&f) {
+        f.caps
+            .handle(rep_call(op, args))
+            .await
+            .unwrap_or_else(|e| panic!("{op}: {e:?}"));
+    }
+    assert_eq!(f.store.ext_count(), 3);
+}
+
+#[tokio::test]
+async fn a_guest_supplied_system_flag_cannot_bypass_the_scope_check() {
+    // A human-originated, non-moderator invocation: the guest smuggles
+    // `system`/`system_originated` into every arg position; the flag is
+    // host-derived only, so it is ignored and the call is refused.
+    let f = human_fixture(Some("member"));
+    let u = f.member.to_string();
+    for flag in ["system", "system_originated", "origin", "automatic"] {
+        let mut args = serde_json::json!({"user": u, "delta": -50, "reason": "moderation.ban"});
+        args[flag] = serde_json::json!(true);
+        assert_eq!(
+            code_of(&f, "reputation.apply_moderation", args).await,
+            "forbidden",
+            "{flag}"
+        );
+    }
+    assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn soft_ban_lift_quota_exhaustion_is_a_typed_rate_limit_and_a_ban_still_applies() {
+    let f = sys_fixture(v2_grants());
+    let u = f.member.to_string();
+    // The store reports the durable LIFT quota exhausted: typed, not generic.
+    *f.store.toggle_cap.lock().unwrap() = Some(5);
     assert_eq!(
-        code_of(&f, "reputation.override", override_args(&f)).await,
+        code_of(
+            &f,
+            "reputation.lift_soft_ban",
+            serde_json::json!({"user": u, "only_reason": "community_soft_floor"})
+        )
+        .await,
         "rate_limited"
     );
+    // Recording a (floor-triggered) soft ban is never quota-blocked.
+    f.caps
+        .handle(rep_call(
+            "reputation.soft_ban",
+            serde_json::json!({"user": u, "reason": "community_soft_floor"}),
+        ))
+        .await
+        .unwrap();
+    // The bound is the store's DURABLE count quota (proven against Postgres in
+    // `soft_ban_toggles_are_quota_limited_per_user_and_per_community_and_typed`);
+    // there is no gate-side refund that could hand a toggle back.
+    assert_eq!(f.store.ext_count(), 2);
+}
+
+#[tokio::test]
+async fn real_human_event_types_are_never_system_originated_so_the_scope_check_applies() {
+    for et in [
+        "message",
+        "interaction.command",
+        "chat.message",
+        "weird.unknown",
+    ] {
+        let mut f = ext_fixture_as(v2_grants(), Some("member"));
+        f.caps.invocation_identity = Some(Arc::new(
+            InvocationIdentity::new("discord", Some("1001".to_string()), vec![])
+                .with_event_id(EVENT_ID)
+                .with_system_originated(crate::identity::is_system_event_type(et)),
+        ));
+        let u = f.member.to_string();
+        assert_eq!(
+            code_of(
+                &f,
+                "reputation.soft_ban",
+                serde_json::json!({"user": u, "reason": "community_soft_floor"})
+            )
+            .await,
+            "forbidden",
+            "{et}"
+        );
+    }
+    // The allowlisted platform event passes without a human actor scope.
+    let mut f = ext_fixture_as(v2_grants(), Some("member"));
+    f.caps.invocation_identity = Some(Arc::new(
+        InvocationIdentity::new("twitch", Some("1001".to_string()), vec![])
+            .with_event_id(EVENT_ID)
+            .with_system_originated(crate::identity::is_system_event_type("channel.follow")),
+    ));
+    let u = f.member.to_string();
+    assert!(f
+        .caps
+        .handle(rep_call(
+            "reputation.soft_ban",
+            serde_json::json!({"user": u, "reason": "community_soft_floor"})
+        ))
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn a_system_flag_stripped_by_an_untrusted_hop_makes_the_core_write_forbidden() {
+    // A third-party logic bundle tool.invokes a core service: the host strips the
+    // flag (`for_tool_call`), so the core bundle's moderation write needs a real
+    // moderator actor scope.
+    let base = InvocationIdentity::new("twitch", Some("1001".to_string()), vec![])
+        .with_event_id(EVENT_ID)
+        .with_system_originated(true);
+    let hop = base.for_tool_call(
+        Some("tool:k".into()),
+        "acme.third-party-logic",
+        "waddles.core.service.reputation",
+    );
+    assert!(!hop.is_system_originated());
+    let mut f = ext_fixture_as(v2_grants(), Some("member"));
+    f.caps.invocation_identity = Some(Arc::new(hop));
+    let u = f.member.to_string();
+    assert_eq!(
+        code_of(
+            &f,
+            "reputation.apply_moderation",
+            serde_json::json!({"user": u, "delta": -50, "reason": "moderation.ban"})
+        )
+        .await,
+        "forbidden"
+    );
+    assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn a_positive_moderation_delta_is_forbidden_for_everyone_including_admins() {
+    let args = |f: &Fixture| serde_json::json!({"user": f.member.to_string(), "delta": 30, "reason": "moderation.restore"});
+    // System-originated (no human actor): still forbidden.
+    let f = sys_fixture(v2_grants());
+    assert_eq!(
+        code_of(&f, "reputation.apply_moderation", args(&f)).await,
+        "forbidden"
+    );
+    // A moderator (human): moderation write is allowed but positive is not.
+    let f = human_fixture(Some("moderator"));
+    assert_eq!(
+        code_of(&f, "reputation.apply_moderation", args(&f)).await,
+        "forbidden"
+    );
+    assert_eq!(f.store.ext_count(), 0);
+    // Even a verified admin: a positive moderation delta is an admin_override
+    // (class 3), denied to the bundle role -> hub-api only.
+    let f = human_fixture(Some("community-admin"));
+    assert_eq!(
+        code_of(&f, "reputation.apply_moderation", args(&f)).await,
+        "forbidden"
+    );
+    assert_eq!(f.store.ext_count(), 0);
+    // Negative moderation is unaffected for a system-originated invocation.
+    let f = sys_fixture(v2_grants());
+    f.store.answer(Ok(550));
+    assert!(f
+        .caps
+        .handle(rep_call(
+            "reputation.apply_moderation",
+            serde_json::json!({"user": f.member.to_string(), "delta": -50, "reason": "moderation.ban"})
+        ))
+        .await
+        .is_ok());
+}
+
+/// Sets what the store's `reputation_active_logic_app` answers.
+fn set_active_logic(f: &Fixture, v: Option<&str>) {
+    *f.store.active_logic.lock().unwrap() = Some(v.map(str::to_string));
+}
+
+#[tokio::test]
+async fn activity_writes_are_forbidden_unless_the_caller_is_the_active_logic_bundle() {
+    let activity = |f: &Fixture| {
+        [
+            (
+                "reputation.apply",
+                serde_json::json!({"user": f.member.to_string(), "delta": 1, "reason": "activity.follow"}),
+            ),
+            (
+                "reputation.adjust",
+                serde_json::json!({"user": f.member.to_string(), "delta": 1, "reason": "game.win"}),
+            ),
+            (
+                "reputation.adjust_many",
+                serde_json::json!({"adjustments": [{"user": f.member.to_string(), "delta": 1}], "reason": "game.round"}),
+            ),
+        ]
+    };
+    // Another app is the active logic bundle, or there is none (fail closed):
+    // forbidden, and the store's write path is never reached.
+    for active in [Some("acme.other-logic"), None] {
+        let f = sys_fixture(v2_grants());
+        set_active_logic(&f, active);
+        for (op, args) in activity(&f) {
+            assert_eq!(
+                code_of(&f, op, args).await,
+                "forbidden",
+                "{op} / {active:?}"
+            );
+        }
+        assert_eq!(f.store.ext_count(), 0);
+        assert!(f.store.calls.lock().unwrap().is_empty());
+    }
+    // The active logic bundle itself is allowed.
+    let f = sys_fixture(v2_grants());
+    set_active_logic(&f, Some(APP_ID));
+    f.store.answer(Ok(601));
+    f.caps
+        .handle(rep_call(
+            "reputation.apply",
+            serde_json::json!({"user": f.member.to_string(), "delta": 1, "reason": "activity.follow"}),
+        ))
+        .await
+        .expect("the active logic bundle may apply");
+}
+
+#[tokio::test]
+async fn moderation_class_is_not_subject_to_logic_exclusivity() {
+    // Moderation has its own permission / core-only / actor-scope gates;
+    // exclusivity is for ACTIVITY writes only.
+    let f = sys_fixture(v2_grants());
+    set_active_logic(&f, Some("acme.other-logic"));
+    f.store.answer(Ok(500));
+    f.caps
+        .handle(rep_call(
+            "reputation.apply_moderation",
+            serde_json::json!({"user": f.member.to_string(), "delta": -10, "reason": "moderation.ban"}),
+        ))
+        .await
+        .expect("moderation write is gated elsewhere");
+}
+
+#[tokio::test]
+async fn a_bundle_can_only_set_or_clear_the_floor_soft_ban_never_a_manual_one() {
+    let f = sys_fixture(v2_grants());
+    let u = f.member.to_string();
+    for (op, args) in [
+        (
+            "reputation.soft_ban",
+            serde_json::json!({"user": u, "reason": "manual.admin-ban"}),
+        ),
+        (
+            "reputation.lift_soft_ban",
+            serde_json::json!({"user": u, "only_reason": "manual.admin-ban"}),
+        ),
+    ] {
+        assert_eq!(code_of(&f, op, args).await, "forbidden", "{op}");
+    }
     assert_eq!(
         f.store.ext_count(),
-        10,
-        "the 11th call never reached the store"
+        0,
+        "no manual soft-ban write reached the store"
     );
+}
+
+/// Admin override is `admin_override` (class 3): the SQL denies it to the bundle
+/// role, so the host refuses it for EVERY caller, admin grant or not, before the
+/// store is touched.
+#[tokio::test]
+async fn override_is_hub_api_only_even_for_a_verified_admin_with_the_admin_grant() {
+    let f = ext_fixture(admin_grants());
+    assert_eq!(
+        code_of(&f, "reputation.override", override_args(&f)).await,
+        "forbidden"
+    );
+    assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn adjust_keys_are_event_derived_distinct_per_call_and_reused_on_a_backend_retry() {
+    let f = fixture();
+    let args = serde_json::json!({"user": f.member.to_string(), "delta": 1, "reason": "r.x"});
+    f.store.answer(Err(ReputationError::Backend("boom".into())));
+    assert_eq!(
+        code_of(&f, "reputation.adjust", args.clone()).await,
+        "backend"
+    );
+    f.store.answer(Ok(601));
+    f.caps
+        .handle(rep_call("reputation.adjust", args.clone()))
+        .await
+        .unwrap();
+    f.store.answer(Ok(602));
+    f.caps
+        .handle(rep_call("reputation.adjust", args))
+        .await
+        .unwrap();
+    let keys = f.store.adjust_keys.lock().unwrap().clone();
+    assert_eq!(keys[0], format!("{EVENT_ID}:reputation_adjust:0"));
+    assert_eq!(keys[1], keys[0], "a failed attempt's retry reuses the key");
+    assert_eq!(keys[2], format!("{EVENT_ID}:reputation_adjust:1"));
+}
+
+#[tokio::test]
+async fn activity_writes_fail_closed_on_flag_off_and_absent_wiring_before_exclusivity_is_consulted()
+{
+    for (flag_on, wired, want) in [
+        (false, true, "feature_disabled"),
+        (true, false, "not_implemented"),
+    ] {
+        let f = fixture_with(v2_grants(), flag_on, wired, Some(("main", COMMUNITY_ID)));
+        let u = f.member.to_string();
+        for (op, args) in [
+            (
+                "reputation.adjust",
+                serde_json::json!({"user": u, "delta": 1, "reason": "r.x"}),
+            ),
+            (
+                "reputation.adjust_many",
+                serde_json::json!({"adjustments": [{"user": u, "delta": 1}], "reason": "r.x"}),
+            ),
+            (
+                "reputation.apply",
+                serde_json::json!({"user": u, "delta": 1, "reason": "r.x"}),
+            ),
+        ] {
+            assert_eq!(
+                code_of(&f, op, args).await,
+                want,
+                "{op} flag_on={flag_on} wired={wired}"
+            );
+        }
+        assert_eq!(f.store.ext_count(), 0);
+        assert!(f.store.calls.lock().unwrap().is_empty());
+    }
 }

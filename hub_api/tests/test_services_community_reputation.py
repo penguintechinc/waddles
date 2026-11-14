@@ -56,6 +56,10 @@ def reputation_db(tmp_path: Any) -> Any:
     dal.close()
 
 
+def _uuid_for(hub_user_id: int) -> str:
+    return f"00000000-0000-4000-8000-{hub_user_id:012d}"
+
+
 def _seed_member(
     dal: Any,
     *,
@@ -65,13 +69,21 @@ def _seed_member(
     reputation: int,
     active: bool = True,
 ) -> None:
+    """A member with a `user_uuid` token and a bundle-store community score row."""
+    tenant_id = dal.communities[community_id].tenant_id
     dal.community_members.insert(
         community_id=community_id,
         user_id=str(hub_user_id),
+        user_uuid=_uuid_for(hub_user_id),
         display_name=display_name,
-        reputation=reputation,
         is_active=active,
         joined_at=datetime.now(UTC),
+    )
+    dal.bundle_reputation_scores.insert(
+        tenant_id=tenant_id,
+        community_id=community_id,
+        user_uuid=_uuid_for(hub_user_id),
+        balance=reputation,
     )
     dal.commit()
 
@@ -79,11 +91,11 @@ def _seed_member(
 def _seed_tenant(
     dal: Any, *, tenant_id: int, hub_user_id: int, score: int, total_events: int = 5
 ) -> None:
-    dal.reputation_tenant.insert(
+    dal.bundle_reputation_tenant_scores.insert(
         tenant_id=tenant_id,
-        hub_user_id=hub_user_id,
+        user_uuid=_uuid_for(hub_user_id),
         score=score,
-        total_events=total_events,
+        event_count=total_events,
         last_event_at=datetime.now(UTC),
     )
     dal.commit()
@@ -164,13 +176,16 @@ class TestGetMyReputation:
         assert result.tenant_tier == "Trusted"
 
     async def test_tenant_score_never_leaks_from_another_tenant(self, reputation_db: Any) -> None:
-        """A `reputation_tenant` row seeded under a DIFFERENT tenant_id must never surface here."""
+        """A tenant-aggregate row seeded under a DIFFERENT tenant_id must never surface here."""
         async_dal, community_id, tenant_id = reputation_db
         dal = async_dal.dal
         other_tenant_id = dal.tenants.insert(
             slug="other-tenant", display_name="Other Tenant", is_active=True
         )
         dal.commit()
+        _seed_member(
+            dal, community_id=community_id, hub_user_id=99, display_name="eve", reputation=600
+        )
         _seed_tenant(dal, tenant_id=other_tenant_id, hub_user_id=99, score=850, total_events=40)
 
         result = await svc.get_my_reputation(
@@ -249,3 +264,33 @@ class TestGetLeaderboard:
             )
         entries = await svc.get_leaderboard(async_dal, dal, community_id=community_id, limit=2)
         assert len(entries) == 2
+
+
+async def test_id_less_tables_are_read_with_explicit_columns(
+    reputation_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: live alpha 500ed on `reputation_tenant.id` (composite PK, no id column).
+
+    The bundle tenant-aggregate table has no `id` either; pydal's bare SELECT would add one, so
+    every read must name its columns explicitly.
+    """
+    async_dal, community_id, tenant_id = reputation_db
+    _seed_member(
+        async_dal.dal, community_id=community_id, hub_user_id=1, display_name="a", reputation=610
+    )
+    seen: list[tuple[Any, ...]] = []
+    real = async_dal.select_async
+
+    async def spy(query: Any, *fields: Any, **kw: Any) -> Any:
+        seen.append(fields)
+        return await real(query, *fields, **kw)
+
+    monkeypatch.setattr(async_dal, "select_async", spy)
+    await svc.get_my_reputation(
+        async_dal, async_dal.dal, community_id=community_id, hub_user_id=1, tenant_id=tenant_id
+    )
+    named = [str(f) for call in seen for f in call]
+    assert "bundle_reputation_tenant_scores.score" in named
+    assert "bundle_reputation_tenant_scores.event_count" in named
+    assert "bundle_reputation_tenant_scores.last_event_at" in named
+    assert all(call for call in seen), "a bare (field-less) select would add a nonexistent id"

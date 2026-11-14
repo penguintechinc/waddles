@@ -114,35 +114,43 @@ describe('AnnouncementsPanel', () => {
     expect(screen.getByRole('link', { name: 'Manage' })).toHaveAttribute('href', '/admin/7/announcements');
   });
 
-  it('renders nothing for an empty feed and warns on a non-HTTP failure', async () => {
-    mockApiGet(() => ({ data: [] }));
-    const empty = renderWithProviders(<AnnouncementsPanel communityId={7} canManage={false} />);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(empty.container).toBeEmptyDOMElement();
-    empty.unmount();
-
-    mockApiGet(() => {
-      throw new Error('network down');
-    });
-    renderWithProviders(<AnnouncementsPanel communityId={7} canManage={false} />);
-    expect(await screen.findByText('We could not load announcements')).toBeInTheDocument();
-    expect(screen.getByText('network down')).toBeInTheDocument();
-  });
-
-  it('treats an HTTP error without a numeric status as unexpected', async () => {
-    mockApiGet(() => {
-      throw Object.assign(new Error('weird'), { response: { data: 'x' } });
-    });
-    renderWithProviders(<AnnouncementsPanel communityId={7} canManage={false} />);
-    expect(await screen.findByText('We could not load announcements')).toBeInTheDocument();
-  });
-
-  it('stays silent for expected denials', async () => {
-    mockApiGet(() => {
-      throw httpError(402, { error: 'plan' });
-    });
+  it('renders nothing and makes no request for non-managers', async () => {
+    const get = mockApiGet(() => ({ data: [] }));
+    get.mockClear();
     const view = renderWithProviders(<AnnouncementsPanel communityId={7} canManage={false} />);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(view.container).toBeEmptyDOMElement();
+    expect(get.mock.calls.some(([url]) => String(url).includes('announcements'))).toBe(false);
+  });
+
+  it('shows an empty state with a connections CTA for an empty feed', async () => {
+    mockApiGet(() => ({ data: [] }));
+    renderWithProviders(<AnnouncementsPanel communityId={7} canManage />);
+    expect(await screen.findByText('No announcements yet')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Connect Discord or Twitch' })).toHaveAttribute('href', '/admin/7/connections');
+  });
+
+  it('shows a visible error with retry on a non-HTTP failure', async () => {
+    mockApiGet(() => {
+      throw new Error('network down');
+    });
+    renderWithProviders(<AnnouncementsPanel communityId={7} canManage />);
+    expect(await screen.findByText('We could not load Announcements')).toBeInTheDocument();
+    expect(screen.getByText('network down')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+
+  it('shows the plan message on 402 and unavailable on 503', async () => {
+    mockApiGet(() => {
+      throw httpError(402, { error: 'plan' });
+    });
+    const first = renderWithProviders(<AnnouncementsPanel communityId={7} canManage />);
+    expect(await screen.findByText('This feature requires a higher plan for this community')).toBeInTheDocument();
+    first.unmount();
+    mockApiGet(() => {
+      throw httpError(503, { error: 'service_unavailable' });
+    });
+    renderWithProviders(<AnnouncementsPanel communityId={7} canManage />);
+    expect(await screen.findByText('Announcements is temporarily unavailable')).toBeInTheDocument();
   });
 });

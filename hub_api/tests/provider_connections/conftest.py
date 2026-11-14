@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 from flask_core import entitlement
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from flask_core.database import AsyncDAL
 from flask_core.service_jwt import (
     ServiceIdentity,
@@ -47,13 +48,13 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    false,
     func,
 )
 
 from blueprints.v1.provider_connections import (
     SERVICE_CONFIG_KEY,
     provider_connections_bp,
-    provider_connections_internal_bp,
 )
 from config import HubAPIConfig
 from services.provider_connections import PlatformKeyVault, ProviderConnectionService
@@ -72,6 +73,7 @@ from tests.provider_connections.fake_twitch import (
     FakeAccount,
     FakeTwitch,
 )
+from tests.provider_connections.grpc_internal_client import GrpcRoutingClient
 from tests.sso.conftest import Entitlements
 
 #: Valid 256-bit test key -- NEVER a real platform key.
@@ -174,6 +176,8 @@ def build_pc_metadata() -> MetaData:
         Column("secret_version", Integer, nullable=False, server_default="1"),
         # migration 0082: sealed outbound API credential (Wix), kind-1 rows only.
         Column("sealed_api_credential", Text),
+        # migration 0103: proof of ownership at bind time; legacy rows default to unverified.
+        Column("ownership_verified", Boolean, nullable=False, server_default=false()),
         Column(
             "created_at",
             DateTime(timezone=True),
@@ -191,7 +195,7 @@ def build_pc_metadata() -> MetaData:
         CheckConstraint(
             "resource_type IN ('discord_guild', 'twitch_channel', 'fake_room', "
             "'external_http', 'aws_lambda', 'gcp_function', 'youtube_channel', 'spectrum_community', "
-            "'wix_site', 'soundcloud_app', 'youtube_api_key')"
+            "'wix_site', 'soundcloud_app', 'youtube_api_key', 'gameserver', 'kick_channel')"
         ),
         CheckConstraint("connection_kind BETWEEN 1 AND 4"),
         CheckConstraint("sealed_api_credential IS NULL OR connection_kind = 1"),
@@ -285,6 +289,25 @@ async def pc_db(tmp_path: Any) -> Any:
     admin_id = int(dal.hub_users.insert(username="tenant-owner"))
     dal.tenant_admins.insert(tenant_id=seed.tenant_id, user_id=admin_id, role="tenant-owner")
     seed.admin_user_id = admin_id
+    # The tenant owner OAuth-linked the Twitch accounts that own both test channels (proof of
+    # ownership at bind time); a test that needs a non-owner uses a fresh, unlinked hub user.
+    for channel_id, login in ((CHANNEL_ID, CHANNEL_LOGIN), (OTHER_CHANNEL_ID, OTHER_CHANNEL_LOGIN)):
+        dal.hub_user_identities.insert(
+            hub_user_id=admin_id,
+            platform="twitch",
+            platform_user_id=channel_id,
+            platform_username=login,
+        )
+    # ... plus the extra channel ids the data-plane pagination tests create on the fly.
+    for extra in ("7003", "7004", "7005", *(f"80{n}" for n in range(10))):
+        dal.hub_user_identities.insert(
+            hub_user_id=admin_id, platform="twitch", platform_user_id=extra
+        )
+    # ... and the Kick broadcaster accounts of the fake Kick channels (fake_kick.CHANNELS).
+    for kick_broadcaster in ("7001", "7002"):
+        dal.hub_user_identities.insert(
+            hub_user_id=admin_id, platform="kick", platform_user_id=kick_broadcaster
+        )
     dal.commit()
     for table_name in dal.tables:
         dal(dal[table_name]).count()
@@ -355,7 +378,7 @@ def hub_config() -> HubAPIConfig:
         db_retry_delay=1,
         secret_key=SECRET_KEY,
         jwt_algorithm="HS256",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -410,7 +433,6 @@ def pc_app(
     app = Quart(__name__)
     QuartSchema(app)
     app.register_blueprint(provider_connections_bp)
-    app.register_blueprint(provider_connections_internal_bp)
     app.config["dal"] = pc_db.dal
     app.config["async_dal"] = pc_db
     app.config["install_dal"] = pc_db.install_dal
@@ -423,14 +445,14 @@ def pc_app(
 @pytest.fixture
 def client(pc_app: Quart) -> Any:
     """Quart test client over ``pc_app``."""
-    return pc_app.test_client()
+    return GrpcRoutingClient(pc_app.test_client())
 
 
 @pytest.fixture
 def static_client(pc_app: Quart, pc_static_service: ProviderConnectionService) -> Any:
     """Test client whose service also has the three static-secret providers registered."""
     pc_app.config[SERVICE_CONFIG_KEY] = pc_static_service
-    return pc_app.test_client()
+    return GrpcRoutingClient(pc_app.test_client())
 
 
 def admin_headers(

@@ -581,14 +581,18 @@ async def process_prebuilt_component(
     """
     async with bundle_span("hub.bundle.onboard_component", app_id=app_id, tenant=tenant_slug):
         await advance_state(install_dal, app_id=app_id, version=version, target=STATUS_VALIDATING)
-        await advance_state(install_dal, app_id=app_id, version=version, target=STATUS_INSPECTING)
+        inspecting = await advance_state(
+            install_dal, app_id=app_id, version=version, target=STATUS_INSPECTING
+        )
+        # The manifest-declared kind pins which export set the component may present.
+        declared_kind = (inspecting.manifest_json or {}).get("kind") or "app"
         logger.info(
             "bundle onboarding: inspecting component",
             extra={"app_id": app_id, "tenant": tenant_slug, "version": version},
         )
 
         try:
-            result = await validate_component(component_bytes)
+            result = await validate_component(component_bytes, declared_kind)
         except ComponentValidatorUnavailableError as exc:
             logger.error(
                 "bundle onboarding: component validator unavailable",

@@ -344,6 +344,7 @@ async fn a_youtube_binding_resolves_its_tenant_and_publishes_while_a_mismatch_is
     let runtime = assemble(
         &settings,
         AssembleDeps {
+            interaction_routing: None,
             identify_budget: None,
             resolver: Arc::new(FakeHub {
                 conn,

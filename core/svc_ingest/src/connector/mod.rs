@@ -35,6 +35,7 @@
 //! `ExportKind::Connector*`); its real-path proof against the real executor
 //! lives in `core/connector_e2e`.
 
+pub mod bundle_schedule;
 pub mod driver;
 pub(crate) mod egress_guard;
 pub mod gateway_rules;

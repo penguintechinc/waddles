@@ -242,14 +242,14 @@ info "Deploying release SHA ${SHA} (tag ${SHA8}) to context ${KUBE_CONTEXT}, nam
 # hub-webui is the plain-name Python image values-alpha.yaml deploys
 # (fix/alpha-deploy-hub-webui) -- see the header comment.
 # ---------------------------------------------------------------------------
-# resolve-433 -- reputation-module, svc-presentation, and svc-streaming are
-# chart-referenced (values-alpha.yaml's reputation/presentation/streaming
+# resolve-433 -- svc-presentation and svc-streaming are
+# chart-referenced (values-alpha.yaml's presentation/streaming
 # sections) but were never in SERVICES, so the image preflight always found
 # them missing. values-alpha.yaml pins each to a static "alpha" tag rather
 # than the per-commit SHA8 (same pattern as bundleExecutor's own comment:
 # "built locally + pushed to the local registry ... same as every other
 # alpha-only module image") -- see service_image_tag below.
-readonly SERVICES="hub-api hub-webui migrations svc-ingest svc-process svc-action egress-proxy seeder reputation-module svc-presentation svc-streaming svc-bundles-executor"
+readonly SERVICES="hub-api hub-webui migrations svc-ingest svc-process svc-action egress-proxy seeder svc-presentation svc-streaming svc-bundles-executor"
 
 service_dockerfile() {
     case "$1" in
@@ -261,7 +261,6 @@ service_dockerfile() {
         svc-process) echo "core/svc_process/Dockerfile.rust" ;;
         svc-action) echo "core/svc_action/Dockerfile.rust" ;;
         egress-proxy) echo "core/egress_proxy/Dockerfile.rust" ;;
-        reputation-module) echo "core/reputation_module/Dockerfile" ;;
         # chore/deploy-svc-presentation-rust-alpha -- Rust svc-presentation (values-alpha.yaml
         # presentation.rust.enabled); Dockerfile.rust builds from the "core" context.
         svc-presentation) echo "core/svc_presentation/Dockerfile.rust" ;;
@@ -279,7 +278,7 @@ service_context() {
     case "$1" in
         # svc-bundles-executor's Dockerfile COPYs core/bundle_executor AND wit/ from the repo
         # root (see its own header comment) -- same "." context as hub-api et al.
-        hub-api|hub-webui|migrations|seeder|reputation-module|svc-bundles-executor) echo "." ;;
+        hub-api|hub-webui|migrations|seeder|svc-bundles-executor) echo "." ;;
         svc-ingest|svc-process|svc-action|egress-proxy|svc-presentation) echo "core" ;;
         svc-streaming) echo "core/svc_streaming" ;;
         *) err "unknown service: $1"; exit 1 ;;
@@ -296,14 +295,13 @@ service_image_repo() {
 
 # Image tag: every service tags with this run's commit SHA8 except the
 # alpha-only local modules values-alpha.yaml pins to a static "alpha" tag
-# (reputation-module, svc-presentation, svc-streaming). fix/alpha-deploy-
+# (svc-presentation, svc-streaming). fix/alpha-deploy-
 # executor-and-failfast: svc-bundles-executor is deliberately NOT in this list --
 # it now gets the same per-commit SHA8 tag as every other live data-plane
 # image (values-alpha.yaml's bundleExecutor.image.tag is unset), closing the
 # stale-mutable-`:alpha`-tag bug this fix addresses.
 service_image_tag() {
     case "$1" in
-        reputation-module) echo "alpha" ;;
         # svc-streaming publishes per-variant tags (<tag>-<variant>, streaming.gpuVariant in
         # values.yaml); alpha builds the cpu variant only. GPU variants: core/svc_streaming/README.md.
         svc-streaming) echo "alpha-cpu" ;;

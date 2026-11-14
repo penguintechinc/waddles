@@ -4,7 +4,7 @@
 # static-file + API-proxy server -- never nginx (house convention).
 
 # node:20 reached upstream EOL 2026-04-30; bumped to node:24 (same interim pin as
-# admin/hub_module/Dockerfile -- org target node:26 not yet adopted here).
+# the former hub backend image) -- org target node:26 not yet adopted here.
 # Stage 1: Build frontend
 FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS frontend-build
 

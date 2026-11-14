@@ -41,6 +41,7 @@ pub async fn read_source_bindings(
     let active_app_ids: std::collections::HashSet<String> = app_active_versions::Entity::find()
         .filter(app_active_versions::Column::TenantId.eq(tenant_id))
         .filter(app_active_versions::Column::CommunityId.eq(community_id))
+        .filter(crate::query::not_globally_disabled())
         .all(conn)
         .await?
         .into_iter()

@@ -44,6 +44,9 @@ pub struct MediaWiring {
     pub concurrency: Arc<tokio::sync::Semaphore>,
 }
 
+/// Per-RPC deadline for hub-api's media tier/BYOK gRPC calls (hub-api rejects anything > 5s).
+const HUB_RPC_DEADLINE: Duration = Duration::from_secs(3);
+
 /// Default process-wide cap on concurrent synchronous image generations.
 pub const DEFAULT_IMAGE_CONCURRENCY: usize = 4;
 
@@ -122,13 +125,18 @@ pub fn build_media_wiring(
             return None;
         }
     };
-    let http = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
+    if cli.hub_api_grpc_endpoint.trim().is_empty() {
+        tracing::error!(
+            "media capability: HUB_API_GRPC_ENDPOINT unset (hub-api tier + BYOK are internal gRPC) \
+             -- capability unavailable (media.* reports not_implemented)"
+        );
+        return None;
+    }
+    let ca = Some(cli.hub_api_grpc_ca_file.trim()).filter(|p| !p.is_empty());
+    let channel = match hub_client::lazy_channel(cli.hub_api_grpc_endpoint.trim(), ca) {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!(error = %e, "media capability: hub-api HTTP client build failed -- capability unavailable");
+            tracing::error!(error = %e, "media capability: hub-api gRPC channel build failed -- capability unavailable");
             return None;
         }
     };
@@ -140,16 +148,16 @@ pub fn build_media_wiring(
         )))
     };
     let tier = HubTierResolver::new(
-        http.clone(),
-        cli.hub_api_url.clone(),
+        channel.clone(),
         bearer(bundle_host_media::tier::TIER_SCOPE),
+        HUB_RPC_DEADLINE,
         Duration::from_secs(60),
         Duration::from_secs(900),
     );
     let creds = HubCredentialResolver::new(
-        http,
-        cli.hub_api_url.clone(),
+        channel,
         bearer(bundle_host_media::credentials::BYOK_SCOPE),
+        HUB_RPC_DEADLINE,
     );
     let provider = GeminiProvider::production(
         GeminiModels {

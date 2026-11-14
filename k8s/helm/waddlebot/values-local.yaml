@@ -15,10 +15,6 @@ global:
   jwtSecret: "local-dev-jwt-secret-change-in-production"
   moduleSecretKey: "local-dev-module-secret-change-in-production"
   serviceApiKey: "local-dev-api-key-change-in-production"
-  # gRPC transport TLS (PR #264) -- local/MicroK8s dev, no cert material provisioned; use
-  # flask_core's dev-only escape hatch (refused under production posture). See values-alpha.yaml.
-  grpcTls:
-    insecureDev: true
   # First-run super-admin bootstrap (PR #256) -- local dev only, never reused beyond this file.
   initialAdmin:
     email: "admin@waddlebot.localhost.local"
@@ -73,47 +69,6 @@ qdrant:
 # already effectively true for local via that default.
 namespace: waddlebot
 
-# Service port configuration for ingress
-hub:
-  service:
-    port: 8060
-
-router:
-  service:
-    port: 8000
-
-identityCore:
-  service:
-    port: 8050
-
-labelsCore:
-  service:
-    port: 8023
-
-browserSource:
-  service:
-    port: 8027
-
-reputation:
-  service:
-    port: 8021
-
-community:
-  service:
-    port: 8020
-
-twitchCollector:
-  service:
-    port: 8002
-
-discordCollector:
-  service:
-    port: 8003
-
-slackCollector:
-  service:
-    port: 8004
-
 # Infrastructure Services - Local Configuration (disabled for now due to chart issues)
 infrastructure:
   # PostgreSQL - Single instance for local
@@ -158,151 +113,6 @@ infrastructure:
   openwhisk:
     enabled: false
 
-# Processing Module - Local Configuration
-processing:
-  router:
-    enabled: true
-    replicas: 1
-    resourcePreset: medium
-    autoscaling:
-      enabled: false
-
-# Admin Modules - Local Configuration
-admin:
-  hub:
-    enabled: true
-    replicas: 1
-    resourcePreset: medium
-
-# Core Modules - Local Configuration
-core:
-  identity:
-    enabled: true
-    replicas: 1
-    resourcePreset: small
-
-  labels:
-    enabled: true
-    replicas: 1
-    resourcePreset: small
-
-  browserSource:
-    enabled: true
-    replicas: 1
-    resourcePreset: small
-
-  reputation:
-    enabled: true
-    replicas: 1
-    resourcePreset: small
-
-  community:
-    enabled: true
-    replicas: 1
-    resourcePreset: small
-
-  aiResearcher:
-    enabled: true
-    replicas: 1
-    resourcePreset: medium
-
-# Trigger Modules - Local Configuration
-trigger:
-  receivers:
-    twitch:
-      enabled: true
-      replicas: 1
-      resourcePreset: medium
-
-    discord:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-    slack:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-    youtubeLive:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-    kick:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-# Action Modules - Local Configuration
-action:
-  interactive:
-    ai:
-      enabled: true
-      replicas: 1
-      resourcePreset: medium
-
-    alias:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-    shoutout:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-    inventory:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-    calendar:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-    memories:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-    youtubeMusic:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-    spotify:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-    loyalty:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-  platformActions:
-    discord:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-    slack:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-    twitch:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
-    youtube:
-      enabled: true
-      replicas: 1
-      resourcePreset: small
-
 # Ingress Configuration - Local/MicroK8s
 ingress:
   enabled: true
@@ -317,44 +127,8 @@ ingress:
       paths:
         - path: /
           pathType: Prefix
-          service: hub
-          port: 8060
-        - path: /api/router
-          pathType: Prefix
-          service: router
-          port: 8000
-        - path: /api/identity
-          pathType: Prefix
-          service: identity-core
-          port: 8050
-        - path: /api/labels
-          pathType: Prefix
-          service: labels-core
-          port: 8023
-        - path: /api/browser-source
-          pathType: Prefix
-          service: browser-source
-          port: 8027
-        - path: /api/reputation
-          pathType: Prefix
-          service: reputation
-          port: 8021
-        - path: /api/community
-          pathType: Prefix
-          service: community
-          port: 8020
-        - path: /webhooks/twitch
-          pathType: Prefix
-          service: twitch-collector
-          port: 8002
-        - path: /webhooks/discord
-          pathType: Prefix
-          service: discord-collector
-          port: 8003
-        - path: /webhooks/slack
-          pathType: Prefix
-          service: slack-collector
-          port: 8004
+          service: hub-webui-v3
+          port: 8080
   tls: []  # No TLS for local development
 
 # Database credentials for secrets
@@ -422,11 +196,7 @@ sharedEnv:
   QDRANT_PORT: "6333"
   QDRANT_GRPC_PORT: "6334"
 
-  # Router Configuration
-  ROUTER_URL: "http://router:8000"
 
-  # Hub Configuration
-  HUB_URL: "http://hub:8060"
 
   # Logging Configuration
   LOG_LEVEL: "DEBUG"
@@ -527,117 +297,6 @@ securityContext:
       - ALL
 
 # Modules - Map action structure to modules structure for template compatibility
-modules:
-  # Default service configuration for all modules
-  _defaults: &module_defaults
-    replicas: 1
-    imageTag: latest
-    resources: {}
-    service:
-      type: ClusterIP
-    image:
-      tag: latest
-      pullPolicy: IfNotPresent
-
-  router:
-    <<: *module_defaults
-    enabled: true
-
-  # Core modules
-  identityCore:
-    <<: *module_defaults
-    enabled: true
-
-  labelsCore:
-    <<: *module_defaults
-    enabled: true
-
-  browserSource:
-    <<: *module_defaults
-    enabled: true
-
-  reputation:
-    <<: *module_defaults
-    enabled: true
-
-  community:
-    <<: *module_defaults
-    enabled: true
-
-  aiResearcher:
-    <<: *module_defaults
-    enabled: false
-
-  # Trigger modules (collectors) - nested under collectors
-  collectors:
-    twitch:
-      <<: *module_defaults
-      enabled: true
-
-    discord:
-      <<: *module_defaults
-      enabled: true
-
-    slack:
-      <<: *module_defaults
-      enabled: true
-
-    youtubeLive:
-      <<: *module_defaults
-      enabled: true
-
-    kick:
-      <<: *module_defaults
-      enabled: true
-
-  # Admin modules
-  hub:
-    <<: *module_defaults
-    enabled: true
-
-  interactive:
-    ai:
-      <<: *module_defaults
-      enabled: true
-    alias:
-      <<: *module_defaults
-      enabled: true
-    shoutout:
-      <<: *module_defaults
-      enabled: true
-    inventory:
-      <<: *module_defaults
-      enabled: true
-    calendar:
-      <<: *module_defaults
-      enabled: true
-    memories:
-      <<: *module_defaults
-      enabled: true
-    youtubeMusic:
-      <<: *module_defaults
-      enabled: true
-    spotify:
-      <<: *module_defaults
-      enabled: true
-    loyalty:
-      <<: *module_defaults
-      enabled: true
-
-  pushing:
-    discordAction:
-      <<: *module_defaults
-      enabled: false
-    slackAction:
-      <<: *module_defaults
-      enabled: false
-    twitchAction:
-      <<: *module_defaults
-      enabled: false
-    youtubeAction:
-      <<: *module_defaults
-      enabled: false
-
 # See values-alpha.yaml's spire.enabled comment: false pending
 # https://github.com/penguintechinc/waddles/issues/437 (SPIRE crash-loop
 # breaks the waddlebot-spire-auto-enroll post-upgrade hook Job).

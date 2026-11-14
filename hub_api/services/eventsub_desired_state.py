@@ -34,7 +34,7 @@ from opentelemetry.trace import Status, StatusCode
 from penguin_dal import AsyncDB
 from sqlalchemy import text
 
-from services.platform_integrations_crypto import decrypt_value, encrypt_token
+from services.provider_connections.vault import SEAL_AAD, open_secret, seal_secret
 
 logger = logging.getLogger(__name__)
 
@@ -331,7 +331,7 @@ async def _requeue(conn: Any, row: Any, want_url: str, *, rotate: bool) -> None:
         {
             "u": want_url,
             "rot": rotate,
-            "sec": encrypt_token(_new_secret(), aad=_aad(row.public_id)) if rotate else "",
+            "sec": seal_secret(_new_secret(), aad=_aad(row.public_id)) if rotate else "",
             "i": row.id,
         },
     )
@@ -366,7 +366,7 @@ async def _insert(
             "v": EVENTSUB_TYPES[sub_type][1],
             "k": key,
             "u": callback_url(base_url, key),
-            "s": encrypt_token(_new_secret(), aad=_aad(public_id)),
+            "s": seal_secret(_new_secret(), aad=_aad(public_id)),
         },
     )
 
@@ -782,4 +782,6 @@ async def secret_for_callback_key(install_dal: AsyncDB, callback_key: str) -> st
         _ops.add(1, {"op": "secret", "outcome": "not_found"})
         raise UnknownSubscriptionError("unknown callback key") from None
     _ops.add(1, {"op": "secret", "outcome": "ok"})
-    return decrypt_value(row.secret_enc, aad=_aad(row.public_id))
+    # Every eventsub row is sealed AAD-bound (there is no legacy layout), so pin SEAL_AAD:
+    # a no-AAD ciphertext is refused rather than accepted through the migration fallback.
+    return open_secret(row.secret_enc, aad=_aad(row.public_id), seal_version=SEAL_AAD)

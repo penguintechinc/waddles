@@ -19,16 +19,13 @@ use bundle_capability_gate::{
     CapabilityGate, GrantScopeKey, GrantSet, GrantedPermission, InMemoryGrantSnapshot,
     InMemoryInstancePolicySnapshot, InMemoryMembership, InMemoryQuotaLedger,
 };
-use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
+use penguin_bundle_host::wire::{CapabilityKind, HostCallBody};
 use svc_action::capabilities::{
     CapabilityHandler, InvokeScope, RelayQueue, StageCapabilities, DISCORD_DRAIN_READY_KEY,
     DISCORD_OP_ACK_KEY_PREFIX,
 };
-use svc_action::config::Secret;
 use svc_action::distribution::BundleCatalog;
-use svc_action::egress::{
-    EgressGuard, EgressLimits, HttpTransport, TransportRequest, TransportResponse,
-};
+use svc_action::egress::{EgressGuard, EgressLimits};
 use svc_action::flags::{boxed, StaticFlag};
 use svc_action::usage::UsageBatcher;
 
@@ -118,33 +115,6 @@ impl RelayQueue for FakeQueue {
     }
 }
 
-/// Fake Discord REST transport recording every request it is asked to send.
-#[derive(Default)]
-struct FakeTransport {
-    requests: Mutex<Vec<TransportRequest>>,
-}
-
-impl HttpTransport for FakeTransport {
-    fn send<'a>(
-        &'a self,
-        req: TransportRequest,
-        _timeout: Duration,
-        _max_response_bytes: usize,
-    ) -> Pin<Box<dyn Future<Output = Result<TransportResponse, HostResultError>> + Send + 'a>> {
-        if let Ok(mut r) = self.requests.lock() {
-            r.push(req);
-        }
-        Box::pin(async {
-            Ok(TransportResponse {
-                status: 200,
-                headers: vec![],
-                body: b"{}".to_vec(),
-                truncated: false,
-            })
-        })
-    }
-}
-
 fn scope() -> InvokeScope {
     InvokeScope {
         tenant: "acme".to_string(),
@@ -214,11 +184,7 @@ fn egress() -> Arc<EgressGuard> {
     ))
 }
 
-fn caps(
-    on: bool,
-    queue: Arc<FakeQueue>,
-    transport: Arc<FakeTransport>,
-) -> StageCapabilities<SharedQueue> {
+fn caps(on: bool, queue: Arc<FakeQueue>) -> StageCapabilities<SharedQueue> {
     StageCapabilities::new(
         SharedQueue(queue),
         egress(),
@@ -229,7 +195,6 @@ fn caps(
         svc_action::pin_sig::PinKeys::parse("k1:000102030405060708090a0b0c0d0e0f", Some("k1"))
             .expect("test keys"),
     )
-    .with_discord(transport, Secret::new("t"))
     .with_egress_dispatcher_flag(boxed(StaticFlag(on)))
 }
 
@@ -290,11 +255,7 @@ async fn routed_chat_send_emits_span_and_metric() {
         .build();
     let recorder = OtelRecorder::new(provider.meter("test"));
     let spans = Spans::default();
-    let c = caps(
-        true,
-        Arc::new(FakeQueue::default()),
-        Arc::new(FakeTransport::default()),
-    );
+    let c = caps(true, Arc::new(FakeQueue::default()));
     {
         let _m = metrics::set_default_local_recorder(&recorder);
         let _s = tracing::subscriber::set_default(spans.clone());

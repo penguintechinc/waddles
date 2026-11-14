@@ -361,6 +361,27 @@ impl FeatureGate for BundlePlatformTableCapabilityGate {
     }
 }
 
+/// Production [`FeatureGate`] for [`crate::capabilities::BUNDLE_GAMESERVER_NET_CAPABILITY_FLAG`]
+/// -- plain opt-in flag; unseen/OFF/license-server-unreachable denies every
+/// `gameserver_net.*` call `feature_disabled` (fail-closed default).
+pub struct BundleGameServerNetCapabilityGate(Arc<LicenseClient>);
+
+impl BundleGameServerNetCapabilityGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for BundleGameServerNetCapabilityGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            self.0
+                .flag_enabled(crate::capabilities::BUNDLE_GAMESERVER_NET_CAPABILITY_FLAG)
+                .await
+        })
+    }
+}
+
 /// Gates the bundle `object-storage` host capability (`crate::capabilities::
 /// StageCapabilities::handle_object_storage`) -- plain opt-in flag; unseen/OFF/
 /// license-server-unreachable means every `object_storage.*` call is denied
@@ -505,6 +526,47 @@ impl FeatureGate for PiiTokenizationGate {
                 return true;
             }
             !self.0.flag_enabled(DISABLE_PII_TOKENIZATION_FLAG).await
+        })
+    }
+}
+
+/// Adapts the license/flag client to the hub_client cache's kill switch
+/// (`waddles.disable-bundle-community-config`): ON = live community config disabled, unseen/OFF/
+/// license-server-unreachable = enabled. Bypass-aware like [`PiiTokenizationGate`]: a bypassed
+/// client reads `true` for every key, which must NOT read as "kill switch ON".
+pub struct LiveBundleConfigGate(pub Option<Arc<LicenseClient>>);
+
+impl hub_client::bundle_config::LiveConfigGate for LiveBundleConfigGate {
+    fn live_enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            match &self.0 {
+                Some(c) if !c.bypass_active() => {
+                    !c.flag_enabled(hub_client::bundle_config::DISABLE_FLAG)
+                        .await
+                }
+                _ => true,
+            }
+        })
+    }
+}
+
+/// Adapts the license/flag client to the bundle-config read-path kill switch
+/// (`waddles.disable-db-bundle-config-reads`, issue #1306): ON = serve per-community config via
+/// the legacy hub-api gRPC path, unseen/OFF/license-server-unreachable = the direct read-only
+/// database path. Bypass-aware like [`LiveBundleConfigGate`]: a bypassed client reads `true` for
+/// every key, which must NOT read as "kill switch ON".
+pub struct DbConfigReadsGate(pub Option<Arc<LicenseClient>>);
+
+impl hub_client::bundle_config::ReadPathGate for DbConfigReadsGate {
+    fn db_reads_enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            match &self.0 {
+                Some(c) if !c.bypass_active() => {
+                    !c.flag_enabled(bundle_config_db::DISABLE_DB_READS_FLAG)
+                        .await
+                }
+                _ => true,
+            }
         })
     }
 }
@@ -1352,6 +1414,19 @@ mod tests {
     // `LICENSE_SERVER_URL` mutations and `flags_capability_tests`'s
     // `FLAG_*` mutations serialize against each other too, not just within
     // their own module.
+
+    /// `waddles.disable-db-bundle-config-reads`: no client and an unseen flag both leave the
+    /// direct database read path ON (opt-out kill switch, issue #1306).
+    #[tokio::test]
+    async fn db_config_reads_gate_defaults_to_the_database_path() {
+        use hub_client::bundle_config::ReadPathGate;
+        assert!(DbConfigReadsGate(None).db_reads_enabled().await);
+        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-db-reads-gate")
+            .expect("default LicenseConfig::new never fails");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        assert!(DbConfigReadsGate(Some(client)).db_reads_enabled().await);
+    }
 
     #[tokio::test]
     async fn fixed_gate_returns_its_constructed_value() {

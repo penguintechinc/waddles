@@ -223,33 +223,11 @@ build_and_push_images() {
 
     log_info "Building and pushing Docker images to registry: $REGISTRY"
 
-    # List of all modules to build
+    # Legacy per-module Python images were retired; live images are built by CI / scripts/alpha-deploy.sh
     declare -a MODULES=(
-        "processing/router_module"
-        "admin/hub_module"
-        "core/identity_core_module"
-        "core/labels_core_module"
-        "core/browser_source_core_module"
-        "core/reputation_module"
-        "core/community_module"
-        "core/ai_researcher_module"
-        "trigger/receiver/twitch_module"
-        "trigger/receiver/discord_module"
-        "trigger/receiver/slack_module"
-        "trigger/receiver/youtube_live_module"
-        "trigger/receiver/kick_module_flask"
-        "action/interactive/ai_interaction_module"
-        "action/interactive/alias_interaction_module"
-        "action/interactive/shoutout_interaction_module"
-        "action/interactive/inventory_interaction_module"
-        "action/interactive/calendar_interaction_module"
-        "action/interactive/memories_interaction_module"
-        "action/interactive/youtube_music_interaction_module"
-        "action/interactive/spotify_interaction_module"
-        "action/interactive/loyalty_interaction_module"
     )
 
-    for module in "${MODULES[@]}"; do
+    for module in ${MODULES[@]+"${MODULES[@]}"}; do
         module_name=$(basename "$module")
         module_path="${PROJECT_ROOT}/${module}"
 

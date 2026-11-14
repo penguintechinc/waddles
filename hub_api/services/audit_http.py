@@ -320,3 +320,48 @@ async def record_session_revoked(
             reason,
             kind,
         )
+
+
+async def record_privileged_user_change(
+    *,
+    actor_user_id: int | None,
+    target_user_uuid: str | None,
+    category: AuditCategory,
+    action: str,
+    outcome: AuditOutcome,
+    operation: str,
+    reason: str | None = None,
+) -> None:
+    """Audit a change (or refused change) to a global admin: actor, target UUID, action, result.
+
+    Carries identifiers only -- the actor's and target's `hub_users.uuid` (never an e-mail or
+    username) plus a closed `operation` (`grant`, `revoke`, `deactivate`, `delete`) and, for a
+    refusal, a closed `reason`. Never raises: a mutation that already took effect must not be
+    reported as failed; an unrecordable event is logged at ERROR with the same context.
+    """
+    service = get_service()
+    if service is None:
+        logger.debug("privileged change audit: no AuditService wired; not audited")
+        return
+    details: dict[str, Any] = {"operation": operation}
+    if reason is not None:
+        details["reason"] = reason
+    try:
+        await service.record(
+            AuditEvent(
+                category=category,
+                action=action,
+                outcome=outcome,
+                actor_kind=ActorKind.USER if actor_user_id is not None else ActorKind.SYSTEM,
+                actor_user_id=actor_user_id,
+                target_type="user",
+                target_id=target_user_uuid,
+                details=details,
+            )
+        )
+    except AuditWriteError:
+        logger.error(
+            "privileged user change audit event NOT recorded: operation=%s outcome=%s",
+            operation,
+            outcome.value,
+        )

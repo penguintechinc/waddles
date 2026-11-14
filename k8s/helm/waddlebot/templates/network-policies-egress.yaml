@@ -230,6 +230,52 @@ spec:
             - port: "443"
               protocol: TCP
 {{- end }}
+{{- if .Values.egressPolicy.twitch.enabled }}
+---
+# Twitch egress for the data-plane callers of Twitch (svc-ingest-rust: IRC wss + Helix + app-token
+# mint; svc-action: Helix + id.twitch.tv token). Additive to dataplane-egress-deny. Same shape as
+# the Discord policy above: own kube-dns rule with a DNS matchName allowlist (toFQDNs needs proxied
+# lookups) + 443/TCP to the named Twitch hosts only. IRC uses wss://irc-ws.chat.twitch.tv:443, so
+# no 6697 here.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-twitch-egress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          {{- toYaml .Values.egressPolicy.twitch.components | nindent 10 }}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: UDP
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: TCP
+          rules:
+            dns:
+              {{- range .Values.egressPolicy.twitch.fqdns }}
+              - matchName: {{ . | quote }}
+              {{- end }}
+    - toFQDNs:
+        {{- range .Values.egressPolicy.twitch.fqdns }}
+        - matchName: {{ . | quote }}
+        {{- end }}
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+{{- end }}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy

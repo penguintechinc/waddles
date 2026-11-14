@@ -351,6 +351,9 @@ async fn resolve_scope_cached<'a>(
     if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(scope) {
         match bundle_active_set::resolve_scope(db, scope.0, scope.1).await {
             Ok(Some(resolved)) => {
+                // The same DB-resolved names the event path keys on, shared with the
+                // bundle-admin path so both address one kv namespace.
+                crate::scope_names::record(scope, &resolved);
                 entry.insert(resolved);
             }
             Ok(None) => {

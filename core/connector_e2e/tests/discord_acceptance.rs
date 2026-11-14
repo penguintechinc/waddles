@@ -792,6 +792,7 @@ impl Rig {
         let runtime = assemble(
             &settings,
             AssembleDeps {
+                interaction_routing: None,
                 resolver: Arc::new(FakeHub { binds }),
                 scope: Arc::new(FakeScope {
                     slug: ctx.slug.clone(),

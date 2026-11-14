@@ -11,7 +11,7 @@
 schema_version: 2
 app_id: waddles.core.service.youtube
 name: YouTube Platform Connector (Rust)
-version: 1.0.2
+version: 1.1.0
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -36,7 +36,7 @@ permissions:
   - id: net.http.fqdn:www.googleapis.com
     justification: YouTube Data API v3 (liveChat/messages list+insert, search, videos); requests are host-transmitted templates
     params:
-      methods: ["GET", "POST"]
+      methods: ["GET", "POST", "DELETE"]
   - id: chat.send:youtube
     justification: Post chat messages into the host-pinned live chat via liveChatMessages.insert
   - id: chat.delete:youtube
@@ -118,6 +118,126 @@ exported_tools:
       required: [target_source_id, payload]
       additionalProperties: false
     output_schema: {type: object}
+  - name: youtube.chat.delete_message
+    access: write
+    risk: dangerous
+    required_scope: community:moderate
+    input_schema:
+      type: object
+      properties:
+        message_id:
+          type: string
+          pattern: "^[A-Za-z0-9_.-]{1,128}$"
+      required:
+        - message_id
+      additionalProperties: false
+    output_schema:
+      type: object
+    host_op:
+      platform: youtube
+      op: chat.delete
+      message_id: message_id
+      required:
+        - message_id
+      origin: channel
+  - name: youtube.chat.ban
+    access: write
+    risk: dangerous
+    required_scope: community:moderate
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+        duration_seconds:
+          type: string
+          pattern: "^[0-9]{1,7}$"
+      required:
+        - user
+      additionalProperties: false
+    output_schema:
+      type: object
+    host_op:
+      platform: youtube
+      op: mod.ban
+      user: user
+      user_wire: placeholder
+      text: duration_seconds
+      required:
+        - user
+      origin: channel
+      returns:
+        - id
+  - name: youtube.chat.unban
+    access: write
+    risk: dangerous
+    required_scope: community:moderate
+    input_schema:
+      type: object
+      properties:
+        ban_id:
+          type: string
+          pattern: "^[A-Za-z0-9_.-]{1,128}$"
+      required:
+        - ban_id
+      additionalProperties: false
+    output_schema:
+      type: object
+    host_op:
+      platform: youtube
+      op: mod.unban
+      message_id: ban_id
+      required:
+        - ban_id
+      origin: channel
+  - name: youtube.chat.add_moderator
+    access: write
+    risk: dangerous
+    required_scope: community:moderate
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+      required:
+        - user
+      additionalProperties: false
+    output_schema:
+      type: object
+    host_op:
+      platform: youtube
+      op: mod.add
+      user: user
+      user_wire: placeholder
+      required:
+        - user
+      origin: channel
+      returns:
+        - id
+  - name: youtube.chat.remove_moderator
+    access: write
+    risk: dangerous
+    required_scope: community:moderate
+    input_schema:
+      type: object
+      properties:
+        moderator_id:
+          type: string
+          pattern: "^[A-Za-z0-9_.-]{1,128}$"
+      required:
+        - moderator_id
+      additionalProperties: false
+    output_schema:
+      type: object
+    host_op:
+      platform: youtube
+      op: mod.remove
+      message_id: moderator_id
+      required:
+        - moderator_id
+      origin: channel
 author: github:penguintechinc
 license: AGPL-3.0-or-later
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/youtube

@@ -8,8 +8,13 @@ RUN pip install --no-cache-dir \
     "sqlalchemy>=2.0" \
     psycopg2-binary \
     flask-sqlalchemy \
-    flask-security-too \
     "PyYAML>=6.0.2,<7.0.0"
+
+# Hash-locked: alembic revisions 0062/0075 import cryptography (AESGCM).
+# Same pinned version as hub_api (migrations/requirements.txt).
+COPY migrations/requirements.txt /tmp/migrations-requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r /tmp/migrations-requirements.txt && \
+    rm -f /tmp/migrations-requirements.txt
 
 # Copy Alembic configuration
 COPY alembic.ini .

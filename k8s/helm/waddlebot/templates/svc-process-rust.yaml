@@ -120,6 +120,12 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
+        # Live per-community bundle config is read straight from the read-only replica (issue
+        # #1306), column-scoped under the SAME role (alembic 0107); hub-api is not on this path.
+        # Rendered only with infrastructure.postgresql.readReplicas.host; unset -> the stage uses
+        # DATABASE_URL above (primary) and logs a WARN. Kill switch (PostHog, opt-out):
+        # waddles.disable-db-bundle-config-reads ON = legacy hub-api gRPC path.
+{{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
 {{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.port | quote }}
@@ -189,6 +195,14 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: SERVICE_API_KEY
+        # Bundle-admin request key (hub-api signs, this stage verifies and consumes
+        # waddles:bundle-admin:requests) -- templates/bundle-admin-request-secret.yaml.
+        - name: BUNDLE_ADMIN_REQUEST_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.bundleAdminRequestSecretName" . }}
+              key: BUNDLE_ADMIN_REQUEST_KEYS
+              optional: true  # absent when the Rust data plane is off; the consumer then logs and stays off
         # CliConfig reads CACHE_HOST/CACHE_PORT/CACHE_PASSWORD -- the shared ConfigMap only
         # publishes REDIS_HOST/REDIS_PORT (a different name), so these are wired explicitly.
         - name: CACHE_HOST
@@ -295,6 +309,11 @@ spec:
         # already points at (no read replica provisioned yet); DB_READER_PASSWORD comes
         # from the shared secret (empty by default -- the loader stays disabled until a
         # real RO-account password is provisioned, see templates/secrets.yaml).
+        {{- if .Values.bundleStorageV2.db.enabled }}
+        # Bundle storage v2 (docs/bundle-storage-v2.md): db/db2/kv host capability connection.
+        # Password from the operator-managed existingSecret only; off by default.
+{{- include "waddlebot.bundleDbEnv" . | nindent 8 }}
+        {{- end }}
         - name: DB_READER_HOST
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderHost | default (include "waddlebot.postgres.host" .) | quote }}
         - name: DB_READER_PORT
@@ -318,6 +337,13 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DB_READER_PASSWORD
+        # `reputation` host capability (waddles_bundle_reputation): same generated value the
+        # db-migrate hook provisions the role with (secrets.yaml $reputationPassword).
+        - name: BUNDLE_REPUTATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: DB_REPUTATION_PASSWORD
         {{- /* Bundle platform-table capability (spec 2026-11-06-bundle-table-access-grants):
         EXPLICIT OPT-IN (infrastructure.postgresql.platformTable.enabled, default false -> no env
         at all, capability fail-closed). Its OWN least-privilege Postgres role

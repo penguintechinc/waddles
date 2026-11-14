@@ -26,6 +26,11 @@ from blueprints.v1.superadmin import superadmin_bp
 from blueprints.v1.user_management import user_management_bp
 from services import free_tier_caps, tenant_service
 from services.errors import ApiError
+from services.global_identity import (
+    grant_global_admin_sync,
+    is_global_admin_sync,
+    revoke_global_admin_sync,
+)
 from tests.conftest import TENANT_SLUG, make_user_token, seed_super_admin
 
 KILL_SWITCH = free_tier_caps.FLAG_DISABLE_FREE_TIER_CAPS
@@ -243,10 +248,15 @@ class TestEveryCreationPathIsCapped:
         direct = re.compile(
             r"\b(communities|tenants|tenant_admins)\.(insert|bulk_insert|update_or_insert)\("
             r"|INSERT\s+INTO\s+(communities|tenants|tenant_admins)\b"
-            r"|is_super_admin\"?\s*[:=]\s*True",
+            r"|is_super_admin\"?\s*[:=]\s*True|grant_global_admin_sync\(",
             re.IGNORECASE,
         )
-        allowed = {"services/free_tier_caps.py", "cli/seed_core_bundles.py"}
+        # global_identity.py: the sync write helpers are only called from inside capped_write jobs.
+        allowed = {
+            "services/free_tier_caps.py",
+            "services/global_identity.py",
+            "cli/seed_core_bundles.py",
+        }
         scanned, offenders = 0, []
         for path in root.rglob("*.py"):
             rel = path.relative_to(root).as_posix()
@@ -330,8 +340,8 @@ class TestAdminCap:
         blocked = await _grant(client, u3)
         assert blocked.status_code == 402
         _assert_upgrade_block(await blocked.get_json(), "admin")
-        assert bool(admin_db.dal.hub_users[u3].is_super_admin) is False
-        assert bool(admin_db.dal.hub_users[u2].is_super_admin) is True  # untouched
+        assert is_global_admin_sync(admin_db.dal, u3) is False
+        assert is_global_admin_sync(admin_db.dal, u2) is True  # untouched
 
     async def test_demoting_bootstrap_does_not_free_a_super_admin_slot(
         self, client: Any, admin_db: Any, gates: Any
@@ -341,7 +351,7 @@ class TestAdminCap:
         _seed_bootstrap(admin_db)
         u2, u3 = _seed_user(admin_db, "u2@x.io"), _seed_user(admin_db, "u3@x.io")
         assert (await _grant(client, u2)).status_code == 200
-        admin_db.dal.hub_users[1].update_record(is_super_admin=False)  # demote bootstrap
+        revoke_global_admin_sync(admin_db.dal, 1)  # demote bootstrap
         admin_db.dal.commit()
         assert free_tier_caps.super_admin_ids(admin_db.dal) == {u2}  # u2 still COUNTS
         blocked = await _grant(client, u3, caller=u2)
@@ -362,14 +372,13 @@ class TestAdminCap:
                 admin_db.dal,
                 caller_tenant_slug=TENANT_SLUG,
                 user_id=uid,
-                update_fields={"is_super_admin": True},
             )
 
         await grant(u2)
         with pytest.raises(ApiError) as exc:
             await grant(u3)
         assert exc.value.status_code == 402
-        assert bool(admin_db.dal.hub_users[u3].is_super_admin) is False
+        assert is_global_admin_sync(admin_db.dal, u3) is False
 
     async def test_regrant_of_existing_admin_not_blocked(
         self, client: Any, admin_db: Any, gates: Any
@@ -397,7 +406,7 @@ class TestAdminCap:
     ) -> None:
         _seed_bootstrap(admin_db)
         u2, u3 = _seed_user(admin_db, "u2@x.io"), _seed_user(admin_db, "u3@x.io")
-        admin_db.dal.hub_users[u2].update_record(is_super_admin=True)
+        grant_global_admin_sync(admin_db.dal, u2)
         admin_db.dal.commit()
         tid = _tenant_id(admin_db)
         await tenant_service.add_tenant_admin(
@@ -587,3 +596,45 @@ class TestConcurrentCreatesAreAtomic:
         )
         assert out == 7
         assert events == ["lock:['free_cap:community:1']:True", "count", "write", "commit"]
+
+
+class TestTenantPublicIdForPicker:
+    async def test_tenant_list_exposes_public_uuid_for_the_user_create_picker(
+        self, client: Any, admin_db: Any, gates: Any
+    ) -> None:
+        import uuid as _uuid
+
+        _seed_bootstrap(admin_db)
+        response = await client.get("/api/v1/superadmin/tenants", headers=_headers())
+        assert response.status_code == 200
+        tenants = (await response.get_json())["tenants"]
+        assert tenants, "expected the seeded tenant"
+        for t in tenants:
+            assert str(_uuid.UUID(t["publicId"])) == t["publicId"]
+
+
+class TestReservedTenants:
+    """`system`/`default` can never be created, renamed, deactivated or deleted via the API."""
+
+    @pytest.mark.parametrize("slug", ["system", "default"])
+    async def test_cannot_create_reserved_slug(
+        self, client: Any, admin_db: Any, gates: Any, slug: str
+    ) -> None:
+        gates[1].tier = "enterprise"
+        _seed_bootstrap(admin_db)
+        response = await _post_tenant(client, slug)
+        assert response.status_code == 409
+
+    async def test_cannot_deactivate_or_delete_system_tenant(
+        self, client: Any, admin_db: Any, gates: Any
+    ) -> None:
+        _seed_bootstrap(admin_db)  # creates the `system` tenant
+        dal = admin_db.dal
+        system_id = dal(dal.tenants.slug == "system").select().first().id
+        put = await client.put(
+            f"/api/v1/superadmin/tenants/{system_id}", headers=_headers(), json={"isActive": False}
+        )
+        assert put.status_code == 403
+        delete = await client.delete(f"/api/v1/superadmin/tenants/{system_id}", headers=_headers())
+        assert delete.status_code == 403
+        assert dal(dal.tenants.slug == "system").select().first().is_active is not False

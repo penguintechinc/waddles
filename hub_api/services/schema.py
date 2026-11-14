@@ -133,7 +133,6 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("email", "string", length=255),
         Field("password_hash", "string", length=255),
         Field("avatar_url", "text"),
-        Field("is_super_admin", "boolean", default=False),
         Field("is_bootstrap", "boolean", default=False),
         Field("is_vendor", "boolean", default=False),
         Field("is_analytics_consumer", "boolean", default=False),
@@ -260,6 +259,16 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("tenant_id", "integer", notnull=True),
         Field("user_id", "integer", notnull=True),
         Field("role", "string", length=50, default="tenant-admin"),
+        Field("created_at", "datetime"),
+        migrate=migrate,
+    )
+
+    # `tenant_members` (alembic 0095): plain membership of a tenant. Membership of the reserved
+    # `system` tenant is what makes a user a "global user" (`services.global_identity`).
+    dal.define_table(
+        "tenant_members",
+        Field("tenant_id", "integer", notnull=True),
+        Field("user_id", "integer", notnull=True),
         Field("created_at", "datetime"),
         migrate=migrate,
     )
@@ -1185,6 +1194,42 @@ def bind_suppression_tables(dal: Any, *, migrate: bool = False) -> None:
     )
 
 
+def bind_reputation_policy_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Bind the per-community / per-tenant reputation policy tables (alembic 0097).
+
+    Keyed by their natural primary key (`community_id` / `tenant_id`) -- no `id` column exists,
+    so reads select explicit fields. Schema: `scripts/db/bundle_reputation_unify.sql`.
+    """
+    if "bundle_reputation_policy" not in dal.tables:
+        dal.define_table(
+            "bundle_reputation_policy",
+            Field("tenant_id", "integer", notnull=True),
+            Field("community_id", "integer", notnull=True),
+            Field("score_min", "integer", default=300),
+            Field("score_max", "integer", default=850),
+            Field("score_default", "integer", default=600),
+            Field("soft_ban_enabled", "boolean", default=False),
+            Field("soft_ban_floor", "integer", default=550),
+            Field("hard_ban_enabled", "boolean", default=False),
+            Field("hard_ban_floor", "integer", default=400),
+            Field("at_risk_threshold", "integer", default=600),
+            Field("updated_at", "datetime"),
+            primarykey=["community_id"],
+            migrate=migrate,
+        )
+    if "bundle_reputation_tenant_policy" not in dal.tables:
+        dal.define_table(
+            "bundle_reputation_tenant_policy",
+            Field("tenant_id", "integer", notnull=True),
+            Field("tenant_auto_ban_enabled", "boolean", default=False),
+            Field("tenant_auto_ban_floor", "integer", default=350),
+            Field("tenant_at_risk_threshold", "integer", default=450),
+            Field("updated_at", "datetime"),
+            primarykey=["tenant_id"],
+            migrate=migrate,
+        )
+
+
 def bind_erasure_reputation_tables(dal: Any, *, migrate: bool = False) -> None:
     """Bind the reputation / pseudonym stores Art. 17 erasure deletes from.
 
@@ -1240,7 +1285,7 @@ def bind_erasure_reputation_tables(dal: Any, *, migrate: bool = False) -> None:
     if "bundle_reputation_adjustments" not in dal.tables:
         dal.define_table(
             "bundle_reputation_adjustments",
-            Field("app_id", "string", length=255, notnull=True),
+            Field("app_id", "string", length=255),
             Field("tenant_id", "integer", notnull=True),
             Field("community_id", "integer"),
             Field("target_user_uuid", "string", length=36, notnull=True),
@@ -1249,6 +1294,38 @@ def bind_erasure_reputation_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("reason_code", "string", length=100, notnull=True),
             Field("occurred_at", "datetime"),
             Field("reversal_of", "bigint"),
+            # alembic 0072 / 0097 ledger columns
+            Field("kind", "string", length=20, default="adjust"),
+            Field("requested_value", "bigint"),
+            Field("balance_after", "bigint"),
+            Field("idempotency_key", "string", length=128),
+            Field("actor", "text"),
+            Field("source_event", "text"),
+            Field("reason_code_id", "integer"),
+            migrate=migrate,
+        )
+    if "bundle_reputation_soft_bans" not in dal.tables:
+        dal.define_table(
+            "bundle_reputation_soft_bans",
+            Field("tenant_id", "integer", notnull=True),
+            Field("community_id", "integer", notnull=True),
+            Field("user_uuid", "string", length=36, notnull=True),
+            Field("reason_code", "integer", notnull=True),
+            Field("set_by", "text", notnull=True),
+            Field("set_at", "datetime"),
+            Field("expires_at", "datetime"),
+            migrate=migrate,
+        )
+    if "bundle_reputation_tenant_scores" not in dal.tables:
+        dal.define_table(
+            "bundle_reputation_tenant_scores",
+            Field("tenant_id", "integer", notnull=True),
+            Field("user_uuid", "string", length=36, notnull=True),
+            Field("score", "integer", default=600),
+            Field("event_count", "bigint", default=0),
+            Field("last_event_at", "datetime"),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
             migrate=migrate,
         )
     if "ephemeral_pseudonyms" not in dal.tables:
@@ -1322,8 +1399,9 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
     `marketplace_catalog`, `marketplace_subscriptions`, `marketplace_settings`,
     `vendor_discount_codes`, `discount_code_redemptions`. Each is the superset
     shape that matches the real schema (000/017/059/064 migrations + alembic
-    0012). `marketplace_catalog` is a read-only Postgres VIEW (059) bound as an
-    ordinary table (`primarykey=["source", "source_id"]`) this process only
+    0012). `marketplace_catalog` is a read-only Postgres VIEW (059, rebuilt by alembic 0091)
+    bound as an
+    ordinary table (`primarykey=["source", "name"]`) this process only
     `select()`s.
     """
     dal.define_table(
@@ -1375,7 +1453,8 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
     dal.define_table(
         "marketplace_catalog",
         Field("source", "string", length=20, notnull=True),
-        Field("source_id", "integer", notnull=True),
+        # NULL for `bundle` rows (addressed by `source_ref` = app_id, alembic 0091).
+        Field("source_id", "integer"),
         Field("name", "string", length=255),
         Field("display_name", "string", length=255),
         Field("description", "text"),
@@ -1398,7 +1477,16 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
         # NULL for 'core' rows (always globally visible); the owning tenant
         # for 'marketplace' rows -- filtered by `visible_tenant_ids()`.
         Field("tenant_id", "integer"),
-        primarykey=["source", "source_id"],
+        # alembic 0091 -- bundle branch + vendor derivation. `vendor_key` is the lower-cased
+        # GitHub org (the vendor marketplace), `source_repo` the lower-cased `org/repo`
+        # (a type/sub-group inside that vendor); both NULL when underivable.
+        Field("source_url", "text"),
+        Field("source_ref", "string", length=255),
+        Field("vendor_key", "string", length=100),
+        Field("source_repo", "string", length=255),
+        # Declarative only (the view is read-only): `source_id` is NULL for bundle rows, so
+        # `name` (app_id for bundles) is the second key part.
+        primarykey=["source", "name"],
         migrate=migrate,
     )
 
@@ -1463,6 +1551,38 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("expires_at", "datetime"),
         migrate=migrate,
     )
+
+
+def bind_reference_tenants_table(dal: Any) -> None:
+    """Bind the shared `tenants` read table (schema owned by SQL migration 058).
+
+    Single definition used by `app.py::_bind_reference_tables` and by standalone CLIs
+    (`cli/refresh_landing_stats.py`) that never run `create_app()` -- `tenants` can only be
+    `define_table()`-d once per DAL, so it lives here, never re-declared per caller.
+    """
+    if "tenants" in dal.tables:
+        return
+    dal.define_table(
+        "tenants",
+        Field("slug", "string", length=100),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
+        Field("display_name", "string", length=255),
+        Field("logo_url", "text"),
+        Field("is_global", "boolean", default=False),
+        Field("is_active", "boolean", default=True),
+        Field("config", "json"),
+        migrate=False,
+    )
+
+
+def bind_landing_stats_tables(dal: Any) -> None:
+    """Bind every table `public_service` stats reads, for processes without `create_app()`.
+
+    Regression (landing-stats-refresh CronJob): the CLI's bare `init_database()` DAL had no
+    tables bound, so `resolve_default_tenant` raised `'DAL' object has no attribute 'tenants'`.
+    """
+    bind_reference_tenants_table(dal)
+    bind_platform_tables(dal)
 
 
 def bind_platform_tables(dal: Any, *, migrate: bool = False) -> None:
@@ -1733,6 +1853,7 @@ def bind_superadmin_tenant_fields(dal: Any, *, migrate: bool = False) -> None:
         "tenants",
         Field("slug", "string", length=100),
         Field("display_name", "string", length=255),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         Field("description", "text"),
         Field("logo_url", "text"),
         Field("is_global", "boolean", default=False),
@@ -1799,6 +1920,7 @@ def bind_tenant_tables(dal: Any, *, migrate: bool = False) -> None:
         "tenants",
         Field("slug", "string", length=100),
         Field("display_name", "string", length=255),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         Field("logo_url", "text"),
         Field("is_global", "boolean", default=False),
         Field("is_active", "boolean", default=True),
@@ -1900,7 +2022,6 @@ def bind_marketplace_vendor_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("username", "string", length=255),
             Field("email", "string", length=255),
             Field("display_name", "string", length=255),
-            Field("is_super_admin", "boolean", default=False),
             Field("is_bootstrap", "boolean", default=False),
             Field("is_vendor", "boolean", default=False),
             migrate=migrate,
@@ -2888,6 +3009,13 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         #: role-sync `sync_enabled` column above; gates
         #: `event_discord_sync_service.py`'s push engine per pairing.
         Field("event_sync_enabled", "boolean", notnull=True, default=False),
+        #: migration 0104 -- opt-in Twitch moderator -> Discord moderator propagation.
+        Field("propagate_moderators", "boolean", notnull=True, default=False),
+        #: migration 0104 -- NULL = grandfathered pre-0104 pairing (never ownership-proven).
+        Field("ownership_verified_at", "datetime"),
+        #: migration 0104 -- TRUE only for rows that existed at upgrade time (bounded).
+        Field("grandfathered", "boolean", notnull=True, default=False),
+        Field("discord_grants_backfilled_at", "datetime"),
         Field("created_by_user_id", "integer"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
@@ -2906,6 +3034,72 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("discord_role_id", "string", length=255, notnull=True),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+
+    # migration 0099_discord_role_mirror -- one-way cross-guild role mirror + its grant ledger.
+    dal.define_table(
+        "discord_role_mirror_mappings",
+        Field("community_id", "integer", notnull=True),
+        Field("source_guild_id", "string", length=255, notnull=True),
+        Field("source_role_id", "string", length=255, notnull=True),
+        Field("target_guild_id", "string", length=255, notnull=True),
+        Field("target_role_id", "string", length=255, notnull=True),
+        Field("last_synced_at", "datetime"),
+        Field("last_roles_added", "integer", notnull=True, default=0),
+        Field("last_roles_removed", "integer", notnull=True, default=0),
+        Field("last_skipped_not_member", "integer", notnull=True, default=0),
+        Field("last_error", "string", length=80),
+        Field("created_at", "datetime"),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "discord_role_mirror_grants",
+        Field("mapping_id", "integer", notnull=True),
+        Field("platform", "string", length=50, notnull=True, default="discord"),
+        Field("platform_user_id", "string", length=255, notnull=True),
+        Field("granted_at", "datetime"),
+        migrate=migrate,
+    )
+    # migration 0104_role_sync_priv_harden -- role-sync grant ledgers (remove only own grants).
+    dal.define_table(
+        "role_sync_community_grants",
+        Field("pairing_id", "integer", notnull=True),
+        Field("community_id", "integer", notnull=True),
+        Field("hub_user_id", "integer", notnull=True),
+        Field("granted_role", "string", length=20, notnull=True),
+        Field("prior_role", "string", length=20),
+        Field("granted_at", "datetime"),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "role_sync_purged_bindings",
+        Field("pairing_id", "integer", notnull=True),
+        Field("community_id", "integer", notnull=True),
+        Field("discord_role_id", "string", length=255, notnull=True),
+        Field("community_role", "string", length=20, notnull=True),
+        Field("purged_at", "datetime"),
+        migrate=migrate,
+    )
+    #: status: 0 pending review, 1 demoted to baseline, 2 dismissed.
+    dal.define_table(
+        "role_sync_remediation_queue",
+        Field("purged_binding_id", "integer", notnull=True),
+        Field("community_id", "integer", notnull=True),
+        Field("hub_user_id", "integer", notnull=True),
+        Field("role_at_review", "string", length=20, notnull=True),
+        Field("status", "integer", notnull=True, default=0),
+        Field("created_at", "datetime"),
+        Field("resolved_at", "datetime"),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "role_sync_discord_grants",
+        Field("pairing_id", "integer", notnull=True),
+        Field("discord_role_id", "string", length=255, notnull=True),
+        Field("platform", "string", length=50, notnull=True, default="discord"),
+        Field("platform_user_id", "string", length=255, notnull=True),
+        Field("granted_at", "datetime"),
         migrate=migrate,
     )
 

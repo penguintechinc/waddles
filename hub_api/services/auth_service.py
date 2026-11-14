@@ -11,9 +11,9 @@ JWT contract: minted via `flask_core.auth.create_jwt_token` --
 `sub`/`tenant`/`scope`/`roles` claims only (security.md's mandatory JWT
 claims), not Node's ad-hoc `{userId, isSuperAdmin, isVendor,
 tenantScopes, ...}` payload. Node's booleans are translated into
-`flask_core.auth.SCOPE_BUNDLES` scope strings (global admin bundle for
-`is_super_admin`, tenant admin/maintainer bundle from `tenant_admins.
-role`) rather than carried as custom claims -- security.md: "never
+`flask_core.auth.SCOPE_BUNDLES` scope strings (global admin bundle for a
+system-tenant admin, `global_identity.is_global_admin`; tenant admin/maintainer bundle from
+`tenant_admins.role`) rather than carried as custom claims -- security.md: "never
 branch on role names", scopes are the only thing `require_scope` checks.
 The response BODY (not the JWT) still carries `isSuperAdmin`/`isVendor`/
 etc. for the frontend, read straight from the DB row -- the JWT is
@@ -47,6 +47,7 @@ from config import HubAPIConfig
 from services import session_service
 from services.audit_http import record_session_issued, record_session_revoked
 from services.errors import bad_request, conflict, forbidden, not_found, unauthorized
+from services.global_identity import is_global_admin
 from services.session_cookie import issue_refresh_cookie
 
 logger = logging.getLogger(__name__)
@@ -139,7 +140,7 @@ async def _scopes_for(
     scopes: set[str] = set(SCOPE_BUNDLES["global"]["viewer"])  # every session gets *:read
     if user is None:
         return roles, scopes
-    if user.is_super_admin:
+    if await is_global_admin(async_dal, dal, user_id=user.id):
         roles.extend(["admin", "super_admin"])
         scopes.update(SCOPE_BUNDLES["global"]["admin"])
     if user.is_vendor:
@@ -237,7 +238,7 @@ async def create_session_token(
     case (flask_core's `create_jwt_token` requires a `user_id`; there is
     no "no subject" JWT) and no refresh token is issued: a pending-link session lives only its
     short access TTL. `tenant` is always set -- `DEFAULT_TENANT_SLUG`
-    ("global") when the caller has no tenant context, per security.md
+    ("default") when the caller has no tenant context, per security.md
     Tenant Isolation ("there is no untenanted token").
 
     For a real user this also opens the `hub_sessions` row (`services/session_service.py`) and,
@@ -252,7 +253,7 @@ async def create_session_token(
     session the audit log cannot account for is never issued (entitled tenants only).
     """
     roles, scopes = await _scopes_for(async_dal, dal, user=user, tenant_id=tenant_id)
-    resolved_tenant = tenant_slug or "global"
+    resolved_tenant = tenant_slug or "default"
 
     await record_session_issued(
         user_id=user.id if user is not None else None,
@@ -487,7 +488,7 @@ async def login(
     *,
     email: str,
     password: str,
-    tenant_slug: str = "global",
+    tenant_slug: str = "default",
 ) -> LoginResult:
     """Login."""
     if not email or not password:
@@ -525,7 +526,7 @@ async def login(
         email=row.email,
         username=row.username,
         avatar_url=row.avatar_url,
-        is_super_admin=bool(row.is_super_admin),
+        is_super_admin=await is_global_admin(async_dal, dal, user_id=row.id),
         is_vendor=bool(row.is_vendor),
         is_analytics_consumer=bool(row.is_analytics_consumer),
     )
@@ -578,7 +579,7 @@ async def admin_login(
         email=row.email,
         username=row.username,
         avatar_url=row.avatar_url,
-        is_super_admin=bool(row.is_super_admin),
+        is_super_admin=await is_global_admin(async_dal, dal, user_id=row.id),
         is_vendor=bool(row.is_vendor),
         is_analytics_consumer=bool(row.is_analytics_consumer),
     )
@@ -691,7 +692,7 @@ async def refresh_session(
         email=row.email,
         username=row.username,
         avatar_url=row.avatar_url,
-        is_super_admin=bool(row.is_super_admin),
+        is_super_admin=await is_global_admin(async_dal, dal, user_id=row.id),
         is_vendor=bool(row.is_vendor),
         is_analytics_consumer=bool(row.is_analytics_consumer),
     )
@@ -864,7 +865,7 @@ async def get_current_user(
         email=row.email,
         username=row.username,
         avatar_url=row.avatar_url,
-        is_super_admin=bool(row.is_super_admin),
+        is_super_admin=await is_global_admin(async_dal, dal, user_id=row.id),
         is_vendor=bool(row.is_vendor),
         is_analytics_consumer=bool(row.is_analytics_consumer),
         has_password=row.password_hash is not None,

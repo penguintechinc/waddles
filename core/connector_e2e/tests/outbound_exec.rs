@@ -33,11 +33,14 @@ use svc_ingest::connector::sender_exec::discord_duties::{
 };
 use svc_ingest::connector::sender_exec::discord_slots::DiscordSlots;
 use svc_ingest::connector::sender_exec::kick_slots::KickSlots;
-use svc_ingest::connector::sender_exec::twitch_slots::TwitchSlots;
+use svc_ingest::connector::sender_exec::twitch_slots::{
+    DutyPair, EventSubSecretSource, TwitchAppSource, TwitchDuties, TwitchSlots,
+};
+use svc_ingest::connector::sender_exec::youtube_duties::{QuotaLedger, WithYoutube, YoutubeDuties};
 use svc_ingest::connector::sender_exec::youtube_slots::YoutubeSlots;
 use svc_ingest::connector::sender_exec::{
     exec_count, BuildError, BuiltTemplate, ExecutorConfig, PlatformPolicy, PlatformSlotRouter,
-    SenderAction, SenderExecutor, SlotValue, TemplateBuilder, WireTemplateBuilder,
+    SenderAction, SenderExecutor, SlotError, SlotValue, TemplateBuilder, WireTemplateBuilder,
 };
 use svc_ingest::outbound::{run_discord_exec, run_exec, run_youtube_exec};
 use svc_ingest::outbound::{
@@ -96,6 +99,53 @@ impl TwitchCredentialSource for TwCreds {
     }
 }
 
+const TW_APP_TOKEN: &str = "TW-APP-TOKEN-SECRET";
+const HOOK_SECRET: &str = "WEBHOOK-SECRET-XYZ";
+const CALLBACK_KEY: &str = "key-abcdefgh";
+const HOOK_BASE: &str = "https://hooks.example.com/base";
+
+/// APP-credential double: the client-credentials token and the connection's broadcaster.
+struct TwApp;
+impl TwitchAppSource for TwApp {
+    const AVAILABLE: bool = true;
+    async fn app_token(&self) -> Result<SecretString, SlotError> {
+        Ok(SecretString::new(TW_APP_TOKEN.to_string()))
+    }
+    async fn broadcaster_id(&self, community_id: i64) -> Result<String, SlotError> {
+        if community_id == COMMUNITY {
+            Ok("111".to_string())
+        } else {
+            Err(SlotError::Refused("no_connection"))
+        }
+    }
+}
+
+/// hub-api secret-route double.
+struct HookSecrets;
+impl EventSubSecretSource for HookSecrets {
+    async fn owns_subscription(&self, community_id: i64, id: &str) -> Result<(), SlotError> {
+        // Ledger: `mine-sub` / `unknown-sub` are registered to this community; `theirs-sub`
+        // belongs to another one (a lookup could show the same broadcaster).
+        if community_id == COMMUNITY && matches!(id, "mine-sub" | "unknown-sub") {
+            Ok(())
+        } else {
+            Err(SlotError::Refused("subscription_not_owned"))
+        }
+    }
+
+    async fn secret(
+        &self,
+        community_id: i64,
+        callback_key: &str,
+    ) -> Result<SecretString, SlotError> {
+        if community_id == COMMUNITY && callback_key == CALLBACK_KEY {
+            Ok(SecretString::new(HOOK_SECRET.to_string()))
+        } else {
+            Err(SlotError::Refused("secret_unavailable"))
+        }
+    }
+}
+
 #[derive(Clone)]
 struct DcCreds;
 impl DiscordCredentialSource for DcCreds {
@@ -106,11 +156,13 @@ impl DiscordCredentialSource for DcCreds {
         Ok(DiscordBinding {
             bot_token: SecretString::new(DC_TOKEN.to_string()),
             guild_id: GUILD.to_string(),
+            application_id: None,
             managed_roles: BTreeMap::from([("vip".to_string(), "222".to_string())]),
         })
     }
 }
 
+#[derive(Clone)]
 struct YtCreds;
 impl YoutubeCredentialSource for YtCreds {
     async fn binding(
@@ -131,6 +183,7 @@ impl YoutubeCredentialSource for YtCreds {
     }
 }
 
+#[derive(Clone)]
 struct Users;
 impl PlatformUserResolver for Users {
     async fn resolve(
@@ -152,6 +205,8 @@ impl PlatformUserResolver for Users {
 struct Rewrite {
     inner: WireTemplateBuilder,
     bases: HashMap<&'static str, String>,
+    /// Every template the guest built, rendered as text (all the guest could ever know).
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl TemplateBuilder for Rewrite {
@@ -161,6 +216,19 @@ impl TemplateBuilder for Rewrite {
         action: &SenderAction,
     ) -> Result<BuiltTemplate, BuildError> {
         let mut built = self.inner.build_request(platform, action).await?;
+        self.seen.lock().unwrap().push(format!(
+            "{} {} {:?} {} {:?}",
+            built.tpl.method,
+            built.tpl.url,
+            built.tpl.headers,
+            built
+                .tpl
+                .body
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .unwrap_or_default(),
+            built.tpl.secret_refs
+        ));
         let (prod, local) = match platform {
             "twitch" => ("https://api.twitch.tv", &self.bases["twitch"]),
             "discord" => ("https://discord.com", &self.bases["discord"]),
@@ -194,13 +262,16 @@ impl svc_ingest::outbound_creds_kick::KickCredentialSource for KkCreds {
 type Exec = SenderExecutor<
     Rewrite,
     PlatformSlotRouter<
-        TwitchSlots<TwCreds>,
+        TwitchSlots<TwCreds, TwApp>,
         DiscordSlots<DcCreds>,
         YoutubeSlots<YtCreds>,
         KickSlots<KkCreds>,
     >,
     CachedFlagGate,
-    DiscordDuties<DcCreds, Users>,
+    WithYoutube<
+        DutyPair<DiscordDuties<DcCreds, Users>, TwitchDuties<HookSecrets, TwApp>>,
+        YoutubeDuties<YtCreds, Users>,
+    >,
 >;
 
 fn guard() -> GuardedClient {
@@ -217,6 +288,7 @@ fn guard() -> GuardedClient {
 struct Rig {
     _wire: WireRig,
     exec: Arc<Exec>,
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
     tw: MockServer,
     dc: MockServer,
     yt: MockServer,
@@ -304,9 +376,11 @@ async fn rig(flag: bool) -> Rig {
         ("discord", dc.uri()),
         ("youtube", yt.uri()),
     ]);
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let builder = Rewrite {
         inner: WireTemplateBuilder::new(Arc::clone(&wire.link), Arc::clone(&wire.registry)),
         bases,
+        seen: Arc::clone(&seen),
     };
     let slots = PlatformSlotRouter::new(
         TwitchSlots::with_endpoint(
@@ -314,16 +388,26 @@ async fn rig(flag: bool) -> Rig {
             "cid123".to_string(),
             guard(),
             format!("{}/helix/users", tw.uri()),
-        ),
+        )
+        .with_app_source(TwApp),
         DiscordSlots::with_endpoint(DcCreds, guard(), format!("{}/api/v10", dc.uri())),
         YoutubeSlots::new(YtCreds),
         KickSlots::new(KkCreds),
     );
-    let duties = DiscordDuties::with_endpoint(
-        DcCreds,
-        Users,
-        format!("{}/api/v10", dc.uri()),
-        Duration::from_secs(30),
+    let duties = WithYoutube::new(
+        DutyPair::new(
+            DiscordDuties::with_endpoint(
+                DcCreds,
+                Users,
+                format!("{}/api/v10", dc.uri()),
+                Duration::from_secs(30),
+            ),
+            TwitchDuties::new(HookSecrets, HOOK_BASE)
+                .unwrap()
+                .with_app_source(TwApp, "cid123".to_string())
+                .with_subs_endpoint(format!("{}/helix/eventsub/subscriptions", tw.uri())),
+        ),
+        YoutubeDuties::with_endpoint(YtCreds, Users, yt.uri(), QuotaLedger::new(100_000)),
     );
     let exec = Arc::new(SenderExecutor::with_duties(
         builder,
@@ -335,6 +419,7 @@ async fn rig(flag: bool) -> Rig {
     Rig {
         _wire: wire,
         exec,
+        seen,
         tw,
         dc,
         yt,
@@ -478,7 +563,10 @@ async fn wait_for(server: &MockServer, method_name: &str, want: usize) -> Vec<wi
             "{o}={}",
             ["twitch", "discord", "youtube"]
                 .iter()
-                .map(|p| exec_count(p, "chat.send", o) + exec_count(p, "event.create", o))
+                .map(|p| exec_count(p, "chat.send", o)
+                    + exec_count(p, "event.create", o)
+                    + exec_count(p, "mod.ban", o)
+                    + exec_count(p, "mod.timeout", o))
                 .sum::<u64>()
         )
     })
@@ -1041,4 +1129,622 @@ async fn registered_ops_reach_build_request_and_unregistered_ops_are_rejected_at
     assert_eq!((reached, rejected), (4, 3), "denominator: rows exercised");
     stop(tw_tx, tw_h).await;
     stop(yt_tx, yt_h).await;
+}
+
+/// S1a real path: the REAL twitch connector wasm turns registered moderation ops into Helix
+/// requests. The executor fills `broadcaster_id` / `moderator_id` from the community binding
+/// (111 / 222), the bundle's own params travel in `text`, and a `text` that tries to name a
+/// destination id is refused by the connector so nothing reaches the wire.
+#[tokio::test(flavor = "multi_thread")]
+async fn twitch_moderation_ops_reach_helix_with_host_filled_ids_and_refuse_bundle_ids() {
+    let rig = rig(true).await;
+    mock_twitch(&rig.tw).await;
+    Mock::given(method("POST"))
+        .and(path("/helix/moderation/bans"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{}]})))
+        .mount(&rig.tw)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/helix/moderation/bans"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&rig.tw)
+        .await;
+    let (tx, h) = drain(&rig, "twitch");
+
+    let ban = entry(
+        "twitch",
+        "mod.ban",
+        "#chan",
+        "#chan",
+        &json!({"reason": "spam"}).to_string(),
+        "999",
+        TENANT,
+    );
+    push(TWITCH_OUTBOUND_QUEUE_KEY, &ban).await;
+    let timeout = entry(
+        "twitch",
+        "mod.timeout",
+        "#chan",
+        "#chan",
+        &json!({"duration": 600, "reason": "slow down"}).to_string(),
+        "999",
+        TENANT,
+    );
+    push(TWITCH_OUTBOUND_QUEUE_KEY, &timeout).await;
+    let posts = wait_for(&rig.tw, "POST", 2).await;
+    let mut bodies: Vec<serde_json::Value> = Vec::new();
+    for req in &posts {
+        assert_eq!(req.url.path(), "/helix/moderation/bans");
+        let q: HashMap<_, _> = req.url.query_pairs().into_owned().collect();
+        assert_eq!(q["broadcaster_id"], "111", "host-filled broadcaster");
+        assert_eq!(q["moderator_id"], "222", "host-filled moderator");
+        assert_eq!(q.len(), 2);
+        assert_eq!(header(req, "authorization"), format!("Bearer {TW_TOKEN}"));
+        assert_eq!(header(req, "client-id"), "cid123");
+        bodies.push(serde_json::from_slice(&req.body).unwrap());
+    }
+    bodies.sort_by_key(|b| b["data"].get("duration").is_some());
+    assert_eq!(
+        bodies[0],
+        json!({"data": {"user_id": "999", "reason": "spam"}})
+    );
+    assert_eq!(
+        bodies[1],
+        json!({"data": {"user_id": "999", "reason": "slow down", "duration": 600}})
+    );
+
+    let unban = entry("twitch", "mod.unban", "#chan", "#chan", "", "999", TENANT);
+    push(TWITCH_OUTBOUND_QUEUE_KEY, &unban).await;
+    let dels = wait_for(&rig.tw, "DELETE", 1).await;
+    let q: HashMap<_, _> = dels[0].url.query_pairs().into_owned().collect();
+    assert_eq!(dels[0].url.path(), "/helix/moderation/bans");
+    assert_eq!(
+        (
+            q["broadcaster_id"].as_str(),
+            q["moderator_id"].as_str(),
+            q["user_id"].as_str()
+        ),
+        ("111", "222", "999")
+    );
+
+    // Bundle-supplied destination: the connector refuses it, so no further request is sent.
+    let before = rig.tw.received_requests().await.unwrap().len();
+    let evil = entry(
+        "twitch",
+        "mod.ban",
+        "#chan",
+        "#chan",
+        &json!({"broadcaster_id": "666", "reason": "x"}).to_string(),
+        "999",
+        TENANT,
+    );
+    push(TWITCH_OUTBOUND_QUEUE_KEY, &evil).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let all = rig.tw.received_requests().await.unwrap();
+    assert_eq!(all.len(), before, "refused op must not reach the wire");
+    assert!(
+        all.iter().all(|r| !r.url.as_str().contains("666")),
+        "no request ever names a bundle-supplied id"
+    );
+    stop(tx, h).await;
+}
+
+/// Extras real path: the REAL connector wasm turns `clip.create` into `POST /clips` with the
+/// host-filled broadcaster only; a `title` (not expressible in the host verifier's query
+/// grammar) and a bundle-chosen broadcaster are refused so nothing reaches the wire.
+#[tokio::test(flavor = "multi_thread")]
+async fn twitch_clip_create_reaches_helix_with_the_host_broadcaster_only() {
+    let rig = rig(true).await;
+    mock_twitch(&rig.tw).await;
+    Mock::given(method("POST"))
+        .and(path("/helix/clips"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(
+            json!({"data": [{"id": "ClipId1", "edit_url": "https://clips.twitch.tv/create/ClipId1"}]}),
+        ))
+        .mount(&rig.tw)
+        .await;
+    let (tx, h) = drain(&rig, "twitch");
+    push(
+        TWITCH_OUTBOUND_QUEUE_KEY,
+        &entry("twitch", "clip.create", "#chan", "#chan", "", "", TENANT),
+    )
+    .await;
+    let posts = wait_for(&rig.tw, "POST", 1).await;
+    let clips: Vec<_> = posts
+        .iter()
+        .filter(|r| r.url.path() == "/helix/clips")
+        .collect();
+    assert_eq!(clips.len(), 1);
+    let q: HashMap<_, _> = clips[0].url.query_pairs().into_owned().collect();
+    assert_eq!(q.len(), 1, "broadcaster_id is the only query key");
+    assert_eq!(q["broadcaster_id"], "111", "host-filled broadcaster");
+    assert!(clips[0].body.is_empty());
+    assert_eq!(
+        header(clips[0], "authorization"),
+        format!("Bearer {TW_TOKEN}")
+    );
+    assert_eq!(header(clips[0], "client-id"), "cid123");
+
+    let before = rig.tw.received_requests().await.unwrap().len();
+    for text in [
+        json!({"title": "my clip"}).to_string(),
+        json!({"broadcaster_id": "666"}).to_string(),
+    ] {
+        push(
+            TWITCH_OUTBOUND_QUEUE_KEY,
+            &entry("twitch", "clip.create", "#chan", "#chan", &text, "", TENANT),
+        )
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let all = rig.tw.received_requests().await.unwrap();
+    assert_eq!(all.len(), before, "refused ops must not reach the wire");
+    assert!(all.iter().all(|r| !r.url.as_str().contains("666")));
+    stop(tx, h).await;
+}
+
+/// Extras real path: `schedule.update` fills the base64 segment id (`=` padding) host-side from
+/// the producer parameters; the guest-built template carries only the id SLOT.
+#[tokio::test(flavor = "multi_thread")]
+async fn twitch_schedule_update_fills_the_segment_id_host_side() {
+    let rig = rig(true).await;
+    mock_twitch(&rig.tw).await;
+    Mock::given(method("PATCH"))
+        .and(path("/helix/schedule/segment"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {}})))
+        .mount(&rig.tw)
+        .await;
+    let (tx, h) = drain(&rig, "twitch");
+    let text = json!({
+        "segment_id": "ZXhhbXBsZSBzZWdtZW50==",
+        "start_time": "2026-11-10T18:00:00Z", "timezone": "America/Chicago",
+        "duration": 90, "title": "Game night", "is_recurring": false,
+    })
+    .to_string();
+    push(
+        TWITCH_OUTBOUND_QUEUE_KEY,
+        &entry(
+            "twitch",
+            "schedule.update",
+            "#chan",
+            "#chan",
+            &text,
+            "",
+            TENANT,
+        ),
+    )
+    .await;
+    let req = wait_for(&rig.tw, "PATCH", 1).await.remove(0);
+    let q: HashMap<_, _> = req.url.query_pairs().into_owned().collect();
+    assert_eq!(q["broadcaster_id"], "111");
+    assert_eq!(q["id"], "ZXhhbXBsZSBzZWdtZW50==");
+    let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+    assert_eq!(body["duration"], "90");
+    assert_eq!(body["title"], "Game night");
+    assert!(
+        rig.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|t| !t.contains("ZXhhbXBsZSBzZWdtZW50")),
+        "the guest never saw the segment id"
+    );
+    stop(tx, h).await;
+}
+
+/// Extras real path: `eventsub.create` runs with the APP token; the HOST fills the callback
+/// (configured base + `callbackKey`), the webhook secret (hub-api secret route) and the
+/// connection's broadcaster. The guest-built template contains none of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn twitch_eventsub_create_fills_callback_secret_and_ids_host_side() {
+    let rig = rig(true).await;
+    mock_twitch(&rig.tw).await;
+    Mock::given(method("POST"))
+        .and(path("/helix/eventsub/subscriptions"))
+        .respond_with(
+            ResponseTemplate::new(202).set_body_json(json!({"data": [{"id": "tw-sub-1"}]})),
+        )
+        .mount(&rig.tw)
+        .await;
+    let (tx, h) = drain(&rig, "twitch");
+    let text =
+        json!({"type": "channel.follow", "version": 2, "callbackKey": CALLBACK_KEY}).to_string();
+    // Channel-less op: the stamp still needs a non-empty origin, so it uses the existing
+    // `guild:-` scope form (no channel to pin; the host binds the connection itself).
+    push(
+        TWITCH_OUTBOUND_QUEUE_KEY,
+        &entry(
+            "twitch",
+            "eventsub.create",
+            "",
+            "guild:-",
+            &text,
+            "",
+            TENANT,
+        ),
+    )
+    .await;
+    let req = wait_for(&rig.tw, "POST", 1)
+        .await
+        .into_iter()
+        .find(|r| r.url.path() == "/helix/eventsub/subscriptions")
+        .expect("eventsub request");
+    assert_eq!(
+        header(&req, "authorization"),
+        format!("Bearer {TW_APP_TOKEN}")
+    );
+    assert_eq!(header(&req, "client-id"), "cid123");
+    let b: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+    assert_eq!(b["type"], "channel.follow");
+    assert_eq!(b["version"], "2");
+    assert_eq!(b["condition"]["broadcaster_user_id"], "111");
+    assert_eq!(b["condition"]["moderator_user_id"], "111");
+    assert_eq!(b["transport"]["method"], "webhook");
+    assert_eq!(
+        b["transport"]["callback"],
+        format!("{HOOK_BASE}/eventsub/twitch/webhook/{CALLBACK_KEY}")
+    );
+    assert_eq!(b["transport"]["secret"], HOOK_SECRET);
+    let seen = rig.seen.lock().unwrap().clone();
+    assert!(!seen.is_empty(), "denominator: templates inspected");
+    for t in &seen {
+        assert!(!t.contains(HOOK_SECRET), "guest saw the secret: {t}");
+        assert!(!t.contains(CALLBACK_KEY), "guest saw the callback key: {t}");
+        assert!(
+            !t.contains("hooks.example.com"),
+            "guest saw the callback host"
+        );
+        assert!(!t.contains(TW_APP_TOKEN));
+    }
+
+    let before = rig.tw.received_requests().await.unwrap().len();
+    for text in [
+        json!({"type": "channel.follow", "version": 2, "callbackKey": "unknown-key-1"}),
+        json!({"type": "channel.follow", "version": 2, "callbackKey": "a/b"}),
+        json!({"type": "channel.follow", "version": 2, "callbackKey": CALLBACK_KEY, "secret": "mine"}),
+        json!({"type": "channel.update", "version": 1, "callbackKey": CALLBACK_KEY}),
+    ] {
+        push(
+            TWITCH_OUTBOUND_QUEUE_KEY,
+            &entry(
+                "twitch",
+                "eventsub.create",
+                "",
+                "guild:-",
+                &text.to_string(),
+                "",
+                TENANT,
+            ),
+        )
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    let all = rig.tw.received_requests().await.unwrap();
+    assert_eq!(all.len(), before, "refused creates must not reach the wire");
+    stop(tx, h).await;
+}
+
+/// A signed channel-less twitch entry naming `message_id` (the subscription id for deletes).
+fn scoped_entry(op: &str, message_id: &str) -> String {
+    let op_id = format!(
+        "e2e-{}-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst),
+        now_ms()
+    );
+    let exp_ms = now_ms() + 60_000;
+    let sig = pin()
+        .sign(&PinFields {
+            platform: "twitch",
+            op,
+            channel: "",
+            origin_channel: "guild:-",
+            message_id,
+            text: "",
+            user_id: "",
+            op_id: &op_id,
+            exp_ms,
+            community_id: COMMUNITY,
+            tenant_id: TENANT,
+        })
+        .unwrap();
+    let mut v = json!({
+        "v": 1, "op": op, "platform": "twitch", "origin_channel": "guild:-",
+        "op_id": op_id, "exp_ms": exp_ms, "community_id": COMMUNITY,
+        "tenant_id": TENANT, "pin_sig": sig,
+    });
+    if !message_id.is_empty() {
+        v["message_id"] = json!(message_id);
+    }
+    v.to_string()
+}
+
+/// A producer-stamped queue entry for an op naming a resource id (`message_id`, signed).
+fn entry_with_message(
+    platform: &str,
+    op: &str,
+    channel: &str,
+    text: &str,
+    user_id: &str,
+    message_id: &str,
+) -> String {
+    let op_id = format!(
+        "e2e-{}-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst),
+        now_ms()
+    );
+    let exp_ms = now_ms() + 60_000;
+    let sig = pin()
+        .sign(&PinFields {
+            platform,
+            op,
+            channel,
+            origin_channel: channel,
+            message_id,
+            text,
+            user_id,
+            op_id: &op_id,
+            exp_ms,
+            community_id: COMMUNITY,
+            tenant_id: TENANT,
+        })
+        .unwrap();
+    let mut v = json!({
+        "v": 1, "op": op, "platform": platform, "origin_channel": channel, "channel": channel,
+        "op_id": op_id, "exp_ms": exp_ms, "community_id": COMMUNITY, "tenant_id": TENANT,
+        "pin_sig": sig,
+    });
+    for (k, val) in [
+        ("text", text),
+        ("user_id", user_id),
+        ("message_id", message_id),
+    ] {
+        if !val.is_empty() {
+            v[k] = json!(val);
+        }
+    }
+    v.to_string()
+}
+
+/// Pushes `raw` on the YouTube queue and returns the drain's ack.
+async fn push_ack(raw: &str) -> serde_json::Value {
+    let op_id = op_id_of(raw);
+    push(YOUTUBE_OUTBOUND_QUEUE_KEY, raw).await;
+    ack_for(&op_id).await
+}
+
+/// YouTube live-chat moderation end to end through the REAL compiled connector: queue -> drain ->
+/// executor (REAL wasm `build-request`) -> verifier -> host duties (ownership proof, target
+/// detokenization, quota) -> `GuardedClient` -> wire. Asserts the exact requests at the fake
+/// YouTube, that a foreign id never reaches the wire, and that the target is the host's value.
+#[tokio::test(flavor = "multi_thread")]
+async fn youtube_moderation_flows_through_the_real_connector_with_host_enforced_ownership() {
+    let rig = rig(true).await;
+    Mock::given(method("GET"))
+        .and(path("/youtube/v3/liveChat/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"items": [{"id": "LCC.own1"}, {"id": "LCC.own2"}]})),
+        )
+        .mount(&rig.yt)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/youtube/v3/liveChat/moderators"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"items": [{"id": "modPre"}]})),
+        )
+        .mount(&rig.yt)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/youtube/v3/liveChat/bans"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "banNew1"})))
+        .mount(&rig.yt)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/youtube/v3/liveChat/moderators"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "modNew1"})))
+        .mount(&rig.yt)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&rig.yt)
+        .await;
+    let (tx, h) = drain(&rig, "youtube");
+    let user = format!("{{user:{USER_UUID}}}");
+    let mut examined = 0;
+
+    // delete: an id the pinned chat owns is proven by host lookup, then deleted.
+    let ack = push_ack(&entry_with_message(
+        "youtube",
+        "chat.delete",
+        "lc1",
+        "",
+        "",
+        "LCC.own1",
+    ))
+    .await;
+    assert_eq!(ack["ok"], true, "{ack}");
+    let dels = wait_for(&rig.yt, "DELETE", 1).await;
+    assert_eq!(dels[0].url.path(), "/youtube/v3/liveChat/messages");
+    assert_eq!(dels[0].url.query(), Some("id=LCC.own1"));
+    assert_eq!(
+        header(&dels[0], "authorization"),
+        format!("Bearer {YT_TOKEN}")
+    );
+    examined += 1;
+
+    // delete: a foreign id is refused host-side; nothing more is deleted.
+    let ack = push_ack(&entry_with_message(
+        "youtube",
+        "chat.delete",
+        "lc1",
+        "",
+        "",
+        "LCC.foreign",
+    ))
+    .await;
+    assert_eq!(ack["ok"], false, "{ack}");
+    examined += 1;
+
+    // ban (temporary): the target is the host's detokenized value, the chat the pinned one.
+    let ack = push_ack(&entry_with_message(
+        "youtube", "mod.ban", "lc1", "600", &user, "",
+    ))
+    .await;
+    assert_eq!(ack["ok"], true, "{ack}");
+    let posts = wait_for(&rig.yt, "POST", 1).await;
+    let ban = posts
+        .iter()
+        .find(|r| r.url.path() == "/youtube/v3/liveChat/bans")
+        .expect("ban request");
+    let body: serde_json::Value = serde_json::from_slice(&ban.body).unwrap();
+    assert_eq!(body["snippet"]["liveChatId"], "lc1");
+    assert_eq!(body["snippet"]["type"], "temporary");
+    assert_eq!(body["snippet"]["banDurationSeconds"], 600);
+    assert_eq!(body["snippet"]["bannedUserDetails"]["channelId"], USER_RAW);
+    assert!(!String::from_utf8_lossy(&ban.body).contains(USER_UUID));
+    examined += 1;
+
+    // unban: the ban id the host created is provable; a foreign ban id is not.
+    let ack = push_ack(&entry_with_message(
+        "youtube",
+        "mod.unban",
+        "lc1",
+        "",
+        "",
+        "banNew1",
+    ))
+    .await;
+    assert_eq!(ack["ok"], true, "{ack}");
+    let ack = push_ack(&entry_with_message(
+        "youtube",
+        "mod.unban",
+        "lc1",
+        "",
+        "",
+        "banForeign",
+    ))
+    .await;
+    assert_eq!(ack["ok"], false, "{ack}");
+    examined += 2;
+
+    // moderators: add (host-created id), remove it, remove a listed one, refuse a foreign one.
+    let ack = push_ack(&entry_with_message(
+        "youtube", "mod.add", "lc1", "", &user, "",
+    ))
+    .await;
+    assert_eq!(ack["ok"], true, "{ack}");
+    for (id, ok) in [("modNew1", true), ("modPre", true), ("modForeign", false)] {
+        let ack = push_ack(&entry_with_message(
+            "youtube",
+            "mod.remove",
+            "lc1",
+            "",
+            "",
+            id,
+        ))
+        .await;
+        assert_eq!(ack["ok"], ok, "{id}: {ack}");
+    }
+    examined += 4;
+
+    // a raw channel id is never a target.
+    let ack = push_ack(&entry_with_message(
+        "youtube",
+        "mod.add",
+        "lc1",
+        "",
+        "UCrawChannelId",
+        "",
+    ))
+    .await;
+    assert_eq!(ack["ok"], false, "{ack}");
+    examined += 1;
+
+    let all = rig.yt.received_requests().await.unwrap();
+    let deleted: Vec<String> = all
+        .iter()
+        .filter(|r| r.method.as_str() == "DELETE")
+        .map(|r| r.url.query().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        deleted,
+        ["id=LCC.own1", "id=banNew1", "id=modNew1", "id=modPre"],
+        "only owned ids may reach YouTube"
+    );
+    assert_eq!(examined, 10, "denominator: ops exercised");
+    stop(tx, h).await;
+}
+
+/// regression: cross-tenant BOLA -- `eventsub.delete` runs with the APP token, which can delete
+/// any subscription of the application. The host resolves the subscription first and only deletes
+/// one whose condition names THIS community's own broadcaster (111); another broadcaster's
+/// subscription and `eventsub.list` (every community's subscriptions) never reach the delete/list
+/// endpoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn twitch_eventsub_delete_is_bound_to_the_communitys_broadcaster_and_list_fails_closed() {
+    let rig = rig(true).await;
+    mock_twitch(&rig.tw).await;
+    for (id, broadcaster) in [("mine-sub", "111"), ("theirs-sub", "999")] {
+        Mock::given(method("GET"))
+            .and(path("/helix/eventsub/subscriptions"))
+            .and(wiremock::matchers::query_param("id", id))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+                {"id": id, "condition": {"broadcaster_user_id": broadcaster}}
+            ]})))
+            .mount(&rig.tw)
+            .await;
+    }
+    Mock::given(method("DELETE"))
+        .and(path("/helix/eventsub/subscriptions"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&rig.tw)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/helix/eventsub/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&rig.tw)
+        .await;
+    let (tx, h) = drain(&rig, "twitch");
+    push(
+        TWITCH_OUTBOUND_QUEUE_KEY,
+        &scoped_entry("eventsub.delete", "mine-sub"),
+    )
+    .await;
+    let dels = wait_for(&rig.tw, "DELETE", 1).await;
+    assert_eq!(dels.len(), 1);
+    let q: HashMap<_, _> = dels[0].url.query_pairs().into_owned().collect();
+    assert_eq!(q["id"], "mine-sub");
+    assert_eq!(
+        header(&dels[0], "authorization"),
+        format!("Bearer {TW_APP_TOKEN}")
+    );
+
+    // Another broadcaster's subscription, an unknown one, and a list: no further DELETE, and the
+    // list never reaches Helix (its only GETs are the ownership lookups by id).
+    for raw in [
+        scoped_entry("eventsub.delete", "theirs-sub"),
+        scoped_entry("eventsub.delete", "unknown-sub"),
+        scoped_entry("eventsub.list", ""),
+    ] {
+        push(TWITCH_OUTBOUND_QUEUE_KEY, &raw).await;
+    }
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let all = rig.tw.received_requests().await.unwrap();
+    let deletes: Vec<_> = all
+        .iter()
+        .filter(|r| r.method.as_str() == "DELETE")
+        .collect();
+    assert_eq!(deletes.len(), 1, "only the owned subscription was deleted");
+    let list_gets: Vec<_> = all
+        .iter()
+        .filter(|r| {
+            r.method.as_str() == "GET"
+                && r.url.path() == "/helix/eventsub/subscriptions"
+                && !r.url.query_pairs().any(|(k, _)| k == "id")
+        })
+        .collect();
+    assert!(list_gets.is_empty(), "eventsub.list must never run");
+    stop(tx, h).await;
 }

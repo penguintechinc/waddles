@@ -11,6 +11,7 @@ badRequest(...))` checks.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -29,6 +30,14 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
+logger = logging.getLogger(__name__)
+SERVICE_NAME = "ai-interaction"
+
+
+class AIChatterServiceUnavailableError(RuntimeError):
+    """`AI_INTERACTION_API_URL` is unset: the legacy ai-interaction service no longer exists."""
+
+
 class AIChatterValidationError(ValueError):
     """A field failed the same range checks `aiChatterController.js` enforces."""
 
@@ -45,8 +54,21 @@ class AIChatterConfigUpdate:
     min_message_length: int | None = None
 
 
+def is_configured() -> bool:
+    """True when `AI_INTERACTION_API_URL` is set; else log an ERROR (routes return 503)."""
+    if os.environ.get("AI_INTERACTION_API_URL", ""):
+        return True
+    logger.error("ai_chatter_service_unavailable service=%s", SERVICE_NAME)
+    return False
+
+
 def _base_url() -> str:
-    return os.environ.get("AI_INTERACTION_API_URL", "http://ai-interaction:8005")
+    """Return the configured upstream URL, or raise loudly (typed 503 at the route) when unset."""
+    url = os.environ.get("AI_INTERACTION_API_URL", "")
+    if not url:
+        logger.error("ai_chatter_service_unavailable service=%s", SERVICE_NAME)
+        raise AIChatterServiceUnavailableError(SERVICE_NAME)
+    return url
 
 
 def _service_key_headers() -> dict[str, str]:

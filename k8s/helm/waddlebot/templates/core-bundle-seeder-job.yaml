@@ -172,7 +172,7 @@ spec:
         {{- $connections := list }}
         {{- range .Values.pipeline.coreBundleSeeder.platformConnections }}
         {{- $connections = append $connections (dict
-              "tenant_slug" (.tenantSlug | default $.Values.pipeline.coreBundleSeeder.defaultTenantSlug | default "global")
+              "tenant_slug" (.tenantSlug | default $.Values.pipeline.coreBundleSeeder.defaultTenantSlug | default "default")
               "community_id" (.communityId | default nil)
               "platform" .platform
               "source_id" .sourceId

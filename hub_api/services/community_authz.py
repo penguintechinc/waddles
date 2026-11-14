@@ -80,6 +80,7 @@ from quart import Request
 
 from services.current_user import get_current_user_id
 from services.errors import ApiError, forbidden, unauthorized
+from services.global_identity import is_global_admin
 from services.schema import bind_community_authz_tables
 
 
@@ -93,7 +94,7 @@ class CommunityRole:
 
 
 async def is_super_admin(async_dal: Any, dal: Any, *, user_id: int) -> bool:
-    """Look up `hub_users.is_super_admin` for `user_id`. False if the user row is missing.
+    """True iff `user_id` is a tenant admin of the reserved `system` tenant (global admin).
 
     THE canonical super-admin check -- DB-authoritative, per security.md's
     "authz decisions on scope [or, here, a dedicated DB flag], never role
@@ -107,10 +108,7 @@ async def is_super_admin(async_dal: Any, dal: Any, *, user_id: int) -> bool:
     stale relative to a since-revoked `hub_users.is_super_admin` flag
     within the token's validity window, where this DB lookup cannot.
     """
-    rows = await async_dal.select_async(dal(dal.hub_users.id == user_id))
-    if not rows:
-        return False
-    return bool(rows.first().is_super_admin)
+    return await is_global_admin(async_dal, dal, user_id=user_id)
 
 
 async def get_caller_community_role(

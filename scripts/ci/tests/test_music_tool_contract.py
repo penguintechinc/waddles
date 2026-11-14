@@ -26,12 +26,31 @@ def test_at_least_one_provider_examined() -> None:
 @pytest.mark.parametrize("provider", PROVIDERS)
 @pytest.mark.parametrize("name", ["bundle.yaml", "hub-manifest.yaml"])
 def test_manifest_matches_contract(provider: str, name: str) -> None:
-    """Each manifest's exported_tools equals the contract block (full or a declared subset)."""
+    """Each manifest's contract tools equal the contract block (full or a declared subset).
+
+    Provider extensions (non-contract suffixes such as Spotify `player.*`) are exempt but must be
+    well-formed tool entries listed after the contract tools.
+    """
     doc = yaml.safe_load((ROOT / f"bundles/rust/music-{provider}/{name}").read_text())
-    got = doc["exported_tools"]
+    common, ext = gen.split(provider, doc["exported_tools"])
+    assert common, f"{provider}/{name}: no contract tools exported"
     prefix = f"music.{provider}."
-    subset = [t["name"].removeprefix(prefix) for t in got]
-    assert gen.build(provider, subset) == got
+    subset = [t["name"].removeprefix(prefix) for t in common]
+    assert gen.build(provider, subset) == common
+    for t in ext:
+        assert {"access", "risk", "input_schema", "output_schema"} <= t.keys(), t["name"]
+        assert t["input_schema"].get("additionalProperties") is False, t["name"]
+
+
+def test_split_rejects_extension_before_contract_tool() -> None:
+    """An extension may not precede (or shadow) a contract tool."""
+    common = gen.build("x", ["search"])
+    ext = [{"name": "music.x.player.state"}]
+    assert gen.split("x", common + ext) == (common, ext)
+    with pytest.raises(SystemExit):
+        gen.split("x", ext + common)
+    with pytest.raises(SystemExit):
+        gen.split("x", [{"name": "music.y.search"}])
 
 
 def test_generator_detects_drift() -> None:

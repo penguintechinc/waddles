@@ -19,9 +19,9 @@ use bundle_executor::heartbeat::Heartbeat;
 use bundle_executor::invoke::{ComponentSource, Executor};
 use bundle_executor::wire::run_connection;
 use penguin_bundle_host::wire::{
-    CapabilityKind, ExportKind, Frame, HelloBody, HelloLimits, HelloOkBody, HostResultBody,
-    HostResultError, InvokeBody, LoadBody, LoadLimits, Message, SandboxInfo, ShutdownBody,
-    read_frame, write_frame,
+    read_frame, write_frame, CapabilityKind, ExportKind, Frame, HelloBody, HelloLimits,
+    HelloOkBody, HostResultBody, HostResultError, InvokeBody, LoadBody, LoadLimits, Message,
+    SandboxInfo, ShutdownBody,
 };
 use sha2::{Digest, Sha256};
 
@@ -111,9 +111,14 @@ impl StageModel {
         match (capability, op) {
             // Optional sub-feature flags (fishing tournaments/overlay) are modelled OFF; the app flag below is the one under test.
             (CapabilityKind::Flags, "enabled")
-                if args["key"].as_str().is_some_and(|k| k.ends_with("-tournaments") || k.ends_with("-overlay")) =>
+                if args["key"]
+                    .as_str()
+                    .is_some_and(|k| k.ends_with("-tournaments") || k.ends_with("-overlay")) =>
             {
-                assert_eq!(args["default_value"], false, "sub-feature flags must default OFF");
+                assert_eq!(
+                    args["default_value"], false,
+                    "sub-feature flags must default OFF"
+                );
                 ok(serde_json::json!({ "enabled": false }))
             }
             (CapabilityKind::Flags, "enabled") => {
@@ -181,10 +186,15 @@ impl StageModel {
                 Some((code, message)) => err(code, message),
                 None => ok(serde_json::json!({ "balance": self.balance_after_wager })),
             },
-            (CapabilityKind::Db, "tool.invoke") if args["target"] == "waddles.core.service.media" => {
+            (CapabilityKind::Db, "tool.invoke")
+                if args["target"] == "waddles.core.service.media" =>
+            {
                 // The media service exports no `tts_synthesize` yet: the real stage answers target_unavailable.
                 assert_eq!(args["tool"], "tts_synthesize");
-                err("target_unavailable", "media service does not export tts_synthesize")
+                err(
+                    "target_unavailable",
+                    "media service does not export tts_synthesize",
+                )
             }
             (CapabilityKind::Db, "tool.invoke") => {
                 assert_eq!(args["target"], "waddles.core.service.economy");
@@ -226,19 +236,11 @@ struct Run {
 }
 
 /// One load + a sequence of `transform` invokes on one connection, the stage model carrying kv between them.
-async fn run(
-    wasm: Vec<u8>,
-    steps: Vec<(&'static str, Box<dyn FnOnce(&mut StageModel) + Send>)>,
-) -> Vec<Run> {
+async fn run(wasm: Vec<u8>, steps: Vec<Step>) -> Vec<Run> {
     run_for(APP_ID.into(), FLAG_KEY.into(), wasm, steps).await
 }
 
-async fn run_for(
-    app_id: String,
-    flag_key: String,
-    wasm: Vec<u8>,
-    steps: Vec<(&'static str, Box<dyn FnOnce(&mut StageModel) + Send>)>,
-) -> Vec<Run> {
+async fn run_for(app_id: String, flag_key: String, wasm: Vec<u8>, steps: Vec<Step>) -> Vec<Run> {
     let (executor_io, stage_io) = tokio::io::duplex(256 * 1024);
     let digest = format!("sha256:{:x}", Sha256::digest(&wasm));
     let executor =
@@ -307,7 +309,10 @@ async fn run_for(
             prepare(&mut model);
             let mut payload = serde_json::json!({ "text": text, "channel_id": "chan-1" });
             if model.replace_payload {
-                payload = model.extra_payload.clone().expect("replace_payload needs extra_payload");
+                payload = model
+                    .extra_payload
+                    .clone()
+                    .expect("replace_payload needs extra_payload");
             } else if let Some(extra) = &model.extra_payload {
                 for (k, v) in extra.as_object().expect("extra_payload is an object") {
                     payload[k] = v.clone();
@@ -681,17 +686,22 @@ async fn csharp_port_matrix_executes_commands_and_replays_through_real_executor(
             "{game}: replay must preserve the response"
         );
         assert!(
-            runs[1]
-                .calls
-                .iter()
-                .any(|(_, op, _)| op == "economy.wager" || op == "tool.invoke" || (game == "fishing" && op == "set")),
+            runs[1].calls.iter().any(|(_, op, _)| op == "economy.wager"
+                || op == "tool.invoke"
+                || (game == "fishing" && op == "set")),
             "{game}: must cross its real economy/service binding"
         );
         examined += 1;
         println!("C# real-executor matrix: {game} PASS");
     }
-    assert_eq!(examined, expected, "zero or partial port coverage must fail");
-    assert!(expected >= 1 && (only.is_some() || expected == 10), "zero or partial port coverage must fail");
+    assert_eq!(
+        examined, expected,
+        "zero or partial port coverage must fail"
+    );
+    assert!(
+        expected >= 1 && (only.is_some() || expected == 10),
+        "zero or partial port coverage must fail"
+    );
 }
 
 /// Wave-4 apps through the production linker: bonustickets (event award), channelpoints (non-chat redemption event + mod
@@ -704,7 +714,8 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
         std::env::var("SUPERPENGUIN_WASM_DIR").expect("SUPERPENGUIN_WASM_DIR is required");
     let load = |slug: &str| {
         let path = std::path::Path::new(&directory).join(format!("superpenguin_{slug}.wasm"));
-        let wasm = std::fs::read(path).expect("a real built component is required for EVERY wave-4 app");
+        let wasm =
+            std::fs::read(path).expect("a real built component is required for EVERY wave-4 app");
         assert!(wasm.len() > 1_000_000);
         wasm
     };
@@ -716,19 +727,49 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
         "waddles.command-superpenguin-bonustickets".into(),
         load("bonustickets"),
         vec![
-            ("!bonus", Box::new(|m| { m.flag_on = false; m.message_id = "off".into(); })),
-            ("!bonus", Box::new(|m| { m.flag_on = true; m.message_id = "claim".into(); })),
-            ("!bonus", Box::new(|m| { m.flag_on = true; m.message_id = "claim".into(); })),
+            (
+                "!bonus",
+                Box::new(|m| {
+                    m.flag_on = false;
+                    m.message_id = "off".into();
+                }),
+            ),
+            (
+                "!bonus",
+                Box::new(|m| {
+                    m.flag_on = true;
+                    m.message_id = "claim".into();
+                }),
+            ),
+            (
+                "!bonus",
+                Box::new(|m| {
+                    m.flag_on = true;
+                    m.message_id = "claim".into();
+                }),
+            ),
         ],
     )
     .await;
-    assert!(!runs[0].trapped && runs[0].reply.is_none(), "bonustickets: flag-off contract");
-    assert!(!runs[1].trapped && runs[1].reply.is_some(), "bonustickets: claim must reply");
     assert!(
-        runs[1].calls.iter().any(|(_, op, a)| op == "tool.invoke" && a["tool"] == "adjust_balance"),
+        !runs[0].trapped && runs[0].reply.is_none(),
+        "bonustickets: flag-off contract"
+    );
+    assert!(
+        !runs[1].trapped && runs[1].reply.is_some(),
+        "bonustickets: claim must reply"
+    );
+    assert!(
+        runs[1]
+            .calls
+            .iter()
+            .any(|(_, op, a)| op == "tool.invoke" && a["tool"] == "adjust_balance"),
         "bonustickets: the credit must cross the economy service tool"
     );
-    assert!(!runs[2].trapped && runs[2].reply == runs[1].reply, "bonustickets: replay preserves the reply");
+    assert!(
+        !runs[2].trapped && runs[2].reply == runs[1].reply,
+        "bonustickets: replay preserves the reply"
+    );
     examined += 1;
     println!("C# wave-4 matrix: bonustickets PASS");
 
@@ -745,35 +786,56 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
         "waddles.command-superpenguin-channelpoints".into(),
         load("channelpoints"),
         vec![
-            ("!redeem map Hydrate award 10 && say thanks {user}", Box::new(|m| {
-                m.flag_on = true;
-                m.message_id = "map".into();
-                m.extra_payload = Some(serde_json::json!({ "is_mod": true }));
-            })),
-            ("", Box::new(move |m| {
-                m.flag_on = true;
-                m.message_id = "redeem-1".into();
-                m.event_type = "channel.channel_points_custom_reward_redemption.add".into();
-                m.extra_payload = Some(redemption_a);
-                m.replace_payload = true;
-            })),
-            ("", Box::new(move |m| {
-                m.flag_on = true;
-                m.message_id = "redeem-1".into();
-                m.event_type = "channel.channel_points_custom_reward_redemption.add".into();
-                m.extra_payload = Some(redemption_b);
-                m.replace_payload = true;
-            })),
+            (
+                "!redeem map Hydrate award 10 && say thanks {user}",
+                Box::new(|m| {
+                    m.flag_on = true;
+                    m.message_id = "map".into();
+                    m.extra_payload = Some(serde_json::json!({ "is_mod": true }));
+                }),
+            ),
+            (
+                "",
+                Box::new(move |m| {
+                    m.flag_on = true;
+                    m.message_id = "redeem-1".into();
+                    m.event_type = "channel.channel_points_custom_reward_redemption.add".into();
+                    m.extra_payload = Some(redemption_a);
+                    m.replace_payload = true;
+                }),
+            ),
+            (
+                "",
+                Box::new(move |m| {
+                    m.flag_on = true;
+                    m.message_id = "redeem-1".into();
+                    m.event_type = "channel.channel_points_custom_reward_redemption.add".into();
+                    m.extra_payload = Some(redemption_b);
+                    m.replace_payload = true;
+                }),
+            ),
         ],
     )
     .await;
-    assert!(!runs[0].trapped && runs[0].reply.is_some(), "channelpoints: mod mapping must reply");
-    assert!(!runs[1].trapped && runs[1].reply.is_some(), "channelpoints: redemption must say its step");
     assert!(
-        runs[1].calls.iter().any(|(_, op, a)| op == "tool.invoke" && a["tool"] == "adjust_balance"),
+        !runs[0].trapped && runs[0].reply.is_some(),
+        "channelpoints: mod mapping must reply"
+    );
+    assert!(
+        !runs[1].trapped && runs[1].reply.is_some(),
+        "channelpoints: redemption must say its step"
+    );
+    assert!(
+        runs[1]
+            .calls
+            .iter()
+            .any(|(_, op, a)| op == "tool.invoke" && a["tool"] == "adjust_balance"),
         "channelpoints: the award must cross the economy service tool"
     );
-    assert!(!runs[2].trapped && runs[2].reply == runs[1].reply, "channelpoints: redemption replay preserves the reply");
+    assert!(
+        !runs[2].trapped && runs[2].reply == runs[1].reply,
+        "channelpoints: redemption replay preserves the reply"
+    );
     examined += 1;
     println!("C# wave-4 matrix: channelpoints PASS");
 
@@ -797,21 +859,42 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
         "waddles.command-superpenguin-giveaway".into(),
         load("giveaway"),
         vec![
-            ("!tgw status", Box::new(|m| { m.flag_on = false; m.message_id = "off".into(); })),
+            (
+                "!tgw status",
+                Box::new(|m| {
+                    m.flag_on = false;
+                    m.message_id = "off".into();
+                }),
+            ),
             ("!tgw status", user_on("status")),
             ("!tgw enter 5", user_on("enter")),
             ("!tgw enter 5", user_on("enter")),
         ],
     )
     .await;
-    assert!(!runs[0].trapped && runs[0].reply.is_none(), "giveaway: flag-off contract");
-    assert!(!runs[1].trapped && runs[1].reply.is_some(), "giveaway: status must reply");
-    assert!(!runs[2].trapped && runs[2].reply.is_some(), "giveaway: entry must reply");
     assert!(
-        runs[2].calls.iter().any(|(_, op, a)| op == "tool.invoke" && a["tool"] == "adjust_balance"),
+        !runs[0].trapped && runs[0].reply.is_none(),
+        "giveaway: flag-off contract"
+    );
+    assert!(
+        !runs[1].trapped && runs[1].reply.is_some(),
+        "giveaway: status must reply"
+    );
+    assert!(
+        !runs[2].trapped && runs[2].reply.is_some(),
+        "giveaway: entry must reply"
+    );
+    assert!(
+        runs[2]
+            .calls
+            .iter()
+            .any(|(_, op, a)| op == "tool.invoke" && a["tool"] == "adjust_balance"),
         "giveaway: the entry debit must cross the economy service tool"
     );
-    assert!(!runs[3].trapped && runs[3].reply == runs[2].reply, "giveaway: entry replay preserves the reply");
+    assert!(
+        !runs[3].trapped && runs[3].reply == runs[2].reply,
+        "giveaway: entry replay preserves the reply"
+    );
     examined += 1;
     println!("C# wave-4 matrix: giveaway PASS");
 
@@ -821,7 +904,13 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
         "waddles.command-superpenguin-wheel".into(),
         load("wheel"),
         vec![
-            ("!wheel list", Box::new(|m| { m.flag_on = false; m.message_id = "off".into(); })),
+            (
+                "!wheel list",
+                Box::new(|m| {
+                    m.flag_on = false;
+                    m.message_id = "off".into();
+                }),
+            ),
             ("!wheel define demo red*2|blue|green", mod_on("define")),
             ("!wheel list", user_on("list")),
             ("!wheel list", user_on("list")),
@@ -829,11 +918,26 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
         ],
     )
     .await;
-    assert!(!runs[0].trapped && runs[0].reply.is_none(), "wheel: flag-off contract");
-    assert!(!runs[1].trapped && runs[1].reply.is_some(), "wheel: define must reply");
-    assert!(!runs[2].trapped && runs[2].reply.is_some(), "wheel: list must reply");
-    assert!(!runs[3].trapped && runs[3].reply == runs[2].reply, "wheel: list replay preserves the reply");
-    assert!(runs[4].trapped, "wheel: an overlay push must fail loud while the host overlay is not implemented");
+    assert!(
+        !runs[0].trapped && runs[0].reply.is_none(),
+        "wheel: flag-off contract"
+    );
+    assert!(
+        !runs[1].trapped && runs[1].reply.is_some(),
+        "wheel: define must reply"
+    );
+    assert!(
+        !runs[2].trapped && runs[2].reply.is_some(),
+        "wheel: list must reply"
+    );
+    assert!(
+        !runs[3].trapped && runs[3].reply == runs[2].reply,
+        "wheel: list replay preserves the reply"
+    );
+    assert!(
+        runs[4].trapped,
+        "wheel: an overlay push must fail loud while the host overlay is not implemented"
+    );
     examined += 1;
     println!("C# wave-4 matrix: wheel PASS");
 
@@ -843,17 +947,35 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
         "waddles.command-superpenguin-audiocommand".into(),
         load("audiocommand"),
         vec![
-            ("!sfx list", Box::new(|m| { m.flag_on = false; m.message_id = "off".into(); })),
+            (
+                "!sfx list",
+                Box::new(|m| {
+                    m.flag_on = false;
+                    m.message_id = "off".into();
+                }),
+            ),
             ("!sfx add boom boom.mp3", mod_on("add")),
             ("!sfx list", user_on("list")),
             ("!sfx boom", user_on("play")),
         ],
     )
     .await;
-    assert!(!runs[0].trapped && runs[0].reply.is_none(), "audiocommand: flag-off contract");
-    assert!(!runs[1].trapped && runs[1].reply.is_some(), "audiocommand: add must reply");
-    assert!(!runs[2].trapped && runs[2].reply.is_some(), "audiocommand: list must reply");
-    assert!(runs[3].trapped, "audiocommand: an overlay push must fail loud while the host overlay is not implemented");
+    assert!(
+        !runs[0].trapped && runs[0].reply.is_none(),
+        "audiocommand: flag-off contract"
+    );
+    assert!(
+        !runs[1].trapped && runs[1].reply.is_some(),
+        "audiocommand: add must reply"
+    );
+    assert!(
+        !runs[2].trapped && runs[2].reply.is_some(),
+        "audiocommand: list must reply"
+    );
+    assert!(
+        runs[3].trapped,
+        "audiocommand: an overlay push must fail loud while the host overlay is not implemented"
+    );
     examined += 1;
     println!("C# wave-4 matrix: audiocommand PASS");
 
@@ -863,15 +985,27 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
         "waddles.command-superpenguin-tts".into(),
         load("tts"),
         vec![
-            ("!tts hello", Box::new(|m| { m.flag_on = false; m.message_id = "off".into(); })),
+            (
+                "!tts hello",
+                Box::new(|m| {
+                    m.flag_on = false;
+                    m.message_id = "off".into();
+                }),
+            ),
             ("!ttsvoice add af_sky", mod_on("voice")),
             ("!tts hello world", user_on("say")),
             ("!tts hello world", user_on("say")),
         ],
     )
     .await;
-    assert!(!runs[0].trapped && runs[0].reply.is_none(), "tts: flag-off contract");
-    assert!(!runs[1].trapped && runs[1].reply.is_some(), "tts: voice add must reply");
+    assert!(
+        !runs[0].trapped && runs[0].reply.is_none(),
+        "tts: flag-off contract"
+    );
+    assert!(
+        !runs[1].trapped && runs[1].reply.is_some(),
+        "tts: voice add must reply"
+    );
     assert!(!runs[2].trapped, "tts: must refuse in chat, not trap");
     assert!(
         reply_text(&runs[2]).contains("TTS is unavailable"),
@@ -879,12 +1013,21 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
         runs[2].reply
     );
     assert!(
-        runs[2].calls.iter().any(|(_, op, a)| op == "tool.invoke" && a["tool"] == "tts_synthesize"),
+        runs[2]
+            .calls
+            .iter()
+            .any(|(_, op, a)| op == "tool.invoke" && a["tool"] == "tts_synthesize"),
         "tts: must have asked the media service tool"
     );
-    assert!(!runs[3].trapped && runs[3].reply.is_some(), "tts: a repeat still gets an answer");
+    assert!(
+        !runs[3].trapped && runs[3].reply.is_some(),
+        "tts: a repeat still gets an answer"
+    );
     examined += 1;
     println!("C# wave-4 matrix: tts PASS");
 
     assert_eq!(examined, 6, "zero or partial wave-4 coverage must fail");
 }
+
+/// One named mutation applied to the stage model in sequence.
+type Step = (&'static str, Box<dyn FnOnce(&mut StageModel) + Send>);

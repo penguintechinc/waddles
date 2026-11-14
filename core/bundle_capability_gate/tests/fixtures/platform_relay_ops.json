@@ -23,8 +23,6 @@
     "reaction.add",
     "message.embed",
     "webhook.create",
-    "commands.register",
-    "commands.register.guild",
     "interaction.callback",
     "interaction.followup"
   ],

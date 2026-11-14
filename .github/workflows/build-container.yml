@@ -11,7 +11,7 @@ on:
       module_path:
         required: true
         type: string
-        description: 'Path to module directory (e.g., processing/router_module)'
+        description: 'Path to module directory (e.g., core/svc_ingest)'
       module_name:
         required: true
         type: string

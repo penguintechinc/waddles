@@ -173,8 +173,8 @@ deliberately differs from the sketch above:
   later `penguin-aaa` extraction. Registry: `services/provider_connections/registry.py`.
 - **API shape.** Shipped: community-scoped CRUD at `/api/v1/communities/{id}/provider-connections`,
   install descriptors at `/api/v1/connection-providers`, and the two data-plane routes
-  `GET /api/v1/internal/provider-connections` (what to run, no tokens) and
-  `POST /api/v1/internal/communities/{id}/provider-connections/{conn}/resolve` (fresh access token).
+  gRPC `ProviderConnectionService.ListBindings` (what to run, no tokens) and
+  gRPC `ProviderConnectionService.ResolveConnection` (fresh access token).
   The redirect-style `authorize` / `callback` / `bind` routes are **not** built here: they belong with
   the Discord `bot_invite_link` migration (Step 2), which is where a second install kind forces the
   shape. `installKind` is `credentials` until then.

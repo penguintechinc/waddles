@@ -40,8 +40,6 @@ pub const RELAY_OPS: &[(&str, &[&str])] = &[
             "reaction.add",
             "message.embed",
             "webhook.create",
-            "commands.register",
-            "commands.register.guild",
             "interaction.callback",
             "interaction.followup",
         ],
@@ -205,7 +203,7 @@ mod tests {
                 n += 1;
             }
         }
-        assert_eq!(n, 10 + 15 + 6 + 4);
+        assert_eq!(n, 10 + 13 + 6 + 4);
     }
 
     #[test]
@@ -219,12 +217,6 @@ mod tests {
             ("discord", "mod.timeout", "moderation.discord"),
             ("discord", "message.edit", "message.edit:discord"),
             ("discord", "reaction.add", "message.reaction:discord"),
-            ("discord", "commands.register", "commands.register:discord"),
-            (
-                "discord",
-                "commands.register.guild",
-                "commands.register:discord",
-            ),
             (
                 "discord",
                 "interaction.followup",
@@ -301,5 +293,17 @@ mod tests {
         assert!(registered_on_any_platform("mod.kick").is_some());
         assert!(registered_on_any_platform("nope").is_none());
         assert!(registered("twitch", "").is_none());
+    }
+
+    /// Security: command registration is a bulk overwrite of the whole guild's shared command
+    /// set, so no bundle may name it through `relay.send`. Only the platform's own reconciler
+    /// (host-built, verified against the hub-api desired state) may run it.
+    #[test]
+    fn command_registration_is_not_bundle_callable() {
+        for op in ["commands.register", "commands.register.guild"] {
+            assert!(registered("discord", op).is_none(), "{op}");
+            assert!(registered_on_any_platform(op).is_none(), "{op}");
+            assert!(permission_for("discord", op).is_none(), "{op}");
+        }
     }
 }

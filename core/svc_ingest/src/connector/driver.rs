@@ -40,6 +40,7 @@ use super::sink::{check_event_limits, EventSink, SinkError};
 use super::transport::{FrameDropReason, FrameOutcome, Transport};
 use super::types::{ConnectionCtx, ConnectorEvent, RawFrame};
 use crate::ingest::{Backoff, STABILITY_WINDOW};
+use crate::interaction_tap::{FrameTap, TapVerdict};
 
 /// A fatal driver error: a configuration/programming fault that retrying
 /// cannot fix, so [`ConnectorDriver::run`] returns it instead of looping.
@@ -220,6 +221,7 @@ pub struct ConnectorDriver<I: ConnectorInvoker, S: EventSink> {
     heartbeat_enabled: bool,
     heartbeat_send_timeout: Duration,
     gate: Arc<dyn HandshakeGate>,
+    tap: Option<Arc<dyn FrameTap>>,
 }
 
 impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
@@ -240,7 +242,17 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
             heartbeat_enabled: false,
             heartbeat_send_timeout: DEFAULT_HEARTBEAT_SEND_TIMEOUT,
             gate: Arc::new(NoopGate),
+            tap: None,
         }
+    }
+
+    /// Installs a host-side frame tap run BEFORE the connector sees a frame (the Discord
+    /// interaction intake: token capture, dedupe, 3-second ack). Without one the driver
+    /// behaves exactly as before.
+    #[must_use]
+    pub fn with_frame_tap(mut self, tap: Arc<dyn FrameTap>) -> Self {
+        self.tap = Some(tap);
+        self
     }
 
     /// Installs the pre-handshake admission gate (e.g. the Discord IDENTIFY
@@ -897,6 +909,27 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         bytes: Vec<u8>,
         logs: &mut PumpLogs,
     ) -> FrameVerdict {
+        if let Some(tap) = &self.tap {
+            match tap.on_frame(platform, &bytes).await {
+                TapVerdict::Pass => {}
+                // Already handled (redelivery): the frame is accounted for; do not route again.
+                TapVerdict::Duplicate => {
+                    return FrameVerdict {
+                        outcome: FrameOutcome::Published,
+                        fault: None,
+                        ok: true,
+                    };
+                }
+                TapVerdict::Refuse(reason) => {
+                    self.metrics.frame(platform, reason);
+                    return FrameVerdict {
+                        outcome: FrameOutcome::Dropped(FrameDropReason::PublishIncomplete),
+                        fault: None,
+                        ok: false,
+                    };
+                }
+            }
+        }
         let frame = RawFrame {
             ctx: ctx.clone(),
             bytes,

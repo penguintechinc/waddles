@@ -373,6 +373,7 @@ async fn flag_on_runs_spectrum_through_the_production_boot_and_refuses_a_mismatc
     let runtime = assemble(
         &settings,
         AssembleDeps {
+            interaction_routing: None,
             identify_budget: None,
             resolver: Arc::new(FakeHub {
                 conn,

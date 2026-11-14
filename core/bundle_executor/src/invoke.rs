@@ -371,6 +371,7 @@ impl<S: ComponentSource> Executor<S> {
         });
         let signing_keys = PlatformPublicKeys::from_cli(cfg)?;
         let connector_linkers = crate::engine::LinkerCache::new(engine.clone());
+        let max_compiles = cfg.effective_max_concurrent_compiles();
         Ok(Self {
             engine,
             linker,
@@ -385,11 +386,9 @@ impl<S: ComponentSource> Executor<S> {
             connector_linkers,
             compiling: tokio::sync::Mutex::new(HashMap::new()),
             call_limiter: Arc::new(Semaphore::new(cfg.executor_max_concurrent_calls as usize)),
-            compile_limiter: Arc::new(Semaphore::new(
-                cfg.executor_max_concurrent_compiles as usize,
-            )),
+            compile_limiter: Arc::new(Semaphore::new(max_compiles as usize)),
             max_concurrent_calls: cfg.executor_max_concurrent_calls,
-            max_concurrent_compiles: cfg.executor_max_concurrent_compiles,
+            max_concurrent_compiles: max_compiles,
             instances_per_bundle: cfg.executor_instances_per_bundle as usize,
             pool_wait: Duration::from_millis(cfg.executor_pool_wait_ms),
             draining: AtomicBool::new(false),
@@ -413,13 +412,14 @@ impl<S: ComponentSource> Executor<S> {
         limits: crate::connector::ConnectorLimits,
         bridge: Option<Arc<HostBridge>>,
     ) -> Result<(), ExecutorError> {
-        let host = crate::connector::ConnectorHost::load(
+        let host = crate::connector::ConnectorHost::load_bounded(
             &self.engine,
             &self.connector_linkers,
             manifest,
             component_bytes,
             limits,
             bridge,
+            Arc::clone(&self.compile_limiter),
         )
         .await?;
         self.connectors.pin(host).await

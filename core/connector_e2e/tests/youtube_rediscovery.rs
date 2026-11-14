@@ -382,6 +382,7 @@ async fn an_ended_live_chat_waits_then_rediscovers_the_new_stream_of_the_same_ch
     let runtime = assemble(
         &settings,
         AssembleDeps {
+            interaction_routing: None,
             identify_budget: None,
             resolver: Arc::new(FakeHub { conn }),
             scope: scope.clone(),

@@ -182,8 +182,6 @@ const TENANTAPI_ROWS: readonly ContractRow[] = [
   ['getSettings(slug)', 'GET /api/v1/tenant/{slug}/settings'],
   ['updateSettings(slug, settings)', 'PUT /api/v1/tenant/{slug}/settings', { body: { settings: '@settings' } }],
   ['getCommunities(slug, params)', 'GET /api/v1/tenant/{slug}/communities'],
-  ['getModules(slug)', 'GET /api/v1/tenant/{slug}/modules'],
-  ['updateModules(slug, allowedModuleIds)', 'PUT /api/v1/tenant/{slug}/modules', { body: { allowedModuleIds: '@allowedModuleIds' } }],
   ['getAdmins(slug)', 'GET /api/v1/tenant/{slug}/admins'],
   ['addAdmin(slug, userId, role)', 'POST /api/v1/tenant/{slug}/admins', { body: { userId: '@userId', role: '@role' } }],
   ['removeAdmin(slug, userId)', 'DELETE /api/v1/tenant/{slug}/admins/{userId}'],
