@@ -61,6 +61,31 @@ async def identity_uuid(async_dal: Any, dal: Any, *, user_id: int) -> str:
     return str(uuid.UUID(str(row.uuid)))
 
 
+async def is_community_staff(async_dal: Any, dal: Any, *, community_id: int, user_id: int) -> bool:
+    """True when `user_id` is a community owner/admin (or a global admin): room-access staff.
+
+    Staff are never refused by a room lock or schedule (`services/call_access.py`). Reuses the
+    same two definitions of "admin" the admin routes authorise with.
+    """
+    from services.community_access import _ADMIN_ROLES
+    from services.community_authz import is_super_admin
+
+    if await is_super_admin(async_dal, dal, user_id=user_id):
+        return True
+    members = dal.community_members
+    rows = await _select(
+        async_dal,
+        dal(
+            (members.community_id == community_id)
+            & (members.user_id == str(user_id))
+            & (members.is_active == True)  # noqa: E712 - pydal query operator
+            & (members.role.belongs(_ADMIN_ROLES))
+        ),
+        members.id,
+    )
+    return bool(rows)
+
+
 def _canonical(participant_id: str) -> str | None:
     """Canonical lowercase UUID text, or None when `participant_id` is not a UUID."""
     try:
