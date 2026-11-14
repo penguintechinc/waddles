@@ -35,7 +35,19 @@ HUB_CALLS = ROOT / "hub_api" / "blueprints" / "v1" / "calls.py"
 TOKEN_RS = ROOT / "core" / "svc_streaming" / "src" / "rooms" / "token.rs"
 ROOMS_PROTO = ROOT / "proto" / "waddles" / "streaming" / "internal" / "v1" / "rooms.proto"
 SERVICE = "waddles.core.service.webrtc"
-HAND_TOOLS = ("room.hand.raise", "room.hand.lower", "room.hand.list", "room.hand.ack", "room.hand.reset")
+HAND_TOOLS = (
+    "room.hand.raise",
+    "room.hand.lower",
+    "room.hand.lower_other",
+    "room.hand.list",
+    "room.hand.list_all",
+    "room.hand.ack",
+    "room.hand.reset",
+)
+# Hand tools that touch another participant's hand or the whole queue: moderate scope only.
+MODERATOR_HAND_TOOLS = ("room.hand.lower_other", "room.hand.list_all", "room.hand.ack", "room.hand.reset")
+# Hand tools that take a participant_id argument (the others act on the verified caller).
+HAND_TOOLS_WITH_PARTICIPANT = ("room.hand.lower_other", "room.hand.ack")
 MODERATOR_ONLY_TOOLS = ("room.kick", "room.mute", "room.unmute", "room.mute_all", "room.lock", "room.unlock")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -185,14 +197,31 @@ def test_hand_tools_declare_the_contract_scopes_and_schema() -> None:
         assert t.get("required_scope") == hands[name]["scope"], name
         schema = t["input_schema"]
         assert schema["additionalProperties"] is False, name
-        assert {"room_id", "actor_id", "actor_role"} <= set(schema["required"]), name
+        # The actor is the host-verified context, never an argument (security review fix).
+        forbidden = set(_contract()["hands_args_forbidden"])
+        assert forbidden == {"actor_id", "actor_role"}
+        assert not forbidden & set(schema["properties"]), f"{name} accepts a caller-asserted actor"
+        want_props = {"api_version", "room_id"} | ({"participant_id"} if name in HAND_TOOLS_WITH_PARTICIPANT else set())
+        assert set(schema["properties"]) == want_props, name
+        assert set(schema["required"]) == want_props - {"api_version"}, name
         assert schema["properties"]["api_version"] == {"enum": ["v1"]}, name
-        assert schema["properties"]["actor_role"]["enum"] == _contract()["roles"], name
-        for uuid_field in ("room_id", "actor_id", "participant_id"):
+        for uuid_field in ("room_id", "participant_id"):
             if uuid_field in schema["properties"]:
                 assert schema["properties"][uuid_field]["format"] == "uuid", (name, uuid_field)
-    assert tools["room.hand.list"]["access"] == "read"
-    assert {tools[n]["access"] for n in HAND_TOOLS if n != "room.hand.list"} == {"write"}
+    # Scope does the gating: own-hand tools need member, everything else moderate.
+    for name in HAND_TOOLS:
+        want = "community:moderate" if name in MODERATOR_HAND_TOOLS else "community:member"
+        assert tools[name]["required_scope"] == want, name
+    assert {tools[n]["access"] for n in ("room.hand.list", "room.hand.list_all")} == {"read"}
+    assert {tools[n]["access"] for n in HAND_TOOLS if "list" not in n} == {"write"}
+    # Every host op named by the contract is one of the five svc-streaming ops.
+    assert {h["host_op"] for h in hands.values()} == {
+        "room.hand.raise",
+        "room.hand.lower",
+        "room.hand.list",
+        "room.hand.ack",
+        "room.hand.reset",
+    }
 
 
 def test_moderator_only_tools_need_the_moderate_scope_and_leave_stays_member_level() -> None:
@@ -281,7 +310,11 @@ def test_rooms_fixture_sends_every_hand_tool_with_v1_and_uuid_participants() -> 
     for name in HAND_TOOLS:
         assert name in fixture, name
         assert fixture[name]["api_version"] == "v1", name
-        for k in ("room_id", "actor_id", "participant_id"):
+        assert not {"actor_id", "actor_role"} & set(fixture[name]), f"rooms sends an actor to {name}"
+        assert set(fixture[name]) == {"api_version", "room_id"} | (
+            {"participant_id"} if name in HAND_TOOLS_WITH_PARTICIPANT else set()
+        ), name
+        for k in ("room_id", "participant_id"):
             if k in fixture[name]:
                 assert UUID_RE.match(fixture[name][k]), (name, k)
 

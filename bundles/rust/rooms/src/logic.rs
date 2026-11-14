@@ -978,12 +978,12 @@ mod tests {
                     json!({"url": format!("https://m/{tool}"), "token": "T", "token_id": USER, "expires_at": 9, "extra": 1}),
                 ),
                 "room.hand.raise" => Ok(
-                    json!({"room_id": args["room_id"], "hand": {"participant_id": args["actor_id"], "raised_at": 1}}),
+                    json!({"room_id": args["room_id"], "hand": {"participant_id": USER, "raised_at": 1}}),
                 ),
-                "room.hand.lower" => Ok(
+                "room.hand.lower" | "room.hand.lower_other" => Ok(
                     json!({"room_id": args["room_id"], "participant_id": args["participant_id"], "lowered": true}),
                 ),
-                "room.hand.list" => Ok(
+                "room.hand.list" | "room.hand.list_all" => Ok(
                     json!({"room_id": args["room_id"], "count": 1, "hands": [{"participant_id": USER, "raised_at": 1, "position": 1}]}),
                 ),
                 "room.hand.ack" => Ok(
@@ -1430,7 +1430,7 @@ mod tests {
         )
         .unwrap();
         // Leave runs as USER; every other moderation command as the room admin.
-        let cmds: [(String, &str); 14] = [
+        let cmds: [(String, &str); 16] = [
             ("!room rooms list".into(), ADMIN),
             (format!("!room participants list {id}"), ADMIN),
             (format!("!room participant remove {id}"), USER),
@@ -1442,7 +1442,9 @@ mod tests {
             (format!("!room lock disable {id}"), ADMIN),
             (format!("!room hand add {id}"), USER),
             (format!("!room hand remove {id}"), USER),
+            (format!("!room hand list {id}"), USER),
             (format!("!room hand list {id}"), ADMIN),
+            (format!("!room hand remove {id} {USER}"), ADMIN),
             (format!("!room hand set ack {id} {USER}"), ADMIN),
             (format!("!room hand reset {id}"), ADMIN),
         ];
