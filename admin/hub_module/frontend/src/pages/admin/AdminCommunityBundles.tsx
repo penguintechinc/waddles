@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FormModalBuilder, type FormField } from '@penguintechinc/react-libs';
+import { type FormField } from '@penguintechinc/react-libs';
+import { FormModalBuilder } from '../../components/FormModal';
 import { useAuth } from '../../contexts/AuthContext';
 import { useFeatureFlag } from '../../lib/useFeatureFlag';
 import { bundleActivationApi, type StorageAccess, type TableAccess } from '../../services/bundleActivationApi';

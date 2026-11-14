@@ -1,14 +1,15 @@
 """Thin gRPC servicer adapters for `waddles.hub.internal.v1`.
 
-`MintEphemeralPseudonyms` (#429), `ResolveDisplayNames` (#427) and `ResolveHandle`
-are real and delegate to `services.identity_resolution_service`; `GetStreamDek`
-(#442) remains an UNIMPLEMENTED stub. Keep these methods thin adapters over plain
+`MintEphemeralPseudonyms` (#429), `ResolveDisplayNames` (#427), `ResolveHandle` and
+`GetStreamDek` (#442, `services.stream_dek_broker`) are real; identity RPCs delegate to
+`services.identity_resolution_service`. Keep these methods thin adapters over plain
 service functions -- no business logic here. Every failure aborts with a gRPC
 status; none returns a default UUID or name.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, NoReturn
 
 import grpc
@@ -32,6 +33,17 @@ from services.identity_resolution_service import (
     resolve_platform_users,
     resolve_target,
 )
+from services.stream_dek_broker import (
+    STREAM_DEK_SCOPE,
+    StreamDekDeniedError,
+    StreamDekError,
+    StreamDekInvalidError,
+    StreamDekNotFoundError,
+    StreamDekRequest,
+    StreamDekServiceDeniedError,
+    StreamDekUnavailableError,
+    broker_from_config,
+)
 
 #: Method -> required scope, consumed by `interceptors.AuthInterceptor`.
 REQUIRED_SCOPES: dict[str, str | tuple[str, ...]] = {
@@ -41,7 +53,7 @@ REQUIRED_SCOPES: dict[str, str | tuple[str, ...]] = {
     "/waddles.hub.internal.v1.IdentityService/ResolvePlatformUser": (
         "identity:platform-user:resolve"
     ),
-    "/waddles.hub.internal.v1.KeyService/GetStreamDek": "key:stream-dek:read",
+    "/waddles.hub.internal.v1.KeyService/GetStreamDek": STREAM_DEK_SCOPE,
     # Data-plane reads (provider connections, distribution, media): dataplane_servicers.py.
     **DATAPLANE_REQUIRED_SCOPES,
 }
@@ -236,14 +248,55 @@ class IdentityServicer(identity_pb2_grpc.IdentityServiceServicer):  # type: igno
         )
 
 
+_DEK_STATUS: dict[type[StreamDekError], grpc.StatusCode] = {
+    StreamDekInvalidError: grpc.StatusCode.INVALID_ARGUMENT,
+    StreamDekServiceDeniedError: grpc.StatusCode.PERMISSION_DENIED,
+    StreamDekDeniedError: grpc.StatusCode.PERMISSION_DENIED,
+    StreamDekNotFoundError: grpc.StatusCode.NOT_FOUND,
+    StreamDekUnavailableError: grpc.StatusCode.UNAVAILABLE,
+}
+
+
 class KeyServicer(key_pb2_grpc.KeyServiceServicer):  # type: ignore[misc]
-    """Adapter for `KeyService` -- ported logic lands in PR #442."""
+    """Adapter for `KeyService`: sealed per-tenant stream DEKs (`services.stream_dek_broker`)."""
+
+    def __init__(self, app_config: Mapping[str, Any] | None = None) -> None:
+        """Bind the app config; the broker is resolved per call (built after startup wiring)."""
+        self._config: Mapping[str, Any] = app_config if app_config is not None else {}
 
     async def GetStreamDek(  # noqa: N802 - grpc-generated servicer method name
         self,
         request: key_pb2.GetStreamDekRequest,
         context: grpc.aio.ServicerContext[Any, Any],
     ) -> key_pb2.GetStreamDekResponse:
-        """Stub -- real DEK sealing ports from PR #442 onto this method."""
-        await context.abort(grpc.StatusCode.UNIMPLEMENTED, "GetStreamDek: pending PR #442")
-        raise AssertionError("unreachable")
+        """Return the tenant's stream DEK sealed to the caller's ephemeral X25519 key.
+
+        Claims come only from the verified token (`AuthInterceptor`); absent claims or an
+        unwired key store fail closed. Status messages are constant and key/PII-free.
+        """
+        claims = service_claims.get()
+        tenant = claims.get("tenant") if claims else None
+        if not claims or not isinstance(tenant, str) or not tenant.strip():
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "unauthorized")
+            raise AssertionError("unreachable")
+        broker = broker_from_config(self._config)
+        if broker is None:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "key store not configured")
+            raise AssertionError("unreachable")
+        try:
+            issued = await broker.issue(
+                StreamDekRequest(
+                    tenant_id=request.tenant_id,
+                    purpose=request.purpose,
+                    version=int(request.version),
+                    caller_public_key=bytes(request.caller_ephemeral_public_key),
+                    claim_tenant=tenant,
+                    caller_sub=str(claims.get("sub", "")),
+                )
+            )
+        except StreamDekError as exc:
+            await context.abort(_DEK_STATUS.get(type(exc), grpc.StatusCode.UNAVAILABLE), str(exc))
+            raise AssertionError("unreachable") from exc
+        return key_pb2.GetStreamDekResponse(
+            sealed_dek=issued.sealed_dek, version=issued.version, ttl_seconds=issued.ttl_seconds
+        )

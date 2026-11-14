@@ -2,7 +2,7 @@ schema_version: 2
 app_id: waddles.core.example.lottery
 name: Lottery Bundle (Python)
 # 1.0.0: initial -- !lottery buy <n>/draw/claim. Economy-SDK ticket purchases, weighted draw, claim payout, activation-gated.
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin

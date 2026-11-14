@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-customcommand"
-version = "1.0.1"
+version = "1.0.2"
 description = "per-community custom text commands (!cc add/edit/del/list, then !<name> replies with $(user)/$(target)/$(count)/$(random min max) substituted; stored + substituted text sanitized on output)"
 requires-python = ">=3.13"
 dependencies = []

@@ -38,33 +38,26 @@ Replay: Valkey `SET NX PX` keyed on the Wix **event id**. 1 MiB body cap. All re
 
 ## Normalized events (contract for consumers)
 
-Every event: `platform = "wix"`, `occurred_at` = RFC 3339 Wix `eventTime`. `actor` = member **UUID** from
-`identity.lookup(platform-identity("wix", <wix member id>))`; no email/name ever. Payload keys below are
+Wix syncs **events only** (decision 2026-11-12). Every event: `platform = "wix"`, `occurred_at` = RFC 3339 Wix
+`eventTime`, `actor` = none (no member id is read, no `identity.lookup`, no `connector.pii.read`). Payload keys below are
 exhaustive; every payload also carries `event_id` (Wix event id), `instance_id` and `time_source` (`"wix"` when `occurred_at` is Wix's own `eventTime`, `"received"` for the receive-time fallback -- non-orderable, consumers must never compare it with Wix times). Unknown `eventType`s are skipped
 (counted, never an error).
 
 | event_type | Wix source | actor | payload (besides event_id, instance_id) |
 |---|---|---|---|
-| `member.linked` | `member_created` | member UUID | `{}` |
-| `member.updated` | `member_updated` | member UUID | `{}` |
-| `member.deleted` | `member_deleted` | member UUID | `{}` |
-| `subscription.started` | `order_purchased`/`order_started`/`order_resumed` with status ACTIVE | member UUID | `{order_id, plan_id, status}` |
-| `subscription.changed` | `order_updated`, `order_marked_as_paid` | member UUID | `{order_id, plan_id, status}` |
-| `subscription.ended` | `order_ended`, `order_canceled`, `order_paused` | member UUID | `{order_id, plan_id, status, reason: "ended"\|"canceled"\|"paused"}` |
 | `event.created` | `wix.events.v3.event_created` | none | `{wix_event_id, title, starts_at, ends_at, timezone, location, status}` |
 | `event.updated` | `event_updated` | none | same |
 | `event.canceled` | `event_canceled`, `event_deleted` | none | same (`status` is the Wix status or `"DELETED"`) |
 
-Rules for consumers: `subscription.started` can fire more than once per order (purchase then start) -- upsert on
-`(actor, plan_id)`. Delivery is at-least-once and unordered: compare `occurred_at`. A member-bound event whose Wix
-member has no linked Waddles identity is **dropped and counted** (`skipped`), not emitted with a null actor.
-`plan_id` / `wix_event_id` are Wix opaque ids; mapping plan -> role / event -> calendar entry is consumer config.
+Rules for consumers: delivery is at-least-once and unordered: compare `occurred_at`. Member
+(`wix.members.v1.*`) and pricing-plan/order webhooks are **ignored** -- skipped and counted, 0 records.
+`wix_event_id` is a Wix opaque id; mapping event -> calendar entry is consumer config.
 Not emitted (out of scope): RSVP/ticket/order-of-tickets events.
 
 ## Operator setup (Wix side)
 
-1. Wix app dashboard -> Webhooks: subscribe Member Created/Updated/Deleted, Pricing Plans Order Purchased/Started/
-   Updated/Ended/Canceled/Paused/Resumed, Events Event Created/Updated/Canceled; callback URL =
+1. Wix app dashboard -> Webhooks: subscribe Events Event Created/Updated/Canceled only (member and pricing-plan
+   webhooks are ignored); callback URL =
    `https://<svc-ingest host>/intake/webhook/<route_key>` (route key shown by hub-api for the connection).
 2. Copy the app **public key** (app home -> "View ID and Keys") and the site **instance id** into the community's
    Wix provider connection (hub-api `provider_connections`, provider `wix`: secret = public key, metadata

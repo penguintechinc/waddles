@@ -8,7 +8,7 @@ import {
   ClockIcon,
 } from '@heroicons/react/24/outline';
 import { adminApi } from '../../services/api';
-import { FormModalBuilder } from '@penguintechinc/react-libs';
+import { FormModalBuilder } from '../../components/FormModal';
 import { WADDLES_COLORS } from '../../theme/waddlebotTheme';
 
 function AdminPolls() {

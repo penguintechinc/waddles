@@ -2,7 +2,7 @@ schema_version: 2
 app_id: waddles.core.example.say
 name: Say Bundle (Python)
 # 1.0.0: initial -- `!say <text>` (moderator/broadcaster only) relays the text as an announcement.
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin

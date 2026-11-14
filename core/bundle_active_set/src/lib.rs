@@ -98,6 +98,6 @@ pub use session_sync::{
 };
 pub use snapshot::{ActiveVersionSnapshot, ToolTargetEntry};
 pub use tools::{
-    ExportedToolInfo, HostOpDecl, HostOpOrigin, HostOpUserWire, RequestedToolInfo, ToolManifestInfo,
-    MCP_TOOLS_CAPABILITY,
+    ExportedToolInfo, HostOpDecl, HostOpOrigin, HostOpUserWire, RequestedToolInfo,
+    ToolManifestInfo, MCP_TOOLS_CAPABILITY,
 };
