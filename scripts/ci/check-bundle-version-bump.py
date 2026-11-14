@@ -20,9 +20,32 @@ import yaml
 
 CATALOG = "bundles/core-bundles.yaml"
 # Inputs shared by every Python bundle build (bundles/Dockerfile.core-bundles COPY list).
-PYTHON_SHARED_INPUTS = ("wit/", "sdk/waddle-sdk/src/", "bundles/build_python_bundles.py")
+PYTHON_SHARED_INPUTS = (
+    "wit/",
+    "sdk/waddle-sdk/src/",
+    "bundles/build_python_bundles.py",
+)
 # Files that carry the version itself; editing only these never requires a further bump.
 VERSION_ONLY_FILES = ("hub-manifest.yaml", "bundle.yaml", "pyproject.toml")
+# Files/dirs inside a bundle dir that never reach the built component (the Dockerfile builds
+# src/, the manifest and Cargo/pyproject metadata; build_python_bundles.py reads only
+# <dir>/src + <dir>/hub-manifest.yaml): docs, license/notice files, and test trees. A docs- or
+# test-only edit never changes the artifact digest, so it never requires a version bump.
+NON_BUILD_SUFFIXES = (".md", ".rst", ".txt")
+NON_BUILD_NAME_PREFIXES = ("LICENSE", "LICENCE", "NOTICE", "COPYING", "AUTHORS")
+NON_BUILD_DIRS = ("docs", "tests")
+
+
+def _is_non_build_file(path: str, bundle_prefix: str) -> bool:
+    """True when `path` (inside `bundle_prefix`) is docs/license/test content, not a build input."""
+    rel = path[len(bundle_prefix) :]
+    parts = rel.split("/")
+    name = parts[-1]
+    if any(part in NON_BUILD_DIRS for part in parts[:-1]):
+        return True
+    return name.endswith(NON_BUILD_SUFFIXES) or name.upper().startswith(
+        NON_BUILD_NAME_PREFIXES
+    )
 
 
 def _entries(catalog_text: str) -> dict[str, dict]:
@@ -49,7 +72,9 @@ def find_unbumped(
             continue
         src = f"bundles/{entry['source_dir'].rstrip('/')}/"
         own_changed = any(
-            p.startswith(src) and p.rsplit("/", 1)[-1] not in VERSION_ONLY_FILES
+            p.startswith(src)
+            and p.rsplit("/", 1)[-1] not in VERSION_ONLY_FILES
+            and not _is_non_build_file(p, src)
             for p in changed
         )
         if own_changed or (entry.get("language") == "python" and shared_changed):
@@ -59,7 +84,9 @@ def find_unbumped(
 
 def _git(*args: str) -> str:
     """Run git and return stdout; raises on failure so the gate cannot silently pass."""
-    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout
+    return subprocess.run(
+        ["git", *args], check=True, capture_output=True, text=True
+    ).stdout
 
 
 def main(argv: list[str], env: Mapping[str, str] | None = None) -> int:
@@ -78,7 +105,9 @@ def main(argv: list[str], env: Mapping[str, str] | None = None) -> int:
         print(f"FAIL: 0 bundles examined in {CATALOG}", file=sys.stderr)
         return 1
     bad = find_unbumped(base_cat, head_cat, changed)
-    print(f"bundle-version-bump: examined {examined} bundles, {len(changed)} changed paths")
+    print(
+        f"bundle-version-bump: examined {examined} bundles, {len(changed)} changed paths"
+    )
     if bad:
         print(
             f"FAIL: {len(bad)} bundle(s) changed build inputs without a version bump "
