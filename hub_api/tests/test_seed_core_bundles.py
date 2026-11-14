@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -2138,7 +2139,7 @@ async def test_seed_one_seeds_each_real_connector_row_and_grants_its_declared_pe
     declares it (not for the events-only Wix connector).
     """
     _patch_validator_and_storage(monkeypatch)
-    bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
+    bundles_dir = Path(__file__).resolve().parents[2] / "bundles"  # noqa: ASYNC240
     catalog = {e.app_id: e for e in load_catalog(bundles_dir / "core-bundles.yaml")}
     real = catalog[app_id]
     (tmp_path / real.manifest_path).write_bytes(
@@ -2310,3 +2311,136 @@ def test_every_real_core_bundle_manifest_has_a_derivable_vendor() -> None:
         seeder._assert_vendor_derivable(manifest)
         checked += 1
     assert checked >= 100, f"only {checked} manifests examined"
+
+
+def _single_row_catalog(tmp_path: Path, entry: CatalogEntry, language: str) -> Path:
+    """Write a one-row catalog for `entry` with the given `language`; return its path."""
+    catalog_path = tmp_path / "core-bundles.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(
+            {
+                "bundles": [
+                    {
+                        "app_id": entry.app_id,
+                        "version": entry.version,
+                        "language": language,
+                        "manifest_path": "ping.manifest.yaml",
+                        "artifact_path": "ping.wasm",
+                        "activation_targets": [{"tenant_slug": TENANT_SLUG}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return catalog_path
+
+
+async def test_python_digest_mismatch_is_a_logged_counted_noop_keeping_the_row(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Policy: componentize-py bundles are not byte-checked; mismatch is logged, counted, kept."""
+    _patch_validator_and_storage(monkeypatch)
+    rust_entry = _write_bundle(tmp_path)
+    entry = replace(rust_entry, language="python")
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    before = (await install_dal(install_dal.app_versions.app_id == entry.app_id).select()).first()
+
+    (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES + b"-different-content")
+    drift: list[str] = []
+    with caplog.at_level("INFO", logger="waddles.hub_api.core_bundle_seeder"):
+        await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock(), digest_drift=drift)
+
+    rows = await install_dal(install_dal.app_versions.app_id == entry.app_id).select()
+    assert len(rows) == 1
+    assert rows.first().artifact_digest == before.artifact_digest  # existing row kept
+    assert len(drift) == 1
+    assert f"existing={before.artifact_digest[:12]}" in drift[0]
+    assert f"{entry.app_id}@{entry.version}" in drift[0]
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelname == "WARNING" and "byte-check not enforced (policy)" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert entry.app_id in warnings[0].getMessage()
+    assert warnings[0].existing_digest_prefix == before.artifact_digest[:12]
+    assert warnings[0].this_build_digest_prefix != warnings[0].existing_digest_prefix
+
+
+async def test_run_python_digest_mismatch_is_not_a_conflict_or_failure(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`_run()`: exit 0, NOT in skipped_conflicts, counted in digest_drift_not_enforced."""
+    _patch_validator_and_storage(monkeypatch)
+    _patch_run_dependencies(install_dal, monkeypatch)
+    entry = _write_bundle(tmp_path)
+    catalog_path = _single_row_catalog(tmp_path, entry, "python")
+
+    assert await seeder._run(tmp_path, catalog_path) == 0
+    (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES + b"-drifted")
+    with caplog.at_level("INFO", logger="waddles.hub_api.core_bundle_seeder"):
+        assert await seeder._run(tmp_path, catalog_path) == 0
+
+    summary = [
+        r for r in caplog.records if r.getMessage().startswith("core-bundle-seeder: summary")
+    ][-1]
+    assert summary.failures == 0
+    assert summary.skipped_conflicts == []
+    assert len(summary.digest_drift_not_enforced) == 1
+    assert not [r for r in caplog.records if getattr(r, "error_code", None) == "digest_conflict"]
+
+
+@pytest.mark.parametrize("language", ["rust", "csharp"])
+async def test_compiled_digest_mismatch_still_raises_digest_conflict(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str
+) -> None:
+    """Compiled (rust/csharp) bundles keep the strict 409 digest_conflict byte check."""
+    _patch_validator_and_storage(monkeypatch)
+    entry = replace(_write_bundle(tmp_path), language=language)
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES + b"-different-content")
+
+    drift: list[str] = []
+    with pytest.raises(ApiError) as excinfo:
+        await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock(), digest_drift=drift)
+    assert excinfo.value.code == "digest_conflict"
+    assert excinfo.value.status_code == 409
+    assert drift == []
+
+
+async def test_unknown_catalog_language_fails_loud(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A language that is neither compiled nor scripted is a loud seeder error, not a guess."""
+    _patch_validator_and_storage(monkeypatch)
+    entry = replace(_write_bundle(tmp_path), language="go")
+    with pytest.raises(CoreBundleSeederError, match="unknown catalog language 'go'"):
+        await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+
+async def test_run_unknown_catalog_language_fails_the_run(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_run()` counts an unknown-language row as a failure (non-zero exit)."""
+    _patch_validator_and_storage(monkeypatch)
+    _patch_run_dependencies(install_dal, monkeypatch)
+    entry = _write_bundle(tmp_path)
+    catalog_path = _single_row_catalog(tmp_path, entry, "go")
+    assert await seeder._run(tmp_path, catalog_path) == 1
+
+
+def test_every_catalog_language_is_classified_compiled_or_scripted() -> None:
+    """Every real catalog row's language is known to the digest policy (no unknown fails loud)."""
+    catalog = Path(__file__).resolve().parents[2] / "bundles" / "core-bundles.yaml"
+    entries = seeder.load_catalog(catalog)
+    assert len(entries) >= 100
+    known = seeder.COMPILED_LANGUAGES | seeder.SCRIPTED_LANGUAGES
+    unknown = {e.language for e in entries} - known
+    assert not unknown, f"unclassified catalog languages: {unknown}"
