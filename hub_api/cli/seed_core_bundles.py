@@ -36,8 +36,9 @@ points at that same `version_id`, activation is skipped too (a true no-op, logge
 `app_install_approvals` row). A different digest under the SAME version string is a data
 integrity conflict (app_versions has its own `UNIQUE(app_id, version)`) -- refused, not
 overwritten; bump the catalog's `version` field alongside the artifact. **That byte check is
-enforced for COMPILED bundles only (`language: rust|csharp|go`).** `componentize-py` (python)
-builds are not byte-reproducible, so by policy a python digest mismatch is a logged, counted
+enforced for COMPILED bundles only (`language: rust|csharp|go`).** Scripted bundles (python via
+`componentize-py`, which is not byte-reproducible; `javascript`/`nodejs` aliases; `typescript`;
+`ruby`) are not byte-checked: by policy a scripted digest mismatch is a logged, counted
 no-op (`digest_drift_not_enforced` in the summary) that keeps the existing row; signature +
 hash verification for all packages is deferred to v3.2.x.
 
@@ -153,12 +154,27 @@ _APP_ID_CHARSET_RE = re.compile(r"^[a-z0-9]+(\.[a-z0-9-]+)+$")
 #: enforced for these ONLY -- a mismatch is a hard `digest_conflict` (see below).
 COMPILED_LANGUAGES = frozenset({"rust", "csharp", "go"})
 
-#: Catalog `language` values built by `componentize-py` (a wizened CPython snapshot). Those
-#: builds are NOT byte-reproducible (same source, same pinned container -> a different sha256
-#: every build; issue #521), so by policy (2026-11-13) the byte check is NOT enforced for them:
-#: a digest mismatch at the same `(app_id, version)` is a logged, counted no-op that keeps the
+#: Catalog `language` values for SCRIPTED bundles: python (built by `componentize-py`, a
+#: wizened CPython snapshot -- NOT byte-reproducible, same source + pinned container -> a
+#: different sha256 every build; issue #521) and Node.js / TypeScript / Ruby bundles (owner decision
+#: 2026-11-13: scripted like python). `javascript` and `nodejs` are ALIASES of one class (Node.js
+#: bundles); `typescript` is its own entry. By policy the byte check is NOT enforced for them: a
+#: digest mismatch at the same `(app_id, version)` is a logged, counted no-op that keeps the
 #: existing row. Signature + hash verification for ALL packages is deferred to v3.2.x.
-SCRIPTED_LANGUAGES = frozenset({"python"})
+#: Both sets are plain frozenset literals of string literals -- the Rust parity test
+#: (core/bundle_active_set executor_profile) parses them textually; keep that shape.
+SCRIPTED_LANGUAGES = frozenset({"python", "javascript", "nodejs", "typescript", "ruby"})
+
+
+def normalize_language(language: str) -> str:
+    """Canonical form of a catalog `language` for set membership: stripped + lower-cased.
+
+    `Rust`, ` rust ` and `rust` are the same language; aliases (`javascript`/`nodejs`) are
+    members of `SCRIPTED_LANGUAGES` themselves, so no alias table is needed. Unknown values are
+    returned unchanged (normalized) and rejected by the caller -- never guessed.
+    """
+    return language.strip().lower()
+
 
 #: `ApiError.code` values that must NOT abort the whole Helm hook (gh-576: "seeder fails
 #: whole hook on one conflict"). Today this is exactly `digest_conflict` --
@@ -733,14 +749,16 @@ async def _resolve_or_publish_version(
     (`app_versions` is immutable per version string, spec Sec6.10) -- the catalog's `version`
     must be bumped alongside the artifact, never silently republished under the same string.
 
-    For a SCRIPTED bundle (`SCRIPTED_LANGUAGES`, componentize-py -- not byte-reproducible),
-    the byte check is NOT enforced (policy): a mismatch is logged at WARNING with both digest
-    prefixes, appended to `digest_drift` (when given) so the run summary counts it, and the
-    existing row is kept. An unknown `entry.language` raises `CoreBundleSeederError`.
+    For a SCRIPTED bundle (`SCRIPTED_LANGUAGES`: python, javascript/nodejs, typescript, ruby -- no
+    byte-reproducible build), the byte check is NOT enforced (policy): a mismatch is logged at
+    WARNING with both digest prefixes, appended to `digest_drift` (when given) so the run
+    summary counts it, and the existing row is kept. `entry.language` is matched
+    case-insensitively (`normalize_language`); an unknown value raises `CoreBundleSeederError`.
     """
-    if entry.language in COMPILED_LANGUAGES:
+    language = normalize_language(entry.language)
+    if language in COMPILED_LANGUAGES:
         enforce_digest = True
-    elif entry.language in SCRIPTED_LANGUAGES:
+    elif language in SCRIPTED_LANGUAGES:
         enforce_digest = False
     else:
         raise CoreBundleSeederError(

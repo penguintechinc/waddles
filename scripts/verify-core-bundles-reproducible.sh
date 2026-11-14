@@ -24,8 +24,9 @@
 #
 # Policy (2026-11-13): the core-bundle-seeder's byte-identical digest check is enforced for
 # COMPILED bundles only (Rust/C#/Go) -- exactly what this gate proves reproducible. Python
-# (componentize-py) bundles are NOT byte-checked by the seeder (a mismatch is a logged, counted
-# no-op, see hub_api/cli/seed_core_bundles.py SCRIPTED_LANGUAGES). Signature + hash checks for
+# (componentize-py), Node.js (javascript/nodejs), TypeScript and Ruby bundles are scripted and NOT
+# byte-checked by the seeder (a mismatch is a logged, counted no-op, see
+# hub_api/cli/seed_core_bundles.py SCRIPTED_LANGUAGES). Signature + hash checks for
 # all packages are deferred to v3.2.x.
 #
 # This script builds the FULL final image (not just one stage) so it also exercises the

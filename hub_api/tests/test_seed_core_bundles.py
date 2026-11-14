@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2336,16 +2337,20 @@ def _single_row_catalog(tmp_path: Path, entry: CatalogEntry, language: str) -> P
     return catalog_path
 
 
-async def test_python_digest_mismatch_is_a_logged_counted_noop_keeping_the_row(
+@pytest.mark.parametrize(
+    "language", ["python", "javascript", "nodejs", "typescript", "TypeScript", "ruby"]
+)
+async def test_scripted_digest_mismatch_is_a_logged_counted_noop_keeping_the_row(
     install_dal: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    language: str,
 ) -> None:
-    """Policy: componentize-py bundles are not byte-checked; mismatch is logged, counted, kept."""
+    """Policy: scripted (python/node/ts) bundles are not byte-checked; logged, counted, kept."""
     _patch_validator_and_storage(monkeypatch)
     rust_entry = _write_bundle(tmp_path)
-    entry = replace(rust_entry, language="python")
+    entry = replace(rust_entry, language=language)
     await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
     before = (await install_dal(install_dal.app_versions.app_id == entry.app_id).select()).first()
 
@@ -2371,17 +2376,21 @@ async def test_python_digest_mismatch_is_a_logged_counted_noop_keeping_the_row(
     assert warnings[0].this_build_digest_prefix != warnings[0].existing_digest_prefix
 
 
-async def test_run_python_digest_mismatch_is_not_a_conflict_or_failure(
+@pytest.mark.parametrize(
+    "language", ["python", "javascript", "nodejs", "typescript", "TypeScript", "ruby"]
+)
+async def test_run_scripted_digest_mismatch_is_not_a_conflict_or_failure(
     install_dal: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    language: str,
 ) -> None:
     """`_run()`: exit 0, NOT in skipped_conflicts, counted in digest_drift_not_enforced."""
     _patch_validator_and_storage(monkeypatch)
     _patch_run_dependencies(install_dal, monkeypatch)
     entry = _write_bundle(tmp_path)
-    catalog_path = _single_row_catalog(tmp_path, entry, "python")
+    catalog_path = _single_row_catalog(tmp_path, entry, language)
 
     assert await seeder._run(tmp_path, catalog_path) == 0
     (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES + b"-drifted")
@@ -2397,7 +2406,7 @@ async def test_run_python_digest_mismatch_is_not_a_conflict_or_failure(
     assert not [r for r in caplog.records if getattr(r, "error_code", None) == "digest_conflict"]
 
 
-@pytest.mark.parametrize("language", ["rust", "csharp", "go"])
+@pytest.mark.parametrize("language", ["rust", "csharp", "go", "RUST"])
 async def test_compiled_digest_mismatch_still_raises_digest_conflict(
     install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str
 ) -> None:
@@ -2420,8 +2429,8 @@ async def test_unknown_catalog_language_fails_loud(
 ) -> None:
     """A language that is neither compiled nor scripted is a loud seeder error, not a guess."""
     _patch_validator_and_storage(monkeypatch)
-    entry = replace(_write_bundle(tmp_path), language="ruby")
-    with pytest.raises(CoreBundleSeederError, match="unknown catalog language 'ruby'"):
+    entry = replace(_write_bundle(tmp_path), language="cobol")
+    with pytest.raises(CoreBundleSeederError, match="unknown catalog language 'cobol'"):
         await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
 
 
@@ -2432,7 +2441,7 @@ async def test_run_unknown_catalog_language_fails_the_run(
     _patch_validator_and_storage(monkeypatch)
     _patch_run_dependencies(install_dal, monkeypatch)
     entry = _write_bundle(tmp_path)
-    catalog_path = _single_row_catalog(tmp_path, entry, "ruby")
+    catalog_path = _single_row_catalog(tmp_path, entry, "cobol")
     assert await seeder._run(tmp_path, catalog_path) == 1
 
 
@@ -2442,5 +2451,25 @@ def test_every_catalog_language_is_classified_compiled_or_scripted() -> None:
     entries = seeder.load_catalog(catalog)
     assert len(entries) >= 100
     known = seeder.COMPILED_LANGUAGES | seeder.SCRIPTED_LANGUAGES
-    unknown = {e.language for e in entries} - known
+    unknown = {seeder.normalize_language(e.language) for e in entries} - known
     assert not unknown, f"unclassified catalog languages: {unknown}"
+
+
+def test_language_classes_are_disjoint_and_exactly_the_owner_policy() -> None:
+    """Compiled = rust/csharp/go; scripted = python + node aliases + typescript + ruby; disjoint."""
+    assert seeder.COMPILED_LANGUAGES == frozenset({"rust", "csharp", "go"})
+    assert seeder.SCRIPTED_LANGUAGES == frozenset(
+        {"python", "javascript", "nodejs", "typescript", "ruby"}
+    )
+    assert not seeder.COMPILED_LANGUAGES & seeder.SCRIPTED_LANGUAGES
+    assert seeder.normalize_language("  NodeJS ") == "nodejs"
+
+
+def test_language_sets_stay_plain_frozenset_string_literals() -> None:
+    """The Rust executor_profile parity test parses these textually -- keep the literal shape."""
+    src = (Path(__file__).resolve().parents[1] / "cli" / "seed_core_bundles.py").read_text()
+    for name in ("COMPILED_LANGUAGES", "SCRIPTED_LANGUAGES"):
+        match = re.search(
+            rf"^{name} = frozenset\(\{{((?:\s*\"[a-z0-9_-]+\",?)+)\s*\}}\)$", src, re.M
+        )
+        assert match, f"{name} is no longer a plain frozenset literal of string literals"

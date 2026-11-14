@@ -11,7 +11,7 @@ chat message (the `!ping` / `!pyping` / `!csping` "big three" language check). I
 **excluded** from the core-bundle reproducible-build gate
 (`.github/workflows/core-bundles-reproducible.yml`; see gh-521 for the `componentize-py`
 snapshot non-determinism), and the core-bundle seeder does not byte-check Python bundles
-(compiled Rust/C#/Go only; signature + hash checks arrive in v3.2.x). Keep it deliberately tiny.
+(compiled Rust/C#/Go only; scripted python/Node.js/TypeScript/Ruby are skipped; signature + hash checks arrive in v3.2.x). Keep it deliberately tiny.
 
 ## Commands
 
