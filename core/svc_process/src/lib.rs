@@ -207,6 +207,31 @@ fn build_ai_wiring(
     }
 }
 
+/// Resolves the deployment environment name the dev-DEK gate is checked against.
+///
+/// An unset `WADDLES_ENV` must never satisfy the dev gate, so it resolves to `production`
+/// (which `LocalDevDekProvider` refuses) -- and the fallback is logged, not silent. A value that
+/// is set but not valid unicode is likewise treated as `production` and logged as an error.
+fn dev_gate_environment(raw: Result<String, std::env::VarError>) -> String {
+    match raw {
+        Ok(name) => name,
+        Err(std::env::VarError::NotPresent) => {
+            tracing::warn!(
+                "WADDLES_ENV is unset; treating the environment as production for the \
+                 INGEST_DEV_KEK gate (the dev key provider will be refused)"
+            );
+            "production".to_string()
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            tracing::error!(
+                "WADDLES_ENV is not valid unicode; treating the environment as production \
+                 for the INGEST_DEV_KEK gate (the dev key provider will be refused)"
+            );
+            "production".to_string()
+        }
+    }
+}
+
 /// Builds this stage's tenant stream-DEK source (`crate::identity_crypto`): the counterpart of
 /// svc-ingest's encrypt side, shared by every consumer through `Config::identity_dek`.
 ///
@@ -231,8 +256,7 @@ fn build_dek_provider(
     use hub_client::dek::{ConfiguredDekProvider, LocalDevDekProvider, STREAM_DEK_SCOPE};
 
     if std::env::var_os("INGEST_DEV_KEK").is_some() {
-        // Unset `WADDLES_ENV` must never satisfy the dev gate: default to production.
-        let env_name = std::env::var("WADDLES_ENV").unwrap_or_else(|_| "production".to_string());
+        let env_name = dev_gate_environment(std::env::var("WADDLES_ENV"));
         match LocalDevDekProvider::new(&env_name, "INGEST_DEV_KEK") {
             Ok(provider) => return Ok(ConfiguredDekProvider::local_dev(provider)),
             Err(err) => tracing::error!(
@@ -2614,6 +2638,28 @@ async fn spawn_v2_registry_refresh(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dev_gate_environment_defaults_to_production_never_a_dev_env() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        assert_eq!(dev_gate_environment(Ok("alpha".to_string())), "alpha");
+        for unusable in [
+            Err(std::env::VarError::NotPresent),
+            Err(std::env::VarError::NotUnicode(OsString::from_vec(vec![
+                0xff,
+            ]))),
+        ] {
+            let name = dev_gate_environment(unusable);
+            assert_eq!(name, "production");
+            // The fallback must be refused by the dev-key gate itself, end to end.
+            assert!(matches!(
+                hub_client::dek::LocalDevDekProvider::from_kek(&name, [7u8; 32]),
+                Err(hub_client::dek::LocalDevDekProviderError::EnvironmentNotAllowed(_))
+            ));
+        }
+    }
+
     /// Wiring: bundle-kv goes to `VALKEY_KV_URL` (dedicated), the spine config
     /// stays on the durable `VALKEY_URL`; unset kv URL => None (no fallback).
     #[test]
