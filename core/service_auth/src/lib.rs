@@ -722,22 +722,124 @@ impl TrustBundle for JwksTrustBundle {
     }
 }
 
+/// Fraction (percent) of a token's lifetime after which [`MachineJwtClient`] proactively
+/// refreshes it -- or `exp - CLOCK_SKEW_SECONDS`, whichever is earlier. The old token stays
+/// usable (until `exp - skew`) while the refresh runs, so a refresh never stalls callers.
+pub const TOKEN_REFRESH_PERCENT: u32 = 80;
+
+/// Base of the jittered window after a failed refresh during which callers get the same
+/// failure replayed (or the still-valid old token) instead of each re-hitting hub-api.
+pub const TOKEN_REFRESH_FAILURE_BACKOFF: Duration = Duration::from_millis(500);
+
+/// Counter `waddles_hub_service_jwt{result,scope}` (exposed as `..._total`): every
+/// [`MachineJwtClient::get_token`] outcome. `reuse` = served from the cache (the steady
+/// state: ~every call), `refresh` = a mint round trip to hub-api succeeded, `refresh_failed`
+/// = the mint failed (callers then got the old still-valid token, or the shared error).
+const METRIC_SERVICE_JWT: &str = "waddles_hub_service_jwt";
+
+/// Records one `get_token` outcome on the process-global meter (a no-op until the host
+/// installs a provider; telemetry never affects a token decision). `scope` is a closed,
+/// configured vocabulary (a handful of hub-api scopes), never caller-supplied data.
+fn record_token_result(scope: &str, result: &'static str) {
+    static COUNTER: std::sync::OnceLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::OnceLock::new();
+    let counter = COUNTER.get_or_init(|| {
+        opentelemetry::global::meter("waddles.service_auth.token")
+            .u64_counter(METRIC_SERVICE_JWT)
+            .with_description(
+                "Machine-JWT acquisitions by result: reuse (cache hit), refresh (hub-api mint), \
+                 refresh_failed (mint failed; old valid token or shared error returned).",
+            )
+            .build()
+    });
+    counter.add(
+        1,
+        &[
+            opentelemetry::KeyValue::new("result", result),
+            opentelemetry::KeyValue::new("scope", scope.to_owned()),
+        ],
+    );
+}
+
+/// `base` scaled by a pseudo-random factor in `[0.75, 1.25)`: de-synchronises retry/backoff
+/// windows so a fleet of waiters that failed together do not all retry together. Not
+/// cryptographic -- only spreads load.
+#[must_use]
+pub fn jittered(base: Duration) -> Duration {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::from(d.subsec_nanos()));
+    // splitmix64 over (clock nanos ^ a per-call sequence): cheap, well mixed.
+    let mut z = nanos ^ SEQ.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    #[allow(clippy::cast_precision_loss)]
+    let fraction = (z >> 11) as f64 / (1u64 << 53) as f64;
+    base.mul_f64(0.75 + 0.5 * fraction)
+}
+
+/// A refresh failure replayable to every caller that queued behind it (the error type itself
+/// is not `Clone`: `io::Error`).
+struct SharedFailure {
+    until: tokio::time::Instant,
+    error: ServiceAuthError,
+}
+
+/// Rebuilds an equal [`ServiceAuthError`] from `err` (all variants but `io::Error` clone as-is).
+fn replicate(err: &ServiceAuthError) -> ServiceAuthError {
+    match err {
+        ServiceAuthError::UnknownKeyId(k) => ServiceAuthError::UnknownKeyId(k.clone()),
+        ServiceAuthError::InvalidToken(m) => ServiceAuthError::InvalidToken(m.clone()),
+        ServiceAuthError::BootstrapRejected(m) => ServiceAuthError::BootstrapRejected(m.clone()),
+        ServiceAuthError::Grpc(status) => ServiceAuthError::Grpc(status.clone()),
+        ServiceAuthError::Config(m) => ServiceAuthError::Config(m.clone()),
+        ServiceAuthError::Io(e) => {
+            ServiceAuthError::Io(std::io::Error::new(e.kind(), e.to_string()))
+        }
+    }
+}
+
 /// Obtains, caches and refreshes a machine JWT for one calling service
 /// (`svc_process`, `svc_action`, ...). Bootstraps against hub-api's
 /// `ServiceAuthService.MintServiceToken` (gRPC, TLS 1.3) using the pod's own
 /// projected Kubernetes ServiceAccount token -- no shared secret is ever
 /// distributed to callers.
+///
+/// A client is **single-scope** (hub-api mints a token per requested scope, so a cached token
+/// is valid exactly for that scope and is never reused for another one); the token is a
+/// process-wide asset shared by every caller of the same client:
+///
+/// - **Reuse:** a cached token is returned until [`TOKEN_REFRESH_PERCENT`]% of its lifetime
+///   (or `exp - CLOCK_SKEW_SECONDS`, whichever is earlier) has elapsed.
+/// - **Single-flight refresh:** concurrent callers that miss queue behind one refresh; the
+///   leader mints, the rest re-check the cache it just filled -- N callers cost one mint.
+/// - **Shared failure:** a failed refresh is recorded for a short jittered window
+///   ([`TOKEN_REFRESH_FAILURE_BACKOFF`]); callers inside it get the same error replayed (never
+///   a fresh mint), or -- if the previous token is still valid -- that token, so a hub-api
+///   blip at refresh time does not fail traffic that already holds a good credential.
 pub struct MachineJwtClient {
     hub: HubChannel,
     sa_token_path: String,
     scope: String,
     cached: RwLock<Option<CachedToken>>,
+    /// Single-flight gate: held across a refresh (an `.await`), hence a tokio mutex.
+    flight: Mutex<()>,
+    /// The last refresh failure, replayed inside its window. Only touched in short sync
+    /// sections (never across an `.await`).
+    failure: std::sync::Mutex<Option<SharedFailure>>,
 }
 
 #[derive(Clone)]
 struct CachedToken {
     token: Arc<str>,
-    expires_at: u64,
+    /// Past this instant the token is refreshed on the next call (but still served while
+    /// `usable_until` holds and a refresh is failing).
+    refresh_at: tokio::time::Instant,
+    /// `exp - CLOCK_SKEW_SECONDS`: the last instant the token may be handed out.
+    usable_until: tokio::time::Instant,
 }
 
 impl MachineJwtClient {
@@ -781,34 +883,116 @@ impl MachineJwtClient {
             sa_token_path: sa_token_path.into(),
             scope: scope.into(),
             cached: RwLock::new(None),
+            flight: Mutex::new(()),
+            failure: std::sync::Mutex::new(None),
         }
     }
 
-    /// Return a currently-valid machine JWT, minting/refreshing one from
-    /// hub-api if the cache is empty or within `CLOCK_SKEW_SECONDS` of
-    /// expiry.
+    /// The scope this client's tokens are minted for.
+    #[must_use]
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    /// Cached token still before its proactive-refresh point, if any.
+    async fn fresh(&self) -> Option<Arc<str>> {
+        let now = tokio::time::Instant::now();
+        let guard = self.cached.read().await;
+        guard
+            .as_ref()
+            .filter(|c| now < c.refresh_at)
+            .map(|c| c.token.clone())
+    }
+
+    /// Cached token that may still be handed out (before `exp - skew`), refresh due or not.
+    async fn usable(&self) -> Option<Arc<str>> {
+        let now = tokio::time::Instant::now();
+        let guard = self.cached.read().await;
+        guard
+            .as_ref()
+            .filter(|c| now < c.usable_until)
+            .map(|c| c.token.clone())
+    }
+
+    /// Locks the failure slot, recovering a poisoned lock (plain data, nothing torn).
+    fn lock_failure(&self) -> std::sync::MutexGuard<'_, Option<SharedFailure>> {
+        self.failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A still-live shared failure, replayed (`None` once its window has passed).
+    fn replayed_failure(&self) -> Option<ServiceAuthError> {
+        let guard = self.lock_failure();
+        guard
+            .as_ref()
+            .filter(|f| tokio::time::Instant::now() < f.until)
+            .map(|f| replicate(&f.error))
+    }
+
+    /// Return a currently-valid machine JWT: the cached one until [`TOKEN_REFRESH_PERCENT`]%
+    /// of its lifetime has passed, otherwise one (single-flighted) refresh from hub-api.
+    /// See the type docs for the reuse / single-flight / shared-failure contract.
     pub async fn get_token(&self) -> Result<Arc<str>, ServiceAuthError> {
-        let now = now_secs();
-        if let Some(cached) = self.cached.read().await.as_ref() {
-            if cached.expires_at > now + CLOCK_SKEW_SECONDS {
-                return Ok(cached.token.clone());
+        if let Some(token) = self.fresh().await {
+            record_token_result(&self.scope, "reuse");
+            return Ok(token);
+        }
+        // Single-flight: concurrent misses queue here; only the first actually mints.
+        let _flight = self.flight.lock().await;
+        if let Some(token) = self.fresh().await {
+            record_token_result(&self.scope, "reuse");
+            return Ok(token);
+        }
+        if let Some(err) = self.replayed_failure() {
+            // A refresh just failed for every caller queued with us: do not re-hit hub-api.
+            if let Some(token) = self.usable().await {
+                record_token_result(&self.scope, "reuse");
+                return Ok(token);
+            }
+            return Err(err);
+        }
+        match self.refresh().await {
+            Ok(token) => {
+                *self.lock_failure() = None;
+                record_token_result(&self.scope, "refresh");
+                Ok(token)
+            }
+            Err(err) => {
+                record_token_result(&self.scope, "refresh_failed");
+                warn!(scope = %self.scope, error = %err, "service_auth.token_refresh_failed");
+                *self.lock_failure() = Some(SharedFailure {
+                    until: tokio::time::Instant::now() + jittered(TOKEN_REFRESH_FAILURE_BACKOFF),
+                    error: replicate(&err),
+                });
+                // The previous token is still inside its validity: keep serving it.
+                match self.usable().await {
+                    Some(token) => Ok(token),
+                    None => Err(err),
+                }
             }
         }
-        self.refresh(now).await
     }
 
-    async fn refresh(&self, now: u64) -> Result<Arc<str>, ServiceAuthError> {
+    /// One mint round trip; stores the token with its refresh point and last-usable instant.
+    async fn refresh(&self) -> Result<Arc<str>, ServiceAuthError> {
+        let issued = tokio::time::Instant::now();
         let sa_token = tokio::fs::read_to_string(&self.sa_token_path).await?;
         let reply = self
             .hub
             .mint(sa_token.trim(), &self.scope, None, None)
             .await?;
-        let expires_at = now + reply.expires_in.min(MAX_TOKEN_TTL_SECONDS);
+        let ttl = Duration::from_secs(reply.expires_in.min(MAX_TOKEN_TTL_SECONDS));
+        let skew = Duration::from_secs(CLOCK_SKEW_SECONDS);
+        let usable_for = ttl.saturating_sub(skew);
+        let refresh_after = (ttl * TOKEN_REFRESH_PERCENT / 100).min(usable_for);
         let token: Arc<str> = Arc::from(reply.token.as_str());
         *self.cached.write().await = Some(CachedToken {
             token: token.clone(),
-            expires_at,
+            refresh_at: issued + refresh_after,
+            usable_until: issued + usable_for,
         });
+        debug!(scope = %self.scope, ttl_secs = ttl.as_secs(), "service_auth.token_refreshed");
         Ok(token)
     }
 }
@@ -1769,16 +1953,19 @@ mod tests {
         let (url, _) = mock_server(vec![(200, body)]).await;
         let sa = temp_sa_token("clamp", "sa");
         let client = MachineJwtClient::new(url, sa.clone(), "s");
-        let before = now_secs();
+        let before = tokio::time::Instant::now();
         client.get_token().await.expect("mint");
-        let exp = client
+        let usable_until = client
             .cached
             .read()
             .await
             .as_ref()
             .expect("cached")
-            .expires_at;
-        assert!(exp <= before + MAX_TOKEN_TTL_SECONDS + 5);
+            .usable_until;
+        assert!(
+            usable_until
+                <= before + Duration::from_secs(MAX_TOKEN_TTL_SECONDS) + Duration::from_secs(5)
+        );
         let _ = std::fs::remove_file(sa);
     }
 
@@ -3258,5 +3445,195 @@ mod grpc_path_tests {
         assert_eq!(alpn.as_deref(), Some(b"h2".as_slice()));
         let _ = std::fs::remove_file(&pki.ca_path);
         let _ = std::fs::remove_file(sa);
+    }
+}
+
+/// Real-path tests of [`MachineJwtClient`]'s reuse / single-flight / shared-failure contract:
+/// a real tonic `MintServiceToken` server (`MockHub`) that counts mints, real concurrent
+/// callers, and the tokio clock moved with `pause`/`advance`/`resume` (never auto-advance,
+/// which would skip real I/O deadlines).
+#[cfg(test)]
+mod machine_client_single_flight_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::task::JoinSet;
+
+    use super::tests::temp_sa_token;
+    use super::*;
+    use crate::mock_hub::{MintReply, MockHub};
+
+    const SCOPE: &str = "key:stream-dek:read";
+
+    async fn skip(by: Duration) {
+        tokio::time::pause();
+        tokio::time::advance(by).await;
+        tokio::time::resume();
+    }
+
+    async fn hub(replies: Vec<MintReply>, delay: Duration) -> MockHub {
+        MockHub::builder().mint(replies).delay(delay).start().await
+    }
+
+    fn client(hub: &MockHub, tag: &str) -> Arc<MachineJwtClient> {
+        let sa = temp_sa_token(&format!("sf_{tag}"), "sa-token");
+        Arc::new(MachineJwtClient::new(hub.endpoint.clone(), sa, SCOPE))
+    }
+
+    /// `n` concurrent `get_token` calls; each result is `Ok(token)` or the error's display.
+    async fn get_all(client: &Arc<MachineJwtClient>, n: usize) -> Vec<Result<String, String>> {
+        let mut set = JoinSet::new();
+        for _ in 0..n {
+            let client = client.clone();
+            set.spawn(async move {
+                client
+                    .get_token()
+                    .await
+                    .map(|t| t.to_string())
+                    .map_err(|e| e.to_string())
+            });
+        }
+        let mut out = Vec::with_capacity(n);
+        while let Some(joined) = set.join_next().await {
+            out.push(joined.expect("task"));
+        }
+        out
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cold_start_stampede_is_exactly_one_mint() {
+        let hub = hub(
+            vec![MintReply::token("tok-1", 900)],
+            Duration::from_millis(150),
+        )
+        .await;
+        let c = client(&hub, "cold");
+        let results = get_all(&c, 160).await;
+        assert!(results.iter().all(|r| r.as_deref() == Ok("tok-1")));
+        assert_eq!(hub.mint_hits(), 1, "160 concurrent cold callers = 1 mint");
+        // And the steady state is pure reuse.
+        let again = get_all(&c, 160).await;
+        assert!(again.iter().all(|r| r.as_deref() == Ok("tok-1")));
+        assert_eq!(hub.mint_hits(), 1);
+    }
+
+    #[tokio::test]
+    async fn token_is_reused_until_eighty_percent_of_its_life_then_refreshed_once() {
+        let hub = hub(
+            vec![
+                MintReply::token("tok-1", 1000),
+                MintReply::token("tok-2", 1000),
+            ],
+            Duration::from_millis(50),
+        )
+        .await;
+        let c = client(&hub, "refresh");
+        assert_eq!(&*c.get_token().await.unwrap(), "tok-1");
+        skip(Duration::from_secs(799)).await; // 79.9% of 1000 s
+        assert!(get_all(&c, 50)
+            .await
+            .iter()
+            .all(|r| r.as_deref() == Ok("tok-1")));
+        assert_eq!(
+            hub.mint_hits(),
+            1,
+            "still inside 80% of the lifetime: reuse"
+        );
+        skip(Duration::from_secs(2)).await; // 80.1%
+        let after = get_all(&c, 160).await;
+        assert!(
+            after.iter().all(|r| r.as_deref() == Ok("tok-2")),
+            "every caller got the refreshed token"
+        );
+        assert_eq!(
+            hub.mint_hits(),
+            2,
+            "160 callers at the refresh point = one refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_refresh_keeps_serving_the_still_valid_token_without_re_minting() {
+        let hub = hub(
+            vec![
+                MintReply::token("tok-1", 1000),
+                MintReply::Reject(tonic::Code::Unavailable),
+            ],
+            Duration::from_millis(50),
+        )
+        .await;
+        let c = client(&hub, "stale");
+        assert_eq!(&*c.get_token().await.unwrap(), "tok-1");
+        skip(Duration::from_secs(850)).await; // refresh due, token valid until 970 s
+        let results = get_all(&c, 160).await;
+        assert!(
+            results.iter().all(|r| r.as_deref() == Ok("tok-1")),
+            "a hub-api blip at refresh time must not fail callers holding a valid token"
+        );
+        assert_eq!(hub.mint_hits(), 2, "one refresh attempt, shared by all 160");
+        // Inside the failure window nobody re-hits the hub.
+        assert!(get_all(&c, 50)
+            .await
+            .iter()
+            .all(|r| r.as_deref() == Ok("tok-1")));
+        assert_eq!(hub.mint_hits(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_cold_failure_is_shared_once_then_retried_after_the_jittered_backoff() {
+        let hub = hub(
+            vec![
+                MintReply::Reject(tonic::Code::Unavailable),
+                MintReply::token("tok-ok", 900),
+            ],
+            Duration::from_millis(100),
+        )
+        .await;
+        let c = client(&hub, "cold_fail");
+        let results = get_all(&c, 160).await;
+        assert!(results.iter().all(Result::is_err), "no token: fail closed");
+        assert_eq!(hub.mint_hits(), 1, "160 waiters share one failed mint");
+        // Still inside the window: replayed, no new mint.
+        assert!(get_all(&c, 20).await.iter().all(Result::is_err));
+        assert_eq!(hub.mint_hits(), 1);
+        // Past the (jittered, <= 625 ms) window the hub is tried again and recovers.
+        skip(Duration::from_secs(2)).await;
+        assert_eq!(&*c.get_token().await.unwrap(), "tok-ok");
+        assert_eq!(hub.mint_hits(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_cached_token_is_scope_specific() {
+        let hub = hub(
+            vec![MintReply::With(Arc::new(|call| {
+                Ok((format!("tok-for-{}", call.scope), 900))
+            }))],
+            Duration::ZERO,
+        )
+        .await;
+        let sa = temp_sa_token("sf_scope", "sa-token");
+        let a = MachineJwtClient::new(hub.endpoint.clone(), sa.clone(), "key:stream-dek:read");
+        let b = MachineJwtClient::new(hub.endpoint.clone(), sa, "identity:ephemeral:mint");
+        assert_eq!(
+            &*a.get_token().await.unwrap(),
+            "tok-for-key:stream-dek:read"
+        );
+        assert_eq!(
+            &*b.get_token().await.unwrap(),
+            "tok-for-identity:ephemeral:mint",
+            "a token minted for one scope is never reused for another"
+        );
+        assert_eq!(hub.mint_hits(), 2);
+    }
+
+    #[test]
+    fn jitter_stays_within_a_quarter_of_the_base_and_actually_varies() {
+        let base = Duration::from_millis(1000);
+        let samples: Vec<Duration> = (0..200).map(|_| jittered(base)).collect();
+        assert!(samples
+            .iter()
+            .all(|d| *d >= Duration::from_millis(750) && *d < Duration::from_millis(1250)));
+        let first = samples[0];
+        assert!(samples.iter().any(|d| *d != first), "jitter must vary");
     }
 }
