@@ -55,7 +55,7 @@ from typing import Any, cast
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import TenantContext, get_tenant_context, tenant_middleware
-from quart import Blueprint, current_app, request
+from quart import Blueprint, after_this_request, current_app, request
 from quart_schema import validate_request, validate_response
 
 # isort: split
@@ -64,7 +64,7 @@ import grpc_internal  # noqa: F401  (puts the generated pb/ tree on sys.path)
 # isort: split
 from waddles.streaming.internal.v1 import rooms_pb2
 
-from services import call_participants, community_access
+from services import call_access, call_ice, call_participants, call_town_hall, community_access
 from services.calls_proxy import (
     HandInfo,
     RoomInfo,
@@ -79,6 +79,7 @@ logger = logging.getLogger(__name__)
 
 calls_admin_bp = Blueprint("v1_calls_admin", __name__, url_prefix="/api/v1/admin")
 member_voice_bp = Blueprint("v1_member_voice", __name__, url_prefix="/api/v1/community")
+member_calls_bp = Blueprint("v1_member_calls", __name__, url_prefix="/api/v1/communities")
 
 SCOPE_READ = "streaming.calls:read"
 SCOPE_WRITE = "streaming.calls:write"
@@ -230,16 +231,65 @@ class LowerHandResponse:
 
 
 @dataclass(slots=True, frozen=True)
+class IceServerDTO:
+    """One STUN entry for the browser's `RTCPeerConnection` (never credentials; TURN is later)."""
+
+    urls: list[str]
+
+
+@dataclass(slots=True, frozen=True)
 class JoinResponse:
-    """`POST .../join` -- the room token and the WHIP/WHEP endpoints for ONE participant."""
+    """`POST .../join` -- everything a browser WHIP/WHEP client needs, for ONE participant.
+
+    `token` is a short-lived room token to send as `Authorization: Bearer <token>` to the WHIP
+    publish and WHEP subscribe endpoints; `publish` / `subscribe` say which of them the policy
+    granted. The token is a credential: it is never logged and the response is `no-store`.
+    """
 
     token: str
+    token_type: str
     url: str
     whip_url: str
     whep_url: str
     token_id: str
     participant_id: str
     expires_at: int
+    publish: bool
+    subscribe: bool
+    ice_servers: list[IceServerDTO]
+    success: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class MyHandResponse:
+    """The caller's OWN hand state only: UUID plus timestamps, nothing about anyone else."""
+
+    participant_id: str
+    raised: bool
+    acknowledged: bool
+    raised_at: int | None
+    acknowledged_at: int | None
+    success: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class TownHallJoin:
+    """How the caller joins the Town Hall: call this hub-api route (it mints the token)."""
+
+    method: str
+    path: str
+
+
+@dataclass(slots=True, frozen=True)
+class TownHallResponse:
+    """The community's persistent Town Hall room."""
+
+    room_id: str
+    label: str
+    locked: bool
+    participant_count: int
+    created: bool
+    join: TownHallJoin
     success: bool = True
 
 
@@ -735,6 +785,54 @@ async def create_ad_hoc_voice_room(community_id: int, data: CreateCallRoomReques
     return await _run(op)
 
 
+async def _join(community_id: int, room_id: str) -> JoinResponse:
+    """Authorise, derive the grants from the shared policy, mint the token for ONE participant."""
+    user_id = await _gated_member(community_id)
+    participant = await _identity(user_id)
+    async_dal, dal = _dal()
+    # Fail fast (and 404 across communities) before the policy: the room must exist here.
+    room = await _client.get_room(community_id, room_id)
+    staff = await call_participants.is_community_staff(
+        async_dal, dal, community_id=community_id, user_id=user_id
+    )
+    kind, ctx = call_access.facts_from_room(room)
+    try:
+        grants = call_access.grants_for(
+            kind, call_access.GrantRole.ADMIN if staff else call_access.GrantRole.MEMBER, ctx
+        )
+    except call_access.AccessDeniedError as exc:
+        raise ApiError(message=exc.reason, status_code=403, code="ROOM_ACCESS_DENIED") from exc
+    ice = call_ice.ice_servers_from_env()
+    joined = await _client.join_room(
+        community_id,
+        room_id,
+        participant,
+        publish=grants.publish,
+        subscribe=grants.subscribe,
+        ttl_secs=call_access.JOIN_TTL_SECS,
+    )
+
+    @after_this_request  # type: ignore[untyped-decorator,unused-ignore]
+    def _no_store(response: Any) -> Any:
+        """The body carries a credential: never cache it."""
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    return JoinResponse(
+        token=joined.token,
+        token_type="Bearer",  # noqa: S106 - the HTTP auth scheme name, not a secret
+        url=joined.whip_url.rsplit("/", 1)[0],
+        whip_url=joined.whip_url,
+        whep_url=joined.whep_url,
+        token_id=joined.token_id,
+        participant_id=joined.participant_id,
+        expires_at=joined.expires_at,
+        publish=grants.publish,
+        subscribe=grants.subscribe,
+        ice_servers=[IceServerDTO(urls=i.urls) for i in ice],
+    )
+
+
 @member_voice_bp.route(
     "/<int:community_id>/interact/voice/rooms/<room_name>/join", methods=["POST"]
 )
@@ -746,17 +844,7 @@ async def join_voice_room(community_id: int, room_name: str) -> Any:
 
     async def op() -> Any:
         # The participant UUID comes from the verified JWT (`_member_actor`), never the body.
-        participant = await _member_actor(community_id)
-        joined = await _client.join_room(community_id, _room_id(room_name), participant)
-        return JoinResponse(
-            token=joined.token,
-            url=joined.whip_url.rsplit("/", 1)[0],
-            whip_url=joined.whip_url,
-            whep_url=joined.whep_url,
-            token_id=joined.token_id,
-            participant_id=joined.participant_id,
-            expires_at=joined.expires_at,
-        )
+        return await _join(community_id, _room_id(room_name))
 
     return await _run(op)
 
@@ -824,4 +912,76 @@ async def lower_voice_hand(community_id: int, room_name: str) -> Any:
     return await _run(op)
 
 
-BLUEPRINTS: list[Blueprint] = [calls_admin_bp, member_voice_bp]
+# ---------------------------------------------------------------------------
+# Community-scoped member routes (`/api/v1/communities/...`): own hand state, Town Hall.
+# ---------------------------------------------------------------------------
+
+
+@member_calls_bp.route("/<int:community_id>/calls/rooms/<room_id>/hands/mine", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_READ)  # type: ignore[misc]
+@validate_response(MyHandResponse)
+async def get_my_hand(community_id: int, room_id: str) -> Any:
+    """The caller's own raised-hand state (member): their own entry only, via `ListHands`."""
+
+    async def op() -> Any:
+        participant = await _member_actor(community_id)
+        hand = await _client.my_hand(community_id, _room_id(room_id), participant)
+        return MyHandResponse(
+            participant_id=participant,
+            raised=hand is not None,
+            acknowledged=bool(hand and hand.acknowledged_at is not None),
+            raised_at=hand.raised_at if hand else None,
+            acknowledged_at=hand.acknowledged_at if hand else None,
+        )
+
+    return await _run(op)
+
+
+async def _town_hall_response(community_id: int) -> TownHallResponse:
+    """Ensure the Town Hall exists and describe it (participant count is a live figure)."""
+    town_hall = await call_town_hall.ensure_town_hall(_client, community_id)
+    room = town_hall.room
+    listed = await _client.list_participants(community_id, room.room_id)
+    return TownHallResponse(
+        room_id=room.room_id,
+        label=room.label or call_town_hall.TOWN_HALL_LABEL,
+        locked=room.locked,
+        participant_count=len(listed.participants),
+        created=town_hall.created,
+        join=TownHallJoin(
+            method="POST",
+            path=f"/api/v1/community/{community_id}/interact/voice/rooms/{room.room_id}/join",
+        ),
+    )
+
+
+@member_calls_bp.route("/<int:community_id>/town-hall", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_READ)  # type: ignore[misc]
+@validate_response(TownHallResponse)
+async def get_town_hall(community_id: int) -> Any:
+    """The community's Town Hall (member); lazily created, idempotent, never expires."""
+
+    async def op() -> Any:
+        await _gated_member(community_id)
+        return await _town_hall_response(community_id)
+
+    return await _run(op)
+
+
+@member_calls_bp.route("/<int:community_id>/town-hall", methods=["POST"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_WRITE)  # type: ignore[misc]
+@validate_response(TownHallResponse)
+async def post_town_hall(community_id: int) -> Any:
+    """Ensure the community's Town Hall exists (member); same result as the GET."""
+
+    async def op() -> Any:
+        await _gated_member(community_id)
+        return await _town_hall_response(community_id)
+
+    return await _run(op)
+
+
+BLUEPRINTS: list[Blueprint] = [calls_admin_bp, member_voice_bp, member_calls_bp]

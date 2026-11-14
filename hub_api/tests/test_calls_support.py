@@ -35,7 +35,7 @@ import grpc_internal  # noqa: F401  (puts the generated pb/ tree on sys.path)
 from waddles.streaming.internal.v1 import rooms_pb2, rooms_pb2_grpc
 
 import blueprints.v1.calls as calls_module
-from blueprints.v1.calls import calls_admin_bp, member_voice_bp
+from blueprints.v1.calls import calls_admin_bp, member_calls_bp, member_voice_bp
 from services.calls_proxy import RoomsClient
 from tests.conftest import make_user_token, seed_community, seed_membership
 
@@ -93,14 +93,23 @@ class FakeRooms(rooms_pb2_grpc.RoomsServiceServicer):
         self.rooms: dict[tuple[str, str], dict[str, Any]] = {}
         self._clock = 1700000000
 
-    def seed_room(self, community_id: int | str, room_id: str = ROOM, label: str = "room1") -> None:
+    def seed_room(
+        self,
+        community_id: int | str,
+        room_id: str = ROOM,
+        label: str = "room1",
+        *,
+        created_at: int = 1700000000,
+        locked: bool = False,
+    ) -> None:
         """Create `room_id` in `community_id` explicitly."""
         self.rooms[(str(community_id), room_id)] = {
             "label": label,
-            "locked": False,
-            "created_at": 1700000000,
+            "locked": locked,
+            "created_at": created_at,
             "members": {},
             "hands": [],
+            "empty_timeout_secs": 300,
         }
 
     def seed_participant(
@@ -158,6 +167,7 @@ class FakeRooms(rooms_pb2_grpc.RoomsServiceServicer):
             publisher_ids=list(state["members"]),
             subscriber_count=len(state["members"]),
             locked=state["locked"],
+            empty_timeout_secs=state["empty_timeout_secs"],
         )
 
     @staticmethod
@@ -188,7 +198,7 @@ class FakeRooms(rooms_pb2_grpc.RoomsServiceServicer):
     async def ListParticipants(self, request: Any, context: Any) -> Any:  # noqa: N802
         await self._guard("ListParticipants", request, context)
         state = await self._room(request, context)
-        participants = state["members"] or {PARTICIPANT: {"muted": False, "joined_at": 1700000100}}
+        participants = state["members"]
         return rooms_pb2.ListParticipantsResponse(
             room_id=request.room_id,
             locked=state["locked"],
@@ -207,7 +217,11 @@ class FakeRooms(rooms_pb2_grpc.RoomsServiceServicer):
     async def CreateRoom(self, request: Any, context: Any) -> Any:  # noqa: N802
         await self._guard("CreateRoom", request, context)
         room_id = ROOM if not any(r == ROOM for _, r in self.rooms) else str(uuid.uuid4())
-        self.seed_room(request.community_id, room_id, label=request.label)
+        self.seed_room(request.community_id, room_id, label=request.label, created_at=self._tick())
+        if request.HasField("empty_timeout_secs"):
+            self.rooms[(request.community_id, room_id)]["empty_timeout_secs"] = (
+                request.empty_timeout_secs
+            )
         return rooms_pb2.CreateRoomResponse(
             room=self._msg(
                 request.community_id, room_id, self.rooms[(request.community_id, room_id)]
@@ -381,6 +395,7 @@ def app(overlay_db: Any) -> Quart:
     QuartSchema(quart_app)
     quart_app.register_blueprint(calls_admin_bp)
     quart_app.register_blueprint(member_voice_bp)
+    quart_app.register_blueprint(member_calls_bp)
     quart_app.config["dal"] = overlay_db.dal
     quart_app.config["async_dal"] = overlay_db
     return quart_app

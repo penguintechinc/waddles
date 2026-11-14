@@ -175,8 +175,9 @@ class TestCommunityAndParticipantComeFromVerifiedAuth:
             headers=_json_headers(headers),
             data=json.dumps({"identity": user_uuid(901), "community_id": cid_a}),
         )
+        fake.seed_room(cid_b, ROOM_OTHER)  # B's own room: the join reaches the RPC
         await client.post(
-            f"/api/v1/community/{cid_b}/interact/voice/rooms/{ROOM}/join",
+            f"/api/v1/community/{cid_b}/interact/voice/rooms/{ROOM_OTHER}/join",
             headers=_json_headers(headers),
             data=json.dumps({"community_id": cid_a, "participant_id": user_uuid(901)}),
         )

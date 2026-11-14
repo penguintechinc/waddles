@@ -48,7 +48,7 @@ def _routes() -> set[tuple[str, str]]:
 
 def test_every_calls_route_is_mapped_and_nothing_stale() -> None:
     routes = _routes()
-    assert len(routes) == 20, routes  # denominator: 14 admin + 6 member routes
+    assert len(routes) == 23, routes  # denominator: 14 admin + 6 member + 3 community routes
     assert routes == set(ROUTE_RPCS), routes ^ set(ROUTE_RPCS)
 
 

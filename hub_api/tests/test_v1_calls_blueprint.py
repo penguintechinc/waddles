@@ -277,6 +277,8 @@ class TestAdminRoutes:
         self, client: Any, overlay_db: Any, fake: FakeRooms
     ) -> None:
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
+        fake.seed_room(community_id)
+        fake.seed_participant(community_id, PARTICIPANT)
         base = f"/api/v1/admin/{community_id}/calls/rooms/{ROOM}"
         parts = await client.get(f"{base}/participants", headers=headers)
         assert (await parts.get_json())["participants"][0]["participant_id"] == PARTICIPANT
@@ -482,7 +484,7 @@ class TestMemberVoiceRoutes:
         body = await response.get_json()
         assert body["token"] == "room-token"
         assert body["url"] == f"https://svc/rtc/rooms/{ROOM}"
-        _, request, _ = fake.calls[0]
+        request = next(r for name, r, _ in fake.calls if name == "JoinRoom")
         assert request.participant_id == user_uuid(42)
         assert request.participant_id not in {PARTICIPANT, "9999-attacker-supplied", "42"}
         assert request.publish and request.subscribe

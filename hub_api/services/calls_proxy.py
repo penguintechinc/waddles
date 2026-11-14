@@ -71,6 +71,7 @@ SCOPE_MODERATE = "streaming.rooms:moderate"
 
 _ADMIN = "/api/v1/admin/<int:community_id>/calls/rooms"
 _MEMBER = "/api/v1/community/<int:community_id>/interact/voice/rooms"
+_COMMUNITIES = "/api/v1/communities"
 
 #: (HTTP method, Quart rule) of every `blueprints/v1/calls.py` route -> `RoomsService` RPC.
 #: `tests/test_calls_rpc_contract.py` fails when a route is missing here, when a mapped RPC is
@@ -97,6 +98,9 @@ ROUTE_RPCS: dict[tuple[str, str], str] = {
     ("POST", f"{_MEMBER}/<room_name>/leave"): "LeaveRoom",
     ("POST", f"{_MEMBER}/<room_name>/raise-hand"): "RaiseHand",
     ("POST", f"{_MEMBER}/<room_name>/lower-hand"): "LowerHand",
+    ("GET", f"{_COMMUNITIES}/<int:community_id>/calls/rooms/<room_id>/hands/mine"): "ListHands",
+    ("GET", f"{_COMMUNITIES}/<int:community_id>/town-hall"): "ListRooms",
+    ("POST", f"{_COMMUNITIES}/<int:community_id>/town-hall"): "CreateRoom",
 }
 
 #: Proto RPCs deliberately without a hub-api route, each with the reason. The contract test
@@ -438,9 +442,18 @@ class RoomsClient:
         )
 
     async def create_room(
-        self, community_id: int, *, label: str, max_publishers: int | None
+        self,
+        community_id: int,
+        *,
+        label: str,
+        max_publishers: int | None,
+        empty_timeout_secs: int | None = None,
     ) -> RoomInfo:
-        """`CreateRoom` -- `label` carries the caller-supplied room name."""
+        """`CreateRoom` -- `label` carries the caller-supplied room name.
+
+        `empty_timeout_secs`: None = server default, 0 = never expire (persistent rooms such as
+        the Town Hall), otherwise seconds an empty room lives (the server clamps it).
+        """
         resp = await self._call(
             "CreateRoom",
             SCOPE_WRITE,
@@ -449,6 +462,7 @@ class RoomsClient:
                 community_id=str(community_id),
                 label=label,
                 max_publishers=max_publishers,
+                empty_timeout_secs=empty_timeout_secs,
             ),
         )
         return _room(resp.room)
@@ -464,8 +478,21 @@ class RoomsClient:
         )
         return _room(resp.room)
 
-    async def join_room(self, community_id: int, room_id: str, participant_id: str) -> JoinInfo:
-        """`JoinRoom` -- mints a publish+subscribe room token for ONE participant."""
+    async def join_room(
+        self,
+        community_id: int,
+        room_id: str,
+        participant_id: str,
+        *,
+        publish: bool,
+        subscribe: bool,
+        ttl_secs: int,
+    ) -> JoinInfo:
+        """`JoinRoom` -- mints a room token for ONE participant with exactly the given grants.
+
+        The grants come from the shared access policy (`services/call_access.py`), never a
+        constant, and `ttl_secs` is the contract's short join lifetime.
+        """
         resp = await self._call(
             "JoinRoom",
             SCOPE_WRITE,
@@ -474,8 +501,9 @@ class RoomsClient:
                 community_id=str(community_id),
                 room_id=room_id,
                 participant_id=participant_id,
-                publish=True,
-                subscribe=True,
+                publish=publish,
+                subscribe=subscribe,
+                ttl_secs=ttl_secs,
             ),
         )
         return JoinInfo(
@@ -693,6 +721,18 @@ class RoomsClient:
             ),
         )
         return _hand(resp.hand)
+
+    async def my_hand(
+        self, community_id: int, room_id: str, participant_id: str
+    ) -> HandInfo | None:
+        """The caller's own queue entry (via `ListHands`), or None when no hand is raised.
+
+        Filtering happens here, so no other participant's entry leaves the client.
+        """
+        for hand in await self.list_hands(community_id, room_id):
+            if hand.participant_id == participant_id:
+                return hand
+        return None
 
     async def reset_hands(
         self, community_id: int, room_id: str, *, actor_id: str, actor_role: int
