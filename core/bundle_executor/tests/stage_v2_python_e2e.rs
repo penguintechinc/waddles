@@ -272,6 +272,7 @@ async fn drive(wasm: Vec<u8>, steps: Vec<(ExportKind, serde_json::Value)>) -> Ve
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             },
             Arc::clone(&executor),
             "test-peer",

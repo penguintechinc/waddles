@@ -401,6 +401,7 @@ async fn run_for(app_id: String, flag_key: String, wasm: Vec<u8>, steps: Vec<Ste
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             },
             Arc::clone(&executor),
             "test-peer",
