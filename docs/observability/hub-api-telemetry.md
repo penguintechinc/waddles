@@ -24,14 +24,20 @@ these variables for the hub-api Deployment:
 ## Kill switch
 
 `waddles.disable-hub-api-otel` is an **opt-out** switch: unseen/OFF = telemetry on, ON = disabled.
-Evaluated once at startup (PostHog, then the `FLAG_WADDLES_DISABLE_HUB_API_OTEL` env baseline,
-then default OFF), so flipping it needs a pod restart.
+
+> **Restart required.** The flag is evaluated **once, at process startup** (PostHog, then the
+> `FLAG_WADDLES_DISABLE_HUB_API_OTEL` env baseline, then default OFF; a flag-plane outage or a
+> 2 s evaluation timeout means OFF, i.e. telemetry on). Flipping it in PostHog or changing the env
+> var has no effect on running pods: roll the hub-api Deployment
+> (`kubectl rollout restart deployment/hub-api`) for the change to apply. There is deliberately no
+> hot toggle: providers, exporters and instrumentation are installed once and removed only at
+> shutdown.
 
 ## What is emitted
 
 | Signal | Content |
 |---|---|
-| Traces | One SERVER span per HTTP request (named `METHOD route-template`, `http.route`, numeric `tenant_id` / `community_id` where known), SQLAlchemy (penguin-dal) query spans, one SERVER span per internal gRPC call continuing the caller's W3C `traceparent`, CLIENT spans for any `grpc.aio` channel opened in-process. Probe routes (`/health`, `/healthz`, `/ready`) are not traced |
+| Traces | One SERVER span per HTTP request (named `METHOD route-template`, `http.route`, numeric `tenant_id` / `community_id` where known), SQLAlchemy (penguin-dal) query spans, pydal query spans (`flask_core` raw `dal` and `AsyncDAL`), one SERVER span per internal gRPC call continuing the caller's W3C `traceparent`, CLIENT spans for every outbound `httpx` call and any `grpc.aio` channel opened in-process. Probe routes (`/health`, `/healthz`, `/ready`) are not traced |
 | Metrics | `http.server.request.duration` histogram (method, route template, status), `http.server.active_requests` up-down counter, `grpc_server_request_duration_seconds` histogram and `grpc_server_handled` counter (method, status code), SQLAlchemy pool metrics, the existing app metrics |
 | Logs | All Python logging (root + the AAA `waddlebot.<module>` logger) at the configured `LOG_LEVEL`, with `trace_id` / `span_id` of the active span |
 
@@ -49,12 +55,37 @@ then default OFF), so flipping it needs a pod restart.
 - The ASGI middleware's own HTTP metrics (raw-path labels) and `send`/`receive` child spans (raw
   path in the span name) are disabled in favour of the route-templated equivalents.
 
+## Outbound calls (httpx)
+
+Every `httpx` client (sync and async) is instrumented. W3C `traceparent`, `tracestate` and
+`baggage` are propagated **only to cluster-internal hosts**: private/loopback IPs, single-label
+Kubernetes service names (`svc-streaming`), `*.svc`, `*.cluster.local`, plus any suffix in
+`TELEMETRY_INTERNAL_HOST_SUFFIXES` (comma separated). A guard wrapped around the real httpx
+transport strips those headers for every other host on every hop (including redirects), so a
+third party never receives our trace ids or baggage. Client-span URLs are reduced to
+`scheme://host[:port]` for external hosts (webhook tokens live in paths) and
+`scheme://host/path` (no query string) for internal ones.
+
+## Database spans
+
+- penguin-dal runs on SQLAlchemy and is covered by the SQLAlchemy instrumentation (pool metrics
+  included).
+- `flask_core`'s pydal connections (`app.config["dal"]`, `AsyncDAL`) are wrapped at
+  `SQLAdapter.execute`: operation (`SELECT`), `db.system` and table name only. Statement text is
+  never recorded (pydal inlines literal values into its SQL) and driver error text is replaced by
+  the exception class name. `AsyncDAL` copies the caller's `contextvars` onto its pool thread, so
+  these spans are children of the request span. Queries with no trace context (bootstrap,
+  background loops) are not traced.
+- The exporter scrubber drops `db.statement` / `db.query.text` from every span.
+
+## Retired: `flask_core.tracing`
+
+`TracingManager` / `init_tracing` were removed: they read non-standard variables
+(`OTLP_ENDPOINT`, `TRACING_*`) and hardcoded an insecure OTLP channel, and nothing used them.
+Services use the OpenTelemetry API plus an env-configured SDK; `hub_api/telemetry.py` is the
+reference. `hub_api/tests/test_tracing_retired.py` fails if either anti-pattern reappears in the
+repo.
+
 ## Known gaps
 
-- `flask_core`'s pydal connections (`app.config["dal"]`) are not SQLAlchemy, so only penguin-dal
-  queries produce DB spans.
-- Outbound `httpx` calls (e.g. hub-api -> svc-streaming REST in `services/calls_proxy.py`) are
-  not instrumented, so no `traceparent` is injected on them yet.
-- `libs/flask_core/flask_core/tracing.py` (`TracingManager`) is unused by hub-api and still
-  reads non-standard variables (`OTLP_ENDPOINT`, hardcoded `insecure=True`); it should be fixed
-  or retired before any service adopts it.
+- Background loops with no request context do not produce pydal spans (SQLAlchemy ones do).

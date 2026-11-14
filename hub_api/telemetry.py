@@ -15,11 +15,25 @@ Shape
   OTLP log handler.
 * :meth:`TelemetryRuntime.shutdown` runs in ``after_serving`` with a bounded flush.
 
+Outbound + database coverage
+----------------------------
+* ``httpx`` (every service hop and external API call) is instrumented. ``traceparent`` /
+  ``tracestate`` / ``baggage`` are propagated to cluster-internal hosts ONLY: a guard wrapped
+  around the real transport strips them for every other host (third parties never see our
+  trace ids), and client-span URLs are reduced to ``scheme://host`` (external) or
+  ``scheme://host/path`` (internal): never a query string, never an external path (webhook
+  tokens live in paths).
+* pydal (``flask_core`` raw ``dal`` / ``AsyncDAL``) is not SQLAlchemy, so a thin
+  ``SQLAdapter.execute`` span wrapper covers it: operation + table name only, never statement
+  text (pydal inlines literal values into its SQL), never the driver's error message.
+  penguin-dal goes through SQLAlchemy and is covered by the SQLAlchemy instrumentation; its
+  statement text is dropped by the exporter scrubber.
+
 Rules enforced here (critical-rules.md Observability, security.md)
 ------------------------------------------------------------------
 * Destination, protocol, headers, timeout, sampler, per-signal exporter and batch sizes come
   from the standard ``OTEL_*`` env only; nothing about the destination is hardcoded (no
-  ``insecure=True``: the endpoint scheme decides).
+  forced-insecure channel: the endpoint scheme decides).
 * A dead exporter never breaks startup, slows a request or crashes: bounded drop-oldest queues,
   export timeouts, non-blocking batch processors, a daemon-thread bounded shutdown.
 * PII/secrets never leave the process: every exported span passes
@@ -36,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import ipaddress
 import logging
 import os
 import re
@@ -49,6 +64,8 @@ from collections.abc import Awaitable, Callable, Mapping, MutableMapping, Sequen
 from dataclasses import dataclass, field
 from typing import Any, Final
 
+import httpx
+import wrapt  # type: ignore[import-untyped]
 from opentelemetry import metrics, propagate, trace
 from opentelemetry.baggage.propagation import W3CBaggagePropagator
 from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
@@ -56,7 +73,9 @@ from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExp
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
 from opentelemetry.instrumentation.grpc import GrpcAioInstrumentorClient
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+from opentelemetry.instrumentation.utils import unwrap
 from opentelemetry.metrics import Meter, NoOpMeterProvider
 from opentelemetry.propagators.composite import CompositePropagator
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
@@ -73,7 +92,7 @@ from opentelemetry.sdk.trace.sampling import (
     Sampler,
     TraceIdRatioBased,
 )
-from opentelemetry.trace import Status
+from opentelemetry.trace import SpanKind, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from quart import Quart, g, request
 
@@ -246,6 +265,9 @@ _DROP_KEYS: Final = frozenset(
         "user_agent.original",
         "url.query",
         "http.query",
+        # SQL text (inlined literals / error details): operation + table are kept instead.
+        "db.statement",
+        "db.query.text",
     }
 )
 _URL_KEYS: Final = frozenset({"http.url", "url.full", "http.target", "http.request.url"})
@@ -285,6 +307,35 @@ def scrub_attributes(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+_SQL_VERB_RE: Final = re.compile(r"^\s*([A-Za-z]{1,16})\b")
+_SQL_TABLE_RE: Final = re.compile(
+    r'\b(?:FROM|INTO|UPDATE|JOIN)\s+"?([A-Za-z_][A-Za-z0-9_.]*)"?', re.IGNORECASE
+)
+_DB_EXCEPTION_TEXT_KEYS: Final = frozenset({"exception.message", "exception.stacktrace"})
+
+
+def _sql_verb(statement: str) -> str:
+    """Leading SQL keyword upper-cased (``SELECT``), or ``""``: the only statement part we keep."""
+    match = _SQL_VERB_RE.match(statement)
+    return match.group(1).upper() if match else ""
+
+
+def _db_status_description(description: str | None) -> str | None:
+    """Keep only the exception class name of a DB span status (driver text can quote row values)."""
+    match = re.match(r"[A-Za-z_][A-Za-z0-9_.]*", description or "")
+    return match.group(0) if match else None
+
+
+def _clean_event_attributes(attributes: Mapping[str, Any] | None, is_db: bool) -> dict[str, Any]:
+    """Scrub span-event attributes; DB error text (it can quote row values) is redacted outright."""
+    cleaned = scrub_attributes(attributes)
+    if is_db:
+        for key in _DB_EXCEPTION_TEXT_KEYS:
+            if key in cleaned:
+                cleaned[key] = REDACTED
+    return cleaned
+
+
 class _ScrubbingSpanExporter(SpanExporter):
     """Wraps the OTLP span exporter so no span (ours or a library's) leaks PII."""
 
@@ -296,20 +347,27 @@ class _ScrubbingSpanExporter(SpanExporter):
     def _clean(span: ReadableSpan) -> ReadableSpan:
         """Rebuild ``span`` with scrubbed name/attributes/events/status description."""
         status = span.status
+        attrs = span.attributes or {}
+        is_db = "db.system" in attrs or "db.system.name" in attrs
+        cleaned = scrub_attributes(attrs)
+        if is_db and "db.operation" not in cleaned and "db.operation.name" not in cleaned:
+            verb = _sql_verb(str(attrs.get("db.statement") or attrs.get("db.query.text") or ""))
+            if verb:
+                cleaned["db.operation"] = verb
+        description = _db_status_description(status.description) if is_db else status.description
         return ReadableSpan(
             name=scrub_text(span.name),
             context=span.context,
             parent=span.parent,
             resource=span.resource,
-            attributes=scrub_attributes(span.attributes),
+            attributes=cleaned,
             events=tuple(
-                Event(e.name, scrub_attributes(e.attributes), e.timestamp) for e in span.events
+                Event(e.name, _clean_event_attributes(e.attributes, is_db), e.timestamp)
+                for e in span.events
             ),
             links=span.links,
             kind=span.kind,
-            status=Status(
-                status.status_code, scrub_text(status.description) if status.description else None
-            ),
+            status=Status(status.status_code, scrub_text(description) if description else None),
             start_time=span.start_time,
             end_time=span.end_time,
             instrumentation_scope=span.instrumentation_scope,
@@ -586,6 +644,152 @@ class TelemetryRuntime:
         return finished
 
 
+# ---------------------------------------------------------------------------
+# outbound httpx (internal-only propagation) and pydal DB spans
+# ---------------------------------------------------------------------------
+
+_TRACE_HEADERS: Final = ("traceparent", "tracestate", "baggage")
+_INTERNAL_SUFFIXES: Final = (".svc", ".cluster.local")
+#: Extra comma-separated host suffixes (e.g. ``.corp.internal``) also treated as cluster-internal.
+INTERNAL_SUFFIXES_ENV: Final = "TELEMETRY_INTERNAL_HOST_SUFFIXES"
+
+
+def is_internal_host(host: str | None) -> bool:
+    """True for cluster-internal targets: private/loopback IPs, single-label names, ``*.svc*``.
+
+    Single-label hosts (``svc-streaming``, ``localhost``) are Kubernetes service short names;
+    anything with a public-looking dotted name is third-party and never receives trace headers.
+    """
+    if not host:
+        return False
+    name = host.strip().strip("[]").lower().rstrip(".")
+    try:
+        ip = ipaddress.ip_address(name)
+    except ValueError:
+        pass
+    else:
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    if "." not in name:
+        return True
+    extra = tuple(x.strip().lower() for x in _env(INTERNAL_SUFFIXES_ENV).split(",") if x.strip())
+    return name.endswith((*_INTERNAL_SUFFIXES, *extra))
+
+
+def _strip_trace_headers(request: Any) -> None:
+    """Delete propagation headers from an httpx request whose host is not cluster-internal."""
+    if isinstance(request, httpx.Request) and not is_internal_host(request.url.host):
+        for header in _TRACE_HEADERS:
+            if header in request.headers:
+                del request.headers[header]
+
+
+def _guard_sync(
+    wrapped: Callable[..., Any], instance: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> Any:
+    """Innermost httpx transport wrapper: drop propagation headers unless the host is internal.
+
+    Runs after the instrumentor injected them (it wraps this wrapper) and before bytes leave the
+    process, on every hop including redirects, so no code path can leak a trace id externally.
+    """
+    _strip_trace_headers(args[0] if args else kwargs.get("request"))
+    return wrapped(*args, **kwargs)
+
+
+async def _guard_async(
+    wrapped: Callable[..., Any], instance: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> Any:
+    """Async transport variant of :func:`_guard_sync`."""
+    _strip_trace_headers(args[0] if args else kwargs.get("request"))
+    return await wrapped(*args, **kwargs)
+
+
+def _client_span_url(url: Any) -> str:
+    """URL recorded on client spans: ``scheme://host[:port]`` (+ scrubbed path only if internal)."""
+    parsed = url if isinstance(url, httpx.URL) else httpx.URL(url)
+    base = f"{parsed.scheme}://{parsed.host}" + (f":{parsed.port}" if parsed.port else "")
+    return base + scrub_text(parsed.path) if is_internal_host(parsed.host) else base
+
+
+def _sanitize_client_span(span: Any, request: Any) -> None:
+    """Request hook for httpx: record the sanitised URL (never a query string or token)."""
+    if span is None or not span.is_recording():
+        return
+    safe = _client_span_url(request.url)
+    present = getattr(span, "attributes", None) or {}
+    for key in ("http.url", "url.full"):
+        if key in present:
+            span.set_attribute(key, safe)
+
+
+async def _sanitize_client_span_async(span: Any, request: Any) -> None:
+    """Async variant of :func:`_sanitize_client_span` (httpx wants one per transport kind)."""
+    _sanitize_client_span(span, request)
+
+
+def _instrument_httpx(
+    tracer_provider: TracerProvider, meter_provider: MeterProvider
+) -> list[Callable[[], None]]:
+    """Install the propagation guard (innermost) then the httpx instrumentor; returns undo steps."""
+    wrapt.wrap_function_wrapper(httpx.HTTPTransport, "handle_request", _guard_sync)
+    wrapt.wrap_function_wrapper(httpx.AsyncHTTPTransport, "handle_async_request", _guard_async)
+    instrumentor = HTTPXClientInstrumentor()
+    instrumentor.instrument(
+        tracer_provider=tracer_provider,
+        meter_provider=meter_provider,
+        request_hook=_sanitize_client_span,
+        async_request_hook=_sanitize_client_span_async,
+    )
+
+    def undo_guard() -> None:
+        unwrap(httpx.HTTPTransport, "handle_request")
+        unwrap(httpx.AsyncHTTPTransport, "handle_async_request")
+
+    return [undo_guard, instrumentor.uninstrument]
+
+
+def _instrument_pydal(tracer_provider: TracerProvider) -> Callable[[], None]:
+    """Span every pydal ``SQLAdapter.execute`` that has a trace parent; returns the undo step.
+
+    Only operation and table are recorded. No statement text (pydal inlines literals), no
+    exception message (driver errors quote row values), and queries with no active trace context
+    (bootstrap, background loops) are not traced, which keeps volume bounded.
+    """
+    from pydal.adapters.base import SQLAdapter
+
+    tracer = tracer_provider.get_tracer("hub_api.pydal")
+
+    def traced_execute(
+        wrapped: Callable[..., Any], instance: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> Any:
+        if not trace.get_current_span().get_span_context().is_valid:
+            return wrapped(*args, **kwargs)
+        command = args[0] if args and isinstance(args[0], str) else ""
+        verb = _sql_verb(command) or "QUERY"
+        attributes: dict[str, Any] = {
+            "db.system": str(getattr(instance, "dbengine", "sql")),
+            "db.operation": verb,
+        }
+        table = _SQL_TABLE_RE.search(command)
+        if table:
+            attributes["db.sql.table"] = table.group(1)
+        with tracer.start_as_current_span(
+            verb,
+            kind=SpanKind.CLIENT,
+            attributes=attributes,
+            record_exception=False,
+            set_status_on_exception=False,
+        ) as span:
+            try:
+                return wrapped(*args, **kwargs)
+            except Exception as exc:
+                span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+                span.set_attribute("error.type", type(exc).__name__)
+                raise
+
+    wrapt.wrap_function_wrapper(SQLAdapter, "execute", traced_execute)
+    return lambda: unwrap(SQLAdapter, "execute")
+
+
 async def _kill_switch_on() -> bool:
     """Evaluate ``waddles.disable-hub-api-otel`` (bounded; any failure = OFF = telemetry on)."""
     try:
@@ -650,14 +854,23 @@ def _attach_log_handler(
 
 async def start(app: Quart, cfg: HubAPIConfig, *, set_global: bool = True) -> TelemetryRuntime:
     """Build providers, exporters and instrumentation; never raises (disabled runtime on no-op)."""
+    runtime = TelemetryRuntime(enabled=True, reason="enabled")
     try:
-        return await _start(app, cfg, set_global=set_global)
+        return await _start(app, cfg, runtime, set_global=set_global)
     except Exception:  # noqa: BLE001 - telemetry must never stop hub-api starting
         logger.exception("telemetry: initialisation failed; telemetry export is disabled")
+        for undo in reversed(runtime._undo):  # never leave half-installed instrumentation behind
+            try:
+                undo()
+            except Exception:  # noqa: BLE001 - best effort
+                logger.debug("telemetry: undo after failed init raised", exc_info=True)
+        runtime._undo.clear()
         return TelemetryRuntime(enabled=False, reason="initialisation failed")
 
 
-async def _start(app: Quart, cfg: HubAPIConfig, *, set_global: bool) -> TelemetryRuntime:
+async def _start(
+    app: Quart, cfg: HubAPIConfig, runtime: TelemetryRuntime, *, set_global: bool
+) -> TelemetryRuntime:
     """Implementation of :func:`start` (may raise)."""
     if not _endpoint_configured():
         reason = "OTEL_EXPORTER_OTLP_ENDPOINT is not set"
@@ -674,7 +887,6 @@ async def _start(app: Quart, cfg: HubAPIConfig, *, set_global: bool) -> Telemetr
         return TelemetryRuntime(enabled=False, reason=reason)
 
     resource = build_resource(cfg)
-    runtime = TelemetryRuntime(enabled=True, reason="enabled")
     modes = {s: _signal_exporter(s) for s in ("TRACES", "METRICS", "LOGS")}
 
     span_batch = _batch_settings("BSP")
@@ -766,6 +978,8 @@ async def _start(app: Quart, cfg: HubAPIConfig, *, set_global: bool) -> Telemetr
     grpc_client = GrpcAioInstrumentorClient()  # type: ignore[no-untyped-call]
     grpc_client.instrument(tracer_provider=tracer_provider)
     runtime._undo.append(grpc_client.uninstrument)
+    runtime._undo.extend(_instrument_httpx(tracer_provider, meter_provider))
+    runtime._undo.append(_instrument_pydal(tracer_provider))
 
     handler = _ScrubbingLoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
     aaa = app.config.get("logger")

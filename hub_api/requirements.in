@@ -67,6 +67,8 @@ opentelemetry-sdk==1.45.2
 opentelemetry-exporter-otlp-proto-grpc==1.45.2
 opentelemetry-instrumentation-asgi==0.66b2
 opentelemetry-instrumentation-sqlalchemy==0.66b2
+# Outbound httpx spans + W3C propagation (cluster-internal hosts only; see hub_api/telemetry.py).
+opentelemetry-instrumentation-httpx==0.66b2
 # Same range libs/flask_core/requirements.in pins (CVE floor; the Dockerfile's later
 # `pip install libs/flask_core` would otherwise downgrade a >=7 resolution to <7 anyway, and the
 # generated grpc_internal/pb stubs + opentelemetry-proto both target the 5.x/6.x runtime).

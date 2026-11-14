@@ -810,6 +810,7 @@ opentelemetry-api==1.45.2 \
     #   opentelemetry-instrumentation
     #   opentelemetry-instrumentation-asgi
     #   opentelemetry-instrumentation-grpc
+    #   opentelemetry-instrumentation-httpx
     #   opentelemetry-instrumentation-sqlalchemy
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
@@ -831,6 +832,7 @@ opentelemetry-instrumentation==0.66b2 \
     # via
     #   opentelemetry-instrumentation-asgi
     #   opentelemetry-instrumentation-grpc
+    #   opentelemetry-instrumentation-httpx
     #   opentelemetry-instrumentation-sqlalchemy
 opentelemetry-instrumentation-asgi==0.66b2 \
     --hash=sha256:9c5ec36e6b898f18e6b07b5077c2a3bafa9abf69de98e729797b9efa465f8aa3 \
@@ -839,6 +841,10 @@ opentelemetry-instrumentation-asgi==0.66b2 \
 opentelemetry-instrumentation-grpc==0.66b2 \
     --hash=sha256:02bda482ef814757d60bb37aafaa756c834c4050378df9b59183abce389e1c56 \
     --hash=sha256:bfa75d83b7080c46e0abd3f66af3be839d27d5c809a25e40a3fa0dd8012af40d
+    # via -r hub_api/requirements.in
+opentelemetry-instrumentation-httpx==0.66b2 \
+    --hash=sha256:93e2b6ab1a505d76ec3d98abcf7e8527d4712167d6c3b5ebbb9c68d9309d9ba5 \
+    --hash=sha256:b4c81e4a6dc7b8d7cb2d3088eb8848f6db6bd4abdc443ac9586ec176f1460187
     # via -r hub_api/requirements.in
 opentelemetry-instrumentation-sqlalchemy==0.66b2 \
     --hash=sha256:463bb3b0e185b65d8728d62de717e94374276497d7632622a6a873edbc0d7f90 \
@@ -864,12 +870,15 @@ opentelemetry-semantic-conventions==0.66b2 \
     #   opentelemetry-instrumentation
     #   opentelemetry-instrumentation-asgi
     #   opentelemetry-instrumentation-grpc
+    #   opentelemetry-instrumentation-httpx
     #   opentelemetry-instrumentation-sqlalchemy
     #   opentelemetry-sdk
 opentelemetry-util-http==0.66b2 \
     --hash=sha256:7ba066ea609202e474679ddf1d0f753a1e6619bd206b36afaecba4bbb86e25d0 \
     --hash=sha256:c4bb5d6744e60353bcaa3e325bc529a1515346b51cb4d9c8e5b730579337e06d
-    # via opentelemetry-instrumentation-asgi
+    # via
+    #   opentelemetry-instrumentation-asgi
+    #   opentelemetry-instrumentation-httpx
 packaging==26.3 \
     --hash=sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79 \
     --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
@@ -1414,6 +1423,7 @@ wrapt==1.17.3 \
     # via
     #   opentelemetry-instrumentation
     #   opentelemetry-instrumentation-grpc
+    #   opentelemetry-instrumentation-httpx
     #   opentelemetry-instrumentation-sqlalchemy
 wsproto==1.3.2 \
     --hash=sha256:61eea322cdf56e8cc904bd3ad7573359a242ba65688716b0710a5eb12beab584 \
