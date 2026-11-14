@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import ipaddress
 import logging
 import os
@@ -81,7 +82,12 @@ from opentelemetry.propagators.composite import CompositePropagator
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.metrics.export import (
+    MetricExporter,
+    MetricExportResult,
+    MetricsData,
+    PeriodicExportingMetricReader,
+)
 from opentelemetry.sdk.resources import OTELResourceDetector, Resource
 from opentelemetry.sdk.trace import Event, ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
@@ -239,8 +245,8 @@ _JWT_RE: Final = re.compile(r"\beyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{5,}\.[A-Za
 _BEARER_RE: Final = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{8,}")
 _SECRET_KV_RE: Final = re.compile(
     r"(?i)\b(access_token|refresh_token|id_token|token|code|state|secret|client_secret|password|"
-    r"passwd|api_key|apikey|key|sig|signature|authorization|email|username|user|name|handle)"
-    r"=([^&\s\"',;]+)"
+    r"passwd|api_key|apikey|key|sig|signature|authorization|email|username|user|login|name|handle)"
+    r"""['"]?\s*[:=]\s*['"]?([^&\s"',;}\]]+)"""
 )
 #: Attribute keys whose value is never exported (token-delimited: `user_name`,
 #: `http.request.header.authorization`).
@@ -273,6 +279,10 @@ _DROP_KEYS: Final = frozenset(
 _URL_KEYS: Final = frozenset({"http.url", "url.full", "http.target", "http.request.url"})
 _QUERY_RE: Final = re.compile(r"\?[^\s#]*")
 REDACTED: Final = "[redacted]"
+#: Bounds for scrubbing arbitrary (possibly hostile / huge) values: depth, items, text.
+MAX_DEPTH: Final = 4
+MAX_ITEMS: Final = 64
+MAX_TEXT_CHARS: Final = 8192
 
 
 def scrub_text(value: str) -> str:
@@ -280,18 +290,56 @@ def scrub_text(value: str) -> str:
     value = _BEARER_RE.sub(r"\1 " + REDACTED, value)
     value = _JWT_RE.sub(REDACTED, value)
     value = _SECRET_KV_RE.sub(lambda m: f"{m.group(1)}={REDACTED}", value)
+    value = value if len(value) <= MAX_TEXT_CHARS else value[:MAX_TEXT_CHARS] + "...[truncated]"
     return _EMAIL_RE.sub(REDACTED, value)
 
 
-def _scrub_value(key: str, value: Any) -> Any:
-    """Scrub one attribute value (strings and string sequences); other primitives pass through."""
+def scrub_any(value: Any, depth: int = 0) -> Any:
+    """Return ``value`` with every leaf scrubbed (only str/bool/int/float/list/dict remain).
+
+    Stringify-then-scrub: anything that is not already a primitive (exceptions, dataclass-like and
+    arbitrary objects, bytes) is turned into text FIRST and that text is scrubbed, so PII inside
+    ``str(obj)`` cannot slip through. Containers are walked recursively with scrubbed keys; a key
+    that names a sensitive field redacts its whole value. Depth, item count and text length are
+    capped so a hostile or huge value cannot blow up memory or time.
+    """
+    if value is None or isinstance(value, bool | int | float):
+        return value
     if isinstance(value, str):
-        if key in _URL_KEYS:
-            value = _QUERY_RE.sub("?" + REDACTED, value)
         return scrub_text(value)
-    if isinstance(value, list | tuple):
-        return [scrub_text(v) if isinstance(v, str) else v for v in value]
-    return value
+    if depth >= MAX_DEPTH:
+        return "[truncated]"
+    if isinstance(value, bytes | bytearray):
+        return scrub_text(bytes(value[:MAX_TEXT_CHARS]).decode("utf-8", "replace"))
+    if isinstance(value, Mapping):
+        out: dict[str, Any] = {}
+        for index, (k, v) in enumerate(value.items()):
+            if index >= MAX_ITEMS:
+                out["[truncated]"] = len(value) - MAX_ITEMS
+                break
+            name = scrub_text(str(k))
+            out[name] = REDACTED if _SENSITIVE_KEY_RE.search(str(k)) else scrub_any(v, depth + 1)
+        return out
+    if isinstance(value, list | tuple | set | frozenset):
+        items = list(value) if not isinstance(value, set | frozenset) else sorted(value, key=str)
+        scrubbed = [scrub_any(v, depth + 1) for v in items[:MAX_ITEMS]]
+        if len(items) > MAX_ITEMS:
+            scrubbed.append("[truncated]")
+        return scrubbed
+    if isinstance(value, BaseException):
+        return scrub_text(f"{type(value).__name__}: {value}")
+    try:
+        text = str(value)
+    except Exception:  # noqa: BLE001 - a hostile __str__ must not break telemetry
+        text = f"<{type(value).__name__}>"
+    return scrub_text(text)
+
+
+def _scrub_value(key: str, value: Any) -> Any:
+    """Scrub one attribute value of any shape (URL-valued keys also lose their query string)."""
+    if isinstance(value, str) and key in _URL_KEYS:
+        value = _QUERY_RE.sub("?" + REDACTED, value)
+    return scrub_any(value)
 
 
 def scrub_attributes(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -334,6 +382,66 @@ def _clean_event_attributes(attributes: Mapping[str, Any] | None, is_db: bool) -
             if key in cleaned:
                 cleaned[key] = REDACTED
     return cleaned
+
+
+def _scrub_points(points: Sequence[Any]) -> tuple[Any, ...]:
+    """Rebuild metric data points with scrubbed attribute values (points are frozen dataclasses)."""
+    return tuple(
+        dataclasses.replace(point, attributes=scrub_attributes(point.attributes))
+        for point in points
+    )
+
+
+def scrub_metrics_data(data: MetricsData) -> MetricsData:
+    """Return ``data`` with every data point's attributes scrubbed; shape is unchanged."""
+    resource_metrics = []
+    for rm in data.resource_metrics:
+        scope_metrics = []
+        for sm in rm.scope_metrics:
+            metric_list = [
+                dataclasses.replace(
+                    m,
+                    data=dataclasses.replace(
+                        m.data,
+                        data_points=_scrub_points(m.data.data_points),  # type: ignore[arg-type]
+                    ),
+                )
+                for m in sm.metrics
+            ]
+            scope_metrics.append(dataclasses.replace(sm, metrics=metric_list))
+        resource_metrics.append(dataclasses.replace(rm, scope_metrics=scope_metrics))
+    return MetricsData(resource_metrics=resource_metrics)
+
+
+class _ScrubbingMetricExporter(MetricExporter):
+    """Wraps the OTLP metric exporter so no metric attribute value leaks PII."""
+
+    def __init__(self, inner: MetricExporter) -> None:
+        """Wrap ``inner``, mirroring its temporality/aggregation preferences for the reader."""
+        super().__init__(
+            preferred_temporality=getattr(inner, "_preferred_temporality", None),
+            preferred_aggregation=getattr(inner, "_preferred_aggregation", None),
+        )
+        self._inner = inner
+
+    def export(
+        self, metrics_data: MetricsData, timeout_millis: float = 10_000, **kwargs: Any
+    ) -> MetricExportResult:
+        """Scrub then forward; a scrubbing bug drops the batch rather than leaking it."""
+        try:
+            cleaned = scrub_metrics_data(metrics_data)
+        except Exception:  # noqa: BLE001 - never export unscrubbed data, never raise into the reader
+            logger.exception("telemetry: metric scrub failed; batch dropped")
+            return MetricExportResult.FAILURE
+        return self._inner.export(cleaned, timeout_millis, **kwargs)
+
+    def force_flush(self, timeout_millis: float = 10_000) -> bool:
+        """Delegate to the wrapped exporter."""
+        return self._inner.force_flush(timeout_millis)
+
+    def shutdown(self, timeout_millis: float = 30_000, **kwargs: Any) -> None:
+        """Shut down the wrapped exporter."""
+        self._inner.shutdown(timeout_millis, **kwargs)
 
 
 class _ScrubbingSpanExporter(SpanExporter):
@@ -391,6 +499,17 @@ class _ScrubbingSpanExporter(SpanExporter):
         return self._inner.force_flush(timeout_millis)
 
 
+def _flatten_into(out: dict[str, Any], key: str, value: Any, depth: int = 0) -> None:
+    """Flatten an ALREADY-scrubbed value into dotted primitive log attributes (lists: text)."""
+    if isinstance(value, Mapping):
+        for sub_key, sub_value in value.items():
+            _flatten_into(out, f"{key}.{sub_key}", sub_value, depth + 1)
+    elif isinstance(value, bool | int | float | str):
+        out[key] = value
+    else:
+        out[key] = str(value)
+
+
 _STD_RECORD_KEYS: Final = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__) | {
     "message",
     "asctime",
@@ -417,20 +536,18 @@ class _ScrubbingLoggingHandler(LoggingHandler):
             rec = copy.copy(record)
             rec.msg = scrub_text(record.getMessage())
             rec.args = ()
+            extras = {
+                key: rec.__dict__.pop(key)
+                for key in [k for k in rec.__dict__ if k not in _STD_RECORD_KEYS]
+            }
+            # scrub_attributes() walks nested values and stringifies non-primitives BEFORE scrubbing
+            # them, so what is flattened and exported below is already clean.
             flat: dict[str, Any] = {}
-            for key in [k for k in rec.__dict__ if k not in _STD_RECORD_KEYS]:
-                value = rec.__dict__.pop(key)
-                if isinstance(value, Mapping):
-                    for sub_key, sub_value in value.items():
-                        flat[f"{key}.{sub_key}"] = sub_value
-                else:
-                    flat[key] = value
             for key, value in scrub_attributes(
-                {k: v for k, v in flat.items() if v is not None}
+                {k: v for k, v in extras.items() if v is not None}
             ).items():
-                rec.__dict__[key] = (
-                    value if isinstance(value, str | bool | int | float) else str(value)
-                )
+                _flatten_into(flat, key, value)
+            rec.__dict__.update(flat)
             if record.exc_info and record.exc_info[1] is not None:
                 exc = record.exc_info[1]
                 rec.__dict__["exception.type"] = type(exc).__name__
@@ -908,7 +1025,7 @@ async def _start(
         timeout = _otlp_timeout_seconds("METRICS")
         readers.append(
             PeriodicExportingMetricReader(
-                OTLPMetricExporter(timeout=timeout),
+                _ScrubbingMetricExporter(OTLPMetricExporter(timeout=timeout)),
                 export_interval_millis=_env_float(
                     "OTEL_METRIC_EXPORT_INTERVAL", 60000.0, 100.0, 3_600_000.0
                 ),

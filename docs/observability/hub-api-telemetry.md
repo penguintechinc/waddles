@@ -52,6 +52,13 @@ these variables for the hub-api Deployment:
   removed or redacted; query strings are stripped from URLs; the raw path is replaced by the
   route template. Free-text log messages must still never contain bare usernames (no regex can
   find them) -- log ids, not names.
+- Scrubbing is **stringify-then-scrub and recursive** (`telemetry.scrub_any`): nested dicts, lists,
+  tuples, sets, bytes, exceptions and arbitrary objects (dataclass repr, custom `__str__`) are
+  turned into text first and every leaf and key is scrubbed; a sensitive key (`username`, `token`,
+  ...) redacts its whole value. Depth (4), items per container (64) and text length (8 KiB) are
+  capped. The same treatment covers log extras, span attributes, span events (exception message
+  and stack text) and metric data-point attribute values (a scrubbing metric exporter);
+  `hub_api/tests/test_telemetry_scrub_nested.py` asserts it over the raw exported bytes.
 - The ASGI middleware's own HTTP metrics (raw-path labels) and `send`/`receive` child spans (raw
   path in the span name) are disabled in favour of the route-templated equivalents.
 
