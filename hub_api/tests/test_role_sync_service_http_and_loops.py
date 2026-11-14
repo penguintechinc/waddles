@@ -233,11 +233,11 @@ class TestLoopPrevention:
         self, guild_pairing_db: Any
     ) -> None:
         dal, community_id, _t, _g = guild_pairing_db
-        pairing = _make_platform_pairing(dal, community_id, direction="bidirectional")
+        pairing = _make_platform_pairing(dal, community_id, direction="bidirectional", target="vip")
         _link_identity(
             dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_PLATFORM_USER
         )
-        _add_community_member(dal, community_id=community_id, hub_user_id=1, role="vip")
+        _add_community_member(dal, community_id=community_id, hub_user_id=1, role="member")
         client = _FakeDiscordClient(
             {},
             guild_members=[

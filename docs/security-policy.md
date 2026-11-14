@@ -121,7 +121,6 @@ These packages are pinned to specific secure versions due to their critical secu
 | `bcrypt` | Password hashing | 4.1.2+ | Patch releases immediately |
 | `python-jose` | JWT/JWS handling | Latest secure | Patch releases immediately |
 | `authlib` | OAuth/OpenID Connect | 1.3.0+ | Quarterly review |
-| `flask-security-too` | Authentication framework | 5.4.0+ | Quarterly review |
 
 #### Standard Library Packages (Flexible Versioning)
 These packages are version-flexible for better compatibility and feature updates:

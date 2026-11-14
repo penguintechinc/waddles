@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { publicApi } from '../../services/api';
 import { useAuth } from '../../contexts/AuthContext';
-import { FormModalBuilder } from '@penguintechinc/react-libs';
+import { FormModalBuilder } from '../../components/FormModal';
 import { Alert } from '../../components/ui';
 import { getErrorMessage } from '../../components/ui/errors';
 import { useJoinOpenCommunity, useMyJoinRequest, useSubmitJoinRequest } from '../../hooks/useJoinRequests';

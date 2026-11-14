@@ -4,7 +4,7 @@ name: Keyword Giveaway Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !kgiveaway open <keyword> [prize] / enter / close / draw / reroll /
 # status, plus keyword-typed entries. Distinct from `giveaway` (timed, PR #853) and `raffle`; see
 # src/app.py's module docstring. Activation-gated only (no feature flag).
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
