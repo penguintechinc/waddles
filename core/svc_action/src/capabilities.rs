@@ -4029,12 +4029,18 @@ mod tests {
         use hub_client::bundle_config::{
             BundleConfigCache, CacheConfig, ConfigKey, StaticConfigSource, StaticLiveGate,
         };
-        let src = Arc::new(StaticConfigSource::new());
-        src.set(
-            ConfigKey::new(10, 7, "waddles.bot.commands.default"),
-            3,
-            r#"{"x":1}"#,
+        // Seed the key the production path derives from the invoke scope (`attach_config_json`),
+        // never a hand-typed id pair: a seed that does not match `scope()` is never read, so the
+        // enabled state would "load" nothing and the test would fail for the wrong reason (or,
+        // worse, pass vacuously).
+        let s = scope();
+        let key = ConfigKey::new(
+            i64::from(s.tenant_id),
+            i64::from(s.community_id),
+            s.app_id.clone(),
         );
+        let src = Arc::new(StaticConfigSource::new());
+        src.set(key, 3, r#"{"x":1}"#);
         for (live, expect) in [(true, true), (false, false)] {
             let cache = Arc::new(BundleConfigCache::new(
                 Arc::clone(&src) as Arc<dyn hub_client::bundle_config::ConfigSource>,
@@ -4046,8 +4052,42 @@ mod tests {
             let mut ctx = h.handle_context(&scope()).expect("context");
             h.attach_config_json(&scope(), &mut ctx).await;
             assert_eq!(ctx.get("config_json").is_some(), expect);
+            if expect {
+                assert_eq!(
+                    ctx["config_json"], r#"{"x":1}"#,
+                    "an enabled switch serves the seeded config for this exact scope"
+                );
+            }
             assert_eq!(cache.len() == 1, expect, "disabled switch must not load");
         }
+    }
+
+    /// Regression: config seeded under any OTHER (tenant, community, app) key is never served to
+    /// this invoke -- the exact mismatch the kill-switch test's old hand-typed seed hit by accident.
+    #[tokio::test]
+    async fn get_context_never_serves_config_seeded_for_a_different_scope() {
+        use hub_client::bundle_config::{
+            BundleConfigCache, CacheConfig, ConfigKey, StaticConfigSource,
+        };
+        let s = scope();
+        let (tenant, community) = (i64::from(s.tenant_id), i64::from(s.community_id));
+        let src = Arc::new(StaticConfigSource::new());
+        for key in [
+            ConfigKey::new(tenant + 1, community, s.app_id.clone()),
+            ConfigKey::new(tenant, community + 1, s.app_id.clone()),
+            ConfigKey::new(tenant, community, "waddles.bot.other.default"),
+        ] {
+            src.set(key, 1, r#"{"leak":true}"#);
+        }
+        let cache = Arc::new(BundleConfigCache::new(src, None, CacheConfig::default()));
+        let h = caps(FakeRelayQueue::default()).with_bundle_config(Some(cache));
+        let mut ctx = h.handle_context(&s).expect("context");
+        h.attach_config_json(&s, &mut ctx).await;
+        assert_ne!(
+            ctx.get("config_json").and_then(|v| v.as_str()),
+            Some(r#"{"leak":true}"#),
+            "another scope's config must never reach this invoke"
+        );
     }
 
     /// Live community config rides `get-context` for the invoke's host-derived scope only.
