@@ -5615,7 +5615,8 @@ mod tests {
         }
 
         /// Fail closed on a broker outage: dead-lettered (not acked-and-dropped), counted, and
-        /// recovers once the broker is back -- the failure is not cached.
+        /// recovers once the broker is back -- the failure is only negative-cached for one short
+        /// jittered backoff window (<= 312 ms by default), never beyond it.
         #[tokio::test]
         async fn a_key_broker_outage_dead_letters_visibly_and_recovers() {
             let ring = test_ring();
@@ -5636,6 +5637,9 @@ mod tests {
             assert_eq!(failures("dek_unavailable") - before, 1.0);
 
             fake.state.lock().unwrap().down = false;
+            // Inside the negative window the failure is replayed (no retry stampede); past its
+            // jittered upper bound (250 ms base * 1.25) the broker is asked again.
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             let mut deps2 = test_deps(
                 FakeSpineOps::default(),
                 registry_capturing_invoke(pong()).await.0,
