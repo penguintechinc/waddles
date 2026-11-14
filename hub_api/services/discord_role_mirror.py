@@ -181,21 +181,45 @@ def would_create_cycle(
 def _reject_roles_used_by_bindings(
     dal: Any, community_id: int, nodes: list[tuple[str, str]]
 ) -> None:
-    """409 if any `(guild, role)` is already bound in `community_role_sync_bindings`.
+    """409 if any `(guild, role)` is bound in `community_role_sync_bindings` (any community).
 
     Keeps the mirror and the Twitch/community-role bindings from controlling the same Discord
-    role (cross-control loop).
+    role (cross-control loop). Same-tenant collisions get a specific message; cross-tenant
+    ones get a generic, detail-free 409 so no other tenant's configuration leaks.
     """
-    pairing_by_guild = {
-        p.discord_guild_id: p.id for p in pairing_svc.list_pairings(dal, community_id)
-    }
+    p = dal.guild_tenant_pairings
     b = dal.community_role_sync_bindings
+    own_tenant = pairing_svc.community_tenant_id(dal, community_id)
     for guild, role in nodes:
-        pairing_id = pairing_by_guild.get(guild)
-        if pairing_id is None:
+        pairing_community = {
+            int(r.id): int(r.community_id) for r in dal(p.discord_guild_id == guild).select()
+        }
+        if not pairing_community:
             continue
-        if dal((b.pairing_id == pairing_id) & (b.discord_role_id == role)).count():
+        hits = dal(
+            b.pairing_id.belongs(list(pairing_community)) & (b.discord_role_id == role)
+        ).select(b.pairing_id)
+        others = [pairing_community[int(h.pairing_id)] for h in hits]
+        if any(pairing_svc.community_tenant_id(dal, c) == own_tenant for c in others):
             raise conflict("That role is already used by a role-sync binding")
+        if others:
+            raise pairing_svc.role_unavailable("used_by_binding", community_id, others[0])
+
+
+def _reject_target_used_by_other_mapping(
+    dal: Any, community_id: int, dst_guild: str, dst_role: str
+) -> None:
+    """409 if `(dst_guild, dst_role)` is already a mirror target; generic if cross-tenant."""
+    t = dal.discord_role_mirror_mappings
+    rows = dal((t.target_guild_id == dst_guild) & (t.target_role_id == dst_role)).select(
+        t.community_id
+    )
+    own_tenant = pairing_svc.community_tenant_id(dal, community_id)
+    others = [int(r.community_id) for r in rows]
+    if any(pairing_svc.community_tenant_id(dal, c) == own_tenant for c in others):
+        raise conflict("That target role is already the target of another mirror mapping")
+    if others:
+        raise pairing_svc.role_unavailable("target_already_mirrored", community_id, others[0])
 
 
 def list_mappings(dal: Any, community_id: int) -> list[RoleMirrorMapping]:
@@ -249,6 +273,7 @@ async def create_mapping(
         dal, community_id, [(src_guild, src_role), (dst_guild, dst_role)]
     )
 
+    _reject_target_used_by_other_mapping(dal, community_id, dst_guild, dst_role)
     t = dal.discord_role_mirror_mappings
     existing = list_mappings(dal, community_id)
     if any(
