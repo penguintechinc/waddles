@@ -45,7 +45,12 @@ pub const SLOW_BUCKETS_S: [f64; 13] = [
 
 /// Every instrument name this module registers -- asserted against emitted
 /// data in tests and mirrored in `docs/observability/data-plane-metrics.md`.
-pub const METRIC_NAMES: [&str; 21] = [
+pub const METRIC_NAMES: [&str; 26] = [
+    "waddles_executor_precompile_cache_total",
+    "waddles_executor_precompile_cache_bytes",
+    "waddles_executor_precompile_cache_entries",
+    "waddles_executor_compile_seconds",
+    "waddles_executor_deserialize_seconds",
     "waddles_executor_load_seconds",
     "waddles_executor_loads_total",
     "waddles_executor_unloads_total",
@@ -204,6 +209,11 @@ pub struct ExecutorMetrics {
     reconnects: Counter<u64>,
     heartbeat_timeouts: Counter<u64>,
     orphaned_unloads: Counter<u64>,
+    precompile_cache: Counter<u64>,
+    precompile_cache_bytes: Gauge<u64>,
+    precompile_cache_entries: Gauge<u64>,
+    compile_seconds: Histogram<f64>,
+    deserialize_seconds: Histogram<f64>,
     connector_calls: Counter<u64>,
     connector_call_seconds: Histogram<f64>,
     wire_frames_shed: Counter<u64>,
@@ -326,6 +336,29 @@ impl ExecutorMetrics {
                 "waddles_executor_orphaned_unloads_total",
                 "Unloads naming a scope that did not reference the digest (duplicate or orphaned)",
             ),
+            precompile_cache: counter(
+                "waddles_executor_precompile_cache_total",
+                "Precompiled-component cache events by result (hit, miss, corrupt, disabled, \
+                 write_failed, evicted)",
+            ),
+            precompile_cache_bytes: meter
+                .u64_gauge(instrument_name("waddles_executor_precompile_cache_bytes"))
+                .with_description("Bytes of precompiled components on disk")
+                .build(),
+            precompile_cache_entries: meter
+                .u64_gauge(instrument_name("waddles_executor_precompile_cache_entries"))
+                .with_description("Precompiled components on disk")
+                .build(),
+            compile_seconds: hist(
+                "waddles_executor_compile_seconds",
+                "From-source JIT compile (+ serialize) time per cold digest, by result",
+                &SLOW_BUCKETS_S,
+            ),
+            deserialize_seconds: hist(
+                "waddles_executor_deserialize_seconds",
+                "Cache read + integrity verify + deserialize time per cache hit, by result",
+                &SLOW_BUCKETS_S,
+            ),
             connector_calls: counter(
                 "waddles_executor_connector_calls_total",
                 "Connector-world export calls by export and outcome (ok, guest_error, fuel_exhausted, \
@@ -372,6 +405,31 @@ impl ExecutorMetrics {
         if result == "orphaned" {
             self.orphaned_unloads.add(1, &[]);
         }
+    }
+
+    /// Counts one compile-cache event (`waddles_executor_precompile_cache_total`).
+    pub fn record_precompile_cache(&self, result: &'static str) {
+        self.precompile_cache
+            .add(1, &[KeyValue::new("result", result)]);
+    }
+
+    /// Publishes the compile-cache size gauges.
+    pub fn set_precompile_cache_size(&self, bytes: u64, entries: usize) {
+        self.precompile_cache_bytes.record(bytes, &[]);
+        self.precompile_cache_entries
+            .record(u64::try_from(entries).unwrap_or(u64::MAX), &[]);
+    }
+
+    /// Records one from-source compile (`waddles_executor_compile_seconds`).
+    pub fn record_compile(&self, elapsed: Duration, result: &'static str) {
+        self.compile_seconds
+            .record(elapsed.as_secs_f64(), &[KeyValue::new("result", result)]);
+    }
+
+    /// Records one cache-hit deserialize (`waddles_executor_deserialize_seconds`).
+    pub fn record_deserialize(&self, elapsed: Duration, result: &'static str) {
+        self.deserialize_seconds
+            .record(elapsed.as_secs_f64(), &[KeyValue::new("result", result)]);
     }
 
     /// Sets the resident-component gauge (`waddles_executor_bundles_loaded`).

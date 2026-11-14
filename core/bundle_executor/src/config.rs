@@ -18,6 +18,38 @@ pub struct StageTarget {
     pub addr: String,
 }
 
+/// The compile-cache HMAC key as read from the environment. A newtype so a
+/// stray `{:?}` of [`CliConfig`] prints `CacheHmacKey(<redacted>)`, never the
+/// secret (`rules/critical-rules.md` Token & Secret Hygiene).
+#[derive(Clone, PartialEq, Eq)]
+pub struct CacheHmacKey(String);
+
+impl CacheHmacKey {
+    /// Wraps a raw key string (trimmed by the consumer, not here).
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+
+    /// The raw key text; callers must never log it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for CacheHmacKey {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.to_string()))
+    }
+}
+
+impl std::fmt::Debug for CacheHmacKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CacheHmacKey(<redacted>)")
+    }
+}
+
 /// CLI/env configuration surface. `clap`'s `env` feature reads the SS12.7
 /// variable of the same name when the flag is not passed explicitly --
 /// this binary is started by its Deployment with env vars only, never
@@ -138,6 +170,38 @@ pub struct CliConfig {
         default_value = "/var/cache/waddles/wasm"
     )]
     pub executor_precompile_dir: PathBuf,
+
+    /// Total on-disk size cap for the precompiled-component cache, in bytes
+    /// (default 8 GiB). Exceeding it evicts least-recently-used entries
+    /// (`crate::compile_cache`). `0` is rejected by `validate()`.
+    #[arg(long, env = "EXECUTOR_PRECOMPILE_MAX_BYTES", default_value_t = 8_589_934_592)]
+    pub executor_precompile_max_bytes: u64,
+
+    /// Entry-count cap for the precompiled-component cache (default 4096).
+    /// Enforced together with `executor_precompile_max_bytes`.
+    #[arg(long, env = "EXECUTOR_PRECOMPILE_MAX_ENTRIES", default_value_t = 4096)]
+    pub executor_precompile_max_entries: u64,
+
+    /// Platform secret keying the HMAC-SHA256 integrity tag on every cached
+    /// `.cwasm` (>= 32 bytes). Deserializing a cwasm runs machine code, so
+    /// no key means NO cache (fail closed to compile-from-source), never an
+    /// unauthenticated one. Prefer `EXECUTOR_CACHE_HMAC_KEY_FILE`; the value
+    /// is held in a redacting type and never logged.
+    #[arg(long, env = "EXECUTOR_CACHE_HMAC_KEY")]
+    pub executor_cache_hmac_key: Option<CacheHmacKey>,
+
+    /// File holding the cache HMAC key (a mounted Secret); wins over
+    /// `executor_cache_hmac_key` when both are set.
+    #[arg(long, env = "EXECUTOR_CACHE_HMAC_KEY_FILE")]
+    pub executor_cache_hmac_key_file: Option<PathBuf>,
+
+    /// ENV baseline of the opt-out kill switch flag
+    /// `waddles.disable-executor-compile-cache`: `true` turns the compile
+    /// cache off (legacy compile-from-source). Unseen/unset = cache ON. The
+    /// executor is credential-less with no flag-service egress, so the
+    /// platform flips this env var rather than the executor polling PostHog.
+    #[arg(long, env = "EXECUTOR_DISABLE_COMPILE_CACHE", default_value_t = false)]
+    pub executor_disable_compile_cache: bool,
 
     /// GC collector the runtime engine is configured with; reported in the
     /// `hello` frame's `collector` field and must match the collector any
@@ -401,6 +465,11 @@ impl CliConfig {
             executor_max_concurrent_calls: 32,
             executor_pool_wait_ms: 500,
             executor_precompile_dir: PathBuf::from("/var/cache/waddles/wasm"),
+            executor_precompile_max_bytes: 8_589_934_592,
+            executor_precompile_max_entries: 4096,
+            executor_cache_hmac_key: None,
+            executor_cache_hmac_key_file: None,
+            executor_disable_compile_cache: false,
             executor_wasm_collector: "drc".to_string(),
             sandbox_gvisor: true,
             host_api_client_cert_file: None,
@@ -485,6 +554,13 @@ impl CliConfig {
                  EXECUTOR_MAX_CONCURRENT_CALLS ({}) must both be >= 1",
                 self.executor_instances_per_bundle, self.executor_max_concurrent_calls,
             )));
+        }
+        if self.executor_precompile_max_bytes == 0 || self.executor_precompile_max_entries == 0 {
+            return Err(ExecutorError::Config(
+                "EXECUTOR_PRECOMPILE_MAX_BYTES and EXECUTOR_PRECOMPILE_MAX_ENTRIES must be > 0 \
+                 (disable the cache via EXECUTOR_DISABLE_COMPILE_CACHE instead)"
+                    .to_string(),
+            ));
         }
         if self.executor_wasm_collector != "drc" {
             // spec SS7.2: the collector is part of the artifact's

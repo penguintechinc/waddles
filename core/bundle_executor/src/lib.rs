@@ -31,6 +31,7 @@
 
 pub mod bucket;
 pub mod config;
+pub mod compile_cache;
 pub mod connector;
 pub mod connector_boot;
 pub mod connector_wire;
