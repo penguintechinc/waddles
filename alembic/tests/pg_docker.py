@@ -313,7 +313,7 @@ def _start_container(container: str, db: PgTestDatabase) -> None:
         ],
         capture_output=True,
         check=True,
-        timeout=300,
+        timeout=_env_seconds(_READY_TIMEOUT_ENV, 300.0),
     )
 
 
