@@ -31,6 +31,7 @@ class Room(_message.Message):
         "publisher_ids",
         "subscriber_count",
         "locked",
+        "empty_timeout_secs",
     )
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
@@ -40,6 +41,7 @@ class Room(_message.Message):
     PUBLISHER_IDS_FIELD_NUMBER: _ClassVar[int]
     SUBSCRIBER_COUNT_FIELD_NUMBER: _ClassVar[int]
     LOCKED_FIELD_NUMBER: _ClassVar[int]
+    EMPTY_TIMEOUT_SECS_FIELD_NUMBER: _ClassVar[int]
     room_id: str
     community_id: str
     label: str
@@ -48,6 +50,7 @@ class Room(_message.Message):
     publisher_ids: _containers.RepeatedScalarFieldContainer[str]
     subscriber_count: int
     locked: bool
+    empty_timeout_secs: int
     def __init__(
         self,
         room_id: _Optional[str] = ...,
@@ -58,31 +61,57 @@ class Room(_message.Message):
         publisher_ids: _Optional[_Iterable[str]] = ...,
         subscriber_count: _Optional[int] = ...,
         locked: _Optional[bool] = ...,
+        empty_timeout_secs: _Optional[int] = ...,
     ) -> None: ...
 
 class Participant(_message.Message):
-    __slots__ = ("participant_id", "publisher", "subscriber", "muted")
+    __slots__ = ("participant_id", "publisher", "subscriber", "muted", "joined_at")
     PARTICIPANT_ID_FIELD_NUMBER: _ClassVar[int]
     PUBLISHER_FIELD_NUMBER: _ClassVar[int]
     SUBSCRIBER_FIELD_NUMBER: _ClassVar[int]
     MUTED_FIELD_NUMBER: _ClassVar[int]
+    JOINED_AT_FIELD_NUMBER: _ClassVar[int]
     participant_id: str
     publisher: bool
     subscriber: bool
     muted: bool
+    joined_at: int
     def __init__(
         self,
         participant_id: _Optional[str] = ...,
         publisher: _Optional[bool] = ...,
         subscriber: _Optional[bool] = ...,
         muted: _Optional[bool] = ...,
+        joined_at: _Optional[int] = ...,
+    ) -> None: ...
+
+class RaisedHand(_message.Message):
+    __slots__ = ("participant_id", "raised_at", "acknowledged_at", "acknowledged_by")
+    PARTICIPANT_ID_FIELD_NUMBER: _ClassVar[int]
+    RAISED_AT_FIELD_NUMBER: _ClassVar[int]
+    ACKNOWLEDGED_AT_FIELD_NUMBER: _ClassVar[int]
+    ACKNOWLEDGED_BY_FIELD_NUMBER: _ClassVar[int]
+    participant_id: str
+    raised_at: int
+    acknowledged_at: int
+    acknowledged_by: str
+    def __init__(
+        self,
+        participant_id: _Optional[str] = ...,
+        raised_at: _Optional[int] = ...,
+        acknowledged_at: _Optional[int] = ...,
+        acknowledged_by: _Optional[str] = ...,
     ) -> None: ...
 
 class ListRoomsRequest(_message.Message):
-    __slots__ = ("community_id",)
+    __slots__ = ("api_version", "community_id")
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
     community_id: str
-    def __init__(self, community_id: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self, api_version: _Optional[str] = ..., community_id: _Optional[str] = ...
+    ) -> None: ...
 
 class ListRoomsResponse(_message.Message):
     __slots__ = ("rooms",)
@@ -91,13 +120,18 @@ class ListRoomsResponse(_message.Message):
     def __init__(self, rooms: _Optional[_Iterable[_Union[Room, _Mapping]]] = ...) -> None: ...
 
 class GetRoomRequest(_message.Message):
-    __slots__ = ("community_id", "room_id")
+    __slots__ = ("api_version", "community_id", "room_id")
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
     community_id: str
     room_id: str
     def __init__(
-        self, community_id: _Optional[str] = ..., room_id: _Optional[str] = ...
+        self,
+        api_version: _Optional[str] = ...,
+        community_id: _Optional[str] = ...,
+        room_id: _Optional[str] = ...,
     ) -> None: ...
 
 class GetRoomResponse(_message.Message):
@@ -107,13 +141,18 @@ class GetRoomResponse(_message.Message):
     def __init__(self, room: _Optional[_Union[Room, _Mapping]] = ...) -> None: ...
 
 class ListParticipantsRequest(_message.Message):
-    __slots__ = ("community_id", "room_id")
+    __slots__ = ("api_version", "community_id", "room_id")
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
     community_id: str
     room_id: str
     def __init__(
-        self, community_id: _Optional[str] = ..., room_id: _Optional[str] = ...
+        self,
+        api_version: _Optional[str] = ...,
+        community_id: _Optional[str] = ...,
+        room_id: _Optional[str] = ...,
     ) -> None: ...
 
 class ListParticipantsResponse(_message.Message):
@@ -132,18 +171,24 @@ class ListParticipantsResponse(_message.Message):
     ) -> None: ...
 
 class CreateRoomRequest(_message.Message):
-    __slots__ = ("community_id", "label", "max_publishers")
+    __slots__ = ("api_version", "community_id", "label", "max_publishers", "empty_timeout_secs")
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     LABEL_FIELD_NUMBER: _ClassVar[int]
     MAX_PUBLISHERS_FIELD_NUMBER: _ClassVar[int]
+    EMPTY_TIMEOUT_SECS_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
     community_id: str
     label: str
     max_publishers: int
+    empty_timeout_secs: int
     def __init__(
         self,
+        api_version: _Optional[str] = ...,
         community_id: _Optional[str] = ...,
         label: _Optional[str] = ...,
         max_publishers: _Optional[int] = ...,
+        empty_timeout_secs: _Optional[int] = ...,
     ) -> None: ...
 
 class CreateRoomResponse(_message.Message):
@@ -153,13 +198,18 @@ class CreateRoomResponse(_message.Message):
     def __init__(self, room: _Optional[_Union[Room, _Mapping]] = ...) -> None: ...
 
 class DeleteRoomRequest(_message.Message):
-    __slots__ = ("community_id", "room_id")
+    __slots__ = ("api_version", "community_id", "room_id")
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
     community_id: str
     room_id: str
     def __init__(
-        self, community_id: _Optional[str] = ..., room_id: _Optional[str] = ...
+        self,
+        api_version: _Optional[str] = ...,
+        community_id: _Optional[str] = ...,
+        room_id: _Optional[str] = ...,
     ) -> None: ...
 
 class DeleteRoomResponse(_message.Message):
@@ -169,13 +219,23 @@ class DeleteRoomResponse(_message.Message):
     def __init__(self, room: _Optional[_Union[Room, _Mapping]] = ...) -> None: ...
 
 class JoinRoomRequest(_message.Message):
-    __slots__ = ("community_id", "room_id", "participant_id", "publish", "subscribe", "ttl_secs")
+    __slots__ = (
+        "api_version",
+        "community_id",
+        "room_id",
+        "participant_id",
+        "publish",
+        "subscribe",
+        "ttl_secs",
+    )
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
     PARTICIPANT_ID_FIELD_NUMBER: _ClassVar[int]
     PUBLISH_FIELD_NUMBER: _ClassVar[int]
     SUBSCRIBE_FIELD_NUMBER: _ClassVar[int]
     TTL_SECS_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
     community_id: str
     room_id: str
     participant_id: str
@@ -184,6 +244,7 @@ class JoinRoomRequest(_message.Message):
     ttl_secs: int
     def __init__(
         self,
+        api_version: _Optional[str] = ...,
         community_id: _Optional[str] = ...,
         room_id: _Optional[str] = ...,
         participant_id: _Optional[str] = ...,
@@ -193,19 +254,29 @@ class JoinRoomRequest(_message.Message):
     ) -> None: ...
 
 class JoinRoomResponse(_message.Message):
-    __slots__ = ("token", "token_id", "participant_id", "expires_at", "whip_url", "whep_url")
+    __slots__ = (
+        "token",
+        "token_id",
+        "participant_id",
+        "expires_at",
+        "whip_url",
+        "whep_url",
+        "api_version",
+    )
     TOKEN_FIELD_NUMBER: _ClassVar[int]
     TOKEN_ID_FIELD_NUMBER: _ClassVar[int]
     PARTICIPANT_ID_FIELD_NUMBER: _ClassVar[int]
     EXPIRES_AT_FIELD_NUMBER: _ClassVar[int]
     WHIP_URL_FIELD_NUMBER: _ClassVar[int]
     WHEP_URL_FIELD_NUMBER: _ClassVar[int]
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
     token: str
     token_id: str
     participant_id: str
     expires_at: int
     whip_url: str
     whep_url: str
+    api_version: str
     def __init__(
         self,
         token: _Optional[str] = ...,
@@ -214,15 +285,25 @@ class JoinRoomResponse(_message.Message):
         expires_at: _Optional[int] = ...,
         whip_url: _Optional[str] = ...,
         whep_url: _Optional[str] = ...,
+        api_version: _Optional[str] = ...,
     ) -> None: ...
 
 class LeaveRoomRequest(_message.Message):
-    __slots__ = ("community_id", "room_id", "participant_id", "actor_id", "actor_role")
+    __slots__ = (
+        "api_version",
+        "community_id",
+        "room_id",
+        "participant_id",
+        "actor_id",
+        "actor_role",
+    )
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
     PARTICIPANT_ID_FIELD_NUMBER: _ClassVar[int]
     ACTOR_ID_FIELD_NUMBER: _ClassVar[int]
     ACTOR_ROLE_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
     community_id: str
     room_id: str
     participant_id: str
@@ -230,6 +311,7 @@ class LeaveRoomRequest(_message.Message):
     actor_role: RoomRole
     def __init__(
         self,
+        api_version: _Optional[str] = ...,
         community_id: _Optional[str] = ...,
         room_id: _Optional[str] = ...,
         participant_id: _Optional[str] = ...,
@@ -253,12 +335,21 @@ class LeaveRoomResponse(_message.Message):
     ) -> None: ...
 
 class KickParticipantRequest(_message.Message):
-    __slots__ = ("community_id", "room_id", "participant_id", "actor_id", "actor_role")
+    __slots__ = (
+        "api_version",
+        "community_id",
+        "room_id",
+        "participant_id",
+        "actor_id",
+        "actor_role",
+    )
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
     PARTICIPANT_ID_FIELD_NUMBER: _ClassVar[int]
     ACTOR_ID_FIELD_NUMBER: _ClassVar[int]
     ACTOR_ROLE_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
     community_id: str
     room_id: str
     participant_id: str
@@ -266,6 +357,7 @@ class KickParticipantRequest(_message.Message):
     actor_role: RoomRole
     def __init__(
         self,
+        api_version: _Optional[str] = ...,
         community_id: _Optional[str] = ...,
         room_id: _Optional[str] = ...,
         participant_id: _Optional[str] = ...,
@@ -289,12 +381,21 @@ class KickParticipantResponse(_message.Message):
     ) -> None: ...
 
 class MuteParticipantRequest(_message.Message):
-    __slots__ = ("community_id", "room_id", "participant_id", "actor_id", "actor_role")
+    __slots__ = (
+        "api_version",
+        "community_id",
+        "room_id",
+        "participant_id",
+        "actor_id",
+        "actor_role",
+    )
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
     PARTICIPANT_ID_FIELD_NUMBER: _ClassVar[int]
     ACTOR_ID_FIELD_NUMBER: _ClassVar[int]
     ACTOR_ROLE_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
     community_id: str
     room_id: str
     participant_id: str
@@ -302,6 +403,7 @@ class MuteParticipantRequest(_message.Message):
     actor_role: RoomRole
     def __init__(
         self,
+        api_version: _Optional[str] = ...,
         community_id: _Optional[str] = ...,
         room_id: _Optional[str] = ...,
         participant_id: _Optional[str] = ...,
@@ -325,12 +427,21 @@ class MuteParticipantResponse(_message.Message):
     ) -> None: ...
 
 class UnmuteParticipantRequest(_message.Message):
-    __slots__ = ("community_id", "room_id", "participant_id", "actor_id", "actor_role")
+    __slots__ = (
+        "api_version",
+        "community_id",
+        "room_id",
+        "participant_id",
+        "actor_id",
+        "actor_role",
+    )
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
     PARTICIPANT_ID_FIELD_NUMBER: _ClassVar[int]
     ACTOR_ID_FIELD_NUMBER: _ClassVar[int]
     ACTOR_ROLE_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
     community_id: str
     room_id: str
     participant_id: str
@@ -338,6 +449,7 @@ class UnmuteParticipantRequest(_message.Message):
     actor_role: RoomRole
     def __init__(
         self,
+        api_version: _Optional[str] = ...,
         community_id: _Optional[str] = ...,
         room_id: _Optional[str] = ...,
         participant_id: _Optional[str] = ...,
@@ -361,17 +473,20 @@ class UnmuteParticipantResponse(_message.Message):
     ) -> None: ...
 
 class MuteAllRequest(_message.Message):
-    __slots__ = ("community_id", "room_id", "actor_id", "actor_role")
+    __slots__ = ("api_version", "community_id", "room_id", "actor_id", "actor_role")
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
     ACTOR_ID_FIELD_NUMBER: _ClassVar[int]
     ACTOR_ROLE_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
     community_id: str
     room_id: str
     actor_id: str
     actor_role: RoomRole
     def __init__(
         self,
+        api_version: _Optional[str] = ...,
         community_id: _Optional[str] = ...,
         room_id: _Optional[str] = ...,
         actor_id: _Optional[str] = ...,
@@ -387,17 +502,20 @@ class MuteAllResponse(_message.Message):
     def __init__(self, room_id: _Optional[str] = ..., muted: _Optional[int] = ...) -> None: ...
 
 class LockRoomRequest(_message.Message):
-    __slots__ = ("community_id", "room_id", "actor_id", "actor_role")
+    __slots__ = ("api_version", "community_id", "room_id", "actor_id", "actor_role")
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
     ACTOR_ID_FIELD_NUMBER: _ClassVar[int]
     ACTOR_ROLE_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
     community_id: str
     room_id: str
     actor_id: str
     actor_role: RoomRole
     def __init__(
         self,
+        api_version: _Optional[str] = ...,
         community_id: _Optional[str] = ...,
         room_id: _Optional[str] = ...,
         actor_id: _Optional[str] = ...,
@@ -413,17 +531,20 @@ class LockRoomResponse(_message.Message):
     def __init__(self, room_id: _Optional[str] = ..., locked: _Optional[bool] = ...) -> None: ...
 
 class UnlockRoomRequest(_message.Message):
-    __slots__ = ("community_id", "room_id", "actor_id", "actor_role")
+    __slots__ = ("api_version", "community_id", "room_id", "actor_id", "actor_role")
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
     ACTOR_ID_FIELD_NUMBER: _ClassVar[int]
     ACTOR_ROLE_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
     community_id: str
     room_id: str
     actor_id: str
     actor_role: RoomRole
     def __init__(
         self,
+        api_version: _Optional[str] = ...,
         community_id: _Optional[str] = ...,
         room_id: _Optional[str] = ...,
         actor_id: _Optional[str] = ...,
@@ -437,3 +558,137 @@ class UnlockRoomResponse(_message.Message):
     room_id: str
     locked: bool
     def __init__(self, room_id: _Optional[str] = ..., locked: _Optional[bool] = ...) -> None: ...
+
+class ListHandsRequest(_message.Message):
+    __slots__ = ("api_version", "community_id", "room_id")
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
+    COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
+    ROOM_ID_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
+    community_id: str
+    room_id: str
+    def __init__(
+        self,
+        api_version: _Optional[str] = ...,
+        community_id: _Optional[str] = ...,
+        room_id: _Optional[str] = ...,
+    ) -> None: ...
+
+class ListHandsResponse(_message.Message):
+    __slots__ = ("room_id", "hands")
+    ROOM_ID_FIELD_NUMBER: _ClassVar[int]
+    HANDS_FIELD_NUMBER: _ClassVar[int]
+    room_id: str
+    hands: _containers.RepeatedCompositeFieldContainer[RaisedHand]
+    def __init__(
+        self,
+        room_id: _Optional[str] = ...,
+        hands: _Optional[_Iterable[_Union[RaisedHand, _Mapping]]] = ...,
+    ) -> None: ...
+
+class RaiseHandRequest(_message.Message):
+    __slots__ = ("api_version", "community_id", "room_id", "participant_id")
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
+    COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
+    ROOM_ID_FIELD_NUMBER: _ClassVar[int]
+    PARTICIPANT_ID_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
+    community_id: str
+    room_id: str
+    participant_id: str
+    def __init__(
+        self,
+        api_version: _Optional[str] = ...,
+        community_id: _Optional[str] = ...,
+        room_id: _Optional[str] = ...,
+        participant_id: _Optional[str] = ...,
+    ) -> None: ...
+
+class RaiseHandResponse(_message.Message):
+    __slots__ = ("hand",)
+    HAND_FIELD_NUMBER: _ClassVar[int]
+    hand: RaisedHand
+    def __init__(self, hand: _Optional[_Union[RaisedHand, _Mapping]] = ...) -> None: ...
+
+class LowerHandRequest(_message.Message):
+    __slots__ = (
+        "api_version",
+        "community_id",
+        "room_id",
+        "participant_id",
+        "actor_id",
+        "actor_role",
+    )
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
+    COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
+    ROOM_ID_FIELD_NUMBER: _ClassVar[int]
+    PARTICIPANT_ID_FIELD_NUMBER: _ClassVar[int]
+    ACTOR_ID_FIELD_NUMBER: _ClassVar[int]
+    ACTOR_ROLE_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
+    community_id: str
+    room_id: str
+    participant_id: str
+    actor_id: str
+    actor_role: RoomRole
+    def __init__(
+        self,
+        api_version: _Optional[str] = ...,
+        community_id: _Optional[str] = ...,
+        room_id: _Optional[str] = ...,
+        participant_id: _Optional[str] = ...,
+        actor_id: _Optional[str] = ...,
+        actor_role: _Optional[_Union[RoomRole, str]] = ...,
+    ) -> None: ...
+
+class LowerHandResponse(_message.Message):
+    __slots__ = ("room_id", "participant_id", "lowered")
+    ROOM_ID_FIELD_NUMBER: _ClassVar[int]
+    PARTICIPANT_ID_FIELD_NUMBER: _ClassVar[int]
+    LOWERED_FIELD_NUMBER: _ClassVar[int]
+    room_id: str
+    participant_id: str
+    lowered: bool
+    def __init__(
+        self,
+        room_id: _Optional[str] = ...,
+        participant_id: _Optional[str] = ...,
+        lowered: _Optional[bool] = ...,
+    ) -> None: ...
+
+class AcknowledgeHandRequest(_message.Message):
+    __slots__ = (
+        "api_version",
+        "community_id",
+        "room_id",
+        "participant_id",
+        "actor_id",
+        "actor_role",
+    )
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
+    COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
+    ROOM_ID_FIELD_NUMBER: _ClassVar[int]
+    PARTICIPANT_ID_FIELD_NUMBER: _ClassVar[int]
+    ACTOR_ID_FIELD_NUMBER: _ClassVar[int]
+    ACTOR_ROLE_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
+    community_id: str
+    room_id: str
+    participant_id: str
+    actor_id: str
+    actor_role: RoomRole
+    def __init__(
+        self,
+        api_version: _Optional[str] = ...,
+        community_id: _Optional[str] = ...,
+        room_id: _Optional[str] = ...,
+        participant_id: _Optional[str] = ...,
+        actor_id: _Optional[str] = ...,
+        actor_role: _Optional[_Union[RoomRole, str]] = ...,
+    ) -> None: ...
+
+class AcknowledgeHandResponse(_message.Message):
+    __slots__ = ("hand",)
+    HAND_FIELD_NUMBER: _ClassVar[int]
+    hand: RaisedHand
+    def __init__(self, hand: _Optional[_Union[RaisedHand, _Mapping]] = ...) -> None: ...

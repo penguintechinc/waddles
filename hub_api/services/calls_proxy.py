@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TIMEOUT_SECONDS = 10.0
 _TOKEN_TTL_SECONDS = 60
 HUB_API_SERVICE = "hub-api"
+# Contract version stamped on every RoomsService request (svc-streaming refuses anything else).
+API_VERSION = "v1"
 
 SCOPE_READ = "streaming.rooms:read"
 SCOPE_WRITE = "streaming.rooms:write"
@@ -291,7 +293,7 @@ class RoomsClient:
         resp = await self._call(
             "ListRooms",
             SCOPE_READ,
-            rooms_pb2.ListRoomsRequest(community_id=str(community_id)),
+            rooms_pb2.ListRoomsRequest(api_version=API_VERSION, community_id=str(community_id)),
         )
         return [_room_dict(r) for r in resp.rooms]
 
@@ -300,7 +302,9 @@ class RoomsClient:
         resp = await self._call(
             "GetRoom",
             SCOPE_READ,
-            rooms_pb2.GetRoomRequest(community_id=str(community_id), room_id=room_id),
+            rooms_pb2.GetRoomRequest(
+                api_version=API_VERSION, community_id=str(community_id), room_id=room_id
+            ),
         )
         return _room_dict(resp.room)
 
@@ -309,7 +313,9 @@ class RoomsClient:
         resp = await self._call(
             "ListParticipants",
             SCOPE_READ,
-            rooms_pb2.ListParticipantsRequest(community_id=str(community_id), room_id=room_id),
+            rooms_pb2.ListParticipantsRequest(
+                api_version=API_VERSION, community_id=str(community_id), room_id=room_id
+            ),
         )
         return {
             "room_id": resp.room_id,
@@ -333,7 +339,10 @@ class RoomsClient:
             "CreateRoom",
             SCOPE_WRITE,
             rooms_pb2.CreateRoomRequest(
-                community_id=str(community_id), label=label, max_publishers=max_publishers
+                api_version=API_VERSION,
+                community_id=str(community_id),
+                label=label,
+                max_publishers=max_publishers,
             ),
         )
         return _room_dict(resp.room)
@@ -343,7 +352,9 @@ class RoomsClient:
         resp = await self._call(
             "DeleteRoom",
             SCOPE_WRITE,
-            rooms_pb2.DeleteRoomRequest(community_id=str(community_id), room_id=room_id),
+            rooms_pb2.DeleteRoomRequest(
+                api_version=API_VERSION, community_id=str(community_id), room_id=room_id
+            ),
         )
         return _room_dict(resp.room)
 
@@ -355,6 +366,7 @@ class RoomsClient:
             "JoinRoom",
             SCOPE_WRITE,
             rooms_pb2.JoinRoomRequest(
+                api_version=API_VERSION,
                 community_id=str(community_id),
                 room_id=room_id,
                 participant_id=participant_id,
@@ -385,6 +397,7 @@ class RoomsClient:
             "LeaveRoom",
             SCOPE_WRITE,
             rooms_pb2.LeaveRoomRequest(
+                api_version=API_VERSION,
                 community_id=str(community_id),
                 room_id=room_id,
                 participant_id=participant_id,
@@ -408,6 +421,7 @@ class RoomsClient:
             "KickParticipant",
             SCOPE_MODERATE,
             rooms_pb2.KickParticipantRequest(
+                api_version=API_VERSION,
                 community_id=str(community_id),
                 room_id=room_id,
                 participant_id=participant_id,
@@ -425,6 +439,7 @@ class RoomsClient:
             "MuteAll",
             SCOPE_MODERATE,
             rooms_pb2.MuteAllRequest(
+                api_version=API_VERSION,
                 community_id=str(community_id),
                 room_id=room_id,
                 actor_id=actor_id,
@@ -442,6 +457,7 @@ class RoomsClient:
                 "LockRoom",
                 SCOPE_MODERATE,
                 rooms_pb2.LockRoomRequest(
+                    api_version=API_VERSION,
                     community_id=str(community_id),
                     room_id=room_id,
                     actor_id=actor_id,
@@ -453,6 +469,7 @@ class RoomsClient:
                 "UnlockRoom",
                 SCOPE_MODERATE,
                 rooms_pb2.UnlockRoomRequest(
+                    api_version=API_VERSION,
                     community_id=str(community_id),
                     room_id=room_id,
                     actor_id=actor_id,

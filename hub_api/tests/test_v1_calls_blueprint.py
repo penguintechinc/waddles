@@ -64,6 +64,10 @@ class FakeRooms(rooms_pb2_grpc.RoomsServiceServicer):
 
     async def _handle(self, rpc: str, request: Any, context: Any, reply: Any) -> Any:
         self.calls.append((rpc, request, dict(context.invocation_metadata())))
+        if request.api_version != "v1":  # mirrors svc-streaming: unknown/missing -> UNIMPLEMENTED
+            await context.abort(
+                grpc.StatusCode.UNIMPLEMENTED, f"api_version {request.api_version} not supported"
+            )
         if rpc in self.fail:
             code, message = self.fail[rpc]
             await context.abort(code, message)

@@ -187,7 +187,7 @@ async fn every_proto_rpc_is_declared_served_and_auth_gated() {
         .map(|l| l.split('(').next().unwrap().trim().to_string())
         .collect();
     let constant: BTreeSet<String> = RPC_NAMES.iter().map(|s| s.to_string()).collect();
-    assert_eq!(declared.len(), 13, "denominator: {declared:?}");
+    assert_eq!(declared.len(), 17, "denominator: {declared:?}");
     assert_eq!(declared, constant, "RPC_NAMES drifted from rooms.proto");
 
     // 2. Each one is routed and demands a token: no token -> Unauthenticated, never
@@ -214,6 +214,10 @@ async fn every_proto_rpc_is_declared_served_and_auth_gated() {
     gate!(mute_all, MuteAllRequest::default(), "MuteAll");
     gate!(lock_room, LockRoomRequest::default(), "LockRoom");
     gate!(unlock_room, UnlockRoomRequest::default(), "UnlockRoom");
+    gate!(list_hands, ListHandsRequest::default(), "ListHands");
+    gate!(raise_hand, RaiseHandRequest::default(), "RaiseHand");
+    gate!(lower_hand, LowerHandRequest::default(), "LowerHand");
+    gate!(acknowledge_hand, AcknowledgeHandRequest::default(), "AcknowledgeHand");
     assert_eq!(seen, declared, "an RPC in the proto is not exercised/served");
 }
 
@@ -229,9 +233,11 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
         .client
         .create_room(req(
             CreateRoomRequest {
+                api_version: "v1".into(),
                 community_id: "7".into(),
                 label: Some("standup".into()),
                 max_publishers: Some(4),
+                empty_timeout_secs: None,
             },
             &write,
         ))
@@ -245,7 +251,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
 
     let listed = h
         .client
-        .list_rooms(req(ListRoomsRequest { community_id: "7".into() }, &read))
+        .list_rooms(req(ListRoomsRequest { api_version: "v1".into(), community_id: "7".into() }, &read))
         .await
         .unwrap()
         .into_inner();
@@ -253,14 +259,14 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
     // Community scoping: another community sees nothing and cannot read the room.
     let other = h
         .client
-        .list_rooms(req(ListRoomsRequest { community_id: "8".into() }, &read))
+        .list_rooms(req(ListRoomsRequest { api_version: "v1".into(), community_id: "8".into() }, &read))
         .await
         .unwrap()
         .into_inner();
     assert!(other.rooms.is_empty());
     let e = h
         .client
-        .get_room(req(GetRoomRequest { community_id: "8".into(), room_id: room.room_id.clone() }, &read))
+        .get_room(req(GetRoomRequest { api_version: "v1".into(), community_id: "8".into(), room_id: room.room_id.clone() }, &read))
         .await
         .unwrap_err();
     assert_eq!(e.code(), Code::NotFound);
@@ -269,7 +275,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
     let joined = h
         .client
         .join_room(req(
-            JoinRoomRequest {
+            JoinRoomRequest { api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 participant_id: participant.clone(),
@@ -289,7 +295,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
     // Moderation: lock refuses further joins, unlock restores them.
     h.client
         .lock_room(req(
-            LockRoomRequest {
+            LockRoomRequest { api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 actor_id: actor.clone(),
@@ -299,7 +305,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
         ))
         .await
         .unwrap();
-    let join_req = || JoinRoomRequest {
+    let join_req = || JoinRoomRequest { api_version: "v1".into(),
         community_id: "7".into(),
         room_id: room.room_id.clone(),
         participant_id: uuid::Uuid::new_v4().to_string(),
@@ -312,7 +318,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
     let participants = h
         .client
         .list_participants(req(
-            ListParticipantsRequest { community_id: "7".into(), room_id: room.room_id.clone() },
+            ListParticipantsRequest { api_version: "v1".into(), community_id: "7".into(), room_id: room.room_id.clone() },
             &read,
         ))
         .await
@@ -321,7 +327,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
     assert!(participants.locked);
     h.client
         .unlock_room(req(
-            UnlockRoomRequest {
+            UnlockRoomRequest { api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 actor_id: actor.clone(),
@@ -339,7 +345,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
     let muted = h
         .client
         .mute_participant(req(
-            MuteParticipantRequest {
+            MuteParticipantRequest { api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 participant_id: target.clone(),
@@ -354,7 +360,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
     assert!(muted.muted);
     h.client
         .unmute_participant(req(
-            UnmuteParticipantRequest {
+            UnmuteParticipantRequest { api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 participant_id: target.clone(),
@@ -367,7 +373,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
         .unwrap();
     h.client
         .mute_all(req(
-            MuteAllRequest {
+            MuteAllRequest { api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 actor_id: actor_id.clone(),
@@ -379,7 +385,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
         .unwrap();
     h.client
         .kick_participant(req(
-            KickParticipantRequest {
+            KickParticipantRequest { api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 participant_id: target.clone(),
@@ -392,7 +398,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
         .unwrap();
     h.client
         .leave_room(req(
-            LeaveRoomRequest {
+            LeaveRoomRequest { api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 participant_id: participant.clone(),
@@ -406,14 +412,14 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
 
     h.client
         .delete_room(req(
-            DeleteRoomRequest { community_id: "7".into(), room_id: room.room_id.clone() },
+            DeleteRoomRequest { api_version: "v1".into(), community_id: "7".into(), room_id: room.room_id.clone() },
             &write,
         ))
         .await
         .unwrap();
     let e = h
         .client
-        .get_room(req(GetRoomRequest { community_id: "7".into(), room_id: room.room_id }, &read))
+        .get_room(req(GetRoomRequest { api_version: "v1".into(), community_id: "7".into(), room_id: room.room_id }, &read))
         .await
         .unwrap_err();
     assert_eq!(e.code(), Code::NotFound);
@@ -443,13 +449,13 @@ async fn moderation_enforces_actor_role_and_feature_flag() {
     let moderate = jwt(&h.signing_pem, SCOPE_MODERATE, |_| {});
     let room = h
         .client
-        .create_room(req(CreateRoomRequest { community_id: "7".into(), ..Default::default() }, &write))
+        .create_room(req(CreateRoomRequest { api_version: "v1".into(), community_id: "7".into(), ..Default::default() }, &write))
         .await
         .unwrap()
         .into_inner()
         .room
         .unwrap();
-    let kick = |role: RoomRole| KickParticipantRequest {
+    let kick = |role: RoomRole| KickParticipantRequest { api_version: "v1".into(),
         community_id: "7".into(),
         room_id: room.room_id.clone(),
         participant_id: uuid::Uuid::new_v4().to_string(),
@@ -468,7 +474,7 @@ async fn moderation_enforces_actor_role_and_feature_flag() {
     let moderate = jwt(&off.signing_pem, SCOPE_MODERATE, |_| {});
     let room = off
         .client
-        .create_room(req(CreateRoomRequest { community_id: "7".into(), ..Default::default() }, &write))
+        .create_room(req(CreateRoomRequest { api_version: "v1".into(), community_id: "7".into(), ..Default::default() }, &write))
         .await
         .unwrap()
         .into_inner()
@@ -477,7 +483,7 @@ async fn moderation_enforces_actor_role_and_feature_flag() {
     let e = off
         .client
         .lock_room(req(
-            LockRoomRequest {
+            LockRoomRequest { api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id,
                 actor_id: uuid::Uuid::new_v4().to_string(),
@@ -497,7 +503,7 @@ async fn invalid_ids_are_invalid_argument() {
     let read = jwt(&h.signing_pem, SCOPE_READ, |_| {});
     let e = h
         .client
-        .get_room(req(GetRoomRequest { community_id: "7".into(), room_id: "not-a-uuid".into() }, &read))
+        .get_room(req(GetRoomRequest { api_version: "v1".into(), community_id: "7".into(), room_id: "not-a-uuid".into() }, &read))
         .await
         .unwrap_err();
     assert_eq!(e.code(), Code::InvalidArgument);
@@ -510,7 +516,7 @@ async fn bad_tokens_are_refused_before_any_work() {
     let base_client = h.client.clone();
     let list = |t: String| {
         let mut c = base_client.clone();
-        async move { c.list_rooms(req(ListRoomsRequest { community_id: "7".into() }, &t)).await }
+        async move { c.list_rooms(req(ListRoomsRequest { api_version: "v1".into(), community_id: "7".into() }, &t)).await }
     };
     // Sanity: a good token works.
     assert!(list(jwt(&k, SCOPE_READ, |_| {})).await.is_ok());
@@ -551,7 +557,7 @@ async fn bad_tokens_are_refused_before_any_work() {
     // Missing header entirely.
     let e = h
         .client
-        .list_rooms(Request::new(ListRoomsRequest { community_id: "7".into() }))
+        .list_rooms(Request::new(ListRoomsRequest { api_version: "v1".into(), community_id: "7".into() }))
         .await
         .unwrap_err();
     assert_eq!(e.code(), Code::Unauthenticated);
@@ -565,9 +571,142 @@ async fn client_without_a_certificate_from_the_configured_ca_is_refused() {
     let refused = match no_cert {
         Err(_) => true,
         Ok(mut c) => c
-            .list_rooms(Request::new(ListRoomsRequest { community_id: "7".into() }))
+            .list_rooms(Request::new(ListRoomsRequest { api_version: "v1".into(), community_id: "7".into() }))
             .await
             .is_err(),
     };
     assert!(refused, "a certificate-less client must not reach any handler");
+}
+
+#[tokio::test]
+async fn unknown_or_missing_api_version_is_unimplemented_not_served() {
+    let mut h = harness(42240, true).await;
+    let read = jwt(&h.signing_pem, SCOPE_READ, |_| {});
+    // Missing (empty) and unknown versions are both refused, with the version named.
+    for v in ["", "v2"] {
+        let e = h
+            .client
+            .list_rooms(req(
+                ListRoomsRequest { api_version: v.into(), community_id: "7".into() },
+                &read,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code(), Code::Unimplemented, "api_version {v:?}");
+        assert!(
+            e.message().contains(&format!("api_version {v} not supported")),
+            "message: {}",
+            e.message()
+        );
+    }
+    // A wrong version never reaches auth-free territory: no token still wins.
+    let e = h
+        .client
+        .list_rooms(Request::new(ListRoomsRequest { api_version: "v2".into(), community_id: "7".into() }))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn hands_rpcs_fail_loud_until_the_queue_exists() {
+    let mut h = harness(42260, true).await;
+    let read = jwt(&h.signing_pem, SCOPE_READ, |_| {});
+    let write = jwt(&h.signing_pem, SCOPE_WRITE, |_| {});
+    let moderate = jwt(&h.signing_pem, SCOPE_MODERATE, |_| {});
+    let room = uuid::Uuid::new_v4().to_string();
+    let who = uuid::Uuid::new_v4().to_string();
+    let (actor, role) = admin();
+    let mut seen = 0;
+    macro_rules! loud {
+        ($method:ident, $msg:expr, $tok:expr, $name:literal) => {{
+            let e = h.client.$method(req($msg, $tok)).await.unwrap_err();
+            assert_eq!(e.code(), Code::Unimplemented, "{}: {}", $name, e.message());
+            assert!(e.message().contains("not implemented"), "{}: {}", $name, e.message());
+            seen += 1;
+        }};
+    }
+    loud!(
+        list_hands,
+        ListHandsRequest { api_version: "v1".into(), community_id: "7".into(), room_id: room.clone() },
+        &read,
+        "ListHands"
+    );
+    loud!(
+        raise_hand,
+        RaiseHandRequest {
+            api_version: "v1".into(),
+            community_id: "7".into(),
+            room_id: room.clone(),
+            participant_id: who.clone(),
+        },
+        &write,
+        "RaiseHand"
+    );
+    loud!(
+        lower_hand,
+        LowerHandRequest {
+            api_version: "v1".into(),
+            community_id: "7".into(),
+            room_id: room.clone(),
+            participant_id: who.clone(),
+            actor_id: actor.clone(),
+            actor_role: role,
+        },
+        &write,
+        "LowerHand"
+    );
+    loud!(
+        acknowledge_hand,
+        AcknowledgeHandRequest {
+            api_version: "v1".into(),
+            community_id: "7".into(),
+            room_id: room,
+            participant_id: who,
+            actor_id: actor,
+            actor_role: role,
+        },
+        &moderate,
+        "AcknowledgeHand"
+    );
+    assert_eq!(seen, 4, "all four hands RPCs examined");
+}
+
+#[tokio::test]
+async fn nonzero_empty_timeout_is_refused_until_expiry_exists() {
+    let mut h = harness(42280, true).await;
+    let write = jwt(&h.signing_pem, SCOPE_WRITE, |_| {});
+    let e = h
+        .client
+        .create_room(req(
+            CreateRoomRequest {
+                api_version: "v1".into(),
+                community_id: "7".into(),
+                empty_timeout_secs: Some(300),
+                ..Default::default()
+            },
+            &write,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Code::Unimplemented);
+    assert!(e.message().contains("empty_timeout_secs"), "{}", e.message());
+    // 0 / unset stay valid (no expiry).
+    let ok = h
+        .client
+        .create_room(req(
+            CreateRoomRequest {
+                api_version: "v1".into(),
+                community_id: "7".into(),
+                empty_timeout_secs: Some(0),
+                ..Default::default()
+            },
+            &write,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .room
+        .unwrap();
+    assert_eq!(ok.empty_timeout_secs, 0);
 }

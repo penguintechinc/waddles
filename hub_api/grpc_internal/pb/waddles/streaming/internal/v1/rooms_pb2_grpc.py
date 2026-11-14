@@ -55,6 +55,12 @@ class RoomsServiceStub:
             response_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ListParticipantsResponse.FromString,
             _registered_method=True,
         )
+        self.ListHands = channel.unary_unary(
+            "/waddles.streaming.internal.v1.RoomsService/ListHands",
+            request_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ListHandsRequest.SerializeToString,
+            response_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ListHandsResponse.FromString,
+            _registered_method=True,
+        )
         self.CreateRoom = channel.unary_unary(
             "/waddles.streaming.internal.v1.RoomsService/CreateRoom",
             request_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.CreateRoomRequest.SerializeToString,
@@ -77,6 +83,18 @@ class RoomsServiceStub:
             "/waddles.streaming.internal.v1.RoomsService/LeaveRoom",
             request_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.LeaveRoomRequest.SerializeToString,
             response_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.LeaveRoomResponse.FromString,
+            _registered_method=True,
+        )
+        self.RaiseHand = channel.unary_unary(
+            "/waddles.streaming.internal.v1.RoomsService/RaiseHand",
+            request_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.RaiseHandRequest.SerializeToString,
+            response_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.RaiseHandResponse.FromString,
+            _registered_method=True,
+        )
+        self.LowerHand = channel.unary_unary(
+            "/waddles.streaming.internal.v1.RoomsService/LowerHand",
+            request_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.LowerHandRequest.SerializeToString,
+            response_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.LowerHandResponse.FromString,
             _registered_method=True,
         )
         self.KickParticipant = channel.unary_unary(
@@ -115,6 +133,12 @@ class RoomsServiceStub:
             response_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.UnlockRoomResponse.FromString,
             _registered_method=True,
         )
+        self.AcknowledgeHand = channel.unary_unary(
+            "/waddles.streaming.internal.v1.RoomsService/AcknowledgeHand",
+            request_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandRequest.SerializeToString,
+            response_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandResponse.FromString,
+            _registered_method=True,
+        )
 
 
 class RoomsServiceServicer:
@@ -133,6 +157,12 @@ class RoomsServiceServicer:
         raise NotImplementedError("Method not implemented!")
 
     def ListParticipants(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def ListHands(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
@@ -157,6 +187,22 @@ class RoomsServiceServicer:
         raise NotImplementedError("Method not implemented!")
 
     def LeaveRoom(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def RaiseHand(self, request, context):
+        """Raised-hand queue, authoritative in svc-streaming (same lifecycle as rooms
+        and locks: in memory, cleared on kick/leave/delete). RaiseHand is idempotent
+        (raising twice keeps the original position). LowerHand by someone other
+        than the participant needs a moderator/admin actor role.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def LowerHand(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
@@ -200,6 +246,12 @@ class RoomsServiceServicer:
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
+    def AcknowledgeHand(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
 
 def add_RoomsServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -217,6 +269,11 @@ def add_RoomsServiceServicer_to_server(servicer, server):
             servicer.ListParticipants,
             request_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ListParticipantsRequest.FromString,
             response_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ListParticipantsResponse.SerializeToString,
+        ),
+        "ListHands": grpc.unary_unary_rpc_method_handler(
+            servicer.ListHands,
+            request_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ListHandsRequest.FromString,
+            response_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ListHandsResponse.SerializeToString,
         ),
         "CreateRoom": grpc.unary_unary_rpc_method_handler(
             servicer.CreateRoom,
@@ -237,6 +294,16 @@ def add_RoomsServiceServicer_to_server(servicer, server):
             servicer.LeaveRoom,
             request_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.LeaveRoomRequest.FromString,
             response_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.LeaveRoomResponse.SerializeToString,
+        ),
+        "RaiseHand": grpc.unary_unary_rpc_method_handler(
+            servicer.RaiseHand,
+            request_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.RaiseHandRequest.FromString,
+            response_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.RaiseHandResponse.SerializeToString,
+        ),
+        "LowerHand": grpc.unary_unary_rpc_method_handler(
+            servicer.LowerHand,
+            request_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.LowerHandRequest.FromString,
+            response_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.LowerHandResponse.SerializeToString,
         ),
         "KickParticipant": grpc.unary_unary_rpc_method_handler(
             servicer.KickParticipant,
@@ -267,6 +334,11 @@ def add_RoomsServiceServicer_to_server(servicer, server):
             servicer.UnlockRoom,
             request_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.UnlockRoomRequest.FromString,
             response_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.UnlockRoomResponse.SerializeToString,
+        ),
+        "AcknowledgeHand": grpc.unary_unary_rpc_method_handler(
+            servicer.AcknowledgeHand,
+            request_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandRequest.FromString,
+            response_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandResponse.SerializeToString,
         ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -361,6 +433,36 @@ class RoomsService:
             "/waddles.streaming.internal.v1.RoomsService/ListParticipants",
             waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ListParticipantsRequest.SerializeToString,
             waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ListParticipantsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def ListHands(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/waddles.streaming.internal.v1.RoomsService/ListHands",
+            waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ListHandsRequest.SerializeToString,
+            waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ListHandsResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -481,6 +583,66 @@ class RoomsService:
             "/waddles.streaming.internal.v1.RoomsService/LeaveRoom",
             waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.LeaveRoomRequest.SerializeToString,
             waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.LeaveRoomResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def RaiseHand(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/waddles.streaming.internal.v1.RoomsService/RaiseHand",
+            waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.RaiseHandRequest.SerializeToString,
+            waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.RaiseHandResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def LowerHand(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/waddles.streaming.internal.v1.RoomsService/LowerHand",
+            waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.LowerHandRequest.SerializeToString,
+            waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.LowerHandResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -661,6 +823,36 @@ class RoomsService:
             "/waddles.streaming.internal.v1.RoomsService/UnlockRoom",
             waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.UnlockRoomRequest.SerializeToString,
             waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.UnlockRoomResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def AcknowledgeHand(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/waddles.streaming.internal.v1.RoomsService/AcknowledgeHand",
+            waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandRequest.SerializeToString,
+            waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandResponse.FromString,
             options,
             channel_credentials,
             insecure,

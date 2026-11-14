@@ -34,9 +34,59 @@ pub mod pb {
 use pb::rooms_service_server::{RoomsService, RoomsServiceServer};
 use pb::*;
 
+/// The only `api_version` this server speaks. Anything else (including empty) is refused with
+/// `UNIMPLEMENTED` before any request field is acted on (rule `backend.md` API Versioning).
+pub const API_VERSION: &str = "v1";
+
+/// Implemented by every `RoomsService` request message so [`RoomsGrpc::run`] can enforce
+/// [`API_VERSION`] uniformly instead of each handler remembering to.
+trait Versioned {
+    /// The request's `api_version` field.
+    fn api_version(&self) -> &str;
+}
+
+macro_rules! versioned {
+    ($($t:ty),+ $(,)?) => {
+        $(impl Versioned for $t {
+            fn api_version(&self) -> &str {
+                &self.api_version
+            }
+        })+
+    };
+}
+
+versioned!(
+    ListRoomsRequest,
+    GetRoomRequest,
+    ListParticipantsRequest,
+    ListHandsRequest,
+    CreateRoomRequest,
+    DeleteRoomRequest,
+    JoinRoomRequest,
+    LeaveRoomRequest,
+    RaiseHandRequest,
+    LowerHandRequest,
+    KickParticipantRequest,
+    MuteParticipantRequest,
+    UnmuteParticipantRequest,
+    MuteAllRequest,
+    LockRoomRequest,
+    UnlockRoomRequest,
+    AcknowledgeHandRequest,
+);
+
+/// Refuses any `api_version` other than [`API_VERSION`] with `UNIMPLEMENTED`.
+fn check_api_version(v: &str) -> Result<(), Status> {
+    if v == API_VERSION {
+        Ok(())
+    } else {
+        Err(Status::unimplemented(format!("api_version {v} not supported")))
+    }
+}
+
 /// Every RPC name in `RoomsService`, kept in lockstep with the proto by the
 /// contract test (`tests/rooms_grpc.rs`) and used as the metric `rpc` label.
-pub const RPC_NAMES: [&str; 13] = [
+pub const RPC_NAMES: [&str; 17] = [
     "ListRooms",
     "GetRoom",
     "ListParticipants",
@@ -50,6 +100,10 @@ pub const RPC_NAMES: [&str; 13] = [
     "MuteAll",
     "LockRoom",
     "UnlockRoom",
+    "ListHands",
+    "RaiseHand",
+    "LowerHand",
+    "AcknowledgeHand",
 ];
 
 /// The `RoomsService` implementation: JWT-gated, delegating to [`RoomService`].
@@ -93,12 +147,14 @@ impl RoomsGrpc {
         f: impl FnOnce(Arc<RoomService>, R) -> Fut,
     ) -> Result<Response<T>, Status>
     where
+        R: Versioned,
         Fut: Future<Output = Result<T, RoomError>>,
     {
         let started = Instant::now();
         let span = tracing::info_span!("rooms.grpc", rpc);
         let result = async {
             self.authenticate(&req, scope)?;
+            check_api_version(req.get_ref().api_version())?;
             f(self.rooms.clone(), req.into_inner())
                 .await
                 .map(Response::new)
@@ -159,6 +215,8 @@ fn room_pb(r: RoomInfo) -> Room {
         publisher_ids: r.publisher_ids.iter().map(Uuid::to_string).collect(),
         subscriber_count: r.subscriber_count as u32,
         locked: r.locked,
+        // Idle-room expiry is not implemented yet (plan T2), so no room ever expires: 0 = disabled.
+        empty_timeout_secs: 0,
     }
 }
 
@@ -168,6 +226,8 @@ fn participant_pb(p: ParticipantInfo) -> Participant {
         publisher: p.publisher,
         subscriber: p.subscriber,
         muted: p.muted,
+        // The room ledger does not record join times yet (plan T2); unset, never a made-up 0.
+        joined_at: None,
     }
 }
 
@@ -221,6 +281,11 @@ impl RoomsService for RoomsGrpc {
         req: Request<CreateRoomRequest>,
     ) -> Result<Response<CreateRoomResponse>, Status> {
         self.run("CreateRoom", SCOPE_WRITE, req, |s, r| async move {
+            if r.empty_timeout_secs.is_some_and(|n| n != 0) {
+                return Err(RoomError::Unsupported(
+                    "empty_timeout_secs: empty-room expiry is not implemented yet".into(),
+                ));
+            }
             let info = s
                 .create(
                     &r.community_id,
@@ -277,6 +342,7 @@ impl RoomsService for RoomsGrpc {
                 expires_at: t.expires_at,
                 whip_url: format!("{base}/rtc/rooms/{room_id}/whip"),
                 whep_url: format!("{base}/rtc/rooms/{room_id}/whep"),
+                api_version: API_VERSION.to_string(),
             })
         })
         .await
@@ -411,6 +477,54 @@ impl RoomsService for RoomsGrpc {
         })
         .await
     }
+
+    async fn list_hands(
+        &self,
+        req: Request<ListHandsRequest>,
+    ) -> Result<Response<ListHandsResponse>, Status> {
+        self.run("ListHands", SCOPE_READ, req, |_s, _r| async move {
+            Err::<ListHandsResponse, _>(hands_unimplemented("ListHands"))
+        })
+        .await
+    }
+
+    async fn raise_hand(
+        &self,
+        req: Request<RaiseHandRequest>,
+    ) -> Result<Response<RaiseHandResponse>, Status> {
+        self.run("RaiseHand", SCOPE_WRITE, req, |_s, _r| async move {
+            Err::<RaiseHandResponse, _>(hands_unimplemented("RaiseHand"))
+        })
+        .await
+    }
+
+    async fn lower_hand(
+        &self,
+        req: Request<LowerHandRequest>,
+    ) -> Result<Response<LowerHandResponse>, Status> {
+        self.run("LowerHand", SCOPE_WRITE, req, |_s, _r| async move {
+            Err::<LowerHandResponse, _>(hands_unimplemented("LowerHand"))
+        })
+        .await
+    }
+
+    async fn acknowledge_hand(
+        &self,
+        req: Request<AcknowledgeHandRequest>,
+    ) -> Result<Response<AcknowledgeHandResponse>, Status> {
+        self.run("AcknowledgeHand", SCOPE_MODERATE, req, |_s, _r| async move {
+            Err::<AcknowledgeHandResponse, _>(hands_unimplemented("AcknowledgeHand"))
+        })
+        .await
+    }
+}
+
+/// Loud refusal for the raised-hand RPCs: the contract exists (proto T1) but the server-side
+/// queue is not built yet (plan T2); callers must never see a silent empty list or no-op.
+fn hands_unimplemented(rpc: &str) -> RoomError {
+    RoomError::Unsupported(format!(
+        "{rpc}: raised-hand queue is not implemented in svc-streaming yet"
+    ))
 }
 
 /// The axum router carrying the tonic service (a single `RoomsService` route set).
