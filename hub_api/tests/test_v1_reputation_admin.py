@@ -271,6 +271,52 @@ class TestCommunityConfig:
             )
             assert r.status_code == 403
 
+    async def test_rejected_requests_are_logged_not_silently_swallowed(
+        self, client: Any, seeded: dict[str, int], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Every ApiError the handlers turn into an error response leaves a log record (gate)."""
+        caplog.set_level("WARNING", logger="blueprints.v1.admin")
+        base = f"/api/v1/admin/{seeded['c1']}/reputation"
+        assert (await client.get(f"{base}/config", headers=_h(2))).status_code == 403
+        assert (
+            await client.put(f"{base}/config", headers=_h(2), json={"softBanEnabled": True})
+        ).status_code == 403
+        assert (await client.get(f"{base}/at-risk", headers=_h(2))).status_code == 403
+        assert (await client.get(f"{base}/history", headers=_h(2))).status_code == 403
+        assert (await client.get(f"{base}/soft-bans", headers=_h(2))).status_code == 403
+        assert (await client.put(f"{base}/soft-bans/2", headers=_h(2), json={})).status_code == 403
+        assert (await client.delete(f"{base}/soft-bans/2", headers=_h(2))).status_code == 403
+        messages = [r.getMessage() for r in caplog.records if r.name == "blueprints.v1.admin"]
+        expected = (
+            "get_reputation_config",
+            "put_reputation_config",
+            "get_reputation_at_risk",
+            "get_reputation_history",
+            "list_reputation_soft_bans",
+            "put_reputation_soft_ban",
+            "delete_reputation_soft_ban",
+        )
+        for name in expected:
+            hits = [m for m in messages if m.startswith(f"{name} rejected: code=")]
+            assert len(hits) == 1, f"{name}: expected one rejection log record, got {messages}"
+            assert "status=403" in hits[0]
+
+    async def test_invalid_expires_at_is_400_and_logged(
+        self, client: Any, seeded: dict[str, int], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level("WARNING", logger="blueprints.v1.admin")
+        r = await client.put(
+            f"/api/v1/admin/{seeded['c1']}/reputation/soft-bans/2",
+            headers=_h(1),
+            json={"expiresAt": "not-a-date"},
+        )
+        assert r.status_code == 400
+        assert any(
+            "put_reputation_soft_ban invalid expiresAt: ValueError" in rec.getMessage()
+            for rec in caplog.records
+        )
+        assert "not-a-date" not in caplog.text  # user input never reaches the log
+
     async def test_admin_of_another_community_is_403(
         self, client: Any, seeded: dict[str, int]
     ) -> None:
@@ -576,3 +622,16 @@ class TestApplyBoundary:
         assert err.value.status_code == 403
         with pytest.raises(reputation_svc.ApiError):
             await reputation_svc._admin_actor(rep_db, rep_db.dal, 424242)  # noqa: SLF001
+
+
+def test_actor_type_logs_an_unparseable_actor_instead_of_hiding_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stored actor that is neither `system:*` nor a UUID is reported `unknown` AND logged."""
+    caplog.set_level("DEBUG", logger="services.community_reputation_service")
+    assert reputation_svc._actor_type("not-a-uuid-or-system") == "unknown"  # noqa: SLF001
+    assert any("neither system:* nor a UUID: ValueError" in r.getMessage() for r in caplog.records)
+    assert "not-a-uuid-or-system" not in caplog.text  # the stored actor value is never logged
+    assert reputation_svc._actor_type("system:floor") == "system"  # noqa: SLF001
+    assert reputation_svc._actor_type(_uuid(7)) == "admin"  # noqa: SLF001
+    assert reputation_svc._actor_type(None) == "unknown"  # noqa: SLF001
