@@ -2307,6 +2307,19 @@ components:
       - occurredAt
       title: HistoryEntryDTO
       type: object
+    IceServerDTO:
+      description: One STUN entry for the browser's `RTCPeerConnection` (never credentials;
+        TURN is later).
+      properties:
+        urls:
+          items:
+            type: string
+          title: Urls
+          type: array
+      required:
+      - urls
+      title: IceServerDTO
+      type: object
     IdentityDTO:
       description: Identity DTO.
       properties:
@@ -5940,6 +5953,21 @@ components:
       - permitted
       - targetAppId
       title: ToolDTO
+      type: object
+    TownHallJoin:
+      description: 'How the caller joins the Town Hall: call this hub-api route (it
+        mints the token).'
+      properties:
+        method:
+          title: Method
+          type: string
+        path:
+          title: Path
+          type: string
+      required:
+      - method
+      - path
+      title: TownHallJoin
       type: object
     TrackDTO:
       description: Wire shape of a resolved `Track` -- mirrors `services.music_providers.track.Track`.
@@ -16487,6 +16515,64 @@ paths:
             it on.'
       summary: '`PUT /api/v1/communities/<id>/calendar/event-sync` body `{"enabled":
         bool}`.'
+  /api/v1/communities/{community_id}/calls/rooms/{room_id}/hands/mine:
+    get:
+      description: ''
+      operationId: get_get_my_hand
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: room_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'The caller''s OWN hand state only: UUID plus timestamps,
+                  nothing about anyone else.'
+                properties:
+                  acknowledged:
+                    title: Acknowledged
+                    type: boolean
+                  acknowledged_at:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Acknowledged At
+                  participant_id:
+                    title: Participant Id
+                    type: string
+                  raised:
+                    title: Raised
+                    type: boolean
+                  raised_at:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Raised At
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - participant_id
+                - raised
+                - acknowledged
+                - raised_at
+                - acknowledged_at
+                title: MyHandResponse
+                type: object
+          description: 'The caller''s OWN hand state only: UUID plus timestamps, nothing
+            about anyone else.'
+      summary: 'The caller''s own raised-hand state (member): their own entry only,
+        via `ListHands`.'
   /api/v1/communities/{community_id}/connections:
     get:
       description: ''
@@ -17693,6 +17779,105 @@ paths:
                 type: object
           description: Response DTO for `GET .../streams/<entityId>`.
       summary: Get details for a specific stream.
+  /api/v1/communities/{community_id}/town-hall:
+    get:
+      description: ''
+      operationId: get_get_town_hall
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: The community's persistent Town Hall room.
+                properties:
+                  created:
+                    title: Created
+                    type: boolean
+                  join:
+                    $ref: '#/components/schemas/TownHallJoin'
+                  label:
+                    title: Label
+                    type: string
+                  locked:
+                    title: Locked
+                    type: boolean
+                  participant_count:
+                    title: Participant Count
+                    type: integer
+                  room_id:
+                    title: Room Id
+                    type: string
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - room_id
+                - label
+                - locked
+                - participant_count
+                - created
+                - join
+                title: TownHallResponse
+                type: object
+          description: The community's persistent Town Hall room.
+      summary: The community's Town Hall (member); lazily created, idempotent, never
+        expires.
+    post:
+      description: ''
+      operationId: post_post_town_hall
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: The community's persistent Town Hall room.
+                properties:
+                  created:
+                    title: Created
+                    type: boolean
+                  join:
+                    $ref: '#/components/schemas/TownHallJoin'
+                  label:
+                    title: Label
+                    type: string
+                  locked:
+                    title: Locked
+                    type: boolean
+                  participant_count:
+                    title: Participant Count
+                    type: integer
+                  room_id:
+                    title: Room Id
+                    type: string
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - room_id
+                - label
+                - locked
+                - participant_count
+                - created
+                - join
+                title: TownHallResponse
+                type: object
+          description: The community's persistent Town Hall room.
+      summary: Ensure the community's Town Hall exists (member); same result as the
+        GET.
   /api/v1/community/{community_id}/activity/my-stats:
     get:
       description: ''
@@ -18135,15 +18320,36 @@ paths:
           content:
             application/json:
               schema:
-                description: '`POST .../join` -- the room token and the WHIP/WHEP
-                  endpoints for ONE participant.'
+                description: '`POST .../join` -- everything a browser WHIP/WHEP client
+                  needs, for ONE participant.
+
+
+                  `token` is a short-lived room token to send as `Authorization: Bearer
+                  <token>` to the WHIP
+
+                  publish and WHEP subscribe endpoints; `publish` / `subscribe` say
+                  which of them the policy
+
+                  granted. The token is a credential: it is never logged and the response
+                  is `no-store`.'
                 properties:
                   expires_at:
                     title: Expires At
                     type: integer
+                  ice_servers:
+                    items:
+                      $ref: '#/components/schemas/IceServerDTO'
+                    title: Ice Servers
+                    type: array
                   participant_id:
                     title: Participant Id
                     type: string
+                  publish:
+                    title: Publish
+                    type: boolean
+                  subscribe:
+                    title: Subscribe
+                    type: boolean
                   success:
                     default: true
                     title: Success
@@ -18153,6 +18359,9 @@ paths:
                     type: string
                   token_id:
                     title: Token Id
+                    type: string
+                  token_type:
+                    title: Token Type
                     type: string
                   url:
                     title: Url
@@ -18165,16 +18374,30 @@ paths:
                     type: string
                 required:
                 - token
+                - token_type
                 - url
                 - whip_url
                 - whep_url
                 - token_id
                 - participant_id
                 - expires_at
+                - publish
+                - subscribe
+                - ice_servers
                 title: JoinResponse
                 type: object
-          description: '`POST .../join` -- the room token and the WHIP/WHEP endpoints
-            for ONE participant.'
+          description: '`POST .../join` -- everything a browser WHIP/WHEP client needs,
+            for ONE participant.
+
+
+            `token` is a short-lived room token to send as `Authorization: Bearer
+            <token>` to the WHIP
+
+            publish and WHEP subscribe endpoints; `publish` / `subscribe` say which
+            of them the policy
+
+            granted. The token is a credential: it is never logged and the response
+            is `no-store`.'
       summary: Join a voice room -- mints a room token for THIS caller, THIS room,
         only if a member.
   /api/v1/community/{community_id}/interact/voice/rooms/{room_name}/leave:
