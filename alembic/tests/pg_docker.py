@@ -157,10 +157,9 @@ CREATE TABLE community_members (
 CREATE TABLE calendar_events (
     id SERIAL PRIMARY KEY
 );
--- 0092_leaderboard_config_toggles ALTERs this legacy table (never Alembic-created).
-CREATE TABLE community_leaderboard_config (
-    id SERIAL PRIMARY KEY
-);
+-- (No community_leaderboard_config stub: 0092_leaderboard_config_toggles creates it itself
+-- when the legacy SQL replay never did, exactly as on the CI bootstrap -- a stub here only
+-- masked that migration failing on the real minimal bootstrap.)
 -- 0063_seal_aad_version ALTERs this legacy table (config/postgres/migrations/
 -- 030_platform_integrations.sql, never Alembic): same columns as the real DDL minus its
 -- indexes/scope CHECK. Mirrored in pr-validation.yml's bootstrap -- keep both in sync.
