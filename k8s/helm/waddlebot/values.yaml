@@ -1986,8 +1986,12 @@ pipeline:
       # (shared compiled cache across stages -- the Phase 1 default). Per-stage pools, e.g.:
       #   - { name: process, stages: [svc-process-rust] }
       #   - { name: action,  stages: [svc-action-rust], replicas: 3 }
-      # Each stage must belong to exactly one pool; optional per-pool replicas/resources/
-      # memoryBudgetMb/autoscaling override the values below. Render fails loudly otherwise.
+      # Each stage must be served by exactly one pool PER LANGUAGE CLASS (an `any` pool covers
+      # both classes); optional per-pool languageClass/replicas/resources/memoryBudgetMb/
+      # autoscaling override the values below. Render fails loudly otherwise. Example with both
+      # executor classes serving both stages:
+      #   - { name: native, languageClass: compiled, stages: [svc-process-rust, svc-action-rust] }
+      #   - { name: script, languageClass: scripted, stages: [svc-process-rust, svc-action-rust] }
       pools: []
       # EXECUTOR_MEMORY_BUDGET_MB: LRU ceiling for resident compiled modules; must be below
       # resources.limits.memory (render fails otherwise). ~2/3 of the limit leaves headroom for
@@ -2075,13 +2079,31 @@ pipeline:
       # scales with the number of activated bundles. Then this limit can shrink again.
       # executor Phase 1 (PLAN.md s3): CPU limit 4 (JIT-miss compiles + ~100 rps/core);
       # memory: 12Gi limit = memoryBudgetMb (8192) LRU ceiling + ~4Gi headroom for instances/JIT.
+      # SIZING POLICY (all environments): requests = the bare minimum that schedules and runs
+      # the pod healthily (500m / 1Gi: the footprint the executor ran at on the alpha overlay
+      # before phase 1; NOT measured on a metrics-API cluster yet); limits carry the headroom.
+      # The memory budget above is checked against the LIMIT, never the request.
       resources:
         requests:
-          cpu: "1000m"
-          memory: "2Gi"
+          cpu: "500m"
+          memory: "1Gi"
         limits:
           cpu: "4000m"
           memory: "12Gi"
+      # Soft spread of an executor pool's pods across nodes (topologySpreadConstraints on
+      # kubernetes.io/hostname, ScheduleAnyway). Needed because low requests no longer make the
+      # scheduler reserve each pod's working set: without it both slot owners (R=2) could land
+      # on one node and be evicted together.
+      spreadAcrossNodes: true
+      # Language classification (values-driven; no code change to add a language). A language
+      # appears in exactly one class (render fails otherwise). Each pool renders
+      # EXECUTOR_LANGUAGE_CLASS (its `languageClass`: compiled | scripted | any, default any) and
+      # EXECUTOR_LANGUAGES (comma-separated languages of that class; `any` = union). The
+      # language-partition layer (router + executor) reads those two env vars; the executor
+      # binary ignores them until then. No ingest/build/seeding workflow is implied by a name here.
+      languageClasses:
+        compiled: [rust, csharp, go]
+        scripted: [python, javascript, nodejs, typescript, ruby]
 
   # fix/pii-tokenization-env-override -- plain env/values off-switch for PII
   # tokenization/detokenization, independent of PostHog

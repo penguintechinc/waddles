@@ -1,3 +1,6 @@
+# ARCHITECTURE EXCEPTION (approved 2026-11-14, revisit): bundle executors run as separate pods
+# (scaled on their own signals here) rather than inside the three primary workflow services;
+# see templates/svc-bundles-executor.yaml and the chart README.
 # svc-bundles-executor per-pool PodDisruptionBudget + autoscaling (executor Phase 1, PLAN.md
 # task 8). The executor is a StatefulSet (stable executor_id), so it is NOT in the generic
 # waddlebot.scaleTargets registry (CPU/memory HPA there targets Deployments and was blind on

@@ -138,7 +138,7 @@ pipeline:
       replicas: 2
       memoryBudgetMb: 5120
       resources:
-        requests: { cpu: "1000m", memory: "2Gi" }
+        requests: { cpu: "500m", memory: "1Gi" }
         limits: { cpu: "4000m", memory: "8Gi" }
   svcCore:
     replicas: 1

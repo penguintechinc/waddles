@@ -29,7 +29,8 @@ def _helm(extra_set: list[str], api_versions: list[str] | None = None, values: s
     args = ["helm", "template", "waddlebot", str(_CHART_DIR), "--kube-version", "1.30.0",
             "--values", str(_CHART_DIR / values)]
     for kv in extra_set:
-        args += ["--set", kv]
+        # "json:" prefix -> --set-json (helm's --set REPLACES a list with a sparse one on index).
+        args += ["--set-json", kv[5:]] if kv.startswith("json:") else ["--set", kv]
     for av in api_versions or []:
         args += ["--api-versions", av]
     return subprocess.run(args, capture_output=True, text=True, check=False)  # noqa: S603 -- fixed argv, test-only
@@ -95,13 +96,15 @@ def test_executor_identity_budget_and_cpu_limit() -> None:
     assert env["EXECUTOR_ID"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.name"
     assert env["POD_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.name"
     assert env["EXECUTOR_POOL"]["value"] == "default"
-    assert env["EXECUTOR_MEMORY_BUDGET_MB"]["value"] == "5120"
+    assert env["EXECUTOR_MEMORY_BUDGET_MB"]["value"] == "15360"
     assert env["EXECUTOR_PRECOMPILED_PREFIX"]["value"] == "precompiled"
     assert env["EXECUTOR_MAX_CONCURRENT_COMPILES"]["value"] == "2"
     assert env["STAGE_HOST_API_ADDR"]["value"] == "waddlebot-svc-process-rust:8301,waddlebot-svc-action-rust:8302"
     c = sts["spec"]["template"]["spec"]["containers"][0]
-    assert c["resources"]["limits"]["cpu"] == "4000m"
-    assert c["resources"]["limits"]["memory"] == "8Gi"
+    # dal2alpha keeps release's per-pod alpha sizing (8 CPU / 24Gi, #1305); requests are minimal.
+    assert c["resources"]["limits"]["cpu"] == "8000m"
+    assert c["resources"]["limits"]["memory"] == "24Gi"
+    assert c["resources"]["requests"] == {"cpu": "500m", "memory": "1Gi"}
     assert c["securityContext"]["readOnlyRootFilesystem"] is True
     assert c["securityContext"]["capabilities"]["drop"] == ["ALL"]
     vols = {v["name"]: v for v in sts["spec"]["template"]["spec"]["volumes"]}
@@ -211,7 +214,8 @@ def test_hpa_external_fallback() -> None:
 
 def test_unknown_mode_and_budget_over_limit_fail() -> None:
     _render_fails(["pipeline.rustDataPlane.bundleExecutor.autoscaling.mode=cpu"], "must be none, keda or hpa-external")
-    _render_fails(["pipeline.rustDataPlane.bundleExecutor.memoryBudgetMb=8192"], "must be >0 and below the memory limit")
+    # dal2alpha limit is 24Gi = 24576Mi: a budget equal to it is rejected (below the LIMIT, not the request).
+    _render_fails(["pipeline.rustDataPlane.bundleExecutor.memoryBudgetMb=24576"], "must be >0 and below the memory limit")
 
 
 def test_per_stage_pools() -> None:
@@ -275,3 +279,127 @@ def test_default_values_budget_below_limit() -> None:
     assert be["resources"]["limits"]["memory"] == "12Gi"
     assert be["memoryBudgetMb"] < 12 * 1024 * 0.75, "budget must leave >=25% headroom under the limit"
     assert be["maxPrecompiledBytes"] == ""
+
+
+_BE = "pipeline.rustDataPlane.bundleExecutor"
+_STAGES = ["svc-process-rust", "svc-action-rust"]
+
+
+def _mi(q: str) -> int:
+    """Quantity with a Gi/Mi suffix in MiB."""
+    return int(q[:-2]) * 1024 if q.endswith("Gi") else int(q[:-2])
+
+
+@pytest.mark.parametrize("values", ["values-alpha.yaml", "values-dal2alpha.yaml", "values-beta.yaml",
+                                    "values-gamma.yaml", "values-production.yaml"])
+def test_sizing_policy_minimal_requests_budget_below_limit(values: str) -> None:
+    """Every overlay: requests are the bare minimum, limits carry headroom, budget < LIMIT."""
+    docs = _render(values=values, extra_set=["global.deploymentTier=alpha"] if values != "values-alpha.yaml" and values != "values-dal2alpha.yaml" else [])
+    ex = _executors(docs)
+    assert len(ex) >= 1, "examined zero executor workloads"
+    for sts in ex:
+        c = sts["spec"]["template"]["spec"]["containers"][0]
+        res = c["resources"]
+        assert res["requests"]["cpu"] == "500m" and res["requests"]["memory"] == "1Gi", (values, res)
+        assert _mi(res["limits"]["memory"]) > _mi(res["requests"]["memory"])
+        budget = int(_env(sts, "svc-bundles-executor")["EXECUTOR_MEMORY_BUDGET_MB"]["value"])
+        assert 0 < budget < _mi(res["limits"]["memory"]), (values, budget, res["limits"])
+
+
+def test_memory_request_above_limit_fails() -> None:
+    _render_fails([f"{_BE}.resources.requests.memory=30Gi"], "exceeds the memory limit")
+
+
+def test_spread_across_nodes_default_and_opt_out() -> None:
+    sts = _executors(_render())[0]
+    tsc = sts["spec"]["template"]["spec"]["topologySpreadConstraints"]
+    assert len(tsc) == 1
+    assert tsc[0]["topologyKey"] == "kubernetes.io/hostname"
+    assert tsc[0]["whenUnsatisfiable"] == "ScheduleAnyway"
+    assert tsc[0]["labelSelector"]["matchLabels"].items() <= sts["spec"]["template"]["metadata"]["labels"].items()
+    off = _executors(_render([f"{_BE}.spreadAcrossNodes=false"]))[0]
+    assert "topologySpreadConstraints" not in off["spec"]["template"]["spec"]
+
+
+def test_architecture_exception_marker_in_executor_templates() -> None:
+    """The approved-exception comment must sit on the executor workload templates."""
+    marker = "ARCHITECTURE EXCEPTION (approved 2026-11-14, revisit)"
+    seen = 0
+    for name in ("svc-bundles-executor.yaml", "svc-bundles-executor-autoscaling.yaml"):
+        text = (_CHART_DIR / "templates" / name).read_text()
+        assert marker in text, name
+        seen += 1
+    assert seen == 2
+
+
+def _langs(sts: dict[str, Any]) -> tuple[str, list[str]]:
+    env = _env(sts, "svc-bundles-executor")
+    raw = env["EXECUTOR_LANGUAGES"]["value"]
+    return env["EXECUTOR_LANGUAGE_CLASS"]["value"], [x for x in raw.split(",") if x]
+
+
+def test_default_pool_is_any_class_with_all_languages_including_ruby() -> None:
+    cls, langs = _langs(_executors(_render())[0])
+    assert cls == "any"
+    assert {"rust", "csharp", "go", "python", "javascript", "nodejs", "typescript", "ruby"} == set(langs)
+    assert len(langs) == len(set(langs)), "a language rendered twice"
+
+
+_PARTITIONED = [
+    f"{_BE}.pools[0].name=native", f"{_BE}.pools[0].languageClass=compiled",
+    f"{_BE}.pools[0].stages[0]=svc-process-rust", f"{_BE}.pools[0].stages[1]=svc-action-rust",
+    f"{_BE}.pools[1].name=script", f"{_BE}.pools[1].languageClass=scripted",
+    f"{_BE}.pools[1].stages[0]=svc-process-rust", f"{_BE}.pools[1].stages[1]=svc-action-rust",
+]
+
+
+def test_scripted_pool_lists_ruby_and_compiled_pool_does_not() -> None:
+    """Both executor classes serve BOTH stages; ruby is scripted only (values-driven)."""
+    ex = {d["metadata"]["name"]: d for d in _executors(_render(_PARTITIONED))}
+    assert set(ex) == {f"{_EXEC}-native", f"{_EXEC}-script"}
+    ncls, nlangs = _langs(ex[f"{_EXEC}-native"])
+    scls, slangs = _langs(ex[f"{_EXEC}-script"])
+    assert (ncls, scls) == ("compiled", "scripted")
+    assert set(nlangs) == {"rust", "csharp", "go"} and "ruby" not in nlangs
+    assert set(slangs) == {"python", "javascript", "nodejs", "typescript", "ruby"}
+    for sts in ex.values():
+        assert _env(sts, "svc-bundles-executor")["STAGE_HOST_API_ADDR"]["value"] == \
+            "waddlebot-svc-process-rust:8301,waddlebot-svc-action-rust:8302"
+
+
+def test_language_added_by_values_only() -> None:
+    """A new scripted language needs no template change."""
+    docs = _render(_PARTITIONED + [f'json:{_BE}.languageClasses.scripted=["python","javascript","nodejs","typescript","ruby","lua"]'])
+    ex = {d["metadata"]["name"]: d for d in _executors(docs)}
+    assert "lua" in _langs(ex[f"{_EXEC}-script"])[1]
+    assert "lua" not in _langs(ex[f"{_EXEC}-native"])[1]
+
+
+def test_language_in_two_classes_fails() -> None:
+    _render_fails([f'json:{_BE}.languageClasses.compiled=["rust","csharp","go","ruby"]'], "appears in more than one class")
+    _render_fails([f'json:{_BE}.languageClasses.scripted=["python","python"]'], "appears in more than one class")
+    _render_fails([f'json:{_BE}.languageClasses.scripted=["Ruby!"]'], "must be a lower-case token")
+    _render_fails([f'json:{_BE}.languageClasses.interpreted=["lua"]'], "unknown class")
+
+
+def test_coverage_is_per_language_class() -> None:
+    # A scripted pool alone leaves the compiled class uncovered.
+    scripted_only = [x.replace("pools[1]", "pools[0]") for x in _PARTITIONED if "pools[1]" in x]
+    assert len(scripted_only) == 4, "scripted pool settings not found"
+    _render_fails(scripted_only, 'is not served by any pool for language class "compiled"')
+    # Two scripted pools on one stage collide; an `any` pool collides with any other pool.
+    _render_fails(_PARTITIONED + [f"{_BE}.pools[2].name=more", f"{_BE}.pools[2].languageClass=scripted",
+                                  f"{_BE}.pools[2].stages[0]=svc-action-rust"],
+                  'assigned to more than one pool for language class "scripted"')
+    _render_fails(_PARTITIONED + [f"{_BE}.pools[2].name=wild", f"{_BE}.pools[2].stages[0]=svc-action-rust"],
+                  "assigned to more than one pool for language class")
+    _render_fails([f"{_BE}.pools[0].name=x", f"{_BE}.pools[0].languageClass=weird",
+                   f"{_BE}.pools[0].stages[0]=svc-process-rust"], "must be compiled, scripted or any")
+
+
+def test_any_pools_still_cover_both_classes() -> None:
+    """Existing per-stage pools (no languageClass) keep working: `any` covers both classes."""
+    docs = _render([f"{_BE}.pools[0].name=process", f"{_BE}.pools[0].stages[0]=svc-process-rust",
+                    f"{_BE}.pools[1].name=action", f"{_BE}.pools[1].stages[0]=svc-action-rust"])
+    classes = {_langs(d)[0] for d in _executors(docs)}
+    assert classes == {"any"}

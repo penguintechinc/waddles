@@ -1,3 +1,12 @@
+# ARCHITECTURE EXCEPTION (approved 2026-11-14, revisit): bundle executors run as separate pods
+# (StatefulSet pools here; later also split by language class compiled|scripted) rather than
+# inside the three primary workflow services (gateway/ingest, processor, action). The owner has
+# not settled whether that separation is right; until revisited it is an approved exception.
+# Reasons: isolation (untrusted bundle code shares no process/Secret/token with a stage, optional
+# Kata), independent scaling (queue-wait / pool-exhaustion signals), compile cost (Cranelift
+# bursts kept off the stages). Cost: an extra mTLS hop per invocation and extra pods. See the
+# chart README "Why executors are separate (exception, to be revisited)".
+#
 # svc-bundles-executor (crate core/bundle_executor, binary svc-bundles-executor): the
 # credential-less WASM bundle sandbox host. One StatefulSet PER POOL (default: one pool
 # serving every stage; waddlebot.executorPools in _autoscaling.tpl). Each pod
@@ -87,6 +96,11 @@ guess.
 {{- if or (le (int $pool.memoryBudgetMb) 0) (ge (int $pool.memoryBudgetMb) $limitMi) }}
 {{- fail (printf "svc-bundles-executor pool %s: memoryBudgetMb (%v) must be >0 and below the memory limit (%vMi) -- the budget is the LRU ceiling for compiled modules; the rest is headroom for instances + compile transients" $pool.name $pool.memoryBudgetMb $limitMi) }}
 {{- end }}
+{{- /* Sizing policy: requests are the bare minimum, limits the headroom -- a request above its limit is rejected by the API server only at apply time, so fail it here. */}}
+{{- $requestMi := int (include "waddlebot.memToMi" (($pool.resources).requests).memory) }}
+{{- if gt $requestMi $limitMi }}
+{{- fail (printf "svc-bundles-executor pool %s: memory request (%vMi) exceeds the memory limit (%vMi)" $pool.name $requestMi $limitMi) }}
+{{- end }}
 ---
 # Headless Service: required by the StatefulSet (stable network identity). The executor has NO
 # listener -- it only dials out -- so there are no ports; this exists for the governing
@@ -107,6 +121,8 @@ spec:
     app.kubernetes.io/component: svc-bundles-executor
     waddles.io/executor-pool: {{ $pool.name | quote }}
 ---
+# ARCHITECTURE EXCEPTION (approved 2026-11-14, revisit): bundle executors run as separate pods,
+# not inside the gateway/ingest, processor or action services (header above; chart README).
 # StatefulSet (executor Phase 1, PLAN.md task 8): pod name == executor_id. Stages shard apps
 # over LIVE executor ids by rendezvous hashing (slot = xxhash64(app_id) % 1024, 2 owners per
 # slot), so the id must be stable across restarts -- a Deployment's random suffix would
@@ -154,6 +170,19 @@ spec:
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       automountServiceAccountToken: false
+      {{- if $be.spreadAcrossNodes }}
+      # Low requests (sizing policy) no longer make the scheduler reserve each pod's working set,
+      # so spread a pool across nodes explicitly: both slot owners must not die with one node.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "waddlebot.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: svc-bundles-executor
+              waddles.io/executor-pool: {{ $pool.name | quote }}
+      {{- end }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -206,6 +235,12 @@ spec:
           value: "true"
         - name: EXECUTOR_POOL
           value: {{ $pool.name | quote }}
+        # Language partition contract (values: bundleExecutor.languageClasses + pools[].languageClass).
+        # Read by the language-partition layer; the executor binary ignores both until then.
+        - name: EXECUTOR_LANGUAGE_CLASS
+          value: {{ $pool.languageClass | quote }}
+        - name: EXECUTOR_LANGUAGES
+          value: {{ join "," $pool.languages | quote }}
         # LRU ceiling for resident compiled modules (MiB); render fails unless below the limit.
         - name: EXECUTOR_MEMORY_BUDGET_MB
           value: {{ $pool.memoryBudgetMb | quote }}

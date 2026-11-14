@@ -448,13 +448,15 @@ pipeline:
       # Per-POD sizing reconciled with release (#1305 alpha sizing, issue #1304): the alpha executor
       # was OOMKilled at 16Gi and took ~1h to compile ~160 bundles at 2 CPU after a restart, so the
       # 8 CPU / 24Gi limit applies to EACH of the 2 StatefulSet pods (not split across them).
-      # Worst case 2 x 24Gi = 48Gi, placeable: dal2alpha workers have 46-61Gi allocatable and each
-      # pod only requests 8Gi. Gamma/beta/prod are unchanged by this block.
+      # Requests are the bare minimum (500m / 1Gi, owner policy 2026-11-14; the old release
+      # request was 2 CPU / 8Gi): the limit is the headroom. Worst case 2 x 24Gi = 48Gi, placeable:
+      # dal2alpha workers have 46-61Gi allocatable and executors spread across nodes
+      # (spreadAcrossNodes). dal2alpha has no metrics API, so the idle footprint is not measured.
       # LRU budget = 15360 MB (5/8 of the 24Gi limit, the same ratio the phase-1 budget used);
       # the render check requires EXECUTOR_MEMORY_BUDGET_MB < the memory limit.
       memoryBudgetMb: 15360
       resources:
-        requests: { cpu: "2000m", memory: "8Gi" }
+        requests: { cpu: "500m", memory: "1Gi" }
         limits: { cpu: "8000m", memory: "24Gi" }
       autoscaling:
         mode: none

@@ -984,3 +984,79 @@ The executor boot-pins `connectors/<p>/<digest>.wasm` plus a signed sidecar
   needs `BUNDLE_SIGNING_KEY_FILE` (0600 file with the base64 seed -- user-held), `BUNDLE_SIGNING_KEY_ID`,
   `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`.
 - Digests are build outputs and are not committed per environment. Verify with `make test-connector-publish`.
+
+## Bundle executors (`svc-bundles-executor`): pools, sizing, language classes
+
+The executor is the credential-less WASM sandbox host. It runs as **one StatefulSet per pool**
+(`pipeline.rustDataPlane.bundleExecutor`): pod name = `EXECUTOR_ID` (downward API), a port-less
+headless Service, `podManagementPolicy: Parallel`, and a per-pool PDB (`maxUnavailable: 1`).
+
+### Why executors are separate (exception, to be revisited)
+
+> **ARCHITECTURE EXCEPTION (approved 2026-11-14, revisit):** bundle executors run as separate
+> pods instead of inside the three primary workflow services (gateway/ingest, processor, action).
+> The owner has not settled whether this separation is right; it is an approved exception until
+> revisited.
+
+| Reason | What the separation buys |
+|---|---|
+| Isolation | Untrusted bundle code never shares a process, token mount or Secret with a stage. The pod has no `envFrom`, no API token, no listener (egress only to the stage host-API ports, the bundle bucket and DNS) and can optionally run in a Kata micro-VM (`bundleExecutor.runtimeClass`) without moving the stages. |
+| Scaling | Executors scale on their own signals (stage queue-wait p95, pool exhaustion) via KEDA or HPA-external, independent of ingest/process/action replica counts. Slot sharding needs stable pod names, hence a StatefulSet. |
+| Compile cost | Cranelift compiles are CPU/memory heavy and bursty (an alpha executor was OOMKilled at 16Gi). Keeping them out of the stages protects stage latency; AOT `.cwasm` artifacts make the cost a one-off. |
+
+Cost of the exception: an extra network hop (mTLS host-API round trip) on every bundle
+invocation, extra pods (and their idle requests), a second scaling/PDB surface, and the
+slot-ownership protocol between stages and executors.
+
+### Sizing policy (all environments)
+
+- **Requests are the bare minimum that schedules and runs the pod healthily** (500m CPU / 1Gi
+  memory; the idle footprint is not measured: dal2alpha has no metrics API). **Limits carry the headroom.**
+- `EXECUTOR_MEMORY_BUDGET_MB` (the LRU ceiling for resident compiled modules) is checked against
+  the memory **limit**, never the request: render fails unless `0 < budget < limit`. The request
+  is only checked to be `<=` the limit.
+- Overlays: dal2alpha 8 CPU / 24Gi limit per pod (budget 15360); beta/gamma/production 4 CPU /
+  8Gi (budget 5120); local alpha 4 CPU / 2560Mi (budget 1536).
+- Trade-off of low requests: pods are Burstable and the scheduler no longer reserves their
+  working set, so a node under memory pressure evicts them first once the LRU cache has grown
+  past the request. Executors therefore carry a soft `topologySpreadConstraints` on
+  `kubernetes.io/hostname` (`spreadAcrossNodes`, default true) so replicas land on different
+  nodes (a lost node must not take both owners of a slot).
+
+### Language classes (`languageClasses`, values-driven)
+
+```yaml
+pipeline:
+  rustDataPlane:
+    bundleExecutor:
+      languageClasses:
+        compiled: [rust, csharp, go]
+        scripted: [python, javascript, nodejs, typescript, ruby]
+      pools:
+        - { name: native, languageClass: compiled, stages: [svc-process-rust, svc-action-rust] }
+        - { name: script, languageClass: scripted, stages: [svc-process-rust, svc-action-rust] }
+```
+
+- Languages are lower-case tokens; **a language may appear in exactly one class** (render fails
+  otherwise). Adding a scripted language (for example `ruby`) is a values change only.
+- A pool has `languageClass: compiled | scripted | any` (default `any`). Each executor pod gets
+  `EXECUTOR_LANGUAGE_CLASS` and `EXECUTOR_LANGUAGES` (comma-separated; `any` = union of both
+  classes). The executor binary does not read them yet: they are the contract the
+  language-partition layer (router + executor) will consume. Nothing else changes for the default
+  single `any` pool.
+- **Coverage rule:** every stage must be served by exactly one pool **per language class**; an
+  `any` pool covers both classes. So the same stage may be listed by a compiled pool and a
+  scripted pool, but not by two pools of the same class, and never by none. The rule lives in one
+  helper (`waddlebot.executorPools`), the single place the partition layer extends.
+- No ingest, build or seeding workflow for any language is part of the chart; this only
+  classifies languages and renders the lists.
+
+### AOT precompile prerequisites the executor consumes
+
+Executors verify signed AOT `.cwasm` artifacts before loading them. Pods read
+`PRECOMPILE_SIGNING_PUBLIC_KEYS` from the ConfigMap `<fullname>-executor-precompile-signing-public`
+(`optional: false`: a missing ConfigMap fails the pod loudly with `CreateContainerConfigError`
+instead of running unverified) and `EXECUTOR_PRECOMPILED_PREFIX` (default `precompiled`) names the
+object prefix inside the bundle bucket. The ConfigMap is published by the key-provisioning hook;
+on alpha/local the keypair is generated, on beta/gamma/production the private-key Secret must
+be pre-created or delegated (`autoProvisionedKeys.precompileSigning.externalSecret: true`).

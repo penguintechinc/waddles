@@ -17,13 +17,53 @@ metrics API) and the wrong signal anyway (queue wait / pool exhaustion are the r
 */}}
 
 {{/*
+waddlebot.executorLanguageClasses -- validated JSON object {"compiled":[...],"scripted":[...]}
+from `bundleExecutor.languageClasses`. Languages are lower-case tokens; a language may appear in
+exactly one class (and once within it) or the render fails. Adding a language (e.g. ruby) is a
+values-only change.
+*/}}
+{{- define "waddlebot.executorLanguageClasses" -}}
+{{- $lc := (.Values.pipeline.rustDataPlane.bundleExecutor).languageClasses | default dict -}}
+{{- $seen := dict -}}
+{{- $out := dict -}}
+{{- range $class := (list "compiled" "scripted") -}}
+{{- $langs := list -}}
+{{- range $l := (get $lc $class | default list) -}}
+{{- if not (regexMatch "^[a-z][a-z0-9+#.-]{0,31}$" (toString $l)) -}}
+{{- fail (printf "bundleExecutor.languageClasses.%s: language %q must be a lower-case token (letters, digits, + # . -)" $class (toString $l)) -}}
+{{- end -}}
+{{- if hasKey $seen (toString $l) -}}
+{{- fail (printf "bundleExecutor.languageClasses: language %q appears in more than one class (or twice): first in %q, again in %q -- a language belongs to exactly one class" (toString $l) (get $seen (toString $l)) $class) -}}
+{{- end -}}
+{{- $_ := set $seen (toString $l) $class -}}
+{{- $langs = append $langs (toString $l) -}}
+{{- end -}}
+{{- $_ := set $out $class $langs -}}
+{{- end -}}
+{{- range $k, $_ := $lc -}}
+{{- if not (has $k (list "compiled" "scripted")) -}}
+{{- fail (printf "bundleExecutor.languageClasses: unknown class %q (only compiled and scripted)" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- $out | toJson -}}
+{{- end -}}
+
+{{/*
 waddlebot.executorPools -- JSON list of executor pools (one StatefulSet each). Empty
-`bundleExecutor.pools` => ONE pool "default" serving every stage, named exactly
-`<fullname>-svc-bundles-executor` (so executor_id = `<fullname>-svc-bundles-executor-<ordinal>`).
-A pool entry: {name, stages: [stage targets], replicas?, resources?, memoryBudgetMb?,
-autoscaling?}. Non-default pools are suffixed `-<name>`. Each stage must belong to exactly one
-pool (sharding computes owners over the executors CONNECTED to a stage, so a stage split
-across pools would mix two membership sets).
+`bundleExecutor.pools` => ONE pool "default" (languageClass any) serving every stage and every
+language, named exactly `<fullname>-svc-bundles-executor` (so executor_id =
+`<fullname>-svc-bundles-executor-<ordinal>`).
+A pool entry: {name, stages: [stage targets], languageClass?, replicas?, resources?,
+memoryBudgetMb?, autoscaling?}. Non-default pools are suffixed `-<name>`. Each pool carries
+`languageClass` (compiled | scripted | any, default any) and `languages` (the matching list(s)
+from waddlebot.executorLanguageClasses; `any` = union).
+
+COVERAGE RULE (the single extension seam for the language-partition layer): every stage must be
+served by exactly ONE pool PER LANGUAGE CLASS -- a pool covers the class it declares, `any`
+covers both. Sharding computes slot owners over the executors CONNECTED to a stage, so two pools
+of the same class on one stage would mix two membership sets; a compiled pool and a scripted
+pool on the same stage do not (they serve disjoint languages). Changing how classes partition
+work changes only this helper.
 */}}
 {{- define "waddlebot.executorPools" -}}
 {{- $be := .Values.pipeline.rustDataPlane.bundleExecutor -}}
@@ -31,31 +71,44 @@ across pools would mix two membership sets).
 {{- if not $all -}}
 {{- fail "pipeline.rustDataPlane.bundleExecutor.stages must list at least one stage ({target, port}) for svc-bundles-executor to dial" -}}
 {{- end -}}
+{{- $lc := include "waddlebot.executorLanguageClasses" . | fromJson -}}
+{{- $anyLangs := concat $lc.compiled $lc.scripted -}}
 {{- $base := dict "replicas" (int $be.replicas) "resources" $be.resources "memoryBudgetMb" (int $be.memoryBudgetMb) "autoscaling" ($be.autoscaling | default dict) -}}
 {{- $out := list -}}
 {{- if not $be.pools -}}
-{{- $out = append $out (merge (dict "name" "default" "suffix" "" "stages" $all) (deepCopy $base)) -}}
+{{- $out = append $out (merge (dict "name" "default" "suffix" "" "stages" $all "languageClass" "any" "languages" $anyLangs) (deepCopy $base)) -}}
 {{- else -}}
 {{- $seen := dict -}}
 {{- range $p := $be.pools -}}
 {{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,14}[a-z0-9])?$" ($p.name | default "")) -}}
 {{- fail (printf "bundleExecutor.pools[].name %q must be a DNS label of <=16 chars" ($p.name | default "")) -}}
 {{- end -}}
+{{- $class := $p.languageClass | default "any" -}}
+{{- if not (has $class (list "compiled" "scripted" "any")) -}}
+{{- fail (printf "bundleExecutor.pools[%s].languageClass %q must be compiled, scripted or any" $p.name $class) -}}
+{{- end -}}
+{{- $langs := ternary $anyLangs (get $lc $class) (eq $class "any") -}}
+{{- $classes := ternary (list "compiled" "scripted") (list $class) (eq $class "any") -}}
 {{- $st := list -}}
 {{- range $t := $p.stages -}}
 {{- $found := false -}}
 {{- range $s := $all -}}{{- if eq $s.target $t -}}{{- $st = append $st $s -}}{{- $found = true -}}{{- end -}}{{- end -}}
 {{- if not $found -}}{{- fail (printf "bundleExecutor.pools[%s].stages: %q is not in bundleExecutor.stages" $p.name $t) -}}{{- end -}}
-{{- if hasKey $seen $t -}}{{- fail (printf "bundleExecutor.pools: stage %q is assigned to more than one pool" $t) -}}{{- end -}}
-{{- $_ := set $seen $t true -}}
+{{- range $c := $classes -}}
+{{- $key := printf "%s/%s" $t $c -}}
+{{- if hasKey $seen $key -}}{{- fail (printf "bundleExecutor.pools: stage %q is assigned to more than one pool for language class %q (pool %q and %q)" $t $c (get $seen $key) $p.name) -}}{{- end -}}
+{{- $_ := set $seen $key $p.name -}}
+{{- end -}}
 {{- end -}}
 {{- if not $st -}}{{- fail (printf "bundleExecutor.pools[%s].stages must list at least one stage" $p.name) -}}{{- end -}}
 {{- $suffix := ternary "" (printf "-%s" $p.name) (eq $p.name "default") -}}
-{{- $pool := dict "name" $p.name "suffix" $suffix "stages" $st "replicas" (int ($p.replicas | default $base.replicas)) "resources" ($p.resources | default $base.resources) "memoryBudgetMb" (int ($p.memoryBudgetMb | default $base.memoryBudgetMb)) "autoscaling" (merge (deepCopy ($p.autoscaling | default dict)) (deepCopy $base.autoscaling)) -}}
+{{- $pool := dict "name" $p.name "suffix" $suffix "stages" $st "languageClass" $class "languages" $langs "replicas" (int ($p.replicas | default $base.replicas)) "resources" ($p.resources | default $base.resources) "memoryBudgetMb" (int ($p.memoryBudgetMb | default $base.memoryBudgetMb)) "autoscaling" (merge (deepCopy ($p.autoscaling | default dict)) (deepCopy $base.autoscaling)) -}}
 {{- $out = append $out $pool -}}
 {{- end -}}
 {{- range $s := $all -}}
-{{- if not (hasKey $seen $s.target) -}}{{- fail (printf "bundleExecutor.pools: stage %q is not served by any pool" $s.target) -}}{{- end -}}
+{{- range $c := (list "compiled" "scripted") -}}
+{{- if not (hasKey $seen (printf "%s/%s" $s.target $c)) -}}{{- fail (printf "bundleExecutor.pools: stage %q is not served by any pool for language class %q" $s.target $c) -}}{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- $out | toJson -}}
