@@ -1,0 +1,62 @@
+{{- if .Values.tetragon.enabled }}
+{{- /*
+Tetragon exec allowlist (enforced), one policy per component (server, model-pull, helm-test). Two kprobes with identical selectors: sys_execve (path = arg 0) and sys_execveat
+(path = arg 1; fexecve passes an empty path, which is never allowlisted). The waddlebot chart hooks
+sys_execve only; without sys_execveat, fexecve/execveat bypass the allowlist (shown live, README).
+Second selector per hook: /proc/self/fd/* only from runc, so `kubectl exec` works.
+*/}}
+{{- $root := . }}
+{{- $policies := list
+  (dict "suffix" "exec-allowlist" "component" "server" "allowed" .Values.tetragon.allowedExec)
+  (dict "suffix" "pull-exec-allowlist" "component" "model-pull" "allowed" .Values.tetragon.allowedExec)
+  (dict "suffix" "test-exec-allowlist" "component" "helm-test" "allowed" .Values.tetragon.testAllowedExec) }}
+{{- range $p := $policies }}
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: {{ printf "%s-%s" (include "ollama.fullname" $root) $p.suffix }}
+  labels:
+    {{- include "ollama.labels" (dict "root" $root "component" "server") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ollama.selectorLabels" (dict "root" $root "component" $p.component) | nindent 6 }}
+  kprobes:
+    {{- range $call := list (dict "call" "sys_execve" "idx" 0) (dict "call" "sys_execveat" "idx" 1) }}
+    - call: {{ $call.call }}
+      syscall: true
+      args:
+        {{- if eq (int $call.idx) 1 }}
+        - index: 0
+          type: int
+        {{- end }}
+        - index: {{ $call.idx }}
+          type: string
+      selectors:
+        - matchArgs:
+            - index: {{ $call.idx }}
+              operator: NotEqual
+              values:
+                {{- toYaml $p.allowed | nindent 16 }}
+            - index: {{ $call.idx }}
+              operator: NotPrefix
+              values:
+                - /proc/self/fd/
+          matchActions:
+            - action: {{ $root.Values.tetragon.action }}
+        - matchArgs:
+            - index: {{ $call.idx }}
+              operator: Prefix
+              values:
+                - /proc/self/fd/
+          matchBinaries:
+            - operator: NotIn
+              followChildren: false
+              values:
+                {{- toYaml $root.Values.tetragon.runcCallers | nindent 16 }}
+          matchActions:
+            - action: {{ $root.Values.tetragon.action }}
+    {{- end }}
+{{- end }}
+{{- end }}

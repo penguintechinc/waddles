@@ -1,0 +1,96 @@
+# Interim Ollama. Single replica by design (StatefulSet + local-path PVC). See README.md.
+
+image:
+  repository: docker.io/ollama/ollama
+  tag: "0.40.13"           # informational; the digest below is what is pulled
+  # Multi-arch index digest; linux/arm64 manifest verified with `docker buildx imagetools inspect`.
+  digest: sha256:b2f0122c476bc9fe7ce679d8bb4bd555351e25e2554eefb156f61cb0a89cf429
+  pullPolicy: IfNotPresent
+
+# Model pulled by the one-shot Job. gemma4:e4b is the approved JSON-capable model.
+# Never Qwen/PRC models.
+model: gemma4:e4b
+
+ollama:
+  numParallel: 1
+  maxLoadedModels: 1
+  keepAlive: 30m
+  noCloud: true
+
+# k8s3-worker is the arm64 node and is tainted kubernetes.io/arch=arm64:NoSchedule.
+nodeSelector:
+  kubernetes.io/arch: arm64
+tolerations:
+  - key: kubernetes.io/arch
+    operator: Equal
+    value: arm64
+    effect: NoSchedule
+
+resources:                  # k8s3-worker allocatable: cpu 12 / ~60Gi
+  requests:
+    cpu: "4"
+    memory: 12Gi
+  limits:
+    cpu: "10"
+    memory: 20Gi
+
+# STATEFUL EXCEPTION (approved): model weights cache. Rebuildable by the pull Job, but ~7-10 GB.
+persistence:
+  storageClassName: local-path
+  size: 25Gi
+
+securityContext:            # uid/gid for the pod; image runs rootless with a read-only rootfs
+  runAsUser: 10001
+  runAsGroup: 10001
+
+service:
+  port: 11434
+
+pullJob:
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+  activeDeadlineSeconds: 3600
+  backoffLimit: 8           # absorbs the race while the server is starting
+
+network:
+  enabled: true
+  defaultDeny: true         # namespace-wide default-deny CiliumNetworkPolicy owned by this release
+  # Opt-in consumers: pods in these namespaces carrying consumerLabel may use the L7-allowed API.
+  consumerNamespaces:
+    - waddlebot
+  consumerLabel:
+    key: waddles.penguintech.io/ollama-client
+    value: "true"
+  # Hosts the SERVER may resolve and reach (TCP 443). Discovered from a real pull: the registry
+  # answers blob requests with a 307 to the R2 host. Drop both for a steady state with no pulls.
+  registryFQDNs:
+    - registry.ollama.ai
+    - dd20bb891979d25aebc8bec07b2b3bbc.r2.cloudflarestorage.com
+  # Cluster-local DNS names (search-domain expansion) are always allowed up to this label depth.
+  clusterDnsMaxDepth: 6
+
+tetragon:
+  enabled: true
+  action: Sigkill
+  # Paths verified against the pinned image: re-check when the digest changes.
+  allowedExec:
+    - /bin/ollama
+    - /usr/bin/ollama
+    - /usr/lib/ollama/llama-server
+  # Only runc may exec /proc/self/fd/* (keeps `kubectl exec` working, kills fileless memfd exec).
+  runcCallers:
+    - /usr/bin/runc
+    - /usr/sbin/runc
+    - /usr/local/sbin/runc
+    - /usr/local/bin/runc
+  testAllowedExec:          # helm test pod only
+    - /bin/sh
+    - /usr/bin/curl
+    - /bin/grep
+    - /usr/bin/grep
+
+test:
+  image:
+    repository: docker.io/curlimages/curl
+    digest: sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69   # 8.11.1
