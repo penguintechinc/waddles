@@ -64,7 +64,7 @@ class TestMigrationMetadata:
         self, migration: ModuleType
     ) -> None:
         """Parallel migrations are landing: the chain must stay linear after any renumber."""
-        parents: dict[str, str | None] = {}
+        parents: dict[str, str | tuple[str, ...] | None] = {}
         for path in _VERSIONS.glob("*.py"):
             if path.name == "__init__.py":
                 continue
@@ -73,20 +73,28 @@ class TestMigrationMetadata:
         assert (
             len(parents) > 40
         )  # a scanner that saw nothing would "prove" a single head
-        heads = set(parents) - {p for p in parents.values() if p is not None}
+        def _parent_ids(value: str | tuple[str, ...] | None) -> list[str]:
+            # A merge revision (0067_merge_heads_*) declares a tuple of parents.
+            if value is None:
+                return []
+            return [value] if isinstance(value, str) else list(value)
+
+        heads = set(parents) - {p for v in parents.values() for p in _parent_ids(v)}
         assert len(heads) == 1, (
             f"expected exactly one alembic head, found {sorted(heads)}"
         )
         assert migration.down_revision in parents, (
             "down_revision names a revision that is missing"
         )
-        cursor: str | None = next(iter(heads))
-        ancestry: list[str] = []
-        while cursor is not None:
-            ancestry.append(cursor)
-            cursor = parents[cursor]
+        ancestry: set[str] = set()
+        pending = [next(iter(heads))]
+        while pending:  # walk every parent: a merge revision has more than one
+            cursor = pending.pop()
+            if cursor in ancestry:
+                continue
+            ancestry.add(cursor)
+            pending.extend(_parent_ids(parents[cursor]))
         assert _REVISION in ancestry
-        assert len(ancestry) == len(set(ancestry))  # no cycles
 
     def test_one_child_per_parent(self, migration: ModuleType) -> None:
         children = [
