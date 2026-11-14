@@ -625,6 +625,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-config-db"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hub_client",
+ "opentelemetry",
+ "redis",
+ "sea-orm",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "bundle-host-credentials"
 version = "0.1.0"
 dependencies = [
@@ -1651,7 +1665,6 @@ dependencies = [
  "opentelemetry",
  "prost",
  "redis",
- "sea-orm",
  "service_auth",
  "sha2 0.10.9",
  "thiserror 2.0.20",
@@ -3958,6 +3971,7 @@ dependencies = [
  "base64 0.22.1",
  "bundle-active-set",
  "bundle-capability-gate",
+ "bundle-config-db",
  "bundle-host-credentials",
  "bundle-host-db",
  "bundle-host-http",

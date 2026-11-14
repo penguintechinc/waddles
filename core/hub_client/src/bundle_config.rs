@@ -17,10 +17,10 @@
 //!   never a silent empty.
 //!
 //! **Sources (issue #1306).** The data plane reads the database directly
-//! ([`crate::bundle_config_db::DbConfigSource`], read-only replica, one batched warm-up query) and
+//! (`bundle_config_db::DbConfigSource` in core/bundle_config_db, read-only replica, one batched warm-up query) and
 //! never needs hub-api on the hot path; the legacy hub-api gRPC [`BundleConfigClient`] remains
 //! behind the opt-out kill switch `waddles.disable-db-bundle-config-reads`
-//! ([`crate::bundle_config_db::RoutedConfigSource`]). Warm-up seeds from many bundle loads are
+//! (`bundle_config_db::RoutedConfigSource`). Warm-up seeds from many bundle loads are
 //! coalesced into ONE batched load ([`BundleConfigCache::enqueue_seed`]).
 //!
 //! No lock is held across an `.await`; every critical section is a short sync map operation.
@@ -40,7 +40,6 @@ use service_auth::MachineJwtClient;
 use tonic::transport::{Channel, Endpoint};
 use tracing::Instrument;
 
-use crate::bundle_config_db::{DbConfigSource, DbReadConfig, ReadPathGate, RoutedConfigSource};
 use crate::pb::bundle_config_service_client::BundleConfigServiceClient;
 use crate::pb::{BatchGetCommunityConfigRequest, GetCommunityConfigRequest};
 use crate::rpc::RpcGuard;
@@ -104,6 +103,25 @@ pub trait ConfigSource: Send + Sync {
     /// Installs the read-path kill switch on a source that routes between paths; a no-op for
     /// every single-path source.
     fn set_read_path_gate(&self, _gate: Arc<dyn ReadPathGate>) {}
+}
+
+/// Opt-out kill switch for the database read path as seen by a routing [`ConfigSource`]
+/// (`bundle_config_db::RoutedConfigSource`); the stage adapts its license/flag client to this.
+/// `db_reads_enabled` is the already-inverted answer of `waddles.disable-db-bundle-config-reads`
+/// -- `true` (the default for unseen/OFF/unreachable) means the database path serves.
+pub trait ReadPathGate: Send + Sync {
+    /// Whether the database read path is currently enabled.
+    fn db_reads_enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+}
+
+/// A [`ReadPathGate`] with a fixed answer (stage fallback when no flag client exists, tests).
+pub struct StaticReadPathGate(pub bool);
+
+impl ReadPathGate for StaticReadPathGate {
+    /// The fixed answer.
+    fn db_reads_enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0 })
+    }
 }
 
 /// Reads the invalidation version key. `None` = unavailable/absent (the TTL is then the backstop).
@@ -724,9 +742,9 @@ pub fn seed_scope_in_background(tenant_id: i32, community_id: i32, app_id: &str)
     ));
 }
 
-/// Builds, installs and returns the stage's cache with the legacy hub-api source only (no
-/// database path). Prefer [`connect_and_install_routed`]; kept for callers/tests that have no
-/// database settings.
+/// Builds, installs and returns the stage's cache. **Non-fatal**: with hub-api unconfigured or
+/// unreachable it logs (ERROR when configured-but-failed) and returns `None`, leaving
+/// `config_json` as before this feature (`{}`) -- never a stage start failure.
 pub async fn connect_and_install(
     endpoint: &str,
     token_endpoint: &str,
@@ -734,84 +752,33 @@ pub async fn connect_and_install(
     ca_cert_path: Option<&str>,
     valkey: Option<redis::aio::MultiplexedConnection>,
 ) -> Option<Arc<BundleConfigCache>> {
-    connect_and_install_routed(
-        endpoint,
-        token_endpoint,
-        sa_token_path,
-        ca_cert_path,
-        valkey,
-        &DbReadConfig::from_values(None, None),
-    )
-    .await
-}
-
-/// Builds, installs and returns the stage's cache over the database read path (preferred) and the
-/// legacy hub-api gRPC path (behind the `waddles.disable-db-bundle-config-reads` kill switch).
-///
-/// **Non-fatal**: with neither source configured it logs (ERROR when a configured source failed)
-/// and returns `None`, leaving `config_json` as before this feature (`{}`) -- never a stage start
-/// failure. With the database configured the stage keeps serving config while hub-api is down or
-/// unconfigured: a hub-api connect failure only removes the legacy fallback.
-pub async fn connect_and_install_routed(
-    endpoint: &str,
-    token_endpoint: &str,
-    sa_token_path: &str,
-    ca_cert_path: Option<&str>,
-    valkey: Option<redis::aio::MultiplexedConnection>,
-    db: &DbReadConfig,
-) -> Option<Arc<BundleConfigCache>> {
-    let db_source: Option<Arc<dyn ConfigSource>> = db.url.clone().map(|url| {
-        Arc::new(DbConfigSource::new(
-            url,
-            crate::bundle_config_db::DB_TIMEOUT,
-        )) as Arc<dyn ConfigSource>
-    });
-    let legacy: Option<Arc<dyn ConfigSource>> = if endpoint.is_empty() || token_endpoint.is_empty()
-    {
+    if endpoint.is_empty() || token_endpoint.is_empty() {
         tracing::info!(
-            "bundle_config: HUB_API_GRPC_ENDPOINT/SERVICE_JWT_TOKEN_ENDPOINT unset; no legacy \
-             hub-api config path"
-        );
-        None
-    } else {
-        match BundleConfigClient::connect(endpoint, token_endpoint, sa_token_path, ca_cert_path)
-            .await
-        {
-            Ok(client) => Some(Arc::new(client) as Arc<dyn ConfigSource>),
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "bundle_config: hub-api connect failed; the legacy hub-api config path is \
-                     unavailable until the stage restarts"
-                );
-                None
-            }
-        }
-    };
-    if db_source.is_none() && legacy.is_none() {
-        tracing::error!(
-            "bundle_config: no config source (set {} or {}, or configure hub-api); bundles \
-             receive an EMPTY config_json",
-            crate::bundle_config_db::REPLICA_URL_ENV,
-            crate::bundle_config_db::PRIMARY_URL_ENV
+            "bundle_config: HUB_API_GRPC_ENDPOINT/SERVICE_JWT_TOKEN_ENDPOINT unset; bundles              receive an empty config_json"
         );
         return None;
     }
-    tracing::info!(
-        db = db_source.is_some(),
-        db_source = ?db.source,
-        legacy_hub_api = legacy.is_some(),
-        "bundle_config: live community config sources"
-    );
-    let probe = valkey.map(|c| Arc::new(ValkeyVersionProbe::new(c)) as Arc<dyn VersionProbe>);
-    let cache = Arc::new(BundleConfigCache::new(
-        Arc::new(RoutedConfigSource::new(db_source, legacy)),
-        probe,
-        CacheConfig::default(),
-    ));
-    install_global(Arc::clone(&cache));
-    tracing::info!("bundle_config: live community config cache installed");
-    Some(cache)
+    match BundleConfigClient::connect(endpoint, token_endpoint, sa_token_path, ca_cert_path).await {
+        Ok(client) => {
+            let probe =
+                valkey.map(|c| Arc::new(ValkeyVersionProbe::new(c)) as Arc<dyn VersionProbe>);
+            let cache = Arc::new(BundleConfigCache::new(
+                Arc::new(client),
+                probe,
+                CacheConfig::default(),
+            ));
+            install_global(Arc::clone(&cache));
+            tracing::info!("bundle_config: live community config cache installed");
+            Some(cache)
+        }
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "bundle_config: hub-api connect failed; bundles receive an EMPTY config_json                  until the stage restarts"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]

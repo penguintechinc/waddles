@@ -1,5 +1,8 @@
 //! Direct read-only database source for live per-community bundle config (issue #1306).
 //!
+//! A separate crate (like `bundle_active_set`) so `hub_client` -- depended on by many crates that
+//! only need hub-api gRPC -- does not pull sea-orm/sqlx into every dependency graph.
+//!
 //! hub-api is the control-plane **writer** (`bundle_community_config`, append-only, highest
 //! version live); the data plane (svc-process, svc-action) reads the database itself -- from the
 //! read-only replica -- under its own column-scoped role and never calls hub-api on the hot path,
@@ -20,7 +23,7 @@
 //! single `unnest(...)` query -- one round trip for the whole warm-up, never one per scope.
 //!
 //! **Failure behaviour (documented, no panic).** A connect/query failure is returned as an
-//! `UNAVAILABLE` status; the [`crate::bundle_config::BundleConfigCache`] then serves the
+//! `UNAVAILABLE` status; the [`hub_client::bundle_config::BundleConfigCache`] then serves the
 //! last-known value (ERROR log + `waddles_bundle_config_load_errors`), and a scope never loaded
 //! falls through to the registered manifest defaults, else a loud ERROR. This module also logs
 //! ERROR with the error kind and a DSN-redacted message and bumps
@@ -39,8 +42,6 @@
 //! Logs/spans/metric labels carry numeric ids and outcomes only -- never a config body.
 
 use std::collections::HashSet;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -53,8 +54,11 @@ use sea_orm::{
 };
 use tracing::Instrument;
 
-use crate::bundle_config::{ConfigKey, ConfigSource, ConfigValue};
-use crate::HubClientError;
+use hub_client::bundle_config::{
+    install_global, BundleConfigCache, BundleConfigClient, CacheConfig, ConfigKey, ConfigSource,
+    ConfigValue, ReadPathGate, ValkeyVersionProbe, VersionProbe,
+};
+use hub_client::HubClientError;
 
 /// Env var holding the read-only replica DSN (preferred).
 pub const REPLICA_URL_ENV: &str = "DATABASE_REPLICA_URL";
@@ -183,7 +187,7 @@ struct Instruments {
 fn instruments() -> &'static Instruments {
     static I: OnceLock<Instruments> = OnceLock::new();
     I.get_or_init(|| {
-        let meter = opentelemetry::global::meter("hub_client.bundle_config_db");
+        let meter = opentelemetry::global::meter("bundle_config_db");
         Instruments {
             reads: meter
                 .u64_counter("waddles_bundle_config_db_reads")
@@ -390,7 +394,7 @@ impl DbConfigSource {
         }
         let started = Instant::now();
         let span = tracing::info_span!(
-            "hub_client.bundle_config_db.read",
+            "bundle_config_db.read",
             db.system = "postgresql",
             op,
             scopes = keys.len(),
@@ -444,25 +448,6 @@ impl ConfigSource for DbConfigSource {
     /// Warm-up load: ONE statement for every scope in `keys`.
     async fn batch_get(&self, keys: &[ConfigKey]) -> Result<Vec<ConfigValue>, HubClientError> {
         self.fetch("batch_get", keys).await
-    }
-}
-
-/// Opt-out kill switch for the database read path as seen by [`RoutedConfigSource`]; the stage
-/// adapts its license/flag client to this. `db_reads_enabled` is the already-inverted answer of
-/// [`DISABLE_DB_READS_FLAG`] -- `true` (the default for unseen/OFF/unreachable) means the
-/// database path serves.
-pub trait ReadPathGate: Send + Sync {
-    /// Whether the database read path is currently enabled.
-    fn db_reads_enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
-}
-
-/// A [`ReadPathGate`] with a fixed answer (stage fallback when no flag client exists, tests).
-pub struct StaticReadPathGate(pub bool);
-
-impl ReadPathGate for StaticReadPathGate {
-    /// The fixed answer.
-    fn db_reads_enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { self.0 })
     }
 }
 
@@ -535,11 +520,76 @@ impl ConfigSource for RoutedConfigSource {
     }
 }
 
+/// Builds, installs and returns the stage's cache over the database read path (preferred) and the
+/// legacy hub-api gRPC path (behind the `waddles.disable-db-bundle-config-reads` kill switch).
+///
+/// **Non-fatal**: with neither source configured it logs (ERROR when a configured source failed)
+/// and returns `None`, leaving `config_json` as before this feature (`{}`) -- never a stage start
+/// failure. With the database configured the stage keeps serving config while hub-api is down or
+/// unconfigured: a hub-api connect failure only removes the legacy fallback.
+pub async fn connect_and_install(
+    endpoint: &str,
+    token_endpoint: &str,
+    sa_token_path: &str,
+    ca_cert_path: Option<&str>,
+    valkey: Option<redis::aio::MultiplexedConnection>,
+    db: &DbReadConfig,
+) -> Option<Arc<BundleConfigCache>> {
+    let db_source: Option<Arc<dyn ConfigSource>> = db
+        .url
+        .clone()
+        .map(|url| Arc::new(DbConfigSource::new(url, DB_TIMEOUT)) as Arc<dyn ConfigSource>);
+    let legacy: Option<Arc<dyn ConfigSource>> = if endpoint.is_empty() || token_endpoint.is_empty()
+    {
+        tracing::info!(
+            "bundle_config: HUB_API_GRPC_ENDPOINT/SERVICE_JWT_TOKEN_ENDPOINT unset; no legacy \
+             hub-api config path"
+        );
+        None
+    } else {
+        match BundleConfigClient::connect(endpoint, token_endpoint, sa_token_path, ca_cert_path)
+            .await
+        {
+            Ok(client) => Some(Arc::new(client) as Arc<dyn ConfigSource>),
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "bundle_config: hub-api connect failed; the legacy hub-api config path is \
+                     unavailable until the stage restarts"
+                );
+                None
+            }
+        }
+    };
+    if db_source.is_none() && legacy.is_none() {
+        tracing::error!(
+            "bundle_config: no config source (set {REPLICA_URL_ENV} or {PRIMARY_URL_ENV}, or \
+             configure hub-api); bundles receive an EMPTY config_json"
+        );
+        return None;
+    }
+    tracing::info!(
+        db = db_source.is_some(),
+        db_source = ?db.source,
+        legacy_hub_api = legacy.is_some(),
+        "bundle_config: live community config sources"
+    );
+    let probe = valkey.map(|c| Arc::new(ValkeyVersionProbe::new(c)) as Arc<dyn VersionProbe>);
+    let cache = Arc::new(BundleConfigCache::new(
+        Arc::new(RoutedConfigSource::new(db_source, legacy)),
+        probe,
+        CacheConfig::default(),
+    ));
+    install_global(Arc::clone(&cache));
+    tracing::info!("bundle_config: live community config cache installed");
+    Some(cache)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::bundle_config::StaticConfigSource;
+    use hub_client::bundle_config::{StaticConfigSource, StaticReadPathGate};
 
     fn key() -> ConfigKey {
         ConfigKey::new(1, 7, "waddles.core.app.calendar")
@@ -613,5 +663,74 @@ mod tests {
             db_only.get(&key()).await.is_err(),
             "kill switch ON with no hub-api: an error, not a silent DB read"
         );
+    }
+    /// Install: neither source -> `None`; DB only (hub-api unset, or configured but unreachable)
+    /// -> a cache that serves from the database path; the unreachable hub-api never blocks it.
+    #[tokio::test]
+    async fn install_is_non_fatal_and_database_only_when_hub_api_is_unavailable() {
+        let none = DbReadConfig::from_values(None, None);
+        assert!(connect_and_install("", "", "", None, None, &none)
+            .await
+            .is_none());
+        // hub-api configured but unreachable (connection refused) and no database: still `None`.
+        assert!(connect_and_install(
+            "https://127.0.0.1:1",
+            "https://127.0.0.1:1/token",
+            "/nonexistent/sa-token",
+            None,
+            None,
+            &none,
+        )
+        .await
+        .is_none());
+        // A database DSN (never connected until first use) installs a cache with or without hub-api.
+        let db = DbReadConfig::from_values(Some("postgresql://u:p@127.0.0.1:1/x".into()), None);
+        let cache = connect_and_install("", "", "", None, None, &db).await;
+        assert!(cache.is_some_and(|c| c.is_empty()));
+        let cache = connect_and_install(
+            "https://127.0.0.1:1",
+            "https://127.0.0.1:1/token",
+            "/nonexistent/sa-token",
+            None,
+            None,
+            &db,
+        )
+        .await;
+        assert!(cache.is_some());
+    }
+
+    /// The fast-fail window opens after a failed read and clears after a good one.
+    #[test]
+    fn failure_backoff_opens_and_clears() {
+        let src = DbConfigSource::new(
+            "postgresql://u:p@127.0.0.1:1/x".into(),
+            Duration::from_secs(1),
+        )
+        .with_failure_backoff(Duration::from_secs(60));
+        assert!(!src.backing_off());
+        src.note_outcome(true);
+        assert!(src.backing_off());
+        src.note_outcome(false);
+        assert!(!src.backing_off());
+    }
+
+    /// An unreachable database is an `UNAVAILABLE` status (never a panic), and the second call
+    /// inside the backoff window fails fast without another connect attempt.
+    #[tokio::test]
+    async fn unreachable_database_is_unavailable_then_fails_fast() {
+        let src = DbConfigSource::new(
+            "postgresql://u:p@127.0.0.1:1/x".into(),
+            Duration::from_millis(500),
+        )
+        .with_failure_backoff(Duration::from_secs(60));
+        let key = ConfigKey::new(1, 7, "waddles.core.app.calendar");
+        let first = src.get(&key).await.unwrap_err();
+        let second = src.batch_get(&[key]).await.unwrap_err();
+        assert!(
+            first.to_string().contains("database read failed"),
+            "{first}"
+        );
+        assert!(second.to_string().contains("failing fast"), "{second}");
+        assert_eq!(src.query_count(), 0, "no statement ever reached a server");
     }
 }

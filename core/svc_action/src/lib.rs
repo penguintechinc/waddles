@@ -796,13 +796,13 @@ async fn build_stage_capabilities(
     // Read path (issue #1306): the read-only replica database directly (`DATABASE_REPLICA_URL`,
     // primary `DATABASE_URL` fallback at WARN), never hub-api on the hot path; hub-api gRPC
     // remains only behind the `waddles.disable-db-bundle-config-reads` kill switch.
-    let bundle_config = hub_client::bundle_config::connect_and_install_routed(
+    let bundle_config = bundle_config_db::connect_and_install(
         &cli.hub_api_grpc_endpoint,
         &cli.service_jwt_token_endpoint,
         &cli.service_jwt_sa_token_path,
         (!cli.hub_api_grpc_ca_file.is_empty()).then_some(cli.hub_api_grpc_ca_file.as_str()),
         config_probe_conn,
-        &hub_client::bundle_config_db::DbReadConfig::from_env(),
+        &bundle_config_db::DbReadConfig::from_env(),
     )
     .await;
     if let Some(cache) = &bundle_config {

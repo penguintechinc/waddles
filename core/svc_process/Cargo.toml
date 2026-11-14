@@ -252,6 +252,9 @@ regex = "=1.13.1"
 # `HubClientMinter` adapter. Same-repo path dependency (not penguin-libs):
 # this proto contract is owned by this repo, not penguin-libs.
 hub_client = { path = "../hub_client", version = "=0.1.0" }
+# Live per-community bundle config read straight from the read-only replica (issue #1306); kept
+# out of hub_client so crates that only need hub-api gRPC do not pull sea-orm into their graph.
+bundle-config-db = { path = "../bundle_config_db", version = "=0.1.0" }
 # `src/pii_tokenize.rs`'s `sanitize_mint_key` (sec review 2026-10-03): hashes
 # the raw handle out of a `handle:<raw username>` fallback mint key before
 # it can ever reach a `TokenizeError`/log line -- never the raw value.

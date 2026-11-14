@@ -36,7 +36,7 @@ This document provides a comprehensive reference for environment variables used 
 
 ## svc-process / svc-action (live bundle config, issue #1306)
 
-`core/svc_process` and `core/svc_action` read per-community bundle config (`get-context().config_json`) directly from Postgres through `core/hub_client/src/bundle_config_db.rs` -- hub-api (the control-plane writer) is not on the hot path and the stages keep serving config while it is down. Details: `docs/BUNDLE_COMMUNITY_CONFIG_LIVE.md`.
+`core/svc_process` and `core/svc_action` read per-community bundle config (`get-context().config_json`) directly from Postgres through `core/bundle_config_db/src/lib.rs` -- hub-api (the control-plane writer) is not on the hot path and the stages keep serving config while it is down. Details: `docs/BUNDLE_COMMUNITY_CONFIG_LIVE.md`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|

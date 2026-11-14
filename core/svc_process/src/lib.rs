@@ -2325,14 +2325,14 @@ fn try_start_changelog_consumer(
                     // (`DATABASE_REPLICA_URL`, primary `DATABASE_URL` fallback at WARN), never
                     // hub-api on the hot path; hub-api gRPC remains only behind the
                     // `waddles.disable-db-bundle-config-reads` kill switch.
-                    let live_cache = hub_client::bundle_config::connect_and_install_routed(
+                    let live_cache = bundle_config_db::connect_and_install(
                         &config.cli.hub_api_grpc_endpoint,
                         &config.cli.service_jwt_token_endpoint,
                         &config.cli.service_jwt_sa_token_path,
                         (!config.cli.hub_api_grpc_ca_file.is_empty())
                             .then_some(config.cli.hub_api_grpc_ca_file.as_str()),
                         config_probe_conn,
-                        &hub_client::bundle_config_db::DbReadConfig::from_env(),
+                        &bundle_config_db::DbReadConfig::from_env(),
                     )
                     .await;
                     if let Some(cache) = &live_cache {

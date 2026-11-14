@@ -907,7 +907,7 @@ mod tests {
     /// direct database read path ON (opt-out kill switch, issue #1306).
     #[tokio::test]
     async fn db_config_reads_gate_defaults_to_the_database_path() {
-        use hub_client::bundle_config_db::ReadPathGate;
+        use hub_client::bundle_config::ReadPathGate;
         assert!(DbConfigReadsGate(None).db_reads_enabled().await);
         let cfg = penguin_licensing::LicenseConfig::new("waddles-test-db-reads-gate")
             .expect("default LicenseConfig::new never fails");
@@ -1110,12 +1110,12 @@ impl hub_client::bundle_config::LiveConfigGate for LiveBundleConfigGate {
 /// every key, which must NOT read as "kill switch ON".
 pub struct DbConfigReadsGate(pub Option<Arc<penguin_licensing::LicenseClient>>);
 
-impl hub_client::bundle_config_db::ReadPathGate for DbConfigReadsGate {
+impl hub_client::bundle_config::ReadPathGate for DbConfigReadsGate {
     fn db_reads_enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             match &self.0 {
                 Some(c) if !c.bypass_active() => {
-                    !c.flag_enabled(hub_client::bundle_config_db::DISABLE_DB_READS_FLAG)
+                    !c.flag_enabled(bundle_config_db::DISABLE_DB_READS_FLAG)
                         .await
                 }
                 _ => true,

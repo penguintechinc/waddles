@@ -5,7 +5,7 @@ under their own column-scoped roles instead of calling hub-api. Grants can only 
 session as the role, so:
 
 * `real_chain` -- a TRUE fresh `alembic` replay to head (roles from 0055, every real table): the
-  Rust reader's exact statement (`core/hub_client/src/bundle_config_db.rs::CONFIG_SQL`, extracted
+  Rust reader's exact statement (`core/bundle_config_db/src/lib.rs::CONFIG_SQL`, extracted
   from the source file) runs as each role against seeded real tables; writes and every
   non-granted column are denied; downgrade REVOKEs exactly the grants (no column ACL left behind);
   upgrade -> downgrade -> upgrade round-trips; the catalog (`service-roles.yaml`) agrees with the
@@ -52,7 +52,7 @@ _MIGRATION = (
     / "versions"
     / "0106_bundle_config_db_reads.py"
 )
-_RUST_SOURCE = REPO_ROOT / "core" / "hub_client" / "src" / "bundle_config_db.rs"
+_RUST_SOURCE = REPO_ROOT / "core" / "bundle_config_db" / "src" / "lib.rs"
 _PRIOR = "0105_twitch_handle_freshness"
 _ROLES = ("waddles_svc_process", "waddles_svc_action")
 APP = "waddles.core.app.calendar"
@@ -74,7 +74,7 @@ def _config_sql() -> str:
     """The Rust reader's statement, verbatim from `CONFIG_SQL` (so test and code cannot drift)."""
     text = _RUST_SOURCE.read_text(encoding="utf-8")
     match = re.search(r'pub const CONFIG_SQL: &str = "\\\n(.*?)";\n', text, re.DOTALL)
-    assert match is not None, "CONFIG_SQL not found in bundle_config_db.rs"
+    assert match is not None, "CONFIG_SQL not found in core/bundle_config_db/src/lib.rs"
     return match.group(1)
 
 

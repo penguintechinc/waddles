@@ -41,11 +41,6 @@ service_auth = { path = "../service_auth", version = "=0.1.0" }
 # (same redis pin as the stages; `tokio-comp` only -- the stage owns TLS/auth of its connection).
 opentelemetry = "=0.32.0"
 redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp"] }
-# Direct read-only Postgres reader for per-community bundle config (`src/bundle_config_db.rs`,
-# issue #1306): the data plane reads the (replica) database itself instead of calling hub-api.
-# Same exact pin as core/svc_ingest's display-name reader and core/svc_process / core/svc_action
-# (`postgres-array` backs the batched `unnest($1::bigint[], ...)` warm-up query).
-sea-orm = { version = "=2.0.2", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "postgres-array"] }
 # Stream-DEK delivery (`src/dek.rs`): open the X25519/HKDF/AES-256-GCM sealed DEK
 # KeyService returns. Same exact pins svc_ingest/svc_process already carried for their
 # (now removed) per-crate copies of this code.

@@ -3,7 +3,7 @@
 User decision 2026-11-12 (issue #1306): hub-api is the control-plane writer; the data plane reads
 the database directly -- from the read-only replica -- and never calls hub-api on the hot path.
 svc-process and svc-action load per-bundle community config (`get-context().config_json`) with
-ONE batched statement per warm-up (`core/hub_client/src/bundle_config_db.rs::CONFIG_SQL`) under
+ONE batched statement per warm-up (`core/bundle_config_db/src/lib.rs::CONFIG_SQL`) under
 their own per-service roles (`waddles_svc_process`, `waddles_svc_action`; created by 0055 and
 already each pod's only database identity), exactly the shape of svc-ingest's display-name reader
 (0101). No role is created here, so downgrade has no role to drop: it only has to REVOKE exactly

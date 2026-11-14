@@ -11,10 +11,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bundle_config_db::DbConfigSource;
 use hub_client::bundle_config::{
     BundleConfigCache, CacheConfig, ConfigKey, ConfigSource, VersionProbe,
 };
-use hub_client::bundle_config_db::DbConfigSource;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use serde_json::{json, Value};
 
@@ -22,7 +22,7 @@ const APP: &str = "waddles.core.app.calendar";
 const PASSWORD: &str = "bcro-test-password-0123456789";
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// The schema subset [`hub_client::bundle_config_db::CONFIG_SQL`] touches, with the columns the
+/// The schema subset [`bundle_config_db::CONFIG_SQL`] touches, with the columns the
 /// role must NOT see (`updated_by`, `artifact_digest`, `staging_source_key`, `name`).
 const SCHEMA: &str = "
 CREATE TABLE tenants (id INTEGER PRIMARY KEY, slug TEXT NOT NULL);

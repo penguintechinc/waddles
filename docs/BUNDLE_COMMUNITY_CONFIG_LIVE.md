@@ -23,9 +23,9 @@ svc-process / svc-action  handle_context (verified envelope scope only)
 
 ## Read path (issue #1306)
 
-* Code: `core/hub_client/src/bundle_config_db.rs` (`DbConfigSource`, `RoutedConfigSource`,
+* Code: `core/bundle_config_db/src/lib.rs` (`DbConfigSource`, `RoutedConfigSource`; its own crate so hub_client stays sea-orm-free,
   `CONFIG_SQL`), wired in svc-process / svc-action via
-  `hub_client::bundle_config::connect_and_install_routed`.
+  `bundle_config_db::connect_and_install`.
 * One statement answers like hub-api's `get_runtime_config`: the community must belong to the
   tenant (`community_id = 0` = tenant-wide), the app must be active for the scope (a community
   activation beats the tenant-wide one), and the result is the manifest
@@ -54,7 +54,7 @@ svc-process / svc-action  handle_context (verified envelope scope only)
   staleness alerting by design -- fail-loud for stale config lives in hub-api, the writer, and is
   tracked separately); a never-seen scope gets the loud `{}` (ERROR). Nothing is silently
   defaulted to different semantics.
-* Telemetry: spans `hub_client.bundle_config_db.read`, `bundle_config.cache.*`; metrics
+* Telemetry: spans `bundle_config_db.read`, `bundle_config.cache.*`; metrics
   `waddles_bundle_config_db_reads{op,outcome}`, `waddles_bundle_config_db_read_seconds{op}`,
   `waddles_bundle_config_read_path{path=db|hub_api}`, plus the existing
   `waddles_bundle_config_cache_lookups{result}`, `waddles_bundle_config_load_errors`,
@@ -99,8 +99,8 @@ hub-api `SET waddles:bundle_config:v:{tenant}:{community}:{app} <version> EX 7d`
 
 ## Tests
 
-* Real Postgres: `core/hub_client/tests/bundle_config_db_pg.rs` (`TEST_DATABASE_URL`, fails loudly
-  without it; CI starts the container via `rust-core-libs.yml` `postgres: true` for hub_client):
+* Real Postgres: `core/bundle_config_db/tests/bundle_config_db_pg.rs` (`TEST_DATABASE_URL`, fails loudly
+  without it; CI starts the container via `rust-core-libs.yml` `postgres: true` for bundle_config_db):
   batched warm-up = 1 query, lazy-load, invalidation refresh, read-only role refused writes and
   non-granted columns, DB-down serves stale.
 * Real migration chain: `alembic/tests/test_0106_bundle_config_db_reads.py` (the Rust statement is

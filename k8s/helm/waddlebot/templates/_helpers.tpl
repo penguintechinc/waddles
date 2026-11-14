@@ -231,7 +231,7 @@ Usage inside a container's `env:` list:
 
 {{/*
 Read-only REPLICA DSN for a data-plane workload's direct bundle-config reads (issue #1306;
-core/hub_client/src/bundle_config_db.rs). Renders `DATABASE_REPLICA_URL` ONLY when
+core/bundle_config_db/src/lib.rs). Renders `DATABASE_REPLICA_URL` ONLY when
 infrastructure.postgresql.readReplicas.host is set -- same role + `$(DB_PASSWORD)` expansion as
 waddlebot.dbEnv (NEVER the secret itself), so it MUST be included AFTER waddlebot.dbEnv in the
 container's `env:` list. Unset (alpha/local: no replica) renders nothing and the stage falls back

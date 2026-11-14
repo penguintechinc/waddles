@@ -1482,7 +1482,6 @@ dependencies = [
  "opentelemetry",
  "prost",
  "redis",
- "sea-orm",
  "service_auth",
  "sha2 0.10.9",
  "thiserror 2.0.20",
