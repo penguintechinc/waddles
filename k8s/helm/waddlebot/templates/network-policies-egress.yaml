@@ -302,7 +302,7 @@ spec:
               protocol: UDP
             - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
               protocol: TCP
-    {{- include "waddlebot.otel.egressRule" (dict "root" $) | nindent 4 }}
+    {{- include "waddlebot.otel.egressRule" (dict "root" $ "component" "egress-proxy") | nindent 4 }}
     # The world — minus loopback/link-local/metadata and this cluster's own
     # pod/service/node CIDRs. Customer private ranges (net.http.private-ip
     # grants) are intentionally reachable at the network level; the

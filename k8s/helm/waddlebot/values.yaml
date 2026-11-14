@@ -371,8 +371,24 @@ global:
         app.kubernetes.io/instance: "signoz"
         app.kubernetes.io/component: "otel-collector"
       ports: [4317]
+    # Optional receiver auth for a collector that enables it: reference an EXISTING Secret key whose value is the
+    # OTEL_EXPORTER_OTLP_HEADERS string (for example `authorization=Bearer <token>`). Never a value here; unset =
+    # no header (today's unauthenticated in-cluster receiver). The Secret ref is `optional`, so a missing Secret
+    # never blocks a pod.
+    headersSecretRef:
+      name: ""
+      key: "headers"
     egress:
       enabled: true
+      # Per-emitter collector allow (the env follows the flag, so a pod never exports toward an unreachable collector).
+      # egress-proxy is OPT-IN: its CNP is the SSRF backstop (world minus every cluster-internal range); allowing the
+      # collector there would let an SSRF reach it and inject telemetry. Its stdout logs still reach SigNoz via the
+      # signoz-agents infra collection; its traces/metrics stay off until a safe path exists.
+      egressProxy: false
+      # svc-bundles-executor: the pod is the trusted HOST process (guest WASM has no sockets; all I/O is host
+      # capabilities), so the exporter is trusted code and the rule is scoped to the collector endpoints only.
+      # Set false to turn executor telemetry (compile time, invoke latency) off.
+      bundleExecutor: true
 
 # Per-family image-tag override for the `hub-api` image family -- pins hub-api independently
 # of global.imageTag (every other workload keeps reading global.imageTag). Empty (default)

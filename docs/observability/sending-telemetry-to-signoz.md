@@ -15,8 +15,18 @@ Helm chart from one values block. Nothing is hardcoded in code or images, and no
 | Auth | none. The SigNoz OTLP receiver has no auth extension and is reachable from in-cluster only |
 
 Emitters (`OTEL_SERVICE_NAME` = component name): `hub-api`, `svc-ingest-rust`, `svc-process-rust`,
-`svc-action-rust`, `svc-bundles-executor`, `svc-presentation`, `svc-streaming`, `egress-proxy`.
-hub-webui, databases, caches and cron/seed jobs get no OTEL env and no collector egress.
+`svc-action-rust`, `svc-bundles-executor`, `svc-presentation`, `svc-streaming`. `egress-proxy` is
+**opt-in** (below). hub-webui, databases, caches and cron/seed jobs get no OTEL env and no collector egress.
+
+### Per-emitter egress flags
+
+| Flag (`global.otel.egress.*`) | Default | Why |
+|---|---|---|
+| `enabled` | `true` | master switch for every collector egress rule |
+| `egressProxy` | **`false`** | The egress-proxy policy is the SSRF backstop for the bundle-directed dialer: "world" minus loopback, link-local, metadata and every cluster pod/service/node range. A collector allow there would let an SSRF reach `signoz-otel-collector:4317` and inject telemetry, so it is opt-in. With the flag off the proxy has no OTEL env either (traces and metrics stay off); its stdout logs still reach SigNoz through the signoz-agents infra collection. Turn on only once a safe path exists. |
+| `bundleExecutor` | `true` | The executor pod is the trusted **host** process. Guest WASM components have no sockets (all I/O goes through host capabilities), so the exporter runs in trusted host code and the owner wants compile-time and invoke-latency telemetry. The rule is scoped to the collector endpoints only (namespace `signoz` + collector pod labels, the configured collector ports); ingress stays empty. Set `false` to remove the rule and the executor's OTEL env. |
+
+The env follows the flag, so a pod never exports toward a destination it cannot reach.
 
 ## Env vars rendered (per emitter container)
 
@@ -49,10 +59,43 @@ Enabling the env is necessary but not sufficient. What leaves a pod depends on t
 Stdout logs of every pod are still collected by the SigNoz k8s-infra agents (`signoz-agents`).
 Follow-ups for the owners are listed in the PR that introduced this page.
 
+## Service-name scheme (executors included)
+
+ONE `service.name` per component, always the component name. All executor pools share
+`svc-bundles-executor`; pool identity is carried in resource attributes, never in the service name:
+
+| Attribute | Value |
+|---|---|
+| `executor.pool` | pool name |
+| `executor.language_class` | `compiled`, `scripted` or `any` |
+| `service.instance.id` | pod name (for example `$(K8S_POD_NAME)`) |
+
+`waddlebot.otel.env` takes an optional `extraResourceAttributes` dict and merges it into
+`OTEL_RESOURCE_ATTRIBUTES` (order: `deployment.environment`, `service.namespace`, the rest sorted, `k8s.pod.name`
+last; a caller key overrides the same key from `global.otel.resourceAttributes`; no duplicates; a comma or `=`
+in a key/value fails the render). The executor pool templates pass it, with no second helper:
+
+```gotemplate
+{{- include "waddlebot.otel.env" (dict "root" $ "service" "svc-bundles-executor"
+      "extraResourceAttributes" (dict "executor.pool" $pool.name
+                                      "executor.language_class" $pool.languageClass
+                                      "service.instance.id" "$(K8S_POD_NAME)")) | nindent 8 }}
+```
+
+Filter one pool in SigNoz: Services -> `svc-bundles-executor`, then add the filter
+`executor.pool = <pool>` (traces and logs explorers, and as a group-by on the metrics explorer).
+Metric points keep resource attributes as labels in SigNoz. For a Prometheus-based autoscaler (KEDA /
+HPA-external, #1248) the pool must be a metric **label** named `executor_pool`: the executor records
+`queue_wait_seconds` and `pool_exhausted_total` with an `executor_pool` attribute, and the OTLP-to-Prometheus
+translation turns the dots in `executor.pool` into `executor_pool` when promoted from resource attributes (the
+collector's `resource_to_telemetry_conversion`, or Prometheus `otlp.promote_resource_attributes`). Pick one
+of those on whichever collector feeds Prometheus; the executor metric attribute itself already uses the
+`executor_pool` spelling.
+
 ## Find a service in SigNoz
 
 1. Open the SigNoz UI, then Services. Filter `deployment.environment = alpha`.
-2. Service names are the component names in the table above (`hub-api`, `svc-ingest-rust`, ...).
+2. Service names are the component names in the table above (`hub-api`, `svc-ingest-rust`, ...); the executor's pools are separated by `executor.pool`, see above.
 3. Narrow to one pod with the resource attribute `k8s.pod.name`.
 4. If a service is missing, check in this order: the pod has `OTEL_EXPORTER_OTLP_ENDPOINT` set
    (`kubectl --context dal2alpha -n waddlebot get deploy <name> -o yaml`), the egress rule exists
@@ -118,7 +161,7 @@ there are two replicas, so either run one replica or front them with a trace-id-
 
 | Hop | Policy | State |
 |---|---|---|
-| waddlebot pod to collector TCP 4317 | egress rule added to the emitter's own CiliumNetworkPolicy by this chart | rendered when `global.otel.enabled` and `global.otel.egress.enabled` |
+| waddlebot pod to collector TCP 4317 | egress rule added to the emitter's own CiliumNetworkPolicy by this chart | rendered when `global.otel.enabled`, `global.otel.egress.enabled` and the emitter's own flag (egress-proxy off by default) |
 | into collector 4317/4318 | `signoz/allow-otlp-ingress`: `fromEntities: [cluster]` | already admits the waddlebot namespace, no change needed |
 
 The rule is added inside the existing egress policies, not as a separate policy: a standalone policy
@@ -133,3 +176,21 @@ Egress on the live cluster before this change is deployed (2026-11-14, checked w
 10.244.2.168:39294 -> 10.244.4.243:4317 tcp SYN`. That deny is what the rule removes.
 
 Tetragon exec allowlists are unaffected: the exporters run in-process (no new binary).
+
+## Ask for the SigNoz owner: authenticate the OTLP receivers
+
+The collector's OTLP receivers have no authentication; the only control is network reachability (allow
+`fromEntities: [cluster]`), so any pod in the cluster can inject telemetry. Please enable receiver auth:
+
+1. Bearer-token (or API-key) authentication on the `otlp` receivers (extension `bearertokenauth`, or mTLS
+   with client certs), for both gRPC 4317 and HTTP 4318.
+2. The token is auto-generated on first run, per the platform secrets policy (stored and escrowed in the
+   platform secret store), never written to git or a values file.
+3. Publish it to waddlebot as a Secret in namespace `waddlebot` whose key holds the exporter header string,
+   for example `authorization=Bearer <token>`.
+
+Emitters pick it up with no template change: set `global.otel.headersSecretRef.name: <secret>` (key defaults
+to `headers`) and the chart renders `OTEL_EXPORTER_OTLP_HEADERS` from a `secretKeyRef` on every emitting
+container. The reference is `optional: true`, so a missing Secret never blocks a pod. The chart never
+holds a value; unset (the default) renders no header, which matches today's unauthenticated receiver. Rotate by
+updating the Secret and restarting the emitters.

@@ -41,13 +41,13 @@ _EMITTERS = {
     "svc-bundles-executor": "svc-bundles-executor",
     "svc-presentation": "svc-presentation",
     "svc-streaming": "svc-streaming",
-    "egress-proxy": "egress-proxy",
 }
+# opt-in emitter (global.otel.egress.egressProxy, default false): SSRF-backstop policy, see tests below.
+_EGRESS_PROXY = ("egress-proxy", "egress-proxy")
 
 # CNP name suffix of every policy that must carry the collector rule when enabled (dal2alpha).
 _CNPS_WITH_RULE = {
     "dataplane-egress-deny",
-    "egress-proxy-egress",
     "hub-api-policy",
     "svc-bundles-executor",
     "svc-presentation-policy",
@@ -61,6 +61,7 @@ _CNPS_WITHOUT_RULE = {
     "valkey-durable-policy",
     "valkey-kv-policy",
     "hub-webui-v3-policy",
+    "egress-proxy-egress",  # opt-in only (flag off by default)
 }
 
 _ENDPOINT = "http://signoz-otel-collector.signoz.svc.cluster.local:4317"
@@ -219,7 +220,7 @@ def test_enabled_exactly_one_service_name_per_emitter(env: str) -> None:
             if c is not main[0]:
                 assert not [e for e in _env(c) if e["name"].startswith("OTEL_")]
         examined += 1
-    assert examined == len(_EMITTERS) == 8
+    assert examined == len(_EMITTERS) == 7
 
 
 def test_non_emitters_never_get_otel_env_when_enabled() -> None:
@@ -368,3 +369,207 @@ def test_ci_overlay_renders_with_otel_disabled() -> None:
     docs = [d for d in yaml.safe_load_all(res.stdout) if d]
     assert len(docs) > 30
     assert all(_collector_rules(c) == [] for c in _cnps(docs).values())
+
+
+# ------------------------------------------- security: egress-proxy opt-in, executor scope
+
+
+_COLLECTOR_MATCH = {
+    "io.kubernetes.pod.namespace": "signoz",
+    "app.kubernetes.io/name": "signoz",
+    "app.kubernetes.io/instance": "signoz",
+    "app.kubernetes.io/component": "otel-collector",
+}
+
+
+def _proxy_cnp(docs: list[dict[str, Any]]) -> dict[str, Any]:
+    """The egress-proxy egress CiliumNetworkPolicy (the SSRF backstop)."""
+    return _cnps(docs)["egress-proxy-egress"]
+
+
+def test_egress_proxy_is_opt_in_and_default_off() -> None:
+    """Finding 1: egress-proxy gets NO collector rule and NO OTEL env unless explicitly opted in."""
+    base = yaml.safe_load((_CHART_DIR / "values.yaml").read_text())["global"]["otel"]["egress"]
+    assert base["egressProxy"] is False and base["bundleExecutor"] is True
+    docs = _render("dal2alpha")
+    proxy = _emitter(docs, _EGRESS_PROXY[0])
+    for c in _containers(proxy):
+        assert not [e for e in _env(c) if e["name"].startswith("OTEL_") or e["name"] == "K8S_POD_NAME"]
+    egress = _proxy_cnp(docs)["spec"]["egress"]
+    # Only DNS (kube-system) + the world CIDR set: nothing cluster-internal at all.
+    assert len(egress) == 2, egress
+    dns, world = egress
+    assert dns["toEndpoints"][0]["matchLabels"] == {"io.kubernetes.pod.namespace": "kube-system", "k8s-app": "kube-dns"}
+    assert "toCIDRSet" in world and "toEndpoints" not in world and "toEntities" not in world
+    for r in egress:
+        assert "toEntities" not in r
+        for ep in r.get("toEndpoints") or []:
+            assert ep["matchLabels"]["io.kubernetes.pod.namespace"] == "kube-system"
+    # The cluster-internal carve-outs the SSRF backstop relies on are still excepted.
+    excepts = {x for cs in world["toCIDRSet"] for x in cs.get("except", [])}
+    assert {"10.244.0.0/16", "10.96.0.0/12"} <= excepts, excepts
+
+
+def test_egress_proxy_opt_in_rule_matches_exactly_the_collector() -> None:
+    """Flag on: exactly one extra rule, collector namespace + pod labels, TCP 4317/4318 only, nothing broader."""
+    off = _proxy_cnp(_render("dal2alpha"))["spec"]["egress"]
+    docs = _render("dal2alpha", ["global.otel.egress.egressProxy=true", "global.otel.collector.ports={4317,4318}"])
+    on = _proxy_cnp(docs)["spec"]["egress"]
+    assert len(on) == len(off) + 1
+    extra = [r for r in on if r not in off]
+    assert len(extra) == 1
+    rule = extra[0]
+    assert set(rule) == {"toEndpoints", "toPorts"}
+    assert [e["matchLabels"] for e in rule["toEndpoints"]] == [_COLLECTOR_MATCH]
+    assert rule["toPorts"] == [{"ports": [{"port": "4317", "protocol": "TCP"}, {"port": "4318", "protocol": "TCP"}]}]
+    # every pre-existing rule is untouched
+    assert all(r in on for r in off)
+    c = _containers(_emitter(docs, _EGRESS_PROXY[0]))[-1]
+    assert {e["name"]: e.get("value") for e in _env(c)}["OTEL_SERVICE_NAME"] == "egress-proxy"
+    # opting in with the global egress switch off renders env but no rule
+    docs2 = _render("dal2alpha", ["global.otel.egress.egressProxy=true", "global.otel.egress.enabled=false"])
+    assert _proxy_cnp(docs2)["spec"]["egress"] == off
+
+
+def test_executor_rule_is_exactly_the_collector_and_has_its_own_flag() -> None:
+    """Finding 2: executor keeps a collector-only rule (default on); its flag removes rule AND env."""
+    docs = _render("dal2alpha", ["global.otel.collector.ports={4317,4318}"])
+    cnp = _cnps(docs)["svc-bundles-executor"]
+    rules = _collector_rules(cnp)
+    assert len(rules) == 1
+    assert set(rules[0]) == {"toEndpoints", "toPorts"}
+    assert [e["matchLabels"] for e in rules[0]["toEndpoints"]] == [_COLLECTOR_MATCH]
+    assert rules[0]["toPorts"] == [{"ports": [{"port": "4317", "protocol": "TCP"}, {"port": "4318", "protocol": "TCP"}]}]
+    # the executor stays credential-less / listener-less: ingress untouched, no new entity or CIDR egress
+    assert cnp["spec"]["ingress"] == []
+    assert not [r for r in cnp["spec"]["egress"] if "toEntities" in r or "toCIDRSet" in r]
+    # default dal2alpha: collector rule present exactly once, env present
+    c = next(c for c in _containers(_emitter(docs, "svc-bundles-executor")) if c["name"] == "svc-bundles-executor")
+    assert {e["name"]: e.get("value") for e in _env(c)}["OTEL_SERVICE_NAME"] == "svc-bundles-executor"
+    off = _render("dal2alpha", ["global.otel.egress.bundleExecutor=false"])
+    assert _collector_rules(_cnps(off)["svc-bundles-executor"]) == []
+    c2 = next(c for c in _containers(_emitter(off, "svc-bundles-executor")) if c["name"] == "svc-bundles-executor")
+    assert not [e for e in _env(c2) if e["name"].startswith("OTEL_")]
+    # other emitters unaffected by the executor flag
+    assert any(e["name"] == "OTEL_SERVICE_NAME" for e in _env(_containers(_emitter(off, "hub-api-v3"))[-1]))
+
+
+def test_executor_rule_does_not_depend_on_pod_sandbox_settings() -> None:
+    """Executor egress/env are independent of any pod runtimeClass: the same rule renders either way.
+
+    Kata RuntimeClass support itself (#1177) is not in this base; re-run after it merges.
+    """
+    plain = _render("dal2alpha")
+    rc = _render("dal2alpha", ["pipeline.rustDataPlane.bundleExecutor.runtimeClass=kata"])
+    a = _collector_rules(_cnps(plain)["svc-bundles-executor"])
+    b = _collector_rules(_cnps(rc)["svc-bundles-executor"])
+    assert len(a) == 1 and a == b
+
+
+# ------------------------------------------------ receiver auth (headersSecretRef)
+
+
+def test_headers_secret_ref_unset_by_default_and_never_a_value() -> None:
+    """Default: no OTEL_EXPORTER_OTLP_HEADERS anywhere. Set: secretKeyRef only (no literal), optional."""
+    docs = _render("dal2alpha")
+    for suffix in _EMITTERS:
+        for c in _containers(_emitter(docs, suffix)):
+            assert not [e for e in _env(c) if e["name"] == "OTEL_EXPORTER_OTLP_HEADERS"]
+    docs = _render("dal2alpha", ["global.otel.headersSecretRef.name=signoz-otlp-auth", "global.otel.egress.egressProxy=true"])
+    examined = 0
+    for suffix in [*_EMITTERS, _EGRESS_PROXY[0]]:
+        w = _emitter(docs, suffix)
+        hdr = [e for c in _containers(w) for e in _env(c) if e["name"] == "OTEL_EXPORTER_OTLP_HEADERS"]
+        assert len(hdr) == 1, suffix
+        assert "value" not in hdr[0]
+        assert hdr[0]["valueFrom"]["secretKeyRef"] == {"name": "signoz-otlp-auth", "key": "headers", "optional": True}
+        examined += 1
+    assert examined == 8
+    docs = _render("dal2alpha", ["global.otel.headersSecretRef.name=s", "global.otel.headersSecretRef.key=bearer"])
+    hdr = [e for c in _containers(_emitter(docs, "hub-api-v3")) for e in _env(c) if e["name"] == "OTEL_EXPORTER_OTLP_HEADERS"]
+    assert hdr[0]["valueFrom"]["secretKeyRef"]["key"] == "bearer"
+    # disabled => no headers env even with the ref set
+    docs = _render("alpha", ["global.otel.headersSecretRef.name=s"])
+    for w in _workloads(docs):
+        for c in _containers(w):
+            assert not [e for e in _env(c) if e["name"] == "OTEL_EXPORTER_OTLP_HEADERS"]
+
+
+# ------------------------------------- service-name scheme: extraResourceAttributes
+
+
+def _mini_chart(tmp_path: Path, extra_expr: str, values_extra: str = "") -> Path:
+    """Builds a throwaway chart that calls waddlebot.otel.env the way an executor pool template would."""
+    chart = tmp_path / "mini"
+    (chart / "templates").mkdir(parents=True)
+    (chart / "Chart.yaml").write_text("apiVersion: v2\nname: mini\nversion: 0.1.0\n")
+    (chart / "values.yaml").write_text(
+        "global:\n  deploymentTier: alpha\n  otel:\n    enabled: true\n"
+        "    endpoint: http://c.example:4317\n    resourceAttributes:\n      service.namespace: waddlebot\n"
+        "      team: base\n" + values_extra
+    )
+    shutil.copy(_CHART_DIR / "templates" / "_otel.tpl", chart / "templates" / "_otel.tpl")
+    (chart / "templates" / "d.yaml").write_text(
+        "apiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: mini-exec\nspec:\n  template:\n    spec:\n"
+        "      containers:\n      - name: svc-bundles-executor\n        env:\n"
+        '        {{- include "waddlebot.otel.env" (dict "root" $ "service" "svc-bundles-executor" '
+        + extra_expr
+        + ") | nindent 8 }}\n"
+    )
+    return chart
+
+
+def _mini_env(chart: Path) -> list[dict[str, Any]]:
+    """Renders the mini chart and returns its container env."""
+    res = subprocess.run(
+        [_helm(), "template", "m", str(chart), "--kube-version", "1.31.0"], capture_output=True, text=True, check=False
+    )
+    assert res.returncode == 0, res.stderr[-1500:]
+    docs = [d for d in yaml.safe_load_all(res.stdout) if d]
+    assert len(docs) == 1
+    return _env(docs[0]["spec"]["template"]["spec"]["containers"][0])
+
+
+def test_extra_resource_attributes_merge_without_duplicates(tmp_path: Path) -> None:
+    """Pool attributes merge into OTEL_RESOURCE_ATTRIBUTES; ONE service.name; env-first, sorted, no dup keys."""
+    chart = _mini_chart(
+        tmp_path,
+        '"extraResourceAttributes" (dict "executor.pool" "p1" "executor.language_class" "compiled" '
+        '"service.instance.id" "$(K8S_POD_NAME)" "team" "override")',
+    )
+    env = _mini_env(chart)
+    names = [e["name"] for e in env]
+    assert names.count("OTEL_SERVICE_NAME") == 1
+    assert len(names) == len(set(names))
+    by = {e["name"]: e.get("value") for e in env}
+    assert by["OTEL_SERVICE_NAME"] == "svc-bundles-executor"
+    parts = by["OTEL_RESOURCE_ATTRIBUTES"].split(",")
+    keys = [p.split("=", 1)[0] for p in parts]
+    assert len(keys) == len(set(keys)), keys
+    assert keys[:2] == ["deployment.environment", "service.namespace"]
+    assert keys[-1] == "k8s.pod.name"
+    middle = keys[2:-1]
+    assert middle == sorted(middle), middle
+    attrs = dict(p.split("=", 1) for p in parts)
+    assert attrs["executor.pool"] == "p1"
+    assert attrs["executor.language_class"] == "compiled"
+    assert attrs["service.instance.id"] == "$(K8S_POD_NAME)"
+    assert attrs["team"] == "override"  # caller wins over global.otel.resourceAttributes
+    assert names.index("K8S_POD_NAME") < names.index("OTEL_RESOURCE_ATTRIBUTES")
+
+
+def test_extra_resource_attributes_absent_matches_plain_render(tmp_path: Path) -> None:
+    """Without extras the attribute string has no executor.* keys (helper stays backward compatible)."""
+    env = _mini_env(_mini_chart(tmp_path, '"x" "y"'))
+    attrs = {e["name"]: e.get("value") for e in env}["OTEL_RESOURCE_ATTRIBUTES"]
+    assert attrs == "deployment.environment=alpha,service.namespace=waddlebot,team=base,k8s.pod.name=$(K8S_POD_NAME)"
+
+
+def test_extra_resource_attribute_with_comma_fails_loud(tmp_path: Path) -> None:
+    """A comma in a caller-supplied attribute would corrupt the string; the render fails."""
+    chart = _mini_chart(tmp_path, '"extraResourceAttributes" (dict "executor.pool" "a,b")')
+    res = subprocess.run(
+        [_helm(), "template", "m", str(chart), "--kube-version", "1.31.0"], capture_output=True, text=True, check=False
+    )
+    assert res.returncode != 0
+    assert "commas" in res.stderr
