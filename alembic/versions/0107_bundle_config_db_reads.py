@@ -29,17 +29,17 @@ step); this migration records the change in the chain and applies it immediately
 order-independent: a missing role or table is a no-op (the minimal CI chain does not create every
 table, and a fresh replay creates the roles later).
 
-Revision ID: 0106_bundle_config_db_reads
-Revises: 0105_twitch_handle_freshness
-Create Date: 2026-11-13
+Revision ID: 0107_bundle_config_db_reads
+Revises: 0106_backfill_kv_capability
+Create Date: 2026-11-14
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0106_bundle_config_db_reads"
-down_revision = "0105_twitch_handle_freshness"
+revision = "0107_bundle_config_db_reads"
+down_revision = "0106_backfill_kv_capability"
 branch_labels = None
 depends_on = None
 
@@ -90,7 +90,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Revoke exactly the column grants this revision added (back to 0105's state).
+    """Revoke exactly the column grants this revision added (back to 0106's state).
 
     Column-level REVOKE removes the `pg_attribute.attacl` entries, so nothing is left behind that
     would make a later `DROP ROLE` fail with "privileges for column ... of table ...".

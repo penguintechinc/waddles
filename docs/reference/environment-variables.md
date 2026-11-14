@@ -40,7 +40,7 @@ This document provides a comprehensive reference for environment variables used 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_REPLICA_URL` | unset | DSN of the **read-only replica**; preferred. Same column-scoped per-service role as the primary (`waddles_svc_process` / `waddles_svc_action`, alembic `0106_bundle_config_db_reads`). The chart renders it only when `infrastructure.postgresql.readReplicas.host` is set (password via `$(DB_PASSWORD)` expansion, never a literal). |
+| `DATABASE_REPLICA_URL` | unset | DSN of the **read-only replica**; preferred. Same column-scoped per-service role as the primary (`waddles_svc_process` / `waddles_svc_action`, alembic `0107_bundle_config_db_reads`). The chart renders it only when `infrastructure.postgresql.readReplicas.host` is set (password via `$(DB_PASSWORD)` expansion, never a literal). |
 | `DATABASE_URL` | rendered by `waddlebot.dbEnv` | Primary DSN, used **only** when `DATABASE_REPLICA_URL` is unset -- a WARN is logged ("reading bundle config from the PRIMARY database"). With neither set the DB path is unavailable (ERROR). |
 | `waddles.disable-db-bundle-config-reads` (PostHog flag, not an env var) | OFF | Opt-out kill switch: unseen/OFF/license-server-unreachable = direct database reads; ON = legacy hub-api gRPC path (`HUB_API_GRPC_ENDPOINT`). Never env/CLI-bypassable. |
 

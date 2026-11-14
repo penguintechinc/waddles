@@ -3,7 +3,7 @@
 //! `TEST_DATABASE_URL` (owner credential, e.g. `postgresql://ci:ci@127.0.0.1:5432/ci`; CI starts
 //! the container via the `postgres` input of `rust-crate-ci.yml`) is REQUIRED -- an unset variable
 //! FAILS, never skips. Each test creates its own throwaway database plus a column-scoped
-//! read-only role holding exactly the grants of alembic `0106_bundle_config_db_reads`, then
+//! read-only role holding exactly the grants of alembic `0107_bundle_config_db_reads`, then
 //! exercises [`DbConfigSource`] / [`BundleConfigCache`] as that role.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};

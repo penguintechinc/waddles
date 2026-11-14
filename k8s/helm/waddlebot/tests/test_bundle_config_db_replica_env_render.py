@@ -2,7 +2,7 @@
 
 svc-process and svc-action read per-community bundle config straight from the read-only replica
 (`core/bundle_config_db/src/lib.rs`) under the SAME column-scoped per-service role they
-already connect as (alembic 0106). The chart must therefore:
+already connect as (alembic 0107). The chart must therefore:
 
 * keep each pod's own role + `DATABASE_URL` (primary; the WARN-logged fallback) -- never a shared
   or owner credential;

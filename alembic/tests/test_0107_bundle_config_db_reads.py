@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0106_bundle_config_db_reads (issue #1306).
+"""Real-Postgres tests for 0107_bundle_config_db_reads (issue #1306).
 
 svc-process / svc-action read per-community bundle config straight from the (replica) database
 under their own column-scoped roles instead of calling hub-api. Grants can only be proven by a live
@@ -50,10 +50,10 @@ requires_docker = pytest.mark.skipif(
 _MIGRATION = (
     Path(__file__).resolve().parent.parent
     / "versions"
-    / "0106_bundle_config_db_reads.py"
+    / "0107_bundle_config_db_reads.py"
 )
 _RUST_SOURCE = REPO_ROOT / "core" / "bundle_config_db" / "src" / "lib.rs"
-_PRIOR = "0105_twitch_handle_freshness"
+_PRIOR = "0106_backfill_kv_capability"
 _ROLES = ("waddles_svc_process", "waddles_svc_action")
 APP = "waddles.core.app.calendar"
 
@@ -63,7 +63,7 @@ _PREPARE = "PREPARE bundle_cfg(bigint[], bigint[], text[]) AS "
 
 def _load() -> ModuleType:
     """Import the migration module by path."""
-    spec = importlib.util.spec_from_file_location("migration_0106", _MIGRATION)
+    spec = importlib.util.spec_from_file_location("migration_0107", _MIGRATION)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -182,10 +182,10 @@ def _seed_real_tables(db: PgTestDatabase) -> None:
 
 @pytest.fixture(scope="module")
 def real_chain() -> Iterator[PgTestDatabase]:
-    """Fresh full-chain Postgres at head (migrations incl. 0106), seeded."""
+    """Fresh full-chain Postgres at head (migrations incl. 0107), seeded."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0106-cfg-reads") as db:
+    with migrated_postgres("0107-cfg-reads") as db:
         _seed_real_tables(db)
         yield db
 
@@ -213,10 +213,10 @@ def _column_acl_entries(owner: Any, role: str) -> int:
         return int(cur.fetchone()[0])
 
 
-def test_metadata_single_head_off_0105() -> None:
-    """Revision id <= 32 chars, chained off 0105, and the graph has exactly one head."""
+def test_metadata_single_head_off_0106() -> None:
+    """Revision id <= 32 chars, chained off 0106, and the graph has exactly one head."""
     m = _load()
-    assert (m.revision, m.down_revision) == ("0106_bundle_config_db_reads", _PRIOR)
+    assert (m.revision, m.down_revision) == ("0107_bundle_config_db_reads", _PRIOR)
     assert len(m.revision) <= 32
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
@@ -362,7 +362,7 @@ def mini_db() -> Iterator[PgTestDatabase]:
     """Bare Postgres 17 with just the roles and tables (fsync off: fast on a loaded disk)."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    container = f"waddles-migtest-0106-mini-{_free_port()}"
+    container = f"waddles-migtest-0107-mini-{_free_port()}"
     port = _free_port()
     db = PgTestDatabase(
         host="127.0.0.1",

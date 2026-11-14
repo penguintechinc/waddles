@@ -32,7 +32,7 @@ svc-process / svc-action  handle_context (verified envelope scope only)
   `community_config_schema.properties.*.default` values `||` the latest saved config (a saved key
   wins). An inactive/cross-tenant scope is simply absent (lazy `get` -> `NOT_FOUND`). Ids are
   numeric only, never slugs.
-* Role/grants: alembic `0106_bundle_config_db_reads` + `config/postgres/service-roles.yaml`
+* Role/grants: alembic `0107_bundle_config_db_reads` + `config/postgres/service-roles.yaml`
   (`columns:`) give `waddles_svc_process` and `waddles_svc_action` **SELECT-only, column-scoped**
   access: `bundle_community_config(tenant_id, community_id, app_id, version, config)`,
   `app_active_versions(app_id, tenant_id, community_id, version_id)`, `app_versions(id)`,
@@ -103,7 +103,7 @@ hub-api `SET waddles:bundle_config:v:{tenant}:{community}:{app} <version> EX 7d`
   without it; CI starts the container via `rust-core-libs.yml` `postgres: true` for bundle_config_db):
   batched warm-up = 1 query, lazy-load, invalidation refresh, read-only role refused writes and
   non-granted columns, DB-down serves stale.
-* Real migration chain: `alembic/tests/test_0106_bundle_config_db_reads.py` (the Rust statement is
+* Real migration chain: `alembic/tests/test_0107_bundle_config_db_reads.py` (the Rust statement is
   extracted from the source and run as each real role; downgrade/upgrade; `DROP ROLE`).
 * Chart: `k8s/helm/waddlebot/tests/test_bundle_config_db_replica_env_render.py`.
 * Real Valkey: `hub_api/tests/test_bundle_config_publish_valkey.py`,
