@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from flask_core.service_jwt import ServiceJwtIssuer
 
 from services import youtube_install as install
@@ -194,7 +195,7 @@ class TestAuthorize:
     async def test_the_global_tenant_uses_the_platform_app_and_cannot_bring_its_own(
         self, yt_client: Any, yt_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        headers = admin_headers(yt_db, tenant="global", user_id=yt_db.global_admin_id)
+        headers = admin_headers(yt_db, tenant=DEFAULT_TENANT_SLUG, user_id=yt_db.global_admin_id)
         monkeypatch.setenv("YOUTUBE_CLIENT_ID", "platform-app.apps.googleusercontent.com")
         monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "platform-secret")
         ok = await _authorize(
@@ -215,7 +216,7 @@ class TestAuthorize:
     ) -> None:
         monkeypatch.delenv("YOUTUBE_CLIENT_ID", raising=False)
         monkeypatch.delenv("YOUTUBE_CLIENT_SECRET", raising=False)
-        headers = admin_headers(yt_db, tenant="global", user_id=yt_db.global_admin_id)
+        headers = admin_headers(yt_db, tenant=DEFAULT_TENANT_SLUG, user_id=yt_db.global_admin_id)
         response = await _authorize(
             yt_client, yt_db, {}, headers=headers, community_id=yt_db.global_community_id
         )
@@ -656,11 +657,12 @@ class TestDiscovery:
         (row,) = await raw_rows(yt_db, "platform_connections")
         assert _meta(row)["live_chat_id"] == YT_CHAT
         assert _meta(row)["channel_id"] == YT_CHANNEL.channel_id
-        # bounded: one discovery call + the framework's re-verification (tokeninfo + channels)
+        # bounded: one discovery call + the framework's re-verification (tokeninfo + channels +
+        # the live_chat_id ownership check, one more liveBroadcasts page)
         assert [c[1] for c in fake_google.calls].count(
             "www.googleapis.com/youtube/v3/liveBroadcasts"
-        ) == 1
-        assert len(fake_google.calls) <= 3
+        ) == 2
+        assert len(fake_google.calls) <= 4
 
     async def test_discovery_is_cooled_down_per_connection(
         self, yt_client: Any, yt_db: Any, fake_google: FakeGoogle

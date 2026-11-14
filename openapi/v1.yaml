@@ -2184,6 +2184,9 @@ components:
         id:
           title: Id
           type: integer
+        propagate_moderators:
+          title: Propagate Moderators
+          type: boolean
         role_name_prefix:
           title: Role Name Prefix
           type: string
@@ -2203,6 +2206,7 @@ components:
       - sync_enabled
       - role_name_prefix
       - event_sync_enabled
+      - propagate_moderators
       - created_by_user_id
       - created_at
       - updated_at
@@ -3620,6 +3624,9 @@ components:
           additionalProperties: true
           title: Metadata
           type: object
+        ownershipVerified:
+          title: Ownershipverified
+          type: boolean
         provider:
           title: Provider
           type: string
@@ -3662,6 +3669,7 @@ components:
       - shared
       - hasRefreshToken
       - hasApiCredential
+      - ownershipVerified
       - expiresAt
       - capabilities
       - metadata
@@ -16140,6 +16148,43 @@ paths:
             role-sync mapping).
       summary: '`GET /api/v1/communities/<id>/discord/roles[?guild_id=]` -- the paired
         guild''s roles.'
+  /api/v1/communities/{community_id}/discord/server-install/authorize:
+    post:
+      description: '
+
+        Body `{"sync_enabled": bool}`. Returns Discord''s bot-authorize URL; the callback
+        records
+
+        the install and pairs the returned guild with this community.'
+      operationId: post_start_server_install
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`authorize_url` envelope for the add-Discord-server
+                  flow -- never a secret.'
+                properties:
+                  authorize_url:
+                    title: Authorize Url
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - authorize_url
+                title: ServerInstallAuthorizeResponse
+                type: object
+          description: '`authorize_url` envelope for the add-Discord-server flow --
+            never a secret.'
+      summary: '`POST /api/v1/communities/<id>/discord/server-install/authorize`.'
   /api/v1/communities/{community_id}/gameserver-connections:
     post:
       description: ''
@@ -24661,6 +24706,60 @@ paths:
           description: '`authorize_url` response envelope -- never includes the submitted
             secret.'
       summary: '`POST /api/v1/tenants/discord/install/authorize`.'
+  /api/v1/tenants/discord/install/status:
+    get:
+      description: ''
+      operationId: get_install_status
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Install-status envelope for the webui -- never carries
+                  a secret, token or ciphertext.
+                properties:
+                  application_id:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Application Id
+                  connection_status:
+                    title: Connection Status
+                    type: string
+                  guild_id:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Guild Id
+                  installed:
+                    title: Installed
+                    type: boolean
+                  redirect_uri:
+                    title: Redirect Uri
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  updated_at:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Updated At
+                required:
+                - success
+                - installed
+                - application_id
+                - connection_status
+                - guild_id
+                - updated_at
+                - redirect_uri
+                title: InstallStatusResponse
+                type: object
+          description: Install-status envelope for the webui -- never carries a secret,
+            token or ciphertext.
+      summary: '`GET /api/v1/tenants/discord/install/status` -- the CALLER''s tenant
+        only (from the JWT).'
   /api/v1/tenants/youtube/app:
     put:
       description: '

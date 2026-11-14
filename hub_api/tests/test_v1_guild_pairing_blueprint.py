@@ -39,6 +39,46 @@ def _feature_enabled_default_on(monkeypatch: pytest.MonkeyPatch) -> None:
     import blueprints.v1.guild_pairing as guild_pairing_module
 
     monkeypatch.setattr(guild_pairing_module, "feature_enabled", AsyncMock(return_value=True))
+    # The Discord membership check is covered by test_discord_server_install_pg_integration.py.
+    monkeypatch.setattr(
+        guild_pairing_module.roles_svc, "verify_bot_in_guild", AsyncMock(return_value=None)
+    )
+    # Install-grant authority gate is covered on real Postgres in the same PG suite.
+    monkeypatch.setattr(
+        guild_pairing_module.server_install_svc,
+        "community_has_install_grant",
+        lambda *_a, **_k: True,
+    )
+
+
+#: Discord role id the fake guild reports as privileged (e.g. carries MANAGE_ROLES).
+_PRIVILEGED_DISCORD_ROLE = "777"
+
+
+@pytest.fixture(autouse=True)
+def _discord_fakes(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Ownership proof passes and the guild's roles are non-privileged unless a test says so."""
+    from services import discord_guild_roles, guild_ownership
+    from services.discord_guild_roles import DiscordRole
+
+    proof = AsyncMock(return_value=None)
+    monkeypatch.setattr(guild_ownership, "verify_guild_control", proof)
+
+    async def _roles(dal: Any, community_id: int, *, guild_id: str | None = None) -> list[Any]:
+        ids = ["1", "2", "42", "901", "999", _PRIVILEGED_DISCORD_ROLE]
+        return [
+            DiscordRole(
+                id=i,
+                name=f"r{i}",
+                color=0,
+                position=0,
+                privileged=i == _PRIVILEGED_DISCORD_ROLE,
+            )
+            for i in ids
+        ]
+
+    monkeypatch.setattr(discord_guild_roles, "list_guild_roles", _roles)
+    return proof
 
 
 async def _create_pairing(
@@ -126,6 +166,7 @@ class TestCreatePairing:
             "sync_enabled",
             "role_name_prefix",
             "event_sync_enabled",
+            "propagate_moderators",
             "created_by_user_id",
             "created_at",
             "updated_at",
@@ -269,13 +310,13 @@ class TestRoleSyncBindings:
                 {
                     "sync_scope": "community_role",
                     "discord_role_id": "901",
-                    "community_role": "moderator",
+                    "community_role": "vip",
                 }
             ),
         )
         assert create_response.status_code == 201
         created_body = await create_response.get_json()
-        assert created_body["binding"]["community_role"] == "moderator"
+        assert created_body["binding"]["community_role"] == "vip"
 
         list_response = await client.get(
             f"/api/v1/communities/{community_id}/guild-pairings/{pairing_id}/role-bindings",
@@ -283,7 +324,7 @@ class TestRoleSyncBindings:
         )
         body = await list_response.get_json()
         assert body["bindings"][0]["sync_scope"] == "community_role"
-        assert body["bindings"][0]["community_role"] == "moderator"
+        assert body["bindings"][0]["community_role"] == "vip"
 
     async def test_community_role_missing_role_value_is_400(
         self, client: Any, auth_headers: Any, guild_pairing_db: Any
@@ -340,3 +381,82 @@ class TestRoleSyncBindings:
             headers=auth_headers(scope="community.guild_pairing:write"),
         )
         assert delete_response.status_code == 204
+
+
+class TestPrivilegeHardening:
+    """S1/S3 regressions at the HTTP surface (role-sync privilege hardening, v3.0)."""
+
+    async def _pairing_id(self, client: Any, auth_headers: Any, community_id: int) -> int:
+        response = await _create_pairing(client, auth_headers, community_id)
+        assert response.status_code == 201
+        return int((await response.get_json())["pairing"]["id"])
+
+    async def _post_binding(
+        self, client: Any, auth_headers: Any, community_id: int, pairing_id: int, body: Any
+    ) -> Any:
+        return await client.post(
+            f"/api/v1/communities/{community_id}/guild-pairings/{pairing_id}/role-bindings",
+            headers={
+                **auth_headers(scope="community.guild_pairing:write"),
+                "Content-Type": "application/json",
+            },
+            data=json_module.dumps(body),
+        )
+
+    @pytest.mark.parametrize("role", ["community-admin", "moderator"])
+    async def test_privileged_inbound_binding_rejected_422(
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any, role: str
+    ) -> None:
+        _, community_id, _t, _g = guild_pairing_db
+        pairing_id = await self._pairing_id(client, auth_headers, community_id)
+        response = await self._post_binding(
+            client,
+            auth_headers,
+            community_id,
+            pairing_id,
+            {"sync_scope": "community_role", "discord_role_id": "901", "community_role": role},
+        )
+        assert response.status_code == 422
+        assert (await response.get_json())["error"]["code"] == "privileged_target_role"
+
+    @pytest.mark.parametrize(
+        "scope_body",
+        [{"sync_scope": "moderator"}, {"sync_scope": "subscriber_tier", "subscriber_tier": 1}],
+    )
+    async def test_outbound_binding_to_privileged_discord_role_rejected_422(
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any, scope_body: Any
+    ) -> None:
+        _, community_id, _t, _g = guild_pairing_db
+        pairing_id = await self._pairing_id(client, auth_headers, community_id)
+        response = await self._post_binding(
+            client,
+            auth_headers,
+            community_id,
+            pairing_id,
+            {**scope_body, "discord_role_id": _PRIVILEGED_DISCORD_ROLE},
+        )
+        assert response.status_code == 422
+
+    async def test_pairing_without_guild_control_proof_is_refused(
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any, _discord_fakes: AsyncMock
+    ) -> None:
+        from services.errors import ApiError
+
+        _, community_id, _t, _g = guild_pairing_db
+        _discord_fakes.side_effect = ApiError("no", 403, "guild_control_insufficient")
+        response = await _create_pairing(client, auth_headers, community_id)
+        assert response.status_code == 403
+        list_response = await client.get(
+            f"/api/v1/communities/{community_id}/guild-pairings",
+            headers=auth_headers(scope="community.guild_pairing:read"),
+        )
+        assert (await list_response.get_json())["pairings"] == []
+
+    async def test_new_pairing_records_ownership_and_mod_propagation_defaults_off(
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
+    ) -> None:
+        dal, community_id, _t, _g = guild_pairing_db
+        pairing_id = await self._pairing_id(client, auth_headers, community_id)
+        row = dal(dal.guild_tenant_pairings.id == pairing_id).select().first()
+        assert row.ownership_verified_at is not None
+        assert row.propagate_moderators is False

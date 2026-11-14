@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-bingo"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!bingo` -> a per-community chat bingo (deterministic per-viewer 5x5 cards, mod-called numbers, first valid line wins), kv-only. Original Waddles implementation."
 requires-python = ">=3.13"
 dependencies = []

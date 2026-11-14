@@ -31,22 +31,45 @@ pub struct ToolCall {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildError(pub String);
 
+/// The mapped remote object an op acts on: its id and, for targets with optimistic
+/// concurrency (Wix), the last revision the remote reported.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Remote<'a> {
+    pub id: Option<&'a str>,
+    pub revision: Option<i64>,
+}
+
+impl<'a> Remote<'a> {
+    /// A remote known only by id (no revision tracked).
+    pub fn id(id: &'a str) -> Self {
+        Remote {
+            id: Some(id),
+            revision: None,
+        }
+    }
+}
+
 /// A sync target: builds payloads for its service bundle's tools, nothing else.
 pub trait SyncAdapter {
     /// The target this adapter serves.
     fn target(&self) -> Target;
     /// `app_id` of the service bundle that owns the tools.
     fn app_id(&self) -> &'static str;
-    /// Builds the tool call for `op`; `remote_id` is the mapped remote object, if any.
+    /// Builds the tool call for `op`; `remote` is the mapped remote object, if any.
     fn build(
         &self,
         op: SyncOp,
         ev: &Event,
-        remote_id: Option<&str>,
+        remote: Remote<'_>,
         cfg: &Config,
     ) -> Result<ToolCall, BuildError>;
     /// Extracts the remote object id from a tool result.
     fn remote_id(&self, result: &Value) -> Option<String>;
+    /// Extracts the remote optimistic-concurrency revision from a tool result, when the target
+    /// has one (Wix). Targets without revisions keep the default `None`.
+    fn remote_revision(&self, _result: &Value) -> Option<i64> {
+        None
+    }
     /// True when `Cancel` is implemented as a remote delete (the remote id is then gone).
     fn cancel_clears_remote(&self) -> bool {
         false
@@ -75,11 +98,12 @@ impl SyncAdapter for DiscordAdapter {
         &self,
         op: SyncOp,
         ev: &Event,
-        remote_id: Option<&str>,
+        remote: Remote<'_>,
         cfg: &Config,
     ) -> Result<ToolCall, BuildError> {
         let rid = || {
-            remote_id
+            remote
+                .id
                 .map(str::to_string)
                 .ok_or_else(|| BuildError("missing remote event id".into()))
         };
@@ -140,11 +164,12 @@ impl SyncAdapter for TwitchAdapter {
         &self,
         op: SyncOp,
         ev: &Event,
-        remote_id: Option<&str>,
+        remote: Remote<'_>,
         _cfg: &Config,
     ) -> Result<ToolCall, BuildError> {
         let rid = || {
-            remote_id
+            remote
+                .id
                 .map(str::to_string)
                 .ok_or_else(|| BuildError("missing remote segment id".into()))
         };
@@ -183,7 +208,14 @@ impl SyncAdapter for TwitchAdapter {
 }
 
 /// Wix Events (`wix.event.{create,update,cancel}`); there is no delete tool, so delete == cancel.
+/// Payloads follow the wix service bundle's `exported_tools` schemas: `starts_at`/`ends_at`,
+/// `location_name` (+ `location_type: VENUE`), and `update` carries the last known `revision`.
 pub struct WixAdapter;
+
+/// Longest Wix event title / description / location name the wix bundle accepts.
+const WIX_TITLE_MAX: usize = 200;
+const WIX_DESCRIPTION_MAX: usize = 500;
+const WIX_LOCATION_MAX: usize = 50;
 
 impl SyncAdapter for WixAdapter {
     fn target(&self) -> Target {
@@ -196,11 +228,12 @@ impl SyncAdapter for WixAdapter {
         &self,
         op: SyncOp,
         ev: &Event,
-        remote_id: Option<&str>,
+        remote: Remote<'_>,
         cfg: &Config,
     ) -> Result<ToolCall, BuildError> {
         let rid = || {
-            remote_id
+            remote
+                .id
                 .map(str::to_string)
                 .ok_or_else(|| BuildError("missing remote event id".into()))
         };
@@ -211,15 +244,27 @@ impl SyncAdapter for WixAdapter {
                 .filter(|l| !l.is_empty())
                 .unwrap_or_else(|| cfg.default_location.clone());
             let mut v = json!({
-                "title": truncate(&ev.title, 100),
-                "description": truncate(&ev.description, 1000),
-                "start_date": to_rfc3339(ev.start).map_err(|e| BuildError(e.to_string()))?,
-                "end_date": to_rfc3339(ev.end).map_err(|e| BuildError(e.to_string()))?,
+                "title": truncate(&ev.title, WIX_TITLE_MAX),
+                "starts_at": to_rfc3339(ev.start).map_err(|e| BuildError(e.to_string()))?,
+                "ends_at": to_rfc3339(ev.end).map_err(|e| BuildError(e.to_string()))?,
                 "timezone": ev.tz,
-                "location": truncate(&location, 100),
             });
+            if !ev.description.is_empty() {
+                v["description"] = json!(truncate(&ev.description, WIX_DESCRIPTION_MAX));
+            }
+            if !location.is_empty() {
+                v["location_name"] = json!(truncate(&location, WIX_LOCATION_MAX));
+                v["location_type"] = json!("VENUE");
+            }
             if with_id {
+                // Wix updates are optimistic-concurrency writes: without the revision the remote
+                // reported last, the update cannot be expressed (fail loudly, never guess).
+                let rev = remote
+                    .revision
+                    .filter(|r| *r >= 1)
+                    .ok_or_else(|| BuildError("missing remote wix revision".into()))?;
                 v["event_id"] = json!(rid()?);
+                v["revision"] = json!(rev);
             }
             Ok(v)
         };
@@ -233,8 +278,23 @@ impl SyncAdapter for WixAdapter {
             args,
         })
     }
+    /// Wix returns the event object (`{"event": {"id", "revision", ..}}`); flat ids also accepted.
     fn remote_id(&self, result: &Value) -> Option<String> {
         id_field(result, &["event_id", "id"])
+            .or_else(|| result.get("event").and_then(|e| id_field(e, &["id"])))
+    }
+    /// Wix carries `revision` as a string-encoded int64 on the event object.
+    fn remote_revision(&self, result: &Value) -> Option<i64> {
+        let raw = result
+            .get("event")
+            .and_then(|e| e.get("revision"))
+            .or_else(|| result.get("revision"))?;
+        match raw {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        }
+        .filter(|r| *r >= 1)
     }
 }
 
@@ -349,7 +409,11 @@ fn run_target(
                 });
             }
         };
-        let call = match adapter.build(op, ev, rec.remote_id.as_deref(), cfg) {
+        let remote = Remote {
+            id: rec.remote_id.as_deref(),
+            revision: rec.remote_revision,
+        };
+        let call = match adapter.build(op, ev, remote, cfg) {
             Ok(c) => c,
             Err(_) => {
                 permanent(rec, "payload_invalid");
@@ -365,6 +429,7 @@ fn run_target(
         if let Some(o) = hashed.as_object_mut() {
             o.remove("event_id");
             o.remove("segment_id");
+            o.remove("revision");
         }
         let payload_hash = sha256_hex(hashed.to_string().as_bytes());
         if matches!(op, SyncOp::Update)
@@ -460,6 +525,7 @@ fn run_target(
                             // Already gone remotely: removal satisfied.
                             SyncOp::Cancel | SyncOp::Delete => {
                                 rec.remote_id = None;
+                                rec.remote_revision = None;
                                 rec.pending_op = None;
                                 rec.status = SyncStatus::Synced;
                                 return Ok(RunOutcome {
@@ -472,6 +538,7 @@ fn run_target(
                             _ if !recreated => {
                                 recreated = true;
                                 rec.remote_id = None;
+                                rec.remote_revision = None;
                                 rec.last_synced_hash = None;
                                 continue;
                             }
@@ -489,9 +556,13 @@ fn run_target(
         };
 
         let remote = adapter.remote_id(&res);
+        let revision = adapter.remote_revision(&res);
         match op {
             SyncOp::Create => match remote {
-                Some(id) => rec.remote_id = Some(id),
+                Some(id) => {
+                    rec.remote_id = Some(id);
+                    rec.remote_revision = revision;
+                }
                 None => {
                     // The create may have happened remotely; never blind-retry (duplicate risk).
                     store::mark_idem(ctx.kv, &key)?;
@@ -507,13 +578,20 @@ fn run_target(
                 if let Some(id) = remote {
                     rec.remote_id = Some(id);
                 }
+                if revision.is_some() {
+                    rec.remote_revision = revision;
+                }
             }
             SyncOp::Cancel => {
                 if adapter.cancel_clears_remote() {
                     rec.remote_id = None;
+                    rec.remote_revision = None;
                 }
             }
-            SyncOp::Delete => rec.remote_id = None,
+            SyncOp::Delete => {
+                rec.remote_id = None;
+                rec.remote_revision = None;
+            }
         }
         if matches!(op, SyncOp::Create | SyncOp::Update) {
             rec.last_synced_hash = Some(payload_hash);

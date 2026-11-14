@@ -135,6 +135,12 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     #: (`core/bundle_capability_gate`'s `reputation.community.admin`).
     #: `dangerous` -- an admin must explicitly approve the grant.
     "reputation.community.admin": "dangerous",
+    #: Core-only reputation families mirrored from `core/bundle_capability_gate`
+    #: (the host refuses non-`waddles.core.` apps): own/admin ledger page, the
+    #: tenant aggregate + auto-ban policy, and MODERATION-class deltas (cap 200).
+    "reputation.history.read": "normal",
+    "reputation.tenant.read": "normal",
+    "reputation.moderation.write": "dangerous",
     #: Shared community currency (issue #714), `core/bundle_capability_gate`'s
     #: `economy.*` families. `read` = balance/leaderboard; `wager` = atomic
     #: stake-debit/payout-credit (+ `max-bet`); `transfer` = member-to-member.

@@ -150,6 +150,59 @@
     @apply px-6 py-5;
   }
 
+  /* ---- Bundle settings form (@rjsf/core default markup -> design tokens) ---- */
+  .bundle-settings-form .form-group {
+    @apply mb-4;
+  }
+  .bundle-settings-form label.control-label,
+  .bundle-settings-form legend {
+    @apply label;
+  }
+  .bundle-settings-form fieldset {
+    @apply border-0 p-0 m-0;
+  }
+  .bundle-settings-form input:not([type='checkbox']):not([type='radio']),
+  .bundle-settings-form select,
+  .bundle-settings-form textarea {
+    @apply input;
+  }
+  .bundle-settings-form .field-description,
+  .bundle-settings-form .help-block {
+    @apply field-hint;
+  }
+  .bundle-settings-form .error-detail {
+    @apply field-error list-none p-0;
+  }
+  .bundle-settings-form .checkbox label {
+    @apply flex items-center gap-2 text-sm text-fg-secondary;
+  }
+  .bundle-settings-form .array-item {
+    @apply flex items-end gap-2;
+  }
+  .bundle-settings-form button.btn-add,
+  .bundle-settings-form .array-item-toolbox button {
+    @apply btn btn-sm btn-secondary;
+  }
+  /* rjsf's default buttons are glyphicon-only (no icon font shipped here): give them text labels. */
+  .bundle-settings-form .glyphicon {
+    @apply not-italic;
+  }
+  .bundle-settings-form .glyphicon-plus::after {
+    content: 'Add item';
+  }
+  .bundle-settings-form .glyphicon-remove::after {
+    content: 'Remove';
+  }
+  .bundle-settings-form .glyphicon-arrow-up::after {
+    content: 'Up';
+  }
+  .bundle-settings-form .glyphicon-arrow-down::after {
+    content: 'Down';
+  }
+  .bundle-settings-form .glyphicon-copy::after {
+    content: 'Copy';
+  }
+
   /* ---- Links ---- */
   a {
     @apply text-interactive hover:text-interactive-hover transition-colors;

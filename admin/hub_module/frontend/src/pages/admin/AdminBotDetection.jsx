@@ -4,7 +4,7 @@ import { adminApi } from '../../services/api';
 import { useAuth } from '../../contexts/AuthContext';
 import BotScoreBadge from '../../components/BotScoreBadge';
 import { ShieldCheckIcon, ExclamationTriangleIcon, UserGroupIcon, ClockIcon } from '@heroicons/react/24/outline';
-import { FormModalBuilder } from '@penguintechinc/react-libs';
+import { FormModalBuilder } from '../../components/FormModal';
 import { WADDLES_COLORS } from '../../theme/waddlebotTheme';
 
 const CONFIDENCE_COLORS = {

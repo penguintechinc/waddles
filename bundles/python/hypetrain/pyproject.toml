@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-hypetrain"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!hypetrain` -> a shared per-community chat hype/combo meter: activity (or `!hype`) builds a combo inside a time window, announces milestones (rate-limited) and resets after inactivity"
 requires-python = ">=3.13"
 dependencies = []

@@ -1,6 +1,6 @@
 """Slash-command desired state (REST) + active-context service semantics: real blueprint + verifier.
 
-Everything between the HTTP request and the (file-backed sqlite) database is real -- guard, Ed25519
+Everything between the HTTP request and the (file-backed sqlite) database is real -- guard, ES256
 issuer/verifier, registry service, SQLAlchemy Core queries. Postgres-only constraints are covered in
 `test_app_commands_registry_pg_integration.py`.
 """
@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey
 from quart import Quart
 from quart_schema import QuartSchema
@@ -48,7 +48,7 @@ def _identity(service_id: str, scopes: set[str], tenant: str) -> ServiceIdentity
 @pytest.fixture
 def issuer() -> ServiceJwtIssuer:
     """Real issuer: svc-ingest (both scopes), a non-system tenant identity, a scope-less one."""
-    private = Ed25519PrivateKey.generate()
+    private = ec.generate_private_key(ec.SECP256R1())
     key = SigningKey(kid="k1", private_key=private, public_key=private.public_key())
     both = {SCOPE_APP_COMMANDS, OTHER_SCOPE}
     return ServiceJwtIssuer(
