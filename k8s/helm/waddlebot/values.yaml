@@ -532,6 +532,11 @@ infrastructure:
     readReplicas:
       enabled: false
       count: 2
+      # Read-only replica Service FQDN (inside the Postgres server cert's SANs) that the data plane
+      # (svc-process, svc-action) reads per-community bundle config from (issue #1306; env
+      # DATABASE_REPLICA_URL, same column-scoped per-service role as the primary). Empty = no
+      # replica: the stages fall back to the primary DATABASE_URL and log a WARN (alpha).
+      host: ""
 
   # Redis Cache & Sessions
   redis:
