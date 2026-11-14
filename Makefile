@@ -134,6 +134,17 @@ test:
 test-scripts:
 	@bash scripts/tests/test_release_merge.sh
 	@bash scripts/tests/test_release_auto_merge.sh
+	@python3 -m pytest -q -p no:cacheprovider scripts/ops
+
+# Read-only command-latency SLA report (p99 < 1 s, first door -> outbound confirmed): p50/p95/p99
+# per command and per hop from the data-plane histograms. Zero samples = FAIL.
+#   make command-latency-report METRICS_URLS="http://127.0.0.1:19090/metrics http://127.0.0.1:19091/metrics"
+#   make command-latency-report METRICS_FILES="/tmp/action-metrics.txt"
+# (port-forward the svc-action/svc-process :9090 first; this target only performs HTTP GETs)
+.PHONY: command-latency-report
+command-latency-report:
+	@test -n "$(strip $(METRICS_URLS)$(METRICS_FILES))" || { echo 'usage: make command-latency-report METRICS_URLS="http://127.0.0.1:19090/metrics ..." [METRICS_FILES="a.txt ..."]' >&2; exit 2; }
+	@python3 -I scripts/ops/command_latency_report.py $(foreach u,$(METRICS_URLS),--url $(u)) $(foreach f,$(METRICS_FILES),--file $(f))
 
 # Verify + merge a PR into release/*: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]
 release-merge:
