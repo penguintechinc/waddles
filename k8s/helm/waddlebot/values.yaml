@@ -2941,18 +2941,13 @@ serviceJwt:
     expirationSeconds: 3600
     path: service-jwt-bootstrap-token
 
-# feature/helm-auto-provision-keys -- deploys must never require a human to run a
-# script before `helm install`/`helm upgrade` succeeds. Every Secret below is looked
-# up first (an existing Secret is KEPT untouched, never regenerated/rotated by this
-# chart) and only auto-GENERATED on a miss when global.deploymentTier is "alpha" or
-# "local". Outside those two tiers a miss render-fails the release unless
-# `externalSecret: true` is set (meaning an ExternalSecret/SealedSecret/other
-# out-of-band controller owns this Secret name and will populate it before the
-# consuming workload starts) or the Secret was pre-created by an operator. See
-# templates/auto-provisioned-secrets.yaml (symmetric keys, pure Helm template) and
-# templates/auto-provisioned-keys-job.yaml (Ed25519/P-256 keys, needs openssl -- Sprig/Helm
-# has no Ed25519-pubkey-from-privkey primitive) + chart README "Self-provisioned
-# platform keys" section.
+# Deploys never require a human to run a script before `helm install`/`helm upgrade`. Every
+# Secret below is created at RUNTIME, create-if-absent, in EVERY tier by a pre-install/
+# pre-upgrade hook (templates/provision-secrets.yaml for symmetric keys,
+# templates/auto-provisioned-keys-job.yaml for the Ed25519/P-256 key pairs): an existing
+# Secret is KEPT untouched, never regenerated/rotated. `externalSecret: true` means an
+# ExternalSecret/SealedSecret/other controller owns the name; the hook then skips it. See the
+# chart README "Secrets: generated on first run".
 autoProvisionedKeys:
   # Hook image for BOTH runtime provisioning Jobs (templates/provision-secrets.yaml -- every
   # internally generated symmetric Secret, all tiers -- and templates/auto-provisioned-keys-job.yaml
