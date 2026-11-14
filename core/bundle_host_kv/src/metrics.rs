@@ -18,6 +18,7 @@ use crate::authorize::KV_PERMISSION_ID;
 struct Instruments {
     op_duration_seconds: Histogram<f64>,
     op_errors_total: Counter<u64>,
+    stage_errors_total: Counter<u64>,
     quota_rejections_total: Counter<u64>,
     authorize_denied_total: Counter<u64>,
     maxmemory_policy_violation_total: Counter<u64>,
@@ -37,6 +38,14 @@ fn instruments() -> &'static Instruments {
             op_errors_total: meter
                 .u64_counter("waddles_bundle_kv_op_errors_total")
                 .with_description("Bundle `kv` host-capability errors, by op and error kind")
+                .build(),
+            stage_errors_total: meter
+                .u64_counter("waddles_bundle_kv_errors_total")
+                .with_description(
+                    "Bundle `kv` host-call failures as seen by the invoking stage, by stage \
+                     (process|action), op and error kind -- the per-stage counterpart of \
+                     waddles_bundle_kv_op_errors_total",
+                )
                 .build(),
             quota_rejections_total: meter
                 .u64_counter("waddles_bundle_kv_quota_rejections_total")
@@ -90,6 +99,35 @@ pub fn record_error(op: &'static str, kind: &'static str) {
     );
 }
 
+/// Increments `waddles_bundle_kv_errors_total{stage,op,kind}` for one failed host call.
+/// `op` is normalised to a closed set (anything unknown becomes `"other"`) so a hostile or
+/// buggy bundle can never mint unbounded label values.
+pub fn record_stage_error(stage: &'static str, op: &str, kind: &'static str) {
+    instruments().stage_errors_total.add(
+        1,
+        &[
+            KeyValue::new("stage", stage),
+            KeyValue::new("op", normalise_op(op)),
+            KeyValue::new("kind", kind),
+        ],
+    );
+}
+
+/// Maps a wire `op` string onto the closed set of kv ops (metric-label cardinality guard).
+pub fn normalise_op(op: &str) -> &'static str {
+    match op {
+        "get" => "get",
+        "set" => "set",
+        "delete" => "delete",
+        "increment" => "increment",
+        "get_versioned" => "get_versioned",
+        "cas" => "cas",
+        "delete_if" => "delete_if",
+        "list" => "list",
+        _ => "other",
+    }
+}
+
 /// Increments the quota-rejection counter for one op, labeled with which
 /// quota was hit (`"key_count"`, `"rate_limit"`).
 pub fn record_quota_rejection(op: &'static str, quota: &'static str) {
@@ -139,6 +177,9 @@ mod tests {
     fn recording_every_instrument_does_not_panic_without_a_configured_provider() {
         record_op_duration("get", "ok", 0.001);
         record_error("set", "invalid_key");
+        record_stage_error("process", "get", "not_granted");
+        assert_eq!(normalise_op("get_versioned"), "get_versioned");
+        assert_eq!(normalise_op("../../etc/passwd"), "other");
         record_quota_rejection("increment", "key_count");
         record_authorize_denied("waddles.bot.a", KV_PERMISSION_ID);
         record_maxmemory_policy_violation("allkeys-lru");

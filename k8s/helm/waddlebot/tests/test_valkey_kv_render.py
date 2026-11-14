@@ -144,6 +144,18 @@ def test_kv_acl_allow_list_probe_works_no_dangerous():
     )
     assert not [r for r in rules if r.startswith("+config") and r != "+config|get"]
     assert "'+config|get'" in line[0], "pipe must be shell-quoted"
+    # Regression (alpha kv outage): bundle_host_kv's Lua scripts call `redis.call('TIME')`, which
+    # is @dangerous -- without a later `+time` every kv write/incr/cas/list dies with
+    # "ACL failure in script ... 'time' command". Nothing else single-command may be added.
+    assert "+time" in rules, "kv Lua scripts need TIME (see bundle_host_kv backend.rs)"
+    assert rules.index("+time") > rules.index("-@dangerous"), "+time must follow -@dangerous"
+    assert not [
+        r
+        for r in rules
+        if r.startswith("+")
+        and not r.startswith("+@")
+        and r not in ("+config|get", "+time")
+    ], rules
 
 
 def test_kv_tls_only_and_service():

@@ -280,6 +280,20 @@ KV_PERMISSION_ID = "storage.kv"
 MCP_TOOLS_CAPABILITY = "mcp.tools"
 
 
+def declares_permission(manifest: BundleManifestV2, permission_id: str) -> bool:
+    """Whether `manifest` declares `permission_id` in EITHER `permissions:` shape.
+
+    The structured form (`- id: storage.kv` + justification, parsed into
+    `permission_declarations`) is the real schema; the bare-string form
+    (`permissions: [storage.kv]`) is the legacy shape kept for back-compat.
+    Checking only the bare-string tuple silently dropped every structured
+    declaration, so no bundle using the real schema was ever granted `kv`.
+    """
+    return permission_id in manifest.permissions or any(
+        d.id == permission_id for d in manifest.permission_declarations
+    )
+
+
 def _derive_capabilities(manifest: BundleManifestV2) -> frozenset[str]:
     """The host capabilities a manifest's declared shape implies -- see this module's scope note."""
     caps = {"context", "flags", "log", "clock"}
@@ -289,7 +303,7 @@ def _derive_capabilities(manifest: BundleManifestV2) -> frozenset[str]:
         caps.add("db")
     if "action" in manifest.stages:
         caps.add("relay")
-    if KV_PERMISSION_ID in manifest.permissions:
+    if declares_permission(manifest, KV_PERMISSION_ID):
         caps.add(KV_PERMISSION_ID)
     if manifest.kind == "service" and manifest.exported_tools and manifest.trusted_source:
         caps.add(MCP_TOOLS_CAPABILITY)

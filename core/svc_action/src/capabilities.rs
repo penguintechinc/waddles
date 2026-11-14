@@ -2697,10 +2697,10 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         call: &HostCallBody,
     ) -> Result<serde_json::Value, HostResultError> {
         // Gate call FIRST (spec SS5) -- `storage.kv`, `AppScoped`. This
-        // supersedes `bundle_host_kv::authorize::authorize_kv`'s interim
-        // always-grant stand-in as the real security boundary; that inner
-        // seam remains harmlessly redundant until it is retired in a
-        // follow-on cleanup.
+        // is the real security boundary. NOTE `bundle_host_kv::authorize::authorize_kv`'s
+        // interim check inside `KvHost` still runs AFTER this and is NOT a no-op: it denies
+        // (`not_granted`) any app whose install summary lacks the `storage.kv` capability
+        // -- see `hub_api` `_derive_capabilities` and migration 0106.
         self.gate
             .authorize(
                 &scope.gate_scope(),
@@ -2720,13 +2720,21 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             scope.app_id.clone(),
         );
 
+        // Every failed kv call is reported from here (ERROR/WARN log with the underlying
+        // KvError kind + message, `waddles_bundle_kv_errors_total{stage,op,kind}`): the guest
+        // only sees the collapsed wire error, so this is the one place an operator can see why.
+        let observe = |e: KvError| {
+            bundle_host_kv::report_failure("action", &call.op, &kv_scope, &e);
+            e
+        };
+
         match call.op.as_str() {
             "get" => {
                 let args: KvKeyArgs = parse_kv_args(&call.args)?;
                 let value = kv
                     .get(&kv_scope, call.call_id, &args.key)
                     .await
-                    .map_err(kv_err_to_host)?;
+                    .map_err(|e| kv_err_to_host(observe(e)))?;
                 Ok(serde_json::json!({ "value": value }))
             }
             "set" => {
@@ -2739,14 +2747,14 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                     args.ttl_seconds,
                 )
                 .await
-                .map_err(kv_err_to_host)?;
+                .map_err(|e| kv_err_to_host(observe(e)))?;
                 Ok(serde_json::json!({}))
             }
             "delete" => {
                 let args: KvKeyArgs = parse_kv_args(&call.args)?;
                 kv.delete(&kv_scope, call.call_id, &args.key)
                     .await
-                    .map_err(kv_err_to_host)?;
+                    .map_err(|e| kv_err_to_host(observe(e)))?;
                 Ok(serde_json::json!({}))
             }
             "increment" => {
@@ -2760,7 +2768,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                         args.ttl_seconds,
                     )
                     .await
-                    .map_err(kv_err_to_host)?;
+                    .map_err(|e| kv_err_to_host(observe(e)))?;
                 Ok(serde_json::json!({ "value": value }))
             }
             "get_versioned" => {
@@ -2768,7 +2776,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 let found = kv
                     .get_versioned(&kv_scope, call.call_id, &args.key)
                     .await
-                    .map_err(kv_err_to_host_v2)?;
+                    .map_err(|e| kv_err_to_host_v2(observe(e)))?;
                 Ok(match found {
                     Some((value, version)) => {
                         serde_json::json!({ "value": value, "version": version })
@@ -2788,7 +2796,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                         args.ttl_seconds,
                     )
                     .await
-                    .map_err(kv_err_to_host_v2)?;
+                    .map_err(|e| kv_err_to_host_v2(observe(e)))?;
                 Ok(match r {
                     bundle_host_kv::KvCasResult::Swapped(v) => {
                         serde_json::json!({ "swapped": true, "version": v })
@@ -2803,7 +2811,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 let r = kv
                     .delete_if(&kv_scope, call.call_id, &args.key, args.expected_version)
                     .await
-                    .map_err(kv_err_to_host_v2)?;
+                    .map_err(|e| kv_err_to_host_v2(observe(e)))?;
                 Ok(match r {
                     bundle_host_kv::KvDeleteIfResult::Deleted => {
                         serde_json::json!({ "deleted": true, "version": 0 })
@@ -2824,7 +2832,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                         args.limit,
                     )
                     .await
-                    .map_err(kv_err_to_host_v2)?;
+                    .map_err(|e| kv_err_to_host_v2(observe(e)))?;
                 Ok(serde_json::json!({ "keys": page.keys, "next_cursor": page.next_cursor }))
             }
             other => Err(denied(
@@ -4022,7 +4030,11 @@ mod tests {
             BundleConfigCache, CacheConfig, ConfigKey, StaticConfigSource, StaticLiveGate,
         };
         let src = Arc::new(StaticConfigSource::new());
-        src.set(ConfigKey::new(10, 7, "waddles.bot.commands.default"), 3, r#"{"x":1}"#);
+        src.set(
+            ConfigKey::new(10, 7, "waddles.bot.commands.default"),
+            3,
+            r#"{"x":1}"#,
+        );
         for (live, expect) in [(true, true), (false, false)] {
             let cache = Arc::new(BundleConfigCache::new(
                 Arc::clone(&src) as Arc<dyn hub_client::bundle_config::ConfigSource>,
@@ -4030,8 +4042,7 @@ mod tests {
                 CacheConfig::default(),
             ));
             cache.set_gate(Arc::new(StaticLiveGate(live)));
-            let h = caps(FakeRelayQueue::default())
-                .with_bundle_config(Some(Arc::clone(&cache)));
+            let h = caps(FakeRelayQueue::default()).with_bundle_config(Some(Arc::clone(&cache)));
             let mut ctx = h.handle_context(&scope()).expect("context");
             h.attach_config_json(&scope(), &mut ctx).await;
             assert_eq!(ctx.get("config_json").is_some(), expect);
@@ -4138,6 +4149,79 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "backend"); // KvError::wire_code() collapse
+    }
+
+    /// Records `(level, "field=value ...")` for every tracing event while it is the default
+    /// subscriber (tracing core API only -- no new dev-dependency).
+    #[derive(Default, Clone)]
+    struct CapturedEvents(Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>);
+
+    struct FieldText(String);
+
+    impl tracing::field::Visit for FieldText {
+        fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={:?} ", f.name(), v);
+        }
+    }
+
+    impl tracing::Subscriber for CapturedEvents {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, e: &tracing::Event<'_>) {
+            let mut f = FieldText(String::new());
+            e.record(&mut f);
+            self.0.lock().unwrap().push((*e.metadata().level(), f.0));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Regression (alpha kv outage): the guest only sees the collapsed `backend` wire error, so
+    /// the host MUST log the underlying kv error kind + message at ERROR. Before this, the only
+    /// trace was a bare INFO line and the real reason (`not_granted`) was invisible.
+    #[tokio::test]
+    async fn a_failed_kv_call_logs_the_underlying_error_kind_and_message_at_error() {
+        let captured = CapturedEvents::default();
+        let _guard = tracing::subscriber::set_default(captured.clone());
+        let caps = caps_with_kv_and_capabilities(FakeRelayQueue::default(), &[]);
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code, "backend",
+            "the guest-visible wire error is unchanged"
+        );
+
+        let events = captured.0.lock().unwrap().clone();
+        let line = events
+            .iter()
+            .find(|(level, line)| {
+                *level == tracing::Level::ERROR && line.contains("bundle kv call failed")
+            })
+            .map(|(_, line)| line.clone())
+            .unwrap_or_else(|| panic!("no ERROR 'bundle kv call failed' event in {events:?}"));
+        assert!(line.contains("error_kind=\"not_granted\""), "{line}");
+        assert!(
+            line.contains("storage.kv is not declared"),
+            "underlying message missing: {line}"
+        );
+        assert!(line.contains("stage=\"action\""), "{line}");
+        assert!(line.contains("op=\"get\""), "{line}");
+        assert!(
+            !line.contains("\"k\""),
+            "the guest key must never be logged: {line}"
+        );
     }
 
     #[tokio::test]
