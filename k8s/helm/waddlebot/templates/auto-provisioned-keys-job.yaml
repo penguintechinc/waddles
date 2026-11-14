@@ -70,6 +70,9 @@
 {{- $bsSecretName := $bs.secretName | default (printf "%s-bundle-signing" $fullname) }}
 {{- $bsCmName := $bs.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" $fullname) }}
 {{- $sj := .Values.autoProvisionedKeys.serviceJwt }}
+{{- $ps := .Values.autoProvisionedKeys.precompileSigning }}
+{{- $psSecretName := $ps.secretName | default (printf "%s-executor-precompile-signing" $fullname) }}
+{{- $psCmName := $ps.publicKeyConfigMapName | default (printf "%s-executor-precompile-signing-public" $fullname) }}
 {{- $sjCmName := $sj.publicKeyConfigMapName | default (printf "%s-service-jwt-public" $fullname) }}
 apiVersion: batch/v1
 kind: Job
@@ -153,6 +156,14 @@ spec:
               value: {{ $sj.keyId | quote }}
             - name: SERVICE_JWT_EXTERNAL
               value: {{ $sj.externalSecret | quote }}
+            - name: PRECOMPILE_SIGNING_SECRET
+              value: {{ $psSecretName | quote }}
+            - name: PRECOMPILE_SIGNING_CM
+              value: {{ $psCmName | quote }}
+            - name: PRECOMPILE_SIGNING_KEY_ID
+              value: {{ $ps.keyId | quote }}
+            - name: PRECOMPILE_SIGNING_EXTERNAL
+              value: {{ $ps.externalSecret | quote }}
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -341,6 +352,13 @@ spec:
               # raised, and the internal gRPC listener (port 50204) never started.
               provision_ed25519 "${SERVICE_JWT_SECRET}" "${SERVICE_JWT_CM}" "${SERVICE_JWT_KEY_ID}" "${SERVICE_JWT_EXTERNAL}" \
                 "SERVICE_JWT_PRIVATE_KEY_" SERVICE_JWT_ACTIVE_KID SERVICE_JWT_PUBLIC_KEY "" pem ec-p256
+
+              # executor-scale task 4 -- DEDICATED Ed25519 key signing precompiled .cwasm
+              # artifacts (core/bundle_executor/src/precompile.rs). Distinct from bundle-signing
+              # so neither key can forge the other's artifacts. Private half is mounted ONLY
+              # into the executor-precompile Jobs; executors get the public ConfigMap.
+              provision_ed25519 "${PRECOMPILE_SIGNING_SECRET}" "${PRECOMPILE_SIGNING_CM}" "${PRECOMPILE_SIGNING_KEY_ID}" "${PRECOMPILE_SIGNING_EXTERNAL}" \
+                PRECOMPILE_SIGNING_PRIVATE_KEY PRECOMPILE_SIGNING_KEY_ID PRECOMPILE_SIGNING_PUBLIC_KEY PRECOMPILE_SIGNING_PUBLIC_KEYS raw
 
               echo "auto-provision-keys: done"
           resources:

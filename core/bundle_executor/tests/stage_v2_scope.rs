@@ -202,6 +202,7 @@ async fn drive(steps: Vec<Step>) -> Vec<Outcome> {
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             },
             Arc::clone(&executor),
             "test-peer",
