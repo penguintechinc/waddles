@@ -63,6 +63,7 @@ COPY connection_resolver ./connection_resolver
 COPY bundle_capability_gate ./bundle_capability_gate
 COPY bundle_tool_call ./bundle_tool_call
 COPY circuit_breaker ./circuit_breaker
+COPY command_latency ./command_latency
 COPY egress_assertion ./egress_assertion
 COPY hub_client ./hub_client
 # Live bundle-config DB reader (issue #1306): path dependency of this crate.
