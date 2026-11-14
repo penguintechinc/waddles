@@ -12,10 +12,11 @@
 //!   participant/room lists) likewise forwards to the service tools.
 //!
 //! AuthZ is the existing per-room ACL role model (`guest < member < moderator <
-//! admin`, [`crate::logic::role_of`]); the role is also sent to the service as
-//! `actor_role` for defense in depth. This is interim and migrates to the SDK
-//! `caller_can` check once that lands on the release branch. Everything is keyed
-//! by UUID (never a username); logs and metrics carry op/outcome labels only.
+//! admin`, [`crate::logic::role_of`]) for the app's own early refusals. The webrtc
+//! tools never trust a role from here: they take the actor from the host-VERIFIED
+//! context and are gated by the manifest `required_scope`, so no `actor_id` or
+//! `actor_role` is sent in any tool call. Everything is keyed by UUID (never a
+//! username); logs and metrics carry op/outcome labels only.
 //!
 //! Commands (verbs from the shared vocabulary; a bare noun reads):
 //! `hand [list] <room>` | `hand add <room>` | `hand remove <room> [<member>]` |
@@ -363,12 +364,12 @@ fn lock(
     actor: &str,
     on: bool,
 ) -> Result<String, RoomsError> {
-    let (mut r, role) = authorize(store, room, actor, Role::Moderator)?;
+    let (mut r, _) = authorize(store, room, actor, Role::Moderator)?;
     let op = if on { "room.lock" } else { "room.unlock" };
     tools
         .invoke(
             op,
-            &json!({"room_id": room, "actor_id": actor, "actor_role": role}),
+            &json!({"room_id": room}),
             Some(&idem_key(&format!("{msg}|{room}"), op)),
         )
         .map_err(tool_err)?;
@@ -407,7 +408,7 @@ fn mute(
     tools
         .invoke(
             op,
-            &json!({"room_id": room, "participant_id": member, "actor_id": actor, "actor_role": role}),
+            &json!({"room_id": room, "participant_id": member}),
             Some(&idem_key(&format!("{msg}|{room}|{member}"), op)),
         )
         .map_err(tool_err)?;
@@ -427,11 +428,11 @@ fn mute_all(
     room: &str,
     actor: &str,
 ) -> Result<String, RoomsError> {
-    let (_, role) = authorize(store, room, actor, Role::Moderator)?;
+    authorize(store, room, actor, Role::Moderator)?;
     let out = tools
         .invoke(
             "room.mute_all",
-            &json!({"room_id": room, "actor_id": actor, "actor_role": role}),
+            &json!({"room_id": room}),
             Some(&idem_key(&format!("{msg}|{room}"), "room.mute_all")),
         )
         .map_err(tool_err)?;
@@ -547,11 +548,20 @@ fn remove_participant(
     if !selfie {
         outranks(store, room, role, member)?;
     }
-    let op = if selfie { "room.leave" } else { "room.kick" };
+    // `room.leave` removes the verified caller only (member scope, no target
+    // argument); `room.kick` names the target (moderate scope).
+    let (op, args) = if selfie {
+        ("room.leave", json!({"room_id": room}))
+    } else {
+        (
+            "room.kick",
+            json!({"room_id": room, "participant_id": member}),
+        )
+    };
     tools
         .invoke(
             op,
-            &json!({"room_id": room, "participant_id": member, "actor_id": actor, "actor_role": role}),
+            &args,
             Some(&idem_key(&format!("{msg}|{room}|{member}"), op)),
         )
         .map_err(tool_err)?;
@@ -737,10 +747,38 @@ mod tests {
             if tool.starts_with("room.hand.") {
                 return self.hand_op(tool, args);
             }
-            if matches!(tool, "room.leave" | "room.kick") {
-                // The server drops a leaving/kicked participant's hand itself.
-                let who = args["participant_id"].as_str().unwrap();
-                self.queue.borrow_mut().retain(|(m, _)| m != who);
+            if matches!(
+                tool,
+                "room.leave"
+                    | "room.kick"
+                    | "room.mute"
+                    | "room.unmute"
+                    | "room.mute_all"
+                    | "room.lock"
+                    | "room.unlock"
+            ) {
+                let o = args.as_object().unwrap();
+                assert!(
+                    !o.contains_key("actor_id") && !o.contains_key("actor_role"),
+                    "{tool} must not carry a caller-asserted actor: {args}"
+                );
+                let me: &str = *self.actor.borrow();
+                // The manifest `required_scope` gate: only leave is member-level.
+                if tool != "room.leave" && !Self::is_staff(me) {
+                    return Err(ToolFail::NotGranted);
+                }
+                if tool == "room.leave" {
+                    assert!(!o.contains_key("participant_id"), "leave is self-only");
+                }
+                if matches!(tool, "room.leave" | "room.kick") {
+                    // The server drops a leaving/kicked participant's hand itself.
+                    let who = if tool == "room.leave" {
+                        me
+                    } else {
+                        args["participant_id"].as_str().unwrap()
+                    };
+                    self.queue.borrow_mut().retain(|(m, _)| m != who);
+                }
             }
             Ok(match tool {
                 "room.participants" => json!({"participants": [
@@ -896,6 +934,75 @@ mod tests {
                 "{tool} carries a caller-asserted actor"
             );
         }
+    }
+
+    #[test]
+    fn no_moderation_call_ever_carries_an_actor_or_a_role() {
+        let (s, k) = world();
+        for (c, who) in [
+            (format!("!room participant remove {ROOM}"), USER),
+            (format!("!room participant remove {ROOM} {USER}"), MOD),
+            (format!("!room mute enable {ROOM} {USER}"), MOD),
+            (format!("!room mute disable {ROOM} {USER}"), MOD),
+            (format!("!room mute enable {ROOM} all"), ADMIN),
+            (format!("!room lock enable {ROOM}"), MOD),
+            (format!("!room lock disable {ROOM}"), ADMIN),
+        ] {
+            say(&c, who, &s, &k);
+        }
+        let calls = s.calls.borrow();
+        let tools: Vec<&str> = calls.iter().map(|c| c.0.as_str()).collect();
+        assert_eq!(
+            tools,
+            [
+                "room.leave",
+                "room.kick",
+                "room.mute",
+                "room.unmute",
+                "room.mute_all",
+                "room.lock",
+                "room.unlock"
+            ]
+        );
+        for (tool, args) in calls.iter() {
+            let o = args.as_object().unwrap();
+            assert!(
+                !o.contains_key("actor_id") && !o.contains_key("actor_role"),
+                "{tool} carries a caller-asserted actor"
+            );
+        }
+        // Leave sends no target; kick/mute name theirs; mute_all/lock name only the room.
+        assert_eq!(calls[0].1, json!({"room_id": ROOM}));
+        assert_eq!(calls[1].1, json!({"room_id": ROOM, "participant_id": USER}));
+        assert_eq!(calls[4].1, json!({"room_id": ROOM}));
+        assert_eq!(calls[5].1, json!({"room_id": ROOM}));
+    }
+
+    #[test]
+    fn an_acl_moderator_without_the_moderate_scope_cannot_moderate() {
+        // The room ACL says moderator, but the host-derived community scope does not:
+        // the scope is authoritative, so every moderator-only tool is refused and
+        // nothing changes (the lock flag is only set after the host agrees).
+        let (s, k) = world();
+        put_json(&k, &format!("acl.{ROOM}.{USER}"), &Role::Moderator).unwrap();
+        for c in [
+            format!("!room lock enable {ROOM}"),
+            format!("!room mute enable {ROOM} all"),
+            format!("!room mute enable {ROOM} {USER2}"),
+            format!("!room participant remove {ROOM} {USER2}"),
+        ] {
+            let out = say(&c, USER, &s, &k);
+            assert!(out.contains("refused"), "{c}: {out}");
+        }
+        assert!(
+            !load(&k, ROOM).unwrap().locked,
+            "host refusal leaves it unlocked"
+        );
+        // Leaving is the one member-level tool and still works for the same person.
+        assert_eq!(
+            say(&format!("!room participant remove {ROOM}"), USER, &s, &k),
+            "You left the room."
+        );
     }
 
     #[test]
@@ -1094,7 +1201,7 @@ mod tests {
             s.calls.borrow()[0],
             (
                 "room.kick".to_string(),
-                json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD, "actor_role": "moderator"})
+                json!({"room_id": ROOM, "participant_id": USER})
             )
         );
         let n = s.calls.borrow().len();

@@ -49,6 +49,9 @@
       "room.unlock": "moderator"
     },
     "scope_for_moderator_only": "community:moderate",
+    "leave_scope": "community:member",
+    "actor_source": "host-verified tool context (ToolContext.actor / actor_scopes); never tool arguments",
+    "args_forbidden": ["actor_id", "actor_role"],
     "mute_all_excludes_actor": true,
     "self_service": ["room.leave"]
   },

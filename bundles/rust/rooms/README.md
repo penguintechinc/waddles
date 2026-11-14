@@ -36,8 +36,10 @@ arguments are UUIDs only -- never usernames. With the flag off every verb below 
 | `rooms [list]` | member | live rooms from the media plane |
 
 AuthZ is the per-room ACL role (`acl.set`); a moderator cannot act on an equal or higher role.
-Interim: this migrates to the SDK `caller_can` check once it lands, at which point the
-`actor_role` argument sent to the service is dropped. The raised-hand queue is NOT kept here:
+The app sends NO `actor_id`/`actor_role` to any webrtc tool: each tool takes the host-verified
+actor and is gated by its declared scope (`room.leave` and the own-hand tools: member; kick, mute,
+lock and the other hand tools: moderate), so an ACL moderator without the community moderate scope
+is refused by the host. The raised-hand queue is NOT kept here:
 it is authoritative in svc-streaming and reached through the webrtc tools `room.hand.raise|lower|
 list` (member scope, own hand only) and `room.hand.lower_other|list_all|ack|reset` (moderate scope,
 verified by the host before dispatch). The app sends NO actor or role argument: the webrtc tool

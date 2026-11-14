@@ -228,16 +228,27 @@ def test_hand_tools_declare_the_contract_scopes_and_schema() -> None:
 def test_moderator_only_tools_need_the_moderate_scope_and_leave_stays_member_level() -> None:
     c, tools = _contract(), _tools()
     assert set(c["moderation"]["min_role"]) == set(MODERATOR_ONLY_TOOLS)
+    forbidden = set(c["moderation"]["args_forbidden"])
+    assert forbidden == {"actor_id", "actor_role"}
     for name in MODERATOR_ONLY_TOOLS:
         assert tools[name].get("required_scope") == c["moderation"]["scope_for_moderator_only"], name
-        assert "actor_role" in tools[name]["input_schema"]["required"], name
-    for name in c["moderation"]["self_service"]:
-        assert "required_scope" not in tools[name], f"{name} is self-service"
+    # Own participation only: `room.leave` is member-scope and has no participant argument.
+    assert c["moderation"]["self_service"] == ["room.leave"]
+    assert tools["room.leave"].get("required_scope") == c["moderation"]["leave_scope"] == "community:member"
+    assert "participant_id" not in tools["room.leave"]["input_schema"]["properties"]
+    # No moderation tool accepts a caller-asserted actor or role: the host-verified
+    # context is the actor and the declared scope is the gate.
+    for name in (*MODERATOR_ONLY_TOOLS, "room.leave"):
+        props = set(tools[name]["input_schema"]["properties"])
+        assert not forbidden & props, f"{name} accepts a caller-asserted actor {forbidden & props}"
+        assert tools[name]["input_schema"]["additionalProperties"] is False, name
 
 
 def test_mute_all_names_the_caller_so_the_server_can_exclude_them() -> None:
     assert _contract()["moderation"]["mute_all_excludes_actor"] is True
-    assert "actor_id" in _tools()["room.mute_all"]["input_schema"]["required"]
+    # The caller is the host-verified actor, forwarded by the tool on the host op; the
+    # tool itself takes no actor argument.
+    assert "actor_id" not in _tools()["room.mute_all"]["input_schema"]["properties"]
     proto = ROOMS_PROTO.read_text()
     body = re.search(r"message MuteAllRequest \{(.*?)\n\}", proto, re.S)
     assert body and "actor_id" in body.group(1), "MuteAllRequest lost actor_id"
@@ -246,7 +257,9 @@ def test_mute_all_names_the_caller_so_the_server_can_exclude_them() -> None:
     for call in sent:
         assert any(k.arg == "actor_id" for k in call.keywords), "hub-api mute-all must pass the caller"
     fixture = json.loads((ROOMS / "tests" / "contract_calls.json").read_text())
-    assert fixture["room.mute_all"]["actor_id"], "rooms mute-all must pass the caller"
+    assert not {"actor_id", "actor_role"} & set(fixture["room.mute_all"]), "rooms must not assert the caller"
+    for name in (*MODERATOR_ONLY_TOOLS, "room.leave"):
+        assert not {"actor_id", "actor_role"} & set(fixture[name]), f"rooms sends an actor to {name}"
 
 
 def test_token_tools_carry_short_ttl_bounds_and_no_display_name() -> None:
