@@ -111,23 +111,31 @@ permissions:
   params:
     write: true
 - id: tool.call:waddles.core.service.webrtc:room.hand.raise
-  justification: raised-hand queue front-end over the webrtc service (room.hand.raise); the queue is authoritative in svc-streaming and the bundle keeps no copy
+  justification: raised-hand queue front-end over the webrtc service (room.hand.raise); the queue is authoritative in svc-streaming, the host verifies the scope and the actor, and the bundle keeps no copy
   params:
     write: true
 - id: tool.call:waddles.core.service.webrtc:room.hand.lower
-  justification: raised-hand queue front-end over the webrtc service (room.hand.lower); the queue is authoritative in svc-streaming and the bundle keeps no copy
+  justification: raised-hand queue front-end over the webrtc service (room.hand.lower); the queue is authoritative in svc-streaming, the host verifies the scope and the actor, and the bundle keeps no copy
+  params:
+    write: true
+- id: tool.call:waddles.core.service.webrtc:room.hand.lower_other
+  justification: raised-hand queue front-end over the webrtc service (room.hand.lower_other); the queue is authoritative in svc-streaming, the host verifies the scope and the actor, and the bundle keeps no copy
   params:
     write: true
 - id: tool.call:waddles.core.service.webrtc:room.hand.list
-  justification: raised-hand queue front-end over the webrtc service (room.hand.list); the queue is authoritative in svc-streaming and the bundle keeps no copy
+  justification: raised-hand queue front-end over the webrtc service (room.hand.list); the queue is authoritative in svc-streaming, the host verifies the scope and the actor, and the bundle keeps no copy
+  params:
+    write: false
+- id: tool.call:waddles.core.service.webrtc:room.hand.list_all
+  justification: raised-hand queue front-end over the webrtc service (room.hand.list_all); the queue is authoritative in svc-streaming, the host verifies the scope and the actor, and the bundle keeps no copy
   params:
     write: false
 - id: tool.call:waddles.core.service.webrtc:room.hand.ack
-  justification: raised-hand queue front-end over the webrtc service (room.hand.ack); the queue is authoritative in svc-streaming and the bundle keeps no copy
+  justification: raised-hand queue front-end over the webrtc service (room.hand.ack); the queue is authoritative in svc-streaming, the host verifies the scope and the actor, and the bundle keeps no copy
   params:
     write: true
 - id: tool.call:waddles.core.service.webrtc:room.hand.reset
-  justification: raised-hand queue front-end over the webrtc service (room.hand.reset); the queue is authoritative in svc-streaming and the bundle keeps no copy
+  justification: raised-hand queue front-end over the webrtc service (room.hand.reset); the queue is authoritative in svc-streaming, the host verifies the scope and the actor, and the bundle keeps no copy
   params:
     write: true
 community_config_schema:
@@ -195,7 +203,13 @@ requested_tools:
 - tool: room.hand.lower
   access: write
   target_app_id: waddles.core.service.webrtc
+- tool: room.hand.lower_other
+  access: write
+  target_app_id: waddles.core.service.webrtc
 - tool: room.hand.list
+  access: read
+  target_app_id: waddles.core.service.webrtc
+- tool: room.hand.list_all
   access: read
   target_app_id: waddles.core.service.webrtc
 - tool: room.hand.ack

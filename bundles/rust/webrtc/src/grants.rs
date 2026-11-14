@@ -139,45 +139,80 @@ pub fn grants_for(kind: GrantKind, role: GrantRole, ctx: GrantCtx) -> Result<Gra
     Ok(Grants { publish, subscribe })
 }
 
-/// The raised-hand tools; their minimum roles are part of the contract.
+/// The raised-hand tools. Authorization is split by TOOL, so the manifest
+/// `required_scope` (enforced by the host before dispatch) does the gating and no
+/// tool derives a privilege from a caller-supplied role: the own-hand tools need
+/// `community:member`, everything that touches anyone else's hand or the whole
+/// queue needs `community:moderate`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandOp {
     Raise,
     Lower,
+    LowerOther,
     List,
+    ListAll,
     Ack,
     Reset,
 }
 
 impl HandOp {
-    /// Every hand op, for table-driven checks.
-    pub const ALL: [HandOp; 5] = [Self::Raise, Self::Lower, Self::List, Self::Ack, Self::Reset];
+    /// Every hand tool, for table-driven checks.
+    pub const ALL: [HandOp; 7] = [
+        Self::Raise,
+        Self::Lower,
+        Self::LowerOther,
+        Self::List,
+        Self::ListAll,
+        Self::Ack,
+        Self::Reset,
+    ];
 
-    /// The tool name (also the host op name).
+    /// The tool name.
     pub fn tool(self) -> &'static str {
         match self {
             Self::Raise => "room.hand.raise",
             Self::Lower => "room.hand.lower",
+            Self::LowerOther => "room.hand.lower_other",
             Self::List => "room.hand.list",
+            Self::ListAll => "room.hand.list_all",
             Self::Ack => "room.hand.ack",
             Self::Reset => "room.hand.reset",
         }
     }
 
-    /// Lowest role that may call the tool at all (acting on oneself).
+    /// The svc-streaming host op behind the tool (`lower_other` and `list_all`
+    /// share the op of their own-hand sibling; the host decides by the forwarded
+    /// actor, never by the tool name).
+    pub fn host_op(self) -> &'static str {
+        match self {
+            Self::Raise => "room.hand.raise",
+            Self::Lower | Self::LowerOther => "room.hand.lower",
+            Self::List | Self::ListAll => "room.hand.list",
+            Self::Ack => "room.hand.ack",
+            Self::Reset => "room.hand.reset",
+        }
+    }
+
+    /// Lowest role that may call the tool at all.
     pub fn min_role(self) -> GrantRole {
         match self {
             Self::Raise | Self::Lower | Self::List => GrantRole::Member,
-            Self::Ack | Self::Reset => GrantRole::Moderator,
+            Self::LowerOther | Self::ListAll | Self::Ack | Self::Reset => GrantRole::Moderator,
         }
     }
 
     /// The manifest `required_scope` the host verifies before dispatch.
     pub fn scope(self) -> &'static str {
-        match self.min_role() {
-            GrantRole::Moderator | GrantRole::Admin => "community:moderate",
-            _ => "community:member",
-        }
+        scope_for(self.min_role())
+    }
+}
+
+/// The community scope a role bundle maps to (what the host verifies).
+pub fn scope_for(role: GrantRole) -> &'static str {
+    if role.is_staff() {
+        "community:moderate"
+    } else {
+        "community:member"
     }
 }
 
@@ -285,6 +320,7 @@ mod tests {
         for op in HandOp::ALL {
             let e = &hands[op.tool()];
             assert_eq!(e["scope"], op.scope(), "{}", op.tool());
+            assert_eq!(e["host_op"], op.host_op(), "{}", op.tool());
             assert_eq!(
                 GrantRole::parse(e["min_role"].as_str().unwrap()),
                 Some(op.min_role()),
@@ -292,5 +328,22 @@ mod tests {
                 op.tool()
             );
         }
+        // Gating is by scope: nothing that touches another participant's hand or
+        // the whole queue is reachable with the member scope.
+        for op in [
+            HandOp::LowerOther,
+            HandOp::ListAll,
+            HandOp::Ack,
+            HandOp::Reset,
+        ] {
+            assert_eq!(op.scope(), "community:moderate", "{}", op.tool());
+        }
+        for op in [HandOp::Raise, HandOp::Lower, HandOp::List] {
+            assert_eq!(op.scope(), "community:member", "{}", op.tool());
+        }
+        assert_eq!(
+            c["hands_args_forbidden"],
+            serde_json::json!(["actor_id", "actor_role"])
+        );
     }
 }

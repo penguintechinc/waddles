@@ -174,11 +174,6 @@ fn outranks(
     Ok(())
 }
 
-/// The `actor_role` string the hand tools expect, as the ACL resolved it.
-fn role_json(role: Role) -> Value {
-    json!(role)
-}
-
 /// Raises the actor's own hand (idempotent in the service, which keeps arrival order).
 fn hand_add(
     tools: &dyn Tools,
@@ -187,12 +182,13 @@ fn hand_add(
     room: &str,
     actor: &str,
 ) -> Result<String, RoomsError> {
-    let (_, role) = authorize(store, room, actor, Role::Member)?;
+    authorize(store, room, actor, Role::Member)?;
+    // No actor in the args: the webrtc tool takes the host-verified actor from its
+    // context, so a hand can only ever be raised for the person who asked.
     tools
         .invoke(
             "room.hand.raise",
-            &json!({"api_version": API_VERSION, "room_id": room, "actor_id": actor,
-                    "actor_role": role_json(role)}),
+            &json!({"api_version": API_VERSION, "room_id": room}),
             Some(&idem_key(&format!("{msg}|{room}"), "room.hand.raise")),
         )
         .map_err(tool_err)?;
@@ -214,16 +210,25 @@ fn hand_remove(
     } else {
         Role::Moderator
     };
-    let (_, role) = authorize(store, room, actor, min)?;
+    authorize(store, room, actor, min)?;
+    // Own hand: `lower` (member scope, no participant arg). Someone else's:
+    // `lower_other` (moderate scope, verified by the host before dispatch).
+    let (tool, args) = if member == actor {
+        (
+            "room.hand.lower",
+            json!({"api_version": API_VERSION, "room_id": room}),
+        )
+    } else {
+        (
+            "room.hand.lower_other",
+            json!({"api_version": API_VERSION, "room_id": room, "participant_id": member}),
+        )
+    };
     let out = tools
         .invoke(
-            "room.hand.lower",
-            &json!({"api_version": API_VERSION, "room_id": room, "participant_id": member,
-                    "actor_id": actor, "actor_role": role_json(role)}),
-            Some(&idem_key(
-                &format!("{msg}|{room}|{member}"),
-                "room.hand.lower",
-            )),
+            tool,
+            &args,
+            Some(&idem_key(&format!("{msg}|{room}|{member}"), tool)),
         )
         .map_err(tool_err)?;
     match out.get("lowered").and_then(Value::as_bool) {
@@ -243,12 +248,11 @@ fn hand_ack(
     member: &str,
 ) -> Result<String, RoomsError> {
     need_uuid("member", member)?;
-    let (_, role) = authorize(store, room, actor, Role::Moderator)?;
+    authorize(store, room, actor, Role::Moderator)?;
     tools
         .invoke(
             "room.hand.ack",
-            &json!({"api_version": API_VERSION, "room_id": room, "participant_id": member,
-                    "actor_id": actor, "actor_role": role_json(role)}),
+            &json!({"api_version": API_VERSION, "room_id": room, "participant_id": member}),
             Some(&idem_key(
                 &format!("{msg}|{room}|{member}"),
                 "room.hand.ack",
@@ -272,12 +276,11 @@ fn hand_reset(
     room: &str,
     actor: &str,
 ) -> Result<String, RoomsError> {
-    let (_, role) = authorize(store, room, actor, Role::Moderator)?;
+    authorize(store, room, actor, Role::Moderator)?;
     let out = tools
         .invoke(
             "room.hand.reset",
-            &json!({"api_version": API_VERSION, "room_id": room, "actor_id": actor,
-                    "actor_role": role_json(role)}),
+            &json!({"api_version": API_VERSION, "room_id": room}),
             Some(&idem_key(&format!("{msg}|{room}"), "room.hand.reset")),
         )
         .map_err(tool_err)?;
@@ -298,11 +301,17 @@ fn hand_list(
     actor: &str,
 ) -> Result<String, RoomsError> {
     let (_, role) = authorize(store, room, actor, Role::Member)?;
+    // Moderators ask for the whole queue (`list_all`, moderate scope); everyone else
+    // only ever gets their own entry (`list`, member scope).
+    let tool = if role >= Role::Moderator {
+        "room.hand.list_all"
+    } else {
+        "room.hand.list"
+    };
     let out = tools
         .invoke(
-            "room.hand.list",
-            &json!({"api_version": API_VERSION, "room_id": room, "actor_id": actor,
-                    "actor_role": role_json(role)}),
+            tool,
+            &json!({"api_version": API_VERSION, "room_id": room}),
             None,
         )
         .map_err(tool_err)?;
@@ -318,7 +327,7 @@ fn hand_list(
         return Ok("No raised hands.".into());
     }
     let unavailable = || RoomsError::Tool(ToolFail::Unavailable);
-    if role < Role::Moderator {
+    if tool == "room.hand.list" {
         return Ok(match hands.first() {
             Some(h) => format!(
                 "Your hand is raised (position {} of {count}).",
@@ -618,20 +627,27 @@ mod tests {
         }
     }
 
-    /// The webrtc service as the rooms app sees it. The raised-hand queue lives HERE
-    /// (as it does in svc-streaming's `RoomService`): same semantics as the tool
-    /// contract -- idempotent raise, role-gated lower/ack/reset, members see only
-    /// their own place in `list`, and leave/kick drop the participant's hand.
+    /// The host + webrtc service as the rooms app sees it. The raised-hand queue lives
+    /// HERE (as in svc-streaming's `RoomService`): idempotent raise, scope-gated
+    /// moderator tools, members see only their own place in `list`, leave/kick drop
+    /// the participant's hand. The actor is the host-VERIFIED context (`actor` +
+    /// community scopes derived from the role), exactly as in production -- hand
+    /// calls may never carry `actor_id`/`actor_role` arguments, and the double
+    /// refuses any that do.
     #[derive(Default)]
     struct Svc {
         calls: RefCell<Vec<(String, Value)>>,
         fail: RefCell<Option<ToolFail>>,
+        /// The verified actor of the chat message being handled (set by `say`).
+        actor: RefCell<&'static str>,
         /// (participant, acknowledged-by) in arrival order.
         queue: RefCell<Vec<(String, Option<String>)>>,
     }
     impl Svc {
-        fn staff(args: &Value) -> bool {
-            matches!(args["actor_role"].as_str(), Some("moderator" | "admin"))
+        /// Community scopes the host derives for `who` (moderators and admins hold
+        /// `community:moderate`; everyone else is a plain member).
+        fn is_staff(who: &str) -> bool {
+            who == MOD || who == ADMIN
         }
         fn hand(m: &str, acked: &Option<String>) -> Value {
             match acked {
@@ -642,33 +658,50 @@ mod tests {
         }
         fn hand_op(&self, tool: &str, args: &Value) -> Result<Value, ToolFail> {
             assert_eq!(args["api_version"], "v1", "{tool} must state v1");
+            let o = args.as_object().unwrap();
+            assert!(
+                !o.contains_key("actor_id") && !o.contains_key("actor_role"),
+                "{tool} must not carry a caller-asserted actor: {args}"
+            );
+            let me: &str = *self.actor.borrow();
+            // The manifest `required_scope` gate the host applies before dispatch.
+            let moderator_tool = matches!(
+                tool,
+                "room.hand.lower_other"
+                    | "room.hand.list_all"
+                    | "room.hand.ack"
+                    | "room.hand.reset"
+            );
+            if moderator_tool && !Self::is_staff(me) {
+                return Err(ToolFail::NotGranted);
+            }
             let mut q = self.queue.borrow_mut();
             match tool {
                 "room.hand.raise" => {
-                    let who = args["actor_id"].as_str().unwrap();
-                    assert!(args.get("participant_id").is_none(), "raise is self-only");
-                    if !q.iter().any(|(m, _)| m == who) {
-                        q.push((who.into(), None));
+                    assert!(!o.contains_key("participant_id"), "raise is self-only");
+                    if !q.iter().any(|(m, _)| m == me) {
+                        q.push((me.into(), None));
                     }
-                    Ok(json!({"room_id": ROOM, "hand": Self::hand(who, &None)}))
+                    Ok(json!({"room_id": ROOM, "hand": Self::hand(me, &None)}))
                 }
-                "room.hand.lower" => {
-                    let who = args["participant_id"].as_str().unwrap();
-                    if who != args["actor_id"] && !Self::staff(args) {
-                        return Err(ToolFail::NotGranted);
-                    }
+                "room.hand.lower" | "room.hand.lower_other" => {
+                    let who = if tool == "room.hand.lower" {
+                        assert!(!o.contains_key("participant_id"), "lower is self-only");
+                        me
+                    } else {
+                        args["participant_id"].as_str().unwrap()
+                    };
                     let before = q.len();
                     q.retain(|(m, _)| m != who);
                     Ok(
                         json!({"room_id": ROOM, "participant_id": who, "lowered": q.len() != before}),
                     )
                 }
-                "room.hand.list" => {
-                    let me = args["actor_id"].as_str().unwrap();
+                "room.hand.list" | "room.hand.list_all" => {
                     let all: Vec<Value> = q
                         .iter()
                         .enumerate()
-                        .filter(|(_, (m, _))| Self::staff(args) || m == me)
+                        .filter(|(_, (m, _))| tool == "room.hand.list_all" || m == me)
                         .map(|(i, (m, a))| {
                             let mut h = Self::hand(m, a);
                             h["position"] = json!(i + 1);
@@ -677,15 +710,11 @@ mod tests {
                         .collect();
                     Ok(json!({"room_id": ROOM, "count": q.len(), "hands": all}))
                 }
-                "room.hand.ack" | "room.hand.reset" if !Self::staff(args) => {
-                    Err(ToolFail::NotGranted)
-                }
                 "room.hand.ack" => {
                     let who = args["participant_id"].as_str().unwrap();
-                    let by = args["actor_id"].as_str().unwrap();
                     match q.iter_mut().find(|(m, _)| m == who) {
                         Some(e) => {
-                            e.1 = Some(by.into());
+                            e.1 = Some(me.into());
                             Ok(json!({"room_id": ROOM, "hand": Self::hand(who, &e.1)}))
                         }
                         None => Err(ToolFail::InvalidArgs("room or source not found".into())),
@@ -753,6 +782,7 @@ mod tests {
         (Svc::default(), k)
     }
     fn say(text: &str, who: &'static str, s: &Svc, k: &Kv) -> String {
+        *s.actor.borrow_mut() = who;
         handle_chat_ex(text, "m1", s, k, &Who(who), None, true)
             .unwrap()
             .reply
@@ -766,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn hand_verbs_call_the_webrtc_hand_tools_with_v1_actor_and_role() {
+    fn hand_verbs_call_the_webrtc_hand_tools_with_v1_and_no_actor_arguments() {
         let (s, k) = world();
         let kv_before = kv_keys(&k);
         let calls = |n: usize| s.calls.borrow()[n].clone();
@@ -778,8 +808,7 @@ mod tests {
             calls(0),
             (
                 "room.hand.raise".to_string(),
-                json!({"api_version": "v1", "room_id": ROOM, "actor_id": USER,
-                       "actor_role": "member"})
+                json!({"api_version": "v1", "room_id": ROOM})
             )
         );
         say(&format!("!room hand add {ROOM}"), USER, &s, &k);
@@ -792,23 +821,101 @@ mod tests {
             calls(2),
             (
                 "room.hand.lower".to_string(),
-                json!({"api_version": "v1", "room_id": ROOM, "participant_id": USER,
-                       "actor_id": USER, "actor_role": "member"})
+                json!({"api_version": "v1", "room_id": ROOM})
             )
         );
         assert!(say(&format!("!room hand remove {ROOM}"), USER, &s, &k).contains("No raised hand"));
         say(&format!("!room hand add {ROOM}"), USER, &s, &k);
         say(&format!("!room hand set ack {ROOM} {USER}"), MOD, &s, &k);
         assert_eq!(
-            s.calls.borrow().last().unwrap().1,
-            json!({"api_version": "v1", "room_id": ROOM, "participant_id": USER,
-                   "actor_id": MOD, "actor_role": "moderator"})
+            s.calls.borrow().last().unwrap().clone(),
+            (
+                "room.hand.ack".to_string(),
+                json!({"api_version": "v1", "room_id": ROOM, "participant_id": USER})
+            )
+        );
+        say(&format!("!room hand remove {ROOM} {USER}"), MOD, &s, &k);
+        assert_eq!(
+            s.calls.borrow().last().unwrap().clone(),
+            (
+                "room.hand.lower_other".to_string(),
+                json!({"api_version": "v1", "room_id": ROOM, "participant_id": USER})
+            )
         );
         say(&format!("!room hand reset {ROOM}"), ADMIN, &s, &k);
-        let last = s.calls.borrow().last().unwrap().clone();
-        assert_eq!(last.0, "room.hand.reset");
-        assert_eq!(last.1["actor_role"], "admin");
+        assert_eq!(
+            s.calls.borrow().last().unwrap().clone(),
+            (
+                "room.hand.reset".to_string(),
+                json!({"api_version": "v1", "room_id": ROOM})
+            )
+        );
         assert_eq!(kv_keys(&k), kv_before, "hands never touch the app kv");
+    }
+
+    #[test]
+    fn list_picks_the_tool_by_role_so_scope_decides_the_view() {
+        let (s, k) = world();
+        say(&format!("!room hand list {ROOM}"), USER, &s, &k);
+        say(&format!("!room hand list {ROOM}"), MOD, &s, &k);
+        let tools: Vec<String> = s.calls.borrow().iter().map(|c| c.0.clone()).collect();
+        assert_eq!(tools, ["room.hand.list", "room.hand.list_all"]);
+    }
+
+    #[test]
+    fn no_hand_call_ever_carries_an_actor_or_a_role() {
+        let (s, k) = world();
+        for (c, who) in [
+            (format!("!room hand add {ROOM}"), USER),
+            (format!("!room hand add {ROOM}"), USER2),
+            (format!("!room hand list {ROOM}"), USER),
+            (format!("!room hand list {ROOM}"), MOD),
+            (format!("!room hand set ack {ROOM} {USER}"), MOD),
+            (format!("!room hand remove {ROOM}"), USER),
+            (format!("!room hand remove {ROOM} {USER2}"), ADMIN),
+            (format!("!room hand reset {ROOM}"), ADMIN),
+        ] {
+            say(&c, who, &s, &k);
+        }
+        let hand_calls: Vec<_> = s
+            .calls
+            .borrow()
+            .iter()
+            .filter(|c| c.0.starts_with("room.hand."))
+            .cloned()
+            .collect();
+        assert!(
+            hand_calls.len() >= 8,
+            "only {} hand calls examined",
+            hand_calls.len()
+        );
+        for (tool, args) in hand_calls {
+            let o = args.as_object().unwrap();
+            assert!(
+                !o.contains_key("actor_id") && !o.contains_key("actor_role"),
+                "{tool} carries a caller-asserted actor"
+            );
+        }
+    }
+
+    #[test]
+    fn an_acl_moderator_without_the_moderate_scope_is_refused_by_the_host() {
+        // The room ACL says moderator, but the host-derived community scope does not:
+        // the scope is authoritative, so the moderator-only tools are refused.
+        let (s, k) = world();
+        put_json(&k, &format!("acl.{ROOM}.{USER}"), &Role::Moderator).unwrap();
+        say(&format!("!room hand add {ROOM}"), USER2, &s, &k);
+        for c in [
+            format!("!room hand reset {ROOM}"),
+            format!("!room hand set ack {ROOM} {USER2}"),
+            format!("!room hand remove {ROOM} {USER2}"),
+            format!("!room hand list {ROOM}"),
+        ] {
+            let out = say(&c, USER, &s, &k);
+            assert!(!out.contains(USER2), "{c}: leaked the queue: {out}");
+        }
+        assert_eq!(s.queue.borrow().len(), 1, "nothing was changed");
+        assert!(say(&format!("!room hand reset {ROOM}"), USER, &s, &k).contains("refused"));
     }
 
     #[test]
