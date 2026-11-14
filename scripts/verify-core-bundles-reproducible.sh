@@ -23,7 +23,7 @@
 # without first closing that issue.
 #
 # Policy (2026-11-13): the core-bundle-seeder's byte-identical digest check is enforced for
-# COMPILED bundles only (Rust/C#) -- exactly what this gate proves reproducible. Python
+# COMPILED bundles only (Rust/C#/Go) -- exactly what this gate proves reproducible. Python
 # (componentize-py) bundles are NOT byte-checked by the seeder (a mismatch is a logged, counted
 # no-op, see hub_api/cli/seed_core_bundles.py SCRIPTED_LANGUAGES). Signature + hash checks for
 # all packages are deferred to v3.2.x.

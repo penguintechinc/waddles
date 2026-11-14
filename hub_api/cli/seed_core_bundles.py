@@ -36,7 +36,7 @@ points at that same `version_id`, activation is skipped too (a true no-op, logge
 `app_install_approvals` row). A different digest under the SAME version string is a data
 integrity conflict (app_versions has its own `UNIQUE(app_id, version)`) -- refused, not
 overwritten; bump the catalog's `version` field alongside the artifact. **That byte check is
-enforced for COMPILED bundles only (`language: rust|csharp`).** `componentize-py` (python)
+enforced for COMPILED bundles only (`language: rust|csharp|go`).** `componentize-py` (python)
 builds are not byte-reproducible, so by policy a python digest mismatch is a logged, counted
 no-op (`digest_drift_not_enforced` in the summary) that keeps the existing row; signature +
 hash verification for all packages is deferred to v3.2.x.
@@ -149,9 +149,9 @@ _PLATFORM_CONNECTIONS_ENV = "CORE_BUNDLES_PLATFORM_CONNECTIONS"
 _APP_ID_CHARSET_RE = re.compile(r"^[a-z0-9]+(\.[a-z0-9-]+)+$")
 
 #: Catalog `language` values whose artifact is a deterministic COMPILED build (cargo-component /
-#: .NET). The byte-identical digest check (`app_versions` immutable per version string) is
+#: .NET / Go). The byte-identical digest check (`app_versions` immutable per version string) is
 #: enforced for these ONLY -- a mismatch is a hard `digest_conflict` (see below).
-COMPILED_LANGUAGES = frozenset({"rust", "csharp"})
+COMPILED_LANGUAGES = frozenset({"rust", "csharp", "go"})
 
 #: Catalog `language` values built by `componentize-py` (a wizened CPython snapshot). Those
 #: builds are NOT byte-reproducible (same source, same pinned container -> a different sha256

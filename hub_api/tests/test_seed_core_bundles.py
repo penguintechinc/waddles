@@ -2397,11 +2397,11 @@ async def test_run_python_digest_mismatch_is_not_a_conflict_or_failure(
     assert not [r for r in caplog.records if getattr(r, "error_code", None) == "digest_conflict"]
 
 
-@pytest.mark.parametrize("language", ["rust", "csharp"])
+@pytest.mark.parametrize("language", ["rust", "csharp", "go"])
 async def test_compiled_digest_mismatch_still_raises_digest_conflict(
     install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str
 ) -> None:
-    """Compiled (rust/csharp) bundles keep the strict 409 digest_conflict byte check."""
+    """Compiled (rust/csharp/go) bundles keep the strict 409 digest_conflict byte check."""
     _patch_validator_and_storage(monkeypatch)
     entry = replace(_write_bundle(tmp_path), language=language)
     await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
@@ -2420,8 +2420,8 @@ async def test_unknown_catalog_language_fails_loud(
 ) -> None:
     """A language that is neither compiled nor scripted is a loud seeder error, not a guess."""
     _patch_validator_and_storage(monkeypatch)
-    entry = replace(_write_bundle(tmp_path), language="go")
-    with pytest.raises(CoreBundleSeederError, match="unknown catalog language 'go'"):
+    entry = replace(_write_bundle(tmp_path), language="ruby")
+    with pytest.raises(CoreBundleSeederError, match="unknown catalog language 'ruby'"):
         await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
 
 
@@ -2432,7 +2432,7 @@ async def test_run_unknown_catalog_language_fails_the_run(
     _patch_validator_and_storage(monkeypatch)
     _patch_run_dependencies(install_dal, monkeypatch)
     entry = _write_bundle(tmp_path)
-    catalog_path = _single_row_catalog(tmp_path, entry, "go")
+    catalog_path = _single_row_catalog(tmp_path, entry, "ruby")
     assert await seeder._run(tmp_path, catalog_path) == 1
 
 
