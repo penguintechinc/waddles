@@ -38,6 +38,7 @@ spec:
               protocol: UDP
             - port: "53"
               protocol: TCP
+    {{- include "waddlebot.otel.egressRule" (dict "root" $) | nindent 4 }}
     {{- range $stage := .Values.pipeline.rustDataPlane.bundleExecutor.stages }}
     - toEndpoints:
         - matchLabels:
