@@ -73,3 +73,38 @@ component build` + `wasm-tools component wit` check, the same way
 thin, mechanically-verified-by-a-downstream-build seam. Everything else
 (type conversions, JSON payload helpers, error mapping, stage stub
 defaults) is host-tested at ~97% line coverage (`cargo llvm-cov`).
+
+## Reading the community's saved config
+
+A community admin edits a bundle's settings in the admin UI (the bundle-admin gateway validates
+them against the manifest `community_config_schema` and stores each save as a new version). At
+invoke time the stage hands the bundle the **live** config of the invoking community -- the
+manifest property `default`s overlaid with the latest saved version -- as a JSON object string in
+`get-context().config_json`. Nothing to fetch, poll or cache in the bundle:
+
+```rust
+use waddle_sdk::BundleContext;
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct Config {
+    default_duration_minutes: u32, // schema default (e.g. 60) is already merged in
+    default_tz: String,
+}
+
+fn dispatch(ctx: BundleContext) -> Result<(), String> {
+    // `ctx.config::<T>()` deserializes `config_json`; an empty `{}` means "no saved config and
+    // no schema defaults" -- use your own `Default` rather than assuming keys exist.
+    let cfg: Config = ctx.config().map_err(|e| e.to_string())?;
+    let _ = cfg.default_duration_minutes;
+    Ok(())
+}
+```
+
+* Served only for the verified envelope scope (your own tenant/community) -- never another's.
+* A save reaches running bundles within seconds (the stage rechecks a Valkey version key; a
+  5-minute TTL is the backstop). If hub-api is unreachable the last-known config is served; if it
+  was never loaded the stage logs an ERROR and passes `{}` -- treat a missing key as "use the
+  schema default" in code too.
+* Declare the schema (types, bounds, `default`s) under `community_config_schema:` in the manifest;
+  see `bundles/rust/calendar` (`default_duration_minutes`) for a working example.

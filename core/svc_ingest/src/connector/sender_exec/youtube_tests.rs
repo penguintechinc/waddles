@@ -163,6 +163,7 @@ fn send(channel: &str, origin: Option<&str>) -> OutboundAction {
         channel: channel.to_string(),
         text: "hello".to_string(),
         origin_channel: origin.map(str::to_string),
+        tenant_id: None,
     }
 }
 

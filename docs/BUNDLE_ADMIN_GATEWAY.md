@@ -15,7 +15,7 @@ Code: `hub_api/blueprints/v1/bundle_admin_gateway.py`, `services/bundle_admin_ga
 
 ```yaml
 # JSON Schema (Draft 2020-12, type: object, <= 64 KiB) for per-community config.
-# NOTE: distinct from the legacy `config_schema:` field-map (149 manifests carry `{}`), untouched.
+# NOTE: the legacy `config_schema:` key is dead and deprecated (see "Legacy `config_schema`" below).
 community_config_schema:
   type: object
   properties: {greeting: {type: string, maxLength: 20}}
@@ -35,6 +35,22 @@ Rules enforced at ingest (`parse_bundle_manifest_v2`): a tool on **another** bun
 `exported_tools`; owner/member scopes are not allowed. Input/output schemas are **not** duplicated:
 the gateway validates against the target's `exported_tools` schemas. Reference:
 `bundles/rust/reputation/{bundle,hub-manifest}.yaml` (`leaderboard` read, `override` action).
+
+## Legacy `config_schema` (deprecated)
+
+Nothing reads `config_schema:`; only `community_config_schema:` reaches community admins. The v2
+validator (`check_legacy_config_schema`) now raises `deprecated_config_schema` when the legacy key
+carries content, and logs a deprecation warning when it is empty (`config_schema: {}`). Every
+property in a `community_config_schema` should carry a `default` (use `type: [x, "null"]` +
+`default: null` for "unset" options; required members of an optional object are exempt).
+
+Decision: the ~195 empty `config_schema: {}` keys in existing manifests are left in place (warning
+only), not mass-deleted. Removal is a no-op behaviour change but would touch ~195 manifests and
+collide with the version-bump work in flight (PR #1256 edits ~133 of them); delete the key
+opportunistically whenever a manifest is touched anyway. The seven bundles that had a real legacy
+schema (calendar, ai-teammates, game-servers, rooms, twitch-clips, live-now, secret) were migrated
+to `community_config_schema` and patch-bumped, since `app_versions` is immutable per version and
+the stored manifest only updates on a new version.
 
 ## Routes
 

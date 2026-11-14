@@ -272,6 +272,10 @@ impl TryFrom<u8> for SyncStatus {
 pub struct SyncRecord {
     pub target: Target,
     pub remote_id: Option<String>,
+    /// Last optimistic-concurrency revision the remote reported (Wix); absent for other targets
+    /// and on records written before revisions were tracked.
+    #[serde(default)]
+    pub remote_revision: Option<i64>,
     pub status: SyncStatus,
     pub attempts: u32,
     pub last_error_code: Option<String>,
@@ -287,6 +291,7 @@ impl SyncRecord {
         SyncRecord {
             target,
             remote_id: None,
+            remote_revision: None,
             status: SyncStatus::Pending,
             attempts: 0,
             last_error_code: None,

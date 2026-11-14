@@ -3,7 +3,7 @@ app_id: waddles.core.example.cringe
 name: Cringe Counter (Python)
 # 1.0.1: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
 # 1.0.2: activation-gated only -- removed the in-bundle waddles.command-cringe feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.4
+version: 1.0.5
 feature: waddles.core.example
 module: core
 provider: builtin

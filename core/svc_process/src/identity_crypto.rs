@@ -9,17 +9,16 @@
 //! tokenized UUID and therefore needs the real value, not the ciphertext
 //! envelope.
 //!
-//! **Integration point (documented, not yet wired):** PR #429 was
-//! unmerged as of this writing. [`decrypt_identity_fields`] is this module's
-//! pre-stage entry point -- call it immediately before `pii_tokenize`
-//! (or as `pii_tokenize`'s own first step) on every consumed
-//! `penguin_spine::PlatformEvent`, using the *same*
-//! `(tenant, stream, event_id)` triple svc-ingest encrypted under (the
-//! `StageEnvelope`'s own `tenant`/`event_id` fields plus the granted
-//! ingest-source stream key svc-process is draining -- see
-//! `crate::source_supervisor`). Once #429 lands, its stage should call
-//! [`decrypt_identity_fields`] as its first step rather than duplicating this
-//! logic.
+//! **Wired:** [`decrypt_identity_fields`] is this module's pre-stage entry
+//! point; `crate::spine::handle_delivered` calls it on every consumed
+//! `penguin_spine::PlatformEvent` after hop verification and strictly before
+//! `pii_tokenize`/dispatch, using the *same* `(tenant, stream, event_id)`
+//! triple svc-ingest encrypted under (the envelope's numeric tenant id -- the
+//! AAD tenant, never the mutable slug -- the delivered entry's own stream key
+//! and `event_id`). The DEK comes from hub-api's `KeyService` through
+//! `hub_client::dek`, shared with svc-ingest so both sides speak one seal
+//! contract; each field's key version is read from its own envelope header, so
+//! a key rotation never strands an in-flight event.
 //!
 //! Wire format is identical to the encrypt side -- see that module's doc
 //! comment for the AAD/header/JSON-envelope layout and
@@ -28,29 +27,28 @@
 //! `tests/fixtures/identity_crypto_golden_vector.json`).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::Engine;
-use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
-use zeroize::Zeroizing;
 
 const FORMAT_VERSION: u8 = 1;
 const NONCE_LEN: usize = 12;
+#[cfg(test)]
 const DEK_LEN: usize = 32;
 const TAG_LEN: usize = 16;
 const HEADER_LEN: usize = 1 + 4;
 
-/// Default per-tenant DEK cache TTL (10 minutes) -- matches
-/// `core/svc_ingest/src/identity_crypto.rs::DEFAULT_DEK_CACHE_TTL`.
-pub const DEFAULT_DEK_CACHE_TTL: Duration = Duration::from_secs(600);
-
-/// A 32-byte AES-256 DEK that zeroizes on drop.
-pub type Dek = Zeroizing<[u8; DEK_LEN]>;
+// The DEK provider (hub-api `KeyService` broker, TTL cache keyed by (numeric tenant id, key
+// version), dev/alpha local KEK) lives in `hub_client::dek`, shared with svc-ingest's encrypt
+// side so the two can never drift apart.
+pub use hub_client::dek::{
+    CachedDekProvider, ConfiguredDekProvider, Dek, DekBroker, DekInvalidate, DekProvider,
+    DekUnavailableError, HubDekBroker, LocalDevDekProvider, LocalDevDekProviderError,
+    DEFAULT_DEK_CACHE_TTL, INGEST_STREAM_PURPOSE, STREAM_DEK_SCOPE,
+};
 
 /// A malformed, truncated, or unknown-version ciphertext envelope.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -69,17 +67,6 @@ pub enum CiphertextFormatError {
 #[error("aead authentication failed")]
 pub struct AeadError;
 
-/// A tenant's DEK could not be resolved -- callers MUST fail closed (never
-/// pass the still-encrypted envelope string through as if it were
-/// plaintext).
-#[derive(Debug, thiserror::Error, Clone)]
-#[error("tenant DEK unavailable for tenant={tenant_id:?} dek_version={dek_version:?}: {reason}")]
-pub struct DekUnavailableError {
-    pub tenant_id: String,
-    pub dek_version: Option<u32>,
-    pub reason: String,
-}
-
 /// Errors [`decrypt_identity_value`]/[`decrypt_identity_fields`] can return.
 #[derive(Debug, thiserror::Error)]
 pub enum IdentityCryptoError {
@@ -95,6 +82,20 @@ pub enum IdentityCryptoError {
     /// guess.
     #[error("actor field is not a valid ciphertext envelope: {0}")]
     NotAnEnvelope(String),
+}
+
+impl IdentityCryptoError {
+    /// Low-cardinality, PII-free label for the `reason` dimension of the
+    /// `identity_decrypt_failures_total` metric.
+    #[must_use]
+    pub fn reason_label(&self) -> &'static str {
+        match self {
+            Self::Format(_) => "bad_envelope",
+            Self::Aead(_) => "aead",
+            Self::DekUnavailable(_) => "dek_unavailable",
+            Self::NotAnEnvelope(_) => "not_an_envelope",
+        }
+    }
 }
 
 fn encode_field(value: &str) -> Vec<u8> {
@@ -238,18 +239,42 @@ pub const PAYLOAD_IDENTITY_FIELDS: &[&str] = &[
     "text",
 ];
 
+/// Decrypts one field's JSON-string envelope: the key version is read from the envelope's own
+/// header and that exact version is fetched (never "whatever is current"), so an event written
+/// before a rotation still decrypts.
+async fn decrypt_field<D: DekProvider>(
+    raw: &str,
+    dek_provider: &D,
+    tenant_id: i64,
+    aad_tenant: &str,
+    stream: &str,
+    field: &str,
+    event_id: &str,
+) -> Result<String, IdentityCryptoError> {
+    let envelope: JsonEnvelope =
+        serde_json::from_str(raw).map_err(|e| IdentityCryptoError::NotAnEnvelope(e.to_string()))?;
+    let dek_version = envelope_dek_version(&from_json_envelope(&envelope)?)?;
+    let dek = dek_provider.get_dek_version(tenant_id, dek_version).await?;
+    decrypt_identity_value(&envelope, &dek, aad_tenant, stream, field, event_id)
+}
+
 /// **Pre-stage entry point** (see this module's doc comment): decrypts a
 /// consumed `PlatformEvent`'s `actor` field plus every
-/// [`PAYLOAD_IDENTITY_FIELDS`] payload field present, in place, resolving
-/// `tenant_id`'s DEK exactly once (the encrypt side used the same DEK for
-/// every field of one event, only the AAD's field name differs). A field
-/// that's absent, or whose value isn't a string, is left untouched. Fails
-/// closed on any error -- callers must never fall through to treating a
-/// still-encrypted string as plaintext.
+/// [`PAYLOAD_IDENTITY_FIELDS`] payload field present, in place. `tenant_id`
+/// is the NUMERIC tenant id the DEK is requested for; `aad_tenant` is the
+/// tenant string svc-ingest bound into the AAD (the numeric id rendered
+/// decimal on a schema-v3 envelope, the slug on the legacy one). A field
+/// that's absent, or whose value isn't a string, is left untouched.
+///
+/// **All-or-nothing, fail closed:** every field is decrypted into staging
+/// first and `event` is only mutated once ALL succeeded, so an error never
+/// leaves a half-decrypted event, and a still-encrypted string is never
+/// passed through as if it were plaintext.
 pub async fn decrypt_identity_fields<D: DekProvider>(
     event: &mut penguin_spine::PlatformEvent,
     dek_provider: &D,
-    tenant_id: &str,
+    tenant_id: i64,
+    aad_tenant: &str,
     stream: &str,
     event_id: &str,
 ) -> Result<(), IdentityCryptoError> {
@@ -263,327 +288,48 @@ pub async fn decrypt_identity_fields<D: DekProvider>(
         return Ok(());
     }
 
-    let (dek, _dek_version) = dek_provider.get_dek(tenant_id).await?;
-    let decrypt_field = |raw: &str, field: &str| -> Result<String, IdentityCryptoError> {
-        let envelope: JsonEnvelope = serde_json::from_str(raw)
-            .map_err(|e| IdentityCryptoError::NotAnEnvelope(e.to_string()))?;
-        decrypt_identity_value(&envelope, &dek, tenant_id, stream, field, event_id)
+    let actor = match event.actor.as_deref() {
+        Some(raw) => Some(
+            decrypt_field(
+                raw,
+                dek_provider,
+                tenant_id,
+                aad_tenant,
+                stream,
+                "actor",
+                event_id,
+            )
+            .await?,
+        ),
+        None => None,
     };
-
-    if let Some(raw) = event.actor.take() {
-        event.actor = Some(decrypt_field(&raw, "actor")?);
-    }
+    let mut payload_plaintexts: Vec<(&'static str, String)> = Vec::new();
     for field in PAYLOAD_IDENTITY_FIELDS {
-        let Some(serde_json::Value::String(raw)) = event.payload.get(*field).cloned() else {
+        let Some(serde_json::Value::String(raw)) = event.payload.get(*field) else {
             continue;
         };
-        let plaintext = decrypt_field(&raw, field)?;
+        let plaintext = decrypt_field(
+            raw,
+            dek_provider,
+            tenant_id,
+            aad_tenant,
+            stream,
+            field,
+            event_id,
+        )
+        .await?;
+        payload_plaintexts.push((field, plaintext));
+    }
+
+    if actor.is_some() {
+        event.actor = actor;
+    }
+    for (field, plaintext) in payload_plaintexts {
         event
             .payload
-            .insert((*field).to_string(), serde_json::Value::String(plaintext));
+            .insert(field.to_string(), serde_json::Value::String(plaintext));
     }
     Ok(())
-}
-
-// ---------------------------------------------------------------------
-// DEK provider -- decrypt-side mirror of `core/svc_ingest`'s provider.
-// Duplicated rather than shared: svc_ingest and svc_process are separate
-// binary crates with no shared `penguin-libs` crate for this yet (same
-// posture PR #440's own module doc calls out for the Python side --
-// `penguin_security.crypto.envelope` is unmerged/unpublished).
-// ---------------------------------------------------------------------
-
-/// Resolves a tenant's DEK. Fails closed (`DekUnavailableError`) on any
-/// resolution failure -- never a silent plaintext fallback.
-#[allow(async_fn_in_trait)]
-pub trait DekProvider: Send + Sync {
-    async fn get_dek(&self, tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError>;
-
-    /// Cache lifetime the broker granted for the DEK most recently returned
-    /// for `tenant_id` (already clamped to [`DEFAULT_DEK_CACHE_TTL`]).
-    /// `None` means no per-response grant; callers use their own TTL.
-    fn granted_ttl(&self, _tenant_id: &str) -> Option<Duration> {
-        None
-    }
-}
-
-struct CacheEntry {
-    dek: Dek,
-    dek_version: u32,
-    expires_at: Instant,
-}
-
-/// Per-tenant TTL cache wrapping another [`DekProvider`] -- identical
-/// behavior to `core/svc_ingest`'s `TtlCachedDekProvider`.
-pub struct TtlCachedDekProvider<D: DekProvider> {
-    inner: Arc<D>,
-    ttl: Duration,
-    cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
-}
-
-impl<D: DekProvider> Clone for TtlCachedDekProvider<D> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            ttl: self.ttl,
-            cache: self.cache.clone(),
-        }
-    }
-}
-
-impl<D: DekProvider> TtlCachedDekProvider<D> {
-    pub fn new(inner: D, ttl: Duration) -> Self {
-        Self {
-            inner: Arc::new(inner),
-            ttl,
-            cache: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    pub fn invalidate(&self, tenant_id: &str) {
-        self.cache
-            .lock()
-            .expect("cache mutex poisoned")
-            .remove(tenant_id);
-    }
-}
-
-impl<D: DekProvider> DekProvider for TtlCachedDekProvider<D> {
-    async fn get_dek(&self, tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-        {
-            let cache = self.cache.lock().expect("cache mutex poisoned");
-            if let Some(entry) = cache.get(tenant_id) {
-                if entry.expires_at > Instant::now() {
-                    return Ok((entry.dek.clone(), entry.dek_version));
-                }
-            }
-        }
-        let (dek, dek_version) = self.inner.get_dek(tenant_id).await?;
-        // Honour the broker's per-response TTL, never exceeding this cache's ceiling.
-        let ttl = self
-            .inner
-            .granted_ttl(tenant_id)
-            .map_or(self.ttl, |granted| granted.min(self.ttl));
-        let mut cache = self.cache.lock().expect("cache mutex poisoned");
-        cache.insert(
-            tenant_id.to_string(),
-            CacheEntry {
-                dek: dek.clone(),
-                dek_version,
-                expires_at: Instant::now() + ttl,
-            },
-        );
-        Ok((dek, dek_version))
-    }
-}
-
-/// Mints the short-lived ES256 machine JWT this provider authenticates
-/// hub-api calls with -- see `core/svc_ingest`'s identical trait doc
-/// comment (PR #438, `feature/eddsa-machine-jwt`, unmerged as of this
-/// writing).
-pub trait MachineJwtProvider: Send + Sync {
-    fn mint(&self) -> Result<String, String>;
-}
-
-/// Placeholder [`MachineJwtProvider`] -- see `core/svc_ingest`'s identical
-/// type for the full rationale.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct UnimplementedMachineJwtProvider;
-
-impl MachineJwtProvider for UnimplementedMachineJwtProvider {
-    fn mint(&self) -> Result<String, String> {
-        Err(
-            "core/service_auth ES256 machine JWT minting is not yet available \
-             (PR #438 / feature/eddsa-machine-jwt is unmerged)"
-                .to_string(),
-        )
-    }
-}
-
-/// This is always what [`HubApiDekProvider`] requests -- see
-/// `core/svc_ingest`'s identical constant.
-pub const INGEST_STREAM_PURPOSE: &str = "ingest-stream";
-
-/// Calls hub-api's tenant-DEK broker endpoint
-/// (`POST /api/v1/internal/keys/tenant-dek`, `feature/tenant-dek-broker`/
-/// #442 -- **server side not yet merged, and #442 is itself being
-/// redesigned as of this writing; this client codes against the
-/// coordinator-described contract and will be reconciled with #442's PR
-/// description once it lands**). Byte-for-byte identical protocol to
-/// `core/svc_ingest`'s `HubApiDekProvider` (see that module's doc comment
-/// for the full HPKE-style seal/open rationale): a fresh X25519 keypair
-/// per call, `{service_id, tenant_id, purpose, version}` sent alongside the
-/// ephemeral public key, and the DEK sealed to it in the response.
-pub struct HubApiDekProvider<J: MachineJwtProvider> {
-    http: reqwest::Client,
-    hub_api_url: String,
-    jwt_provider: J,
-    service_id: String,
-    /// Per-tenant broker-granted TTL of the last successful resolution.
-    granted_ttls: Mutex<HashMap<String, Duration>>,
-}
-
-impl<J: MachineJwtProvider + Clone> Clone for HubApiDekProvider<J> {
-    fn clone(&self) -> Self {
-        Self {
-            http: self.http.clone(),
-            hub_api_url: self.hub_api_url.clone(),
-            jwt_provider: self.jwt_provider.clone(),
-            service_id: self.service_id.clone(),
-            // A clone re-learns grants on its first resolution per tenant.
-            granted_ttls: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct TenantDekRequest<'a> {
-    tenant_id: &'a str,
-    purpose: &'a str,
-    version: u32,
-    client_pubkey: String,
-}
-
-#[derive(Deserialize)]
-struct TenantDekResponse {
-    enc: String,
-    ciphertext: String,
-    dek_version: u32,
-    ttl_seconds: u64,
-}
-
-impl<J: MachineJwtProvider> HubApiDekProvider<J> {
-    pub fn new(
-        http: reqwest::Client,
-        hub_api_url: impl Into<String>,
-        jwt_provider: J,
-        service_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            http,
-            hub_api_url: hub_api_url.into(),
-            jwt_provider,
-            service_id: service_id.into(),
-            granted_ttls: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-impl<J: MachineJwtProvider> DekProvider for HubApiDekProvider<J> {
-    fn granted_ttl(&self, tenant_id: &str) -> Option<Duration> {
-        self.granted_ttls
-            .lock()
-            .ok()
-            .and_then(|m| m.get(tenant_id).copied())
-    }
-
-    async fn get_dek(&self, tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-        let unavailable = |reason: String| DekUnavailableError {
-            tenant_id: tenant_id.to_string(),
-            dek_version: None,
-            reason,
-        };
-        let jwt = self.jwt_provider.mint().map_err(&unavailable)?;
-
-        let client_secret = x25519_dalek::EphemeralSecret::random();
-        let client_public = x25519_dalek::PublicKey::from(&client_secret);
-
-        let url = format!(
-            "{}/api/v1/internal/keys/tenant-dek",
-            self.hub_api_url.trim_end_matches('/')
-        );
-        let resp = self
-            .http
-            .post(&url)
-            .bearer_auth(jwt)
-            .json(&TenantDekRequest {
-                tenant_id,
-                purpose: INGEST_STREAM_PURPOSE,
-                version: 1,
-                client_pubkey: base64::engine::general_purpose::STANDARD
-                    .encode(client_public.as_bytes()),
-            })
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-            .map_err(|e| unavailable(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(unavailable(format!(
-                "hub-api returned HTTP {}",
-                resp.status()
-            )));
-        }
-        let body: TenantDekResponse = resp.json().await.map_err(|e| unavailable(e.to_string()))?;
-
-        let context = format!(
-            "{}|{}|{}|{}",
-            self.service_id, tenant_id, INGEST_STREAM_PURPOSE, 1
-        );
-        let dek_bytes = hpke_seal_open(
-            client_secret,
-            &body.enc,
-            &body.ciphertext,
-            context.as_bytes(),
-        )
-        .map_err(&unavailable)?;
-
-        let ttl = Duration::from_secs(body.ttl_seconds).min(DEFAULT_DEK_CACHE_TTL);
-        // A poisoned lock only loses the per-response hint; the cache falls
-        // back to its own (equal-or-larger) ceiling TTL -- no DEK is exposed.
-        if let Ok(mut granted) = self.granted_ttls.lock() {
-            granted.insert(tenant_id.to_string(), ttl);
-        }
-        Ok((Zeroizing::new(dek_bytes), body.dek_version))
-    }
-}
-
-/// HPKE-lite seal-open -- byte-identical construction to
-/// `core/svc_ingest`'s identical function; see that module's doc comment
-/// for the full rationale and the RFC 9180-conformance caveat.
-fn hpke_seal_open(
-    client_secret: x25519_dalek::EphemeralSecret,
-    enc_b64: &str,
-    ciphertext_b64: &str,
-    context: &[u8],
-) -> Result<[u8; DEK_LEN], String> {
-    let enc_bytes = base64::engine::general_purpose::STANDARD
-        .decode(enc_b64)
-        .map_err(|e| format!("malformed enc: {e}"))?;
-    let enc_arr: [u8; 32] = enc_bytes
-        .try_into()
-        .map_err(|_| "enc must be exactly 32 bytes".to_string())?;
-    let server_public = x25519_dalek::PublicKey::from(enc_arr);
-    let shared_secret = client_secret.diffie_hellman(&server_public);
-
-    let hk = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
-    let mut key_and_nonce = [0u8; DEK_LEN + NONCE_LEN];
-    hk.expand(context, &mut key_and_nonce)
-        .map_err(|e| format!("HKDF expand failed: {e}"))?;
-    let (key_bytes, nonce_bytes) = key_and_nonce.split_at(DEK_LEN);
-
-    let ciphertext = base64::engine::general_purpose::STANDARD
-        .decode(ciphertext_b64)
-        .map_err(|e| format!("malformed ciphertext: {e}"))?;
-    let cipher = Aes256Gcm::new_from_slice(key_bytes).expect("key_bytes is always 32 bytes");
-    let nonce = Nonce::from_slice(nonce_bytes);
-    let plaintext = cipher
-        .decrypt(
-            nonce,
-            aes_gcm::aead::Payload {
-                msg: &ciphertext,
-                aad: context,
-            },
-        )
-        .map_err(|_| "HPKE-lite unseal failed (AEAD authentication error)".to_string())?;
-    if plaintext.len() != DEK_LEN {
-        return Err(format!(
-            "unsealed DEK is {} bytes, expected {DEK_LEN}",
-            plaintext.len()
-        ));
-    }
-    let mut out = [0u8; DEK_LEN];
-    out.copy_from_slice(&plaintext);
-    Ok(out)
 }
 
 /// The Valkey stream every DEK cache consumer MUST subscribe to -- see
@@ -636,9 +382,9 @@ impl InvalidationSource for redis::aio::MultiplexedConnection {
 
 /// See `core/svc_ingest`'s identical function for the full doc -- **not yet
 /// spawned from `src/lib.rs`**, same documented-follow-up status.
-pub async fn run_dek_invalidation_listener<D: DekProvider, S: InvalidationSource>(
+pub async fn run_dek_invalidation_listener<C: DekInvalidate, S: InvalidationSource>(
     mut source: S,
-    cache: TtlCachedDekProvider<D>,
+    cache: C,
     expected_purpose: &str,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
@@ -653,8 +399,11 @@ pub async fn run_dek_invalidation_listener<D: DekProvider, S: InvalidationSource
                         if fields.get("purpose").map(String::as_str) != Some(expected_purpose) {
                             continue;
                         }
-                        match fields.get("tenant") {
-                            Some(tenant) => cache.invalidate(tenant),
+                        match fields.get("tenant").map(|t| t.parse::<i64>()) {
+                            Some(Ok(tenant_id)) => cache.invalidate(tenant_id),
+                            Some(Err(_)) => tracing::warn!(
+                                "dek invalidation entry 'tenant' is not a numeric tenant id, skipping"
+                            ),
                             None => tracing::warn!(
                                 "dek invalidation entry missing 'tenant' field, skipping"
                             ),
@@ -673,73 +422,119 @@ pub async fn run_dek_invalidation_listener<D: DekProvider, S: InvalidationSource
     }
 }
 
+/// Shared test fixtures: a hard-gated local DEK source and the encrypt side of the envelope
+/// format (svc-process is decrypt-only in production), so the rest of this crate's tests can
+/// feed `handle_delivered` the ciphertext svc-ingest would have written.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use aes_gcm::aead::OsRng;
+    use aes_gcm::AeadCore;
+
+    const TEST_KEK: [u8; DEK_LEN] = [0x42; DEK_LEN];
+
+    /// A `ConfiguredDekProvider` serving [`dek`]'s keys.
+    pub(crate) fn dek_provider() -> ConfiguredDekProvider {
+        ConfiguredDekProvider::local_dev(
+            LocalDevDekProvider::from_kek("local", TEST_KEK).expect("local env is allowed"),
+        )
+    }
+
+    /// The DEK [`dek_provider`] serves for `tenant_id` (key version 1).
+    pub(crate) fn dek(tenant_id: i64) -> Dek {
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, &TEST_KEK);
+        let mut out = [0u8; DEK_LEN];
+        hk.expand(
+            format!("waddles-ingest-dev-dek:{tenant_id}:1").as_bytes(),
+            &mut out,
+        )
+        .expect("32 bytes is a valid HKDF length");
+        zeroize::Zeroizing::new(out)
+    }
+
+    /// Encrypts one value into the JSON-string envelope svc-ingest writes.
+    pub(crate) fn encrypt_value(
+        plaintext: &str,
+        dek: &Dek,
+        dek_version: u32,
+        aad_tenant: &str,
+        stream: &str,
+        field: &str,
+        event_id: &str,
+    ) -> String {
+        let aad = build_aad(aad_tenant, stream, field, event_id, dek_version);
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ct = Aes256Gcm::new_from_slice(dek.as_ref())
+            .expect("32-byte key")
+            .encrypt(
+                &nonce,
+                aes_gcm::aead::Payload {
+                    msg: plaintext.as_bytes(),
+                    aad: &aad,
+                },
+            )
+            .expect("AES-GCM encrypt");
+        let b64 = base64::engine::general_purpose::STANDARD;
+        serde_json::to_string(&JsonEnvelope {
+            v: FORMAT_VERSION,
+            dek_version,
+            nonce: b64.encode(nonce.as_slice()),
+            ct: b64.encode(&ct),
+        })
+        .expect("envelope serializes")
+    }
+
+    /// Encrypts a delivered entry's identity fields in place under [`dek_provider`]'s key,
+    /// binding the entry's own tenant/stream/event id exactly as svc-ingest does. `actor`
+    /// controls whether the top-level actor is encrypted too (a test that swaps only the
+    /// payload after the fixture was built passes `false`).
+    pub(crate) fn encrypt_delivered(d: &mut penguin_spine::Delivered, actor: bool) {
+        let tenant_id = d.env.tenant_id.unwrap_or(0);
+        let aad_tenant = d
+            .env
+            .tenant_id
+            .map_or_else(|| d.env.tenant.clone(), |id| id.to_string());
+        let key = dek(tenant_id);
+        let (stream, event_id) = (d.stream.clone(), d.env.event_id.clone());
+        if actor {
+            if let Some(a) = d.env.event.actor.take() {
+                d.env.event.actor = Some(encrypt_value(
+                    &a,
+                    &key,
+                    1,
+                    &aad_tenant,
+                    &stream,
+                    "actor",
+                    &event_id,
+                ));
+            }
+        }
+        for field in PAYLOAD_IDENTITY_FIELDS {
+            if let Some(serde_json::Value::String(v)) = d.env.event.payload.get(*field).cloned() {
+                d.env.event.payload.insert(
+                    (*field).to_string(),
+                    serde_json::Value::String(encrypt_value(
+                        &v,
+                        &key,
+                        1,
+                        &aad_tenant,
+                        &stream,
+                        field,
+                        &event_id,
+                    )),
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroize::Zeroizing;
 
     fn test_dek() -> Dek {
         Zeroizing::new([7u8; DEK_LEN])
-    }
-
-    /// Manually seals `dek_plain` the way a real #442 broker would -- see
-    /// `core/svc_ingest`'s identical test helper for the full rationale.
-    fn seal_for_test(
-        client_public: &x25519_dalek::PublicKey,
-        context: &[u8],
-        dek_plain: &[u8; DEK_LEN],
-    ) -> (String, String) {
-        let server_secret = x25519_dalek::EphemeralSecret::random();
-        let server_public = x25519_dalek::PublicKey::from(&server_secret);
-        let shared = server_secret.diffie_hellman(client_public);
-        let hk = Hkdf::<Sha256>::new(None, shared.as_bytes());
-        let mut key_and_nonce = [0u8; DEK_LEN + NONCE_LEN];
-        hk.expand(context, &mut key_and_nonce).unwrap();
-        let (key_bytes, nonce_bytes) = key_and_nonce.split_at(DEK_LEN);
-        let cipher = Aes256Gcm::new_from_slice(key_bytes).unwrap();
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let ct = cipher
-            .encrypt(
-                nonce,
-                aes_gcm::aead::Payload {
-                    msg: dek_plain.as_slice(),
-                    aad: context,
-                },
-            )
-            .unwrap();
-        (
-            base64::engine::general_purpose::STANDARD.encode(server_public.as_bytes()),
-            base64::engine::general_purpose::STANDARD.encode(ct),
-        )
-    }
-
-    #[test]
-    fn hpke_seal_open_round_trips_a_sealed_dek() {
-        let client_secret = x25519_dalek::EphemeralSecret::random();
-        let client_public = x25519_dalek::PublicKey::from(&client_secret);
-        let context = b"svc-process|acme|ingest-stream|1";
-        let dek_plain = [42u8; DEK_LEN];
-        let (enc_b64, ct_b64) = seal_for_test(&client_public, context, &dek_plain);
-        let opened = hpke_seal_open(client_secret, &enc_b64, &ct_b64, context).unwrap();
-        assert_eq!(opened, dek_plain);
-    }
-
-    #[test]
-    fn hpke_seal_open_fails_closed_on_context_mismatch() {
-        let client_secret = x25519_dalek::EphemeralSecret::random();
-        let client_public = x25519_dalek::PublicKey::from(&client_secret);
-        let (enc_b64, ct_b64) = seal_for_test(
-            &client_public,
-            b"svc-process|acme|ingest-stream|1",
-            &[1u8; DEK_LEN],
-        );
-        let err = hpke_seal_open(
-            client_secret,
-            &enc_b64,
-            &ct_b64,
-            b"svc-process|other-tenant|ingest-stream|1",
-        )
-        .unwrap_err();
-        assert!(err.contains("AEAD"));
     }
 
     fn invalidation_entry(fields: &[(&str, &str)]) -> HashMap<String, String> {
@@ -770,44 +565,37 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn invalidation_listener_drops_cache_for_matching_purpose() {
-        struct CountingProvider(std::sync::atomic::AtomicU32);
-        impl DekProvider for CountingProvider {
-            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok((Zeroizing::new([1u8; DEK_LEN]), 1))
-            }
-        }
-        let cache = TtlCachedDekProvider::new(
-            CountingProvider(std::sync::atomic::AtomicU32::new(0)),
-            Duration::from_secs(60),
-        );
-        cache.get_dek("acme").await.unwrap();
-        cache.get_dek("acme").await.unwrap();
-        assert_eq!(cache.inner.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    #[derive(Clone, Default)]
+    struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<i64>>>);
 
+    impl DekInvalidate for Recorder {
+        fn invalidate(&self, tenant_id: i64) {
+            self.0.lock().unwrap().push(tenant_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidation_listener_invalidates_numeric_tenants_for_matching_purpose_only() {
+        let rec = Recorder::default();
         let source = FakeInvalidationSource {
-            batches: vec![vec![invalidation_entry(&[
-                ("tenant", "acme"),
-                ("purpose", INGEST_STREAM_PURPOSE),
-            ])]],
+            batches: vec![vec![
+                invalidation_entry(&[("tenant", "42"), ("purpose", INGEST_STREAM_PURPOSE)]),
+                invalidation_entry(&[("tenant", "43"), ("purpose", "other")]),
+                invalidation_entry(&[("tenant", "acme"), ("purpose", INGEST_STREAM_PURPOSE)]),
+            ]],
             next: 0,
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let cache_clone = cache.clone();
         let handle = tokio::spawn(run_dek_invalidation_listener(
             source,
-            cache_clone,
+            rec.clone(),
             INGEST_STREAM_PURPOSE,
             rx,
         ));
         tokio::time::sleep(Duration::from_millis(20)).await;
         let _ = tx.send(());
         handle.await.unwrap();
-
-        cache.get_dek("acme").await.unwrap();
-        assert_eq!(cache.inner.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(*rec.0.lock().unwrap(), vec![42]);
     }
 
     /// Uses `core/svc_ingest`'s `envelope_encrypt`/`to_json_envelope`
@@ -883,9 +671,9 @@ mod tests {
     async fn decrypt_identity_fields_is_a_noop_for_a_none_actor_and_no_payload_fields() {
         struct AlwaysFailProvider;
         impl DekProvider for AlwaysFailProvider {
-            async fn get_dek(&self, tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
+            async fn get_dek(&self, _tenant_id: i64) -> Result<(Dek, u32), DekUnavailableError> {
                 Err(DekUnavailableError {
-                    tenant_id: tenant_id.to_string(),
+                    tenant_id: 0,
                     dek_version: None,
                     reason: "should never be called".to_string(),
                 })
@@ -899,9 +687,16 @@ mod tests {
             occurred_at: "2026-09-14T12:00:00.000Z".to_string(),
             source: None,
         };
-        decrypt_identity_fields(&mut event, &AlwaysFailProvider, "acme", "stream-a", "evt-1")
-            .await
-            .unwrap();
+        decrypt_identity_fields(
+            &mut event,
+            &AlwaysFailProvider,
+            1,
+            "acme",
+            "stream-a",
+            "evt-1",
+        )
+        .await
+        .unwrap();
         assert_eq!(event.actor, None);
     }
 
@@ -909,7 +704,7 @@ mod tests {
     async fn decrypt_identity_fields_decrypts_actor_in_place() {
         struct FixedDekProvider;
         impl DekProvider for FixedDekProvider {
-            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
+            async fn get_dek(&self, _tenant_id: i64) -> Result<(Dek, u32), DekUnavailableError> {
                 Ok((test_dek(), 1))
             }
         }
@@ -924,9 +719,16 @@ mod tests {
             occurred_at: "2026-09-14T12:00:00.000Z".to_string(),
             source: None,
         };
-        decrypt_identity_fields(&mut event, &FixedDekProvider, "acme", "stream-a", "evt-1")
-            .await
-            .unwrap();
+        decrypt_identity_fields(
+            &mut event,
+            &FixedDekProvider,
+            1,
+            "acme",
+            "stream-a",
+            "evt-1",
+        )
+        .await
+        .unwrap();
         assert_eq!(event.actor.as_deref(), Some("someuser"));
     }
 
@@ -934,9 +736,9 @@ mod tests {
     async fn decrypt_identity_fields_fails_closed_on_dek_unavailable() {
         struct FailingProvider;
         impl DekProvider for FailingProvider {
-            async fn get_dek(&self, tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
+            async fn get_dek(&self, _tenant_id: i64) -> Result<(Dek, u32), DekUnavailableError> {
                 Err(DekUnavailableError {
-                    tenant_id: tenant_id.to_string(),
+                    tenant_id: 0,
                     dek_version: None,
                     reason: "no broker configured in this test".to_string(),
                 })
@@ -958,57 +760,12 @@ mod tests {
             source: None,
         };
         let err =
-            decrypt_identity_fields(&mut event, &FailingProvider, "acme", "stream-a", "evt-1")
+            decrypt_identity_fields(&mut event, &FailingProvider, 1, "acme", "stream-a", "evt-1")
                 .await
                 .unwrap_err();
         assert!(matches!(err, IdentityCryptoError::DekUnavailable(_)));
     }
 
-    #[tokio::test]
-    async fn ttl_cached_provider_honours_broker_granted_ttl() {
-        // regression: gh-442 -- per-response TTL was computed then discarded.
-        struct ShortGrant(std::sync::atomic::AtomicU32);
-        impl DekProvider for ShortGrant {
-            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok((Zeroizing::new([1u8; DEK_LEN]), 1))
-            }
-            fn granted_ttl(&self, _tenant_id: &str) -> Option<Duration> {
-                Some(Duration::from_millis(1))
-            }
-        }
-        let provider = TtlCachedDekProvider::new(
-            ShortGrant(std::sync::atomic::AtomicU32::new(0)),
-            Duration::from_secs(60),
-        );
-        provider.get_dek("acme").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        provider.get_dek("acme").await.unwrap();
-        assert_eq!(
-            provider.inner.0.load(std::sync::atomic::Ordering::SeqCst),
-            2
-        );
-    }
-
-    #[test]
-    fn ttl_cache_type_is_send_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        struct Noop;
-        impl DekProvider for Noop {
-            async fn get_dek(&self, tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-                Err(DekUnavailableError {
-                    tenant_id: tenant_id.to_string(),
-                    dek_version: None,
-                    reason: String::new(),
-                })
-            }
-        }
-        assert_send_sync::<TtlCachedDekProvider<Noop>>();
-    }
-
-    /// Fixture shape mirrors `core/svc_ingest`'s identical struct --
-    /// generated once, offline, from PR #440's actual Python
-    /// `identity_crypto.py`. See this module's doc comment.
     #[derive(Deserialize)]
     struct GoldenVector {
         dek_hex: String,
@@ -1055,7 +812,7 @@ mod tests {
     async fn decrypt_identity_fields_decrypts_every_payload_identity_field() {
         struct FixedDekProvider;
         impl DekProvider for FixedDekProvider {
-            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
+            async fn get_dek(&self, _tenant_id: i64) -> Result<(Dek, u32), DekUnavailableError> {
                 Ok((test_dek(), 1))
             }
         }
@@ -1094,9 +851,16 @@ mod tests {
             occurred_at: "2026-09-14T12:00:00.000Z".to_string(),
             source: None,
         };
-        decrypt_identity_fields(&mut event, &FixedDekProvider, "acme", "stream-a", "evt-1")
-            .await
-            .unwrap();
+        decrypt_identity_fields(
+            &mut event,
+            &FixedDekProvider,
+            1,
+            "acme",
+            "stream-a",
+            "evt-1",
+        )
+        .await
+        .unwrap();
 
         let mut examined = 0;
         for (field, plaintext) in field_plaintexts {
@@ -1131,7 +895,7 @@ mod tests {
     async fn decrypt_identity_fields_recovers_twitch_and_discord_fixtures() {
         struct FixedDekProvider;
         impl DekProvider for FixedDekProvider {
-            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
+            async fn get_dek(&self, _tenant_id: i64) -> Result<(Dek, u32), DekUnavailableError> {
                 Ok((test_dek(), 1))
             }
         }
@@ -1259,6 +1023,7 @@ mod tests {
             decrypt_identity_fields(
                 &mut event,
                 &FixedDekProvider,
+                1,
                 "acme",
                 stream_for_case,
                 event_id_for_case,

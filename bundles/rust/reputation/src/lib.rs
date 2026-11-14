@@ -1,4 +1,4 @@
-//! Reputation SERVICE bundle (v1.1.0).
+//! Reputation SERVICE bundle (v1.1.1).
 //!
 //! An always-on `kind: service` bundle on `world stage-tools`: it exports
 //! `tool-provider` (the surface other bundles reach through `tool.invoke`) and

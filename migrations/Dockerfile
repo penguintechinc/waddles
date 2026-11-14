@@ -8,7 +8,6 @@ RUN pip install --no-cache-dir \
     "sqlalchemy>=2.0" \
     psycopg2-binary \
     flask-sqlalchemy \
-    flask-security-too \
     "PyYAML>=6.0.2,<7.0.0"
 
 # Hash-locked: alembic revisions 0062/0075 import cryptography (AESGCM).

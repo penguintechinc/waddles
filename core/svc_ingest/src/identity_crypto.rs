@@ -50,27 +50,29 @@
 //! into another field's slot and still decrypt.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
 use base64::Engine;
-use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
-use zeroize::Zeroizing;
 
 const FORMAT_VERSION: u8 = 1;
 const NONCE_LEN: usize = 12; // 96-bit GCM nonce, CSPRNG per NIST SP 800-38D
+#[cfg(test)]
 const DEK_LEN: usize = 32; // AES-256
 const TAG_LEN: usize = 16;
 const HEADER_LEN: usize = 1 + 4; // format version (1B) + dek_version (4B BE), matches Python's `>BI`
 
-/// Default per-tenant DEK cache TTL (10 minutes), matching the
-/// tenant-envelope-encryption design and PR #440's
-/// `DEFAULT_DEK_CACHE_TTL_S`.
-pub const DEFAULT_DEK_CACHE_TTL: Duration = Duration::from_secs(600);
+// The DEK provider (hub-api `KeyService` broker, TTL cache keyed by (numeric tenant id,
+// key version), dev/alpha local KEK) lives in `hub_client::dek`, shared with svc-process's
+// decrypt side so the two can never drift apart. Re-exported here so this crate's historical
+// `identity_crypto::` paths keep resolving.
+pub use hub_client::dek::{
+    CachedDekProvider, ConfiguredDekProvider, Dek, DekBroker, DekInvalidate, DekProvider,
+    DekUnavailableError, HubDekBroker, LocalDevDekProvider, LocalDevDekProviderError,
+    DEFAULT_DEK_CACHE_TTL, INGEST_STREAM_PURPOSE, STREAM_DEK_SCOPE,
+};
 
 /// The top-level `PlatformEvent` field this module always encrypts when
 /// present. Matches PR #440's original `IDENTITY_FIELDS` scope.
@@ -111,10 +113,6 @@ pub const PAYLOAD_IDENTITY_FIELDS: &[&str] = &[
     "text",
 ];
 
-/// A 32-byte AES-256 DEK that zeroizes on drop -- never `Debug`-printed,
-/// never logged.
-pub type Dek = Zeroizing<[u8; DEK_LEN]>;
-
 /// A malformed, truncated, or unknown-version ciphertext envelope.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CiphertextFormatError {
@@ -132,16 +130,6 @@ pub enum CiphertextFormatError {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("aead authentication failed")]
 pub struct AeadError;
-
-/// A tenant's DEK could not be resolved -- the caller MUST fail closed.
-/// Never caught-and-ignored to fall back to plaintext.
-#[derive(Debug, thiserror::Error, Clone)]
-#[error("tenant DEK unavailable for tenant={tenant_id:?} dek_version={dek_version:?}: {reason}")]
-pub struct DekUnavailableError {
-    pub tenant_id: String,
-    pub dek_version: Option<u32>,
-    pub reason: String,
-}
 
 /// Length-prefix-encodes one AAD field (`u32` BE length + raw bytes) so no
 /// combination of values can collide -- matches Python's `_encode_field`
@@ -350,107 +338,8 @@ pub fn decrypt_identity_value(
 }
 
 // ---------------------------------------------------------------------
-// DEK provider: hub-api-issued, TTL-cached, never hardcoded.
+// DEK cache invalidation (Valkey stream).
 // ---------------------------------------------------------------------
-
-/// Resolves a tenant's active (or a specific, for rotation-window reads)
-/// DEK. No `dyn`-safe trait object here (async-fn-in-trait) -- callers are
-/// generic (`crate::publish::publish_event`'s `D: DekProvider` bound) or go
-/// through [`ConfiguredDekProvider`], the enum this crate threads through
-/// `tokio::spawn`ed receiver tasks (see `src/lib.rs::build_dek_provider`).
-#[allow(async_fn_in_trait)]
-pub trait DekProvider: Send + Sync {
-    fn get_dek(
-        &self,
-        tenant_id: &str,
-    ) -> impl std::future::Future<Output = Result<(Dek, u32), DekUnavailableError>> + Send;
-
-    /// Cache lifetime the broker granted for the DEK most recently returned
-    /// for `tenant_id` (already clamped to [`DEFAULT_DEK_CACHE_TTL`]).
-    /// `None` means no per-response grant; callers use their own TTL.
-    fn granted_ttl(&self, _tenant_id: &str) -> Option<Duration> {
-        None
-    }
-}
-
-struct CacheEntry {
-    dek: Dek,
-    dek_version: u32,
-    expires_at: Instant,
-}
-
-/// Wraps another [`DekProvider`] with a per-tenant TTL cache (default 10
-/// minutes, matching the design's hub-api-side cache) so a steady-state
-/// ingest loop does not call the broker on every event. A cache miss
-/// (expired or never-seen) always re-resolves via `inner`, so a rotated DEK
-/// is picked up within one TTL window without a restart.
-pub struct TtlCachedDekProvider<D: DekProvider> {
-    inner: Arc<D>,
-    ttl: Duration,
-    cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
-}
-
-// Manual `Clone` impl (not `#[derive(Clone)]`): a derive would add a
-// spurious `D: Clone` bound -- `Arc<D>` is `Clone` regardless of whether
-// `D` itself is, which is exactly what lets this provider be shared cheaply
-// across every `tokio::spawn`ed receiver task.
-impl<D: DekProvider> Clone for TtlCachedDekProvider<D> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            ttl: self.ttl,
-            cache: self.cache.clone(),
-        }
-    }
-}
-
-impl<D: DekProvider> TtlCachedDekProvider<D> {
-    pub fn new(inner: D, ttl: Duration) -> Self {
-        Self {
-            inner: Arc::new(inner),
-            ttl,
-            cache: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    /// Evicts every cached entry for `tenant_id` -- call on a
-    /// `dek-rotated:{tenant}` signal, once that pub/sub channel exists.
-    pub fn invalidate(&self, tenant_id: &str) {
-        self.cache
-            .lock()
-            .expect("cache mutex poisoned")
-            .remove(tenant_id);
-    }
-}
-
-impl<D: DekProvider> DekProvider for TtlCachedDekProvider<D> {
-    async fn get_dek(&self, tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-        {
-            let cache = self.cache.lock().expect("cache mutex poisoned");
-            if let Some(entry) = cache.get(tenant_id) {
-                if entry.expires_at > Instant::now() {
-                    return Ok((entry.dek.clone(), entry.dek_version));
-                }
-            }
-        }
-        let (dek, dek_version) = self.inner.get_dek(tenant_id).await?;
-        // Honour the broker's per-response TTL, never exceeding this cache's ceiling.
-        let ttl = self
-            .inner
-            .granted_ttl(tenant_id)
-            .map_or(self.ttl, |granted| granted.min(self.ttl));
-        let mut cache = self.cache.lock().expect("cache mutex poisoned");
-        cache.insert(
-            tenant_id.to_string(),
-            CacheEntry {
-                dek: dek.clone(),
-                dek_version,
-                expires_at: Instant::now() + ttl,
-            },
-        );
-        Ok((dek, dek_version))
-    }
-}
 
 /// The Valkey stream every DEK cache consumer MUST subscribe to and act on:
 /// on any entry naming `(tenant, purpose)` this process cares about, the
@@ -529,9 +418,9 @@ impl InvalidationSource for redis::aio::MultiplexedConnection {
 /// a documented follow-up once #442's exact stream field names/message
 /// shape are published; the function itself is complete and unit-tested
 /// today against a fake [`InvalidationSource`].
-pub async fn run_dek_invalidation_listener<D: DekProvider, S: InvalidationSource>(
+pub async fn run_dek_invalidation_listener<C: DekInvalidate, S: InvalidationSource>(
     mut source: S,
-    cache: TtlCachedDekProvider<D>,
+    cache: C,
     expected_purpose: &str,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
@@ -546,8 +435,12 @@ pub async fn run_dek_invalidation_listener<D: DekProvider, S: InvalidationSource
                         if fields.get("purpose").map(String::as_str) != Some(expected_purpose) {
                             continue;
                         }
-                        match fields.get("tenant") {
-                            Some(tenant) => cache.invalidate(tenant),
+                        // Caches are keyed by NUMERIC tenant id, so the signal must name one.
+                        match fields.get("tenant").map(|t| t.parse::<i64>()) {
+                            Some(Ok(tenant_id)) => cache.invalidate(tenant_id),
+                            Some(Err(_)) => tracing::warn!(
+                                "dek invalidation entry 'tenant' is not a numeric tenant id, skipping"
+                            ),
                             None => tracing::warn!(
                                 "dek invalidation entry missing 'tenant' field, skipping"
                             ),
@@ -566,429 +459,13 @@ pub async fn run_dek_invalidation_listener<D: DekProvider, S: InvalidationSource
     }
 }
 
-/// Mints the short-lived EdDSA machine JWT this provider authenticates
-/// hub-api calls with. Implemented against `core/service_auth`'s interface
-/// (PR #438, `feature/eddsa-machine-jwt`) -- **unmerged as of this writing**;
-/// this trait exists so `HubApiDekProvider` compiles and is unit-testable
-/// today against a fake, and swaps to the real `service_auth` minter as a
-/// one-line change once #438 lands.
-pub trait MachineJwtProvider: Send + Sync {
-    fn mint(&self) -> Result<String, String>;
-}
-
-/// Placeholder [`MachineJwtProvider`] used until `core/service_auth`'s real
-/// EdDSA machine-JWT minter lands (PR #438, `feature/eddsa-machine-jwt` --
-/// **unmerged as of this writing**). Every call fails closed with a clear
-/// reason, which propagates as a [`DekUnavailableError`] from
-/// [`HubApiDekProvider::get_dek`] -- never a silent unauthenticated call to
-/// hub-api. Swap for the real minter as a one-line change once #438 lands.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct UnimplementedMachineJwtProvider;
-
-impl MachineJwtProvider for UnimplementedMachineJwtProvider {
-    fn mint(&self) -> Result<String, String> {
-        Err(
-            "core/service_auth EdDSA machine JWT minting is not yet available \
-             (PR #438 / feature/eddsa-machine-jwt is unmerged)"
-                .to_string(),
-        )
-    }
-}
-
-/// This is always what [`HubApiDekProvider`] requests -- the tenant-DEK
-/// broker (#442) is scoped to exactly this one purpose (stream-field
-/// envelope encryption), distinct from any future purpose the same broker
-/// might serve.
-pub const INGEST_STREAM_PURPOSE: &str = "ingest-stream";
-
-/// Calls hub-api's tenant-DEK broker endpoint
-/// (`POST /api/v1/internal/keys/tenant-dek`, per `feature/tenant-dek-
-/// broker`/#442 -- **server side not yet merged, and #442 is itself being
-/// redesigned as of this writing; this client codes against the
-/// coordinator-described contract and will be reconciled with #442's PR
-/// description (exact field names/wire shape) once it lands**):
-///
-/// - The client never sends a static bearer credential for the DEK itself
-///   -- it generates a fresh X25519 keypair **per call** and sends only
-///   the ephemeral public key plus `{service_id, tenant_id, purpose,
-///   version}` (the EdDSA machine JWT, [`MachineJwtProvider`], still
-///   authenticates the *caller*, separately).
-/// - hub-api's response seals the DEK to that ephemeral public key
-///   (HPKE-style: `enc` is the server's own one-time X25519 public key,
-///   `ciphertext` is AEAD-sealed under a key/nonce this module derives
-///   from the ECDH shared secret + the same
-///   `service_id|tenant_id|purpose|version` context, via [`hpke_seal_open`]
-///   below) -- so the transported bytes are meaningless to anything except
-///   the caller that generated the matching ephemeral private key, not
-///   just to network eavesdroppers.
-/// - `ttl_seconds` from the response caps how long [`TtlCachedDekProvider`]
-///   may keep this DEK cached (never longer than [`DEFAULT_DEK_CACHE_TTL`]
-///   regardless of what the server returns -- a compromised/misbehaving
-///   broker response can shorten the cache window, never lengthen it past
-///   this client's own ceiling).
-/// - Callers MUST additionally drop any cached DEK the moment a
-///   `(tenant, purpose, version)` tuple appears on the Valkey stream
-///   `keys:tenant-dek:invalidate` -- see [`DekInvalidationListener`].
-///
-/// Fails closed unconditionally: any non-2xx response, network error,
-/// malformed body, or ECDH/AEAD failure returns [`DekUnavailableError`] --
-/// never a silent plaintext fallback.
-pub struct HubApiDekProvider<J: MachineJwtProvider> {
-    http: reqwest::Client,
-    hub_api_url: String,
-    jwt_provider: J,
-    /// This process's own identity in the broker's AAD-bound context
-    /// (`"svc-ingest"`/`"svc-process"`) -- never a secret, just a label.
-    service_id: String,
-    /// Per-tenant broker-granted TTL of the last successful resolution.
-    granted_ttls: Mutex<HashMap<String, Duration>>,
-}
-
-impl<J: MachineJwtProvider + Clone> Clone for HubApiDekProvider<J> {
-    fn clone(&self) -> Self {
-        Self {
-            http: self.http.clone(),
-            hub_api_url: self.hub_api_url.clone(),
-            jwt_provider: self.jwt_provider.clone(),
-            service_id: self.service_id.clone(),
-            // A clone re-learns grants on its first resolution per tenant.
-            granted_ttls: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct TenantDekRequest<'a> {
-    tenant_id: &'a str,
-    purpose: &'a str,
-    version: u32,
-    /// Base64 X25519 public key -- fresh per call, never reused across
-    /// requests (a reused ephemeral key would let a network observer
-    /// correlate requests, and defeats the point of "ephemeral").
-    client_pubkey: String,
-}
-
-#[derive(Deserialize)]
-struct TenantDekResponse {
-    /// Base64 X25519 public key -- the server's own one-time keypair for
-    /// this response's HPKE-style seal, NOT a long-lived server identity
-    /// key.
-    enc: String,
-    /// Base64 AEAD-sealed DEK bytes.
-    ciphertext: String,
-    dek_version: u32,
-    /// Server-asserted cache ceiling -- [`HubApiDekProvider::get_dek`]
-    /// clamps this to [`DEFAULT_DEK_CACHE_TTL`], never trusting it upward.
-    ttl_seconds: u64,
-}
-
-impl<J: MachineJwtProvider> HubApiDekProvider<J> {
-    pub fn new(
-        http: reqwest::Client,
-        hub_api_url: impl Into<String>,
-        jwt_provider: J,
-        service_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            http,
-            hub_api_url: hub_api_url.into(),
-            jwt_provider,
-            service_id: service_id.into(),
-            granted_ttls: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-impl<J: MachineJwtProvider> DekProvider for HubApiDekProvider<J> {
-    fn granted_ttl(&self, tenant_id: &str) -> Option<Duration> {
-        self.granted_ttls
-            .lock()
-            .ok()
-            .and_then(|m| m.get(tenant_id).copied())
-    }
-
-    async fn get_dek(&self, tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-        let unavailable = |reason: String| DekUnavailableError {
-            tenant_id: tenant_id.to_string(),
-            dek_version: None,
-            reason,
-        };
-        let jwt = self.jwt_provider.mint().map_err(&unavailable)?;
-
-        // Fresh ephemeral X25519 keypair, this call only.
-        let client_secret = x25519_dalek::EphemeralSecret::random();
-        let client_public = x25519_dalek::PublicKey::from(&client_secret);
-
-        let url = format!(
-            "{}/api/v1/internal/keys/tenant-dek",
-            self.hub_api_url.trim_end_matches('/')
-        );
-        let resp = self
-            .http
-            .post(&url)
-            .bearer_auth(jwt)
-            .json(&TenantDekRequest {
-                tenant_id,
-                purpose: INGEST_STREAM_PURPOSE,
-                version: 1,
-                client_pubkey: base64::engine::general_purpose::STANDARD
-                    .encode(client_public.as_bytes()),
-            })
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-            .map_err(|e| unavailable(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(unavailable(format!(
-                "hub-api returned HTTP {}",
-                resp.status()
-            )));
-        }
-        let body: TenantDekResponse = resp.json().await.map_err(|e| unavailable(e.to_string()))?;
-
-        let context = format!(
-            "{}|{}|{}|{}",
-            self.service_id, tenant_id, INGEST_STREAM_PURPOSE, 1
-        );
-        let dek_bytes = hpke_seal_open(
-            client_secret,
-            &body.enc,
-            &body.ciphertext,
-            context.as_bytes(),
-        )
-        .map_err(&unavailable)?;
-
-        let ttl = Duration::from_secs(body.ttl_seconds).min(DEFAULT_DEK_CACHE_TTL);
-        // A poisoned lock only loses the per-response hint; the cache falls
-        // back to its own (equal-or-larger) ceiling TTL -- no DEK is exposed.
-        if let Ok(mut granted) = self.granted_ttls.lock() {
-            granted.insert(tenant_id.to_string(), ttl);
-        }
-        Ok((Zeroizing::new(dek_bytes), body.dek_version))
-    }
-}
-
-/// HPKE-lite seal-open: derives an AES-256-GCM key+nonce from the X25519
-/// ECDH shared secret (`client_secret` x `enc`) via HKDF-SHA256, bound to
-/// `context` as HKDF info, then opens `ciphertext` under that key with a
-/// zero nonce (the HKDF `info` binding, unique per `(service_id, tenant_id,
-/// purpose, version)`, is what prevents nonce reuse across distinct
-/// contexts -- a genuine RFC 9180 HPKE construction additionally derives a
-/// fresh `base_nonce`/sequence number per message; this simplified
-/// construction is a **placeholder pending #442's exact wire format**, not
-/// a claim of RFC 9180 conformance).
-///
-/// Exposed at `pub(crate)` visibility only -- an internal helper, not part
-/// of this module's public API surface. Takes `client_secret` **by value**
-/// (`x25519_dalek::EphemeralSecret::diffie_hellman` consumes `self` --
-/// deliberately, by that crate's design, so an ephemeral secret can never
-/// be reused across more than one key exchange): callers construct a fresh
-/// one immediately before calling this, exactly once.
-fn hpke_seal_open(
-    client_secret: x25519_dalek::EphemeralSecret,
-    enc_b64: &str,
-    ciphertext_b64: &str,
-    context: &[u8],
-) -> Result<[u8; DEK_LEN], String> {
-    let enc_bytes = base64::engine::general_purpose::STANDARD
-        .decode(enc_b64)
-        .map_err(|e| format!("malformed enc: {e}"))?;
-    let enc_arr: [u8; 32] = enc_bytes
-        .try_into()
-        .map_err(|_| "enc must be exactly 32 bytes".to_string())?;
-    let server_public = x25519_dalek::PublicKey::from(enc_arr);
-    let shared_secret = client_secret.diffie_hellman(&server_public);
-
-    let hk = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
-    let mut key_and_nonce = [0u8; DEK_LEN + NONCE_LEN];
-    hk.expand(context, &mut key_and_nonce)
-        .map_err(|e| format!("HKDF expand failed: {e}"))?;
-    let (key_bytes, nonce_bytes) = key_and_nonce.split_at(DEK_LEN);
-
-    let ciphertext = base64::engine::general_purpose::STANDARD
-        .decode(ciphertext_b64)
-        .map_err(|e| format!("malformed ciphertext: {e}"))?;
-    let cipher = Aes256Gcm::new_from_slice(key_bytes).expect("key_bytes is always 32 bytes");
-    let nonce = Nonce::from_slice(nonce_bytes);
-    let plaintext = cipher
-        .decrypt(
-            nonce,
-            aes_gcm::aead::Payload {
-                msg: &ciphertext,
-                aad: context,
-            },
-        )
-        .map_err(|_| "HPKE-lite unseal failed (AEAD authentication error)".to_string())?;
-    if plaintext.len() != DEK_LEN {
-        return Err(format!(
-            "unsealed DEK is {} bytes, expected {DEK_LEN}",
-            plaintext.len()
-        ));
-    }
-    let mut out = [0u8; DEK_LEN];
-    out.copy_from_slice(&plaintext);
-    Ok(out)
-}
-
-/// The environments [`LocalDevDekProvider`] is permitted to run in --
-/// checked at construction time so the dev/alpha DEK-derivation fallback
-/// can never silently activate in beta/gamma/prod. Stricter than PR #440's
-/// Python `LocalDevDekProvider` (which gates only on `INGEST_DEV_KEK` being
-/// set, with no environment check of its own) -- this Rust port adds the
-/// hard environment gate PR #440 lacks, per this task's explicit
-/// requirement.
-const LOCAL_DEV_ALLOWED_ENVIRONMENTS: &[&str] = &["alpha", "local"];
-
-/// Dev/alpha-only fallback DEK provider -- HKDF-derives a per-tenant DEK
-/// from a local KEK. **Not the production mechanism** -- production is
-/// always [`HubApiDekProvider`]. Exists only so local/alpha environments
-/// without a live hub-api broker endpoint can still exercise real
-/// AES-256-GCM encryption end-to-end, never a no-op/plaintext stand-in.
-///
-/// **Hard-gated**: construction fails unless `env_name` (read from
-/// `WADDLES_ENV`, case-insensitive) is `alpha` or `local` -- refuses
-/// unconditionally in beta/gamma/production, regardless of whether a dev
-/// KEK happens to be configured there.
-pub struct LocalDevDekProvider {
-    kek: Zeroizing<[u8; DEK_LEN]>,
-}
-
-impl Clone for LocalDevDekProvider {
-    fn clone(&self) -> Self {
-        Self {
-            kek: self.kek.clone(),
-        }
-    }
-}
-
-// Never `Debug`-derived: the default derive would print `kek`'s raw bytes.
-impl std::fmt::Debug for LocalDevDekProvider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LocalDevDekProvider")
-            .field("kek", &"***redacted***")
-            .finish()
-    }
-}
-
-/// Why [`LocalDevDekProvider::new`] refused to construct.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum LocalDevDekProviderError {
-    #[error(
-        "LocalDevDekProvider is refused outside alpha/local (WADDLES_ENV={0:?}) -- \
-         never the production DEK mechanism"
-    )]
-    EnvironmentNotAllowed(String),
-    #[error("{env_var} is not set -- LocalDevDekProvider requires an explicit dev KEK, never a hardcoded default")]
-    KekNotSet { env_var: &'static str },
-    #[error("{env_var} must resolve to >= {min} bytes of KEK material")]
-    KekTooShort { env_var: &'static str, min: usize },
-}
-
-impl LocalDevDekProvider {
-    /// Resolves the dev KEK from `kek_env_var`, gated by `env_name` (the
-    /// deployment environment, e.g. `WADDLES_ENV`) -- refuses construction
-    /// outside alpha/local unconditionally.
-    pub fn new(env_name: &str, kek_env_var: &str) -> Result<Self, LocalDevDekProviderError> {
-        if !LOCAL_DEV_ALLOWED_ENVIRONMENTS.contains(&env_name.to_ascii_lowercase().as_str()) {
-            return Err(LocalDevDekProviderError::EnvironmentNotAllowed(
-                env_name.to_string(),
-            ));
-        }
-        let raw = std::env::var(kek_env_var).map_err(|_| LocalDevDekProviderError::KekNotSet {
-            env_var: Box::leak(kek_env_var.to_string().into_boxed_str()),
-        })?;
-        if raw.len() < DEK_LEN {
-            return Err(LocalDevDekProviderError::KekTooShort {
-                env_var: Box::leak(kek_env_var.to_string().into_boxed_str()),
-                min: DEK_LEN,
-            });
-        }
-        let mut kek = [0u8; DEK_LEN];
-        kek.copy_from_slice(&raw.as_bytes()[..DEK_LEN]);
-        Ok(Self {
-            kek: Zeroizing::new(kek),
-        })
-    }
-}
-
-impl DekProvider for LocalDevDekProvider {
-    async fn get_dek(&self, tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-        let version: u32 = 1;
-        let hk = Hkdf::<Sha256>::new(None, self.kek.as_ref());
-        let mut dek = [0u8; DEK_LEN];
-        let info = format!("waddles-ingest-dev-dek:{tenant_id}:{version}");
-        hk.expand(info.as_bytes(), &mut dek)
-            .map_err(|e| DekUnavailableError {
-                tenant_id: tenant_id.to_string(),
-                dek_version: Some(version),
-                reason: format!("HKDF expand failed: {e}"),
-            })?;
-        Ok((Zeroizing::new(dek), version))
-    }
-}
-
-/// Runtime-selected [`DekProvider`] -- production (`HubApi`) or dev/alpha
-/// fallback (`LocalDev`, see [`LocalDevDekProvider`]'s hard environment
-/// gate). Not `dyn`-boxed: `async fn` in a trait object needs an extra
-/// boxing dependency this crate doesn't otherwise need; an enum dispatch is
-/// simpler and just as usable across `tokio::spawn`ed receiver tasks.
-#[derive(Clone)]
-pub enum ConfiguredDekProvider<J: MachineJwtProvider + Clone> {
-    HubApi(TtlCachedDekProvider<HubApiDekProvider<J>>),
-    LocalDev(TtlCachedDekProvider<LocalDevDekProvider>),
-}
-
-impl<J: MachineJwtProvider + Clone> DekProvider for ConfiguredDekProvider<J> {
-    async fn get_dek(&self, tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-        match self {
-            Self::HubApi(p) => p.get_dek(tenant_id).await,
-            Self::LocalDev(p) => p.get_dek(tenant_id).await,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroize::Zeroizing;
 
     fn test_dek() -> Dek {
         Zeroizing::new([7u8; DEK_LEN])
-    }
-
-    /// Manually seals `dek_plain` exactly the way a real #442 broker would
-    /// (server-side ephemeral X25519 keypair, ECDH against `client_public`,
-    /// HKDF-SHA256 with `context` as info, AES-256-GCM), returning
-    /// `(enc_b64, ciphertext_b64)` -- the same shape
-    /// [`hpke_seal_open`] consumes. Used only to prove
-    /// [`hpke_seal_open`]'s math is self-consistent, since no real #442
-    /// broker exists yet to test against.
-    fn seal_for_test(
-        client_public: &x25519_dalek::PublicKey,
-        context: &[u8],
-        dek_plain: &[u8; DEK_LEN],
-    ) -> (String, String) {
-        let server_secret = x25519_dalek::EphemeralSecret::random();
-        let server_public = x25519_dalek::PublicKey::from(&server_secret);
-        let shared = server_secret.diffie_hellman(client_public);
-        let hk = Hkdf::<Sha256>::new(None, shared.as_bytes());
-        let mut key_and_nonce = [0u8; DEK_LEN + NONCE_LEN];
-        hk.expand(context, &mut key_and_nonce).unwrap();
-        let (key_bytes, nonce_bytes) = key_and_nonce.split_at(DEK_LEN);
-        let cipher = Aes256Gcm::new_from_slice(key_bytes).unwrap();
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let ct = cipher
-            .encrypt(
-                nonce,
-                aes_gcm::aead::Payload {
-                    msg: dek_plain.as_slice(),
-                    aad: context,
-                },
-            )
-            .unwrap();
-        (
-            base64::engine::general_purpose::STANDARD.encode(server_public.as_bytes()),
-            base64::engine::general_purpose::STANDARD.encode(ct),
-        )
     }
 
     /// Yields one batch of fake stream entries per call, then blocks
@@ -1026,140 +503,107 @@ mod tests {
             .collect()
     }
 
+    /// Records which tenants were invalidated.
+    #[derive(Clone, Default)]
+    struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<i64>>>);
+
+    impl DekInvalidate for Recorder {
+        fn invalidate(&self, tenant_id: i64) {
+            self.0.lock().unwrap().push(tenant_id);
+        }
+    }
+
+    async fn run_listener(batches: Vec<Vec<HashMap<String, String>>>, rec: Recorder) {
+        let source = FakeInvalidationSource { batches, next: 0 };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(run_dek_invalidation_listener(
+            source,
+            rec,
+            INGEST_STREAM_PURPOSE,
+            rx,
+        ));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = tx.send(());
+        handle.await.unwrap();
+    }
+
     #[tokio::test]
-    async fn invalidation_listener_drops_cache_for_matching_purpose() {
-        struct CountingProvider(std::sync::atomic::AtomicU32);
-        impl DekProvider for CountingProvider {
-            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok((Zeroizing::new([1u8; DEK_LEN]), 1))
+    async fn invalidation_listener_invalidates_the_numeric_tenant_for_matching_purpose() {
+        let rec = Recorder::default();
+        run_listener(
+            vec![vec![entry(&[
+                ("tenant", "42"),
+                ("purpose", INGEST_STREAM_PURPOSE),
+            ])]],
+            rec.clone(),
+        )
+        .await;
+        assert_eq!(*rec.0.lock().unwrap(), vec![42]);
+    }
+
+    #[tokio::test]
+    async fn invalidation_listener_ignores_a_different_purpose_and_non_numeric_tenants() {
+        let rec = Recorder::default();
+        run_listener(
+            vec![vec![
+                entry(&[("tenant", "42"), ("purpose", "some-other-purpose")]),
+                entry(&[("tenant", "acme"), ("purpose", INGEST_STREAM_PURPOSE)]),
+                entry(&[("purpose", INGEST_STREAM_PURPOSE)]),
+            ]],
+            rec.clone(),
+        )
+        .await;
+        assert!(rec.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalidation_listener_forces_a_real_cache_to_re_resolve() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        struct Counting(std::sync::Arc<AtomicU32>);
+        impl DekBroker for Counting {
+            async fn fetch(
+                &self,
+                _t: i64,
+                _v: u32,
+            ) -> Result<hub_client::dek::BrokeredDek, DekUnavailableError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(hub_client::dek::BrokeredDek {
+                    dek: Zeroizing::new([1u8; DEK_LEN]),
+                    version: 1,
+                    ttl: Duration::from_secs(60),
+                })
             }
         }
-        let cache = TtlCachedDekProvider::new(
-            CountingProvider(std::sync::atomic::AtomicU32::new(0)),
-            Duration::from_secs(60),
-        );
-        cache.get_dek("acme").await.unwrap();
-        cache.get_dek("acme").await.unwrap();
-        assert_eq!(
-            cache.inner.0.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "cached before invalidation"
-        );
+        let calls = std::sync::Arc::new(AtomicU32::new(0));
+        let cache = CachedDekProvider::new(Counting(calls.clone()), Duration::from_secs(60));
+        cache.get_dek(42).await.unwrap();
+        cache.get_dek(42).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         let source = FakeInvalidationSource {
             batches: vec![vec![entry(&[
-                ("tenant", "acme"),
+                ("tenant", "42"),
                 ("purpose", INGEST_STREAM_PURPOSE),
             ])]],
             next: 0,
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let cache_clone = cache.clone();
         let handle = tokio::spawn(run_dek_invalidation_listener(
             source,
-            cache_clone,
+            cache.clone(),
             INGEST_STREAM_PURPOSE,
             rx,
         ));
-        // Give the spawned listener a chance to process the one scripted
-        // batch before shutting it down.
         tokio::time::sleep(Duration::from_millis(20)).await;
         let _ = tx.send(());
         handle.await.unwrap();
 
-        cache.get_dek("acme").await.unwrap();
+        cache.get_dek(42).await.unwrap();
         assert_eq!(
-            cache.inner.0.load(std::sync::atomic::Ordering::SeqCst),
+            calls.load(Ordering::SeqCst),
             2,
             "invalidation must force a re-resolve"
         );
-    }
-
-    #[tokio::test]
-    async fn invalidation_listener_ignores_a_different_purpose() {
-        struct CountingProvider(std::sync::atomic::AtomicU32);
-        impl DekProvider for CountingProvider {
-            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok((Zeroizing::new([1u8; DEK_LEN]), 1))
-            }
-        }
-        let cache = TtlCachedDekProvider::new(
-            CountingProvider(std::sync::atomic::AtomicU32::new(0)),
-            Duration::from_secs(60),
-        );
-        cache.get_dek("acme").await.unwrap();
-
-        let source = FakeInvalidationSource {
-            batches: vec![vec![entry(&[
-                ("tenant", "acme"),
-                ("purpose", "some-other-purpose"),
-            ])]],
-            next: 0,
-        };
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let cache_clone = cache.clone();
-        let handle = tokio::spawn(run_dek_invalidation_listener(
-            source,
-            cache_clone,
-            INGEST_STREAM_PURPOSE,
-            rx,
-        ));
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let _ = tx.send(());
-        handle.await.unwrap();
-
-        cache.get_dek("acme").await.unwrap();
-        assert_eq!(
-            cache.inner.0.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "a non-matching purpose must never invalidate"
-        );
-    }
-
-    #[test]
-    fn hpke_seal_open_round_trips_a_sealed_dek() {
-        let client_secret = x25519_dalek::EphemeralSecret::random();
-        let client_public = x25519_dalek::PublicKey::from(&client_secret);
-        let context = b"svc-ingest|acme|ingest-stream|1";
-        let dek_plain = [42u8; DEK_LEN];
-        let (enc_b64, ct_b64) = seal_for_test(&client_public, context, &dek_plain);
-        let opened = hpke_seal_open(client_secret, &enc_b64, &ct_b64, context).unwrap();
-        assert_eq!(opened, dek_plain);
-    }
-
-    #[test]
-    fn hpke_seal_open_fails_closed_on_context_mismatch() {
-        let client_secret = x25519_dalek::EphemeralSecret::random();
-        let client_public = x25519_dalek::PublicKey::from(&client_secret);
-        let (enc_b64, ct_b64) = seal_for_test(
-            &client_public,
-            b"svc-ingest|acme|ingest-stream|1",
-            &[1u8; DEK_LEN],
-        );
-        let err = hpke_seal_open(
-            client_secret,
-            &enc_b64,
-            &ct_b64,
-            b"svc-ingest|other-tenant|ingest-stream|1",
-        )
-        .unwrap_err();
-        assert!(err.contains("AEAD"));
-    }
-
-    #[test]
-    fn hpke_seal_open_fails_closed_on_wrong_client_key() {
-        let sealing_client_secret = x25519_dalek::EphemeralSecret::random();
-        let sealing_client_public = x25519_dalek::PublicKey::from(&sealing_client_secret);
-        let context = b"svc-ingest|acme|ingest-stream|1";
-        let (enc_b64, ct_b64) = seal_for_test(&sealing_client_public, context, &[1u8; DEK_LEN]);
-
-        // A *different* client secret attempts to open a response sealed to
-        // someone else's ephemeral public key -- must fail, never leak.
-        let wrong_client_secret = x25519_dalek::EphemeralSecret::random();
-        let err = hpke_seal_open(wrong_client_secret, &enc_b64, &ct_b64, context).unwrap_err();
-        assert!(err.contains("AEAD"));
     }
 
     #[test]
@@ -1262,148 +706,6 @@ mod tests {
         let dek = test_dek();
         let err = decrypt_identity_value(&obj, &dek, "acme", "s", "actor", "e").unwrap_err();
         assert!(matches!(err, IdentityCryptoError::Format(_)));
-    }
-
-    #[tokio::test]
-    async fn ttl_cached_provider_honours_broker_granted_ttl() {
-        // regression: gh-442 -- per-response TTL was computed then discarded.
-        struct ShortGrant(std::sync::atomic::AtomicU32);
-        impl DekProvider for ShortGrant {
-            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok((Zeroizing::new([1u8; DEK_LEN]), 1))
-            }
-            fn granted_ttl(&self, _tenant_id: &str) -> Option<Duration> {
-                Some(Duration::from_millis(1))
-            }
-        }
-        let provider = TtlCachedDekProvider::new(
-            ShortGrant(std::sync::atomic::AtomicU32::new(0)),
-            Duration::from_secs(60),
-        );
-        provider.get_dek("acme").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        provider.get_dek("acme").await.unwrap();
-        assert_eq!(
-            provider.inner.0.load(std::sync::atomic::Ordering::SeqCst),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn ttl_cached_provider_caches_within_ttl() {
-        struct CountingProvider(std::sync::atomic::AtomicU32);
-        impl DekProvider for CountingProvider {
-            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok((Zeroizing::new([1u8; DEK_LEN]), 1))
-            }
-        }
-        let provider = TtlCachedDekProvider::new(
-            CountingProvider(std::sync::atomic::AtomicU32::new(0)),
-            Duration::from_secs(60),
-        );
-        provider.get_dek("acme").await.unwrap();
-        provider.get_dek("acme").await.unwrap();
-        provider.get_dek("acme").await.unwrap();
-        assert_eq!(
-            provider.inner.0.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn ttl_cached_provider_re_resolves_after_expiry() {
-        struct CountingProvider(std::sync::atomic::AtomicU32);
-        impl DekProvider for CountingProvider {
-            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok((Zeroizing::new([1u8; DEK_LEN]), 1))
-            }
-        }
-        let provider = TtlCachedDekProvider::new(
-            CountingProvider(std::sync::atomic::AtomicU32::new(0)),
-            Duration::from_millis(1),
-        );
-        provider.get_dek("acme").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        provider.get_dek("acme").await.unwrap();
-        assert_eq!(
-            provider.inner.0.load(std::sync::atomic::Ordering::SeqCst),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn ttl_cached_provider_invalidate_forces_re_resolve() {
-        struct CountingProvider(std::sync::atomic::AtomicU32);
-        impl DekProvider for CountingProvider {
-            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok((Zeroizing::new([1u8; DEK_LEN]), 1))
-            }
-        }
-        let provider = TtlCachedDekProvider::new(
-            CountingProvider(std::sync::atomic::AtomicU32::new(0)),
-            Duration::from_secs(60),
-        );
-        provider.get_dek("acme").await.unwrap();
-        provider.invalidate("acme");
-        provider.get_dek("acme").await.unwrap();
-        assert_eq!(
-            provider.inner.0.load(std::sync::atomic::Ordering::SeqCst),
-            2
-        );
-    }
-
-    #[test]
-    fn local_dev_provider_refuses_outside_alpha_local() {
-        for env in ["beta", "gamma", "production", "prod", ""] {
-            let err =
-                LocalDevDekProvider::new(env, "WADDLES_TEST_NONEXISTENT_KEK_VAR").unwrap_err();
-            assert!(matches!(
-                err,
-                LocalDevDekProviderError::EnvironmentNotAllowed(_)
-            ));
-        }
-    }
-
-    #[test]
-    fn local_dev_provider_allows_alpha_and_local_case_insensitively() {
-        // SAFETY: test-only env var mutation, single-threaded within this test.
-        std::env::set_var("WADDLES_TEST_DEV_KEK", "x".repeat(DEK_LEN));
-        for env in ["alpha", "Alpha", "LOCAL", "local"] {
-            LocalDevDekProvider::new(env, "WADDLES_TEST_DEV_KEK").unwrap();
-        }
-        std::env::remove_var("WADDLES_TEST_DEV_KEK");
-    }
-
-    #[test]
-    fn local_dev_provider_requires_the_kek_env_var_set() {
-        std::env::remove_var("WADDLES_TEST_UNSET_KEK");
-        let err = LocalDevDekProvider::new("alpha", "WADDLES_TEST_UNSET_KEK").unwrap_err();
-        assert!(matches!(err, LocalDevDekProviderError::KekNotSet { .. }));
-    }
-
-    #[test]
-    fn local_dev_provider_requires_kek_at_least_32_bytes() {
-        std::env::set_var("WADDLES_TEST_SHORT_KEK", "tooshort");
-        let err = LocalDevDekProvider::new("alpha", "WADDLES_TEST_SHORT_KEK").unwrap_err();
-        assert!(matches!(err, LocalDevDekProviderError::KekTooShort { .. }));
-        std::env::remove_var("WADDLES_TEST_SHORT_KEK");
-    }
-
-    #[tokio::test]
-    async fn local_dev_provider_is_deterministic_per_tenant() {
-        std::env::set_var("WADDLES_TEST_DETERMINISTIC_KEK", "k".repeat(DEK_LEN));
-        let provider = LocalDevDekProvider::new("alpha", "WADDLES_TEST_DETERMINISTIC_KEK").unwrap();
-        let (dek_a1, v1) = provider.get_dek("tenant-a").await.unwrap();
-        let (dek_a2, v2) = provider.get_dek("tenant-a").await.unwrap();
-        let (dek_b, _) = provider.get_dek("tenant-b").await.unwrap();
-        assert_eq!(*dek_a1, *dek_a2);
-        assert_eq!(v1, v2);
-        assert_ne!(*dek_a1, *dek_b);
-        std::env::remove_var("WADDLES_TEST_DETERMINISTIC_KEK");
     }
 
     /// Fixture shape mirrors `gen_golden.py`'s printed JSON -- generated

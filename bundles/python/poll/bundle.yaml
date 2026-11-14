@@ -11,7 +11,7 @@ name: Community Polls Bundle (Python)
 # markers), strict-boolean mod gate (a string badge no longer passes), tenant-wide community
 # sentinel support (fix/bundle-defects-wave; refs gh-675).
 # 1.0.3: activation-gated only -- removed the in-bundle waddles.command-poll feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.5
+version: 1.0.6
 feature: waddles.core.example
 module: core
 provider: builtin

@@ -13,7 +13,8 @@ Config (env, never CLI args; no secrets besides DATABASE_URL):
   DEMO_GUILD_ID           REQUIRED -- Discord guild snowflake (no default; fails loud if unset)
   DEMO_DISCORD_USER_ID    Discord snowflake of the demo member (SWAP IN the real one)
   DEMO_DISCORD_ROLE_ID    Discord role snowflake to sync (SWAP IN the customer's real role)
-  DEMO_COMMUNITY_ROLE     Waddles role the Discord role grants (default `moderator`)
+  DEMO_COMMUNITY_ROLE     Waddles role the Discord role grants (default `vip`; inbound
+                          role-sync may only target `vip`/`member` since migration 0104)
   DEMO_BASELINE_ROLE      role the member is reset to / demoted to (default `member`)
   DEMO_ROLE_NAME_PREFIX   pairing role-name prefix (default `[DEMO]`)
   DEMO_DIRECTION          pairing direction (default `discord_to_twitch`)
@@ -34,7 +35,8 @@ logger = logging.getLogger("seed_demo_prelink")
 
 #: Roles `community_role_sync_bindings.community_role` CHECK accepts (migration 0036);
 #: `community-owner` is deliberately never assignable by sync.
-VALID_COMMUNITY_ROLES = ("community-admin", "moderator", "vip", "member")
+#: Inbound (Discord -> Waddles) targets are a non-privileged allowlist (migration 0104 CHECK).
+VALID_COMMUNITY_ROLES = ("vip", "member")
 VALID_DIRECTIONS = ("discord_to_twitch", "twitch_to_discord", "bidirectional")
 DISCORD = "discord"
 
@@ -124,14 +126,16 @@ def load_config(env: Mapping[str, str]) -> DemoConfig:
             env.get("DEMO_DISCORD_ROLE_ID", "900000000000000002"),
             "DEMO_DISCORD_ROLE_ID",
         ),
-        community_role=env.get("DEMO_COMMUNITY_ROLE", "moderator"),
+        community_role=env.get("DEMO_COMMUNITY_ROLE", "vip"),
         baseline_role=env.get("DEMO_BASELINE_ROLE", "member"),
         role_name_prefix=env.get("DEMO_ROLE_NAME_PREFIX", "[DEMO]"),
         direction=env.get("DEMO_DIRECTION", "discord_to_twitch"),
     )
     if cfg.community_role not in VALID_COMMUNITY_ROLES:
         raise SeedError(f"DEMO_COMMUNITY_ROLE must be one of {VALID_COMMUNITY_ROLES}")
-    if cfg.baseline_role not in (*VALID_COMMUNITY_ROLES, "communicator", "speaker"):
+    if cfg.baseline_role not in (
+        *VALID_COMMUNITY_ROLES, "moderator", "community-admin", "communicator", "speaker"
+    ):
         raise SeedError("DEMO_BASELINE_ROLE is not a known community role")
     if cfg.baseline_role == cfg.community_role:
         raise SeedError(

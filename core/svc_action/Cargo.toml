@@ -88,7 +88,7 @@ penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", re
 # `src/host_api.rs`. Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
 # (PR penguintechinc/penguin-libs#93, same commit `core/bundle_executor`
 # pins).
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "53e95619f1b3e49e1150b78a125981fcc5905d8a", package = "penguin-bundle-host", version = "=0.5.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "96a5065f1d379ea0cfc7c7716c6eab628138330a", package = "penguin-bundle-host", version = "=0.6.0" }
 # Spec SS13.5's two flags this crate gates on (`waddles.core.rust-data-plane`,
 # `waddles.core.bundle-egress`) -- see `src/flags.rs`. Pinned to the tip of
 # `release/rust-licensing/v0.1.x`.
@@ -171,22 +171,17 @@ bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
 bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
 # Per-community / host-minted credentials + Valkey quota for bundle http.send secret refs (host-seams-2).
 bundle-host-credentials = { path = "../bundle_host_credentials", version = "=0.1.0" }
-# Outbound PII-detokenization pass (`src/capabilities.rs`'s
-# `detokenize_text`/`with_detokenize`) -- the egress half of the PII
-# boundary whose inbound half is `core/svc_process`'s own `pii_tokenize`
-# dependency on `hub_client`. Same-repo path dependency, same rationale as
-# `bundle-active-set` above.
-egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
 # Discord `allowed_mentions` mass-mention backstop (`src/capabilities.rs`'s Discord
 # relay body, `src/senders.rs`'s webhook body) -- one definition shared with
 # `core/svc_ingest`'s bot-token REST sender so no Discord send path can forget
 # it. Same-repo path dependency, same rationale as `bundle-active-set` above.
 discord-mentions = { path = "../discord_mentions", version = "=0.1.0" }
-# `waddles.hub.internal.v1.IdentityService.ResolveDisplayNames` client,
-# needed directly (not just transitively via `egress_detokenizer`) so
-# `crate::lib`'s startup wiring can construct the real
-# `egress_detokenizer::HubClientResolver`.
+# `waddles.hub.internal.v1.IdentityService.ResolvePlatformUser` client
+# (`crate::platform_user`'s producer-side host-tool user resolver).
 hub_client = { path = "../hub_client", version = "=0.1.0" }
+# Live per-community bundle config read straight from the read-only replica (issue #1306); kept
+# out of hub_client so crates that only need hub-api gRPC do not pull sea-orm into their graph.
+bundle-config-db = { path = "../bundle_config_db", version = "=0.1.0" }
 # `crate::platform_user` classifies `hub_client`'s gRPC status codes (producer-side user
 # detokenization) -- same exact pin hub_client already resolves, no new version in the graph.
 tonic = { version = "=0.14.6", default-features = false }

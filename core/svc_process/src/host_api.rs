@@ -1281,6 +1281,7 @@ mod tests {
                 runtime: sandbox_runtime.to_string(),
                 verified: sandbox_runtime == "gvisor",
             },
+            executor_id: None,
         }
     }
 

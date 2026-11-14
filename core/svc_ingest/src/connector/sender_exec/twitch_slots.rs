@@ -285,8 +285,11 @@ impl<C: TwitchCredentialSource, A: TwitchAppSource> SlotSource for TwitchSlots<C
 pub trait EventSubSecretSource: Send + Sync {
     /// The webhook secret for `callback_key`, refused unless the key is registered to
     /// `community_id`.
-    async fn secret(&self, community_id: i64, callback_key: &str)
-        -> Result<SecretString, SlotError>;
+    async fn secret(
+        &self,
+        community_id: i64,
+        callback_key: &str,
+    ) -> Result<SecretString, SlotError>;
 
     /// `Ok` only when Twitch subscription `twitch_subscription_id` is registered in the ledger
     /// under `community_id` (`Refused("subscription_not_owned")` otherwise).
@@ -487,15 +490,24 @@ impl<S: EventSubSecretSource, A: TwitchAppSource> TwitchDuties<S, A> {
             .map_err(|_| unavailable())?;
         match resp.status {
             200..=299 => {}
-            404 => return Err(ExecError::Slot(SlotError::Refused("subscription_not_found"))),
+            404 => {
+                return Err(ExecError::Slot(SlotError::Refused(
+                    "subscription_not_found",
+                )))
+            }
             _ => return Err(unavailable()),
         }
         let v: Value = serde_json::from_slice(&resp.body).map_err(|_| unavailable())?;
         let sub = v
             .get("data")
             .and_then(Value::as_array)
-            .and_then(|d| d.iter().find(|s| s.get("id").and_then(Value::as_str) == Some(id)))
-            .ok_or(ExecError::Slot(SlotError::Refused("subscription_not_found")))?;
+            .and_then(|d| {
+                d.iter()
+                    .find(|s| s.get("id").and_then(Value::as_str) == Some(id))
+            })
+            .ok_or(ExecError::Slot(SlotError::Refused(
+                "subscription_not_found",
+            )))?;
         let cond = sub.get("condition");
         let names = |k: &str| cond.and_then(|c| c.get(k)).and_then(Value::as_str);
         // Exactly one of the two keys the seven supported types use must be present and equal.
@@ -503,7 +515,9 @@ impl<S: EventSubSecretSource, A: TwitchAppSource> TwitchDuties<S, A> {
         if owner == Some(broadcaster.as_str()) {
             Ok(())
         } else {
-            Err(ExecError::Slot(SlotError::Refused("subscription_not_owned")))
+            Err(ExecError::Slot(SlotError::Refused(
+                "subscription_not_owned",
+            )))
         }
     }
 }
@@ -982,7 +996,11 @@ mod tests {
         assert_eq!(got["app.token"].expose(), "app-tok");
         assert_eq!(got["app.client_id"].expose(), "cid");
         assert_eq!(got["app.broadcaster_id"].expose(), "111");
-        assert_eq!(calls.load(Ordering::SeqCst), 0, "no user credential resolved");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "no user credential resolved"
+        );
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 
@@ -1119,7 +1137,10 @@ mod tests {
         assert!(!p.contains("key-abcdefgh") && !p.contains("callbackKey"));
         let v: Value = serde_json::from_str(&p).unwrap();
         let inner: Value = serde_json::from_str(v["text"].as_str().unwrap()).unwrap();
-        assert_eq!(inner, serde_json::json!({"type":"channel.follow","version":2}));
+        assert_eq!(
+            inner,
+            serde_json::json!({"type":"channel.follow","version":2})
+        );
         for bad in [
             r#"{"type":"channel.follow","version":2}"#,
             r#"{"type":"channel.follow","version":2,"callbackKey":"a/b"}"#,
@@ -1142,8 +1163,8 @@ mod tests {
     #[tokio::test]
     async fn schedule_payloads_strip_the_segment_id_and_delete_takes_nothing_else() {
         let upd = r#"{"segment_id":"ZXhh==","title":"t","duration":60}"#;
-        let p: Value = serde_json::from_str(&payload("schedule.update", Some(upd)).await.unwrap())
-            .unwrap();
+        let p: Value =
+            serde_json::from_str(&payload("schedule.update", Some(upd)).await.unwrap()).unwrap();
         let inner: Value = serde_json::from_str(p["text"].as_str().unwrap()).unwrap();
         assert_eq!(inner, serde_json::json!({"title":"t","duration":60}));
         assert_eq!(
@@ -1173,11 +1194,15 @@ mod tests {
     async fn dynamic_slots_are_host_built_and_refuse_bad_input() {
         let t = r#"{"type":"stream.online","version":1,"callbackKey":"key-abcdefgh"}"#;
         assert_eq!(
-            slot("eventsub.create", t, "TWITCH_EVENTSUB_CALLBACK").await.unwrap(),
+            slot("eventsub.create", t, "TWITCH_EVENTSUB_CALLBACK")
+                .await
+                .unwrap(),
             "https://hooks.example.com/base/eventsub/twitch/webhook/key-abcdefgh"
         );
         assert_eq!(
-            slot("eventsub.create", t, "TWITCH_EVENTSUB_SECRET").await.unwrap(),
+            slot("eventsub.create", t, "TWITCH_EVENTSUB_SECRET")
+                .await
+                .unwrap(),
             "whsec"
         );
         let unknown = r#"{"type":"stream.online","version":1,"callbackKey":"unknown-key-1"}"#;
@@ -1188,16 +1213,26 @@ mod tests {
             ExecError::Slot(SlotError::Refused("secret_unavailable"))
         );
         assert_eq!(
-            slot("schedule.delete", r#"{"segment_id":"ZXhh=="}"#, "TWITCH_SEGMENT_ID")
-                .await
-                .unwrap(),
+            slot(
+                "schedule.delete",
+                r#"{"segment_id":"ZXhh=="}"#,
+                "TWITCH_SEGMENT_ID"
+            )
+            .await
+            .unwrap(),
             "ZXhh=="
         );
-        assert!(slot("schedule.delete", r#"{"segment_id":"a&b"}"#, "TWITCH_SEGMENT_ID")
-            .await
-            .is_err());
+        assert!(slot(
+            "schedule.delete",
+            r#"{"segment_id":"a&b"}"#,
+            "TWITCH_SEGMENT_ID"
+        )
+        .await
+        .is_err());
         assert_eq!(
-            slot("eventsub.create", t, "TWITCH_ANYTHING").await.unwrap_err(),
+            slot("eventsub.create", t, "TWITCH_ANYTHING")
+                .await
+                .unwrap_err(),
             ExecError::HostDutyMissing
         );
     }
@@ -1282,9 +1317,11 @@ mod tests {
             .and(query_param("id", id))
             .and(header("authorization", "Bearer app-tok"))
             .and(header("client-id", "cid"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({"data": [{"id": id, "condition": condition}]}),
-            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"data": [{"id": id, "condition": condition}]}),
+                ),
+            )
             .mount(server)
             .await;
     }
@@ -1310,9 +1347,24 @@ mod tests {
     #[tokio::test]
     async fn delete_is_bound_to_the_communitys_own_broadcaster() {
         let server = MockServer::start().await;
-        mount_sub(&server, "mine", serde_json::json!({"broadcaster_user_id": "111"})).await;
-        mount_sub(&server, "raid", serde_json::json!({"to_broadcaster_user_id": "111"})).await;
-        mount_sub(&server, "theirs", serde_json::json!({"broadcaster_user_id": "999"})).await;
+        mount_sub(
+            &server,
+            "mine",
+            serde_json::json!({"broadcaster_user_id": "111"}),
+        )
+        .await;
+        mount_sub(
+            &server,
+            "raid",
+            serde_json::json!({"to_broadcaster_user_id": "111"}),
+        )
+        .await;
+        mount_sub(
+            &server,
+            "theirs",
+            serde_json::json!({"broadcaster_user_id": "999"}),
+        )
+        .await;
         mount_sub(&server, "nocond", serde_json::json!({})).await;
         let d = app_duties(&server);
         assert!(d.claims("twitch", "eventsub.delete"));
@@ -1332,7 +1384,12 @@ mod tests {
         // regression: broadcaster ids are not unique across communities. `shared` names the
         // SAME broadcaster (111) but is registered to community 9: community 7 is refused by the
         // ledger even though the broadcaster matches.
-        mount_sub(&server, "shared", serde_json::json!({"broadcaster_user_id": "111"})).await;
+        mount_sub(
+            &server,
+            "shared",
+            serde_json::json!({"broadcaster_user_id": "111"}),
+        )
+        .await;
         assert_eq!(
             gate_delete(&d, Some(7), "shared").await.unwrap_err(),
             ExecError::Slot(SlotError::Refused("subscription_not_owned"))

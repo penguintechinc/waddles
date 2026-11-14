@@ -248,6 +248,10 @@ pub async fn ensure_loaded(
     let metrics = stage_metrics::stage_metrics();
     let result = if outcome.is_ok() { "ok" } else { "error" };
     metrics.record_bundle_load(app_id, "load", result, started.elapsed());
+    if outcome.is_ok() {
+        // Seed the live-config cache for this scope (lazy-load still covers a failed seed).
+        hub_client::bundle_config::seed_scope_in_background(tenant_id, community_id, app_id);
+    }
     if let Ok(loaded) = &outcome {
         // The executor's own account of the load (`precompile_ms`, covering
         // fetch + verify + compile on its side) -- the stage cannot see
@@ -2235,6 +2239,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -2311,6 +2316,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -2823,6 +2829,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -2915,6 +2922,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3006,6 +3014,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3100,6 +3109,7 @@ mod tests {
                                 runtime: "runc".to_string(),
                                 verified: false,
                             },
+                            executor_id: None,
                         }),
                     ),
                 )
