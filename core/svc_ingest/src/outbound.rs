@@ -906,6 +906,23 @@ async fn handle_discord_entry<C: DrainControl, X: ActionExecutor, G: ReplayGuard
     if matches!(claim, Err(SenderError::Rejected { .. })) {
         return;
     }
+    // Command-latency canary egress sink: a stamp-verified, replay-claimed `chat.send` that is
+    // EXACTLY the canary's (numeric tenant + numeric community + sentinel channel) is acknowledged
+    // without any platform call -- the synthetic command's "outbound" lands here, never in Discord.
+    // The match is exact on all three, so no real community's send can be swallowed.
+    if claim.is_ok() && crate::canary::sink_matches(&entry) {
+        tracing::info!(
+            platform = "discord",
+            op,
+            "canary sink: acknowledged without a platform call"
+        );
+        if let Some(op_id) = &entry.op_id {
+            if let Err(err) = ctl.post_ack(op_id, &ack_payload(&Ok(None))).await {
+                tracing::error!(platform = "discord", op, error = %err, "canary sink: failed to post the op result; the canary will time out");
+            }
+        }
+        return;
+    }
     // The stamp gate above ran first; the executor (when configured) then
     // re-checks the pin, verifies the connector's template and sends through
     // the guarded client only. A refused/failed op is acked and dropped

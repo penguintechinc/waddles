@@ -63,6 +63,7 @@
 //! dependency, unlike `svc_process`/`svc_action`.
 
 pub mod active_context;
+pub mod canary;
 pub mod commands_reconcile;
 pub mod config;
 pub mod connector;
@@ -323,6 +324,11 @@ where
     crypto::ensure_installed();
 
     let (_telemetry_guard, prom_registry) = telemetry::init(SERVICE_NAME);
+    // Command-latency kill switch (`waddles.disable-command-latency-telemetry`): seeded from the ENV
+    // baseline here, kept live by the refresher once the license client exists below. The
+    // instruments are created now that the global meter provider is installed.
+    command_latency::switch::init_from_env();
+    let _ = command_latency::metrics::metrics();
 
     tracing::info!(
         http_port = config.cli.http_port,
@@ -373,6 +379,13 @@ where
     let mut connector_ready: Option<Arc<dyn connector_runtime::RuntimeReady>> = None;
     let license_client = license::build_license_client();
     license::set_shared_license_client(license_client.clone());
+    {
+        let client = license_client.clone();
+        command_latency::switch::spawn_refresher(move || {
+            let client = client.clone();
+            async move { canary::kill_switch_wanted(client.as_ref()).await }
+        });
+    }
     // Egress detokenizer: installed BEFORE any outbound drain starts. The drain is the only
     // platform egress; it substitutes `{user:<token>}` right before each send.
     egress::install(egress::Egress::from_cli(
@@ -404,6 +417,15 @@ where
             dek_provider.clone(),
         )
         .await?;
+
+        // Command-latency synthetic canary (flag `waddles.command-latency-canary`, default OFF):
+        // the machinery is built lazily on the first enabled tick.
+        canary::spawn(
+            config.clone(),
+            ingest_metrics.clone(),
+            dek_provider.clone(),
+            license_client.clone(),
+        );
 
         // Connector service bundle runtime (spec 2026-11-05 PR-E): only when an
         // `CONNECTOR_<P>_ENABLED` baseline is ON. It owns the single executor

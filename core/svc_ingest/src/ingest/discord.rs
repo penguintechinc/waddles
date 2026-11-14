@@ -627,6 +627,9 @@ async fn run_loop<C, A, M, P, Dk>(
                 }
                 recv = channel.next_chat_message() => match recv {
                     Ok(Some(msg)) => {
+                        // Command-latency first door: the gateway frame has just been received and
+                        // decoded. Taken before the permissions lookup so that leg is measured too.
+                        let first_door_ms = command_latency::stamp::now_ms();
                         if !stable {
                             stable = true;
                             backoff.reset();
@@ -664,18 +667,28 @@ async fn run_loop<C, A, M, P, Dk>(
                         {
                             continue;
                         }
-                        if let Err(err) = publish_event(
-                            appender,
-                            metrics,
-                            keyring,
-                            active_kid,
-                            scope,
-                            &sid,
-                            &workstream_id,
-                            None,
-                            event,
-                            dek_provider,
-                            identity_metrics,
+                        let receive_span = tracing::info_span!(
+                            "ingest.receive",
+                            platform = "discord",
+                            pre_publish_ms = command_latency::stamp::now_ms().saturating_sub(first_door_ms),
+                            "otel.kind" = "consumer",
+                        );
+                        if let Err(err) = command_latency::first_door::with_first_door(
+                            first_door_ms,
+                            command_latency::Door::Gateway,
+                            tracing::Instrument::instrument(publish_event(
+                                appender,
+                                metrics,
+                                keyring,
+                                active_kid,
+                                scope,
+                                &sid,
+                                &workstream_id,
+                                None,
+                                event,
+                                dek_provider,
+                                identity_metrics,
+                            ), receive_span),
                         )
                         .await
                         {
