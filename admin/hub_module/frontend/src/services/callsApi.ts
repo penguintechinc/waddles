@@ -127,9 +127,18 @@ export interface RaisedHand {
   acknowledgedBy: string | null;
 }
 
-/** What `join` returns. The room token is only for a media client; it is never rendered. */
+/** STUN/TURN entry from the join response (the server sends none yet; TURN is planned for v3.3.x). */
+export interface IceServer {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
+}
+
+/** What `join` returns. The room token is only for the media client (`CallSession`); it is never rendered or stored. */
 export interface JoinedRoom {
   token: string;
+  /** Optional in the API; defaults to none (host candidates only). */
+  iceServers: IceServer[];
   url: string;
   whipUrl: string;
   whepUrl: string;
@@ -192,6 +201,24 @@ function parseHand(raw: unknown, what = 'raised_hands[]'): RaisedHand {
     acknowledgedAt: readOptNumber(row, 'acknowledged_at'),
     acknowledgedBy: readOptString(row, 'acknowledged_by'),
   };
+}
+
+/** `ice_servers` is optional; a malformed entry is an error (a silently dropped TURN server would look like a network bug). */
+export function parseIceServers(raw: unknown): IceServer[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new WireShapeError('join', '"ice_servers" is not a list');
+  return raw.map((entry) => {
+    const row = expectRecord(entry, 'ice_servers[]');
+    const urls = row['urls'];
+    const valid = typeof urls === 'string' || (Array.isArray(urls) && urls.length > 0 && urls.every((u) => typeof u === 'string'));
+    if (!valid) throw new WireShapeError('ice_servers[]', '"urls" is not a string or list of strings');
+    const server: IceServer = { urls: urls as string | string[] };
+    const username = readOptString(row, 'username');
+    const credential = readOptString(row, 'credential');
+    if (username !== null) server.username = username;
+    if (credential !== null) server.credential = credential;
+    return server;
+  });
 }
 
 function parseRooms(body: unknown): CallRoom[] {
@@ -341,6 +368,7 @@ export function joinRoom(communityId: number, roomId: string): Promise<JoinedRoo
     const body = expectRecord((await apiClient.post<unknown>(`/api/v1/community/${communityId}/interact/voice/rooms/${id}/join`)).data, 'join');
     return {
       token: readString(body, 'token', 'join'),
+      iceServers: parseIceServers(body['ice_servers']),
       url: readString(body, 'url', 'join'),
       whipUrl: readString(body, 'whip_url', 'join'),
       whepUrl: readString(body, 'whep_url', 'join'),
@@ -374,6 +402,61 @@ export function lowerHand(communityId: number, roomId: string): Promise<boolean>
     const id = checkedRoomId(roomId);
     const { data } = await apiClient.post<unknown>(`/api/v1/community/${communityId}/interact/voice/rooms/${id}/lower-hand`);
     return readBool(expectRecord(data, 'lower hand'), 'lowered');
+  });
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// PROVISIONAL routes: agreed with the hub-api owner for PR #1326's follow-up (T4) but NOT yet in `openapi/v1.yaml`.
+// Shapes below follow that agreement; `callsApi.openapi.contract.test.ts` validates each one against the spec the
+// moment it appears there, and `callsApi.provisional.test.ts` pins the agreed shapes until then. When T4 lands,
+// check the spec, move these into the main contract table and delete the "provisional" wording.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** The community's persistent default room ("Town Hall"). PROVISIONAL shape: `{ room_id, label, participant_count }`. */
+export interface TownHall {
+  roomId: string;
+  label: string | null;
+  participantCount: number;
+}
+
+function parseTownHall(raw: unknown): TownHall {
+  const body = expectRecord(raw, 'town hall');
+  return {
+    roomId: readString(body, 'room_id', 'town hall'),
+    label: readOptString(body, 'label'),
+    participantCount: readNumber(body, 'participant_count', 'town hall'),
+  };
+}
+
+/** `GET /api/v1/communities/:id/town-hall` (PROVISIONAL): the community's Town Hall; 404 when it has not been opened. */
+export function fetchTownHall(communityId: number): Promise<TownHall> {
+  return run(async () => parseTownHall((await apiClient.get<unknown>(`/api/v1/communities/${communityId}/town-hall`)).data));
+}
+
+/** `POST /api/v1/communities/:id/town-hall` (PROVISIONAL, idempotent "ensure"): opens the Town Hall if needed. */
+export function ensureTownHall(communityId: number): Promise<TownHall> {
+  return run(async () => parseTownHall((await apiClient.post<unknown>(`/api/v1/communities/${communityId}/town-hall`)).data));
+}
+
+/** `GET /community/.../voice/rooms/:id/hands/mine` (PROVISIONAL): the caller's own hand and its acknowledgement, or null. */
+export function fetchMyHand(communityId: number, roomId: string): Promise<RaisedHand | null> {
+  return run(async () => {
+    const id = checkedRoomId(roomId);
+    const { data } = await apiClient.get<unknown>(`/api/v1/community/${communityId}/interact/voice/rooms/${id}/hands/mine`);
+    const hand = expectRecord(data, 'my hand')['hand'];
+    return hand === null || hand === undefined ? null : parseHand(hand, 'hand');
+  });
+}
+
+/** `GET /community/.../voice/rooms/:id/participants` (PROVISIONAL member mirror of the admin route): names resolved by hub-api. */
+export function fetchMemberParticipants(communityId: number, roomId: string): Promise<CallParticipantList> {
+  return run(async () => {
+    const id = checkedRoomId(roomId);
+    const body = expectRecord((await apiClient.get<unknown>(`/api/v1/community/${communityId}/interact/voice/rooms/${id}/participants`)).data, 'participants');
+    return {
+      participants: readArray(body, 'participants', 'participants').map(parseParticipant),
+      locked: readBool(body, 'locked'),
+    };
   });
 }
 

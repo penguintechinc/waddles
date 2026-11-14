@@ -185,6 +185,26 @@ describe('DashboardLayout — landmarks and keyboard access', () => {
   });
 });
 
+describe('DashboardLayout — Town Hall link', () => {
+  it('links the community navigation to the Town Hall route that App.jsx serves', () => {
+    mockAuth.isCommunityAdmin.mockReturnValue(false);
+    capturedProps = {};
+    render(
+      <MemoryRouter initialEntries={['/dashboard/community/7']}>
+        <Routes>
+          <Route path="/dashboard/community/:id/*" element={<DashboardLayout />} />
+          <Route path="/community/:communityId/town-hall" element={<div data-testid="town-hall-page" />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const community = capturedProps.categories.find((c) => c.key === 'community');
+    const townHall = community.items.find((i) => i.name === 'Town Hall');
+    expect(townHall).toBeTruthy();
+    act(() => capturedProps.onNavigate(townHall.href));
+    expect(screen.getByTestId('town-hall-page')).toBeTruthy();
+  });
+});
+
 describe('DashboardLayout — SidebarMenu props', () => {
   beforeEach(() => {
     mockAuth.isCommunityAdmin.mockReturnValue(false);

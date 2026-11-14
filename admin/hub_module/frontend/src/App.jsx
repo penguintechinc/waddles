@@ -100,6 +100,7 @@ const AdminCalendarScanner = lazy(() => import('./pages/admin/AdminCalendarScann
 const AdminCalendarAttendance = lazy(() => import('./pages/admin/AdminCalendarAttendance'));
 const AdminLiveStreams = lazy(() => import('./pages/admin/AdminLiveStreams'));
 const AdminCommunityCalls = lazy(() => import('./pages/admin/AdminCommunityCalls'));
+const TownHall = lazy(() => import('./pages/community/TownHall'));
 const AdminPolls = lazy(() => import('./pages/admin/AdminPolls'));
 const AdminForms = lazy(() => import('./pages/admin/AdminForms'));
 const AdminSupportDashboard = lazy(() => import('./pages/admin/AdminSupportDashboard'));
@@ -288,6 +289,7 @@ function App() {
         <Route path="/community/:communityId/inventory" element={<InventoryBrowse />} />
         <Route path="/community/:communityId/inventory/my-items" element={<InventoryMyItems />} />
         <Route path="/community/:communityId/game-servers" element={<GameServers />} />
+        <Route path="/community/:communityId/town-hall" element={<TownHall />} />
         <Route path="/community/:communityId/interact" element={<CommunityInteraction />} />
         <Route path="/community/:communityId/interact/:channelId" element={<CommunityInteraction />} />
 

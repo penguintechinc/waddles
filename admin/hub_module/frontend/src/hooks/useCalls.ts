@@ -10,7 +10,11 @@ import {
   acknowledgeHand,
   createRoom,
   deleteRoom,
+  ensureTownHall,
+  fetchMemberParticipants,
+  fetchMyHand,
   fetchParticipants,
+  fetchTownHall,
   fetchRaisedHands,
   fetchRooms,
   joinRoom,
@@ -29,6 +33,7 @@ import {
   type CallsScope,
   type JoinedRoom,
   type RaisedHand,
+  type TownHall,
 } from '../services/callsApi';
 
 /** How often the moderator view refreshes participants and the hands queue (ms). */
@@ -39,6 +44,9 @@ export const callKeys = {
   rooms: (scope: CallsScope, communityId: number) => ['calls', scope, communityId, 'rooms'] as const,
   participants: (communityId: number, roomId: string) => ['calls', 'admin', communityId, 'rooms', roomId, 'participants'] as const,
   hands: (communityId: number, roomId: string) => ['calls', 'admin', communityId, 'rooms', roomId, 'hands'] as const,
+  townHall: (communityId: number) => ['calls', 'member', communityId, 'town-hall'] as const,
+  memberParticipants: (communityId: number, roomId: string) => ['calls', 'member', communityId, 'rooms', roomId, 'participants'] as const,
+  myHand: (communityId: number, roomId: string) => ['calls', 'member', communityId, 'rooms', roomId, 'my-hand'] as const,
 };
 
 /** Stops polling once a read has failed, so an error state stays put until the user retries. */
@@ -173,10 +181,54 @@ export function useLeaveRoom(communityId: number) {
 
 /** Raise the member's own hand; resolves to the queued hand. */
 export function useRaiseHand(communityId: number) {
-  return useCallsMutation((roomId: string) => raiseHand(communityId, roomId), []);
+  return useCallsMutation((roomId: string) => raiseHand(communityId, roomId), [['calls', 'member', communityId]]);
 }
 
 /** Lower the member's own hand; resolves to whether a hand was actually raised. */
 export function useLowerHand(communityId: number) {
-  return useCallsMutation((roomId: string) => lowerHand(communityId, roomId), []);
+  return useCallsMutation((roomId: string) => lowerHand(communityId, roomId), [['calls', 'member', communityId]]);
+}
+
+/** The community's Town Hall room (PROVISIONAL route, see `callsApi.ts`); a 404 means it has not been opened yet. */
+export function useTownHall(communityId: number): UseQueryResult<TownHall, CallsApiError> {
+  return useQuery<TownHall, CallsApiError>({
+    queryKey: callKeys.townHall(communityId),
+    queryFn: () => fetchTownHall(communityId),
+    retry: false,
+  });
+}
+
+/** Open (ensure) the Town Hall, then refresh it. */
+export function useEnsureTownHall(communityId: number) {
+  return useCallsMutation(() => ensureTownHall(communityId), [callKeys.townHall(communityId)]);
+}
+
+/**
+ * Participants of a room for the call view, polled: the moderator (admin) route for moderators, the member route
+ * (PROVISIONAL) for everyone else. `enabled` is false until the call is connected.
+ */
+export function useCallParticipants(
+  communityId: number,
+  roomId: string,
+  moderator: boolean,
+  enabled: boolean,
+): UseQueryResult<CallParticipantList, CallsApiError> {
+  return useQuery<CallParticipantList, CallsApiError>({
+    queryKey: moderator ? callKeys.participants(communityId, roomId) : callKeys.memberParticipants(communityId, roomId),
+    queryFn: () => (moderator ? fetchParticipants(communityId, roomId) : fetchMemberParticipants(communityId, roomId)),
+    enabled,
+    retry: false,
+    refetchInterval: (query) => pollUnlessFailed(query.state),
+  });
+}
+
+/** The member's own hand and whether a moderator acknowledged it (PROVISIONAL route), polled while connected. */
+export function useMyHand(communityId: number, roomId: string, enabled: boolean): UseQueryResult<RaisedHand | null, CallsApiError> {
+  return useQuery<RaisedHand | null, CallsApiError>({
+    queryKey: callKeys.myHand(communityId, roomId),
+    queryFn: () => fetchMyHand(communityId, roomId),
+    enabled,
+    retry: false,
+    refetchInterval: (query) => pollUnlessFailed(query.state),
+  });
 }

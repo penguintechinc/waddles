@@ -16,7 +16,7 @@ import { ParticipantList } from './ParticipantList';
 
 export interface RoomDetailProps {
   communityId: number;
-  room: CallRoom;
+  room: Pick<CallRoom, 'roomId' | 'label'>;
   onNotice: (text: string) => void;
   onActionError: (error: CallsApiError) => void;
 }

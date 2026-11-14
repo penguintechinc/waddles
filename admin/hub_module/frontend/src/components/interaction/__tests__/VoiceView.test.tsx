@@ -1,47 +1,61 @@
 /**
- * Member voice view: rooms by label, join, raise/lower hand with state and live announcements, an honest
- * "media join coming" notice (no fabricated participants, no LiveKit claim), member-only controls, and the
- * flag-off / retryable-503 / not-found states.
+ * Member voice channel: rooms by label, open one into the real call view (lobby -> join -> leave), role-based controls
+ * (moderators vs members), ad-hoc room creation, and the flag-off / retryable-503 / error states. The media stack itself
+ * is covered by CallRoomView / media tests; here it runs on the same fakes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import VoiceView from '../VoiceView';
 import { createTestQueryClient } from '../../../test/renderWithProviders';
-import { ADA, OTHER_ROOM_ID, ROOM_ID, envelope, handWire, httpError, roomWire, serve } from '../../../test/callsFixtures';
+import { ADA, OTHER_ROOM_ID, ROOM_ID, envelope, httpError, participantWire, roomWire, serve } from '../../../test/callsFixtures';
+import { answerResponse, fakeDevices, fakeMediaDeps, resetFakeRtc } from '../../../test/fakeRtc';
+
+const auth = vi.hoisted(() => ({ admin: false }));
+vi.mock('../../../contexts/AuthContext', () => ({ useAuth: () => ({ isCommunityAdmin: () => auth.admin }) }));
 
 const BASE = '/api/v1/community/7/interact/voice/rooms';
+const SELF = '11111111-1111-4111-8111-111111111111';
 
 const roomsOk = { success: true, rooms: [roomWire(), roomWire({ room_id: OTHER_ROOM_ID, label: 'Late night', locked: true, publisher_ids: [], subscriber_count: 1 })] };
 const joinOk = {
   success: true,
   token: 'room-token-secret',
-  url: 'https://media.example/whip',
-  whip_url: 'https://media.example/whip/r',
-  whep_url: 'https://media.example/whep/r',
+  url: 'https://media.example/rtc/rooms/r',
+  whip_url: 'https://media.example/rtc/rooms/r/whip',
+  whep_url: 'https://media.example/rtc/rooms/r/whep',
   token_id: 'tok-1',
-  participant_id: ADA,
+  participant_id: SELF,
   expires_at: 1760003600,
+};
+const roster = { success: true, locked: false, participants: [participantWire(SELF, 'Me Myself'), participantWire(ADA, 'Ada Lovelace')] };
+
+const callRoutes = {
+  [`GET ${BASE}`]: roomsOk,
+  [`POST ${BASE}/${ROOM_ID}/join`]: joinOk,
+  [`POST ${BASE}/${ROOM_ID}/leave`]: { success: true, message: 'Left room' },
+  [`GET ${BASE}/${ROOM_ID}/participants`]: roster,
+  [`GET ${BASE}/${ROOM_ID}/hands/mine`]: { success: true, hand: null },
 };
 
 function renderView(channel: { communityId: number | string; name?: string; allowAdHocVoice?: boolean } = { communityId: '7', name: 'Voice lounge' }) {
+  const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => (init.method === 'DELETE' ? new Response(null, { status: 204 }) : answerResponse('/rtc/rooms/r/sessions/s')));
   return render(
     <QueryClientProvider client={createTestQueryClient()}>
-      <VoiceView channel={channel} />
+      <VoiceView channel={channel} overrides={{ devices: fakeDevices(), media: fakeMediaDeps(fetchImpl as unknown as ReturnType<typeof vi.fn>) }} />
     </QueryClientProvider>,
   );
 }
 
-async function joinTownHall() {
-  fireEvent.click(await screen.findByRole('button', { name: 'Join Town hall' }));
-  return screen.findByTestId('voice-in-call');
-}
-
 describe('VoiceView', () => {
-  beforeEach(() => vi.spyOn(console, 'error').mockImplementation(() => {}));
+  beforeEach(() => {
+    resetFakeRtc();
+    auth.admin = false;
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
   afterEach(() => vi.restoreAllMocks());
 
-  it('lists rooms by label with counts, a locked badge, and never an id', async () => {
+  it('lists rooms by label with counts, a locked badge (not openable), and never an id', async () => {
     serve({ [`GET ${BASE}`]: roomsOk });
     const { container } = renderView();
     expect(await screen.findByText('Town hall')).toBeInTheDocument();
@@ -49,105 +63,41 @@ describe('VoiceView', () => {
     expect(screen.getByText('3 participants')).toBeInTheDocument();
     expect(screen.getByText('1 participant')).toBeInTheDocument();
     expect(screen.getByText('Locked')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Join Late night' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Open Late night' })).toBeDisabled();
     expect(container.textContent).not.toContain(ROOM_ID);
   });
 
-  it('joins by UUID and shows the honest media notice, without fake participants or the token', async () => {
-    const { post } = serve({ [`GET ${BASE}`]: roomsOk, [`POST ${BASE}/${ROOM_ID}/join`]: joinOk });
+  it('opens a room into the call view, joins with real media (no placeholder), and leaves back to the list', async () => {
+    const { post } = serve(callRoutes);
     const { container } = renderView();
-    const call = await joinTownHall();
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Town hall' }));
+    expect(await screen.findByTestId('call-lobby')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Join with microphone' }));
+    const connected = await screen.findByTestId('call-connected');
     expect(post).toHaveBeenCalledWith(`${BASE}/${ROOM_ID}/join`);
-    const notice = within(call).getByTestId('media-join-coming');
-    expect(notice).toHaveTextContent('Audio and video are not available yet');
-    expect(notice).toHaveTextContent('no audio or video is sent or received');
-    expect(container.textContent).not.toMatch(/LiveKit/i);
+    expect(container.textContent).not.toMatch(/LiveKit|not available yet|media join is coming/i);
     expect(container.textContent).not.toContain('room-token-secret');
-    expect(container.textContent).not.toMatch(/Participant \d|You \(local\)/);
-    expect(within(call).getByText('Town hall')).toBeInTheDocument();
-  });
+    expect(within(connected).getByTestId('my-hand')).toBeInTheDocument();
 
-  it('gives members raise/lower hand with state and announcements, and no moderator controls', async () => {
-    const hand = handWire(ADA, 'Ada Lovelace', 1760000300);
-    const { post } = serve({
-      [`GET ${BASE}`]: roomsOk,
-      [`POST ${BASE}/${ROOM_ID}/join`]: joinOk,
-      [`POST ${BASE}/${ROOM_ID}/raise-hand`]: { success: true, hand },
-      [`POST ${BASE}/${ROOM_ID}/lower-hand`]: { success: true, lowered: true },
-    });
-    renderView();
-    const call = await joinTownHall();
-    expect(within(call).getByTestId('hand-state')).toHaveTextContent('Your hand is down.');
-
-    const raise = within(call).getByRole('button', { name: 'Raise hand' });
-    expect(raise).toHaveAttribute('aria-pressed', 'false');
-    fireEvent.click(raise);
-    const lower = await within(call).findByRole('button', { name: 'Lower hand' });
-    expect(lower).toHaveAttribute('aria-pressed', 'true');
-    expect(post).toHaveBeenCalledWith(`${BASE}/${ROOM_ID}/raise-hand`);
-    expect(within(call).getByTestId('hand-state')).toHaveTextContent('Your hand is raised.');
-    expect(within(call).getByTestId('voice-live-region')).toHaveTextContent('You raised your hand.');
-
-    fireEvent.click(lower);
-    await within(call).findByRole('button', { name: 'Raise hand' });
-    expect(within(call).getByTestId('voice-live-region')).toHaveTextContent('You lowered your hand.');
-    expect(within(call).getByTestId('hand-state')).toHaveTextContent('Your hand is down.');
-
-    for (const moderatorControl of [/Mute all/, /Clear all hands/, /Acknowledge/, /Remove .* from the room/, /^Kick/]) {
-      expect(screen.queryByRole('button', { name: moderatorControl })).not.toBeInTheDocument();
-    }
-  });
-
-  it('keeps the hand down and shows the server message when raising fails', async () => {
-    serve({
-      [`GET ${BASE}`]: roomsOk,
-      [`POST ${BASE}/${ROOM_ID}/join`]: joinOk,
-      [`POST ${BASE}/${ROOM_ID}/raise-hand`]: httpError(429, envelope('RATE_LIMITED', 'Too many hands, slow down')),
-    });
-    renderView();
-    const call = await joinTownHall();
-    fireEvent.click(within(call).getByRole('button', { name: 'Raise hand' }));
-    expect(await within(call).findByText('Too many hands, slow down')).toBeInTheDocument();
-    expect(within(call).getByTestId('hand-state')).toHaveTextContent('Your hand is down.');
-    expect(within(call).getByRole('button', { name: 'Raise hand' })).toBeInTheDocument();
-  });
-
-  it('leaves the room and returns to the list; a failed leave stays in the call with an error', async () => {
-    let failLeave = true;
-    const { post } = serve({
-      [`GET ${BASE}`]: roomsOk,
-      [`POST ${BASE}/${ROOM_ID}/join`]: joinOk,
-      [`POST ${BASE}/${ROOM_ID}/leave`]: () => (failLeave ? httpError(503, envelope('STREAMING_UNAVAILABLE', 'Cannot leave right now', { retryable: true })) : { success: true, message: 'Left room' }),
-    });
-    renderView();
-    const call = await joinTownHall();
-    fireEvent.click(within(call).getByRole('button', { name: 'Leave room' }));
-    expect(await within(call).findByText('Cannot leave right now')).toBeInTheDocument();
-    expect(within(call).getByText(/You can try again\./)).toBeInTheDocument();
-    failLeave = false;
-    fireEvent.click(within(call).getByRole('button', { name: 'Leave room' }));
-    await waitFor(() => expect(screen.queryByTestId('voice-in-call')).not.toBeInTheDocument());
-    expect(post).toHaveBeenCalledWith(`${BASE}/${ROOM_ID}/leave`);
+    fireEvent.click(within(connected).getByRole('button', { name: 'Leave room' }));
     expect(await screen.findByText('Late night')).toBeInTheDocument();
+    expect(post).toHaveBeenCalledWith(`${BASE}/${ROOM_ID}/leave`);
+    expect(screen.queryByTestId('call-room')).not.toBeInTheDocument();
   });
 
-  it('shows why joining failed (room gone) and stays on the list', async () => {
-    serve({ [`GET ${BASE}`]: roomsOk, [`POST ${BASE}/${ROOM_ID}/join`]: httpError(404, envelope('ROOM_NOT_FOUND', 'Room not found')) });
+  it('gives community admins the moderator controls instead of the member hand toggle', async () => {
+    auth.admin = true;
+    serve({
+      ...callRoutes,
+      [`GET /api/v1/admin/7/calls/rooms/${ROOM_ID}/participants`]: roster,
+      [`GET /api/v1/admin/7/calls/rooms/${ROOM_ID}/raised-hands`]: { success: true, count: 0, raised_hands: [] },
+    });
     renderView();
-    fireEvent.click(await screen.findByRole('button', { name: 'Join Town hall' }));
-    const banner = await screen.findByText('Room not found');
-    expect(banner.closest('[role="alert"]')).toHaveTextContent('That room no longer exists');
-    expect(screen.queryByTestId('voice-in-call')).not.toBeInTheDocument();
-  });
-
-  it('creates an ad-hoc room with room_name when the channel allows it', async () => {
-    const { post } = serve({ [`GET ${BASE}`]: roomsOk, [`POST ${BASE}`]: roomWire() });
-    renderView({ communityId: 7, name: 'Voice lounge', allowAdHocVoice: true });
-    fireEvent.click(await screen.findByRole('button', { name: 'Create room' }));
-    fireEvent.change(screen.getByLabelText(/Room name/), { target: { value: 'hangout' } });
-    fireEvent.click(within(screen.getByRole('region', { name: 'Create a room' })).getByRole('button', { name: 'Create room' }));
-    await waitFor(() => expect(post).toHaveBeenCalledWith(BASE, { room_name: 'hangout' }));
-    await waitFor(() => expect(screen.queryByRole('region', { name: 'Create a room' })).not.toBeInTheDocument());
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Town hall' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Join with microphone' }));
+    const connected = await screen.findByTestId('call-connected');
+    expect(await within(connected).findByRole('button', { name: 'Mute all' })).toBeInTheDocument();
+    expect(within(connected).queryByTestId('my-hand')).not.toBeInTheDocument();
   });
 
   it('refreshes the list on demand and cancels the create form', async () => {
@@ -161,7 +111,17 @@ describe('VoiceView', () => {
     expect(screen.queryByRole('region', { name: 'Create a room' })).not.toBeInTheDocument();
   });
 
-  it('shows the server message when creating a room fails, and keeps the form open', async () => {
+  it('creates an ad-hoc room with room_name when the channel allows it', async () => {
+    const { post } = serve({ [`GET ${BASE}`]: roomsOk, [`POST ${BASE}`]: roomWire() });
+    renderView({ communityId: 7, name: 'Voice lounge', allowAdHocVoice: true });
+    fireEvent.click(await screen.findByRole('button', { name: 'Create room' }));
+    fireEvent.change(screen.getByLabelText(/Room name/), { target: { value: 'hangout' } });
+    fireEvent.click(within(screen.getByRole('region', { name: 'Create a room' })).getByRole('button', { name: 'Create room' }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith(BASE, { room_name: 'hangout' }));
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Create a room' })).not.toBeInTheDocument());
+  });
+
+  it('shows the server message when creating a room fails, keeps the form open, and dismisses the banner', async () => {
     serve({ [`GET ${BASE}`]: roomsOk, [`POST ${BASE}`]: httpError(429, envelope('RATE_LIMITED', 'Room limit reached')) });
     renderView({ communityId: 7, allowAdHocVoice: true });
     fireEvent.click(await screen.findByRole('button', { name: 'Create room' }));
@@ -173,45 +133,12 @@ describe('VoiceView', () => {
     expect(screen.queryByText('Room limit reached')).not.toBeInTheDocument();
   });
 
-  it('shows an error when lowering the hand fails and keeps it raised', async () => {
-    serve({
-      [`GET ${BASE}`]: roomsOk,
-      [`POST ${BASE}/${ROOM_ID}/join`]: joinOk,
-      [`POST ${BASE}/${ROOM_ID}/raise-hand`]: { success: true, hand: handWire(ADA, 'Ada Lovelace', 1760000300) },
-      [`POST ${BASE}/${ROOM_ID}/lower-hand`]: httpError(503, envelope('STREAMING_UNAVAILABLE', 'Cannot lower right now', { retryable: true })),
-    });
-    renderView();
-    const call = await joinTownHall();
-    fireEvent.click(within(call).getByRole('button', { name: 'Raise hand' }));
-    fireEvent.click(await within(call).findByRole('button', { name: 'Lower hand' }));
-    expect(await within(call).findByText('Cannot lower right now')).toBeInTheDocument();
-    expect(within(call).getByTestId('hand-state')).toHaveTextContent('Your hand is raised.');
-  });
-
-  it('reports a lower-hand that found no raised hand (moderator already cleared it)', async () => {
-    serve({
-      [`GET ${BASE}`]: roomsOk,
-      [`POST ${BASE}/${ROOM_ID}/join`]: joinOk,
-      [`POST ${BASE}/${ROOM_ID}/raise-hand`]: { success: true, hand: handWire(ADA, 'Ada Lovelace', 1760000300) },
-      [`POST ${BASE}/${ROOM_ID}/lower-hand`]: { success: true, lowered: false },
-    });
-    renderView();
-    const call = await joinTownHall();
-    fireEvent.click(within(call).getByRole('button', { name: 'Raise hand' }));
-    fireEvent.click(await within(call).findByRole('button', { name: 'Lower hand' }));
-    await within(call).findByRole('button', { name: 'Raise hand' });
-    expect(within(call).getByTestId('voice-live-region')).toHaveTextContent('Your hand was already lowered.');
-  });
-
-  it('hides room creation when the channel does not allow ad-hoc rooms', async () => {
-    serve({ [`GET ${BASE}`]: roomsOk });
-    renderView();
-    await screen.findByText('Town hall');
-    expect(screen.queryByRole('button', { name: 'Create room' })).not.toBeInTheDocument();
-  });
-
-  it('explains an empty room list differently by channel setting', async () => {
+  it('hides room creation when the channel does not allow ad-hoc rooms, and explains an empty list per setting', async () => {
     serve({ [`GET ${BASE}`]: { success: true, rooms: [] } });
+    const { unmount } = renderView();
+    expect(await screen.findByTestId('voice-no-rooms')).toHaveTextContent('A moderator can open a room for the community.');
+    expect(screen.queryByRole('button', { name: 'Create room' })).not.toBeInTheDocument();
+    unmount();
     renderView({ communityId: 7, allowAdHocVoice: true });
     expect(await screen.findByTestId('voice-no-rooms')).toHaveTextContent('Create a room to start a conversation.');
   });

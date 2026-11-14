@@ -12,6 +12,8 @@ export interface AuthView {
   username: string | null;
   isAuthenticated: boolean;
   isSuperAdmin: boolean;
+  /** Whether the caller administers the given community (false when the context cannot say). */
+  isCommunityAdmin: (communityId: number) => boolean;
   /** Re-fetches `/auth/me` into the context (skipped by the context if fresh). */
   refreshUser: () => Promise<void>;
 }
@@ -28,6 +30,12 @@ async function callRefresh(refresh: unknown): Promise<void> {
   if (typeof refresh === 'function') await Promise.resolve(Reflect.apply(refresh, undefined, []));
 }
 
+/** Wraps the context's `isCommunityAdmin(communityId)` when it is a function; "not an admin" otherwise. */
+function narrowCommunityAdmin(fn: unknown): (communityId: number) => boolean {
+  if (typeof fn !== 'function') return () => false;
+  return (communityId) => Reflect.apply(fn, undefined, [communityId]) === true;
+}
+
 /** Narrows an unknown context value into an `AuthView`. Exported for tests. */
 export function toAuthView(raw: unknown): AuthView {
   const record: WireRecord = isRecord(raw) ? raw : {};
@@ -35,6 +43,7 @@ export function toAuthView(raw: unknown): AuthView {
     username: readUsername(record),
     isAuthenticated: record['isAuthenticated'] === true,
     isSuperAdmin: record['isSuperAdmin'] === true,
+    isCommunityAdmin: narrowCommunityAdmin(record['isCommunityAdmin']),
     refreshUser: () => callRefresh(record['refreshUser']),
   };
 }
