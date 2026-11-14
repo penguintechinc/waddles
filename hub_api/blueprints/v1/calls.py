@@ -7,20 +7,32 @@ Go RTC service it once proxied was folded into Rust `svc-streaming`
 caller, calls one RPC, and reshapes the result into hub-api's own `{success, ...}` envelope.
 
 Room identity: the `<room_name>` path segment is the room's UUID `room_id` (returned by
-create/list); the caller-supplied name on create is stored as the room's `label`.
-Participants are UUIDs derived (uuid5) from tenant + community + user id -- no usernames or
-raw user ids cross to svc-streaming. Tenant and community come from the verified JWT /
-membership checks, never from a request body.
+create/list; legacy names are not accepted); the caller-supplied name on create is stored as
+the room's `label`, which list/get return for display.
 
-Raised-hand queues (`raised-hands`, `acknowledge-hand`) have no svc-streaming equivalent
-(that state lives in the `rooms` app bundle's kv) and answer an explicit 501 -- never an
-empty success.
+Participants are UUID-only toward svc-streaming: the participant/actor id is the caller's
+`hub_users.uuid` (`services/call_participants.py`), the same identity the `rooms` app bundle
+resolves, so REST and chat moderation target the same person. hub-api -- the PII boundary --
+resolves display names itself (members of the asked community only; anyone else renders as
+"guest") and never sends a name downstream or into a log. Tenant and community come from the
+verified JWT / membership checks, never from a request body; a room addressed through the
+wrong community is a 404.
+
+Every operation (all routes below) is behind the PostHog flag `waddles.streaming.rtc`
+(default OFF; OFF answers HTTP 402 with the standard licensed-feature error body). The flag
+is checked after the membership/admin check, so a non-member learns nothing about the plan.
+
+Failures are never masked: an upstream error maps to an explicit status with the standard
+error envelope (404 unknown room, 403 refused, 429 limit, 503 service unavailable with
+`retryable`), logged at ERROR by the client and counted in a metric.
 
 Two route groups, TWO DIFFERENT authz levels ported from two different Node routers mounting
 the SAME controller functions:
 
   `calls_admin_bp` (`/api/v1/admin/:communityId/calls/*`) -- `community_access.
-  require_community_admin()`; the downstream actor role is ADMIN.
+  require_community_admin()`; the downstream actor role is ADMIN. Moderation routes (lock,
+  kick, mute, hands list/acknowledge) authorise by scope `streaming.calls:admin`, never role
+  names.
 
   `member_voice_bp` (`/api/v1/community/:id/interact/voice/*`) -- Node applied `requireAuth`
   ONLY. THIS IS THE SECURITY FIX, not a faithful reproduction: every member route also
@@ -28,23 +40,23 @@ the SAME controller functions:
   otherwise any authenticated caller could mint a join token for any community's room. The
   downstream actor role is MEMBER.
 
-Response bodies are not hub-api-owned rows: `@validate_response`/`jsonify_dto()` are NOT used
-for the same reason `event.py` skips them (Output Validation guards an OWNED row); the client
-(`RoomsClient`) maps protobuf messages to explicit field sets, so nothing extra can leak.
+Success bodies are explicit dataclass DTOs (`@validate_response`); the client
+(`RoomsClient`) maps protobuf messages to explicit field sets first, so nothing extra can leak.
 """
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, cast
 
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import TenantContext, get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
-from quart_schema import validate_request
+from quart_schema import validate_request, validate_response
 
 # isort: split
 import grpc_internal  # noqa: F401  (puts the generated pb/ tree on sys.path)
@@ -52,10 +64,18 @@ import grpc_internal  # noqa: F401  (puts the generated pb/ tree on sys.path)
 # isort: split
 from waddles.streaming.internal.v1 import rooms_pb2
 
-from services import community_access
-from services.calls_proxy import RoomsClient, RoomsRpcError
+from services import call_participants, community_access
+from services.calls_proxy import (
+    HandInfo,
+    RoomInfo,
+    RoomsClient,
+    RoomsRpcError,
+    StreamingTargetNotConfiguredError,
+)
 from services.current_user import get_current_user_id
 from services.errors import ApiError, payment_required
+
+logger = logging.getLogger(__name__)
 
 calls_admin_bp = Blueprint("v1_calls_admin", __name__, url_prefix="/api/v1/admin")
 member_voice_bp = Blueprint("v1_member_voice", __name__, url_prefix="/api/v1/community")
@@ -65,16 +85,8 @@ SCOPE_WRITE = "streaming.calls:write"
 SCOPE_ADMIN = "streaming.calls:admin"
 
 #: Two-gate Feature flag -- `libs/streaming_module/features.py`'s
-#: `streaming.rtc` Feature contract, free tier.
+#: `streaming.rtc` Feature contract, free tier. Gates every route in this module.
 FEATURE_STREAMING_RTC = "waddles.streaming.rtc"
-
-#: Namespace for the participant/actor UUIDs sent downstream (uuid5 of tenant+community+user).
-_PARTICIPANT_NS = uuid.UUID("6f3c1c1e-5b8e-4a67-9d3b-2f0c8f3f6a11")
-
-HAND_RAISE_UNSUPPORTED = (
-    "Raised-hand queues are not available: that state lives in the rooms app bundle, "
-    "not the call-room service"
-)
 
 
 def _issuer() -> Any:
@@ -88,29 +100,197 @@ _client = RoomsClient(
 )
 
 
+@dataclass(slots=True, frozen=True)
+class CreateCallRoomRequest:
+    """Request DTO for `POST .../calls/rooms` -- snake_case, matches Node's `req.body`."""
+
+    room_name: str
+    max_participants: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ParticipantTargetRequest:
+    """Request DTO for kick/mute/unmute -- `identity` is the target participant's UUID."""
+
+    identity: str
+
+
+@dataclass(slots=True, frozen=True)
+class AcknowledgeHandRequest:
+    """Request DTO for `POST .../acknowledge-hand` -- `user_id` is the participant's UUID."""
+
+    user_id: str
+
+
+@dataclass(slots=True, frozen=True)
+class RoomsListResponse:
+    """`GET .../rooms` -- every live room of the community."""
+
+    rooms: list[RoomInfo]
+    success: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class RoomResponse(RoomInfo):
+    """One room (create/get): the `RoomInfo` fields plus `success`."""
+
+    success: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class MessageResponse:
+    """Plain acknowledgement."""
+
+    message: str
+    success: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class ParticipantDTO:
+    """A room participant: UUID, hub-api-resolved display name, media flags."""
+
+    participant_id: str
+    display_name: str
+    publisher: bool
+    subscriber: bool
+    muted: bool
+    joined_at: int | None
+
+
+@dataclass(slots=True, frozen=True)
+class ParticipantsResponse:
+    """`GET .../participants`."""
+
+    participants: list[ParticipantDTO]
+    locked: bool
+    success: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class ParticipantMuteResponse:
+    """Result of a per-participant mute/unmute: the participant's resulting muted state."""
+
+    participant_id: str
+    muted: bool
+    success: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class MuteAllResponse:
+    """Result of `mute-all`: how many publishers were muted."""
+
+    muted: int
+    message: str = "All participants muted"
+    success: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class HandDTO:
+    """One raised hand with the hub-api-resolved display name (UUIDs elsewhere)."""
+
+    participant_id: str
+    display_name: str
+    raised_at: int
+    acknowledged_at: int | None
+    acknowledged_by: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class RaisedHandsResponse:
+    """`GET .../raised-hands` -- the queue, oldest first."""
+
+    raised_hands: list[HandDTO]
+    count: int
+    success: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class HandResponse:
+    """Result of raising/acknowledging one hand."""
+
+    hand: HandDTO
+    success: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class ResetHandsResponse:
+    """Result of clearing a room's raised-hand queue: how many hands were cleared."""
+
+    cleared: int
+    message: str = "Raised hands cleared"
+    success: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class LowerHandResponse:
+    """Result of lowering the caller's hand; `lowered` is False when none was raised."""
+
+    lowered: bool
+    success: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class JoinResponse:
+    """`POST .../join` -- the room token and the WHIP/WHEP endpoints for ONE participant."""
+
+    token: str
+    url: str
+    whip_url: str
+    whep_url: str
+    token_id: str
+    participant_id: str
+    expires_at: int
+    success: bool = True
+
+
 def _dal() -> tuple[Any, Any]:
+    """The app's `(async_dal, dal)` pair."""
     return current_app.config["async_dal"], current_app.config["dal"]
 
 
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
+    """An `ApiError` as the standard `{success:false, error:{code,message}}` envelope."""
     from flask_core.api_utils import error_response
 
     return cast(
-        tuple[dict[str, object], int], error_response(exc.message, exc.status_code, exc.code)
+        tuple[dict[str, object], int],
+        error_response(exc.message, exc.status_code, exc.code, exc.details),
     )
 
 
-def _rpc_error(exc: RoomsRpcError) -> tuple[dict[str, Any], int]:
-    """`{success:false, error}` carrying the downstream status (404/400/403/429/501/502...)."""
-    return {"success": False, "error": exc.message}, exc.status_code
+def _rpc_error(exc: RoomsRpcError) -> tuple[dict[str, object], int]:
+    """A failed upstream call in the standard envelope; 5xx marks the failure retryable."""
+    retryable = exc.status_code in (502, 503, 504)
+    return _err(
+        ApiError(
+            message=exc.message,
+            status_code=exc.status_code,
+            code=exc.code,
+            details={"retryable": True} if retryable else None,
+        )
+    )
 
 
-async def _guarded(op: Callable[[], Awaitable[tuple[dict[str, Any], int]]]) -> Any:
-    """Run one RPC-backed operation, mapping `RoomsRpcError` to the error envelope."""
+async def _run(op: Callable[[], Awaitable[Any]]) -> Any:
+    """Run one operation, mapping authz, upstream and configuration failures to explicit statuses.
+
+    `ApiError` (authz/validation/flag) and `RoomsRpcError` keep their own status; a missing
+    svc-streaming target/mTLS configuration is a deployment error answered with 503 and an
+    ERROR log -- loud, never an empty success.
+    """
     try:
         return await op()
+    except ApiError as exc:
+        logger.debug("calls request refused: %s %s", exc.status_code, exc.code)
+        return _err(exc)
     except RoomsRpcError as exc:
+        logger.debug("calls upstream failure relayed: %s %s", exc.status_code, exc.code)
         return _rpc_error(exc)
+    except StreamingTargetNotConfiguredError as exc:
+        logger.error("rooms gRPC client is not configured: %s", exc)
+        return _rpc_error(
+            RoomsRpcError(503, "Streaming service is not configured", "STREAMING_NOT_CONFIGURED")
+        )
 
 
 def _room_id(room_name: str) -> str:
@@ -123,13 +303,26 @@ def _room_id(room_name: str) -> str:
         ) from exc
 
 
-def _person_uuid(ctx: TenantContext, community_id: int, user_id: int) -> str:
-    """Stable pseudonymous UUID for (tenant, community, user) -- never a name or raw id."""
-    return str(uuid.uuid5(_PARTICIPANT_NS, f"{ctx.tenant_slug}:{community_id}:{user_id}"))
+def _participant_uuid(value: str, what: str) -> str:
+    """A request-supplied participant id must be a UUID (canonicalised); names are refused."""
+    try:
+        return str(uuid.UUID(value))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ApiError(
+            message=f"{what} must be a participant UUID",
+            status_code=400,
+            code="INVALID_IDENTITY",
+        ) from exc
 
 
-async def _require_admin(community_id: int) -> str:
-    """Enforce `require_community_admin`; returns the admin's pseudonymous actor UUID."""
+async def _require_rtc_enabled(ctx: TenantContext) -> None:
+    """Raise 402 (licensed-feature body) unless `waddles.streaming.rtc` is ON for the tenant."""
+    if not await feature_enabled(FEATURE_STREAMING_RTC, tenant=ctx.tenant_slug):
+        raise payment_required("Calls / RTC is not enabled for this plan")
+
+
+async def _require_admin(community_id: int) -> int:
+    """Enforce the community-admin gate; returns the caller's `hub_users.id`."""
     async_dal, dal = _dal()
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101 - tenant_middleware already ran (outermost decorator)
@@ -137,11 +330,11 @@ async def _require_admin(community_id: int) -> str:
     await community_access.require_community_admin(
         async_dal, dal, request, ctx, community_id=community_id, user_id=user_id
     )
-    return _person_uuid(ctx, community_id, user_id)
+    return user_id
 
 
-async def _require_member(community_id: int) -> str:
-    """Enforce `require_community_member`; returns the caller's pseudonymous participant UUID."""
+async def _require_member(community_id: int) -> int:
+    """Enforce the active-membership gate; returns the caller's `hub_users.id`."""
     async_dal, dal = _dal()
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101 - tenant_middleware already ran (outermost decorator)
@@ -149,127 +342,168 @@ async def _require_member(community_id: int) -> str:
     await community_access.require_community_member(
         async_dal, dal, request, ctx, community_id=community_id, user_id=user_id
     )
-    return _person_uuid(ctx, community_id, user_id)
+    return user_id
 
 
-# ---------------------------------------------------------------------------
-# Shared operations -- one per `callsController.js` export, called from both
-# `calls_admin_bp` (after `_require_admin`) and `member_voice_bp` (after
-# `_require_member`) where Node reuses the same controller function.
-# ---------------------------------------------------------------------------
+async def _gated_admin(community_id: int) -> int:
+    """Admin gate, then the RTC flag (authz first: a non-admin never learns the plan)."""
+    user_id = await _require_admin(community_id)
+    ctx = get_tenant_context(request)
+    assert ctx is not None  # nosec B101 - tenant_middleware already ran (outermost decorator)
+    await _require_rtc_enabled(ctx)
+    return user_id
 
 
-async def _list_rooms(community_id: int) -> tuple[dict[str, Any], int]:
-    rooms = await _client.list_rooms(community_id)
-    return {"success": True, "rooms": rooms}, 200
+async def _gated_member(community_id: int) -> int:
+    """Membership gate, then the RTC flag."""
+    user_id = await _require_member(community_id)
+    ctx = get_tenant_context(request)
+    assert ctx is not None  # nosec B101 - tenant_middleware already ran (outermost decorator)
+    await _require_rtc_enabled(ctx)
+    return user_id
+
+
+async def _identity(user_id: int) -> str:
+    """The caller's participant/actor UUID (`hub_users.uuid`)."""
+    async_dal, dal = _dal()
+    return await call_participants.identity_uuid(async_dal, dal, user_id=user_id)
+
+
+async def _admin_actor(community_id: int) -> str:
+    """Gated admin check; returns the admin's participant/actor UUID."""
+    return await _identity(await _gated_admin(community_id))
+
+
+async def _member_actor(community_id: int) -> str:
+    """Gated membership check; returns the caller's participant UUID."""
+    return await _identity(await _gated_member(community_id))
+
+
+async def _names(community_id: int, participant_ids: list[str]) -> dict[str, str]:
+    """Display names for `participant_ids` (community members only; others are "guest")."""
+    async_dal, dal = _dal()
+    return await call_participants.resolve_display_names(
+        async_dal, dal, community_id=community_id, participant_ids=participant_ids
+    )
+
+
+def _hand_dto(hand: HandInfo, names: dict[str, str]) -> HandDTO:
+    """A `HandInfo` plus its resolved name as the response DTO."""
+    return HandDTO(
+        participant_id=hand.participant_id,
+        display_name=names.get(hand.participant_id, call_participants.GUEST_LABEL),
+        raised_at=hand.raised_at,
+        acknowledged_at=hand.acknowledged_at,
+        acknowledged_by=hand.acknowledged_by,
+    )
+
+
+async def _hand_response(community_id: int, hand: HandInfo) -> HandResponse:
+    """Resolve the one participant's name and build the single-hand response."""
+    names = await _names(community_id, [hand.participant_id])
+    return HandResponse(hand=_hand_dto(hand, names))
+
+
+async def _list_rooms(community_id: int) -> RoomsListResponse:
+    """List the community's rooms (admin and member routes share this)."""
+    return RoomsListResponse(rooms=await _client.list_rooms(community_id))
 
 
 async def _create_room(
     community_id: int, *, room_name: str, max_participants: int | None
-) -> tuple[dict[str, Any], int]:
+) -> tuple[RoomResponse, int]:
+    """Create a room labelled `room_name` (admin and member routes share this)."""
     room = await _client.create_room(community_id, label=room_name, max_publishers=max_participants)
-    return {"success": True, **room}, 201
+    return RoomResponse(**asdict(room)), 201
 
 
-@dataclass(slots=True, frozen=True)
-class CreateCallRoomRequest:
-    """Request DTO for `POST .../calls/rooms` -- snake_case, matches Node's `req.body`."""
-
-    room_name: str
-    max_participants: int | None = None
+# ---------------------------------------------------------------------------
+# Admin routes -- `community_access.require_community_admin()`, actor role ADMIN.
+# ---------------------------------------------------------------------------
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+@validate_response(RoomsListResponse)
 async def get_call_rooms(community_id: int) -> Any:
     """Get all call rooms for a community (admin)."""
-    try:
-        await _require_admin(community_id)
-        ctx = get_tenant_context(request)
-        assert ctx is not None  # nosec B101 -- tenant_middleware guarantees this
-        if not await feature_enabled(FEATURE_STREAMING_RTC, tenant=ctx.tenant_slug):
-            raise payment_required("Calls / RTC is not enabled for this plan")
-    except ApiError as exc:
-        return _err(exc)
-    return await _guarded(lambda: _list_rooms(community_id))
+
+    async def op() -> Any:
+        await _gated_admin(community_id)
+        return await _list_rooms(community_id)
+
+    return await _run(op)
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(CreateCallRoomRequest)
+@validate_response(RoomResponse, 201)
 async def create_call_room(community_id: int, data: CreateCallRoomRequest) -> Any:
     """Create a new call room (admin)."""
-    try:
-        await _require_admin(community_id)
-    except ApiError as exc:
-        return _err(exc)
-    return await _guarded(
-        lambda: _create_room(
+
+    async def op() -> Any:
+        await _gated_admin(community_id)
+        return await _create_room(
             community_id, room_name=data.room_name, max_participants=data.max_participants
         )
-    )
+
+    return await _run(op)
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+@validate_response(RoomResponse)
 async def get_call_room(community_id: int, room_name: str) -> Any:
     """Get a specific call room (admin)."""
-    try:
-        await _require_admin(community_id)
-        room_id = _room_id(room_name)
-    except ApiError as exc:
-        return _err(exc)
 
-    async def op() -> tuple[dict[str, Any], int]:
-        return {"success": True, **await _client.get_room(community_id, room_id)}, 200
+    async def op() -> Any:
+        await _gated_admin(community_id)
+        room = await _client.get_room(community_id, _room_id(room_name))
+        return RoomResponse(**asdict(room))
 
-    return await _guarded(op)
+    return await _run(op)
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+@validate_response(MessageResponse)
 async def delete_call_room(community_id: int, room_name: str) -> Any:
     """Delete a call room (admin)."""
-    try:
-        await _require_admin(community_id)
-        room_id = _room_id(room_name)
-    except ApiError as exc:
-        return _err(exc)
 
-    async def op() -> tuple[dict[str, Any], int]:
-        await _client.delete_room(community_id, room_id)
-        return {"success": True, "message": "Room deleted"}, 200
+    async def op() -> Any:
+        await _gated_admin(community_id)
+        await _client.delete_room(community_id, _room_id(room_name))
+        return MessageResponse(message="Room deleted")
 
-    return await _guarded(op)
+    return await _run(op)
 
 
 async def _set_locked(community_id: int, room_name: str, locked: bool) -> Any:
-    try:
-        actor = await _require_admin(community_id)
-        room_id = _room_id(room_name)
-    except ApiError as exc:
-        return _err(exc)
+    """Lock or unlock a room as an admin (shared by the two lock routes)."""
 
-    async def op() -> tuple[dict[str, Any], int]:
+    async def op() -> Any:
+        actor = await _admin_actor(community_id)
         await _client.set_locked(
             community_id,
-            room_id,
+            _room_id(room_name),
             locked,
             actor_id=actor,
             actor_role=rooms_pb2.ROOM_ROLE_ADMIN,
         )
-        return {"success": True, "message": "Room locked" if locked else "Room unlocked"}, 200
+        return MessageResponse(message="Room locked" if locked else "Room unlocked")
 
-    return await _guarded(op)
+    return await _run(op)
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/lock", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+@validate_response(MessageResponse)
 async def lock_call_room(community_id: int, room_name: str) -> Any:
     """Lock a call room (admin)."""
     return await _set_locked(community_id, room_name, True)
@@ -278,6 +512,7 @@ async def lock_call_room(community_id: int, room_name: str) -> Any:
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/unlock", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+@validate_response(MessageResponse)
 async def unlock_call_room(community_id: int, room_name: str) -> Any:
     """Unlock a call room (admin)."""
     return await _set_locked(community_id, room_name, False)
@@ -286,104 +521,137 @@ async def unlock_call_room(community_id: int, room_name: str) -> Any:
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/participants", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+@validate_response(ParticipantsResponse)
 async def get_call_participants(community_id: int, room_name: str) -> Any:
-    """Get participants in a room (admin)."""
-    try:
-        await _require_admin(community_id)
-        room_id = _room_id(room_name)
-    except ApiError as exc:
-        return _err(exc)
+    """Get participants in a room (admin), with display names resolved by hub-api."""
 
-    async def op() -> tuple[dict[str, Any], int]:
-        body = await _client.list_participants(community_id, room_id)
-        return {
-            "success": True,
-            "participants": body["participants"],
-            "locked": body["locked"],
-        }, 200
+    async def op() -> Any:
+        await _gated_admin(community_id)
+        listed = await _client.list_participants(community_id, _room_id(room_name))
+        names = await _names(community_id, [p.participant_id for p in listed.participants])
+        return ParticipantsResponse(
+            participants=[
+                ParticipantDTO(
+                    participant_id=p.participant_id,
+                    display_name=names.get(p.participant_id, call_participants.GUEST_LABEL),
+                    publisher=p.publisher,
+                    subscriber=p.subscriber,
+                    muted=p.muted,
+                    joined_at=p.joined_at,
+                )
+                for p in listed.participants
+            ],
+            locked=listed.locked,
+        )
 
-    return await _guarded(op)
-
-
-@dataclass(slots=True, frozen=True)
-class KickParticipantRequest:
-    """Request DTO for `POST .../kick` -- `identity` is the participant's UUID."""
-
-    identity: str
+    return await _run(op)
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/kick", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
-@validate_request(KickParticipantRequest)
+@validate_request(ParticipantTargetRequest)
+@validate_response(MessageResponse)
 async def kick_call_participant(
-    community_id: int, room_name: str, data: KickParticipantRequest
+    community_id: int, room_name: str, data: ParticipantTargetRequest
 ) -> Any:
     """Kick a participant from a room (admin)."""
-    try:
-        actor = await _require_admin(community_id)
-        room_id = _room_id(room_name)
-        try:
-            participant = str(uuid.UUID(data.identity))
-        except ValueError as exc:
-            raise ApiError(
-                message="identity must be a participant UUID",
-                status_code=400,
-                code="INVALID_IDENTITY",
-            ) from exc
-    except ApiError as exc:
-        return _err(exc)
 
-    async def op() -> tuple[dict[str, Any], int]:
+    async def op() -> Any:
+        actor = await _admin_actor(community_id)
         await _client.kick_participant(
             community_id,
-            room_id,
-            participant,
+            _room_id(room_name),
+            _participant_uuid(data.identity, "identity"),
             actor_id=actor,
             actor_role=rooms_pb2.ROOM_ROLE_ADMIN,
         )
-        return {"success": True, "message": "Participant removed"}, 200
+        return MessageResponse(message="Participant removed")
 
-    return await _guarded(op)
+    return await _run(op)
+
+
+async def _set_participant_muted(
+    community_id: int, room_name: str, data: ParticipantTargetRequest, muted: bool
+) -> Any:
+    """Mute or unmute one participant as an admin (shared by the two routes)."""
+
+    async def op() -> Any:
+        actor = await _admin_actor(community_id)
+        target = _participant_uuid(data.identity, "identity")
+        state = await _client.set_participant_muted(
+            community_id,
+            _room_id(room_name),
+            target,
+            muted,
+            actor_id=actor,
+            actor_role=rooms_pb2.ROOM_ROLE_ADMIN,
+        )
+        return ParticipantMuteResponse(participant_id=target, muted=state)
+
+    return await _run(op)
+
+
+@calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/mute", methods=["POST"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+@validate_request(ParticipantTargetRequest)
+@validate_response(ParticipantMuteResponse)
+async def mute_call_participant(
+    community_id: int, room_name: str, data: ParticipantTargetRequest
+) -> Any:
+    """Mute one participant (admin)."""
+    return await _set_participant_muted(community_id, room_name, data, True)
+
+
+@calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/unmute", methods=["POST"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+@validate_request(ParticipantTargetRequest)
+@validate_response(ParticipantMuteResponse)
+async def unmute_call_participant(
+    community_id: int, room_name: str, data: ParticipantTargetRequest
+) -> Any:
+    """Lift a moderation mute from one participant (admin)."""
+    return await _set_participant_muted(community_id, room_name, data, False)
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/mute-all", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+@validate_response(MuteAllResponse)
 async def mute_all_call_participants(community_id: int, room_name: str) -> Any:
-    """Mute all participants in a room (admin)."""
-    try:
-        actor = await _require_admin(community_id)
-        room_id = _room_id(room_name)
-    except ApiError as exc:
-        return _err(exc)
+    """Mute all publishers in a room except the acting admin (admin)."""
 
-    async def op() -> tuple[dict[str, Any], int]:
-        await _client.mute_all(
-            community_id, room_id, actor_id=actor, actor_role=rooms_pb2.ROOM_ROLE_ADMIN
+    async def op() -> Any:
+        actor = await _admin_actor(community_id)
+        muted = await _client.mute_all(
+            community_id,
+            _room_id(room_name),
+            actor_id=actor,
+            actor_role=rooms_pb2.ROOM_ROLE_ADMIN,
         )
-        return {"success": True, "message": "All participants muted"}, 200
+        return MuteAllResponse(muted=muted)
 
-    return await _guarded(op)
+    return await _run(op)
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/raised-hands", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+@validate_response(RaisedHandsResponse)
 async def get_raised_hands(community_id: int, room_name: str) -> Any:
-    """Raised-hands queue (admin) -- 501: not a svc-streaming concern, see module docstring."""
-    try:
-        await _require_admin(community_id)
-    except ApiError as exc:
-        return _err(exc)
-    return {"success": False, "error": HAND_RAISE_UNSUPPORTED}, 501
+    """The room's raised-hand queue, oldest first, with display names (admin)."""
 
+    async def op() -> Any:
+        await _gated_admin(community_id)
+        hands = await _client.list_hands(community_id, _room_id(room_name))
+        names = await _names(community_id, [h.participant_id for h in hands])
+        return RaisedHandsResponse(
+            raised_hands=[_hand_dto(h, names) for h in hands], count=len(hands)
+        )
 
-@dataclass(slots=True, frozen=True)
-class AcknowledgeHandRequest:
-    """Request DTO for `POST .../acknowledge-hand`."""
-
-    user_id: str
+    return await _run(op)
 
 
 @calls_admin_bp.route(
@@ -392,13 +660,42 @@ class AcknowledgeHandRequest:
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(AcknowledgeHandRequest)
+@validate_response(HandResponse)
 async def acknowledge_hand(community_id: int, room_name: str, data: AcknowledgeHandRequest) -> Any:
-    """Acknowledge a raised hand (admin) -- 501: not a svc-streaming concern."""
-    try:
-        await _require_admin(community_id)
-    except ApiError as exc:
-        return _err(exc)
-    return {"success": False, "error": HAND_RAISE_UNSUPPORTED}, 501
+    """Acknowledge a participant's raised hand (admin)."""
+
+    async def op() -> Any:
+        actor = await _admin_actor(community_id)
+        hand = await _client.acknowledge_hand(
+            community_id,
+            _room_id(room_name),
+            _participant_uuid(data.user_id, "user_id"),
+            actor_id=actor,
+            actor_role=rooms_pb2.ROOM_ROLE_ADMIN,
+        )
+        return await _hand_response(community_id, hand)
+
+    return await _run(op)
+
+
+@calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/reset-hands", methods=["POST"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+@validate_response(ResetHandsResponse)
+async def reset_hands(community_id: int, room_name: str) -> Any:
+    """Clear the room's whole raised-hand queue (admin)."""
+
+    async def op() -> Any:
+        actor = await _admin_actor(community_id)
+        cleared = await _client.reset_hands(
+            community_id,
+            _room_id(room_name),
+            actor_id=actor,
+            actor_role=rooms_pb2.ROOM_ROLE_ADMIN,
+        )
+        return ResetHandsResponse(cleared=cleared)
+
+    return await _run(op)
 
 
 # ---------------------------------------------------------------------------
@@ -410,30 +707,32 @@ async def acknowledge_hand(community_id: int, room_name: str, data: AcknowledgeH
 @member_voice_bp.route("/<int:community_id>/interact/voice/rooms", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_READ)  # type: ignore[misc]
+@validate_response(RoomsListResponse)
 async def list_voice_rooms(community_id: int) -> Any:
     """List voice rooms for a community (member)."""
-    try:
-        await _require_member(community_id)
-    except ApiError as exc:
-        return _err(exc)
-    return await _guarded(lambda: _list_rooms(community_id))
+
+    async def op() -> Any:
+        await _gated_member(community_id)
+        return await _list_rooms(community_id)
+
+    return await _run(op)
 
 
 @member_voice_bp.route("/<int:community_id>/interact/voice/rooms", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_WRITE)  # type: ignore[misc]
 @validate_request(CreateCallRoomRequest)
+@validate_response(RoomResponse, 201)
 async def create_ad_hoc_voice_room(community_id: int, data: CreateCallRoomRequest) -> Any:
     """Create an ad-hoc voice room (member)."""
-    try:
-        await _require_member(community_id)
-    except ApiError as exc:
-        return _err(exc)
-    return await _guarded(
-        lambda: _create_room(
+
+    async def op() -> Any:
+        await _gated_member(community_id)
+        return await _create_room(
             community_id, room_name=data.room_name, max_participants=data.max_participants
         )
-    )
+
+    return await _run(op)
 
 
 @member_voice_bp.route(
@@ -441,29 +740,25 @@ async def create_ad_hoc_voice_room(community_id: int, data: CreateCallRoomReques
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_WRITE)  # type: ignore[misc]
+@validate_response(JoinResponse)
 async def join_voice_room(community_id: int, room_name: str) -> Any:
     """Join a voice room -- mints a room token for THIS caller, THIS room, only if a member."""
-    try:
-        # The participant UUID comes from the verified JWT (`_require_member`), never the body.
-        participant = await _require_member(community_id)
-        room_id = _room_id(room_name)
-    except ApiError as exc:
-        return _err(exc)
 
-    async def op() -> tuple[dict[str, Any], int]:
-        joined = await _client.join_room(community_id, room_id, participant)
-        return {
-            "success": True,
-            "token": joined["token"],
-            "url": joined["whip_url"].rsplit("/", 1)[0],
-            "whip_url": joined["whip_url"],
-            "whep_url": joined["whep_url"],
-            "token_id": joined["token_id"],
-            "participant_id": joined["participant_id"],
-            "expires_at": joined["expires_at"],
-        }, 200
+    async def op() -> Any:
+        # The participant UUID comes from the verified JWT (`_member_actor`), never the body.
+        participant = await _member_actor(community_id)
+        joined = await _client.join_room(community_id, _room_id(room_name), participant)
+        return JoinResponse(
+            token=joined.token,
+            url=joined.whip_url.rsplit("/", 1)[0],
+            whip_url=joined.whip_url,
+            whep_url=joined.whep_url,
+            token_id=joined.token_id,
+            participant_id=joined.participant_id,
+            expires_at=joined.expires_at,
+        )
 
-    return await _guarded(op)
+    return await _run(op)
 
 
 @member_voice_bp.route(
@@ -471,25 +766,62 @@ async def join_voice_room(community_id: int, room_name: str) -> Any:
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_WRITE)  # type: ignore[misc]
+@validate_response(MessageResponse)
 async def leave_voice_room(community_id: int, room_name: str) -> Any:
     """Leave a voice room (member) -- always acts as oneself (actor == participant)."""
-    try:
-        participant = await _require_member(community_id)
-        room_id = _room_id(room_name)
-    except ApiError as exc:
-        return _err(exc)
 
-    async def op() -> tuple[dict[str, Any], int]:
+    async def op() -> Any:
+        participant = await _member_actor(community_id)
         await _client.leave_room(
             community_id,
-            room_id,
+            _room_id(room_name),
             participant,
             actor_id=participant,
             actor_role=rooms_pb2.ROOM_ROLE_MEMBER,
         )
-        return {"success": True, "message": "Left room"}, 200
+        return MessageResponse(message="Left room")
 
-    return await _guarded(op)
+    return await _run(op)
+
+
+@member_voice_bp.route(
+    "/<int:community_id>/interact/voice/rooms/<room_name>/raise-hand", methods=["POST"]
+)
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_WRITE)  # type: ignore[misc]
+@validate_response(HandResponse)
+async def raise_voice_hand(community_id: int, room_name: str) -> Any:
+    """Raise the caller's own hand (member); idempotent -- the original queue spot is kept."""
+
+    async def op() -> Any:
+        participant = await _member_actor(community_id)
+        hand = await _client.raise_hand(community_id, _room_id(room_name), participant)
+        return await _hand_response(community_id, hand)
+
+    return await _run(op)
+
+
+@member_voice_bp.route(
+    "/<int:community_id>/interact/voice/rooms/<room_name>/lower-hand", methods=["POST"]
+)
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_WRITE)  # type: ignore[misc]
+@validate_response(LowerHandResponse)
+async def lower_voice_hand(community_id: int, room_name: str) -> Any:
+    """Lower the caller's own hand (member); a no-op (`lowered: false`) when none is raised."""
+
+    async def op() -> Any:
+        participant = await _member_actor(community_id)
+        lowered = await _client.lower_hand(
+            community_id,
+            _room_id(room_name),
+            participant,
+            actor_id=participant,
+            actor_role=rooms_pb2.ROOM_ROLE_MEMBER,
+        )
+        return LowerHandResponse(lowered=lowered)
+
+    return await _run(op)
 
 
 BLUEPRINTS: list[Blueprint] = [calls_admin_bp, member_voice_bp]
