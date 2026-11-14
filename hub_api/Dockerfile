@@ -13,7 +13,7 @@ COPY hub_api/requirements.txt .
 ARG CACHE_EPOCH=1
 # (DL3042 below: the pip cache is a BuildKit cache mount, used only with --require-hashes)
 # hadolint ignore=DL3042
-RUN --mount=type=cache,id=waddles-pip-v${CACHE_EPOCH},target=/root/.cache/pip,sharing=shared \
+RUN --mount=type=cache,id=waddles-pip-hub-api-v${CACHE_EPOCH},target=/root/.cache/pip,sharing=locked \
     pip install --require-hashes -r requirements.txt
 
 # flask_core (libs/flask_core) is a real installable package (setup.py) --

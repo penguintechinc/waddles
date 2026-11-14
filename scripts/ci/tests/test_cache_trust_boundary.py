@@ -28,7 +28,7 @@ cm = importlib.util.module_from_spec(_spec)
 sys.modules["cm"] = cm
 _spec.loader.exec_module(cm)
 
-MOUNT = "RUN --mount=type=cache,id=x,target=/root/.cache/pip,sharing=shared \\\n    "
+MOUNT = "RUN --mount=type=cache,id=x-v${CACHE_EPOCH},target=/root/.cache/pip,sharing=locked \\\n    "
 
 
 def findings(run_line: str) -> list[Any]:
@@ -47,8 +47,8 @@ def test_original_unhashed_flask_core_install_is_flagged() -> None:
         MOUNT + "pip install --require-hashes -r /tmp/r.txt && rm -f /tmp/r.txt",
         MOUNT + "pip install --no-deps --no-build-isolation /app/libs/flask_core",
         MOUNT + "python3 -m pip install --require-hashes -r r.txt",
-        "RUN --mount=type=cache,id=c,target=/c cargo build --release --locked && install -D a b",
-        "RUN --mount=type=cache,id=n,target=/root/.npm npm ci --ignore-scripts",
+        "RUN --mount=type=cache,id=c-v${CACHE_EPOCH},target=/c,sharing=locked cargo build --release --locked && install -D a b",
+        "RUN --mount=type=cache,id=n-v${CACHE_EPOCH},target=/root/.npm,sharing=locked npm ci --ignore-scripts",
     ],
 )
 def test_verified_installs_pass(run: str) -> None:
@@ -63,9 +63,9 @@ def test_verified_installs_pass(run: str) -> None:
         + "pip install --no-deps requests",  # --no-deps on a *named* package is not enough
         MOUNT + "pip install -r requirements.txt",
         MOUNT + "pip install --require-hashes -r r.txt && pip install /app/x",
-        "RUN --mount=type=cache,id=c,target=/c cargo build --release",
-        "RUN --mount=type=cache,id=n,target=/root/.npm npm install",
-        "RUN --mount=type=cache,id=n,target=/root/.npm yarn install",
+        "RUN --mount=type=cache,id=c-v${CACHE_EPOCH},target=/c,sharing=locked cargo build --release",
+        "RUN --mount=type=cache,id=n-v${CACHE_EPOCH},target=/root/.npm,sharing=locked npm install",
+        "RUN --mount=type=cache,id=n-v${CACHE_EPOCH},target=/root/.npm,sharing=locked yarn install",
     ],
 )
 def test_unverified_installs_fail(run: str) -> None:
@@ -171,3 +171,60 @@ def test_deploy_workflow_passes_the_cache_epoch_and_the_trusted_context() -> Non
     text = (REPO / ".github/workflows/deploy-dal2alpha.yml").read_text()
     assert "CACHE_EPOCH=${{ vars.ALPHA_CACHE_EPOCH" in text
     assert "GITHUB_EVENT_NAME" in text or "--event" in text
+
+
+CARGO = "cargo build --release --locked"
+
+
+def mount_line(cache_id: str, sharing: str | None) -> str:
+    """A cargo RUN with one cache mount."""
+    extra = f",sharing={sharing}" if sharing else ""
+    return f"RUN --mount=type=cache,id={cache_id},target=/usr/local/cargo/git{extra} {CARGO}"
+
+
+@pytest.mark.parametrize("sharing", ["shared", None, "private"])
+def test_only_sharing_locked_is_allowed(sharing: str | None) -> None:
+    """The deploy run 43637937508 failure: shared cargo git db written by concurrent builds."""
+    got = findings(mount_line("waddles-cargo-git-svc-action-v${CACHE_EPOCH}", sharing))
+    assert any("sharing=locked" in f.why for f in got), got
+
+
+def test_locked_per_image_cargo_mount_passes() -> None:
+    line = mount_line("waddles-cargo-git-svc-action-v${CACHE_EPOCH}", "locked")
+    assert cm.check_text("D", f"FROM x\n{line}\n", "svc-action")[1] == []
+
+
+def test_cache_id_must_be_per_image_when_the_image_is_known() -> None:
+    line = mount_line(
+        "waddles-cargo-git-v${CACHE_EPOCH}", "locked"
+    )  # the old shared id
+    got = cm.check_text("D", f"FROM x\n{line}\n", "svc-action")[1]
+    assert any("not per image" in f.why for f in got), got
+
+
+def test_cache_id_without_epoch_is_flagged() -> None:
+    got = findings(mount_line("waddles-cargo-git-svc-action", "locked"))
+    assert any("CACHE_EPOCH" in f.why for f in got), got
+
+
+def test_an_id_shared_by_two_dockerfiles_is_flagged() -> None:
+    line = mount_line("waddles-cargo-git-v${CACHE_EPOCH}", "locked")
+    texts = {"a/Dockerfile": f"FROM x\n{line}\n", "b/Dockerfile": f"FROM x\n{line}\n"}
+    assert cm.duplicate_ids(texts)
+    assert cm.duplicate_ids({"a/Dockerfile": texts["a/Dockerfile"]}) == []
+
+
+def test_repo_cache_ids_are_per_image_locked_and_unique() -> None:
+    images = cm.image_names()
+    texts = {p: (REPO / p).read_text() for p in cm.dockerfiles()}
+    assert cm.duplicate_ids(texts) == []
+    rust = [p for p in images if p.endswith("Dockerfile.rust")]
+    assert len(rust) == 7
+    for p in rust:
+        text = texts[p]
+        for kind in ("cargo-registry", "cargo-git", "target"):
+            assert f"id=waddles-{kind}-{images[p]}-v${{CACHE_EPOCH}}" in text, (
+                f"{p}: no per-image {kind} mount"
+            )
+    for p, text in texts.items():
+        assert "sharing=shared" not in text, f"{p}: sharing=shared is forbidden"

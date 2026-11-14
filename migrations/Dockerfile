@@ -16,7 +16,7 @@ COPY migrations/requirements.txt /tmp/migrations-requirements.txt
 ARG CACHE_EPOCH=1
 # (DL3042 below: the pip cache is a BuildKit cache mount, used only with --require-hashes)
 # hadolint ignore=DL3042
-RUN --mount=type=cache,id=waddles-pip-v${CACHE_EPOCH},target=/root/.cache/pip,sharing=shared \
+RUN --mount=type=cache,id=waddles-pip-migrations-v${CACHE_EPOCH},target=/root/.cache/pip,sharing=locked \
     pip install --require-hashes -r /tmp/migrations-requirements.txt && \
     rm -f /tmp/migrations-requirements.txt
 
