@@ -85,7 +85,7 @@ def _helm() -> str:
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
     """Runs `helm template` with fixed argv (no shell); --kube-version keeps helm v4 happy."""
     cmd = [_helm(), "template", "waddlebot", str(_CHART_DIR), "--kube-version", "1.31.0", *args]
-    return subprocess.run(cmd, capture_output=True, text=True, check=False)  # noqa: S603 -- fixed argv, test-only
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)
 
 
 def _render(env: str, sets: list[str] | None = None, files: list[str] | None = None) -> list[dict[str, Any]]:
@@ -265,7 +265,8 @@ def test_values_drive_endpoint_protocol_sampler_and_signals() -> None:
 def test_presentation_own_endpoint_override_wins_and_is_single() -> None:
     """presentation.rust.otlpEndpoint (pre-existing override) beats the global endpoint, once."""
     docs = _render("dal2alpha", ["presentation.rust.otlpEndpoint=http://own.example:4317"])
-    c = [c for c in _containers(_emitter(docs, "svc-presentation")) if c["name"] == "svc-presentation"][0]
+    c = [c for c in _containers(_emitter(docs, "svc-presentation")) if c["name"] == "svc-presentation"]
+    c = c[0]
     eps = [e["value"] for e in _env(c) if e["name"] == "OTEL_EXPORTER_OTLP_ENDPOINT"]
     assert eps == ["http://own.example:4317"]
     assert [e["name"] for e in _env(c)].count("OTEL_SERVICE_NAME") == 1
@@ -274,7 +275,8 @@ def test_presentation_own_endpoint_override_wins_and_is_single() -> None:
 def test_presentation_legacy_override_still_works_when_disabled() -> None:
     """With global.otel off, presentation.rust.otlpEndpoint still renders (historical behaviour)."""
     docs = _render("alpha", ["presentation.rust.otlpEndpoint=http://own.example:4317"])
-    c = [c for c in _containers(_emitter(docs, "svc-presentation")) if c["name"] == "svc-presentation"][0]
+    c = [c for c in _containers(_emitter(docs, "svc-presentation")) if c["name"] == "svc-presentation"]
+    c = c[0]
     by = {e["name"]: e.get("value") for e in _env(c)}
     assert by["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://own.example:4317"
     assert by["OTEL_EXPORTER_OTLP_PROTOCOL"] == "grpc"
@@ -336,7 +338,7 @@ def test_no_standalone_otel_policy_that_could_flip_a_pod_to_default_deny() -> No
 
 def test_enabled_without_endpoint_fails_the_render() -> None:
     """An enabled block with no endpoint is a chart error, never a silent no-op."""
-    values, base_sets = _ENV_FILES["dal2alpha"]
+    values, _ = _ENV_FILES["dal2alpha"]
     res = _run(["-f", str(_CHART_DIR / values), "--set", "global.otel.endpoint="])
     assert res.returncode != 0
     assert "global.otel.endpoint" in res.stderr
