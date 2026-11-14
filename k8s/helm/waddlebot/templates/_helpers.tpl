@@ -1228,17 +1228,21 @@ chart's own Postgres service. Usage: include "waddlebot.bundleDbEnv" .
 {{- end -}}
 
 {{/*
-Executor container resources. When Kata is enabled and bundleExecutor.runtimeClass.resources
-is set, those requests/limits replace the per-environment values (they size the guest VM
-workload; the RuntimeClass `overhead` is added by Kubernetes on top automatically).
-Call: include "waddlebot.executorResources" (dict "root" $ "default" <resources map>)
+Effective executor sizing for ONE pool, as JSON {"resources": {...}, "memoryBudgetMb": N}.
+Default: the pool's own resources + memoryBudgetMb. When Kata is enabled
+(bundleExecutor.runtimeClass.enabled) and bundleExecutor.runtimeClass.resources is set, those
+requests/limits REPLACE the pool's (they size the workload inside the guest VM; the RuntimeClass
+`overhead` is added by Kubernetes on top automatically) and the LRU budget becomes
+bundleExecutor.runtimeClass.memoryBudgetMb (0/unset fails the budget < limit render check).
+The caller validates budget < memory LIMIT on the EFFECTIVE values.
+Call: include "waddlebot.executorEffective" (dict "root" $ "pool" $pool) | fromJson
 */}}
-{{- define "waddlebot.executorResources" -}}
+{{- define "waddlebot.executorEffective" -}}
 {{- $rc := .root.Values.bundleExecutor.runtimeClass | default dict -}}
 {{- if and $rc.enabled $rc.resources -}}
-{{- toYaml $rc.resources -}}
+{{- dict "resources" $rc.resources "memoryBudgetMb" (int ($rc.memoryBudgetMb | default 0)) | toJson -}}
 {{- else -}}
-{{- toYaml .default -}}
+{{- dict "resources" .pool.resources "memoryBudgetMb" (int .pool.memoryBudgetMb) | toJson -}}
 {{- end -}}
 {{- end -}}
 
@@ -1263,17 +1267,17 @@ Off by default; password only ever from an operator-managed existingSecret (requ
 
 {{/*
 svc-bundles-executor stage dial list -- the comma-separated `host:port` value of
-STAGE_HOST_API_ADDR: one entry per `pipeline.rustDataPlane.bundleExecutor.stages` item
+STAGE_HOST_API_ADDR: one entry per stage of ONE executor pool (waddlebot.executorPools)
 (`<fullname>-<target>:<port>`), in order. The executor runs one independent dial loop per
 entry (core/bundle_executor/src/config.rs). Fails the render on an empty list -- an executor
-that dials no stage would serve nothing.
+that dials no stage would serve nothing. Call with (dict "root" $ "stages" $pool.stages).
 */}}
 {{- define "waddlebot.bundleExecutorStageAddrs" -}}
-{{- $stages := .Values.pipeline.rustDataPlane.bundleExecutor.stages | default list -}}
+{{- $stages := .stages | default list -}}
 {{- if not $stages -}}
 {{- fail "pipeline.rustDataPlane.bundleExecutor.stages must list at least one stage ({target, port}) for svc-bundles-executor to dial" -}}
 {{- end -}}
-{{- $fullname := include "waddlebot.fullname" . -}}
+{{- $fullname := include "waddlebot.fullname" .root -}}
 {{- $addrs := list -}}
 {{- range $stage := $stages -}}
 {{- $addrs = append $addrs (printf "%s-%s:%v" $fullname $stage.target $stage.port) -}}

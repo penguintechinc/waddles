@@ -73,7 +73,7 @@ def _find_container_env(
 ) -> list[dict[str, Any]]:
     """Returns the named container's `env[]` list from the Deployment whose name ends with the suffix."""
     for doc in docs:
-        if doc.get("kind") != "Deployment":
+        if doc.get("kind") not in ("Deployment", "StatefulSet"):
             continue
         name = doc.get("metadata", {}).get("name", "")
         if not name.endswith(deployment_name_suffix):
@@ -156,7 +156,7 @@ class TestExecutorsGetHostApiStageIdentity:
         executors = [
             d
             for d in rendered_docs
-            if d.get("kind") == "Deployment" and "executor" in d.get("metadata", {}).get("name", "")
+            if d.get("kind") in ("Deployment", "StatefulSet") and "executor" in d.get("metadata", {}).get("name", "")
         ]
         assert [d["metadata"]["name"] for d in executors] == ["waddlebot-svc-bundles-executor"], (
             "exactly ONE executor Deployment must render, and no -action twin"

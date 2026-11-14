@@ -72,6 +72,17 @@ spec:
         - ports:
             - port: {{ .Values.infrastructure.seaweedfs.service.s3Port | quote }}
               protocol: TCP
+    {{- if .Values.otel.collector.enabled }}
+    # OTLP export (executor Phase 1): in-namespace collector only, gRPC port only.
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: otel-collector
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.otelGrpcPort | quote }}
+              protocol: TCP
+    {{- end }}
     # hub-api HTTP readiness ONLY: the `wait-for-hub-api` init container polls /ready on
     # this port (without it the pod sticks in Init:0/1). The executor has no hub-api
     # client at runtime (no gRPC/HTTP dep -- core/bundle_executor/Cargo.toml) and no
