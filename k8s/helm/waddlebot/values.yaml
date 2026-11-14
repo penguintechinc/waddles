@@ -2800,6 +2800,19 @@ serviceJwt:
   # the token to that one tenant. hub-api's internal gRPC server rejects tokens
   # with no tenant claim -- an identity with `tenant` unset cannot call identity RPCs.
   identities:
+    # hub-api calling svc-streaming's RoomsService (hub_api/services/calls_proxy.py): hub-api
+    # mints these itself (in-process issuer) -- they are NOT obtainable via the SA bootstrap
+    # beyond the SA match below. One scope per RPC class: read (list/get/participants), write
+    # (create/delete/join/leave), moderate (kick/mute/lock). svc-streaming additionally pins
+    # `sub` to this SPIFFE id (ROOMS_GRPC_ALLOWED_SUBJECTS).
+    hub-api:
+      spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/hub-api"
+      serviceAccount: hub-api
+      tenant: system
+      allowedScopes:
+        - "streaming.rooms:read"
+        - "streaming.rooms:write"
+        - "streaming.rooms:moderate"
     svc-process:
       spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-process"
       serviceAccount: svc-process

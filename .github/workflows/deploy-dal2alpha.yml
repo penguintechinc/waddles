@@ -102,7 +102,7 @@ jobs:
           - { service: svc-presentation, file: core/svc_presentation/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }
           - { service: egress-proxy, file: core/egress_proxy/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }
           # svc-streaming: cpu variant only; chart appends -<variant> to the tag.
-          - { service: svc-streaming, file: core/svc_streaming/Dockerfile.rust, context: core/svc_streaming, extra_ctx: "", target: cpu, suffix: "-cpu" }
+          - { service: svc-streaming, file: core/svc_streaming/Dockerfile.rust, context: core/svc_streaming, extra_ctx: "proto=./proto", target: cpu, suffix: "-cpu" }
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6

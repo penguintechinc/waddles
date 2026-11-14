@@ -162,12 +162,24 @@ spec:
         - name: SERVICE_JWT_PUBLIC_KEY_{{ $kid }}
           value: {{ $pem | quote }}
         {{- end }}
-        {{- if .Values.pipeline.svcStreaming.enabled }}
-        # hub_api/services/calls_proxy.py -- svc-streaming (RTC control plane) base URL. Rendered
-        # from the same Service name/port templates/svc-streaming.yaml creates; hub-api has NO
-        # in-code default and fails loud on the first proxied call when this is absent.
-        - name: STREAMING_RTC_URL
-          value: "http://{{ include "waddlebot.fullname" . }}-svc-streaming:{{ .Values.pipeline.svcStreaming.port }}"
+        {{- if and .Values.pipeline.svcStreaming.enabled (eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true") }}
+        # hub_api/services/calls_proxy.py -- svc-streaming RoomsService gRPC target (HTTP/2 + mTLS,
+        # ES256 machine JWT per call). Rendered from the same Service name/port
+        # templates/svc-streaming.yaml creates; hub-api has NO in-code default and fails loud on the
+        # first call when this (or the mTLS file set) is absent. The server cert's SAN is the
+        # Service name (waddlebot.hostApiTlsDesiredDnsNames).
+        - name: STREAMING_RTC_GRPC_TARGET
+          value: "{{ include "waddlebot.fullname" . }}-svc-streaming:{{ .Values.pipeline.svcStreaming.grpcPort }}"
+        # hub-api's own allow-listed SPIFFE identity (serviceJwt.identities.hub-api) -- the `sub`
+        # of the machine JWT it mints for each RoomsService call.
+        - name: STREAMING_RTC_SERVICE_ID
+          value: {{ tpl (index .Values.serviceJwt.identities "hub-api").spiffeId . | quote }}
+        - name: STREAMING_RTC_GRPC_CA_FILE
+          value: /etc/waddlebot/host-api-tls/ca.crt
+        - name: STREAMING_RTC_GRPC_CLIENT_CERT_FILE
+          value: /etc/waddlebot/host-api-tls/tls.crt
+        - name: STREAMING_RTC_GRPC_CLIENT_KEY_FILE
+          value: /etc/waddlebot/host-api-tls/tls.key
         {{- end }}
         - name: SERVICE_JWT_AUDIENCE
           value: {{ .Values.serviceJwt.audience | quote }}
@@ -370,6 +382,9 @@ spec:
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
         {{- include "waddlebot.hubApiGrpcTlsVolumeMount" . | nindent 8 }}
+        {{- if and .Values.pipeline.svcStreaming.enabled (eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true") }}
+        {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
+        {{- end }}
         {{- if .Values.pipeline.hubApi.credentialManager.caSecretName }}
         - name: credential-manager-ca
           mountPath: /etc/waddlebot/credential-manager
@@ -385,6 +400,9 @@ spec:
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}
       {{- include "waddlebot.hubApiGrpcTlsVolume" . | nindent 6 }}
+      {{- if and .Values.pipeline.svcStreaming.enabled (eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true") }}
+      {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
+      {{- end }}
       {{- if .Values.pipeline.hubApi.credentialManager.caSecretName }}
       - name: credential-manager-ca
         secret:

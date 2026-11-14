@@ -21,12 +21,14 @@ on:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
     paths:
       - 'core/svc_streaming/**'
+      - 'proto/waddles/streaming/**'
       - '.version'
       - '.github/workflows/build-svc-streaming.yml'
   pull_request:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
     paths:
       - 'core/svc_streaming/**'
+      - 'proto/waddles/streaming/**'
       - '.github/workflows/build-svc-streaming.yml'
   merge_group:
     types: [checks_requested]
@@ -171,6 +173,8 @@ jobs:
         with:
           context: ${{ env.MODULE_PATH }}
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
+          # build.rs compiles the repo-root rooms.proto; Dockerfile.rust `COPY --from=proto`.
+          build-contexts: proto=./proto
           target: ${{ matrix.variant }}
           push: true
           platforms: ${{ env.BUILD_PLATFORM }}
@@ -251,6 +255,8 @@ jobs:
         with:
           context: ${{ env.MODULE_PATH }}
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
+          # build.rs compiles the repo-root rooms.proto; Dockerfile.rust `COPY --from=proto`.
+          build-contexts: proto=./proto
           target: ${{ matrix.variant }}
           push: false
           load: true
