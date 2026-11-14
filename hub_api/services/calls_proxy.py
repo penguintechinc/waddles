@@ -259,6 +259,24 @@ class HandInfo:
 
 
 @dataclass(slots=True, frozen=True)
+class HandList:
+    """`ListHands` result: the visible entries, the full queue length and the actor's position."""
+
+    hands: list[HandInfo]
+    count: int
+    position: int | None
+
+
+@dataclass(slots=True, frozen=True)
+class MyHand:
+    """The caller's own hand (None when not raised) with queue length and 1-based position."""
+
+    hand: HandInfo | None
+    queue_length: int
+    position: int | None
+
+
+@dataclass(slots=True, frozen=True)
 class JoinInfo:
     """`JoinRoom` result: a room token for ONE participant plus the WHIP/WHEP endpoints."""
 
@@ -487,15 +505,19 @@ class RoomsClient:
         publish: bool,
         subscribe: bool,
         ttl_secs: int,
+        staff: bool = False,
     ) -> JoinInfo:
         """`JoinRoom` -- mints a room token for ONE participant with exactly the given grants.
 
         The grants come from the shared access policy (`services/call_access.py`), never a
-        constant, and `ttl_secs` is the contract's short join lifetime.
+        constant, and `ttl_secs` is the contract's short join lifetime. `staff` makes the call
+        carry the moderate-scope service JWT, which is the only way svc-streaming records a
+        participant as room staff (no request field can claim it).
         """
+        scope = SCOPE_MODERATE if staff else SCOPE_WRITE
         resp = await self._call(
             "JoinRoom",
-            SCOPE_WRITE,
+            scope,
             rooms_pb2.JoinRoomRequest(
                 api_version=API_VERSION,
                 community_id=str(community_id),
@@ -649,19 +671,44 @@ class RoomsClient:
             )
         return bool(resp.locked)
 
-    async def list_hands(self, community_id: int, room_id: str) -> list[HandInfo]:
-        """`ListHands` -- the room's raised-hand queue, oldest first."""
+    async def list_hands(
+        self, community_id: int, room_id: str, *, actor_id: str, staff: bool = False
+    ) -> HandList:
+        """`ListHands` as `actor_id` (who must have joined the room).
+
+        `staff=True` carries the moderate-scope JWT: the server then returns the WHOLE queue,
+        provided the actor is recorded as room staff. Otherwise (read scope) it returns only the
+        actor's own entry plus the queue length and the actor's position.
+        """
+        scope = SCOPE_MODERATE if staff else SCOPE_READ
         resp = await self._call(
             "ListHands",
-            SCOPE_READ,
+            scope,
             rooms_pb2.ListHandsRequest(
-                api_version=API_VERSION, community_id=str(community_id), room_id=room_id
+                api_version=API_VERSION,
+                community_id=str(community_id),
+                room_id=room_id,
+                actor_id=actor_id,
             ),
         )
-        return [_hand(h) for h in resp.hands]
+        return HandList(
+            hands=[_hand(h) for h in resp.hands],
+            count=resp.count,
+            position=resp.position if resp.HasField("position") else None,
+        )
+
+    async def my_hand(self, community_id: int, room_id: str, participant_id: str) -> MyHand:
+        """The caller's own queue entry, length and position (read scope: no one else's data).
+
+        The server returns only the actor's own entry for a read-scope call; the filter below
+        is defence in depth so a misbehaving server cannot leak another participant's entry.
+        """
+        listed = await self.list_hands(community_id, room_id, actor_id=participant_id)
+        own = next((h for h in listed.hands if h.participant_id == participant_id), None)
+        return MyHand(hand=own, queue_length=listed.count, position=listed.position)
 
     async def raise_hand(self, community_id: int, room_id: str, participant_id: str) -> HandInfo:
-        """`RaiseHand` -- idempotent: raising twice keeps the original queue position."""
+        """`RaiseHand` for oneself -- idempotent: raising twice keeps the original position."""
         resp = await self._call(
             "RaiseHand",
             SCOPE_WRITE,
@@ -670,6 +717,7 @@ class RoomsClient:
                 community_id=str(community_id),
                 room_id=room_id,
                 participant_id=participant_id,
+                actor_id=participant_id,
             ),
         )
         return _hand(resp.hand)
@@ -721,18 +769,6 @@ class RoomsClient:
             ),
         )
         return _hand(resp.hand)
-
-    async def my_hand(
-        self, community_id: int, room_id: str, participant_id: str
-    ) -> HandInfo | None:
-        """The caller's own queue entry (via `ListHands`), or None when no hand is raised.
-
-        Filtering happens here, so no other participant's entry leaves the client.
-        """
-        for hand in await self.list_hands(community_id, room_id):
-            if hand.participant_id == participant_id:
-                return hand
-        return None
 
     async def reset_hands(
         self, community_id: int, room_id: str, *, actor_id: str, actor_role: int

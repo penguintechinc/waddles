@@ -16549,6 +16549,14 @@ paths:
                   participant_id:
                     title: Participant Id
                     type: string
+                  position:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Position
+                  queue_length:
+                    title: Queue Length
+                    type: integer
                   raised:
                     title: Raised
                     type: boolean
@@ -16567,6 +16575,8 @@ paths:
                 - acknowledged
                 - raised_at
                 - acknowledged_at
+                - position
+                - queue_length
                 title: MyHandResponse
                 type: object
           description: 'The caller''s OWN hand state only: UUID plus timestamps, nothing
