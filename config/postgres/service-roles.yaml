@@ -109,6 +109,13 @@ legacy_deny_tables:
   - user_passkeys
   - revoked_tokens
   - oauth_state_tokens
+  # Platform secret store (alembic 0109): lives in its OWN schema, reachable only through the
+  # explicit grants of that migration (hub-api; SELECT on the public_keys view for the data-plane
+  # roles) -- never through public_dml, which only covers `public`. Listed here, schema-qualified,
+  # so that moving a table into `public` later still denies every legacy role.
+  - platform_vault.secrets
+  - platform_vault.secret_events
+  - platform_vault.root_marker
 
 # Always read-only for application roles: schema-state bookkeeping.
 read_only_tables:
