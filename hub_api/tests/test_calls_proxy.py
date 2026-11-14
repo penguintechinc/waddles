@@ -236,7 +236,7 @@ async def test_every_client_method_stamps_api_version_v1(fake: FakeRooms) -> Non
     await c.create_room(1, label="x", max_publishers=None)
     await c.delete_room(1, ROOM)
     fake.seed_room(1)
-    await c.join_room(1, ROOM, PARTICIPANT)
+    await c.join_room(1, ROOM, PARTICIPANT, publish=True, subscribe=True, ttl_secs=60)
     await c.leave_room(1, ROOM, PARTICIPANT, **admin)
     await c.kick_participant(1, ROOM, PARTICIPANT, **admin)
     await c.set_participant_muted(1, ROOM, PARTICIPANT, True, **admin)
