@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use bundle_host_http::guarded::{GuardedClient, GuardedLimits};
 use connection_resolver::{ConnectionRef, SecretString};
 use prometheus::Registry;
-use redis::aio::MultiplexedConnection;
+use redis::aio::ConnectionManager;
 use svc_ingest::connector::identify_budget::{
     AcquireOutcome, BotIdentity, BudgetError, DiscordIdentifyGate, GatewayBotSource,
     GatewayInfoSource, IdentifyBudget, IdentifyBudgetMetrics, RedisIdentifyBudget,
@@ -50,10 +50,10 @@ async fn valkey() -> (DockerContainer, String) {
     (c, url)
 }
 
-async fn conn(url: &str) -> MultiplexedConnection {
+async fn conn(url: &str) -> ConnectionManager {
     redis::Client::open(url)
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap()
 }

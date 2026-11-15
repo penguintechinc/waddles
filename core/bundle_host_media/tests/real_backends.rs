@@ -95,7 +95,7 @@ fn uuid_like() -> u128 {
         .as_nanos()
 }
 
-async fn valkey() -> (DockerContainer, redis::aio::MultiplexedConnection) {
+async fn valkey() -> (DockerContainer, redis::aio::ConnectionManager) {
     let c = start_container(
         VALKEY_IMAGE,
         6379,
@@ -106,7 +106,7 @@ async fn valkey() -> (DockerContainer, redis::aio::MultiplexedConnection) {
     .await;
     let conn = redis::Client::open(format!("redis://{}:{}/", c.host(), c.port()))
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     (c, conn)
