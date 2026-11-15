@@ -35,6 +35,7 @@ use bundle_executor::invoke::Executor;
 use bundle_executor::manifest::{VerifiedManifest, WitWorld};
 use bundle_executor::parity_support::pseudonym_uuid;
 use bundle_executor::wire::run_connection;
+use bundle_host_http::guarded::{GuardedClient, GuardedLimits};
 use clap::Parser;
 use connection_resolver::{
     BindingPage, BindingSummary, ConnectionKind, ConnectionRef, ConnectionResolve,
@@ -42,6 +43,9 @@ use connection_resolver::{
 };
 use connector_e2e::{digest_of, NoSource};
 use futures_util::{SinkExt, StreamExt};
+use svc_ingest::active_context::{
+    register_routing_metrics, ContextError, ContextSource, ContextView, InteractionReplier,
+};
 use svc_ingest::connector::host_calls::{CallScope, IdentityTokenizer, TokenizeError};
 use svc_ingest::connector::identify_budget::{BotIdentity, DISCORD_API_BASE, IDENTIFY_WINDOW};
 use svc_ingest::connector::secrets::{Destination, ResolvedAuth};
@@ -51,14 +55,16 @@ use svc_ingest::connector_runtime::boot::{
     assemble, AssembleDeps, HostBridge, IdentifyBudgetBackend, LoopbackSeams, RuntimeSettings,
 };
 use svc_ingest::connector_runtime::feed::{DesiredConnection, DynFeed, FeedError, TransportPlan};
+use svc_ingest::connector_runtime::interaction_routing::InteractionRouting;
 use svc_ingest::connector_runtime::profiles::discord::GATEWAY_URL;
 use svc_ingest::connector_runtime::scoped::ScopeLookup;
 use svc_ingest::connector_runtime::selector::{
     start_legacy, ConnectorSelector, LegacyPlan, LegacyStarters, IDENTIFY_BUDGET_READY,
 };
 use svc_ingest::identity_crypto::{
-    decrypt_identity_value, DekProvider, JsonEnvelope, LocalDevDekProvider,
+    decrypt_identity_value, ConfiguredDekProvider, DekProvider, JsonEnvelope, LocalDevDekProvider,
 };
+use svc_ingest::interaction_store::InteractionStore;
 use svc_ingest::scope_resolver::{ResolvedScope, Unresolved};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -139,6 +145,9 @@ struct Bind {
     guild: &'static str,
 }
 
+/// The bot's Discord application id (a snowflake), as hub-api's resolved credential carries it.
+const APPLICATION_ID: &str = "9100000000000000099";
+
 /// hub-api's binding list for the Discord provider.
 struct FakeHub {
     binds: Vec<Bind>,
@@ -156,7 +165,11 @@ impl ConnectionResolve for FakeHub {
                 access_token: SecretString::new("unused-the-seam-serves-credentials".to_owned()),
             },
             expires_at: None,
-            metadata: Default::default(),
+            // Discord ON routes interactions: the sink factory refuses a binding whose
+            // credential does not carry the bot's application id.
+            metadata: [("application_id".to_owned(), APPLICATION_ID.to_owned())]
+                .into_iter()
+                .collect(),
         })
     }
 
@@ -209,6 +222,30 @@ impl ScopeLookup for FakeScope {
             _ => return Box::pin(async { Err(Unresolved::NotFound) }),
         };
         Box::pin(async move { r.map_err(|_| Unresolved::Invalid) })
+    }
+}
+
+/// hub-api active-context access for the Discord interaction path. This suite drives the
+/// gateway (IDENTIFY / dispatch) path only -- slash interactions are proven in
+/// `interaction_flow.rs` -- so any call here is a test bug and fails loudly (`Unavailable`).
+struct NoHubContext;
+
+impl ContextSource for NoHubContext {
+    fn get<'a>(
+        &'a self,
+        _source_id: &'a str,
+        _user: &'a str,
+    ) -> BoxFut<'a, Result<ContextView, ContextError>> {
+        Box::pin(async { Err(ContextError::Unavailable) })
+    }
+
+    fn put<'a>(
+        &'a self,
+        _source_id: &'a str,
+        _user: &'a str,
+        _community: &'a str,
+    ) -> BoxFut<'a, Result<ContextView, ContextError>> {
+        Box::pin(async { Err(ContextError::Unavailable) })
     }
 }
 
@@ -547,7 +584,22 @@ async fn eventually(what: &str, cond: impl Fn() -> bool) {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("timed out waiting for: {what}");
+    // The captured runtime log tells WHY nothing happened (a refused connection, a failed
+    // assembly step, ...): a bare timeout is undiagnosable from CI output. Warnings and errors
+    // first (the reconcile tick's debug lines would otherwise drown them), then the tail.
+    let log = logged();
+    let notable: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains(" warn ") || l.contains(" error "))
+        .take(40)
+        .collect();
+    let tail: Vec<&str> = log.lines().rev().take(10).collect();
+    let tail = format!(
+        "{}\n--- last lines ---\n{}",
+        notable.join("\n"),
+        tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+    );
+    panic!("timed out waiting for: {what}\n--- captured warnings/errors ---\n{tail}");
 }
 
 type Entry = (String, Vec<(String, Vec<u8>)>);
@@ -789,10 +841,32 @@ impl Rig {
         );
         let lease_conn = ctx.kc().await;
         let gateway = ctx.gw;
+        // Discord ON requires the interaction routing deps at assembly: the real store on the
+        // test Valkey, the real replier (its egress allow-list is empty, so it can reach
+        // nothing), the registered metrics, and the same identity tokenizer the bridge uses.
+        let store = InteractionStore::new(ctx.kc().await);
+        let interaction_routing = InteractionRouting {
+            source: Arc::new(NoHubContext),
+            replier: Arc::new(InteractionReplier::new(
+                store.clone(),
+                GuardedClient::new(
+                    GuardedLimits {
+                        max_redirects: 0,
+                        timeout: Duration::from_secs(1),
+                        max_response_bytes: 1024,
+                    },
+                    Vec::new(),
+                ),
+                DISCORD_API_BASE.to_owned(),
+            )),
+            store,
+            metrics: register_routing_metrics(&registry).expect("routing metrics register once"),
+            tokenizer: tok.clone() as Arc<dyn IdentityTokenizer>,
+        };
         let runtime = assemble(
             &settings,
             AssembleDeps {
-                interaction_routing: None,
+                interaction_routing: Some(interaction_routing),
                 resolver: Arc::new(FakeHub { binds }),
                 scope: Arc::new(FakeScope {
                     slug: ctx.slug.clone(),
@@ -804,7 +878,9 @@ impl Rig {
                     vec![7u8; 32],
                 )])),
                 active_kid: "k1".into(),
-                dek: Arc::new(LocalDevDekProvider::new("local", KEK_ENV).unwrap()),
+                dek: Arc::new(ConfiguredDekProvider::local_dev(
+                    LocalDevDekProvider::new("local", KEK_ENV).unwrap(),
+                )),
                 identity_metrics: prometheus::IntCounterVec::new(
                     prometheus::Opts::new("discord_acceptance_identity_total", "test"),
                     &["tenant", "status"],
@@ -922,14 +998,24 @@ impl Decoded {
     async fn decrypt(&self, key: &str, field: &str, ptr: &str) -> String {
         let env: JsonEnvelope =
             serde_json::from_str(self.s(ptr)).expect("identity field is an envelope");
-        let tenant = self.s("/tenant");
-        let dek = LocalDevDekProvider::new("local", KEK_ENV)
-            .unwrap()
-            .get_dek(tenant)
-            .await
-            .expect("dek");
-        decrypt_identity_value(&env, &dek.0, tenant, key, field, self.s("/event_id"))
-            .expect("identity field decrypts")
+        // The sink keys the DEK and binds the AAD by the NUMERIC tenant id (never the slug).
+        let tenant_id = self.env["tenant_id"]
+            .as_i64()
+            .expect("entry carries the numeric tenant_id");
+        let dek =
+            ConfiguredDekProvider::local_dev(LocalDevDekProvider::new("local", KEK_ENV).unwrap())
+                .get_dek(tenant_id)
+                .await
+                .expect("dek");
+        decrypt_identity_value(
+            &env,
+            &dek.0,
+            &tenant_id.to_string(),
+            key,
+            field,
+            self.s("/event_id"),
+        )
+        .expect("identity field decrypts")
     }
 }
 
