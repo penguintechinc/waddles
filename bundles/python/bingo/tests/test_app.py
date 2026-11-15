@@ -834,12 +834,16 @@ def test_manifests_and_pyproject_agree() -> None:
     bundle = (BUNDLE_DIR / "bundle.yaml").read_text()
     hub = (BUNDLE_DIR / "hub-manifest.yaml").read_text()
     pyproject = (BUNDLE_DIR / "pyproject.toml").read_text()
+    # The version is bumped on every behavior change, so assert the three files agree with
+    # each other instead of pinning a literal (a pinned 1.0.0 went stale on the first bump).
+    match = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
+    assert match, "pyproject.toml declares no version"
+    version = re.escape(match.group(1))
     for text in (bundle, hub):
-        assert re.search(r"^version: 1\.0\.0$", text, re.MULTILINE)
+        assert re.search(rf"^version: {version}$", text, re.MULTILINE)
         assert "app_id: waddles.core.example.bingo" in text
         assert text.count('command_prefix: ["!bingo"]') == 2
-    assert 'version = "1.0.0"' in pyproject
-    assert 'tested_with: "1.0.0"' in bundle
+    assert re.search(r'^  tested_with: "[0-9.]+"$', bundle, re.MULTILINE)
 
 
 def test_manifest_declares_only_kv_and_chat_send() -> None:

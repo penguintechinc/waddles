@@ -165,3 +165,22 @@ Fail-closed is unchanged: no key / no token means the event is dead-lettered, ne
 | Capability host crates (`bundle_host_kv`, `_db`, `_economy`, `_reputation`) and `svc_process::identity` register instruments **with** `_seconds`/`_total` suffixes | via the Prometheus bridge they scrape as `…_seconds_seconds` / `…_total_total`, so dashboards querying the single-suffixed names read empty on the scrape path (OTLP→Prometheus translators that de-duplicate are unaffected). Fix = rename the instruments (see *Naming*), a separate, dashboard-visible change |
 | `host_api::Connection::invoke` has no timeout and the read loop's EOF does not fail pending requests | an executor that dies mid-invoke can leave that consumer's `invoke` pending forever; only `heartbeat`/`mark_closed` stop *new* invokes. Found while testing the closed-connection path |
 | `svc_ingest` / `svc_streaming` | out of scope for this change |
+
+## Command latency SLA (svc-ingest, svc-process, svc-action)
+
+Owner SLA: non-external commands p99 < 1 s, first door -> outbound platform call confirmed. The first-door stamp
+rides the envelope's W3C `tracestate` (`waddles=t0:...`), so no payload or spine change. Full design, spans, logs,
+canary, handoff list and the ranked latency suspects: [`command-latency.md`](command-latency.md). Everything is behind
+the opt-out kill switch `waddles.disable-command-latency-telemetry` (unseen/OFF = telemetry ON).
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `waddles_command_hop_seconds` | histogram | `hop` (`ingest_publish`, `queue_wait`, `process_stage`, `action_queue_wait`, `dispatch_to_invoke`, `executor_to_outbound`, `outbound_call`) | seconds one command spent in one hop; 5 ms-10 s buckets with extra resolution at 0.5-1.5 s |
+| `waddles_command_e2e_seconds` | histogram | `command` (registered commands only, else `other`), `bundle_lang` (closed set, unmapped `unknown`), `outcome` (`ok`, `refused`, `timeout`, `error`), `door` (`gateway`, `sink`, `http`, `publish`) | first door -> outbound op confirmed, recorded where svc-action sees the Discord ack |
+| `waddles_command_e2e_over_budget_total` | counter | `command`, `bundle_lang`, `outcome` | e2e >= 1.0 s |
+| `waddles_command_latency_marker_invalid_total` | counter | `reason` (`skewed`, `stale`, `missing`) | first-door stamps refused: a forged/skewed stamp only skips its own sample |
+| `waddles_canary_e2e_seconds` | histogram | `outcome` | synthetic canary command, same end point as a user command |
+| `waddles_canary_failures_total` | counter | `reason` | `timeout` (>5 s), `misconfigured`, `publish_failed`, `store_unavailable`, `not_ok`, `result_unreadable` |
+
+Label policy holds: no id, user, message text, channel or slug is ever a label; `command` is a registry lookup,
+never the user's text.

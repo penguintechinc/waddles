@@ -170,6 +170,10 @@ where
     // would bind to the no-op default provider and silently record nothing.
     // Every later `stage_metrics::stage_metrics()` call returns this same set.
     let _ = stage_metrics::stage_metrics();
+    // Command-latency kill switch: ENV baseline now, live PostHog value via the refresher.
+    command_latency::switch::init_from_env();
+    let _ = command_latency::metrics::metrics();
+    command_latency::switch::spawn_refresher(flags::command_latency_kill_switch_wanted);
     // Route `bundle-capability-gate`'s `metrics`-facade audit counters
     // (grants and denials) into the same OTel pipeline; without a recorder
     // the facade drops them.

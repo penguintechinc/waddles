@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from provision_harness import with_provisioned  # type: ignore[import-not-found]
 
 _CHART = Path(__file__).resolve().parent.parent
 _ENVS = (
@@ -190,7 +191,8 @@ def test_kv_has_cilium_policy():
 
 
 def test_kv_password_isolated_and_not_in_nonsecret_fields():
-    docs = _docs("values-alpha.yaml")
+    # -valkey-kv is created at RUNTIME by the provision-secrets hook; run the real hook.
+    docs = with_provisioned(_docs("values-alpha.yaml"))
     kv = [
         d
         for d in docs
@@ -331,8 +333,13 @@ def test_valkey_tls_cert_covers_kv_san():
 
 
 def test_beta_tier_without_certs_fails_closed():
-    """Real beta tier: TLS now defaults on, so a missing cert fails closed (never silent
-    plaintext)."""
+    """Real beta tier with the cert source removed (no cert-manager, not delegated, no material):
+    a missing Valkey TLS cert fails the render closed (never silent plaintext).
+
+    Previously this asserted a bare non-zero exit of plain beta, which was satisfied by an
+    UNRELATED guard (the valkeyDurable admin password) -- beta itself uses cert-manager. The
+    message is now asserted so the gate can only pass for the right reason.
+    """
     r = subprocess.run(
         [
             "helm",
@@ -343,9 +350,14 @@ def test_beta_tier_without_certs_fails_closed():
             "1.30.0",
             "--values",
             str(_CHART / "values-beta.yaml"),
+            "--set",
+            "global.transitTls.certManager.enabled=false",
+            "--set",
+            "global.valkeyTls.externalSecret=false",
         ],  # noqa: S603
         capture_output=True,
         text=True,
         check=False,
     )
     assert r.returncode != 0
+    assert "global.valkeyTls" in r.stderr and "not found" in r.stderr
