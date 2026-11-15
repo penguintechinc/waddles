@@ -38,7 +38,7 @@ use svc_ingest::connector_runtime::boot::{
 };
 use svc_ingest::connector_runtime::feed::{DesiredConnection, DynFeed, FeedError, TransportPlan};
 use svc_ingest::connector_runtime::scoped::ScopeLookup;
-use svc_ingest::identity_crypto::LocalDevDekProvider;
+use svc_ingest::identity_crypto::{ConfiguredDekProvider, LocalDevDekProvider};
 use svc_ingest::scope_resolver::{ResolvedScope, Unresolved};
 use tokio::sync::oneshot;
 use wiremock::matchers::{method, path};
@@ -358,7 +358,9 @@ async fn a_youtube_binding_resolves_its_tenant_and_publishes_while_a_mismatch_is
                 vec![7u8; 32],
             )])),
             active_kid: "k1".into(),
-            dek: Arc::new(LocalDevDekProvider::new("local", "BOOT_WIRING_YT_KEK").unwrap()),
+            dek: Arc::new(ConfiguredDekProvider::local_dev(
+                LocalDevDekProvider::new("local", "BOOT_WIRING_YT_KEK").unwrap(),
+            )),
             identity_metrics: prometheus::IntCounterVec::new(
                 prometheus::Opts::new("boot_wiring_yt_identity_total", "test"),
                 &["tenant", "status"],

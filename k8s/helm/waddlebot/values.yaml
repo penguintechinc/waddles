@@ -25,6 +25,12 @@ global:
 
   # Image tag to deploy (e.g., "latest", commit SHA, or version tag)
   imageTag: "latest"
+  # Optional per-image tag pins, keyed by image repo name (hub-api, hub-webui, migrations, seeder,
+  # svc-ingest, svc-process, svc-action, svc-presentation, svc-bundles-executor, svc-streaming
+  # (without the -<variant> suffix), egress-proxy). An unlisted image falls back to imageTag. The
+  # dal2alpha deploy pins every image so only rebuilt images change their image string (and restart).
+  # Explicit per-component tags (hubApi.imageTag, modules.migrations.imageTag, ...) still win.
+  imageTags: {}
 
   # Image pull policy -- applied to EVERY workload container (hub-api, svc-*-rust,
   # svc-bundles-executor included; no template hardcodes a policy). IfNotPresent is correct
