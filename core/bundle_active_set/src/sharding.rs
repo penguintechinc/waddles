@@ -218,7 +218,9 @@ impl SessionRouter {
                 .class_of_executor
                 .get(executor)
                 .copied()
-                .unwrap_or_default()
+                // An executor not in the class map is a pre-partition executor: it accepts both
+                // classes (`ExecutorClass::Any`), stated explicitly rather than via a default.
+                .unwrap_or(ExecutorClass::Any)
                 .accepts(c),
         }
     }

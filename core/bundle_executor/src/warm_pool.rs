@@ -187,10 +187,10 @@ impl<T> WarmPool<T> {
     /// entries so the caller drops them outside the lock. In-flight fills are invalidated.
     pub fn evict(&self, digest: &str) -> Vec<T> {
         let mut st = self.lock();
-        st.slots
-            .remove(digest)
-            .map(|s| s.ready.into_iter().map(|(_, t)| t).collect())
-            .unwrap_or_default()
+        match st.slots.remove(digest) {
+            Some(slot) => slot.ready.into_iter().map(|(_, t)| t).collect(),
+            None => Vec::new(), // unknown digest: nothing was loaded, nothing to hand back
+        }
     }
 
     /// Drops every slot not used within the idle TTL; returns the dropped entries.
