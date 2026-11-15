@@ -183,6 +183,10 @@ roles:
         SELECT: [id]
       app_version_uploads:
         SELECT: [id, app_version_id, manifest_json]
+      # Command-latency `command` label (0112): registered command names only, read from the replica;
+      # no tenant/community/app column.
+      app_commands:
+        SELECT: [command]
 
   waddles_svc_core:
     description: svc-core placeholder stage (no table access)
@@ -206,7 +210,8 @@ roles:
       app_active_versions:
         SELECT: [app_id, tenant_id, community_id, version_id]
       app_versions:
-        SELECT: [id]
+        # + (app_id, language) for the command-latency `bundle` / `bundle_lang` labels (0112).
+        SELECT: [id, app_id, language]
       app_version_uploads:
         SELECT: [id, app_version_id, manifest_json]
 

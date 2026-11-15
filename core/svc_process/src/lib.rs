@@ -2371,6 +2371,13 @@ fn try_start_changelog_consumer(
                             bundle_db_license_client.clone(),
                         )));
                     }
+                    // `command` latency label: registered commands from the read REPLICA only
+                    // (never the primary, never an env list); seed + periodic + lazy-on-miss.
+                    let _latency_labels =
+                        bundle_config_db::labels::start(command_latency::labels::Wanted {
+                            commands: true,
+                            bundles: false,
+                        });
                     let deps = Arc::new(deps);
                     start_bundle_admin_consumer(&deps).await;
                     Some(

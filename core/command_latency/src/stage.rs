@@ -156,9 +156,12 @@ pub fn report_confirmed(
                 .command
                 .as_deref()
                 .unwrap_or(crate::registry::NO_COMMAND);
-            let lang = crate::registry::global().bundle_lang(app_id);
+            let reg = crate::registry::global();
+            let lang = reg.bundle_lang(app_id);
+            let bundle = reg.bundle_label(app_id);
             m.record_e2e(
                 command,
+                &bundle,
                 lang,
                 outcome,
                 stamps.door.unwrap_or(crate::Door::Publish),

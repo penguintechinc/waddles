@@ -6,8 +6,8 @@
 //! | Exposed name | Type | Labels |
 //! |---|---|---|
 //! | `waddles_command_hop_seconds` | histogram | `hop` |
-//! | `waddles_command_e2e_seconds` | histogram | `command, bundle_lang, outcome, door` |
-//! | `waddles_command_e2e_over_budget_total` | counter | `command, bundle_lang, outcome` |
+//! | `waddles_command_e2e_seconds` | histogram | `command, bundle, bundle_lang, outcome, door` |
+//! | `waddles_command_e2e_over_budget_total` | counter | `command, bundle, bundle_lang, outcome` |
 //! | `waddles_command_latency_marker_invalid_total` | counter | `reason` |
 //! | `waddles_canary_e2e_seconds` | histogram | `outcome` |
 //! | `waddles_canary_failures_total` | counter | `reason` |
@@ -162,6 +162,7 @@ impl CommandMetrics {
     pub fn record_e2e(
         &self,
         command: &str,
+        bundle: &str,
         bundle_lang: &str,
         outcome: Outcome,
         door: Door,
@@ -175,6 +176,7 @@ impl CommandMetrics {
             elapsed.as_secs_f64(),
             &[
                 KeyValue::new("command", command.to_string()),
+                KeyValue::new("bundle", bundle.to_string()),
                 KeyValue::new("bundle_lang", bundle_lang.to_string()),
                 KeyValue::new("outcome", outcome.label()),
                 KeyValue::new("door", door.label()),
@@ -185,6 +187,7 @@ impl CommandMetrics {
                 1,
                 &[
                     KeyValue::new("command", command.to_string()),
+                    KeyValue::new("bundle", bundle.to_string()),
                     KeyValue::new("bundle_lang", bundle_lang.to_string()),
                     KeyValue::new("outcome", outcome.label()),
                 ],
@@ -343,6 +346,7 @@ mod tests {
         ));
         assert!(!m.record_e2e(
             "ping",
+            "waddles.core.ping",
             "rust",
             Outcome::Ok,
             Door::Gateway,
@@ -350,6 +354,7 @@ mod tests {
         ));
         assert!(m.record_e2e(
             "ping",
+            "waddles.core.ping",
             "rust",
             Outcome::Ok,
             Door::Gateway,
@@ -357,6 +362,7 @@ mod tests {
         ));
         assert!(m.record_e2e(
             "ping",
+            "waddles.core.ping",
             "rust",
             Outcome::Timeout,
             Door::Sink,
@@ -379,6 +385,7 @@ mod tests {
         crate::switch::set_disabled(true);
         assert!(!m.record_e2e(
             "ping",
+            "waddles.core.ping",
             "rust",
             Outcome::Ok,
             Door::Gateway,

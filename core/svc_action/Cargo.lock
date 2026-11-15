@@ -630,6 +630,7 @@ name = "bundle-config-db"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "command-latency",
  "hub_client",
  "opentelemetry",
  "redis",

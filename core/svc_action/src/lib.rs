@@ -814,6 +814,12 @@ async fn build_stage_capabilities(
         cache.set_read_path_gate(Arc::new(flags::DbConfigReadsGate(license.clone())));
     }
     let caps = caps.with_bundle_config(bundle_config);
+    // `bundle` / `bundle_lang` latency labels: registered bundles from the read REPLICA only (never
+    // the primary, never an env list); seed + periodic + lazy-on-miss refresh.
+    let _latency_labels = bundle_config_db::labels::start(command_latency::labels::Wanted {
+        commands: false,
+        bundles: true,
+    });
     // `db` host capability (v1 + v2 `db2.*`): see `try_build_db_wiring`'s doc for
     // its two distinct unwired outcomes.
     let bundle_db_cfg = bundle_host_db::ConnectConfig {

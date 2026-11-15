@@ -16,6 +16,8 @@ path = "src/lib.rs"
 # on this crate introduces no second pin of the same package.
 [dependencies]
 hub_client = { path = "../hub_client", version = "=0.1.0" }
+# Label registries fed from the replica (`labels.rs`): the LabelSource trait + bounded caps.
+command-latency = { path = "../command_latency", version = "=0.1.0" }
 # Same exact pin as core/svc_ingest's display-name reader and core/svc_process / core/svc_action
 # (`postgres-array` backs the batched `unnest($1::bigint[], ...)` warm-up statement).
 sea-orm = { version = "=2.0.2", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "postgres-array"] }

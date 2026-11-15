@@ -1,30 +1,33 @@
 //! Bounded label vocabularies for the command-latency metrics.
 //!
-//! The `command` label must come from the REGISTERED command set and never from user text, and the
-//! `bundle_lang` label from a closed language set, so neither can mint unbounded series or leak a
-//! message. Both are process-wide registries fed by (a) an environment baseline and (b) the
-//! [`CommandRegistry::register`] / [`CommandRegistry::set_bundle_lang`] API for a catalog feed.
+//! The `command` label must come from the REGISTERED command set, the `bundle` label from the
+//! registered app bundles and the `bundle_lang` label from a closed language set, so none of them can
+//! mint unbounded series or leak a message. The process-wide registry is fed ONLY by a cached read of
+//! the database read replica (see [`crate::labels`]): seeded once at start, refreshed periodically and
+//! re-read (rate limited) when a registry miss is observed. There is no environment baseline.
 //!
-//! | Env var | Format |
-//! |---|---|
-//! | `WADDLES_COMMAND_LATENCY_COMMANDS` | `ping,roll,8ball` |
-//! | `WADDLES_BUNDLE_LANGS` | `waddles.core.example.ping:rust,waddles.fun.roll:python` |
+//! Anything not registered folds to [`NO_COMMAND`] / [`NO_BUNDLE`] (`other`), an app whose language is
+//! not mapped to [`UNKNOWN_LANG`], and each set is capped ([`MAX_COMMANDS`], [`MAX_BUNDLES`]).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{OnceLock, RwLock};
+
+use tokio::sync::Notify;
 
 use crate::stamp::is_valid_command;
 
 /// Hard cap on registered command names (a registry is bounded by construction).
 pub const MAX_COMMANDS: usize = 256;
-/// Hard cap on `app_id -> language` entries.
-pub const MAX_BUNDLES: usize = 1024;
+/// Hard cap on registered app bundles (`app_id -> language` entries); bounds the `bundle` label.
+pub const MAX_BUNDLES: usize = 256;
 
 /// The closed `bundle_lang` vocabulary; anything else folds to `other`, an unmapped app to `unknown`.
 pub const KNOWN_LANGS: [&str; 6] = ["rust", "python", "csharp", "go", "js", "other"];
 
 /// Commands that mean "no registered command": the label for a non-command or unregistered message.
 pub const NO_COMMAND: &str = "other";
+/// The `bundle` label for an app that is not a registered bundle.
+pub const NO_BUNDLE: &str = "other";
 /// The label for a bundle whose language is not mapped.
 pub const UNKNOWN_LANG: &str = "unknown";
 
@@ -34,6 +37,9 @@ pub const UNKNOWN_LANG: &str = "unknown";
 pub struct CommandRegistry {
     commands: RwLock<HashSet<String>>,
     langs: RwLock<HashMap<String, &'static str>>,
+    /// Woken (never blocks) when a command-shaped or bundle-shaped value is not registered, so the
+    /// refresher can lazy-load. Lossy by design: many misses coalesce into one pending wake.
+    miss: Notify,
 }
 
 fn fold_lang(raw: &str) -> &'static str {
@@ -87,24 +93,104 @@ impl CommandRegistry {
     /// is read in place and never stored, logged or returned; an unregistered token yields `None`.
     pub fn detect(&self, text: &str) -> Option<String> {
         let token = text.split_whitespace().next()?;
-        let token = token
-            .strip_prefix('!')
-            .or_else(|| token.strip_prefix('/'))
-            .unwrap_or(token);
+        let stripped = token.strip_prefix('!').or_else(|| token.strip_prefix('/'));
+        let prefixed = stripped.is_some();
+        let token = stripped.unwrap_or(token);
         if token.len() > 32 {
             return None;
         }
         let lower = token.to_ascii_lowercase();
-        self.contains(&lower).then_some(lower)
+        if self.contains(&lower) {
+            return Some(lower);
+        }
+        // A prefixed, label-shaped, unregistered token may be a command registered after the last
+        // refresh: ask the refresher to re-read (it rate limits). Plain chat never triggers this.
+        if prefixed && is_valid_command(&lower) {
+            self.miss.notify_one();
+        }
+        None
     }
 
-    /// Maps a bundle `app_id` to a language in the closed set (anything else becomes `other`).
-    pub fn set_bundle_lang(&self, app_id: &str, lang: &str) {
+    /// The wake signal raised by a registry miss; awaited by [`crate::labels::spawn_refresher`].
+    pub fn miss_signal(&self) -> &Notify {
+        &self.miss
+    }
+
+    /// Atomically replaces the command set with `names` (invalid names skipped, capped at
+    /// [`MAX_COMMANDS`]); a command deleted in the database drops out on the next refresh.
+    pub fn replace_commands<I, S>(&self, names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut next = HashSet::new();
+        for n in names {
+            let n = n.as_ref().trim().to_ascii_lowercase();
+            if next.len() >= MAX_COMMANDS {
+                break;
+            }
+            if is_valid_command(&n) {
+                next.insert(n);
+            }
+        }
+        *self.commands.write().unwrap_or_else(|e| e.into_inner()) = next;
+    }
+
+    /// Atomically replaces the `app_id -> language` map (capped at [`MAX_BUNDLES`]; languages folded
+    /// into the closed set; app ids that are not label-safe skipped).
+    pub fn replace_bundles<I, A, L>(&self, bundles: I)
+    where
+        I: IntoIterator<Item = (A, L)>,
+        A: AsRef<str>,
+        L: AsRef<str>,
+    {
+        let mut next = HashMap::new();
+        for (app, lang) in bundles {
+            if next.len() >= MAX_BUNDLES {
+                break;
+            }
+            let app = app.as_ref().trim();
+            if is_valid_bundle(app) {
+                next.insert(app.to_string(), fold_lang(lang.as_ref()));
+            }
+        }
+        *self.langs.write().unwrap_or_else(|e| e.into_inner()) = next;
+    }
+
+    /// Number of registered bundles.
+    pub fn bundle_count(&self) -> usize {
+        self.langs.read().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// The bounded `bundle` label: the `app_id` when it is a registered bundle, else
+    /// [`NO_BUNDLE`]. A miss on a label-shaped id wakes the refresher.
+    pub fn bundle_label(&self, app_id: &str) -> String {
+        if self
+            .langs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(app_id)
+        {
+            return app_id.to_string();
+        }
+        if is_valid_bundle(app_id) {
+            self.miss.notify_one();
+        }
+        NO_BUNDLE.to_string()
+    }
+
+    /// Maps a bundle `app_id` to a language in the closed set (anything else becomes `other`);
+    /// `false` (no change) when the id is not label-safe or the cap is reached.
+    pub fn set_bundle_lang(&self, app_id: &str, lang: &str) -> bool {
+        if !is_valid_bundle(app_id) {
+            return false;
+        }
         let mut map = self.langs.write().unwrap_or_else(|e| e.into_inner());
         if map.len() >= MAX_BUNDLES && !map.contains_key(app_id) {
-            return;
+            return false;
         }
         map.insert(app_id.to_string(), fold_lang(lang));
+        true
     }
 
     /// The bounded language label for a bundle (`unknown` when unmapped).
@@ -116,32 +202,22 @@ impl CommandRegistry {
             .copied()
             .unwrap_or(UNKNOWN_LANG)
     }
-
-    /// Seeds both registries from the documented environment variables.
-    pub fn load_env(&self) {
-        if let Ok(raw) = std::env::var("WADDLES_COMMAND_LATENCY_COMMANDS") {
-            for name in raw.split(',') {
-                self.register(name);
-            }
-        }
-        if let Ok(raw) = std::env::var("WADDLES_BUNDLE_LANGS") {
-            for pair in raw.split(',') {
-                if let Some((app, lang)) = pair.split_once(':') {
-                    self.set_bundle_lang(app.trim(), lang);
-                }
-            }
-        }
-    }
 }
 
-/// The process-wide registry, seeded from the environment on first use.
+/// The process-wide registry; empty until [`crate::labels::spawn_refresher`] seeds it from the
+/// database (an empty registry labels everything `other` / `unknown`, never an error).
 pub fn global() -> &'static CommandRegistry {
     static GLOBAL: OnceLock<CommandRegistry> = OnceLock::new();
-    GLOBAL.get_or_init(|| {
-        let reg = CommandRegistry::new();
-        reg.load_env();
-        reg
-    })
+    GLOBAL.get_or_init(CommandRegistry::new)
+}
+
+/// `true` for a label-safe bundle `app_id`: 1..=128 of `[A-Za-z0-9._-]`.
+pub fn is_valid_bundle(app_id: &str) -> bool {
+    !app_id.is_empty()
+        && app_id.len() <= 128
+        && app_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
 }
 
 #[cfg(test)]
@@ -191,5 +267,49 @@ mod tests {
         assert_eq!(reg.bundle_lang("a"), "rust");
         assert_eq!(reg.bundle_lang("b"), "other");
         assert_eq!(reg.bundle_lang("never-seen"), UNKNOWN_LANG);
+    }
+
+    #[test]
+    fn replace_swaps_atomically_drops_stale_and_caps() {
+        let reg = CommandRegistry::new();
+        reg.replace_commands(["Ping", "roll", "bad name", ""]);
+        assert!(reg.contains("ping") && reg.contains("roll") && !reg.contains("bad name"));
+        reg.replace_commands(["roll"]);
+        assert!(!reg.contains("ping"), "a deleted command drops out");
+        reg.replace_commands((0..MAX_COMMANDS + 50).map(|i| format!("c{i}")));
+        assert_eq!(reg.command_count(), MAX_COMMANDS);
+
+        reg.replace_bundles([("waddles.core.ping", "Rust"), ("has space", "rust")]);
+        assert_eq!(reg.bundle_count(), 1);
+        assert_eq!(reg.bundle_label("waddles.core.ping"), "waddles.core.ping");
+        assert_eq!(reg.bundle_label("never-seen"), NO_BUNDLE);
+        reg.replace_bundles((0..MAX_BUNDLES + 10).map(|i| (format!("app{i}"), "python")));
+        assert_eq!(reg.bundle_count(), MAX_BUNDLES);
+    }
+
+    #[tokio::test]
+    async fn a_prefixed_unregistered_token_wakes_the_refresher_but_plain_chat_does_not() {
+        let reg = CommandRegistry::new();
+        assert_eq!(reg.detect("hello there"), None);
+        let none = tokio::time::timeout(
+            std::time::Duration::from_millis(30),
+            reg.miss_signal().notified(),
+        )
+        .await;
+        assert!(none.is_err(), "plain chat must not trigger a refresh");
+        assert_eq!(reg.detect("!newcmd arg"), None);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            reg.miss_signal().notified(),
+        )
+        .await
+        .expect("a prefixed miss wakes the refresher");
+        assert_eq!(reg.bundle_label("waddles.new.app"), NO_BUNDLE);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            reg.miss_signal().notified(),
+        )
+        .await
+        .expect("a bundle miss wakes the refresher");
     }
 }
