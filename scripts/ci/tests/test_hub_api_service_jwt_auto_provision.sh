@@ -53,7 +53,7 @@ with open(f"{workdir}/job_script.sh", "w") as fh:
     fh.write(script)
 
 env = {e["name"]: e.get("value", "") for e in container.get("env", [])}
-required = ["NAMESPACE", "DEPLOYMENT_TIER", "SERVICE_JWT_SECRET", "SERVICE_JWT_CM", "SERVICE_JWT_KEY_ID", "SERVICE_JWT_EXTERNAL"]
+required = ["NAMESPACE", "SERVICE_JWT_SECRET", "SERVICE_JWT_CM", "SERVICE_JWT_KEY_ID", "SERVICE_JWT_EXTERNAL"]
 missing = [k for k in required if not env.get(k)]
 if missing:
     print(f"FAIL: auto-provision-keys Job missing/empty required env var(s): {missing}", file=sys.stderr)

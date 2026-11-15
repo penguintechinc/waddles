@@ -168,6 +168,11 @@ pub struct SupervisorDeps {
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::pii_minter`'s doc.
     pub pii_minter: Option<Arc<dyn crate::pii_tokenize::IdentityMinter>>,
+    /// ONE instance shared by every binding consumer (never one per binding)
+    /// so a message read by ~160 per-app consumers is tokenized once -- cloned
+    /// into every consumer's own `ProcessDeps`, see
+    /// `crate::spine::ProcessDeps::tokenize_memo`'s doc.
+    pub tokenize_memo: Arc<crate::tokenize_memo::TokenizeMemo>,
     /// The SAME `Arc<ActiveDigests>` instance `crate::changelog_consumer`
     /// writes to on every `load`/`unload` (`ConsumerState::active_digests`)
     /// -- shared (never copied) into every spawned binding consumer's own
@@ -203,6 +208,9 @@ pub struct SupervisorDeps {
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::media_wiring`'s doc.
     pub media_wiring: Option<crate::media::MediaWiring>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::dek_provider`'s doc.
+    pub dek_provider: Option<hub_client::dek::ConfiguredDekProvider>,
 }
 
 impl SupervisorDeps {
@@ -246,6 +254,7 @@ impl SupervisorDeps {
             egress: Arc::clone(&self.egress),
             pii_gate: Arc::clone(&self.pii_gate),
             pii_minter: self.pii_minter.clone(),
+            tokenize_memo: Arc::clone(&self.tokenize_memo),
             db_wiring: self.db_wiring.clone(),
             breaker: Arc::clone(&self.breaker),
             reputation_wiring: self.reputation_wiring.clone(),
@@ -255,6 +264,7 @@ impl SupervisorDeps {
             identity_wiring: self.identity_wiring.clone(),
             ai_wiring: self.ai_wiring.clone(),
             media_wiring: self.media_wiring.clone(),
+            dek_provider: self.dek_provider.clone(),
         }
     }
 }

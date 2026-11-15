@@ -58,10 +58,13 @@ impl AppCredentialSource for NoAppCredentials {
     }
 }
 
+/// Host-config lookup: env-var name -> value.
+type ConfigGetter = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// Host-config-backed app credentials for twitch + discord.
 pub struct PlatformAppCredentials {
     minter: Arc<AppTokenMinter>,
-    get: Box<dyn Fn(&str) -> Option<String> + Send + Sync>,
+    get: ConfigGetter,
 }
 
 impl PlatformAppCredentials {
@@ -73,10 +76,7 @@ impl PlatformAppCredentials {
 
     /// Explicit config source (tests); `token_url` overrides Twitch's endpoint
     /// ONLY for the loopback test minter.
-    pub fn new(
-        get: Box<dyn Fn(&str) -> Option<String> + Send + Sync>,
-        loopback_token_url: Option<String>,
-    ) -> Result<Self, String> {
+    pub fn new(get: ConfigGetter, loopback_token_url: Option<String>) -> Result<Self, String> {
         let cfg = |url: String| {
             HashMap::from([(
                 TWITCH_APP.to_string(),

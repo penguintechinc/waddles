@@ -48,7 +48,7 @@ spec:
         # already builds under CI as module "hub-webui" (containers.yml); no longer the
         # shared pipeline.nodeBaseImage skeleton placeholder. Bare module name "hub-webui"
         # is the alpha-local repo under global.imageRegistry -- see scripts/deploy-alpha.sh.
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-webui" "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-webui") }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:

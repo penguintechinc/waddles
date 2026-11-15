@@ -53,7 +53,7 @@ use svc_ingest::connector_runtime::selector::{
 };
 use svc_ingest::connector_runtime::Readiness;
 use svc_ingest::identity_crypto::{
-    decrypt_identity_value, DekProvider, JsonEnvelope, LocalDevDekProvider,
+    decrypt_identity_value, ConfiguredDekProvider, DekProvider, JsonEnvelope, LocalDevDekProvider,
 };
 use svc_ingest::scope_resolver::{ResolvedScope, Unresolved};
 use tokio::net::TcpListener;
@@ -665,7 +665,9 @@ impl Rig {
                     vec![7u8; 32],
                 )])),
                 active_kid: "k1".into(),
-                dek: Arc::new(LocalDevDekProvider::new("local", KEK_ENV).unwrap()),
+                dek: Arc::new(ConfiguredDekProvider::local_dev(
+                    LocalDevDekProvider::new("local", KEK_ENV).unwrap(),
+                )),
                 identity_metrics: prometheus::IntCounterVec::new(
                     prometheus::Opts::new("connector_acceptance_identity_total", "test"),
                     &["tenant", "status"],
@@ -783,14 +785,24 @@ impl Decoded {
     async fn decrypt(&self, key: &str, field: &str, ptr: &str) -> String {
         let env: JsonEnvelope =
             serde_json::from_str(self.s(ptr)).expect("identity field is an envelope");
-        let tenant = self.s("/tenant");
-        let dek = LocalDevDekProvider::new("local", KEK_ENV)
-            .unwrap()
-            .get_dek(tenant)
-            .await
-            .expect("dek");
-        decrypt_identity_value(&env, &dek.0, tenant, key, field, self.s("/event_id"))
-            .expect("identity field decrypts")
+        // The sink keys the DEK and binds the AAD by the NUMERIC tenant id (never the slug).
+        let tenant_id = self.env["tenant_id"]
+            .as_i64()
+            .expect("entry carries the numeric tenant_id");
+        let dek =
+            ConfiguredDekProvider::local_dev(LocalDevDekProvider::new("local", KEK_ENV).unwrap())
+                .get_dek(tenant_id)
+                .await
+                .expect("dek");
+        decrypt_identity_value(
+            &env,
+            &dek.0,
+            &tenant_id.to_string(),
+            key,
+            field,
+            self.s("/event_id"),
+        )
+        .expect("identity field decrypts")
     }
 }
 

@@ -59,23 +59,24 @@ hub-api's own Deployment env (the only consumer):
 {{- $actionConnections := $root.Values.pipeline.rustDataPlane.svcAction.dynamicConnections.enabled -}}
 {{- $actionOverlayPush := include "waddlebot.svcActionOverlayPush" $root -}}
 {{- $processGameserver := $root.Values.pipeline.rustDataPlane.svcProcess.gameserverNet.enabled -}}
+{{- $ingestDynamic := $root.Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled -}}
 {{- range $key, $identity := .Values.serviceJwt.identities }}
-{{- /* svc-ingest's grant is a cross-tenant `system` credential on an
-internet-facing pod: render the WHOLE identity ONLY when pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled (default false). */ -}}
-{{- if or (ne $key "svc-ingest") $root.Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+{{- /* svc-ingest's identity is a cross-tenant `system` credential on an internet-facing pod, so it is
+least-privilege: it is ALWAYS rendered, but with ONLY `key:stream-dek:read` (the tenant stream-DEK
+fetch it cannot encrypt a single event without) unless
+pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled (default false), which adds the rest. */ -}}
 {{- $scopes := list -}}
 {{- range $scope := $identity.allowedScopes }}
 {{- /* svc-action keeps its other scopes always, but its `connections:*` scopes (resolve +
 resolve:static) render ONLY when pipeline.rustDataPlane.svcAction.dynamicConnections.enabled. */ -}}
 {{- /* `presentation.overlay:push` (svc-action -> Rust svc-presentation PUSH JWT) renders ONLY while the Rust svc-presentation is the deployed runtime (waddlebot.svcActionOverlayPush). */ -}}
 {{- /* svc-process's `connections:*:gameserver` scopes render ONLY when pipeline.rustDataPlane.svcProcess.gameserverNet.enabled (default false). */ -}}
-{{- if and (or (ne $key "svc-action") $actionConnections (not (hasPrefix "connections:" $scope))) (or (ne $key "svc-process") $processGameserver (not (hasPrefix "connections:" $scope))) (or (ne $scope "presentation.overlay:push") $actionOverlayPush) }}
+{{- if and (or (ne $key "svc-action") $actionConnections (not (hasPrefix "connections:" $scope))) (or (ne $key "svc-process") $processGameserver (not (hasPrefix "connections:" $scope))) (or (ne $scope "presentation.overlay:push") $actionOverlayPush) (or (ne $key "svc-ingest") $ingestDynamic (eq $scope "key:stream-dek:read")) }}
 {{- $scopes = append $scopes $scope -}}
 {{- end }}
 {{- end }}
 {{- $spiffeId := tpl $identity.spiffeId $root -}}
 {{- $identities = append $identities (dict "service_id" $spiffeId "k8s_namespace" $root.Values.namespace "k8s_service_account" $identity.serviceAccount "allowed_scopes" $scopes "tenant" ($identity.tenant | default "")) -}}
-{{- end }}
 {{- end }}
 {{- $identities | toJson -}}
 {{- end -}}

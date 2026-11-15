@@ -7,7 +7,7 @@ name: Inventory Bundle (Python)
 # documented grammar extensions.
 # 1.0.3: integrity: lossless give (refund on failed credit), per-user directory lock (no lost updates), item-name/count/quantity bounds, normalized caller identity, strict boolean mod gate (fix/bundle-defects-wave).
 # 1.0.4: activation-gated only -- removed the in-bundle waddles.command-inventory feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.6
+version: 1.0.7
 feature: waddles.core.example
 module: core
 provider: builtin

@@ -6,7 +6,7 @@
 schema_version: 2
 app_id: waddles.core.example.ai-teammates
 name: AI Teammates (Researcher, Receptionist, Producer)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -102,7 +102,7 @@ requested_tools:
 - tool: youtube.live.channels
   access: read
   target_app_id: waddles.core.service.youtube
-config_schema:
+community_config_schema:
   type: object
   additionalProperties: false
   properties:
@@ -132,8 +132,12 @@ config_schema:
           maximum: 400
           default: 300
         collection:
-          type: string
+          type:
+          - string
+          - 'null'
           pattern: ^[a-z0-9][a-z0-9_.-]{0,39}$
+          default: null
+      default: {}
     receptionist:
       type: object
       additionalProperties: false
@@ -155,8 +159,11 @@ config_schema:
           type: boolean
           default: false
         welcome_channel_id:
-          type: string
+          type:
+          - string
+          - 'null'
           maxLength: 100
+          default: null
         greet_on_join:
           type: boolean
           default: true
@@ -172,6 +179,7 @@ config_schema:
           minimum: 40
           maximum: 400
           default: 240
+      default: {}
     producer:
       type: object
       additionalProperties: false
@@ -199,6 +207,7 @@ config_schema:
                 type: string
                 maxLength: 100
                 description: channel_ref as reported by <platform>.live.channels
+          default: []
         quiet_minutes:
           type: integer
           minimum: 1
@@ -215,7 +224,9 @@ config_schema:
           maximum: 6
           default: 3
         quiet_hours:
-          type: object
+          type:
+          - object
+          - 'null'
           additionalProperties: false
           required:
           - start_hour
@@ -234,23 +245,27 @@ config_schema:
               minimum: -840
               maximum: 840
               default: 0
+          default: null
         topics:
           type: array
           maxItems: 20
           items:
             type: string
             maxLength: 120
+          default: []
         blocklist:
           type: array
           maxItems: 200
           items:
             type: string
             maxLength: 60
+          default: []
         max_chars:
           type: integer
           minimum: 40
           maximum: 300
           default: 200
+      default: {}
 admin_actions:
 - name: teammate.status
   access: read

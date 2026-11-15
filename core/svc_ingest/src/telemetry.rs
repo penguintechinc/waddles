@@ -234,11 +234,16 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         .expect("register svc_ingest_outbound_pin_refused_total");
     crate::outbound_creds::register_metrics(registry)
         .expect("register svc_ingest_outbound_credential_resolve_total");
+    crate::tenant_discord::register_metrics(registry)
+        .expect("register waddles_tenant_discord_app_missing_total");
     crate::connector::sender_exec::register_metrics(registry)
         .expect("register svc_ingest_sender_exec_total / _seconds");
     crate::connector::sender_exec::youtube_duties::register_metrics(registry)
         .expect("register svc_ingest_youtube_duty_refused_total / _quota_units_total");
     crate::outbound_boot::register_metrics(registry).expect("register svc_ingest_outbound_path");
+    crate::egress::register_metrics(registry).expect("register svc_ingest_egress_detokenize_total");
+    crate::display_names::register_metrics(registry)
+        .expect("register svc_ingest_egress_display_name_db_errors_total");
 
     let eventsub_verifications_total = prometheus::IntCounterVec::new(
         prometheus::Opts::new(

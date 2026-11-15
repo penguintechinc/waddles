@@ -53,16 +53,24 @@ fn start_marker_path(path: &Path) -> PathBuf {
     PathBuf::from(os)
 }
 
+/// Per-process counter making every temp name unique, so concurrent
+/// heartbeats never share (and race to rename) one `.tmp` file.
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn write_timestamp(path: &Path, secs: u64) -> Result<(), ExecutorError> {
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".{}.{seq}.tmp", std::process::id()));
     let tmp_path = PathBuf::from(tmp);
     {
         let mut f = std::fs::File::create(&tmp_path).map_err(ExecutorError::Io)?;
         write!(f, "{secs}").map_err(ExecutorError::Io)?;
         f.sync_all().map_err(ExecutorError::Io)?;
     }
-    std::fs::rename(&tmp_path, path).map_err(ExecutorError::Io)
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        ExecutorError::Io(e)
+    })
 }
 
 fn now_secs() -> u64 {
@@ -211,6 +219,42 @@ mod tests {
             !PathBuf::from(tmp).exists(),
             "the .tmp staging file must be renamed away, not left behind"
         );
+        cleanup(&path);
+    }
+
+    /// Regression: concurrent heartbeats used one shared `.tmp` name, so one
+    /// writer's rename stole the other's file (ENOENT). Unique names fix it.
+    #[test]
+    fn concurrent_writes_never_race_on_rename() {
+        let path = temp_probe_path("concurrent");
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let p = path.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        touch(&p).expect("concurrent touch must not fail");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("writer thread");
+        }
+        assert!(
+            read_timestamp(&path).is_ok(),
+            "final file is a valid timestamp"
+        );
+        let dir = path.parent().unwrap();
+        let stem = path.file_name().unwrap().to_string_lossy().to_string();
+        let leftovers = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with(&stem) && n.ends_with(".tmp")
+            })
+            .count();
+        assert_eq!(leftovers, 0, "no .tmp staging files left behind");
         cleanup(&path);
     }
 }
