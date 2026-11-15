@@ -3,7 +3,7 @@
 # regression: lookup-keep preserved EMPTY reader password; multi-app path off (alpha 2026-10-02)
 
 `lookup` always returns empty outside a real `helm install`/`upgrade` against a
-live cluster (see templates/auto-provisioned-secrets.yaml's own header comment),
+live cluster (the reason generated secrets moved to the runtime provision-secrets hook),
 so a `helm template` run can never directly exercise "an existing Secret key
 decodes to the empty string" -- the exact branch this fix added. Instead:
 
@@ -13,11 +13,10 @@ decodes to the empty string" -- the exact branch this fix added. Instead:
    / `waddlebot.tlsSecretComplete` helpers (_helpers.tpl) treat an empty
    decoded value as MISSING, not KEEP -- this is the real fix, tested
    directly against the actual template code, not a re-implementation.
-2. `TestFailsClosedOutsideAlphaLocal` confirms every lookup-KEEP site still
-   fails chart rendering (actionable message) in beta/gamma/production when no
-   value exists at all (lookup returns nil in `helm template` either way, so
-   this exercises the "missing" path identically whether the cause was never-
-   existed or existed-but-empty).
+2. `TestEmptyKeptValueIsRegeneratedAtRuntime` proves the runtime provision-secrets hook
+   (which replaced every lookup-KEEP site for generated secrets) treats an EMPTY existing
+   value as unset in every tier, while keeping real values -- the TLS helpers above remain
+   the only template-time lookup users.
 """
 
 from __future__ import annotations
@@ -29,6 +28,7 @@ from typing import Any
 
 import pytest
 import yaml
+from provision_harness import materialize  # type: ignore[import-not-found]
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _ALPHA_VALUES = _CHART_DIR / "values-alpha.yaml"
@@ -105,21 +105,26 @@ class TestHelperLogicDirect:
         assert probe_data["nilExistingTls"] == ""
 
 
-class TestFailsClosedOutsideAlphaLocal:
-    """Every lookup-KEEP site still fails rendering in beta/gamma/production with
-    no pre-existing Secret and no explicit value -- unaffected by this fix
-    (lookup returns nil in `helm template` regardless of cause).
+class TestEmptyKeptValueIsRegeneratedAtRuntime:
+    """The same bug class for the RUNTIME provision-secrets hook (which replaced the
+    template-time `lookup` sites, alpha/local-only, for every generated secret): an existing
+    Secret key that decodes EMPTY must be treated as unset and filled -- in every tier --
+    while real values next to it are kept. Exercised with the real hook script, the real
+    rendered spec and a fake cluster (tests/provision_harness.py).
     """
 
-    def test_waddlebot_secrets_fails_without_explicit_values(self) -> None:
-        # Valkey durable admin password is its own explicit fail-closed guard (different message);
-        # supply it so the generic "outside alpha/local" auto-generation guard is what fires.
-        result = _helm_template(_BETA_VALUES, ["infrastructure.valkeyDurable.adminPassword=fresh-test-pw"])
-        assert result.returncode != 0, "beta render should fail closed with no generated secrets supplied"
-        assert "outside alpha/local" in result.stderr or "outside alpha/local" in result.stdout
+    @pytest.mark.parametrize("values_file", [_ALPHA_VALUES, _BETA_VALUES])
+    def test_empty_reader_password_is_filled_and_real_values_kept(self, values_file: Path) -> None:
+        result = _helm_template(values_file)
+        assert result.returncode == 0, f"render should succeed in every tier:\n{result.stderr}"
+        docs = [doc for doc in yaml.safe_load_all(result.stdout) if doc]
+        assert docs, "helm template produced zero documents -- cannot be a pass"
+        existing = {"waddlebot-secrets": {"DB_READER_PASSWORD": "", "REDIS_PASSWORD": "kept-real-redis-value-1234"}}
+        out = materialize(docs, existing)["waddlebot-secrets"]["data"]
+        assert len(out["DB_READER_PASSWORD"]) == 43, "an EMPTY kept value must be regenerated, never preserved"
+        assert out["REDIS_PASSWORD"] == "kept-real-redis-value-1234", "a real existing value must never be rotated"
 
     def test_alpha_still_generates_successfully(self) -> None:
-        # Sanity check: the fix must not have broken the alpha generate path.
         result = _helm_template(_ALPHA_VALUES)
         assert result.returncode == 0, f"alpha render should succeed:\n{result.stdout}\n{result.stderr}"
         docs = [doc for doc in yaml.safe_load_all(result.stdout) if doc]

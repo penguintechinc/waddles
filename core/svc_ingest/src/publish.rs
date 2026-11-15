@@ -212,6 +212,22 @@ fn mint_trace() -> Trace {
     }
 }
 
+/// The envelope trace: minted FROM the live `ingest.publish` span's OTel ids when a tracer backs
+/// it (so every downstream stage span joins one distributed trace rooted here, and the sampler's
+/// decision travels in the flags), else a fresh locally minted W3C trace as before.
+fn mint_trace_for(span: &tracing::Span) -> Trace {
+    if command_latency::switch::is_disabled() {
+        return mint_trace();
+    }
+    match command_latency::span::span_ids(span) {
+        Some((trace_id, span_id, sampled)) => Trace {
+            traceparent: command_latency::span::format_traceparent(&trace_id, &span_id, sampled),
+            tracestate: None,
+        },
+        None => mint_trace(),
+    }
+}
+
 /// Publishes one normalized event onto its ingest source's stream, exactly
 /// once, minting every D30 identity field -- the sole `StageEnvelope`
 /// construction site in this crate.
@@ -475,10 +491,64 @@ async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProv
     source_id: &str,
     workstream_id: &str,
     session_id: Option<&str>,
-    mut event: PlatformEvent,
+    event: PlatformEvent,
     dek_provider: &D,
     identity_metrics: &prometheus::IntCounterVec,
 ) -> Result<String, PublishError> {
+    use tracing::Instrument as _;
+    // Command-latency: the `ingest.publish` span covers the whole funnel (identity encryption,
+    // binding, XADD) and parents the downstream stage spans through the envelope's trace context.
+    // Attributes are bounded and non-PII: numeric ids and the platform slug only.
+    let span = tracing::info_span!(
+        "ingest.publish",
+        platform = %event.platform,
+        tenant_id = resolved.as_ref().map(|r| r.tenant_id),
+        community_id = resolved.as_ref().map(|r| r.community_id),
+        door = tracing::field::Empty,
+        "otel.kind" = "producer",
+    );
+    let outcome = publish_resolved_inner(
+        resolved,
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        scope,
+        source_id,
+        workstream_id,
+        session_id,
+        event,
+        dek_provider,
+        identity_metrics,
+        &span,
+    )
+    .instrument(span.clone())
+    .await;
+    if let Err(err) = &outcome {
+        command_latency::span::record_error(&span, "PublishError", &err.to_string());
+    }
+    outcome
+}
+
+/// The un-instrumented body of [`publish_resolved`]; `span` is the live `ingest.publish` span, read
+/// only to mint the envelope's trace from its OTel ids when a tracer backs it.
+#[allow(clippy::too_many_arguments)]
+async fn publish_resolved_inner<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProvider>(
+    resolved: Option<ResolvedScope>,
+    appender: &A,
+    metrics: &M,
+    keyring: &KeyRing,
+    active_kid: &str,
+    scope: &Scope,
+    source_id: &str,
+    workstream_id: &str,
+    session_id: Option<&str>,
+    mut event: PlatformEvent,
+    dek_provider: &D,
+    identity_metrics: &prometheus::IntCounterVec,
+    span: &tracing::Span,
+) -> Result<String, PublishError> {
+    let entered_ms = command_latency::stamp::now_ms();
     if is_reserved_event_type(&event.event_type) {
         return Err(PublishError::ReservedEventType);
     }
@@ -493,7 +563,22 @@ async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProv
     let stream = scope.source_stream(&event.platform, source_id);
     let platform = event.platform.clone();
 
-    let trace = mint_trace();
+    let mut trace = mint_trace_for(span);
+    // The first-door stamp: the receiver's instant when it set one, else this funnel's own entry
+    // time marked `publish` (a lower bound, never a silent zero). Metadata only; never read for
+    // authorization anywhere downstream.
+    let latency_on = !command_latency::switch::is_disabled();
+    let (t0_ms, door) = command_latency::first_door::current()
+        .unwrap_or((entered_ms, command_latency::Door::Publish));
+    if latency_on {
+        let stamps = command_latency::Stamps {
+            t0_ms: Some(t0_ms),
+            door: Some(door),
+            ..command_latency::Stamps::default()
+        };
+        trace.tracestate = Some(stamps.merge_into_tracestate(trace.tracestate.as_deref()));
+        span.record("door", door.label());
+    }
     let trace_id = trace_id_from_traceparent(&trace.traceparent)
         .expect("mint_trace always produces a valid W3C traceparent")
         .to_string();
@@ -648,6 +733,26 @@ async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProv
 
     let entry_id = appender.append(&stream, &env).await?;
     metrics.stream_event_written(&platform, source_id);
+    if latency_on {
+        // First door -> XADD acknowledged: receive, permissions lookup, identity encryption,
+        // binding, append. An implausible t0 only skips this sample.
+        let done_ms = command_latency::stamp::now_ms();
+        match command_latency::stamp::elapsed_ms(t0_ms, done_ms) {
+            Ok(ms) => {
+                command_latency::metrics::metrics().record_hop(
+                    command_latency::Hop::IngestPublish,
+                    std::time::Duration::from_millis(ms),
+                );
+                tracing::debug!(
+                    hop = command_latency::Hop::IngestPublish.label(),
+                    elapsed_ms = ms,
+                    door = door.label(),
+                    "ingest publish hop"
+                );
+            }
+            Err(why) => command_latency::metrics::metrics().record_marker_invalid(why.label()),
+        }
+    }
     Ok(entry_id)
 }
 

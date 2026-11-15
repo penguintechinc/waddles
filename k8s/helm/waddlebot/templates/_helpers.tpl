@@ -147,31 +147,6 @@ Args (dict): root (the root "."), role.
 {{- end -}}
 {{- end }}
 
-{{/*
-Resolve + validate one role's password (secrets.yaml calls this exactly once per role).
-Args (dict): ctx (root "."), role. Precedence: explicit infrastructure.postgresql.
-serviceRoles.passwords.<role> > existing key in the credentials Secret (KEEP) > generate
-(alpha/local only) > fail closed -- the shared waddlebot.autoSecretValue policy. The value
-must be URL-safe ([A-Za-z0-9._~-], it is embedded in DATABASE_URL) and >= 16 chars, and
-must not look like a placeholder / repo default: the same rules scripts/db/
-service_roles.py enforces at migration time, so a bad value fails here, at render.
-*/}}
-{{- define "waddlebot.db.rolePassword" -}}
-{{- $ctx := .ctx -}}
-{{- $role := .role -}}
-{{- $key := include "waddlebot.db.passwordKey" $role -}}
-{{- $explicit := index ($ctx.Values.infrastructure.postgresql.serviceRoles.passwords | default dict) $role | default "" | toString -}}
-{{- $explicit = ternary "" $explicit (hasPrefix "REPLACE_ME" $explicit) -}}
-{{- $value := include "waddlebot.autoSecretValue" (dict "ctx" $ctx "key" $key "explicit" $explicit "length" 32 "secret" (include "waddlebot.db.credentialsSecretName" $ctx)) -}}
-{{- if not (regexMatch "^[A-Za-z0-9._~-]{16,}$" $value) -}}
-{{- fail (printf "PostgreSQL password for role %q must be >=16 chars of [A-Za-z0-9._~-] (it is embedded in DATABASE_URL)" $role) -}}
-{{- end -}}
-{{- if regexMatch "(?i)(changeme|change_me|replace_me|example|password|dev_)" $value -}}
-{{- fail (printf "PostgreSQL password for role %q looks like a placeholder / repo default -- refusing" $role) -}}
-{{- end -}}
-{{- $value -}}
-{{- end }}
-
 {{/* Connection target pieces (the in-chart Postgres Service). */}}
 {{- define "waddlebot.postgres.host" -}}
 {{- /* FQDN (feature/transit-tls-core F8): always in the server cert's SANs and inside the internal CA's nameConstraints suffix, so sslmode=verify-full holds. */ -}}
@@ -990,58 +965,10 @@ regenerated, closing the gap where #541 added the drift *detection*
 {{- end }}
 
 {{/*
-fix/helm-alpha-self-provisioning -- lookup-then-generate-or-require for a single key
-inside the monolithic waddlebot-secrets Secret (templates/secrets.yaml). Mirrors
-templates/auto-provisioned-secrets.yaml's KEEP-vs-GENERATE policy but at per-key
-granularity, since waddlebot-secrets also carries user-supplied pass-through values
-(OAuth tokens, AWS/GCP creds, etc.) that must always reflect current .Values and are
-therefore never routed through this helper.
-
-Args (dict): ctx (the root "."), key (Secret data key name, e.g. "JWT_SECRET"),
-explicit (the value already resolved from .Values, "" if unset/placeholder), length
-(random byte-string length, default 32), optional secret (the Secret to look the key up
-in; default "waddlebot-secrets"), optional legacySecret/legacyKey (a SECOND Secret/key
-read ONLY as a one-way migration source when `secret` has no value yet -- how
-POSTGRES_PASSWORD moves out of waddlebot-secrets into waddlebot-db-admin on `helm upgrade`
-without minting a new password that the Postgres PVC's initdb-time password would reject).
-
-Precedence: explicit non-placeholder value from .Values wins outright (operator/
-ExternalSecret already deliberately set it) > existing Secret key (KEEP, never
-rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
+Per-key lookup-then-generate (waddlebot.autoSecretValue) was REMOVED: template-time `lookup` is empty under
+`helm template | kubectl apply` / ArgoCD and would regenerate every secret. Generation is now runtime,
+create-if-absent, in every tier -- templates/provision-secrets.yaml + files/provision-secrets.sh.
 */}}
-{{- define "waddlebot.autoSecretValue" -}}
-{{- $ctx := .ctx -}}
-{{- $key := .key -}}
-{{- $explicit := .explicit | default "" -}}
-{{- $length := .length | default 32 -}}
-{{- $hex := .hex | default false -}}
-{{- $secretName := .secret | default "waddlebot-secrets" -}}
-{{- if ne $explicit "" -}}
-{{- $explicit -}}
-{{- else -}}
-{{- $tier := $ctx.Values.global.deploymentTier -}}
-{{- $canGenerate := or (eq $tier "alpha") (eq $tier "local") (.alwaysGenerate | default false) -}}
-{{- $existing := lookup "v1" "Secret" $ctx.Values.namespace $secretName -}}
-{{- $legacy := dict -}}
-{{- if .legacySecret -}}
-{{- $legacy = lookup "v1" "Secret" $ctx.Values.namespace .legacySecret | default dict -}}
-{{- end -}}
-{{- $legacyKey := .legacyKey | default $key -}}
-{{- if (include "waddlebot.secretKeyNonEmpty" (dict "existing" $existing "key" $key)) -}}
-{{- index $existing.data $key | b64dec -}}
-{{- else if (include "waddlebot.secretKeyNonEmpty" (dict "existing" $legacy "key" $legacyKey)) -}}
-{{- index $legacy.data $legacyKey | b64dec -}}
-{{- else if $canGenerate -}}
-{{- if $hex -}}
-{{- sha256sum (randBytes 32) -}}
-{{- else -}}
-{{- randAlphaNum (int $length) -}}
-{{- end -}}
-{{- else -}}
-{{- fail (printf "%s: key %q has no value and global.deploymentTier=%q is outside alpha/local -- auto-generation is alpha/local only. Set the corresponding value explicitly (or pre-populate this Secret via ExternalSecret/SealedSecret) before deploying." $secretName $key $tier) -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
 
 {{/* Server-role volume: full cert+key+CA bundle, mounted by templates/infrastructure/redis.yaml. */}}
 {{- define "waddlebot.valkeyTlsServerVolume" -}}

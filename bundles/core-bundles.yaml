@@ -1344,7 +1344,7 @@ bundles:
   #
   # 8 bundles on the default `stage` world:
   - app_id: waddles.core.example.customcommand
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/customcommand
     manifest_path: customcommand.manifest.yaml

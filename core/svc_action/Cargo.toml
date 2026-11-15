@@ -156,6 +156,9 @@ bundle-tool-call = { path = "../bundle_tool_call", version = "=0.1.0" }
 # declares the identical dependency so the breaker logic is written and
 # tested exactly once. See `core/circuit_breaker/Cargo.toml`.
 circuit-breaker = { path = "../circuit_breaker", version = "=0.1.0" }
+# Command-latency SLA telemetry (owner SLA 2026-11-14): first-door stamp in the tracestate, per-hop and
+# end-to-end histograms, bounded label registries, kill switch `waddles.disable-command-latency-telemetry`.
+command-latency = { path = "../command_latency", version = "=0.1.0" }
 # `db` bundle host capability (`src/capabilities.rs::handle_db`) -- same
 # same-repo path dependency as `core/svc_process`'s identical line: this
 # crate's identifier-safety/tenant-isolation rules are owned by this
