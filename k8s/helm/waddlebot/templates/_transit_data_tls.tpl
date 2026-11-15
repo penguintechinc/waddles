@@ -129,13 +129,20 @@ the self-signed root certificate; the key is never projected into a client). Sta
 {{- define "waddlebot.transitTls.pgDnsNames" -}}
 {{- $s := .Values.infrastructure.postgresql.service.name -}}
 {{- $ns := .Values.namespace -}}
-{{- $names := list -}}
 {{- if include "waddlebot.transitTls.cm" . -}}
-{{- $names = append $names (printf "%s.%s.svc.cluster.local" $s $ns) -}}
+{{- list (printf "%s.%s.svc.cluster.local" $s $ns) | toJson -}}
 {{- else -}}
-{{- $names = concat $names (list $s (printf "%s.%s" $s $ns) (printf "%s.%s.svc" $s $ns) (printf "%s.%s.svc.cluster.local" $s $ns)) -}}
+{{- list $s (printf "%s.%s" $s $ns) (printf "%s.%s.svc" $s $ns) (printf "%s.%s.svc.cluster.local" $s $ns) | toJson -}}
 {{- end -}}
-{{- /* Replica topology: the -ro Service clients dial, the headless replica Service and each replica pod's stable DNS name (same cert, same Secret). */ -}}
+{{- end }}
+
+{{/*
+Replica server cert SANs: ONLY the -ro Service, the headless replica Service and each replica pod's stable DNS name --
+never the primary (read-write) FQDN, so a compromised replica key cannot impersonate the writer. "[]" when replicas are off.
+*/}}
+{{- define "waddlebot.transitTls.pgReplicaDnsNames" -}}
+{{- $ns := .Values.namespace -}}
+{{- $names := list -}}
 {{- if include "waddlebot.postgres.replicasActive" . -}}
 {{- $ro := include "waddlebot.postgres.roName" . -}}
 {{- $hl := include "waddlebot.postgres.replicaHeadlessName" . -}}
@@ -149,6 +156,24 @@ the self-signed root certificate; the key is never projected into a client). Sta
 {{- end -}}
 {{- end -}}
 {{- $names | toJson -}}
+{{- end }}
+
+{{/* Replica server cert Secret: cert-manager mode = its OWN Secret; static mode = separate keys in the transit Secret (same CA lifecycle). */}}
+{{- define "waddlebot.transitTls.pgReplicaSecretName" -}}
+{{- if include "waddlebot.transitTls.cm" . -}}{{ include "waddlebot.fullname" . }}-postgres-replica-tls{{- else -}}{{ include "waddlebot.transitTls.secretName" . }}{{- end -}}
+{{- end }}
+{{- define "waddlebot.transitTls.pgReplicaItems" -}}
+{{- if include "waddlebot.transitTls.cm" . -}}
+- key: tls.crt
+  path: tls.crt
+- key: tls.key
+  path: tls.key
+{{- else -}}
+- key: postgres-replica.crt
+  path: tls.crt
+- key: postgres-replica.key
+  path: tls.key
+{{- end -}}
 {{- end }}
 
 {{- define "waddlebot.transitTls.s3DnsNames" -}}
@@ -208,7 +233,7 @@ subdomains, i.e. the durable per-pod names). The root can therefore never sign a
 
 {{/* Identity hash over the SANs + algorithm marker: a changed Service name/namespace regenerates (alpha) or fails closed. */}}
 {{- define "waddlebot.transitTls.sansSha256" -}}
-{{- printf "ecdsa-p256|%s|%s" (include "waddlebot.transitTls.pgDnsNames" .) (include "waddlebot.transitTls.s3DnsNames" .) | sha256sum -}}
+{{- printf "ecdsa-p256|%s|%s|%s" (include "waddlebot.transitTls.pgDnsNames" .) (include "waddlebot.transitTls.s3DnsNames" .) (include "waddlebot.transitTls.pgReplicaDnsNames" .) | sha256sum -}}
 {{- end }}
 
 {{/* Pod-template annotation so server pods roll when the SAN identity changes. */}}
@@ -249,6 +274,9 @@ falls back to plaintext: a failed handshake or hostname mismatch is a connection
   value: "verify-full"
 - name: PGSSLROOTCERT
   value: {{ include "waddlebot.transitTls.caPath" . | quote }}
+{{- /* libpq-only (psycopg2, psql, alembic): require SCRAM channel binding to the in-chart server. asyncpg 0.30 and sqlx 0.9 have no such option and ignore this variable. */}}
+- name: PGCHANNELBINDING
+  value: "require"
 {{- end -}}
 {{- end }}
 

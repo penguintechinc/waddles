@@ -492,11 +492,14 @@ spec:
           value: {{ $pg.service.port | quote }}
         - name: REPL_USER
           value: {{ $rr.replicationUser | quote }}
-        - name: PGPASSWORD
+        - name: REPL_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.postgres.replicationSecretName" . }}
               key: PW_WADDLES_REPLICATOR
+        # libpq reads the password from this 0600 passfile (emptyDir); primary_conninfo only carries its PATH.
+        - name: PGPASSFILE
+          value: /pgpass/pgpass
         - name: PGSSLMODE
           value: verify-full
         - name: PGSSLROOTCERT
@@ -506,6 +509,8 @@ spec:
           mountPath: /var/lib/postgresql/data
         - name: tmp
           mountPath: /tmp
+        - name: pgpass
+          mountPath: /pgpass
         - name: transit-ca
           mountPath: /etc/waddles/transit-ca
           readOnly: true
@@ -569,6 +574,8 @@ spec:
           value: verify-full
         - name: PGSSLROOTCERT
           value: {{ include "waddlebot.transitTls.caPath" . | quote }}
+        - name: PGPASSFILE
+          value: /pgpass/pgpass
         - name: MAX_LAG_SECONDS
           value: {{ $rr.maxLagSeconds | quote }}
         volumeMounts:
@@ -580,6 +587,9 @@ spec:
           mountPath: /tmp
         - name: transit-tls
           mountPath: /etc/postgres-tls
+          readOnly: true
+        - name: pgpass
+          mountPath: /pgpass
           readOnly: true
         - name: transit-ca
           mountPath: /etc/waddles/transit-ca
@@ -616,12 +626,18 @@ spec:
         emptyDir: {}
       - name: tmp
         emptyDir: {}
+      # Passfile (0600, uid 999) for the WAL receiver; tmpfs so it never touches disk.
+      - name: pgpass
+        emptyDir:
+          medium: Memory
+          sizeLimit: 1Mi
+      # Replica-only server key/cert (SANs: -ro + headless + replica pods). The primary key is never mounted here.
       - name: transit-tls
         secret:
-          secretName: {{ include "waddlebot.transitTls.pgSecretName" . }}
+          secretName: {{ include "waddlebot.transitTls.pgReplicaSecretName" . }}
           defaultMode: 0440
           items:
-          {{- include "waddlebot.transitTls.pgItems" . | nindent 10 }}
+          {{- include "waddlebot.transitTls.pgReplicaItems" . | nindent 10 }}
       - name: transit-ca
         secret:
           secretName: {{ include "waddlebot.transitTls.caSecretName" . }}

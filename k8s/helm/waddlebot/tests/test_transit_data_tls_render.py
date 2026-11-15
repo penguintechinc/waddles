@@ -122,13 +122,20 @@ def test_transit_secret_is_ecdsa_p256_sha256_and_chains(values):
     secs = [d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-transit-tls")]
     assert len(secs) == 1, "exactly one transit-tls Secret expected"
     data = secs[0]["stringData"]
-    assert sorted(data) == ["ca.crt", "postgres.crt", "postgres.key", "seaweedfs.crt", "seaweedfs.key"]
+    assert sorted(data) == ["ca.crt", "postgres-replica.crt", "postgres-replica.key", "postgres.crt", "postgres.key", "seaweedfs.crt", "seaweedfs.key"]
     ec_marker = "BEGIN EC " + "PRIVATE" + " KEY"  # split so secret scanners do not flag the test source
     assert ec_marker in data["postgres.key"] and ec_marker in data["seaweedfs.key"]
-    assert "".join(data.values()).count(ec_marker) == 2, "only the two server keys may be stored (never the CA key)"
+    assert "".join(data.values()).count(ec_marker) == 3, "only the three server keys (postgres, postgres-replica, seaweedfs) may be stored (never the CA key)"
+    assert ec_marker in data["postgres-replica.key"]
     ca_txt = _openssl_text(data["ca.crt"])
     assert "CA:TRUE" in ca_txt and "ecdsa-with-SHA256" in ca_txt and "prime256v1" in ca_txt
-    for leaf, fqdn in (("postgres.crt", _fqdn(docs, "postgres")), ("seaweedfs.crt", _fqdn(docs, "seaweedfs"))):
+    ro_fqdn = "infra-postgres-ro.waddlebot.svc.cluster.local"
+    rtxt = _openssl_text(data["postgres-replica.crt"])
+    assert f"DNS:{ro_fqdn}" in rtxt and f"DNS:{_fqdn(docs, 'postgres')}," not in rtxt + ","
+    assert f"DNS:{_fqdn(docs, 'postgres')}" not in rtxt.replace(ro_fqdn, ""), "replica cert must not name the writer"
+    ptxt = _openssl_text(data["postgres.crt"])
+    assert ro_fqdn not in ptxt, "primary cert must not carry the -ro/replica names"
+    for leaf, fqdn in (("postgres.crt", _fqdn(docs, "postgres")), ("seaweedfs.crt", _fqdn(docs, "seaweedfs")), ("postgres-replica.crt", ro_fqdn)):
         txt = _openssl_text(data[leaf])
         assert "ecdsa-with-SHA256" in txt and "prime256v1" in txt, leaf
         assert f"DNS:{fqdn}" in txt, (leaf, txt)

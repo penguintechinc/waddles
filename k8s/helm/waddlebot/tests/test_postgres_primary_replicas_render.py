@@ -161,7 +161,7 @@ def test_replica_statefulset_and_pdb(case) -> None:
     assert pod["affinity"]["podAntiAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]
     env = {e["name"]: e for e in init["env"]}
     assert env["PGSSLMODE"]["value"] == "verify-full"
-    assert "secretKeyRef" in env["PGPASSWORD"]["valueFrom"]
+    assert "secretKeyRef" in env["REPL_PASSWORD"]["valueFrom"]
     probe = pod["containers"][0]["readinessProbe"]["exec"]["command"]
     assert probe == ["/bin/sh", "/scripts/ready.sh"]
     assert "startupProbe" in pod["containers"][0]
@@ -190,15 +190,195 @@ def test_ro_service_selects_only_replicas_and_is_in_sans(case) -> None:
     assert all(replica_labels.get(k) == v for k, v in ro["spec"]["selector"].items())
     primary_labels = _one(docs, "StatefulSet", "postgres")["spec"]["template"]["metadata"]["labels"]
     assert not all(primary_labels.get(k) == v for k, v in ro["spec"]["selector"].items()), "-ro must never select the primary"
-    fqdn = f"{ro['metadata']['name']}.{ro['metadata']['namespace']}.svc.cluster.local"
-    # SANs live in the cert-manager Certificate (beta/gamma/prod/dal2alpha) or the runtime provisioning spec (others).
-    sans = [d for d in _kind(docs, "Certificate") if d["metadata"]["name"].endswith("-postgres-tls")]
-    if sans:
-        assert fqdn in sans[0]["spec"]["dnsNames"]
-    else:
-        spec_blob = yaml.dump([d for d in docs if d.get("kind") == "Secret"])
-        job_text = yaml.dump([d for d in docs if d.get("kind") in ("Job", "ConfigMap", "Secret")])
-        assert fqdn in spec_blob or fqdn in job_text, f"{fqdn} missing from the postgres TLS SAN spec"
+    assert ro["metadata"]["name"] == "infra-postgres-ro"
+
+
+def _leaf_sans(docs: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """{'primary': [...], 'replica': [...]} server-cert SANs, from cert-manager Certificates or the provisioning spec."""
+    certs = {d["metadata"]["name"]: d["spec"]["dnsNames"] for d in _kind(docs, "Certificate") if "dnsNames" in d["spec"]}
+    primary = [v for k, v in certs.items() if k.endswith("-postgres-tls")]
+    replica = [v for k, v in certs.items() if k.endswith("-postgres-replica-tls")]
+    if primary:
+        assert len(primary) == 1 and len(replica) == 1, (list(certs),)
+        return {"primary": primary[0], "replica": replica[0]}
+    out: dict[str, list[str]] = {}
+    for d in _kind(docs, "ConfigMap"):
+        spec = d.get("data", {}).get("spec.psv")
+        if not spec:
+            continue
+        for line in spec.splitlines():
+            parts = line.split("|")
+            if parts[0] == "tls_leaf" and parts[2] == "postgres.crt":
+                out["primary"] = [x for x in parts[5].split(",") if x]
+            if parts[0] == "tls_leaf" and parts[2] == "postgres-replica.crt":
+                out["replica"] = [x for x in parts[5].split(",") if x]
+    assert set(out) == {"primary", "replica"}, f"postgres leaf specs not found: {list(out)}"
+    return out
+
+
+@pytest.mark.parametrize("case", _PG_CASES, ids=_ids)
+def test_replica_cert_sans_are_separate_from_the_writer(case) -> None:
+    """Replica cert: -ro/headless/pod names only. Primary cert: primary names only. Replicas mount only their own key."""
+    helm, (values, extra) = case
+    docs = _render(helm, values, extra)
+    sans = _leaf_sans(docs)
+    ns = "waddlebot"
+    primary_fqdn = f"infra-postgres.{ns}.svc.cluster.local"
+    ro_fqdn = f"infra-postgres-ro.{ns}.svc.cluster.local"
+    hl_fqdn = f"infra-postgres-replica-hl.{ns}.svc.cluster.local"
+    assert primary_fqdn in sans["primary"]
+    assert not any("-ro" in n or "replica" in n for n in sans["primary"]), sans["primary"]
+    assert ro_fqdn in sans["replica"] and hl_fqdn in sans["replica"]
+    assert f"postgres-replica-0.{hl_fqdn}" in sans["replica"]
+    assert primary_fqdn not in sans["replica"] and "infra-postgres" not in sans["replica"], "replica cert must not name the writer"
+    assert not any("*" in n for n in sans["primary"] + sans["replica"])
+    # Mounts: primary pod -> primary key items only; replica pod -> replica key items only.
+    def tls_vol(sts: str) -> dict[str, Any]:
+        vols = _one(docs, "StatefulSet", sts)["spec"]["template"]["spec"]["volumes"]
+        return next(v for v in vols if v["name"] == "transit-tls")["secret"]
+    prim, rep = tls_vol("postgres"), tls_vol("postgres-replica")
+    prim_keys = {i["key"] for i in prim["items"]}
+    rep_keys = {i["key"] for i in rep["items"]}
+    assert not any("replica" in k for k in prim_keys), prim_keys
+    assert rep_keys and all(("replica" in k) or k in ("tls.crt", "tls.key") for k in rep_keys), rep_keys
+    if prim["secretName"] == rep["secretName"]:  # static mode: one Secret, disjoint projected keys
+        assert prim_keys.isdisjoint(rep_keys), (prim_keys, rep_keys)
+    else:  # cert-manager mode: a dedicated replica Secret
+        assert rep["secretName"].endswith("-postgres-replica-tls")
+
+
+@pytest.mark.parametrize("case", _PG_CASES, ids=_ids)
+def test_replica_uses_a_passfile_not_a_password_in_conninfo(case) -> None:
+    """Replica reads the password from a 0600 passfile on tmpfs; no PGPASSWORD env; the init script rewrites primary_conninfo."""
+    helm, (values, extra) = case
+    docs = _render(helm, values, extra)
+    pod = _one(docs, "StatefulSet", "postgres-replica")["spec"]["template"]["spec"]
+    init = pod["initContainers"][0]
+    env = {e["name"]: e for e in init["env"]}
+    assert "PGPASSWORD" not in env and env["PGPASSFILE"]["value"] == "/pgpass/pgpass"
+    assert "secretKeyRef" in env["REPL_PASSWORD"]["valueFrom"]
+    assert "PGPASSWORD" not in {e["name"] for e in pod["containers"][0]["env"]}
+    vol = next(v for v in pod["volumes"] if v["name"] == "pgpass")
+    assert vol["emptyDir"]["medium"] == "Memory"
+    script = _one(docs, "ConfigMap", "postgres-replication-scripts")["data"]["basebackup.sh"]
+    assert "passfile=" in script and "chmod 600" in script and "password" in script
+
+
+def _run_basebackup(tmp_path: Path, script: str, preseed: str | None) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    """Run the rendered basebackup.sh against a fake pg_basebackup; returns (result, PGDATA, passfile)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "pg_basebackup"
+    # The fake mimics `pg_basebackup -R` leaking the password into primary_conninfo (the behaviour to defend against).
+    fake.write_text(
+        "#!/bin/sh\n"
+        "while [ $# -gt 0 ]; do case $1 in -D) d=$2; shift;; esac; shift; done\n"
+        "mkdir -p \"$d\"; echo 16 > \"$d/PG_VERSION\"\n"
+        "printf \"primary_conninfo = 'host=x user=u password=LEAKED-SECRET sslmode=verify-full'\\nprimary_slot_name = 'replica_0'\\n\" > \"$d/postgresql.auto.conf\"\n"
+    )
+    fake.chmod(0o755)
+    pgdata = tmp_path / "data" / "pgdata"
+    if preseed is not None:
+        pgdata.mkdir(parents=True)
+        (pgdata / "PG_VERSION").write_text("16\n")
+        (pgdata / "postgresql.auto.conf").write_text(preseed)
+    pgpass = tmp_path / "pgpass"
+    pgpass.mkdir()
+    env = {
+        "PATH": f"{bindir}:/usr/bin:/bin", "HOSTNAME": "postgres-replica-0", "PGDATA": str(pgdata),
+        "PRIMARY_HOST": "infra-postgres.waddlebot.svc.cluster.local", "PRIMARY_PORT": "5432",
+        "REPL_USER": "waddles_replicator", "REPL_PASSWORD": "LEAKED-SECRET",
+        "PGSSLROOTCERT": "/etc/waddles/transit-ca/ca.crt", "PGPASSFILE": str(pgpass / "pgpass"),
+    }
+    res = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=env, check=False)  # noqa: S603,S607
+    return res, pgdata, pgpass / "pgpass"
+
+
+@pytest.mark.parametrize("preseed", [None, "primary_conninfo = 'host=old password=LEAKED-SECRET'\nprimary_slot_name = 'replica_0'\n"],
+                         ids=["fresh-basebackup", "already-bootstrapped-with-leaked-password"])
+def test_basebackup_script_strips_password_and_writes_passfile(tmp_path: Path, preseed: str | None) -> None:
+    """Executes the rendered init script: conninfo ends up password-free with passfile=, passfile is 0600 and holds the secret."""
+    docs = _render("helm4", "values-alpha.yaml", ())
+    script = _one(docs, "ConfigMap", "postgres-replication-scripts")["data"]["basebackup.sh"]
+    res, pgdata, passfile = _run_basebackup(tmp_path, script, preseed)
+    assert res.returncode == 0, res.stderr
+    conf = (pgdata / "postgresql.auto.conf").read_text()
+    assert "LEAKED-SECRET" not in conf and "password=" not in conf.replace("passfile=", "")
+    assert "passfile=" in conf and "primary_slot_name = 'replica_0'" in conf
+    assert "sslmode=verify-full" in conf and conf.count("primary_conninfo") == 1
+    assert oct(passfile.stat().st_mode & 0o777) == "0o600"
+    assert passfile.read_text().strip().endswith(":replication:waddles_replicator:LEAKED-SECRET")
+    assert "LEAKED-SECRET" not in res.stdout + res.stderr
+
+
+@pytest.mark.parametrize("helm", list(_HELMS))
+def test_handover_hook_scales_legacy_deployment_with_minimal_rbac(helm: str) -> None:
+    """Pre-install/pre-upgrade Job scales Deployment/postgres to 0 and waits; RBAC is resourceName-scoped; no-op when absent."""
+    docs = _render(helm, "values-alpha.yaml", ())
+    job = next(d for d in _kind(docs, "Job") if d["metadata"]["name"].endswith("-postgres-handover"))
+    ann = job["metadata"]["annotations"]
+    assert ann["helm.sh/hook"] == "pre-install,pre-upgrade"
+    assert "before-hook-creation" in ann["helm.sh/hook-delete-policy"]
+    assert job["spec"]["backoffLimit"] == 0 and job["spec"]["activeDeadlineSeconds"] > 300
+    role = next(d for d in _kind(docs, "Role") if d["metadata"]["name"].endswith("-postgres-handover"))
+    by_res = {tuple(r["resources"]): r for r in role["rules"]}
+    dep = by_res[("deployments",)]
+    assert dep["resourceNames"] == ["postgres"] and set(dep["verbs"]) == {"get", "patch"}
+    scale = by_res[("deployments/scale",)]
+    assert scale["resourceNames"] == ["postgres"] and set(scale["verbs"]) == {"get", "patch", "update"}
+    pods = by_res[("pods",)]
+    assert set(pods["verbs"]) == {"get", "list", "watch"} and "resourceNames" not in pods
+    assert not any("delete" in r["verbs"] or "*" in r["verbs"] for r in role["rules"])
+    sa_hook = next(d for d in _kind(docs, "ServiceAccount") if d["metadata"]["name"].endswith("-postgres-handover"))
+    assert job["spec"]["template"]["spec"]["serviceAccountName"] == sa_hook["metadata"]["name"]
+    script = next(d for d in _kind(docs, "ConfigMap") if d["metadata"]["name"].endswith("-postgres-handover"))["data"]["handover.sh"]
+    assert "--ignore-not-found" in script and "scale deployment/postgres --replicas=0" in script
+    assert "!app.kubernetes.io/role" in script and "exit 1" in script
+
+
+def test_handover_script_noop_scales_waits_and_times_out(tmp_path: Path) -> None:
+    """Runs the hook script against a fake kubectl: absent -> no-op; present -> scale + wait; stuck pods -> non-zero exit."""
+    docs = _render("helm4", "values-alpha.yaml", ())
+    script = next(d for d in _kind(docs, "ConfigMap") if d["metadata"]["name"].endswith("-postgres-handover"))["data"]["handover.sh"]
+    sfile = tmp_path / "handover.sh"
+    sfile.write_text(script)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "kubectl.log"
+    (bindir / "kubectl").write_text(
+        "#!/bin/sh\n"
+        f"echo \"$@\" >> {log}\n"
+        "case \"$*\" in\n"
+        "  *'get deployment postgres'*) [ \"$DEP\" = present ] && echo deployment.apps/postgres; exit 0;;\n"
+        "  *'get pods'*) [ \"$PODS\" = stuck ] && echo pod/postgres-abc; exit 0;;\n"
+        "  *scale*) exit 0;;\n"
+        "esac\n"
+    )
+    (bindir / "kubectl").chmod(0o755)
+    base = {"PATH": f"{bindir}:/usr/bin:/bin", "NAMESPACE": "waddlebot", "TIMEOUT_SECONDS": "1"}
+    run = lambda **kw: subprocess.run(["bash", str(sfile)], capture_output=True, text=True, env={**base, **kw}, check=False)  # noqa: E731,S603,S607
+    absent = run(DEP="absent", PODS="none")
+    assert absent.returncode == 0 and "nothing to do" in absent.stdout and "scale" not in log.read_text()
+    ok = run(DEP="present", PODS="none")
+    assert ok.returncode == 0 and "scale deployment/postgres --replicas=0" in log.read_text()
+    stuck = run(DEP="present", PODS="stuck")
+    assert stuck.returncode == 1 and "FAILED" in stuck.stderr
+
+
+@pytest.mark.parametrize("case", _PG_CASES, ids=_ids)
+def test_watermark_stays_on_primary_and_ingest_reads_ro(case) -> None:
+    """DB_WATERMARK_HOST is the primary FQDN (never -ro) while loader reads use -ro; svc-ingest gets a -ro replica DSN."""
+    helm, (values, extra) = case
+    docs = _render(helm, values, extra + ("pipeline.rustDataPlane.enabled=true",))
+    for suffix in ("svc-process-rust", "svc-action-rust"):
+        env = _env(_by_suffix(docs, suffix)["spec"]["template"]["spec"]["containers"][0])
+        wm = env["DB_WATERMARK_HOST"]["value"]
+        assert wm == "infra-postgres.waddlebot.svc.cluster.local", (suffix, wm)
+        assert "-ro" not in wm and wm != env["DB_READER_HOST"]["value"], suffix
+        assert env["DB_READER_HOST"]["value"] == "infra-postgres-ro.waddlebot.svc.cluster.local"
+    ing = _env(_by_suffix(docs, "svc-ingest-rust")["spec"]["template"]["spec"]["containers"][0])
+    assert "@infra-postgres-ro.waddlebot.svc.cluster.local:5432/" in ing["DATABASE_REPLICA_URL"]["value"]
+    assert "@infra-postgres.waddlebot.svc.cluster.local:5432/" in ing["DATABASE_URL"]["value"]
 
 
 @pytest.mark.parametrize("case", _PG_CASES, ids=_ids)
@@ -289,3 +469,11 @@ def test_replication_secret_is_not_in_shared_secrets(case) -> None:
     assert users == {"postgres", "postgres-replica"}, users
     prov = [d for d in docs if d.get("kind") == "Job" and "provisions-secrets" in str(d["metadata"].get("annotations", {}))]
     assert prov and any("-db-replication" in d["metadata"]["annotations"]["waddles.penguintech.io/provisions-secrets"] for d in prov)
+
+
+@pytest.mark.parametrize("helm", list(_HELMS))
+def test_libpq_clients_require_channel_binding(helm: str) -> None:
+    """libpq clients of the in-chart Postgres get PGCHANNELBINDING=require (asyncpg/sqlx lack the option and ignore the env)."""
+    docs = _render(helm, "values-alpha.yaml", ())
+    hub = _env(_by_suffix(docs, "hub-api-v3")["spec"]["template"]["spec"]["containers"][0])
+    assert hub["PGCHANNELBINDING"]["value"] == "require" and hub["PGSSLMODE"]["value"] == "verify-full"

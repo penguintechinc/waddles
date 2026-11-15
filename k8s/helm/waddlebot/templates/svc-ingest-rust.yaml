@@ -120,6 +120,8 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_ingest") | nindent 8 }}
+        # Display-name (detokenization) reads default to the replicas; absent = primary DATABASE_URL + WARN.
+{{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_ingest") | nindent 8 }}
 {{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.port | quote }}

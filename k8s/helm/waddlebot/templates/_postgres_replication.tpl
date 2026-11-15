@@ -56,32 +56,58 @@ SQL
 done
 {{- end }}
 
-{{/* Replica initContainer: pg_basebackup from the primary over verify-full TLS, ONLY when PGDATA has no cluster. */}}
+{{/*
+Replica initContainer (runs on EVERY pod start): (1) writes a 0600 passfile from the Secret into an emptyDir, (2) pg_basebackup
+from the primary over verify-full TLS ONLY when PGDATA has no cluster, (3) rewrites primary_conninfo in postgresql.auto.conf so
+it carries NO password (passfile= instead) -- also cleaning replicas bootstrapped by an earlier revision -- and fails loud if a
+password= survives.
+*/}}
 {{- define "waddlebot.postgres.basebackupScript" -}}
 set -eu
 ord="${HOSTNAME##*-}"
+umask 077
+esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'; }
+printf '%s:%s:replication:%s:%s\n' "$PRIMARY_HOST" "$PRIMARY_PORT" "$REPL_USER" "$(esc "$REPL_PASSWORD")" > "$PGPASSFILE"
+chmod 600 "$PGPASSFILE"
+unset REPL_PASSWORD
 if [ -s "$PGDATA/PG_VERSION" ]; then
   echo "basebackup: PGDATA already initialised, skipping"
-  exit 0
-fi
-mkdir -p "$PGDATA"
-chmod 700 "$PGDATA"
-i=0
-while [ "$i" -lt 60 ]; do
-  # No PG_VERSION => any content is a half-finished earlier attempt of THIS init container; safe to clear.
-  find "$PGDATA" -mindepth 1 -delete
-  if pg_basebackup -h "$PRIMARY_HOST" -p "$PRIMARY_PORT" -U "$REPL_USER" -w \
-       -D "$PGDATA" -X stream -c fast -R -S "replica_${ord}"; then
-    chmod 700 "$PGDATA"
-    echo "basebackup: seeded from $PRIMARY_HOST with slot replica_${ord}"
-    exit 0
+else
+  mkdir -p "$PGDATA"
+  chmod 700 "$PGDATA"
+  i=0
+  seeded=0
+  while [ "$i" -lt 60 ]; do
+    # No PG_VERSION => any content is a half-finished earlier attempt of THIS init container; safe to clear.
+    find "$PGDATA" -mindepth 1 -delete
+    if pg_basebackup -h "$PRIMARY_HOST" -p "$PRIMARY_PORT" -U "$REPL_USER" -w \
+         -D "$PGDATA" -X stream -c fast -R -S "replica_${ord}"; then
+      seeded=1
+      break
+    fi
+    i=$((i + 1))
+    echo "basebackup: attempt $i failed (primary/slot not ready?), retrying in 5s" >&2
+    sleep 5
+  done
+  if [ "$seeded" -ne 1 ]; then
+    echo "basebackup: gave up after 60 attempts" >&2
+    exit 1
   fi
-  i=$((i + 1))
-  echo "basebackup: attempt $i failed (primary/slot not ready?), retrying in 5s" >&2
-  sleep 5
-done
-echo "basebackup: gave up after 60 attempts" >&2
-exit 1
+  chmod 700 "$PGDATA"
+  echo "basebackup: seeded from $PRIMARY_HOST with slot replica_${ord}"
+fi
+conf="$PGDATA/postgresql.auto.conf"
+[ -f "$conf" ] || { echo "basebackup: $conf missing" >&2; exit 1; }
+{ grep -v '^[[:space:]]*primary_conninfo' "$conf" || [ "$?" -eq 1 ]; } > "$conf.new"
+printf "primary_conninfo = 'host=%s port=%s user=%s sslmode=verify-full sslrootcert=%s passfile=%s application_name=replica_%s'\n" \
+  "$PRIMARY_HOST" "$PRIMARY_PORT" "$REPL_USER" "$PGSSLROOTCERT" "$PGPASSFILE" "$ord" >> "$conf.new"
+mv "$conf.new" "$conf"
+chmod 600 "$conf"
+if grep -Eiq 'password[[:space:]]*=' "$conf"; then
+  echo "basebackup: FAILED - a password= survived in postgresql.auto.conf" >&2
+  exit 1
+fi
+echo "basebackup: primary_conninfo uses passfile (no password stored)"
 {{- end }}
 
 {{/*
@@ -99,4 +125,35 @@ SELECT pg_is_in_recovery()
 SQL
 )
 [ "$out" = "t" ]
+{{- end }}
+
+{{/*
+Pre-upgrade hand-over: scale the LEGACY Deployment/postgres to 0 and wait (bounded) for its pods to terminate.
+No-op when the Deployment is absent. Legacy pods carry no `app.kubernetes.io/role` label; the StatefulSet pods do,
+so the selector can never match (or wait on) the new topology.
+*/}}
+{{- define "waddlebot.postgres.handoverScript" -}}
+set -euo pipefail
+ns="${NAMESPACE:?}"
+limit="${TIMEOUT_SECONDS:-300}"
+found="$(kubectl -n "$ns" get deployment postgres --ignore-not-found -o name)"
+if [ -z "$found" ]; then
+  echo "postgres-handover: no legacy Deployment/postgres in $ns; nothing to do"
+  exit 0
+fi
+echo "postgres-handover: scaling legacy Deployment/postgres to 0 (PVC untouched)"
+kubectl -n "$ns" scale deployment/postgres --replicas=0
+start=$(date +%s)
+while :; do
+  left="$(kubectl -n "$ns" get pods -l 'app.kubernetes.io/name=postgres,!app.kubernetes.io/role' -o name | wc -l)"
+  if [ "$left" -eq 0 ]; then
+    echo "postgres-handover: legacy postgres pods are gone"
+    exit 0
+  fi
+  if [ $(( $(date +%s) - start )) -ge "$limit" ]; then
+    echo "postgres-handover: FAILED - $left legacy postgres pod(s) still present after ${limit}s; aborting the upgrade (two postmasters must never share PGDATA)" >&2
+    exit 1
+  fi
+  sleep 3
+done
 {{- end }}

@@ -318,6 +318,9 @@ spec:
         {{- end }}
         - name: DB_READER_HOST
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderHost | default (include "waddlebot.postgres.readHost" . | default (include "waddlebot.postgres.host" .)) | quote }}
+        # Safe-seq watermark: pinned to the PRIMARY (a replica's lag must never move the watermark).
+        - name: DB_WATERMARK_HOST
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbWatermarkHost | default (include "waddlebot.postgres.host" .) | quote }}
         - name: DB_READER_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderPort | default .Values.infrastructure.postgresql.service.port | quote }}
         - name: DB_READER_NAME

@@ -597,6 +597,10 @@ infrastructure:
     # PVC `persistence.name`); replicas = StatefulSet `postgres-replica` (volumeClaimTemplates, physical
     # streaming replication, one slot per replica). Writes -> `service.name` (rw); reads ->
     # `<service.name>-ro` (load-balanced across ready replicas). See README "PostgreSQL topology".
+    # Pre-install/pre-upgrade hook (templates/postgres-handover-job.yaml): scales a LEGACY Deployment/postgres to 0 and
+    # waits for its pods to terminate before the StatefulSet starts. No-op when absent. Fails the release on timeout.
+    handover:
+      timeoutSeconds: 300
     readReplicas:
       enabled: true
       # Default 2: one replica per node (preferred podAntiAffinity, also away from the primary) so reads
@@ -2016,6 +2020,8 @@ pipeline:
       # infrastructure.postgresql.service.name/port/database, not hardcoded here so a
       # future replica is a values-only change.
       dbReaderHost: ""
+      # Safe-seq WATERMARK read host: ALWAYS the primary by default (never the -ro replica); override only for tests.
+      dbWatermarkHost: ""
       dbReaderPort: ""
       dbReaderName: ""
       # A distinct, SELECT-only Postgres role -- never infrastructure.postgresql.username
@@ -2094,6 +2100,8 @@ pipeline:
       # see its comments for the full rationale (hub-api sole writer, READ-ONLY Postgres,
       # gated OFF by default, safe defaults before the RO role exists).
       dbReaderHost: ""
+      # Safe-seq WATERMARK read host: ALWAYS the primary by default (never the -ro replica); override only for tests.
+      dbWatermarkHost: ""
       dbReaderPort: ""
       dbReaderName: ""
       # feature/bundle-reader-role -- see svcProcess's identical field's own comment

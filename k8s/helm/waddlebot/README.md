@@ -229,13 +229,16 @@ Default = **primary + read replicas** (physical streaming replication, TLS verif
 
 ##### Alpha upgrade (existing Deployment `postgres` -> StatefulSet; PVC preserved)
 
-The old Deployment mounts PVC `postgres-data` (ReadWriteOnce). Helm creates new resources before deleting removed ones, so the old pod could still hold PGDATA when `postgres-0` starts; scale it down first.
+No manual step is required: the `<release>-postgres-handover` pre-install/pre-upgrade hook Job scales the legacy `Deployment/postgres` to 0 and waits (default 300s, `infrastructure.postgresql.handover.timeoutSeconds`) until its pods are gone, failing the release loudly on timeout; it is a no-op when the Deployment is absent. It has a resourceName-scoped Role (deployments + deployments/scale on `postgres` only; read-only pod list/watch). Helm creates new resources before deleting removed ones, which is why the hook (not Helm) must stop the old pod before `postgres-0` starts.
 
-1. Confirm the PVC and take a safety copy of its state: `kubectl --context dal2alpha -n waddlebot get pvc postgres-data` (never delete it; the chart now marks it `keep`).
-2. Stop the old primary: `kubectl --context dal2alpha -n waddlebot scale deploy/postgres --replicas=0` and wait until `kubectl ... get pods -l app.kubernetes.io/name=postgres` shows no old pod.
-3. `helm3 upgrade waddlebot k8s/helm/waddlebot -f values-alpha.yaml --kube-context dal2alpha -n waddlebot` (Helm v3.17.3, see repo notes). The provision-secrets hook creates `<fullname>-db-replication`; the old Deployment is removed by Helm; `postgres-0` starts on the existing PVC, then `postgres-replica-0/1` base-backup from it.
-4. Verify: `kubectl ... get sts postgres postgres-replica`; `kubectl ... exec postgres-0 -c postgres -- psql -U waddlebot -c "select application_name,state,sync_state,replay_lag from pg_stat_replication"` shows 2 `streaming` rows; `kubectl ... get endpoints infra-postgres-ro` lists both replica IPs; `select slot_name,active from pg_replication_slots` shows replica_0/1 active.
-5. Rollback: `kubectl ... scale sts/postgres --replicas=0` and `sts/postgres-replica --replicas=0`, `helm3 rollback waddlebot <prev>` (recreates the Deployment on the same, untouched PVC). Replica PVCs (`postgres-data-postgres-replica-N`) are disposable copies; the primary data is never rewritten by this change (a primary restart only adds WAL settings).
+1. (Optional manual pre-step, same effect as the hook) `kubectl --context dal2alpha -n waddlebot scale deploy/postgres --replicas=0`.
+2. `helm3 upgrade waddlebot k8s/helm/waddlebot -f values-alpha.yaml --kube-context dal2alpha -n waddlebot` (Helm v3.17.3). Hooks: handover (-6), provision-secrets creates `<fullname>-db-replication` and, because the SAN identity changed, re-issues the transit CA + leaves (postgres, postgres-replica, seaweedfs).
+3. Verify: `get sts postgres postgres-replica`; on postgres-0 `select application_name,state,replay_lag from pg_stat_replication` shows 2 `streaming` rows; `get endpoints infra-postgres-ro` lists both replica IPs; `select slot_name,active from pg_replication_slots` shows replica_0/1 active.
+4. Rollback: scale both StatefulSets to 0, `helm3 rollback waddlebot <prev>` (recreates the Deployment on the same, untouched PVC). Replica PVCs are disposable copies.
+
+**Replication credential and TLS isolation.** Replicas authenticate with a `.pgpass` (0600, tmpfs emptyDir) built from the Secret at every start; `primary_conninfo` in `postgresql.auto.conf` carries only `passfile=` (the init script rewrites it on every start and fails if a `password=` survives, so replicas bootstrapped by an earlier revision are cleaned). Replicas serve with their own key/cert whose SANs are only `-ro`, the headless Service and the replica pod names; the primary key/cert never reaches a replica pod, so a compromised replica cannot impersonate the writer. In static mode both leaves live in the transit Secret (the provisioning CA key is per-run, so leaves are minted together with their CA) and each pod projects only its own keys; cert-manager mode uses a dedicated `<fullname>-postgres-replica-tls` Secret. libpq clients (psycopg2/psql/alembic) additionally set `PGCHANNELBINDING=require`; asyncpg 0.30 and sqlx 0.9 have no such option and are left as is.
+
+**Watermark.** svc-process/svc-action read the changelog SAFE-SEQ watermark over a separate connection to the PRIMARY (`DB_WATERMARK_HOST`, default the primary FQDN) while bundle loader reads use `DB_READER_HOST` (`-ro`).
 
 #### Redis
 
