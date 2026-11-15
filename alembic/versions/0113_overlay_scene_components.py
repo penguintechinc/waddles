@@ -15,13 +15,11 @@ external reference (the numeric `id` never leaves the database).
   output_kind_code  1 text, 2 image, 3 sanitized_html, 4 surface
   status_code       1 visible, 2 hidden
 
-release/v3.0.X currently has two heads (0108_bundle_precompile_requests, 0109_platform_vault);
-this revision merges both so the chain is single-headed on its own. If #1354's
-0110_merge_precompile_vault lands first, re-point down_revision to "0110_merge_precompile_vault".
-0111/0112 are reserved by other in-flight work.
+`down_revision` is the release head at merge time (single-head gate); 0111/0112 are reserved by
+other in-flight work.
 
 Revision ID: 0113_overlay_scene_components
-Revises: 0108_bundle_precompile_requests, 0109_platform_vault
+Revises: 0119_storage_objects_split
 """
 
 from __future__ import annotations
@@ -32,7 +30,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision = "0113_overlay_scene_components"
-down_revision = ("0108_bundle_precompile_requests", "0109_platform_vault")
+down_revision = "0119_storage_objects_split"
 branch_labels = None
 depends_on = None
 
