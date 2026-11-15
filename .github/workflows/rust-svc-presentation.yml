@@ -9,6 +9,8 @@ on:
       - 'core/overlay_auth/**'
       - 'core/service_auth/**'
       - 'core/hub_client/**'
+      - 'core/bundle_host_surface/**'
+      - 'proto/waddles/presentation/**'
       - 'core/egress_detokenizer/**'
       - '.github/workflows/rust-svc-presentation.yml'
       - '.github/workflows/rust-crate-ci.yml'
@@ -54,6 +56,8 @@ jobs:
             core/overlay_auth/**
             core/service_auth/**
             core/hub_client/**
+            core/bundle_host_surface/**
+            proto/waddles/presentation/**
             core/egress_detokenizer/**
 
   lint-test:
@@ -67,7 +71,7 @@ jobs:
       # protoc is needed by hub_client's build.rs (tonic-prost-build), a
       # dependency of `overlay::detok` (via egress_detokenizer).
       extra_apt_packages: protobuf-compiler
-      extra_apt_reason: 'for hub_client (protoc)'
+      extra_apt_reason: 'for hub_client + bundle_host_surface (protoc)'
       # Thin binary entrypoint, untestable without subprocessing -- same
       # convention as rust-svc-process.yml/rust-egress-proxy.yml.
       coverage_ignore_regex: 'main\.rs'

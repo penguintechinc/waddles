@@ -175,6 +175,11 @@ spec:
         # it with "missing required audience").
         - name: SERVICE_JWT_SA_TOKEN_PATH
           value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        {{- if eq (include "waddlebot.presentationGrpcEnabled" .) "true" }}
+        # overlay.publish-surface delivery -> svc-presentation's surface gRPC (TLS, CA-only mount).
+        # Default-OFF behind PostHog `waddles.overlay-surfaces` (the owner flips it).
+        {{- include "waddlebot.presentationGrpcClientEnv" . | nindent 8 }}
+        {{- end }}
         - name: WADDLES_SANDBOX_GVISOR
           value: {{ .Values.pipeline.rustDataPlane.svcAction.sandboxGvisor | quote }}
         # Per-call wall-clock budget handed to the executor on every `invoke` -- kept in
@@ -372,11 +377,17 @@ spec:
         {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
         {{- end }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
+        {{- if eq (include "waddlebot.presentationGrpcEnabled" .) "true" }}
+        {{- include "waddlebot.presentationGrpcCaVolumeMount" . | nindent 8 }}
+        {{- end }}
       volumes:
       {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
       - name: tmp
         emptyDir: {}
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
+      {{- if eq (include "waddlebot.presentationGrpcEnabled" .) "true" }}
+      {{- include "waddlebot.presentationGrpcCaVolume" . | nindent 6 }}
+      {{- end }}
       {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
       {{- end }}

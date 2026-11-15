@@ -138,6 +138,24 @@ global:
     # beta/gamma/production. Alpha/local ignore this flag entirely (auto-generated instead).
     externalSecret: false
 
+  # TLS material for svc-presentation's in-cluster surface gRPC listener
+  # (waddles.presentation.internal.v1.SurfaceService on pipeline.svcPresentation.grpcPort;
+  # core/svc_presentation/src/surfaces/ingress.rs -- the listener REFUSES to start in plaintext off
+  # loopback). Generated at runtime by the provision-secrets Job (ECDSA P-256 via OpenSSL, its own
+  # CA, SANs = the svc-presentation Service DNS names) exactly like hub-api's gRPC identity; the
+  # callers (svc-action-rust, svc-process-rust) mount ONLY the CA (PRESENTATION_GRPC_CA_FILE).
+  # NEVER a literal cert/key in git; populate via --set-file or an out-of-git values override /
+  # ExternalSecret.
+  presentationGrpcTls:
+    ca:
+      crt: ""
+    tls:
+      crt: ""
+      key: ""
+    # true delegates provisioning of the <fullname>-presentation-grpc-tls Secret (keys ca.crt,
+    # tls.crt, tls.key) to an out-of-band ExternalSecret/SealedSecret controller.
+    externalSecret: false
+
   # fix/valkey-tls-alpha -- TLS material for the Valkey (infra-redis) cache/streams
   # listener. `penguin_spine::SpineConfig::validate()` (core/svc_process, core/svc_action,
   # core/svc_ingest) fails closed when SECURITY_TRANSPORT_TLS=true (the default -- never
@@ -1608,6 +1626,15 @@ pipeline:
   svcPresentation:
     enabled: true
     port: 8207
+    # In-cluster surface gRPC port (waddles.presentation.internal.v1.SurfaceService): the ONLY
+    # transport bundles' `overlay.publish-surface` publishes use. TLS (global.presentationGrpcTls)
+    # is mandatory; ingress is restricted to svc-action-rust/svc-process-rust by
+    # templates/svc-presentation-grpc-networkpolicy.yaml.
+    grpcPort: 50051
+    # Default-OFF feature flag gating the publish side: PostHog `waddles.overlay-surfaces`
+    # (checked by the stages, never by svc-presentation). The OWNER flips it (PostHog -> Feature
+    # flags). Until it is ON every `surface.publish` denies `feature_disabled`; the listener and
+    # callers' endpoints being wired is independent of it.
     # MUST stay 1. The overlay fan-out is IN-PROCESS: each pod only knows the websocket/SSE
     # clients connected to itself, so with >1 replica a pushed frame reaches only the clients on
     # the pod that received it -- frames split across pods. The chart REFUSES to render

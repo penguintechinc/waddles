@@ -82,6 +82,9 @@ spec:
         - name: metrics
           containerPort: 9090
           protocol: TCP
+        - name: grpc
+          containerPort: {{ .Values.pipeline.svcPresentation.grpcPort }}
+          protocol: TCP
         envFrom:
         - configMapRef:
             name: {{ include "waddlebot.fullname" . }}-config
@@ -96,6 +99,7 @@ spec:
           value: {{ .Values.pipeline.svcPresentation.port | quote }}
         - name: METRICS_PORT
           value: "9090"
+        {{- include "waddlebot.presentationGrpcTlsServerEnv" . | nindent 8 }}
         - name: PUSH_JWKS_ENDPOINT
           value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: PUSH_AUDIENCE
@@ -164,6 +168,7 @@ spec:
         {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
         - name: tmp
           mountPath: /tmp
+        {{- include "waddlebot.presentationGrpcTlsVolumeMount" . | nindent 8 }}
         {{- if .Values.pipeline.hubApi.enabled }}
         {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
         {{- end }}
@@ -173,6 +178,7 @@ spec:
       - name: tmp
         emptyDir: {}
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
+      {{- include "waddlebot.presentationGrpcTlsVolume" . | nindent 6 }}
       {{- if .Values.pipeline.hubApi.enabled }}
       {{- include "waddlebot.hubApiGrpcCaVolume" . | nindent 6 }}
       {{- end }}
@@ -203,9 +209,13 @@ spec:
     targetPort: metrics
     protocol: TCP
     name: metrics
+  - port: {{ .Values.pipeline.svcPresentation.grpcPort }}
+    targetPort: grpc
+    protocol: TCP
+    name: grpc
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-presentation
 # R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
-{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-presentation" "ports" (list $.Values.pipeline.svcPresentation.port 9090) "runtime" "rust" "binaries" (list "/app/svc-presentation")) }}
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-presentation" "ports" (list $.Values.pipeline.svcPresentation.port 9090 $.Values.pipeline.svcPresentation.grpcPort) "excludePorts" (list $.Values.pipeline.svcPresentation.grpcPort) "runtime" "rust" "binaries" (list "/app/svc-presentation")) }}
 {{- end }}

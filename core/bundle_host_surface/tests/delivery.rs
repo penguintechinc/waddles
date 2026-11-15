@@ -160,3 +160,30 @@ async fn a_dead_endpoint_is_unavailable_never_a_hang() {
         .unwrap_err();
     assert_eq!(err.code(), "unavailable");
 }
+
+#[tokio::test]
+async fn publish_for_app_owns_the_apps_namespace_and_parses_the_guests_two_words() {
+    let (host, seen) = start().await;
+    let own = "waddles.core.example.music.queue";
+    let args = serde_json::json!({"surface_id": own, "payload_json": "{}"});
+    // The fake server answers `invalid_argument` for this surface id; the point is the call DID
+    // reach it, for the host-verified community.
+    let e = bundle_host_surface::publish_for_app(&host, "waddles.core.example.music", 9, &args)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), "invalid");
+    assert_eq!(seen.lock().unwrap().request.as_ref().unwrap().1, 9);
+    // Another bundle's namespace never leaves the host.
+    let foreign =
+        serde_json::json!({"surface_id": "waddles.core.example.dj.queue", "payload_json": "{}"});
+    let e = bundle_host_surface::publish_for_app(&host, "waddles.core.example.music", 9, &foreign)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), "not_granted");
+    // Extra keys (a guest naming a community) are refused.
+    let sneaky = serde_json::json!({"surface_id": own, "payload_json": "{}", "community_id": 1});
+    let e = bundle_host_surface::publish_for_app(&host, "waddles.core.example.music", 9, &sneaky)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), "invalid");
+}

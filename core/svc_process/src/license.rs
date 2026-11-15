@@ -509,6 +509,26 @@ impl FeatureGate for HarnessMediaGenerationGate {
     }
 }
 
+/// Default-OFF PostHog flag gating the bundle `overlay.publish-surface` host capability
+/// (`surface.publish`: gRPC delivery to svc-presentation). Same key as svc-action's.
+pub const OVERLAY_SURFACES_FLAG: &str = "waddles.overlay-surfaces";
+
+/// Production [`FeatureGate`] for [`OVERLAY_SURFACES_FLAG`] -- plain read of
+/// `LicenseClient::flag_enabled` (fail-closed default).
+pub struct OverlaySurfacesGate(Arc<LicenseClient>);
+
+impl OverlaySurfacesGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for OverlaySurfacesGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0.flag_enabled(OVERLAY_SURFACES_FLAG).await })
+    }
+}
+
 /// Production [`crate::ai::TierSource`] -- the deployment license tier from
 /// `LicenseClient::tier` (last-known cached value within grace; `Free` when never
 /// seen/expired, so the AI capability fails closed; `Enterprise` under domain bypass).

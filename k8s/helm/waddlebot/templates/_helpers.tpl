@@ -689,6 +689,86 @@ hub-api's gRPC server cert, consumed by HubClient::connect's HUB_API_GRPC_CA_FIL
 {{- end }}
 
 {{/*
+svc-presentation's in-cluster surface gRPC listener (waddles.presentation.internal.v1.SurfaceService,
+core/svc_presentation/src/surfaces/ingress.rs): its OWN identity Secret `<fullname>-presentation-grpc-tls`
+(keys ca.crt/tls.crt/tls.key), minted at runtime by templates/provision-secrets.yaml (ECDSA P-256,
+own CA) like hub-api's gRPC identity. SANs are the svc-presentation Service's DNS names so
+`bundle_host_surface::SurfaceHost` verifies the server by hostname. Callers mount ONLY the CA.
+*/}}
+{{- define "waddlebot.presentationGrpcEnabled" -}}
+{{- if and .Values.pipeline.svcPresentation.enabled .Values.presentation.rust.enabled -}}
+true
+{{- end -}}
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcSvcName" -}}
+{{- printf "%s-svc-presentation" (include "waddlebot.fullname" .) -}}
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsDesiredDnsNames" -}}
+{{- $svcName := include "waddlebot.presentationGrpcSvcName" . -}}
+{{- $ns := .Values.namespace -}}
+{{- list $svcName (printf "%s.%s" $svcName $ns) (printf "%s.%s.svc" $svcName $ns) (printf "%s.%s.svc.cluster.local" $svcName $ns) | sortAlpha | join "," -}}
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsSansSha256" -}}
+{{- include "waddlebot.presentationGrpcTlsDesiredDnsNames" . | sha256sum -}}
+{{- end }}
+
+{{/* Endpoint the stages dial (https, the Service DNS name the cert's SANs cover). */}}
+{{- define "waddlebot.presentationGrpcEndpoint" -}}
+{{- printf "https://%s:%v" (include "waddlebot.presentationGrpcSvcName" .) .Values.pipeline.svcPresentation.grpcPort -}}
+{{- end }}
+
+{{/* Server-role env for svc-presentation (core/svc_presentation/src/config.rs). */}}
+{{- define "waddlebot.presentationGrpcTlsServerEnv" -}}
+- name: SURFACE_GRPC_PORT
+  value: {{ .Values.pipeline.svcPresentation.grpcPort | quote }}
+- name: SURFACE_GRPC_TLS_CERT_FILE
+  value: /etc/waddlebot/presentation-grpc-tls/tls.crt
+- name: SURFACE_GRPC_TLS_KEY_FILE
+  value: /etc/waddlebot/presentation-grpc-tls/tls.key
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsVolume" -}}
+- name: presentation-grpc-tls
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-presentation-grpc-tls
+    defaultMode: 0440
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsVolumeMount" -}}
+- name: presentation-grpc-tls
+  mountPath: /etc/waddlebot/presentation-grpc-tls
+  readOnly: true
+{{- end }}
+
+{{/* Caller-role env + CA-only mount (svc-action-rust, svc-process-rust): `overlay.publish-surface`
+delivery (`bundle_host_surface::SurfaceHost`). Never the server's tls.crt/tls.key. */}}
+{{- define "waddlebot.presentationGrpcClientEnv" -}}
+- name: PRESENTATION_GRPC_ENDPOINT
+  value: {{ include "waddlebot.presentationGrpcEndpoint" . | quote }}
+- name: PRESENTATION_GRPC_CA_FILE
+  value: /etc/waddlebot/presentation-grpc-ca/ca.crt
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcCaVolume" -}}
+- name: presentation-grpc-ca
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-presentation-grpc-tls
+    items:
+      - key: ca.crt
+        path: ca.crt
+    defaultMode: 0440
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcCaVolumeMount" -}}
+- name: presentation-grpc-ca
+  mountPath: /etc/waddlebot/presentation-grpc-ca
+  readOnly: true
+{{- end }}
+
+{{/*
 fix/chart-host-api-stage-identity -- the single source of truth for the host-api-tls
 identity cert's CN (and `HOST_API_STAGE_IDENTITY`), read together with this file's
 waddlebot.hostApiTls* helpers above and templates/host-api-tls-secret.yaml's/

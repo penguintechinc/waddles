@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use bundle_host_surface::{PublishArgs, SurfaceError, SurfaceHost, SurfacePolicy};
+use bundle_host_surface::{SurfaceError, SurfaceHost};
 use penguin_bundle_host::wire::HostResultError;
 
 use crate::capabilities::denied;
@@ -110,12 +110,8 @@ pub async fn publish(
             "surface publishing is disabled (waddles.overlay-surfaces)",
         ));
     }
-    let args = PublishArgs::parse(args).map_err(|e| error_body(&e))?;
     // A bundle owns exactly its own namespace; no permission list widens that here.
-    let policy = SurfacePolicy::for_app(app_id, std::iter::empty());
-    wiring
-        .host
-        .publish(&policy, community_id, &args.surface_id, &args.payload_json)
+    bundle_host_surface::publish_for_app(&wiring.host, app_id, community_id, args)
         .await
         .map_err(|e| error_body(&e))?;
     Ok(serde_json::json!({ "published": true }))

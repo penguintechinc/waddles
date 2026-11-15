@@ -226,6 +226,10 @@ bundle-host-credentials = { path = "../bundle_host_credentials", version = "=0.1
 # The `media` host capability (Gemini image/music/video, tier-gated + BYOK):
 # same-repo path dependency, see core/bundle_host_media.
 bundle-host-media = { path = "../bundle_host_media", version = "=0.1.0" }
+# `crate::surface`: stage side of `overlay.publish-surface` (gRPC delivery to svc-presentation,
+# host-derived community + app-id namespace ownership). Its build.rs compiles
+# `proto/waddles/presentation/internal/v1` with the same protoc/`proto` context as hub_client.
+bundle-host-surface = { path = "../bundle_host_surface", version = "=0.1.0" }
 # Machine-JWT source for bundle-host-media's hub-api calls (tier + BYOK);
 # already in this crate's lock via core/hub_client.
 service_auth = { path = "../service_auth", version = "=0.1.0" }
@@ -275,6 +279,8 @@ hmac = "=0.12.1"
 hex = "=0.4.3"
 
 [dev-dependencies]
+# `crate::surface` tests run a real in-process tonic `SurfaceService` on loopback.
+tokio-stream = { version = "=0.1.19", features = ["net"] }
 # In-process KeyService fake (the seal contract) for the real-path decrypt tests.
 hub_client = { path = "../hub_client", version = "=0.1.0", features = ["test-support"] }
 # In-process `ServiceAuthService` mint hub for the machine-JWT bootstrap of those tests.

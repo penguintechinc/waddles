@@ -35,6 +35,11 @@ global:
     externalSecret: true
   hubApiGrpcTls:
     externalSecret: true
+  # svc-presentation surface gRPC server identity (<fullname>-presentation-grpc-tls: ca.crt, tls.crt,
+  # tls.key; ECDSA P-256, SANs = the svc-presentation Service DNS names) -- same out-of-band
+  # ExternalSecret/SealedSecret convention as hubApiGrpcTls above; auto-generation is alpha/local only.
+  presentationGrpcTls:
+    externalSecret: true
 
 pipeline:
   hubApi:

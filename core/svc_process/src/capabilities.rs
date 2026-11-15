@@ -593,6 +593,8 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// `None` until [`Self::with_media`] -- every `media.*` call denies
     /// `not_implemented` in that state (fail-loud, never a canned result).
     media: Option<MediaWiring>,
+    /// `None` until [`Self::with_surface`] -- `surface.publish` denies `not_implemented` then.
+    surface: Option<crate::surface::SurfaceWiring>,
     /// The instant this invocation's executor deadline expires, set with
     /// [`Self::with_media`]; bounds the synchronous image call.
     media_deadline: Option<std::time::Instant>,
@@ -733,6 +735,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             ai: None,
             ai_deadline: None,
             media: None,
+            surface: None,
             media_deadline: None,
             invocation_identity: None,
             verified_scope: None,
@@ -905,6 +908,33 @@ impl<K: KvBackend> StageCapabilities<K> {
         self.media = Some(media);
         self.media_deadline = Some(invoke_deadline);
         self
+    }
+
+    /// Attaches the `overlay.publish-surface` wiring (delivery host + default-OFF flag).
+    pub fn with_surface(mut self, surface: crate::surface::SurfaceWiring) -> Self {
+        self.surface = Some(surface);
+        self
+    }
+
+    /// `surface.publish`: community and app id come from the host-verified scope, never args.
+    async fn handle_surface(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        if call.op != "surface.publish" {
+            return Err(denied(
+                "unknown_op",
+                format!("surface op {:?} not supported", call.op),
+            ));
+        }
+        let scope = self.gate_scope();
+        crate::surface::publish(
+            self.surface.as_ref(),
+            scope.app_id(),
+            i64::from(scope.community_id()),
+            &call.args,
+        )
+        .await
     }
 
     /// `media.generate_image` / `media.submit_music` / `media.submit_video` /
@@ -4553,6 +4583,10 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             // `media.*` ops likewise: own gate permission (`media.generate`), own
             // handler (`bundle_host_media`), never the `storage.tables` path.
             CapabilityKind::Db if call.op.starts_with("media.") => self.handle_media(&call).await,
+            // `surface.publish` (overlay.publish-surface): own handler, never `storage.tables`.
+            CapabilityKind::Db if call.op.starts_with("surface.") => {
+                self.handle_surface(&call).await
+            }
             CapabilityKind::Db => self.handle_db(&call).await,
             // `enabled` is wired to a real `penguin_licensing::
             // LicenseClient` (`crate::license::resolve_flag`) -- see

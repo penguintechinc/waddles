@@ -957,6 +957,9 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `StageCapabilities`. `None` when its config/dependencies are not
     /// provisioned (every `media.*` call then denies `not_implemented`).
     pub media_wiring: Option<crate::media::MediaWiring>,
+    /// `overlay.publish-surface` wiring (`crate::surface::build_surface_wiring`); `None` leaves
+    /// `surface.publish` denying `not_implemented`.
+    pub surface_wiring: Option<crate::surface::SurfaceWiring>,
     /// The tenant stream-DEK source (hub-api `KeyService` in production, the hard-gated
     /// dev/alpha KEK otherwise) [`handle_delivered`] decrypts inbound identity fields with.
     /// `None` is a deployment error, not an opt-out: an event that carries identity fields
@@ -1159,6 +1162,10 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
             media.clone(),
             std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms),
         ),
+        None => caps,
+    };
+    let caps = match &deps.surface_wiring {
+        Some(surface) => caps.with_surface(surface.clone()),
         None => caps,
     };
     // Live per-community config for `get-context().config_json` (None when hub-api is not
@@ -2774,6 +2781,7 @@ mod tests {
             identity_wiring: None,
             ai_wiring: None,
             media_wiring: None,
+            surface_wiring: None,
             dek_provider: Some(crate::identity_crypto::test_support::dek_provider()),
         };
         (deps, metrics)
