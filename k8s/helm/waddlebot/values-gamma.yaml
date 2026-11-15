@@ -37,6 +37,17 @@ global:
     externalSecret: true
 
 pipeline:
+  # RTC media (gamma): dedicated LoadBalancer Service scoped to the ONE UDP media port -- never
+  # NodePort/hostPort/externalIPs (owner decision 2026-11-14). Needs a UDP-capable LB (MetalLB /
+  # provider with UDP support): see docs/RTC_MEDIA_EXPOSURE.md. Set `annotations` for the
+  # provider (e.g. metallb.universe.tf/address-pool) and `loadBalancerSourceRanges` only for a
+  # closed audience. `publicBaseUrl` must resolve to the LB address for whip_url/ICE host.
+  svcStreaming:
+    webrtc:
+      media:
+        service:
+          type: LoadBalancer
+          externalTrafficPolicy: Local
   hubApi:
     # Run `make generate-bundle-signing-key KEY_ID=<label> KUBE_CONTEXT=<DO gamma context>
     # NAMESPACE=waddlebot` once before the first bundle approval on this env -- see

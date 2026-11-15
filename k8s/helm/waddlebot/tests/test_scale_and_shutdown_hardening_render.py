@@ -162,7 +162,10 @@ class TestStartupProbe:
     def test_alpha_slow_start_workloads(self, alpha_docs: list[dict[str, Any]]) -> None:
         for suffix in _STARTUP_WORKLOADS:
             c = _by_suffix(alpha_docs, "Deployment", suffix)["spec"]["template"]["spec"]["containers"][0]
-            assert c["startupProbe"]["failureThreshold"] == 30, suffix
+            # svc-streaming carries its own budget (pipeline.svcStreaming.startupProbe: 5s x 60 =
+            # 300s for the cold first boot); every other slow-start workload uses the chart default.
+            want = 60 if suffix.endswith("svc-streaming") else 30
+            assert c["startupProbe"]["failureThreshold"] == want, suffix
             assert "livenessProbe" in c and "readinessProbe" in c, suffix
 
 

@@ -175,12 +175,20 @@ pipeline:
   # above (not the generic pipeline.svcProcess/svcAction resources -- ffmpeg/transcode is
   # real CPU work). No nodePort override -- base's pipeline.svcStreaming.nodePort.enabled
   # stays false, beta is ClusterIP-only per devops-kubernetes.md's "no NodePort in
-  # beta/prod" rule (svc-streaming isn't RTMP-reachable from outside dal2 yet).
+  # beta/prod" rule (svc-streaming isn't RTMP-reachable from outside dal2 yet). Resources follow
+  # the base owner policy (requests 250m/512Mi, limits 4 CPU/4Gi) -- no beta-specific override.
+  #
+  # RTC media: dedicated LoadBalancer Service scoped to the ONE UDP media port -- never
+  # NodePort/hostPort/externalIPs. Needs a UDP-capable LB on dal2beta (MetalLB); see
+  # docs/RTC_MEDIA_EXPOSURE.md. Annotations / loadBalancerSourceRanges hooks live under
+  # webrtc.media.service. `publicBaseUrl` must resolve to the LB address for whip_url/ICE host.
   svcStreaming:
     replicas: 1
-    resources:
-      requests: { cpu: "500m", memory: "512Mi" }
-      limits: { cpu: "4000m", memory: "2Gi" }
+    webrtc:
+      media:
+        service:
+          type: LoadBalancer
+          externalTrafficPolicy: Local
 
 # Issue #287 -- svc-streaming (Rust) image, CI-built from core/svc_streaming/Dockerfile.rust,
 # published to ghcr.io like every other beta module.

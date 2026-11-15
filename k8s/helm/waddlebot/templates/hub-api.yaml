@@ -180,6 +180,12 @@ spec:
           value: /etc/waddlebot/host-api-tls/tls.crt
         - name: STREAMING_RTC_GRPC_CLIENT_KEY_FILE
           value: /etc/waddlebot/host-api-tls/tls.key
+        # TLS server name verified against the svc-streaming cert SANs (waddlebot.hostApiTlsDesiredDnsNames);
+        # defaults to the Service name from the target, so it always matches a SAN.
+        - name: STREAMING_RTC_GRPC_SERVER_NAME
+          value: {{ .Values.pipeline.hubApi.streamingRtc.serverName | default (printf "%s-svc-streaming" (include "waddlebot.fullname" .)) | quote }}
+        - name: STREAMING_RTC_TIMEOUT_SECONDS
+          value: {{ .Values.pipeline.hubApi.streamingRtc.timeoutSeconds | default 10 | quote }}
         {{- end }}
         - name: SERVICE_JWT_AUDIENCE
           value: {{ .Values.serviceJwt.audience | quote }}

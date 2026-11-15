@@ -1361,6 +1361,19 @@ pipeline:
     enabled: true
     port: 8204
     grpcPort: 50204
+    # RTC RoomsService client (hub_api/services/calls_proxy.py `RoomsClient`) -> svc-streaming
+    # gRPC (HTTP/2 + mTLS + a per-call ES256 service JWT minted by hub-api's own issuer for the
+    # `serviceJwt.identities.hub-api` SPIFFE id). The target/CA/client-cert env is derived in
+    # templates/hub-api.yaml from the svc-streaming Service; only the tunables live here. The
+    # retired REST env `STREAMING_RTC_URL` is never rendered.
+    streamingRtc:
+      # Per-call gRPC deadline -> STREAMING_RTC_TIMEOUT_SECONDS (client default 10 when empty).
+      timeoutSeconds: 10
+      # TLS server name the client verifies -> STREAMING_RTC_GRPC_SERVER_NAME. Empty = the Service
+      # name from the target, which IS a SAN of the shared host-api-tls cert
+      # (waddlebot.hostApiTlsDesiredDnsNames: <fullname>-svc-streaming[.<ns>.svc.cluster.local]).
+      # Set only when reaching svc-streaming through a different DNS name.
+      serverName: ""
     # SPIFFE_PEER_TRUST / SPIFFE_PEER_ID_HEADER (hub_api/services/machine_auth.py). Default OFF.
     # Enable ONLY behind an mTLS terminator that strips the header from non-mTLS traffic AND
     # after a per-identity community allow-list exists -- see docs/PROVIDER_CONNECTIONS.md.
@@ -1550,8 +1563,12 @@ pipeline:
   # pod, not a generic pipeline-stage skeleton.
   svcStreaming:
     enabled: true
-    # Stateful singleton (RTMP/SRT listeners + local stream dir): Deployment strategy is
-    # Recreate and replicas must stay 1. No HPA/PDB (not in waddlebot.scaleTargets).
+    # Stateful singleton (RTMP/SRT listeners + local stream dir + the in-memory RTC SFU rooms):
+    # Deployment strategy is Recreate and replicas must stay 1. No HPA/PDB (not in
+    # waddlebot.scaleTargets): a PDB with minAvailable 1 on a single replica would block every node
+    # drain, and maxUnavailable 1 would be a no-op. EVERY svc-streaming rollout (image bump, config
+    # change) therefore DROPS ALL LIVE RTC ROOMS AND STREAMS -- clients must rejoin. Deploy in a
+    # quiet window. (Isolating RTC into its own pod is plan Q5, not done here.)
     # Longer drain than the chart default so in-flight streams/recordings can finalize.
     terminationGracePeriodSeconds: 60
     port: 8208
@@ -1559,8 +1576,58 @@ pipeline:
     metricsPort: 9090
     rtmpPort: 1935
     srtPort: 9000
-    webrtcRangeStart: 40000
-    webrtcRangeEnd: 40100
+    # WebRTC media (RTC rooms + WHIP/WHEP): ONE multiplexed UDP port (webrtc-rs UDP mux) plus an
+    # optional ICE-TCP fallback on ONE TCP port. No port range, no TURN (v3.3.x, #1318).
+    # The port rendered here is BOTH the container port the SFU binds and the port the media
+    # Service publishes (NodePort / LoadBalancer) -- the SFU advertises the port it binds in its
+    # ICE candidates, so the externally reachable port MUST equal it (the render fails otherwise).
+    # Env contract with core/svc_streaming: WEBRTC_UDP_RANGE="<udpPort>-<udpPort>" (single-port
+    # range, accepted by config.rs::parse_udp_range); WEBRTC_ICE_TCP_PORT=<iceTcp.port> only when
+    # iceTcp.enabled (the SFU rejects/ignores it until the T2 mux server lands -- see
+    # docs/RTC_MEDIA_EXPOSURE.md).
+    webrtc:
+      udpPort: 40000
+      iceTcp:
+        enabled: false
+        port: 40000
+      # Dedicated media Service, scoped to the ports above and NOTHING else (RTMP/SRT/HTTP/gRPC
+      # are never published here). Alpha/local: NodePort (owner-approved exemption from the
+      # no-external-ports rule, fixed nodePort == udpPort, set in values-alpha/-dal2alpha/-local).
+      # beta/gamma/production: LoadBalancer (never NodePort/hostPort/externalIPs).
+      media:
+        service:
+          enabled: true
+          type: LoadBalancer        # NodePort | LoadBalancer
+          # NodePort only: must equal the bound port (udpPort / iceTcp.port) and sit in the
+          # cluster's NodePort range (default 30000-32767).
+          nodePort:
+            udp: 0
+            tcp: 0
+          # LoadBalancer only. Empty = open to the internet (browsers anywhere must reach media);
+          # restrict only for a closed audience. Provider-specific annotations go in `annotations`
+          # (e.g. MetalLB address pool). Cluster policy keeps the client source IP (no SNAT).
+          loadBalancerSourceRanges: []
+          loadBalancerClass: ""
+          externalTrafficPolicy: Local
+          annotations: {}
+        # CiliumNetworkPolicy ingress on the media port(s): which entities may open media flows.
+        # Alpha NodePort with externalTrafficPolicy Cluster SNATs through the node, so the overlay
+        # adds host + remote-node. Nothing else is admitted on these ports.
+        networkPolicy:
+          fromEntities: ["world"]
+      # No STUN/TURN: the SFU advertises host candidates only (TURN is v3.3.x, #1318). The generic
+      # svc-streaming CNP egress profile is `world`, so a future STUN server needs no extra rule.
+    # Rooms room-token signing key (WEBRTC_ROOM_TOKEN_SECRET). No value ever lives in values.
+    # `existingSecret` names a pre-created Secret + key that is mounted as that env var. Empty =
+    # the env is NOT rendered and RoomsService fails loud on the first JoinRoom
+    # ("WEBRTC_ROOM_TOKEN_SECRET is not set"). SEAM: the platform_secrets store (being built
+    # separately) will supersede this reference; the room token is moving to ES256 (plan Q6) --
+    # the Secret then holds the PEM private key and svc-streaming a new env name. Keep this
+    # indirection, do not inline.
+    rooms:
+      roomToken:
+        existingSecret: ""
+        key: "WEBRTC_ROOM_TOKEN_SECRET"
     streamDataDir: "/var/lib/waddlebot/stream"
     # Externally-reachable base URL svc-streaming embeds in playback URLs and uses as
     # the WebRTC ICE host. Empty = unset (service default http://localhost:8208).
@@ -1581,10 +1648,23 @@ pipeline:
       rtmpPort: 31935
       srtPort: 30900
       httpPort: 31208
+    # Probes. HTTP (not native gRPC): the RoomsService listener demands a client certificate and
+    # the kubelet's gRPC probe cannot present one, so `grpc.health.v1` probes cannot work. The
+    # probes hit the plaintext HTTP port 8208 (/health, /readyz) -- owner-approved exception to
+    # the svc-* "native gRPC probes" rule (see the EXCEPTION comment in templates/svc-streaming.yaml).
+    # Startup budget = periodSeconds x failureThreshold: 5s x 60 = 300s (chart default is 150s) for the
+    # first cold boot -- DB wait + GPU trial-encode gate + rooms/WASM bundle first compile.
+    startupProbe:
+      periodSeconds: 5
+      failureThreshold: 60
+    # Owner policy for this pod: small guaranteed request (it idles most of the time; the
+    # scheduler should not reserve transcode capacity), generous limit so an RTMP transcode or a
+    # room full of subscribers can burst without throttling/OOM. cpu 4 / 4Gi is the ceiling on
+    # every environment; the 512Mi tmpfs HLS scratch (stream-data) counts against the memory limit.
     resources:
       requests:
-        cpu: "1000m"
-        memory: "1Gi"
+        cpu: "250m"
+        memory: "512Mi"
       limits:
         cpu: "4000m"
         memory: "4Gi"

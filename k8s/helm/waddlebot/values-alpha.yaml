@@ -253,9 +253,23 @@ pipeline:
       rtmpPort: 31935
       srtPort: 30900
       httpPort: 31208
-    resources:
-      requests: { cpu: "200m", memory: "256Mi" }
-      limits: { cpu: "2000m", memory: "1Gi" }
+    # Resources follow the base owner policy (requests 250m/512Mi, limits 4 CPU/4Gi).
+    #
+    # RTC media: NodePort (owner-approved alpha exemption from the no-external-ports rule). The
+    # fixed nodePort MUST equal webrtc.udpPort -- the SFU advertises the port it binds in its ICE
+    # candidates, so the router UDP port-forward is WAN 31400/udp -> <node IP>:31400/udp (owner
+    # action; docs/RTC_MEDIA_EXPOSURE.md). externalTrafficPolicy Cluster so any node answers
+    # (the node SNATs, hence host + remote-node in the CNP entities). Chart refuses NodePort
+    # outside global.deploymentTier alpha|local.
+    webrtc:
+      udpPort: 31400
+      media:
+        service:
+          type: NodePort
+          nodePort: { udp: 31400, tcp: 0 }
+          externalTrafficPolicy: Cluster
+        networkPolicy:
+          fromEntities: ["world", "host", "remote-node"]
 
   # feature/e2e-helm-rust-dataplane -- Rust data-plane stack. Formalizing the alpha e2e
   # cutover state here (svc-action executor wiring) -- this was previously
