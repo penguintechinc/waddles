@@ -15,7 +15,7 @@ async fn store() -> RedisSpectrumStore {
         .expect("VALKEY_URL must be set: spectrum store tests need a REAL Valkey (no silent skip)");
     let client = redis::Client::open(url).expect("valkey client");
     let conn = client
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .expect("real valkey must be reachable");
     RedisSpectrumStore::new(conn)
