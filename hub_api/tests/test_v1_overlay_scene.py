@@ -70,7 +70,13 @@ def _tenant_id(overlay_db: Any, community_id: int) -> int:
     return int(dal(dal.communities.id == community_id).select().first().tenant_id)
 
 
-def _activate_bundle(overlay_db: Any, community_id: int, app_id: str, widgets: list[dict]) -> None:
+def _activate_bundle(
+    overlay_db: Any,
+    community_id: int,
+    app_id: str,
+    widgets: list[dict],
+    owned_surfaces: list[str] | None = None,
+) -> None:
     """Enable a bundle declaring `widgets` under `stages.presentation.overlay_widgets`."""
     dal = overlay_db.dal
     tenant_id = _tenant_id(overlay_db, community_id)
@@ -84,7 +90,9 @@ def _activate_bundle(overlay_db: Any, community_id: int, app_id: str, widgets: l
         execution_model="wasi-component",
         platform_compatibility={},
         status="active",
-        stages={"presentation": {"overlay_widgets": widgets}},
+        stages={
+            "presentation": {"overlay_widgets": widgets, "owned_surfaces": owned_surfaces or []}
+        },
     )
     dal.app_activations.insert(
         community_id=community_id, tenant_id=tenant_id, app_id=app_id, enabled=True
@@ -92,17 +100,26 @@ def _activate_bundle(overlay_db: Any, community_id: int, app_id: str, widgets: l
     dal.commit()
 
 
-def _register_widget(overlay_db: Any, community_id: int, widget_id: str) -> None:
+def _register_widget(
+    overlay_db: Any,
+    community_id: int,
+    widget_id: str,
+    *,
+    bundle_app_id: str = "reg.bundle",
+    surface_id: str | None = None,
+    output_kind_code: int = 1,
+) -> None:
     """Insert an `overlay_widget_registry` row for `community_id`."""
     dal = overlay_db.dal
     dal.overlay_widget_registry.insert(
         public_id=f"00000000-0000-0000-0000-{community_id:012d}",
         tenant_id=_tenant_id(overlay_db, community_id),
         community_id=community_id,
-        bundle_app_id="reg.bundle",
+        bundle_app_id=bundle_app_id,
+        surface_id=surface_id,
         widget_id=widget_id,
         display_name=widget_id,
-        output_kind_code=1,
+        output_kind_code=output_kind_code,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
@@ -136,6 +153,7 @@ class TestWidgets:
     async def test_registry_widgets_are_tenant_isolated(self, client: Any, overlay_db: Any) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
         other = seed_community(overlay_db, tenant_slug=OTHER_TENANT_SLUG, name="other")
+        _activate_bundle(overlay_db, cid, "reg.bundle", [])
         _register_widget(overlay_db, cid, "mine.widget")
         _register_widget(overlay_db, other, "theirs.widget")
         res = await client.get(_url(cid, "/widgets"), headers=headers)
@@ -157,6 +175,115 @@ class TestWidgets:
         assert SCOPE_ADMIN == "streaming.overlay:admin"
 
 
+class TestBundleIsolation:
+    async def test_same_widget_id_in_two_bundles_does_not_shadow(
+        self, client: Any, overlay_db: Any
+    ) -> None:
+        headers, cid, _ = _owner_headers(overlay_db)
+        first = {**WIDGET, "display_name": "First", "default_x": 100}
+        second = {**WIDGET, "display_name": "Second", "default_x": 200}
+        _activate_bundle(overlay_db, cid, "a.bundle", [first])
+        _activate_bundle(overlay_db, cid, "b.bundle", [second])
+        listed = (await (await client.get(_url(cid, "/widgets"), headers=headers)).get_json())[
+            "widgets"
+        ]
+        assert [(w["bundle_app_id"], w["display_name"]) for w in listed] == [
+            ("a.bundle", "First"),
+            ("b.bundle", "Second"),
+        ]
+        for app_id, x in (("a.bundle", 100), ("b.bundle", 200)):
+            res = await client.post(
+                _url(cid, "/layout/components"),
+                headers=headers,
+                json={"bundle_app_id": app_id, "widget_id": WIDGET["widget_id"]},
+            )
+            comp = (await res.get_json())["component"]
+            assert (comp["bundle_app_id"], comp["x"]) == (app_id, x)
+
+    async def test_placement_must_name_the_declaring_bundle(
+        self, client: Any, overlay_db: Any
+    ) -> None:
+        headers, cid, _ = _owner_headers(overlay_db)
+        _activate_bundle(overlay_db, cid, "a.bundle", [WIDGET])
+        res = await client.post(
+            _url(cid, "/layout/components"),
+            headers=headers,
+            json={"bundle_app_id": "b.bundle", "widget_id": WIDGET["widget_id"]},
+        )
+        assert res.status_code == 404
+
+    async def test_widget_pointing_at_another_bundles_surface_is_withheld(
+        self, client: Any, overlay_db: Any
+    ) -> None:
+        headers, cid, _ = _owner_headers(overlay_db)
+        owner = {
+            **WIDGET,
+            "widget_id": "music.card",
+            "output_kind": "surface",
+            "surface_id": "music.now",
+        }
+        thief = {
+            **WIDGET,
+            "widget_id": "evil.card",
+            "output_kind": "surface",
+            "surface_id": "music.now",
+        }
+        _activate_bundle(overlay_db, cid, "owner.bundle", [owner], owned_surfaces=["music.now"])
+        _activate_bundle(overlay_db, cid, "thief.bundle", [thief])
+        listed = (await (await client.get(_url(cid, "/widgets"), headers=headers)).get_json())[
+            "widgets"
+        ]
+        assert [w["widget_id"] for w in listed] == ["music.card"]
+        res = await client.post(
+            _url(cid, "/layout/components"),
+            headers=headers,
+            json={"bundle_app_id": "thief.bundle", "widget_id": "evil.card"},
+        )
+        assert res.status_code == 404
+
+    async def test_registry_row_cannot_claim_another_bundles_surface(
+        self, client: Any, overlay_db: Any
+    ) -> None:
+        headers, cid, _ = _owner_headers(overlay_db)
+        owner = {
+            **WIDGET,
+            "widget_id": "music.card",
+            "output_kind": "surface",
+            "surface_id": "music.now",
+        }
+        _activate_bundle(overlay_db, cid, "owner.bundle", [owner], owned_surfaces=["music.now"])
+        _activate_bundle(overlay_db, cid, "thief.bundle", [])
+        _register_widget(
+            overlay_db,
+            cid,
+            "evil.card",
+            bundle_app_id="thief.bundle",
+            surface_id="music.now",
+            output_kind_code=4,
+        )
+        listed = (await (await client.get(_url(cid, "/widgets"), headers=headers)).get_json())[
+            "widgets"
+        ]
+        assert [w["widget_id"] for w in listed] == ["music.card"]
+
+    async def test_two_bundles_claiming_one_surface_is_409(
+        self, client: Any, overlay_db: Any
+    ) -> None:
+        headers, cid, _ = _owner_headers(overlay_db)
+        _activate_bundle(overlay_db, cid, "a.bundle", [], owned_surfaces=["music.now"])
+        _activate_bundle(overlay_db, cid, "b.bundle", [], owned_surfaces=["music.now"])
+        res = await client.get(_url(cid, "/widgets"), headers=headers)
+        assert res.status_code == 409
+
+    async def test_registry_row_of_disabled_bundle_is_not_listed(
+        self, client: Any, overlay_db: Any
+    ) -> None:
+        headers, cid, _ = _owner_headers(overlay_db)
+        _register_widget(overlay_db, cid, "orphan.widget", bundle_app_id="gone.bundle")
+        res = await client.get(_url(cid, "/widgets"), headers=headers)
+        assert (await res.get_json())["widgets"] == []
+
+
 class TestLayout:
     async def test_default_canvas_is_1080p(self, client: Any, overlay_db: Any) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
@@ -173,7 +300,7 @@ class TestLayout:
         add = await client.post(
             _url(cid, "/layout/components"),
             headers=headers,
-            json={"widget_id": WIDGET["widget_id"]},
+            json={"bundle_app_id": "waddles.core.overlay.alerts", "widget_id": WIDGET["widget_id"]},
         )
         assert add.status_code == 201
         comp = (await add.get_json())["component"]
@@ -210,16 +337,19 @@ class TestLayout:
         add = await client.post(
             _url(cid, "/layout/components"),
             headers=headers,
-            json={"widget_id": WIDGET["widget_id"], "bundle_app_id": "evil.bundle"},
+            json={"bundle_app_id": "real.bundle", "widget_id": WIDGET["widget_id"]},
         )
         assert (await add.get_json())["component"]["bundle_app_id"] == "real.bundle"
 
     async def test_unavailable_widget_is_404(self, client: Any, overlay_db: Any) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
         other = seed_community(overlay_db, tenant_slug=OTHER_TENANT_SLUG, name="other")
+        _activate_bundle(overlay_db, cid, "reg.bundle", [])
         _register_widget(overlay_db, other, "theirs.widget")
         res = await client.post(
-            _url(cid, "/layout/components"), headers=headers, json={"widget_id": "theirs.widget"}
+            _url(cid, "/layout/components"),
+            headers=headers,
+            json={"bundle_app_id": "reg.bundle", "widget_id": "theirs.widget"},
         )
         assert res.status_code == 404
 
@@ -246,7 +376,7 @@ class TestLayout:
         res = await client.post(
             _url(cid, "/layout/components"),
             headers=headers,
-            json={"widget_id": WIDGET["widget_id"], "x": 3000},
+            json={"bundle_app_id": "real.bundle", "widget_id": WIDGET["widget_id"], "x": 3000},
         )
         assert res.status_code == 400
 
@@ -256,7 +386,11 @@ class TestLayout:
         res = await client.post(
             _url(cid, "/layout/components"),
             headers=headers,
-            json={"widget_id": WIDGET["widget_id"], "props": {"k": "x" * 9000}},
+            json={
+                "bundle_app_id": "real.bundle",
+                "widget_id": WIDGET["widget_id"],
+                "props": {"k": "x" * 9000},
+            },
         )
         assert res.status_code == 400
 
@@ -267,13 +401,13 @@ class TestLayout:
             ok = await client.post(
                 _url(cid, "/layout/components"),
                 headers=headers,
-                json={"widget_id": WIDGET["widget_id"]},
+                json={"bundle_app_id": "real.bundle", "widget_id": WIDGET["widget_id"]},
             )
             assert ok.status_code == 201
         over = await client.post(
             _url(cid, "/layout/components"),
             headers=headers,
-            json={"widget_id": WIDGET["widget_id"]},
+            json={"bundle_app_id": "real.bundle", "widget_id": WIDGET["widget_id"]},
         )
         assert over.status_code == 409
 
@@ -283,7 +417,7 @@ class TestLayout:
         add = await client.post(
             _url(cid, "/layout/components"),
             headers=headers,
-            json={"widget_id": WIDGET["widget_id"]},
+            json={"bundle_app_id": "real.bundle", "widget_id": WIDGET["widget_id"]},
         )
         instance = (await add.get_json())["component"]["instance_id"]
         other_headers, other_cid, _ = _owner_headers(overlay_db)
@@ -301,7 +435,7 @@ class TestLayout:
             await client.post(
                 _url(cid, "/layout/components"),
                 headers=headers,
-                json={"widget_id": WIDGET["widget_id"]},
+                json={"bundle_app_id": "real.bundle", "widget_id": WIDGET["widget_id"]},
             )
         res = await client.delete(_url(cid, "/layout"), headers=headers)
         assert (await res.get_json())["removed_count"] == 3
@@ -348,7 +482,12 @@ class TestCanvas:
         await client.post(
             _url(cid, "/layout/components"),
             headers=headers,
-            json={"widget_id": WIDGET["widget_id"], "x": 3000, "y": 100},
+            json={
+                "bundle_app_id": "real.bundle",
+                "widget_id": WIDGET["widget_id"],
+                "x": 3000,
+                "y": 100,
+            },
         )
         res = await client.put(
             _url(cid, "/layout/canvas"), headers=headers, json={"resolution": "1080p"}

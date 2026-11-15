@@ -116,6 +116,7 @@ def upgrade() -> None:
         sa.UniqueConstraint(
             "tenant_id",
             "community_id",
+            "bundle_app_id",
             "widget_id",
             name="uq_overlay_widget_registry_widget",
         ),

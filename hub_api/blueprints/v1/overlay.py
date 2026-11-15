@@ -317,6 +317,7 @@ async def get_overlay_stats(community_id: int) -> Any:
 class AddComponentRequest:
     """Request DTO for placing a widget; omitted geometry falls back to the widget defaults."""
 
+    bundle_app_id: Annotated[str, Field(min_length=1, max_length=128)]
     widget_id: _WidgetId
     x: _Px | None = None
     y: _PxY | None = None
@@ -440,6 +441,7 @@ async def add_scene_component(community_id: int, data: AddComponentRequest) -> A
         dal,
         community_id=community_id,
         data=overlay_scene_service.ComponentInput(
+            bundle_app_id=data.bundle_app_id,
             widget_id=data.widget_id,
             x=data.x,
             y=data.y,

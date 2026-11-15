@@ -134,8 +134,8 @@ from services.bundle_manifest_v2 import (
     parse_command_declarations,
     parse_config_schema,
     parse_exported_tools,
-    parse_overlay_widgets,
     parse_permission_declarations,
+    parse_presentation_widgets,
     parse_requested_tools,
     parse_schedule,
     requested_tool_declarations,
@@ -265,9 +265,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         schedule=parse_schedule(raw.get("schedule")),
         community_config_schema=parse_config_schema(raw.get("community_config_schema")),
         admin_tools=parse_admin_tools(raw.get("admin_tools"), own_app_id=raw["app_id"]),
-        overlay_widgets=parse_overlay_widgets(
-            (stages.get("presentation") or {}).get("overlay_widgets")
-        ),
+        overlay_widgets=parse_presentation_widgets(stages.get("presentation")),
     )
 
 

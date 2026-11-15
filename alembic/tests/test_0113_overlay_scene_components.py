@@ -76,6 +76,15 @@ def test_registry_unique_per_community_and_cascade(db: PgTestDatabase) -> None:
     with engine.begin() as conn:
         cid, tid = _community(conn, "ovl-unique")
         conn.execute(insert, {"t": tid, "c": cid})
+    # The same widget_id from a DIFFERENT bundle is a distinct widget, not a duplicate.
+    with engine.begin() as conn:
+        conn.execute(
+            sqlalchemy.text(
+                "INSERT INTO overlay_widget_registry (tenant_id, community_id, bundle_app_id, "
+                "widget_id, display_name) VALUES (:t, :c, 'c.d', 'w.one', 'One')"
+            ),
+            {"t": tid, "c": cid},
+        )
     with pytest.raises(sqlalchemy.exc.IntegrityError), engine.begin() as conn:
         conn.execute(insert, {"t": tid, "c": cid})
     with engine.begin() as conn:

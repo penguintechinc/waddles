@@ -11,6 +11,11 @@ Invariants worth knowing before changing anything:
 * **Tenant scoping is derived, never supplied.** Every query filters on BOTH the community id
   and the tenant id read from the `communities` row, so a widget registered by another tenant
   can never be listed, placed, moved or removed here.
+* **Widgets are keyed by (bundle_app_id, widget_id).** Two bundles may declare the same
+  `widget_id`; both are listed and neither shadows the other. A placement names both halves.
+* **Surfaces have one owner.** A `surface` widget may only point at a surface its own bundle lists
+  in `stages.presentation.owned_surfaces`; two enabled bundles claiming one surface is a loud 409,
+  and a widget aimed at another bundle's surface is withheld (never placeable).
 * **A component's origin is resolved, not trusted.** `bundle_app_id`, output kind and surface
   come from the widget the community is actually allowed to use (an enabled bundle's declared
   widget or a registry row), never from the request body.
@@ -123,6 +128,7 @@ class SceneLayout:
 class ComponentInput:
     """Validated placement request; `None` fields fall back to the widget's defaults."""
 
+    bundle_app_id: str
     widget_id: str
     x: int | None = None
     y: int | None = None
@@ -228,13 +234,21 @@ def _canvas_row(dal: Any, community_id: int) -> Any | None:
     return dal(dal.presentation_config.community_id == community_id).select().first()
 
 
-def _widgets_sync(dal: Any, tenant_id: int, community_id: int) -> dict[str, WidgetRecord]:
-    """Union of widgets declared by enabled bundles and rows in the community's registry.
+WidgetKey = tuple[str, str]
 
-    A registry row (a bundle's explicit runtime registration) overrides a manifest declaration with
-    the same `widget_id`. Both sources are filtered to this tenant + community.
+
+def _widgets_sync(dal: Any, tenant_id: int, community_id: int) -> dict[WidgetKey, WidgetRecord]:
+    """Widgets placeable by this community, keyed by `(bundle_app_id, widget_id)`.
+
+    Sources: enabled bundles' `stages.presentation.overlay_widgets` and the community's registry
+    rows (registered at runtime by an *enabled* bundle; a registry row overrides a manifest
+    declaration with the same key). Everything is filtered to this tenant + community. Raises 409
+    when two enabled bundles claim the same surface; withholds any `surface` widget whose surface
+    is not owned by its own bundle.
     """
-    found: dict[str, WidgetRecord] = {}
+    found: dict[WidgetKey, WidgetRecord] = {}
+    surface_owner: dict[str, str] = {}
+    enabled_apps: set[str] = set()
 
     query = (
         (dal.app_activations.tenant_id == tenant_id)
@@ -244,19 +258,31 @@ def _widgets_sync(dal: Any, tenant_id: int, community_id: int) -> dict[str, Widg
         & (dal.app_catalog.status == "active")
     )
     for row in dal(query).select(dal.app_activations.app_id, dal.app_catalog.stages):
+        app_id = row.app_activations.app_id
+        enabled_apps.add(app_id)
         stages = row.app_catalog.stages
         presentation = stages.get("presentation") if isinstance(stages, dict) else None
-        declared = presentation.get("overlay_widgets") if isinstance(presentation, dict) else None
-        for entry in declared or []:
+        if not isinstance(presentation, dict):
+            continue
+        for surface in presentation.get("owned_surfaces") or []:
+            other = surface_owner.setdefault(surface, app_id)
+            if other != app_id:
+                raise conflict(
+                    f"Surface {surface!r} is claimed by both {other!r} and {app_id!r}; "
+                    "disable one of the bundles"
+                )
+        for entry in presentation.get("overlay_widgets") or []:
             if isinstance(entry, dict) and isinstance(entry.get("widget_id"), str):
-                widget = _widget_from_declaration(row.app_activations.app_id, entry)
-                found[widget.widget_id] = widget
+                widget = _widget_from_declaration(app_id, entry)
+                found[(app_id, widget.widget_id)] = widget
 
     registry = dal.overlay_widget_registry
     for reg in dal(
         (registry.tenant_id == tenant_id) & (registry.community_id == community_id)
     ).select():
-        found[reg.widget_id] = WidgetRecord(
+        if reg.bundle_app_id not in enabled_apps:
+            continue
+        found[(reg.bundle_app_id, reg.widget_id)] = WidgetRecord(
             widget_id=reg.widget_id,
             bundle_app_id=reg.bundle_app_id,
             display_name=reg.display_name,
@@ -272,7 +298,17 @@ def _widgets_sync(dal: Any, tenant_id: int, community_id: int) -> dict[str, Widg
             default_z_index=reg.default_z_index,
             props_schema=reg.props_schema or {},
         )
-    return found
+
+    placeable: dict[WidgetKey, WidgetRecord] = {}
+    for key, widget in found.items():
+        if widget.output_kind == "surface" and surface_owner.get(widget.surface_id or "") != key[0]:
+            logger.warning(
+                "overlay_widget_surface_not_owned",
+                extra={"community_id": community_id, "app_id": key[0], "widget_id": key[1]},
+            )
+            continue
+        placeable[key] = widget
+    return placeable
 
 
 def _widget_from_declaration(app_id: str, entry: dict[str, Any]) -> WidgetRecord:
@@ -304,7 +340,8 @@ async def list_available_widgets(
     def _fn() -> list[WidgetRecord]:
         tenant_id = _community_tenant_id(dal, community_id)
         return sorted(
-            _widgets_sync(dal, tenant_id, community_id).values(), key=lambda w: w.widget_id
+            _widgets_sync(dal, tenant_id, community_id).values(),
+            key=lambda w: (w.bundle_app_id, w.widget_id),
         )
 
     return list(await _run(async_dal, _fn, write=False))
@@ -337,7 +374,9 @@ async def add_component(
 
     def _fn() -> ComponentRecord:
         tenant_id = _community_tenant_id(dal, community_id)
-        widget = _widgets_sync(dal, tenant_id, community_id).get(data.widget_id)
+        widget = _widgets_sync(dal, tenant_id, community_id).get(
+            (data.bundle_app_id, data.widget_id)
+        )
         if widget is None:
             raise not_found("Widget is not available to this community")
         comps = dal.overlay_scene_components

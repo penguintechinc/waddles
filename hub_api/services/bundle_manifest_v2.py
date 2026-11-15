@@ -1041,8 +1041,37 @@ _WIDGET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 _ALLOWED_OUTPUT_KINDS = frozenset({"text", "image", "sanitized_html", "surface"})
 
 
-def parse_overlay_widgets(raw_entries: Any) -> tuple[OverlayWidgetDeclaration, ...]:
-    """Validate the optional `stages.presentation.overlay_widgets` list; absent parses to `()`."""
+_SURFACE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+
+
+def parse_presentation_widgets(
+    presentation_stage: Any,
+) -> tuple[OverlayWidgetDeclaration, ...]:
+    """Parse `stages.presentation.{owned_surfaces,overlay_widgets}` together (both optional)."""
+    if not isinstance(presentation_stage, dict):
+        return ()
+    raw_owned = presentation_stage.get("owned_surfaces")
+    owned: frozenset[str] = frozenset()
+    if raw_owned is not None:
+        _require(
+            isinstance(raw_owned, list)
+            and all(isinstance(x, str) and bool(_SURFACE_ID_RE.fullmatch(x)) for x in raw_owned),
+            "invalid_owned_surfaces",
+            "owned_surfaces must be a list of surface ids matching [a-z0-9][a-z0-9_.-]{0,63}",
+        )
+        owned = frozenset(raw_owned)
+    return parse_overlay_widgets(presentation_stage.get("overlay_widgets"), owned)
+
+
+def parse_overlay_widgets(
+    raw_entries: Any, owned_surfaces: frozenset[str] = frozenset()
+) -> tuple[OverlayWidgetDeclaration, ...]:
+    """Validate the optional `stages.presentation.overlay_widgets` list; absent parses to `()`.
+
+    An `output_kind: surface` widget may only name a surface the same bundle declares in
+    `stages.presentation.owned_surfaces` (`owned_surfaces` here), so a bundle cannot point a
+    widget at another bundle's surface.
+    """
     if raw_entries is None:
         return ()
     _require(
@@ -1111,6 +1140,11 @@ def parse_overlay_widgets(raw_entries: Any) -> tuple[OverlayWidgetDeclaration, .
             output_kind != "surface" or surface_id is not None,
             "invalid_widget_surface_id",
             "an output_kind 'surface' widget must name its surface_id",
+        )
+        _require(
+            output_kind != "surface" or surface_id in owned_surfaces,
+            "widget_surface_not_owned",
+            f"surface {surface_id!r} is not listed in this bundle's owned_surfaces",
         )
 
         allow_standalone = entry.get("allow_standalone_output", True)
@@ -1712,9 +1746,7 @@ def parse_bundle_manifest_v2(
         "invalid_stage",
         "stages.presentation must be a mapping",
     )
-    overlay_widgets = parse_overlay_widgets(
-        presentation_stage.get("overlay_widgets") if presentation_stage else None
-    )
+    overlay_widgets = parse_presentation_widgets(presentation_stage)
     declared_ids = {d.id for d in permission_declarations}
     permission_declarations = permission_declarations + tuple(
         d for d in requested_tool_declarations(requested_tools) if d.id not in declared_ids

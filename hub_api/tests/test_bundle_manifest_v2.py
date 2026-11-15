@@ -876,13 +876,12 @@ def test_exported_tool_host_op_malformed_is_rejected(bad: object) -> None:
     assert exc.value.reason == "invalid_tool_host_op"
 
 
-def _presentation(widgets: object) -> dict:
+def _presentation(widgets: object, owned_surfaces: object = None) -> dict:
     """`stages` override declaring a presentation stage with `overlay_widgets`."""
-    return {
-        "stages": {
-            "presentation": {"entry": "waddle:bundle/stage@1.0.0", "overlay_widgets": widgets}
-        }
-    }
+    stage: dict = {"entry": "waddle:bundle/stage@1.0.0", "overlay_widgets": widgets}
+    if owned_surfaces is not None:
+        stage["owned_surfaces"] = owned_surfaces
+    return {"stages": {"presentation": stage}}
 
 
 def test_overlay_widgets_default_empty() -> None:
@@ -907,7 +906,8 @@ def test_overlay_widgets_valid_parse() -> None:
                     "default_height": 160,
                     "props_schema": {"theme": {"type": "string"}},
                 }
-            ]
+            ],
+            ["music.now_playing"],
         )
     )
     (w,) = manifest.overlay_widgets
@@ -979,3 +979,23 @@ def test_overlay_widgets_invalid_rejected(widgets: object, reason: str) -> None:
     with pytest.raises(ManifestV2Error) as exc:
         _parse(_presentation(widgets))
     assert exc.value.reason == reason
+
+
+def test_surface_widget_requires_owned_surface() -> None:
+    widget = [
+        {"widget_id": "w.a", "display_name": "A", "output_kind": "surface", "surface_id": "s.one"}
+    ]
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(_presentation(widget))
+    assert exc.value.reason == "widget_surface_not_owned"
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(_presentation(widget, ["s.two"]))
+    assert exc.value.reason == "widget_surface_not_owned"
+    assert _parse(_presentation(widget, ["s.one"])).overlay_widgets[0].surface_id == "s.one"
+
+
+@pytest.mark.parametrize("owned", ["s.one", [1], ["BAD ID"]])
+def test_owned_surfaces_must_be_surface_id_list(owned: object) -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(_presentation([], owned))
+    assert exc.value.reason == "invalid_owned_surfaces"
