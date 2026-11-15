@@ -38,7 +38,7 @@ EVENT_GENERATED, EVENT_IMPORTED, EVENT_RESTORED = 1, 2, 3
 EVENT_ACTIVATED, EVENT_VERIFY_ONLY, EVENT_RETIRED, EVENT_DESTROYED = 4, 5, 6, 7
 EVENT_ROTATION_REQUESTED = 8
 EVENT_DRIFT, EVENT_ESCROWED = 10, 11
-#: Operator reason codes (migration 0110): why a rotation / retirement was requested.
+#: Operator reason codes (migration 0115): why a rotation / retirement was requested.
 REASON_OP_SCHEDULED, REASON_OP_COMPROMISE, REASON_OP_MAINTENANCE = 8, 9, 10
 #: `rotation_requests.action` codes.
 ACTION_ROTATE, ACTION_RETIRE = 1, 2

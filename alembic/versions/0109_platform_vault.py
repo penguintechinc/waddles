@@ -67,8 +67,8 @@ Wipe / rollback guards (B2, H4), enforced by triggers because the roles that mat
 roles need no table privilege): only active (2) and verify-only (3) rows that carry public material,
 and only public columns -- no `sealed_value`, `fingerprint` or `kek_id`.
 
-Revision ids are <= 32 chars. `down_revision` is 0107: the `0108_revoke_cfg_communities` follow-up is
-on an unmerged branch; whichever lands second must re-point its `down_revision` to keep one head.
+Revision ids are <= 32 chars. `down_revision` is `0108_revoke_cfg_communities`; the sibling
+`0108_bundle_precompile_requests` head is joined by `0110_merge_precompile_vault`.
 
 Revision ID: 0109_platform_vault
 Revises: 0108_revoke_cfg_communities

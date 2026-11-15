@@ -47,7 +47,7 @@ requires_docker = pytest.mark.skipif(
 _MIGRATION = (
     Path(__file__).resolve().parent.parent / "versions" / "0109_platform_vault.py"
 )
-_PRIOR = "0107_bundle_config_db_reads"
+_PRIOR = "0108_revoke_cfg_communities"
 _KEK = "0123456789abcdef"
 _TABLE_PRIVS = (
     "SELECT",
@@ -59,7 +59,7 @@ _TABLE_PRIVS = (
     "TRIGGER",
 )
 _TABLES = ("secrets", "secret_events", "root_marker", "rotation_requests")
-_HEAD = "0110_platform_vault_rotation"  # the 0110 merge revision adds the ledger + reason codes
+_HEAD = "0115_platform_vault_rotation"  # migration 0115 adds the ledger + reason codes
 
 
 def _load() -> ModuleType:
@@ -83,7 +83,7 @@ def _statements(fn_name: str) -> list[str]:
 
 
 def test_metadata_and_single_head() -> None:
-    """Revision id <= 32 chars, chained off 0107, and the graph has exactly one head."""
+    """Revision id <= 32 chars, chained off 0108_revoke_cfg_communities, and the graph has exactly one head."""
     m = _load()
     assert (m.revision, m.down_revision) == (
         "0109_platform_vault",
@@ -93,7 +93,7 @@ def test_metadata_and_single_head() -> None:
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == [_HEAD], f"alembic heads: {heads}"
+    assert len(heads) == 1, f"alembic heads: {heads}"
 
 
 def test_catalog_denies_the_vault_to_every_legacy_role_and_names_no_vault_grant() -> (
@@ -130,7 +130,7 @@ def test_catalog_denies_the_vault_to_every_legacy_role_and_names_no_vault_grant(
 def test_declared_grants_have_no_delete_truncate_or_all() -> None:
     """hub-api never holds DELETE/TRUNCATE; events are INSERT/SELECT only (append-only)."""
     grants = _load().HUB_API_GRANTS
-    assert set(grants) == set(_TABLES) - {"rotation_requests"}  # the ledger is 0110's
+    assert set(grants) == set(_TABLES) - {"rotation_requests"}  # the ledger is 0115's
     for table, privs in grants.items():
         assert not {"DELETE", "TRUNCATE", "ALL"} & set(privs), table
     assert grants["secret_events"] == ("SELECT", "INSERT")
@@ -317,7 +317,7 @@ def _expected(role: str) -> dict[str, set[str]]:
     if role == m.HUB_API_ROLE:
         for table, privs in m.HUB_API_GRANTS.items():
             expected[table] = set(privs)
-        expected["rotation_requests"] = {"SELECT", "INSERT"}  # migration 0110
+        expected["rotation_requests"] = {"SELECT", "INSERT"}  # migration 0115
     if role in m.PUBLIC_KEY_READERS:
         expected[m.VIEW] = {"SELECT"}
     return expected
@@ -906,11 +906,11 @@ def test_verify_only_only_follows_active(real_chain: PgTestDatabase) -> None:
     owner.close()
 
 
-# --------------------------------------------------------------------------- 0110 (T8 + anchor)
+# --------------------------------------------------------------------------- 0115 (T8 + anchor)
 
 
 @requires_docker
-def test_0110_reason_codes_ledger_and_anchor(real_chain: PgTestDatabase) -> None:
+def test_0115_reason_codes_ledger_and_anchor(real_chain: PgTestDatabase) -> None:
     """Operator reason codes 8..10 are accepted (11 is not); the replay ledger is append-only with
     a unique key; the escrow anchor only moves forward and its digest is fixed per generation."""
     owner = _owner(real_chain)

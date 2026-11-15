@@ -86,7 +86,7 @@ ROTATION_MIN_INTERVAL: Final = timedelta(minutes=10)
 
 
 class RotationReason(IntEnum):
-    """Operator reason codes accepted on the API (stored as the migration-0110 codes 8/9/10)."""
+    """Operator reason codes accepted on the API (stored as the migration-0115 codes 8/9/10)."""
 
     SCHEDULED = 1
     COMPROMISE = 2

@@ -32,8 +32,8 @@ Three additions to `platform_vault` (migration 0109), both inside the same deny-
 Downgrade drops the ledger and restores the 1..7 checks, and refuses when a row already uses a
 code above 7 (a replay of the chain must not silently rewrite audit history).
 
-Revision ID: 0110_platform_vault_rotation
-Revises: 0109_platform_vault, 0108_bundle_precompile_requests
+Revision ID: 0115_platform_vault_rotation
+Revises: 0110_merge_precompile_vault
 Create Date: 2026-11-14
 """
 
@@ -41,11 +41,10 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0110_platform_vault_rotation"
-#: A MERGE revision: it also joins `0108_bundle_precompile_requests`, which branched off 0107 in
-#: parallel with `0108_revoke_cfg_communities` -> 0109 and left the graph with two heads (the
-#: release branch could not `alembic upgrade head`). One head again after this revision.
-down_revision = ("0109_platform_vault", "0108_bundle_precompile_requests")
+revision = "0115_platform_vault_rotation"
+#: A plain revision on top of `0110_merge_precompile_vault` (PR #1354), the merge that joins the
+#: two 0108 heads; 0111-0114 are claimed by other in-flight PRs, hence 0115.
+down_revision = "0110_merge_precompile_vault"
 branch_labels = None
 depends_on = None
 
