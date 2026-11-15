@@ -56,7 +56,7 @@ allowed / tenant mismatch), `INVALID_ARGUMENT` (bad tenant, purpose or public ke
 failed -- retryable, no fallback key, key withheld), `RESOURCE_EXHAUSTED` (per-caller bucket
 `GRPC_TENANT_DEK_RPS`=5 / `GRPC_TENANT_DEK_BURST`=30).
 
-Every decision (issued or refused) writes `keystore.stream_dek_issuances` (alembic 0100/0119: caller
+Every decision (issued or refused) writes `keystore.stream_dek_issuances` (alembic 0100/0120: caller
 service, tenant id, lineage, version, outcome); a key is returned only after its `issued` row
 commits. Key material, the caller's public key and sealed bytes are never logged. Metrics and spans
 are the broker's (`waddles_stream_dek_requests`, `waddles_stream_dek_duration_ms`, span
