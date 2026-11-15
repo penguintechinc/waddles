@@ -360,8 +360,12 @@ const DISCORD_OP_ACK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Poll interval while waiting for the drain's result. Polling (`GETDEL`)
 /// rather than a blocking pop: a blocking command would stall every other
 /// command multiplexed on this stage's shared Valkey connection (`kv`,
-/// usage metering, relay pushes).
-const DISCORD_OP_ACK_POLL: Duration = Duration::from_millis(50);
+/// usage metering, relay pushes) -- a dedicated connection per waiting op is
+/// not worth it, so the interval is tightened instead: 5 ms bounds the added
+/// ack latency to ~2.5 ms on average (was ~25 ms at 50 ms) for a cheap
+/// `GETDEL` per tick. The overall [`DISCORD_OP_ACK_TIMEOUT`] and the
+/// fail-loud `relay_unconfirmed` path are unchanged.
+const DISCORD_OP_ACK_POLL: Duration = Duration::from_millis(5);
 
 /// Discord's hard limit on a message's `content`. A `dm.send` longer than this
 /// can never be delivered, so it is refused up front rather than queued (the
@@ -5262,6 +5266,14 @@ mod tests {
             "waddles:transport:discord:drain-ready"
         );
         assert_eq!(DISCORD_OP_ACK_KEY_PREFIX, "waddles:transport:discord:ack:");
+    }
+
+    /// Latency-SLA pin: the ack poll stays at or under 5 ms and well inside
+    /// the overall ack deadline (the fail-loud timeout still bounds the wait).
+    #[test]
+    fn ack_poll_interval_is_tight_and_bounded_by_the_timeout() {
+        assert!(DISCORD_OP_ACK_POLL <= Duration::from_millis(5));
+        assert!(DISCORD_OP_ACK_POLL * 100 <= DISCORD_OP_ACK_TIMEOUT);
     }
 
     fn discord_call(message: &serde_json::Value) -> HostCallBody {
