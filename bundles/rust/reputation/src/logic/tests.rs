@@ -274,6 +274,7 @@ fn ctx(key: Option<&str>, actor: Option<&str>, scopes: &[&str]) -> ToolContext {
         idempotency_key: key.map(str::to_string),
         actor: actor.map(str::to_string),
         actor_scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        ..ToolContext::default()
     }
 }
 

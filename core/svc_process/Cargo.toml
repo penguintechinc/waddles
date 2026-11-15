@@ -166,7 +166,7 @@ bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0
 bundle-tool-call = { path = "../bundle_tool_call", version = "=0.1.0" }
 # Target-user id parsing for the `reputation` capability (`handle_reputation`):
 # a bundle names its target as a UUID string; same pin as the gate crate.
-uuid = { version = "=1.26.1" }
+uuid = { version = "=1.26.1", features = ["v5"] }
 # `src/identity.rs` (the `identity` bundle host capability): an OTel latency
 # histogram + outcome counter for identity resolutions, reading the global
 # meter provider `penguin-logging` installs (never building its own), exactly

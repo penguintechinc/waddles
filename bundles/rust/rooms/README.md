@@ -22,7 +22,7 @@ arguments are UUIDs only -- never usernames. With the flag off every verb below 
 
 | Command | Min role | Effect |
 |---|---|---|
-| `hand [list] <room>` | member | ordered raised-hand queue (`*` = acknowledged) |
+| `hand [list] <room>` | member | moderator: ordered queue (`*` = acknowledged); member: your own place in it |
 | `hand add <room>` / `hand remove <room>` | member | raise / lower your hand (idempotent) |
 | `hand remove <room> <member>` | moderator | lower someone else's hand |
 | `hand set ack <room> <member>` | moderator | acknowledge a hand |
@@ -36,11 +36,19 @@ arguments are UUIDs only -- never usernames. With the flag off every verb below 
 | `rooms [list]` | member | live rooms from the media plane |
 
 AuthZ is the per-room ACL role (`acl.set`); a moderator cannot act on an equal or higher role.
-Interim: this migrates to the SDK `caller_can` check once it lands, at which point the
-`actor_role` argument sent to the service is dropped. The hand queue is app state in kv
-(`hands.<room>`); moderation fronts the webrtc service tools `room.list|participants|leave|
-kick|mute|unmute|mute_all|lock|unlock`, which forward to svc-streaming's moderation host API
-(`core/svc_streaming/docs/rooms-moderation-host-api.md`; the host enforces role again).
+The app sends NO `actor_id`/`actor_role` to any webrtc tool: each tool takes the host-verified
+actor and is gated by its declared scope (`room.leave` and the own-hand tools: member; kick, mute,
+lock and the other hand tools: moderate), so an ACL moderator without the community moderate scope
+is refused by the host. The raised-hand queue is NOT kept here:
+it is authoritative in svc-streaming and reached through the webrtc tools `room.hand.raise|lower|
+list` (member scope, own hand only) and `room.hand.lower_other|list_all|ack|reset` (moderate scope,
+verified by the host before dispatch). The app sends NO actor or role argument: the webrtc tool
+takes the host-verified actor, and the tool the app picks (by the ACL role) is gated by scope. There
+is no `hands.*` kv key, the server clears a hand on leave/kick, and a member's `hand list` shows only
+their own place in the queue (moderators see every UUID). The rest of moderation fronts
+`room.list|participants|leave|kick|mute|unmute|mute_all|lock|unlock`, which forward to
+svc-streaming's moderation host API (`core/svc_streaming/docs/rooms-moderation-host-api.md`; the
+host enforces the role again).
 Telemetry: counter `waddles_bundle_counter_rooms_ops` and histogram `rooms_op_seconds`
 (labels `op`, `outcome` only) plus one PII-free debug log per command; the stage supplies the span.
 
@@ -53,10 +61,24 @@ Delivered as an `admin.action` event `{op, args}` (the gateway has verified the 
 
 ## Access policy (`grants_for`)
 
-Closed/outside-schedule rooms refuse non-staff; green room = moderators/admins only; stage =
+Closed/outside-schedule/locked rooms refuse non-staff; green room = moderators/admins only; stage =
 only moderators/admins publish; guests (opt-in per room) can only subscribe; everyone else
-publish + subscribe. State is community-scoped kv (`room.<uuid>`, `acl.<room>.<actor>`,
+publish + subscribe. `grants_for` is an adapter over the webrtc bundle's canonical
+`src/grants.rs` (compiled in from the same file; contract: `../webrtc/contract/grants.json`);
+join tokens are requested with the contract's short TTL (60 s) and a UUID participant only.
+State is community-scoped kv (`room.<uuid>`, `acl.<room>.<actor>`,
 `event.<uuid>`, `rooms.index`; no `:` in keys).
 
 Contract with the service: `tests/contract_calls.json` is pinned by a unit test here and by
 `scripts/ci/tests/test_rooms_webrtc_contract.py` against the webrtc manifest.
+
+## Identity (per-community pseudonym)
+
+The app's actor is the caller's per-community call-participant pseudonym, obtained through the webrtc
+tool `participant.self` (host-derived `__ctx.participant`), never the global community `user_uuid`. ACL keys,
+`created_by`, join-token participants and every svc-streaming id therefore use the same id hub-api's REST layer
+uses. Unresolvable => the command is refused (fail closed). Note: ACL entries / rooms created before this
+change were keyed by the old id and must be recreated (alpha only; nothing is migrated).
+
+Rooms created here are NOT yet registered in hub-api's `call_rooms` record (REST join refuses non-staff for
+them): blocked on a RecordRoom path (no hub-api RPC exists; svc-streaming room facts T2b has not landed).

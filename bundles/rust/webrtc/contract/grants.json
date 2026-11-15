@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "description": "Room access + join-token policy contract. Source of truth for bundles/rust/webrtc/src/grants.rs (replayed by its unit tests, by the rooms app bundle, and by scripts/ci/tests/test_rooms_webrtc_contract.py against hub-api's REST join).",
+  "roles": ["guest", "member", "moderator", "admin"],
+  "kinds": ["community", "event", "breakout", "stage", "green_room"],
+  "token": {
+    "alg": "ES256",
+    "join_ttl_secs": 60,
+    "join_ttl_max_secs": 900,
+    "ttl_min_secs": 30,
+    "ttl_max_secs": 3600,
+    "identity_claim": "sub",
+    "identity_format": "uuid",
+    "forbidden_claims": ["name", "display_name", "username", "email", "nickname", "label"]
+  },
+  "cases": [
+    {"id": "community-guest-closed-to-guests", "kind": "community", "role": "guest", "expect": {"denied": "guests are not allowed in this room"}},
+    {"id": "community-guest-allowed-is-viewer", "kind": "community", "role": "guest", "allow_guests": true, "expect": {"publish": false, "subscribe": true}},
+    {"id": "community-member", "kind": "community", "role": "member", "expect": {"publish": true, "subscribe": true}},
+    {"id": "community-moderator", "kind": "community", "role": "moderator", "expect": {"publish": true, "subscribe": true}},
+    {"id": "community-admin", "kind": "community", "role": "admin", "expect": {"publish": true, "subscribe": true}},
+    {"id": "event-member", "kind": "event", "role": "member", "expect": {"publish": true, "subscribe": true}},
+    {"id": "breakout-member", "kind": "breakout", "role": "member", "expect": {"publish": true, "subscribe": true}},
+    {"id": "stage-member-is-viewer", "kind": "stage", "role": "member", "expect": {"publish": false, "subscribe": true}},
+    {"id": "stage-guest-is-viewer", "kind": "stage", "role": "guest", "allow_guests": true, "expect": {"publish": false, "subscribe": true}},
+    {"id": "stage-moderator-publishes", "kind": "stage", "role": "moderator", "expect": {"publish": true, "subscribe": true}},
+    {"id": "stage-admin-publishes", "kind": "stage", "role": "admin", "expect": {"publish": true, "subscribe": true}},
+    {"id": "green-room-member-refused", "kind": "green_room", "role": "member", "expect": {"denied": "green room is for moderators"}},
+    {"id": "green-room-guest-refused", "kind": "green_room", "role": "guest", "allow_guests": true, "expect": {"denied": "green room is for moderators"}},
+    {"id": "green-room-moderator", "kind": "green_room", "role": "moderator", "expect": {"publish": true, "subscribe": true}},
+    {"id": "green-room-admin", "kind": "green_room", "role": "admin", "expect": {"publish": true, "subscribe": true}},
+    {"id": "closed-member-refused", "kind": "community", "role": "member", "closed": true, "expect": {"denied": "room is closed"}},
+    {"id": "closed-admin-refused", "kind": "community", "role": "admin", "closed": true, "expect": {"denied": "room is closed"}},
+    {"id": "locked-member-refused", "kind": "community", "role": "member", "locked": true, "expect": {"denied": "room is locked"}},
+    {"id": "locked-guest-refused", "kind": "community", "role": "guest", "allow_guests": true, "locked": true, "expect": {"denied": "room is locked"}},
+    {"id": "locked-moderator-may-join", "kind": "community", "role": "moderator", "locked": true, "expect": {"publish": true, "subscribe": true}},
+    {"id": "outside-window-member-refused", "kind": "community", "role": "member", "window": "outside", "expect": {"denied": "room is outside its scheduled window"}},
+    {"id": "outside-window-guest-refused", "kind": "community", "role": "guest", "allow_guests": true, "window": "outside", "expect": {"denied": "room is outside its scheduled window"}},
+    {"id": "outside-window-moderator-may-join", "kind": "community", "role": "moderator", "window": "outside", "expect": {"publish": true, "subscribe": true}},
+    {"id": "inside-window-member", "kind": "community", "role": "member", "window": "inside", "expect": {"publish": true, "subscribe": true}}
+  ],
+  "moderation": {
+    "min_role": {
+      "room.kick": "moderator",
+      "room.mute": "moderator",
+      "room.unmute": "moderator",
+      "room.mute_all": "moderator",
+      "room.lock": "moderator",
+      "room.unlock": "moderator"
+    },
+    "scope_for_moderator_only": "community:moderate",
+    "leave_scope": "community:member",
+    "actor_source": "host-verified tool context (ToolContext.actor / actor_scopes); never tool arguments",
+    "args_forbidden": ["actor_id", "actor_role"],
+    "mute_all_excludes_actor": true,
+    "self_service": ["room.leave"]
+  },
+  "hands_actor_source": "host-verified tool context (ToolContext.actor / actor_scopes); never tool arguments",
+  "hands_args_forbidden": ["actor_id", "actor_role"],
+  "hands": {
+    "room.hand.raise": {"scope": "community:member", "min_role": "member", "host_op": "room.hand.raise", "subject": "self"},
+    "room.hand.lower": {"scope": "community:member", "min_role": "member", "host_op": "room.hand.lower", "subject": "self"},
+    "room.hand.lower_other": {"scope": "community:moderate", "min_role": "moderator", "host_op": "room.hand.lower", "subject": "other"},
+    "room.hand.list": {"scope": "community:member", "min_role": "member", "host_op": "room.hand.list", "view": "own"},
+    "room.hand.list_all": {"scope": "community:moderate", "min_role": "moderator", "host_op": "room.hand.list", "view": "all"},
+    "room.hand.ack": {"scope": "community:moderate", "min_role": "moderator", "host_op": "room.hand.ack", "subject": "other"},
+    "room.hand.reset": {"scope": "community:moderate", "min_role": "moderator", "host_op": "room.hand.reset", "subject": "all"}
+  }
+}
