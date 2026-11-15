@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from provision_harness import with_provisioned  # type: ignore[import-not-found]
+from provision_harness import hook_failure, with_provisioned  # type: ignore[import-not-found]
 
 _CHART = Path(__file__).resolve().parent.parent
 _ENVS = (
@@ -323,7 +323,7 @@ def test_kv_disabled_falls_back_to_cache():
 
 
 def test_valkey_tls_cert_covers_kv_san():
-    docs = _docs("values-alpha.yaml")
+    docs = with_provisioned(_docs("values-alpha.yaml"))
     sec = [
         d
         for d in docs
@@ -334,11 +334,7 @@ def test_valkey_tls_cert_covers_kv_san():
 
 def test_beta_tier_without_certs_fails_closed():
     """Real beta tier with the cert source removed (no cert-manager, not delegated, no material):
-    a missing Valkey TLS cert fails the render closed (never silent plaintext).
-
-    Previously this asserted a bare non-zero exit of plain beta, which was satisfied by an
-    UNRELATED guard (the valkeyDurable admin password) -- beta itself uses cert-manager. The
-    message is now asserted so the gate can only pass for the right reason.
+    a missing Valkey TLS cert fails the provisioner closed (never silent plaintext).
     """
     r = subprocess.run(
         [
@@ -353,11 +349,15 @@ def test_beta_tier_without_certs_fails_closed():
             "--set",
             "global.transitTls.certManager.enabled=false",
             "--set",
+            "global.transitTls.externalSecret=true",
+            "--set",
             "global.valkeyTls.externalSecret=false",
         ],  # noqa: S603
         capture_output=True,
         text=True,
         check=False,
     )
-    assert r.returncode != 0
-    assert "global.valkeyTls" in r.stderr and "not found" in r.stderr
+    assert r.returncode == 0, r.stderr
+    docs = [d for d in yaml.safe_load_all(r.stdout) if d]
+    err = hook_failure(docs)
+    assert "valkey-tls" in err and "outside alpha/local" in err

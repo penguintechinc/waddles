@@ -135,7 +135,8 @@ def test_executor_env_and_distinct_client_secret_mounted_only_there() -> None:
 
 def test_executor_client_cert_san_is_executor_identity_only() -> None:
     crypto = pytest.importorskip("cryptography.x509")
-    docs = _docs(_yt())
+    from provision_harness import with_provisioned  # type: ignore[import-not-found]
+    docs = with_provisioned(_docs(_yt()))
     sec = next(d for d in docs if d.get("kind") == "Secret" and d["metadata"]["name"].endswith("-ingest-executor-tls"))
     cert = crypto.load_pem_x509_certificate(sec["stringData"]["tls.crt"].encode())
     sans = cert.extensions.get_extension_for_class(crypto.SubjectAlternativeName).value.get_values_for_type(crypto.DNSName)
@@ -291,7 +292,8 @@ def test_alpha_connector_certs_use_a_separate_ca_and_executor_trusts_both() -> N
     The executor trusts stage CA + connector CA through a bundle mounted over HOST_API_CA_FILE."""
     crypto = pytest.importorskip("cryptography.x509")
     hashes = pytest.importorskip("cryptography.hazmat.primitives.hashes")
-    docs = _docs(_yt())
+    from provision_harness import with_provisioned  # type: ignore[import-not-found]
+    docs = with_provisioned(_docs(_yt()))
     stage, stage_sec = _ca_of(docs, "-host-api-tls")
     srv_ca, srv = _ca_of(docs, "-svc-ingest-host-api-tls")
     cli_ca, cli = _ca_of(docs, "-ingest-executor-tls")

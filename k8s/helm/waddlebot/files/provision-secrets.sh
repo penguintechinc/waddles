@@ -51,9 +51,12 @@ INPUTS_DIR="${INPUTS_DIR:-/inputs}"
 KUBECTL="${KUBECTL:-kubectl}"
 MAX_TRIES="${MAX_TRIES:-6}"
 LABEL_RELEASE="${LABEL_RELEASE:-waddlebot}"
+DEPLOYMENT_TIER="${DEPLOYMENT_TIER:-alpha}"
 
 KEEP_ANN="helm.sh/resource-policy"
 MARKER_ANN="waddles.penguintech.io/root-marker"
+CERT_ID_ANN="waddlebot.io/cert-identity"
+CERT_SANS_ANN="waddlebot.io/cert-sans-sha256"
 MARKER_MSG="waddles-root-check"
 URLSAFE_RE='^[A-Za-z0-9._~-]+$'
 
@@ -62,7 +65,7 @@ cleanup() { rm -rf "${WORK}"; }
 trap cleanup EXIT
 
 N_EXAMINED=0; N_CREATED=0; N_PATCHED=0; N_UNCHANGED=0; N_SKIPPED=0; N_KEYS_ADDED=0
-F_EXISTS=0; F_RV=""; F_KEEP=""; F_MARK=""
+F_EXISTS=0; F_RV=""; F_KEEP=""; F_MARK=""; F_CID=""; F_CSAN=""
 
 log() { printf '%s\n' "$*"; }
 die() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
@@ -165,12 +168,12 @@ check_value() { # <secret> <key> <value> <opts> <source: kept|generated|explicit
 }
 
 # ------------------------------------------------------ cluster reads ----
-fetch_secret() { # <name> <dest dir> -> sets F_EXISTS F_RV F_KEEP F_MARK, writes <dest>/<KEY> (base64)
+fetch_secret() { # <name> <dest dir> -> sets F_EXISTS F_RV F_KEEP F_MARK F_CID F_CSAN, writes <dest>/<KEY> (base64)
   local name="$1" dest="$2" out rc tag a b err="${WORK}/err"
   rm -rf "${dest}"; mkdir -p "${dest}"
-  F_EXISTS=0; F_RV=""; F_KEEP=""; F_MARK=""
+  F_EXISTS=0; F_RV=""; F_KEEP=""; F_MARK=""; F_CID=""; F_CSAN=""
   set +e
-  out="$(kc get secret "${name}" -o go-template='RV {{.metadata.resourceVersion}}{{"\n"}}ANN {{with .metadata.annotations}}{{index . "'"${KEEP_ANN}"'"}}{{end}}{{"\n"}}MARK {{with .metadata.annotations}}{{index . "'"${MARKER_ANN}"'"}}{{end}}{{"\n"}}{{with .data}}{{range $k, $v := .}}K {{$k}} {{$v}}{{"\n"}}{{end}}{{end}}' 2>"${err}")"
+  out="$(kc get secret "${name}" -o go-template='RV {{.metadata.resourceVersion}}{{"\n"}}ANN {{with .metadata.annotations}}{{index . "'"${KEEP_ANN}"'"}}{{end}}{{"\n"}}MARK {{with .metadata.annotations}}{{index . "'"${MARKER_ANN}"'"}}{{end}}{{"\n"}}CID {{with .metadata.annotations}}{{index . "'"${CERT_ID_ANN}"'"}}{{end}}{{"\n"}}CSAN {{with .metadata.annotations}}{{index . "'"${CERT_SANS_ANN}"'"}}{{end}}{{"\n"}}{{with .data}}{{range $k, $v := .}}K {{$k}} {{$v}}{{"\n"}}{{end}}{{end}}' 2>"${err}")"
   rc=$?
   set -e
   if [ "${rc}" -ne 0 ]; then
@@ -183,6 +186,8 @@ fetch_secret() { # <name> <dest dir> -> sets F_EXISTS F_RV F_KEEP F_MARK, writes
       RV) F_RV="${a}" ;;
       ANN) F_KEEP="${a}" ;;
       MARK) F_MARK="${a}" ;;
+      CID) F_CID="${a}" ;;
+      CSAN) F_CSAN="${a}" ;;
       K) printf '%s' "${b}" > "${dest}/${a}" ;;
     esac
   done <<EOF
@@ -240,13 +245,181 @@ note_new() { # <key> <final b64>
   printf '%s' "$2" > "${WORK}/new/$1"
   N_BLOCK_ADDED=$((N_BLOCK_ADDED + 1))
 }
+
+# ------------------------------------------------------- ECDSA P-256 TLS ----
+gen_p256_ca() { # <ca_dir> <cn> <days>
+  local dir="$1" cn="$2" days="${3:-365}"
+  mkdir -p "${dir}"
+  [ -s "${dir}/ca.key" ] && [ -s "${dir}/ca.crt" ] && return 0
+  openssl ecparam -name prime256v1 -genkey -noout -out "${dir}/ca.key"
+  cat > "${dir}/ca.cnf" <<EOF
+[req]
+prompt = no
+distinguished_name = dn
+x509_extensions = v3_ca
+[dn]
+CN = ${cn}
+[v3_ca]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+EOF
+  openssl req -x509 -new -sha256 -key "${dir}/ca.key" -days "${days}" -config "${dir}/ca.cnf" -out "${dir}/ca.crt" 2>/dev/null
+}
+
+gen_p256_leaf() { # <ca_dir> <out_crt> <out_key> <cn> <dns_csv> <uri_csv> <days>
+  local ca_dir="$1" out_crt="$2" out_key="$3" cn="$4" dns_csv="$5" uri_csv="$6" days="${7:-365}"
+  local san="" item serial
+  local IFS=','
+  for item in ${dns_csv}; do
+    [ -n "${item}" ] || continue
+    san="${san:+${san},}DNS:${item}"
+  done
+  for item in ${uri_csv}; do
+    [ -n "${item}" ] || continue
+    san="${san:+${san},}URI:${item}"
+  done
+  unset IFS
+  openssl ecparam -name prime256v1 -genkey -noout -out "${out_key}"
+  cat > "${ca_dir}/leaf_req.cnf" <<EOF
+[req]
+prompt = no
+distinguished_name = dn
+[dn]
+CN = ${cn}
+EOF
+  openssl req -new -sha256 -key "${out_key}" -config "${ca_dir}/leaf_req.cnf" -out "${ca_dir}/leaf.csr" 2>/dev/null
+  cat > "${ca_dir}/leaf_ext.cnf" <<EOF
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth,clientAuth
+${san:+subjectAltName=${san}}
+EOF
+  serial="$(openssl rand -hex 16)"
+  openssl x509 -req -sha256 -in "${ca_dir}/leaf.csr" -CA "${ca_dir}/ca.crt" -CAkey "${ca_dir}/ca.key" \
+    -set_serial "0x${serial}" -days "${days}" -extfile "${ca_dir}/leaf_ext.cnf" -out "${out_crt}" 2>/dev/null
+}
+
+tls_block_kept() { # <blk> -> returns 0 if existing secret is complete & matches CERT_ID/CERT_SANS
+  [ "${F_EXISTS}" = 1 ] || return 1
+  [ -z "${CERT_ID}" ] || [ "${F_CID}" = "${CERT_ID}" ] || return 1
+  [ -z "${CERT_SANS}" ] || [ "${F_CSAN}" = "${CERT_SANS}" ] || return 1
+  local kind a b c d e f g
+  while IFS='|' read -r -u 4 kind a b c d e f g; do
+    case "${kind}" in
+      tls_ca) [ -n "$(cur_b64 "${b}")" ] || return 1 ;;
+      tls_leaf) [ -n "$(cur_b64 "${b}")" ] && [ -n "$(cur_b64 "${c}")" ] || return 1 ;;
+      tls_alias) [ -n "$(cur_b64 "${a}")" ] || return 1 ;;
+      tls_concat) [ -n "$(cur_b64 "${a}")" ] || return 1 ;;
+    esac
+  done 4< "$1"
+  return 0
+}
+
 resolve_block() { # <block file> ; fills ${WORK}/fin (all final values) and ${WORK}/new (changes)
   local blk="$1" kind key how arg opts cur v fin src tries legacy_ref dec inp
-  : > "${WORK}/keys"; MARKER_KEY=""
+  local tls_kept=0 tls_init=0 ca_dir ca_tag ca_key ca_cn days cert_key key_key cn dns_csv uri_csv ref_sec ref_k joined part
+  : > "${WORK}/keys"; MARKER_KEY=""; CERT_ID=""; CERT_SANS=""
   while IFS='|' read -r -u 3 kind key how arg opts; do
     case "${kind}" in
       secret) continue ;;
       marker) MARKER_KEY="${key}"; continue ;;
+      tls_meta) CERT_ID="${key}"; CERT_SANS="${how}"; continue ;;
+      tls_ca|tls_leaf|tls_alias|tls_concat)
+        if [ "${tls_init}" -eq 0 ]; then
+          tls_init=1
+          if tls_block_kept "${blk}"; then tls_kept=1; fi
+        fi
+        case "${kind}" in
+          tls_ca)
+            ca_tag="${key}"; ca_key="${how}"; ca_cn="${arg}"; days="${opts:-365}"
+            printf '%s\n' "${ca_key}" >> "${WORK}/keys"
+            cur="$(cur_b64 "${ca_key}")"
+            inp="${INPUTS_DIR}/${CUR_NAME}__${ca_key}"
+            if [ -s "${inp}" ]; then
+              fin="$(b64 "$(cat "${inp}")")"
+              [ "${fin}" = "${cur}" ] || note_new "${ca_key}" "${fin}"
+            elif [ "${tls_kept}" -eq 1 ]; then
+              fin="${cur}"
+            else
+              case "${DEPLOYMENT_TIER}" in
+                alpha|local) ;;
+                *) die "secret/${CUR_NAME}: key ${ca_key} not found and DEPLOYMENT_TIER=${DEPLOYMENT_TIER} is outside alpha/local -- auto-generation is alpha/local only" ;;
+              esac
+              ca_dir="${WORK}/tls_ca/${ca_tag}"
+              gen_p256_ca "${ca_dir}" "${ca_cn}" "${days}" || die "secret/${CUR_NAME}: P-256 CA generation failed"
+              fin="$(base64 < "${ca_dir}/ca.crt" | tr -d '\n')"
+              note_new "${ca_key}" "${fin}"
+              log "unset -> generated(p256-ca): secret/${CUR_NAME} key ${ca_key}"
+            fi
+            printf '%s' "${fin}" > "${WORK}/fin/${ca_key}"
+            ;;
+          tls_leaf)
+            IFS='|' read -r _ ca_tag cert_key key_key cn dns_csv uri_csv days <<< "${kind}|${key}|${how}|${arg}|${opts}"
+            printf '%s\n%s\n' "${cert_key}" "${key_key}" >> "${WORK}/keys"
+            cur="$(cur_b64 "${cert_key}")"
+            local cur_k="$(cur_b64 "${key_key}")"
+            local inp_c="${INPUTS_DIR}/${CUR_NAME}__${cert_key}"
+            local inp_k="${INPUTS_DIR}/${CUR_NAME}__${key_key}"
+            if [ -s "${inp_c}" ] && [ -s "${inp_k}" ]; then
+              local fin_c fin_k
+              fin_c="$(b64 "$(cat "${inp_c}")")"; fin_k="$(b64 "$(cat "${inp_k}")")"
+              [ "${fin_c}" = "${cur}" ] || note_new "${cert_key}" "${fin_c}"
+              [ "${fin_k}" = "${cur_k}" ] || note_new "${key_key}" "${fin_k}"
+              printf '%s' "${fin_c}" > "${WORK}/fin/${cert_key}"
+              printf '%s' "${fin_k}" > "${WORK}/fin/${key_key}"
+            elif [ "${tls_kept}" -eq 1 ]; then
+              printf '%s' "${cur}" > "${WORK}/fin/${cert_key}"
+              printf '%s' "${cur_k}" > "${WORK}/fin/${key_key}"
+            else
+              case "${DEPLOYMENT_TIER}" in
+                alpha|local) ;;
+                *) die "secret/${CUR_NAME}: keys ${cert_key},${key_key} not found and DEPLOYMENT_TIER=${DEPLOYMENT_TIER} is outside alpha/local -- auto-generation is alpha/local only" ;;
+              esac
+              ca_dir="${WORK}/tls_ca/${ca_tag}"
+              gen_p256_ca "${ca_dir}" "${ca_tag}" "${days:-365}" || die "secret/${CUR_NAME}: P-256 CA init failed"
+              local tmp_leaf="${WORK}/tls_leaf_${CUR_NAME}_${cert_key}"
+              gen_p256_leaf "${ca_dir}" "${tmp_leaf}.crt" "${tmp_leaf}.key" "${cn}" "${dns_csv}" "${uri_csv}" "${days:-365}" \
+                || die "secret/${CUR_NAME}: P-256 leaf generation failed for ${cert_key}"
+              local fin_c fin_k
+              fin_c="$(base64 < "${tmp_leaf}.crt" | tr -d '\n')"
+              fin_k="$(base64 < "${tmp_leaf}.key" | tr -d '\n')"
+              rm -f "${tmp_leaf}.crt" "${tmp_leaf}.key"
+              note_new "${cert_key}" "${fin_c}"
+              note_new "${key_key}" "${fin_k}"
+              printf '%s' "${fin_c}" > "${WORK}/fin/${cert_key}"
+              printf '%s' "${fin_k}" > "${WORK}/fin/${key_key}"
+              log "unset -> generated(p256-leaf): secret/${CUR_NAME} keys ${cert_key},${key_key}"
+            fi
+            ;;
+          tls_alias)
+            printf '%s\n' "${key}" >> "${WORK}/keys"
+            cur="$(cur_b64 "${key}")"
+            fin="$(cat "${WORK}/fin/${how}")"
+            [ "${fin}" = "${cur}" ] || note_new "${key}" "${fin}"
+            printf '%s' "${fin}" > "${WORK}/fin/${key}"
+            ;;
+          tls_concat)
+            printf '%s\n' "${key}" >> "${WORK}/keys"
+            cur="$(cur_b64 "${key}")"
+            joined=""
+            local IFS=','
+            for part in ${how}; do
+              [ -n "${part}" ] || continue
+              ref_sec="${part%%/*}"; ref_k="${part#*/}"
+              [ -f "${WORK}/final/${ref_sec}/${ref_k}" ] || die "secret/${CUR_NAME} key ${key}: missing ${ref_sec}/${ref_k}"
+              dec="$(unb64 "$(cat "${WORK}/final/${ref_sec}/${ref_k}")")"
+              joined="${joined:+${joined}$'\n'}${dec}"
+            done
+            unset IFS
+            fin="$(b64 "${joined}")"
+            [ "${fin}" = "${cur}" ] || note_new "${key}" "${fin}"
+            printf '%s' "${fin}" > "${WORK}/fin/${key}"
+            ;;
+        esac
+        continue
+        ;;
       key) ;;
       *) die "unknown spec directive '${kind}' in secret/${CUR_NAME}" ;;
     esac
@@ -351,6 +524,8 @@ write_secret() { # returns 0 done, 1 retry (lost a race)
   if [ "${F_EXISTS}" = 0 ]; then
     ann="$(keep_annotations_json)"
     [ -z "${marker}" ] || ann="${ann},\"${MARKER_ANN}\":\"${marker}\""
+    [ -z "${CERT_ID}" ] || ann="${ann},\"${CERT_ID_ANN}\":\"${CERT_ID}\""
+    [ -z "${CERT_SANS}" ] || ann="${ann},\"${CERT_SANS_ANN}\":\"${CERT_SANS}\""
     printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"%s","namespace":"%s","labels":{"app.kubernetes.io/part-of":"waddlebot","app.kubernetes.io/managed-by":"waddlebot-provision-secrets","waddles.penguintech.io/release":"%s"},"annotations":{%s}},"type":"Opaque","data":{%s}}' \
       "${name}" "${NAMESPACE}" "${LABEL_RELEASE}" "${ann}" "$(json_data)" > "${WORK}/create.json"
     set +e; kc create -f "${WORK}/create.json" >/dev/null 2>"${err}"; rc=$?; set -e
@@ -366,11 +541,19 @@ write_secret() { # returns 0 done, 1 retry (lost a race)
     fi
     die "kubectl create secret/${name} failed: $(errhead "${err}")"
   fi
-  # existing Secret: patch ONLY changed keys (+ keep/argocd/marker annotations when missing)
+  # existing Secret: patch ONLY changed keys (+ keep/argocd/marker/cert annotations when missing)
   [ "${F_KEEP}" = keep ] || ann="$(keep_annotations_json)"
   if [ -n "${marker}" ] && [ -z "${F_MARK}" ]; then
     [ -z "${ann}" ] || ann="${ann},"
     ann="${ann}\"${MARKER_ANN}\":\"${marker}\""
+  fi
+  if [ -n "${CERT_ID}" ] && [ "${F_CID}" != "${CERT_ID}" ]; then
+    [ -z "${ann}" ] || ann="${ann},"
+    ann="${ann}\"${CERT_ID_ANN}\":\"${CERT_ID}\""
+  fi
+  if [ -n "${CERT_SANS}" ] && [ "${F_CSAN}" != "${CERT_SANS}" ]; then
+    [ -z "${ann}" ] || ann="${ann},"
+    ann="${ann}\"${CERT_SANS_ANN}\":\"${CERT_SANS}\""
   fi
   if [ "${N_BLOCK_ADDED}" -eq 0 ] && [ -z "${ann}" ]; then
     N_UNCHANGED=$((N_UNCHANGED + 1))

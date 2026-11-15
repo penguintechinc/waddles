@@ -67,6 +67,8 @@ def main() -> int:
             f"RV {obj['rv']}",
             f"ANN {ann.get('helm.sh/resource-policy', '')}",
             f"MARK {ann.get('waddles.penguintech.io/root-marker', '')}",
+            f"CID {ann.get('waddlebot.io/cert-identity', '')}",
+            f"CSAN {ann.get('waddlebot.io/cert-sans-sha256', '')}",
         ]
         out += [f"K {k} {v}" for k, v in obj.get("data", {}).items()]
         sys.stdout.write("\n".join(out) + "\n")
