@@ -20303,7 +20303,8 @@ paths:
                 title: PricingConfigDTO
                 type: object
           description: '`marketplace_settings`-backed premium pricing configuration.'
-      summary: '`GET /pricing` -- public (matches Node: no `requireAuth`).'
+      summary: '`GET /pricing` -- public (matches Node: no `requireAuth`); replica
+        lag is fine.'
   /api/v1/marketplace/premium/status/{community_id}:
     get:
       description: ''
@@ -20363,7 +20364,7 @@ paths:
         default:
           description: Undocumented response
       summary: '`GET /api/v1/marketplace/public/vendor/modules` -- unauthenticated
-        listing.'
+        listing (replica).'
   /api/v1/marketplace/public/vendor/submissions/{submission_id}:
     get:
       description: ''
@@ -21228,7 +21229,8 @@ paths:
                 title: AuditLogResponse
                 type: object
           description: Response DTO for audit log.
-      summary: Get audit log.
+      summary: 'Get audit log (append-only listing: scope-gated, no DB authz, replica
+        lag is fine).'
   /api/v1/platform/communities:
     get:
       description: ''
@@ -21449,7 +21451,8 @@ paths:
                 title: PlatformStatsResponse
                 type: object
           description: Response DTO for platform stats.
-      summary: Get platform stats.
+      summary: 'Get platform stats (aggregate dashboard: scope-gated, no DB authz,
+        replica lag is fine).'
   /api/v1/platform/users:
     get:
       description: ''
