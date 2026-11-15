@@ -141,8 +141,14 @@ Call with (dict "root" $ "service" "svc-bundles-executor").
 {{- end -}}
 
 {{- define "waddlebot.rustOtelEnv" -}}
+{{- /* LEGACY opt-in path (`otel.exporter.endpoint` / in-chart `otel.collector`). It renders NOTHING when
+       `global.otel` is enabled (waddlebot.otel.env, templates/_otel.tpl, is the single source then -- two
+       blocks would duplicate OTEL_SERVICE_NAME/K8S_POD_NAME) and nothing when no legacy endpoint resolves
+       (a disabled chart carries no OTEL_* env at all). */ -}}
 {{- $root := .root -}}
 {{- $ex := $root.Values.otel.exporter | default dict -}}
+{{- $ep := include "waddlebot.otlpEndpoint" $root -}}
+{{- if and $ep (not (include "waddlebot.otel.enabled" $root)) }}
 - name: OTEL_SERVICE_NAME
   value: {{ .service | quote }}
 - name: K8S_POD_NAME
@@ -151,8 +157,6 @@ Call with (dict "root" $ "service" "svc-bundles-executor").
       fieldPath: metadata.name
 - name: OTEL_RESOURCE_ATTRIBUTES
   value: "deployment.environment={{ $root.Values.global.deploymentTier | default "alpha" }},k8s.pod.name=$(K8S_POD_NAME)"
-{{- $ep := include "waddlebot.otlpEndpoint" $root }}
-{{- if $ep }}
 - name: OTEL_EXPORTER_OTLP_ENDPOINT
   value: {{ $ep | quote }}
 - name: OTEL_EXPORTER_OTLP_PROTOCOL

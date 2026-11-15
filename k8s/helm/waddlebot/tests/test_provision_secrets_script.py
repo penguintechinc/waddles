@@ -237,6 +237,35 @@ def test_marker_stamped_matches_python_hmac_and_mismatch_fails(env: Env) -> None
     assert r.returncode != 0 and "root marker mismatch" in r.stderr
 
 
+_MARK = "waddles.penguintech.io/root-marker"
+_KEK_A = "ab" * 32  # synthetic test key, not a real secret
+
+
+def _kek_marker(kek_hex: str) -> str:
+    raw = bytes.fromhex(kek_hex)
+    return f"v1.{hashlib.sha256(raw).hexdigest()[:16]}.{hmac.new(raw, b'waddles-root-check', hashlib.sha256).hexdigest()}"
+
+
+def test_existing_kek_with_other_annotations_but_no_marker_is_stamped(env: Env) -> None:
+    # regression: dal2alpha hook failure -- kubectl-applied Secret has annotations but no marker;
+    # real kubectl prints "<no value>" for the missing key, which used to read as a mismatch
+    env.put("kek", {"TENANT_KEK_HEX": _KEK_A}, {"helm.sh/resource-policy": "keep", "kubectl.kubernetes.io/last-applied-configuration": "{}"})
+    r = env.run(SPEC)
+    assert r.returncode == 0, r.stderr
+    assert env.get("kek")["annotations"][_MARK] == _kek_marker(_KEK_A)
+    assert env.val("kek", "TENANT_KEK_HEX") == _KEK_A
+
+
+def test_stamped_matching_kek_passes_and_different_kek_fails(env: Env) -> None:
+    env.put("kek", {"TENANT_KEK_HEX": _KEK_A}, {"helm.sh/resource-policy": "keep", _MARK: _kek_marker(_KEK_A)})
+    assert env.run(SPEC).returncode == 0
+    other = "cd" * 32
+    env.put("kek", {"TENANT_KEK_HEX": other}, {"helm.sh/resource-policy": "keep", _MARK: _kek_marker(_KEK_A)})
+    r = env.run(SPEC)
+    assert r.returncode != 0 and "root marker mismatch" in r.stderr
+    assert env.val("kek", "TENANT_KEK_HEX") == other
+
+
 def test_malformed_kek_cannot_be_stamped(env: Env) -> None:
     env.put("kek", {"TENANT_KEK_HEX": "not-hex-and-long-enough-but-wrong-shape-xxxxxxxxxxxxxxxxxxxxxxxxxxx"})
     r = env.run(SPEC)

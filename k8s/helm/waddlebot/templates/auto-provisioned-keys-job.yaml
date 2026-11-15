@@ -84,6 +84,10 @@ metadata:
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-6"
+    # Secrets/ConfigMaps this Job creates at RUNTIME (not templated) -- declared so
+    # scripts/ci/check-helm-hook-dependency-ordering.py resolves the post-hook
+    # consumers (executor-precompile backfill/queue) to this provider at weight -6.
+    waddles.penguintech.io/provisions-secrets: {{ join "," (list $bsSecretName $bsCmName $psSecretName $psCmName $sjCmName | sortAlpha | uniq) | quote }}
     # fix/helm-hook-rbac-ordering -- before-hook-creation (not hook-failed) is the
     # right policy: it already guarantees a stale/failed Job from a previous attempt
     # is deleted and replaced automatically the next time this hook fires, so nobody

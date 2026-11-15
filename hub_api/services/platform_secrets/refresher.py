@@ -131,8 +131,10 @@ class PgNotifyWaiter:
         if conn is not None:
             try:
                 conn.close()
-            except Exception:  # noqa: BLE001, S110 -- closing a dead connection
-                pass
+            except Exception as exc:  # noqa: BLE001 -- closing a dead connection is best effort
+                logger.debug(
+                    "platform secret LISTEN close failed error_type=%s", type(exc).__name__
+                )
 
 
 class CacheRefresher:

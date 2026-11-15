@@ -63,6 +63,16 @@ def main() -> int:
             sys.stderr.write(f'Error from server (NotFound): secrets "{name}" not found\n')
             return 1
         ann = obj.get("annotations", {})
+        if ann:  # real kubectl prints "<no value>" for a missing key inside a non-empty map
+            ann = {
+                k: ann.get(k, "<no value>")
+                for k in (
+                    "helm.sh/resource-policy",
+                    "waddles.penguintech.io/root-marker",
+                    "waddlebot.io/cert-identity",
+                    "waddlebot.io/cert-sans-sha256",
+                )
+            }
         out = [
             f"RV {obj['rv']}",
             f"ANN {ann.get('helm.sh/resource-policy', '')}",
