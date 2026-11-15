@@ -34,6 +34,7 @@ from tests.conftest import (
     make_user_token,
     seed_community,
     seed_membership,
+    seed_scoped_member,
 )
 
 
@@ -115,6 +116,47 @@ def _member_headers(
     seed_membership(ai_routing_db, community_id=community_id, user_id=user_id, role="member")
     token = make_user_token(user_id=user_id, tenant=tenant)
     return {"Authorization": f"Bearer {token}"}
+
+
+class TestAiRoutingDedicatedScope:
+    """AI routing config/BYOK admin needs `ai.routing:manage`; broad scopes do not satisfy it."""
+
+    @pytest.mark.parametrize("method", ["GET", "PUT"])
+    async def test_broad_scopes_cannot_use_ai_config(
+        self, client: Any, ai_routing_db: Any, method: str
+    ) -> None:
+        community_id = seed_community(ai_routing_db)
+        seed_scoped_member(
+            ai_routing_db,
+            community_id=community_id,
+            user_id=711,
+            scopes=[
+                "community:manage_members",
+                "community:manage_channels",
+                "calls:manage",
+                "billing:manage",
+            ]
+            + ["media.byok:manage"],
+        )
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=711)}"}
+        response = await client.open(
+            f"/api/v1/admin/{community_id}/ai/config",
+            method=method,
+            headers=headers,
+            json={"preferred_tier": "premium", "on_insufficient_balance": "block"},
+        )
+        assert response.status_code == 403
+
+    async def test_ai_routing_manage_scope_is_sufficient(
+        self, client: Any, ai_routing_db: Any
+    ) -> None:
+        community_id = seed_community(ai_routing_db)
+        seed_scoped_member(
+            ai_routing_db, community_id=community_id, user_id=712, scopes=["ai.routing:manage"]
+        )
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=712)}"}
+        response = await client.get(f"/api/v1/admin/{community_id}/ai/config", headers=headers)
+        assert response.status_code == 200
 
 
 class TestGetConfig:

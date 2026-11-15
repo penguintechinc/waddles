@@ -51,6 +51,7 @@ from services.ai_routing.router import route_completion
 from services.community_access import require_community_admin, require_community_member
 from services.current_user import get_current_scopes, get_current_user_id
 from services.errors import ApiError
+from services.scope_registry import SCOPE_AI_ROUTING_MANAGE
 
 #: Upper bound on the prompt characters the completion proxy accepts. Bounds the CPU the injection
 #: scan / PII redaction / provider call can be made to spend on one request (OWASP LLM10) -- every
@@ -120,7 +121,13 @@ async def _require_admin(community_id: int) -> int:
     async_dal, dal = _dal()
     user_id = get_current_user_id(request)
     await require_community_admin(
-        async_dal, dal, request, ctx, community_id=community_id, user_id=user_id
+        async_dal,
+        dal,
+        request,
+        ctx,
+        community_id=community_id,
+        user_id=user_id,
+        scope=SCOPE_AI_ROUTING_MANAGE,
     )
     return user_id
 

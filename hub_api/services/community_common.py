@@ -273,6 +273,7 @@ def ensure_community_tables(dal: Any, *, migrate: bool = False) -> None:
             dal.Field("display_name", "string"),
             dal.Field("description", "text"),
             dal.Field("is_system", "boolean", default=False),
+            dal.Field("role_kind", "integer", default=0),
             dal.Field("priority", "integer", default=0),
             dal.Field("base_claims", "json"),
             dal.Field("created_at", "datetime"),
