@@ -574,6 +574,10 @@ TOOL_REQUIRED_SCOPES = frozenset(
         "rooms:update",
         "rooms:close",
         "rooms:guests",
+        "rooms:kick",
+        "rooms:mute",
+        "rooms:lock",
+        "rooms:hands",
     }
 )
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")

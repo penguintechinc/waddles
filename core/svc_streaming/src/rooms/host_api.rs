@@ -325,7 +325,13 @@ struct ParticipantActionReq {
     room_id: Uuid,
     participant_id: Uuid,
     actor_id: Uuid,
-    actor_role: ActorRole,
+    /// Display/audit label only -- NEVER read for authorization (scopes decide).
+    #[serde(default)]
+    #[allow(dead_code)]
+    actor_role: Option<String>,
+    /// Host-verified scopes the webrtc tool forwards; the per-action scope is re-checked here.
+    #[serde(default)]
+    actor_scopes: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -333,7 +339,29 @@ struct RoomActorReq {
     community_id: String,
     room_id: Uuid,
     actor_id: Uuid,
-    actor_role: ActorRole,
+    /// Display/audit label only -- NEVER read for authorization (scopes decide).
+    #[serde(default)]
+    #[allow(dead_code)]
+    actor_role: Option<String>,
+    /// Host-verified scopes the webrtc tool forwards; the per-action scope is re-checked here.
+    #[serde(default)]
+    actor_scopes: Vec<String>,
+}
+
+/// Per-action moderation scopes (a moderator is just a bundle holding them).
+pub const SCOPE_ROOMS_KICK: &str = "rooms:kick";
+pub const SCOPE_ROOMS_MUTE: &str = "rooms:mute";
+pub const SCOPE_ROOMS_LOCK: &str = "rooms:lock";
+
+/// Refuses a moderation op unless the caller's verified scopes include the one it needs.
+fn need_scope(scopes: &[String], scope: &'static str) -> Result<(), RoomError> {
+    if has(scopes, scope) {
+        Ok(())
+    } else {
+        Err(RoomError::Forbidden(
+            "the action's dedicated scope is required",
+        ))
+    }
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T, RoomError> {
@@ -505,11 +533,24 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
         "room.leave" | "room.kick" => {
             let r: ParticipantActionReq = parse(body)?;
             let closed = if op == "room.leave" {
-                svc.leave(&r.community_id, r.room_id, r.participant_id, r.actor_id, r.actor_role)
+                // Removing someone else needs the kick scope; leaving yourself needs none.
+                let role = if has(&r.actor_scopes, SCOPE_ROOMS_KICK) {
+                    ActorRole::Moderator
+                } else {
+                    ActorRole::Member
+                };
+                svc.leave(&r.community_id, r.room_id, r.participant_id, r.actor_id, role)
                     .await?
             } else {
-                svc.kick(&r.community_id, r.room_id, r.participant_id, r.actor_id, r.actor_role)
-                    .await?
+                need_scope(&r.actor_scopes, SCOPE_ROOMS_KICK)?;
+                svc.kick(
+                    &r.community_id,
+                    r.room_id,
+                    r.participant_id,
+                    r.actor_id,
+                    ActorRole::Moderator,
+                )
+                .await?
             };
             Ok(json!({"room_id": r.room_id, "participant_id": r.participant_id,
                       "sessions_closed": closed}))
@@ -517,21 +558,31 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
         "room.mute" | "room.unmute" => {
             let r: ParticipantActionReq = parse(body)?;
             let muted = op == "room.mute";
-            svc.set_muted(&r.community_id, r.room_id, r.participant_id, muted, r.actor_role)
-                .await?;
+            need_scope(&r.actor_scopes, SCOPE_ROOMS_MUTE)?;
+            svc.set_muted(
+                &r.community_id,
+                r.room_id,
+                r.participant_id,
+                muted,
+                ActorRole::Moderator,
+            )
+            .await?;
             Ok(json!({"room_id": r.room_id, "participant_id": r.participant_id, "muted": muted}))
         }
         "room.mute_all" => {
             let r: RoomActorReq = parse(body)?;
+            need_scope(&r.actor_scopes, SCOPE_ROOMS_MUTE)?;
             let n = svc
-                .mute_all(&r.community_id, r.room_id, r.actor_id, r.actor_role)
+                .mute_all(&r.community_id, r.room_id, r.actor_id, ActorRole::Moderator)
                 .await?;
             Ok(json!({"room_id": r.room_id, "muted": n}))
         }
         "room.lock" | "room.unlock" => {
             let r: RoomActorReq = parse(body)?;
             let locked = op == "room.lock";
-            svc.set_locked(&r.community_id, r.room_id, locked, r.actor_role).await?;
+            need_scope(&r.actor_scopes, SCOPE_ROOMS_LOCK)?;
+            svc.set_locked(&r.community_id, r.room_id, locked, ActorRole::Moderator)
+                .await?;
             Ok(json!({"room_id": r.room_id, "locked": locked}))
         }
         "room.hand.raise" => {

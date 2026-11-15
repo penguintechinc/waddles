@@ -216,8 +216,8 @@ def test_hand_tools_declare_the_contract_scopes_and_schema() -> None:
             if uuid_field in schema["properties"]:
                 assert schema["properties"][uuid_field]["format"] == "uuid", (name, uuid_field)
     # Scope does the gating: own-hand tools need member, everything else moderate.
-    for name in HAND_TOOLS:
-        want = "community:moderate" if name in MODERATOR_HAND_TOOLS else "community:member"
+    # Scope does the gating: own-hand tools need member, everything else the dedicated rooms:hands.
+        want = "rooms:hands" if name in MODERATOR_HAND_TOOLS else "community:member"
         assert tools[name]["required_scope"] == want, name
     assert {tools[n]["access"] for n in ("room.hand.list", "room.hand.list_all")} == {"read"}
     assert {tools[n]["access"] for n in HAND_TOOLS if "list" not in n} == {"write"}
@@ -237,7 +237,8 @@ def test_moderator_only_tools_need_the_moderate_scope_and_leave_stays_member_lev
     forbidden = set(c["moderation"]["args_forbidden"])
     assert forbidden == {"actor_id", "actor_role"}
     for name in MODERATOR_ONLY_TOOLS:
-        assert tools[name].get("required_scope") == c["moderation"]["scope_for_moderator_only"], name
+        assert tools[name].get("required_scope") == c["moderation"]["scopes"][name], name
+        assert tools[name]["required_scope"].startswith("rooms:"), name
     # Own participation only: `room.leave` is member-scope and has no participant argument.
     assert c["moderation"]["self_service"] == ["room.leave"]
     assert tools["room.leave"].get("required_scope") == c["moderation"]["leave_scope"] == "community:member"

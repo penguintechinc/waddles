@@ -739,12 +739,18 @@ SCOPE_BUNDLES: Dict[str, Dict[str, List[str]]] = {
         'viewer': ['tenant:read', 'billing:read'],
     },
     'community': {
+        # Room scopes: every room action has its own scope (security.md `resource:action`); a
+        # role is only a predefined group of them and no code checks a role name. admin holds
+        # all; maintainer (the moderator group) holds exactly the moderation ones it has today.
         'admin': [
             'community:read', 'community:write', 'community:admin', 'community:delete',
             'bot.command:admin', 'social.polls:write', 'settings:write',
+            'rooms:create', 'rooms:update', 'rooms:close', 'rooms:guests',
+            'rooms:kick', 'rooms:mute', 'rooms:lock', 'rooms:hands',
         ],
         'maintainer': [
             'community:read', 'community:write', 'bot.command:admin', 'social.polls:write',
+            'rooms:kick', 'rooms:mute', 'rooms:lock', 'rooms:hands',
         ],
         'viewer': ['community:read', 'social.polls:read'],
     },

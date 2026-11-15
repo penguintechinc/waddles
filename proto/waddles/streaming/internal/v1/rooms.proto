@@ -28,8 +28,9 @@ service RoomsService {
   // Scope "streaming.rooms:write" (member-level actions).
   rpc CreateRoom(CreateRoomRequest) returns (CreateRoomResponse);
   rpc DeleteRoom(DeleteRoomRequest) returns (DeleteRoomResponse);
-  // Scope "streaming.rooms:write". Replaces the room's facts (kind, closed, schedule window,
-  // allow_guests) wholesale; the facts are authoritative here and enforced on JoinRoom.
+  // Scope "streaming.rooms:update" ONLY (its own scope; the moderator bundle does not carry
+  // it). Replaces the room's facts (kind, closed, schedule window, allow_guests) wholesale;
+  // the facts are authoritative here and enforced on JoinRoom.
   rpc UpdateRoom(UpdateRoomRequest) returns (UpdateRoomResponse);
   // Scope "streaming.rooms:write". A call carrying the "streaming.rooms:moderate" service
   // JWT instead additionally registers the participant as room STAFF in the server-side
@@ -60,8 +61,10 @@ service RoomsService {
   rpc ResetHands(ResetHandsRequest) returns (ResetHandsResponse);
 }
 
-// The acting participant's room role, resolved by the caller (hub-api: admin
-// routes act as ROOM_ROLE_ADMIN, member routes as ROOM_ROLE_MEMBER).
+// The acting participant's room role label. DISPLAY / AUDIT ONLY: svc-streaming never
+// authorizes on it -- every RPC is authorized by the verified service-JWT scope alone. A
+// per-action scope (`streaming.rooms:update|kick|mute|lock|hands`, each also satisfied by
+// the `streaming.rooms:moderate` bundle where noted) is what grants a moderation action.
 enum RoomRole {
   ROOM_ROLE_UNSPECIFIED = 0;
   ROOM_ROLE_GUEST = 1;

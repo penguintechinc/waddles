@@ -452,7 +452,8 @@ async fn staff_ops_follow_the_moderation_flag_and_kicks_clear_hands() {
     let (st, r) = room
         .op(
             "room.kick",
-            json!({"participant_id": a, "actor_id": m, "actor_role": "moderator"}),
+            json!({"participant_id": a, "actor_id": m, "actor_role": "moderator",
+                   "actor_scopes": ["rooms:kick"]}),
         )
         .await;
     assert_eq!(st, StatusCode::OK, "{r}");

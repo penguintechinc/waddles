@@ -143,7 +143,7 @@ pub fn grants_for(kind: GrantKind, role: GrantRole, ctx: GrantCtx) -> Result<Gra
 /// `required_scope` (enforced by the host before dispatch) does the gating and no
 /// tool derives a privilege from a caller-supplied role: the own-hand tools need
 /// `community:member`, everything that touches anyone else's hand or the whole
-/// queue needs `community:moderate`.
+/// queue needs the dedicated `rooms:hands` scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandOp {
     Raise,
@@ -201,13 +201,26 @@ impl HandOp {
         }
     }
 
-    /// The manifest `required_scope` the host verifies before dispatch.
+    /// The manifest `required_scope` the host verifies before dispatch: `community:member` for
+    /// the own-hand tools, the dedicated `rooms:hands` scope for everything that touches
+    /// anyone else's hand or the whole queue (a moderator is just a bundle holding it).
     pub fn scope(self) -> &'static str {
-        scope_for(self.min_role())
+        if self.min_role().is_staff() {
+            SCOPE_ROOMS_HANDS
+        } else {
+            scope_for(GrantRole::Member)
+        }
     }
 }
 
-/// Moderation tools that act on OTHER participants or the whole room: moderate scope only.
+/// Dedicated per-action scopes (a role is only a predefined bundle of these).
+pub const SCOPE_ROOMS_KICK: &str = "rooms:kick";
+pub const SCOPE_ROOMS_MUTE: &str = "rooms:mute";
+pub const SCOPE_ROOMS_LOCK: &str = "rooms:lock";
+pub const SCOPE_ROOMS_HANDS: &str = "rooms:hands";
+
+/// Moderation tools that act on OTHER participants or the whole room: each needs its own
+/// dedicated scope (see [`moderation_scope`]).
 pub const MODERATOR_TOOLS: [&str; 6] = [
     "room.kick",
     "room.mute",
@@ -223,12 +236,12 @@ pub const LEAVE_TOOL: &str = "room.leave";
 /// The manifest `required_scope` a moderation tool declares (host-verified before
 /// dispatch); `None` for a tool that is not part of the moderation set.
 pub fn moderation_scope(tool: &str) -> Option<&'static str> {
-    if MODERATOR_TOOLS.contains(&tool) {
-        Some(scope_for(GrantRole::Moderator))
-    } else if tool == LEAVE_TOOL {
-        Some(scope_for(GrantRole::Member))
-    } else {
-        None
+    match tool {
+        "room.kick" => Some(SCOPE_ROOMS_KICK),
+        "room.mute" | "room.unmute" | "room.mute_all" => Some(SCOPE_ROOMS_MUTE),
+        "room.lock" | "room.unlock" => Some(SCOPE_ROOMS_LOCK),
+        t if t == LEAVE_TOOL => Some(scope_for(GrantRole::Member)),
+        _ => None,
     }
 }
 
@@ -347,7 +360,7 @@ mod tests {
             assert_eq!(min_role[tool], "moderator", "{tool}");
             assert_eq!(
                 moderation_scope(tool),
-                m["scope_for_moderator_only"].as_str(),
+                m["scopes"][tool].as_str(),
                 "{tool}"
             );
         }
@@ -384,7 +397,7 @@ mod tests {
             HandOp::Ack,
             HandOp::Reset,
         ] {
-            assert_eq!(op.scope(), "community:moderate", "{}", op.tool());
+            assert_eq!(op.scope(), "rooms:hands", "{}", op.tool());
         }
         for op in [HandOp::Raise, HandOp::Lower, HandOp::List] {
             assert_eq!(op.scope(), "community:member", "{}", op.tool());

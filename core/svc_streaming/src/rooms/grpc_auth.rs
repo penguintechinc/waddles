@@ -39,8 +39,15 @@ pub const SERVICE_JWT_ALGORITHM: &str = "ES256";
 pub const SCOPE_READ: &str = "streaming.rooms:read";
 /// Scope for member-level write RPCs (create/delete/join/leave, raise/lower hand).
 pub const SCOPE_WRITE: &str = "streaming.rooms:write";
-/// Scope for moderation RPCs (kick/mute/lock, hand acknowledge/reset).
+/// The moderator BUNDLE: accepted wherever a per-action moderation scope is (kick, mute, lock,
+/// hands), exactly the moderator's powers today -- never `update` or `create`/`close`.
 pub const SCOPE_MODERATE: &str = "streaming.rooms:moderate";
+/// Per-action scopes, each its own scope (a role is just a predefined bundle of these).
+pub const SCOPE_UPDATE: &str = "streaming.rooms:update";
+pub const SCOPE_KICK: &str = "streaming.rooms:kick";
+pub const SCOPE_MUTE: &str = "streaming.rooms:mute";
+pub const SCOPE_LOCK: &str = "streaming.rooms:lock";
+pub const SCOPE_HANDS: &str = "streaming.rooms:hands";
 /// Claims every service JWT must carry: the exact `require` list of
 /// `flask_core.service_jwt.ServiceJwtVerifier.verify` (hub-api's issuer stamps all of them;
 /// `tenant` and `community` are optional extras it adds per identity/grant).

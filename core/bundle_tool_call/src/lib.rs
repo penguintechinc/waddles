@@ -115,10 +115,11 @@ impl ActorContext {
 /// |---|---|
 /// | `community-owner`, `owner` | member, vip, moderate, admin, owner, rooms:* |
 /// | `community-admin` | member, vip, moderate, admin, rooms:* |
-/// | `moderator` | member, moderate |
+/// | `moderator` | member, moderate, rooms:kick, rooms:mute, rooms:lock, rooms:hands |
 ///
-/// `rooms:*` = the dedicated room-management scopes (`rooms:create`, `rooms:update`,
-/// `rooms:close`, `rooms:guests`); a moderator holds none of them yet.
+/// `rooms:*` = every dedicated room scope: management (`rooms:create`, `rooms:update`,
+/// `rooms:close`, `rooms:guests`) and moderation (`rooms:kick`, `rooms:mute`, `rooms:lock`,
+/// `rooms:hands`). A moderator holds exactly the moderation ones (what it can do today).
 /// | `vip` | member, vip |
 /// | `member` | member |
 pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
@@ -135,6 +136,10 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
             "rooms:update",
             "rooms:close",
             "rooms:guests",
+            "rooms:kick",
+            "rooms:mute",
+            "rooms:lock",
+            "rooms:hands",
         ],
         "community-admin" => &[
             "community:member",
@@ -145,8 +150,19 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
             "rooms:update",
             "rooms:close",
             "rooms:guests",
+            "rooms:kick",
+            "rooms:mute",
+            "rooms:lock",
+            "rooms:hands",
         ],
-        "moderator" => &["community:member", "community:moderate"],
+        "moderator" => &[
+            "community:member",
+            "community:moderate",
+            "rooms:kick",
+            "rooms:mute",
+            "rooms:lock",
+            "rooms:hands",
+        ],
         "vip" => &["community:member", "community:vip"],
         "member" => &["community:member"],
         _ => &[],

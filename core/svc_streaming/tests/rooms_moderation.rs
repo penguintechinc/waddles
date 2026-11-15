@@ -444,7 +444,8 @@ async fn pump(p: &Publisher, from: u16, n: u16) -> u16 {
 
 fn mod_body(room: &str, extra: Value) -> Value {
     let mut b = json!({"community_id": "7", "room_id": room,
-        "actor_id": Uuid::new_v4(), "actor_role": "moderator"});
+        "actor_id": Uuid::new_v4(), "actor_role": "moderator",
+        "actor_scopes": ["rooms:kick", "rooms:mute", "rooms:lock"]});
     for (k, v) in extra.as_object().unwrap() {
         b[k] = v.clone();
     }
@@ -487,14 +488,11 @@ async fn muted_publisher_is_not_forwarded_until_unmuted() {
     let before = v.handler.packets_received.load(Ordering::SeqCst);
     assert!(before >= 5, "baseline media should flow, got {before}");
 
-    // Non-moderators are refused.
+    // A caller without the action's scope is refused (a role label is never read).
     let (st, _) = call(
         &h.host,
         "room.mute",
-        mod_body(
-            &room,
-            json!({"participant_id": p.id, "actor_role": "member"}),
-        ),
+        mod_body(&room, json!({"participant_id": p.id, "actor_scopes": []})),
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
@@ -570,10 +568,7 @@ async fn kick_closes_live_peers_and_blocks_rejoin() {
     let (st, _) = call(
         &h.host,
         "room.kick",
-        mod_body(
-            &room,
-            json!({"participant_id": v.id, "actor_role": "guest"}),
-        ),
+        mod_body(&room, json!({"participant_id": v.id, "actor_scopes": []})),
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
@@ -651,10 +646,7 @@ async fn leave_closes_own_sessions_without_blocklisting() {
     let (st, _) = call(
         &h.host,
         "room.leave",
-        mod_body(
-            &room,
-            json!({"participant_id": p.id, "actor_role": "member"}),
-        ),
+        mod_body(&room, json!({"participant_id": p.id, "actor_scopes": []})),
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
@@ -777,4 +769,55 @@ async fn list_and_participants_are_community_scoped_and_ids_only() {
         );
     }
     let _ = (p.pc.close().await, v.pc.close().await);
+}
+
+/// Each moderation action needs ITS OWN verified scope: the moderator role alone, and another
+/// action's scope, never suffice; the specific scope alone does.
+#[tokio::test]
+async fn host_moderation_ops_need_their_own_scope() {
+    let h = harness(43100, true);
+    let room = new_room(&h).await;
+    let victim = Uuid::new_v4().to_string();
+    let cases = [
+        ("room.kick", "rooms:kick", json!({"participant_id": victim})),
+        ("room.mute", "rooms:mute", json!({"participant_id": victim})),
+        (
+            "room.unmute",
+            "rooms:mute",
+            json!({"participant_id": victim}),
+        ),
+        ("room.mute_all", "rooms:mute", json!({})),
+        ("room.lock", "rooms:lock", json!({})),
+        ("room.unlock", "rooms:lock", json!({})),
+    ];
+    for (op, scope, extra) in cases {
+        let others: Vec<&str> = [
+            "rooms:kick",
+            "rooms:mute",
+            "rooms:lock",
+            "rooms:hands",
+            "rooms:update",
+        ]
+        .into_iter()
+        .filter(|s| *s != scope)
+        .collect();
+        for scopes in [
+            json!([]),
+            json!([
+                "community:moderate",
+                "moderator",
+                "streaming.rooms:moderate"
+            ]),
+            json!(others),
+        ] {
+            let mut b = mod_body(&room, extra.clone());
+            b["actor_scopes"] = scopes.clone();
+            let (st, r) = call(&h.host, op, b).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{op} with {scopes}: {r}");
+        }
+        let mut b = mod_body(&room, extra.clone());
+        b["actor_scopes"] = json!([scope]);
+        let (st, r) = call(&h.host, op, b).await;
+        assert_ne!(st, StatusCode::FORBIDDEN, "{op} with only {scope}: {r}");
+    }
 }

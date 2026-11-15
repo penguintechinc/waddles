@@ -15,6 +15,7 @@ struct Tok {
     read: String,
     write: String,
     moderate: String,
+    update: String,
 }
 
 fn tokens(h: &Harness) -> Tok {
@@ -22,6 +23,7 @@ fn tokens(h: &Harness) -> Tok {
         read: jwt(&h.signing_pem, SCOPE_READ, |_| {}),
         write: jwt(&h.signing_pem, SCOPE_WRITE, |_| {}),
         moderate: jwt(&h.signing_pem, SCOPE_MODERATE, |_| {}),
+        update: jwt(&h.signing_pem, "streaming.rooms:update", |_| {}),
     }
 }
 
@@ -122,7 +124,7 @@ async fn facts_round_trip_create_get_update() {
     assert_eq!(plain.kind, RoomKind::Community as i32);
     assert!(!plain.allow_guests && plain.starts_at.is_none() && plain.ends_at.is_none());
 
-    let up = update(&mut h, &t.write, &room.room_id, |r| {
+    let up = update(&mut h, &t.update, &room.room_id, |r| {
         r.kind = RoomKind::GreenRoom as i32;
         r.closed = true;
     })
@@ -172,20 +174,20 @@ async fn facts_are_validated_and_scope_gated() {
         .await
         .unwrap_err();
     assert_eq!(e.code(), Code::InvalidArgument);
-    let e = update(&mut h, &t.write, &room.room_id, |r| r.kind = 42)
+    let e = update(&mut h, &t.update, &room.room_id, |r| r.kind = 42)
         .await
         .unwrap_err();
     assert_eq!(e.code(), Code::InvalidArgument);
 
     // Window must be well-formed.
-    let e = update(&mut h, &t.write, &room.room_id, |r| {
+    let e = update(&mut h, &t.update, &room.room_id, |r| {
         r.starts_at = Some(200);
         r.ends_at = Some(100);
     })
     .await
     .unwrap_err();
     assert_eq!(e.code(), Code::InvalidArgument);
-    let e = update(&mut h, &t.write, &room.room_id, |r| r.starts_at = Some(-1))
+    let e = update(&mut h, &t.update, &room.room_id, |r| r.starts_at = Some(-1))
         .await
         .unwrap_err();
     assert_eq!(e.code(), Code::InvalidArgument);
@@ -195,7 +197,7 @@ async fn facts_are_validated_and_scope_gated() {
         .await
         .unwrap_err();
     assert_eq!(e.code(), Code::PermissionDenied);
-    let e = update(&mut h, &t.write, &uid(), |_| {}).await.unwrap_err();
+    let e = update(&mut h, &t.update, &uid(), |_| {}).await.unwrap_err();
     assert_eq!(e.code(), Code::NotFound);
     let e = h
         .client
@@ -206,7 +208,7 @@ async fn facts_are_validated_and_scope_gated() {
                 room_id: room.room_id.clone(),
                 ..Default::default()
             },
-            &t.write,
+            &t.update,
         ))
         .await
         .unwrap_err();
@@ -220,7 +222,7 @@ async fn facts_are_validated_and_scope_gated() {
                 room_id: room.room_id,
                 ..Default::default()
             },
-            &t.write,
+            &t.update,
         ))
         .await
         .unwrap_err();
@@ -270,7 +272,7 @@ async fn closed_room_refuses_everyone_including_staff_until_reopened() {
     join(&mut h, &t.write, &room.room_id, &who, false, false)
         .await
         .unwrap();
-    update(&mut h, &t.write, &room.room_id, |r| {
+    update(&mut h, &t.update, &room.room_id, |r| {
         r.kind = RoomKind::Community as i32;
         r.closed = true;
     })
@@ -284,7 +286,7 @@ async fn closed_room_refuses_everyone_including_staff_until_reopened() {
         denied(join(&mut h, &t.moderate, &room.room_id, &uid(), false, false).await)
             .contains("closed")
     );
-    update(&mut h, &t.write, &room.room_id, |r| {
+    update(&mut h, &t.update, &room.room_id, |r| {
         r.kind = RoomKind::Community as i32;
     })
     .await
@@ -463,7 +465,7 @@ async fn staff_bypasses_a_locked_room_only_with_verified_moderate_scope() {
     assert_eq!(e.code(), Code::NotFound);
 
     // Facts still apply to staff: a closed room refuses even the bypass.
-    update(&mut h, &t.write, &room.room_id, |r| {
+    update(&mut h, &t.update, &room.room_id, |r| {
         r.kind = RoomKind::Community as i32;
         r.closed = true;
     })
@@ -473,4 +475,95 @@ async fn staff_bypasses_a_locked_room_only_with_verified_moderate_scope() {
         denied(join(&mut h, &t.moderate, &room.room_id, &uid(), false, false).await)
             .contains("closed")
     );
+}
+
+fn scoped(h: &Harness, scope: &str) -> String {
+    jwt(&h.signing_pem, scope, |_| {})
+}
+
+/// Every action is authorized by its own verified service-JWT scope alone: a token holding the
+/// exact scope works with NO role (the stated `actor_role` is a display label that is never
+/// read), and a moderator-bundle token lacking a scope is refused.
+#[tokio::test]
+async fn actions_need_their_own_service_scope_and_never_a_role() {
+    let mut h = harness(44260, true).await;
+    let t = tokens(&h);
+    let room = create(&mut h, &t, facts_create(RoomKind::Community)).await;
+
+    // UpdateRoom: only `streaming.rooms:update`; write, read and the moderator bundle are refused.
+    let upd = scoped(&h, "streaming.rooms:update");
+    update(&mut h, &upd, &room.room_id, |r| r.allow_guests = true)
+        .await
+        .expect("the exact update scope works without any role");
+    for denied_token in [
+        t.write.clone(),
+        t.read.clone(),
+        t.moderate.clone(),
+        scoped(&h, "streaming.rooms:kick"),
+    ] {
+        let e = update(&mut h, &denied_token, &room.room_id, |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(e.code(), Code::PermissionDenied);
+    }
+
+    // Moderation RPCs: the exact action scope works even when the request claims role GUEST;
+    // another action's scope and the write scope are refused; the moderator bundle works.
+    let mod_tokens = [
+        (scoped(&h, "streaming.rooms:kick"), true),
+        (t.moderate.clone(), true),
+        (scoped(&h, "streaming.rooms:mute"), false),
+        (scoped(&h, "streaming.rooms:lock"), false),
+        (scoped(&h, "streaming.rooms:update"), false),
+        (t.write.clone(), false),
+    ];
+    for (token, ok) in mod_tokens {
+        let who = uid();
+        join(&mut h, &t.write, &room.room_id, &who, false, false)
+            .await
+            .unwrap();
+        let r = h
+            .client
+            .kick_participant(req(
+                KickParticipantRequest {
+                    api_version: API.into(),
+                    community_id: "7".into(),
+                    room_id: room.room_id.clone(),
+                    participant_id: who,
+                    actor_id: uid(),
+                    actor_role: RoomRole::Guest as i32,
+                },
+                &token,
+            ))
+            .await;
+        assert_eq!(r.is_ok(), ok, "kick: {r:?}");
+        if !ok {
+            assert_eq!(r.unwrap_err().code(), Code::PermissionDenied);
+        }
+    }
+    for scope in [
+        "streaming.rooms:lock",
+        "streaming.rooms:kick",
+        "streaming.rooms:mute",
+    ] {
+        let token = scoped(&h, scope);
+        let r = h
+            .client
+            .lock_room(req(
+                LockRoomRequest {
+                    api_version: API.into(),
+                    community_id: "7".into(),
+                    room_id: room.room_id.clone(),
+                    actor_id: uid(),
+                    actor_role: RoomRole::Unspecified as i32,
+                },
+                &token,
+            ))
+            .await;
+        assert_eq!(
+            r.is_ok(),
+            scope == "streaming.rooms:lock",
+            "lock with {scope}: {r:?}"
+        );
+    }
 }

@@ -599,7 +599,7 @@ exported_tools:
         format: uuid
       sessions_closed:
         type: integer
-  required_scope: community:moderate
+  required_scope: rooms:kick
 - name: room.mute
   access: write
   risk: normal
@@ -627,7 +627,7 @@ exported_tools:
         format: uuid
       muted:
         type: boolean
-  required_scope: community:moderate
+  required_scope: rooms:mute
 - name: room.unmute
   access: write
   risk: normal
@@ -655,7 +655,7 @@ exported_tools:
         format: uuid
       muted:
         type: boolean
-  required_scope: community:moderate
+  required_scope: rooms:mute
 - name: room.mute_all
   access: write
   risk: normal
@@ -676,7 +676,7 @@ exported_tools:
         format: uuid
       muted:
         type: integer
-  required_scope: community:moderate
+  required_scope: rooms:mute
 - name: room.lock
   access: write
   risk: normal
@@ -697,7 +697,7 @@ exported_tools:
         format: uuid
       locked:
         type: boolean
-  required_scope: community:moderate
+  required_scope: rooms:lock
 - name: room.unlock
   access: write
   risk: normal
@@ -718,7 +718,7 @@ exported_tools:
         format: uuid
       locked:
         type: boolean
-  required_scope: community:moderate
+  required_scope: rooms:lock
 - name: room.hand.raise
   access: write
   risk: normal
@@ -811,7 +811,7 @@ exported_tools:
         format: uuid
       lowered:
         type: boolean
-  required_scope: community:moderate
+  required_scope: rooms:hands
 - name: room.hand.list
   access: read
   risk: normal
@@ -893,7 +893,7 @@ exported_tools:
             format: uuid
             position:
               type: integer
-  required_scope: community:moderate
+  required_scope: rooms:hands
 - name: room.hand.ack
   access: write
   risk: normal
@@ -932,7 +932,7 @@ exported_tools:
           acknowledged_by:
             type: string
             format: uuid
-  required_scope: community:moderate
+  required_scope: rooms:hands
 - name: room.hand.reset
   access: write
   risk: normal
@@ -956,7 +956,7 @@ exported_tools:
         format: uuid
       cleared:
         type: integer
-  required_scope: community:moderate
+  required_scope: rooms:hands
 config_schema: {}
 compatible_with: []
 incompatible_with: []

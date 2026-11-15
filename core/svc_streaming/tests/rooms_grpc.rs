@@ -408,18 +408,31 @@ async fn moderation_enforces_actor_role_and_feature_flag() {
         actor_id: uuid::Uuid::new_v4().to_string(),
         actor_role: role as i32,
     };
-    for role in [RoomRole::Member, RoomRole::Guest, RoomRole::Unspecified] {
-        let e = h
-            .client
+    // The stated role is a display label: with the verified moderation scope ANY stated role
+    // works, without it NONE does (even a claimed admin).
+    for role in [
+        RoomRole::Member,
+        RoomRole::Guest,
+        RoomRole::Unspecified,
+        RoomRole::Moderator,
+    ] {
+        h.client
             .kick_participant(req(kick(role), &moderate))
             .await
-            .unwrap_err();
-        assert_eq!(e.code(), Code::PermissionDenied, "{role:?}");
+            .unwrap_or_else(|e| panic!("{role:?}: {e}"));
     }
-    h.client
-        .kick_participant(req(kick(RoomRole::Moderator), &moderate))
-        .await
-        .unwrap();
+    for role in [RoomRole::Admin, RoomRole::Moderator] {
+        let e = h
+            .client
+            .kick_participant(req(kick(role), &write))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.code(),
+            Code::PermissionDenied,
+            "{role:?} without the scope"
+        );
+    }
 
     // Flag OFF: moderation refused loudly (Unimplemented), not silently ignored.
     let mut off = harness(42160, false).await;

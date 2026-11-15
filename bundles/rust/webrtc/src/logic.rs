@@ -202,6 +202,10 @@ fn room_scopes(ctx: &ToolContext) -> Vec<&'static str> {
         SCOPE_ROOMS_UPDATE,
         "rooms:close",
         SCOPE_ROOMS_GUESTS,
+        "rooms:kick",
+        "rooms:mute",
+        "rooms:lock",
+        "rooms:hands",
     ]
     .into_iter()
     .filter(|s| ctx.has_scope(s))
@@ -591,7 +595,8 @@ fn reject_actor_args(args: &Value) -> Result<(), ToolError> {
 /// The actor is the host-verified context and its role comes from its host-derived
 /// scopes; `actor_id`/`actor_role` arguments are refused. Which scope is required
 /// follows from the tool (see [`moderation_scope`]): `room.leave` removes only the
-/// verified caller (member scope), everything else needs `community:moderate`,
+/// verified caller (member scope), everything else needs its own dedicated scope (`rooms:kick`,
+/// `rooms:mute`, `rooms:lock`),
 /// verified by the host before dispatch and again here on the verified context.
 /// `actor_id` and the scope-derived `actor_role` ride on every host op so
 /// svc-streaming can bind and re-check them.
@@ -620,6 +625,7 @@ fn moderation_call(
     let actor = verified_actor_scope(ctx, scope)?;
     let mut req = json!({
         "room_id": room, "actor_id": actor.id, "actor_role": role_wire(actor.role),
+        "actor_scopes": room_scopes(ctx),
     });
     // `room.leave` acts on the verified caller only; the others name their target.
     match (&target, tool == LEAVE_TOOL) {
@@ -672,9 +678,11 @@ fn verified_actor_scope(ctx: &ToolContext, scope: &str) -> Result<Actor, ToolErr
     if !ctx.has_scope(scope) {
         return Err(ToolError::NotGranted);
     }
+    // The role is only a label derived from verified scopes: holding any dedicated staff scope
+    // (not just the member scope) makes the caller at least a moderator for the host's check.
     let role = if ctx.has_scope("community:admin") {
         GrantRole::Admin
-    } else if ctx.has_scope("community:moderate") {
+    } else if ctx.has_scope("community:moderate") || scope != "community:member" {
         GrantRole::Moderator
     } else {
         GrantRole::Member
@@ -1434,7 +1442,7 @@ mod tests {
             } else {
                 assert!(
                     matches!(member, Err(ToolError::NotGranted)),
-                    "{tool} must need community:moderate"
+                    "{tool} must need its dedicated scope"
                 );
             }
         }
@@ -1569,8 +1577,24 @@ mod tests {
 
     const OTHER: &str = "44444444-4444-4444-4444-444444444444";
     const MEMBER_SCOPES: [&str; 1] = ["community:member"];
-    const MOD_SCOPES: [&str; 2] = ["community:member", "community:moderate"];
-    const ADMIN_SCOPES: [&str; 3] = ["community:member", "community:moderate", "community:admin"];
+    /// The moderator bundle: exactly the moderation scopes (no room-management scopes).
+    const MOD_SCOPES: [&str; 6] = [
+        "community:member",
+        "community:moderate",
+        "rooms:kick",
+        "rooms:mute",
+        "rooms:lock",
+        "rooms:hands",
+    ];
+    const ADMIN_SCOPES: [&str; 7] = [
+        "community:member",
+        "community:moderate",
+        "community:admin",
+        "rooms:kick",
+        "rooms:mute",
+        "rooms:lock",
+        "rooms:hands",
+    ];
     /// The admin bundle including the dedicated room-management scopes.
     const ROOM_ADMIN_SCOPES: [&str; 7] = [
         "community:member",

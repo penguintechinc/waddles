@@ -48,7 +48,14 @@
       "room.lock": "moderator",
       "room.unlock": "moderator"
     },
-    "scope_for_moderator_only": "community:moderate",
+    "scopes": {
+      "room.kick": "rooms:kick",
+      "room.mute": "rooms:mute",
+      "room.unmute": "rooms:mute",
+      "room.mute_all": "rooms:mute",
+      "room.lock": "rooms:lock",
+      "room.unlock": "rooms:lock"
+    },
     "leave_scope": "community:member",
     "actor_source": "host-verified tool context (ToolContext.actor / actor_scopes); never tool arguments",
     "args_forbidden": ["actor_id", "actor_role"],
@@ -60,10 +67,10 @@
   "hands": {
     "room.hand.raise": {"scope": "community:member", "min_role": "member", "host_op": "room.hand.raise", "subject": "self"},
     "room.hand.lower": {"scope": "community:member", "min_role": "member", "host_op": "room.hand.lower", "subject": "self"},
-    "room.hand.lower_other": {"scope": "community:moderate", "min_role": "moderator", "host_op": "room.hand.lower", "subject": "other"},
+    "room.hand.lower_other": {"scope": "rooms:hands", "min_role": "moderator", "host_op": "room.hand.lower", "subject": "other"},
     "room.hand.list": {"scope": "community:member", "min_role": "member", "host_op": "room.hand.list", "view": "own"},
-    "room.hand.list_all": {"scope": "community:moderate", "min_role": "moderator", "host_op": "room.hand.list", "view": "all"},
-    "room.hand.ack": {"scope": "community:moderate", "min_role": "moderator", "host_op": "room.hand.ack", "subject": "other"},
-    "room.hand.reset": {"scope": "community:moderate", "min_role": "moderator", "host_op": "room.hand.reset", "subject": "all"}
+    "room.hand.list_all": {"scope": "rooms:hands", "min_role": "moderator", "host_op": "room.hand.list", "view": "all"},
+    "room.hand.ack": {"scope": "rooms:hands", "min_role": "moderator", "host_op": "room.hand.ack", "subject": "other"},
+    "room.hand.reset": {"scope": "rooms:hands", "min_role": "moderator", "host_op": "room.hand.reset", "subject": "all"}
   }
 }

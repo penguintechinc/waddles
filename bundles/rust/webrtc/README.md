@@ -19,15 +19,15 @@ calls the `webrtc` host capability (`wit/waddle-bundle/webrtc.wit`).
 | `room.list`, `room.participants {room_id}` | read | live rooms / participants (UUIDs + media flags only) |
 | `participant.self {}` | read (member) | the caller's host-derived PER-COMMUNITY call-participant id `{participant}` (same uuid5 hub-api's REST layer uses); fails closed when the host could not derive it |
 | `room.leave {room_id}` | write, `community:member` | removes only the verified caller from the room (no participant argument) |
-| `room.kick|mute|unmute {room_id, participant_id}` | write, `community:moderate` | moderate another participant; kick closes sessions and blocks rejoin |
-| `room.mute_all|lock|unlock {room_id}` | write, `community:moderate` | `mute_all` never mutes the verified caller (the server excludes `actor_id`) |
+| `room.kick|mute|unmute {room_id, participant_id}` | write, `rooms:kick` (kick) / `rooms:mute` (mute, unmute) | moderate another participant; kick closes sessions and blocks rejoin |
+| `room.mute_all|lock|unlock {room_id}` | write, `rooms:mute` (mute_all) / `rooms:lock` (lock, unlock) | `mute_all` never mutes the verified caller (the server excludes `actor_id`) |
 | `room.hand.raise {room_id, api_version?}` | write, `community:member` | the verified caller raises their OWN hand (idempotent) |
 | `room.hand.lower {room_id, api_version?}` | write, `community:member` | the verified caller lowers their OWN hand |
 | `room.hand.list {room_id, api_version?}` | read, `community:member` | the caller's own entry (+ `position`) and the queue `count` -- never other participants |
-| `room.hand.lower_other {room_id, participant_id, api_version?}` | write, `community:moderate` | lower another participant's hand |
-| `room.hand.list_all {room_id, api_version?}` | read, `community:moderate` | the whole ordered queue |
-| `room.hand.ack {room_id, participant_id, api_version?}` | write, `community:moderate` | acknowledge one raised hand |
-| `room.hand.reset {room_id, api_version?}` | write, `community:moderate` | clear the whole queue; returns `cleared` |
+| `room.hand.lower_other {room_id, participant_id, api_version?}` | write, `rooms:hands` | lower another participant's hand |
+| `room.hand.list_all {room_id, api_version?}` | read, `rooms:hands` | the whole ordered queue |
+| `room.hand.ack {room_id, participant_id, api_version?}` | write, `rooms:hands` | acknowledge one raised hand |
+| `room.hand.reset {room_id, api_version?}` | write, `rooms:hands` | clear the whole queue; returns `cleared` |
 
 ## Verified actor (all actor-bound tools)
 
@@ -49,7 +49,7 @@ The server clears a participant's hand when they leave, are kicked or the room i
 `actor_id` / `actor_role` are refused outright. The actor is the HOST-VERIFIED tool context
 (`ToolContext.actor`, a community user UUID) and the role is derived from its host-derived scopes.
 What the caller may do is decided by WHICH tool it calls: the manifest `required_scope`
-(`community:member` for the own-hand tools, `community:moderate` for `lower_other`, `list_all`,
+(`community:member` for the own-hand tools, the dedicated `rooms:hands` scope for `lower_other`, `list_all`,
 `ack`, `reset`) is verified by the host before dispatch, and the tool re-checks the scope on the
 verified context. Each tool also validates its args (lowercase UUIDs, `api_version` absent or
 `"v1"`, unknown fields rejected) and forwards to a host op (`POST /host/v1/webrtc/room.hand.*`,
@@ -109,3 +109,7 @@ verified caller to hold `community:moderate` or `community:admin` (checked in th
 and re-checked by the host `room.create`). `room.update {room_id, kind?, closed?, allow_guests?, starts_at?, ends_at?}`
 (`community:admin`, risk `dangerous`, PATCH: omitted facts unchanged, `null` clears a schedule bound, never sets or changes a town hall) updates a room's facts on svc-streaming and ends every live session that
 would no longer be admitted; the rooms app calls it from `room.set_access` / `room.set_schedule`.
+
+Scopes: each action has its own scope; a role is only a predefined bundle (`scopes_for_role` in
+`core/bundle_tool_call`). Moderator bundle = `rooms:kick`, `rooms:mute`, `rooms:lock`, `rooms:hands`
+(what moderators can do today); admin/owner add `rooms:create`, `rooms:update`, `rooms:close`, `rooms:guests`.

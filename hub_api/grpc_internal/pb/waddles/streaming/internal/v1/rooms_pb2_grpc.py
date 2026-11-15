@@ -196,8 +196,9 @@ class RoomsServiceServicer:
         raise NotImplementedError("Method not implemented!")
 
     def UpdateRoom(self, request, context):
-        """Scope "streaming.rooms:write". Replaces the room's facts (kind, closed, schedule window,
-        allow_guests) wholesale; the facts are authoritative here and enforced on JoinRoom.
+        """Scope "streaming.rooms:update" ONLY (its own scope; the moderator bundle does not carry
+        it). Replaces the room's facts (kind, closed, schedule window, allow_guests) wholesale;
+        the facts are authoritative here and enforced on JoinRoom.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")

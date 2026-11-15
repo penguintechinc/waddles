@@ -741,17 +741,19 @@ fn role_scope_map_is_cumulative_and_fails_closed() {
     assert!(scopes_for_role("community-admin").contains(&"community:moderate"));
     assert!(!scopes_for_role("moderator").contains(&"community:admin"));
     // Dedicated room scopes: admin/owner bundles carry all of them, a moderator none yet.
-    for s in [
-        "rooms:create",
-        "rooms:update",
-        "rooms:close",
-        "rooms:guests",
-    ] {
-        assert!(scopes_for_role("community-admin").contains(&s), "{s}");
-        assert!(scopes_for_role("owner").contains(&s), "{s}");
-        for r in ["moderator", "vip", "member"] {
-            assert!(!scopes_for_role(r).contains(&s), "{r} must not hold {s}");
-        }
+    let mgmt = ["rooms:create", "rooms:update", "rooms:close", "rooms:guests"];
+    let moderation = ["rooms:kick", "rooms:mute", "rooms:lock", "rooms:hands"];
+    for s in mgmt.iter().chain(moderation.iter()) {
+        assert!(scopes_for_role("community-admin").contains(s), "{s}");
+        assert!(scopes_for_role("owner").contains(s), "{s}");
+        assert!(!scopes_for_role("vip").contains(s) && !scopes_for_role("member").contains(s));
+    }
+    // A moderator holds exactly the moderation scopes (today's powers), none of management.
+    for s in moderation {
+        assert!(scopes_for_role("moderator").contains(&s), "{s}");
+    }
+    for s in mgmt {
+        assert!(!scopes_for_role("moderator").contains(&s), "moderator must not hold {s}");
     }
     assert!(!scopes_for_role("vip").contains(&"community:moderate"));
     for bad in ["", "admin", "COMMUNITY-ADMIN", "root"] {

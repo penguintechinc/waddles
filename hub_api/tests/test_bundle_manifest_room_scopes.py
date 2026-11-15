@@ -13,7 +13,16 @@ import yaml
 
 from services.bundle_manifest_v2 import TOOL_REQUIRED_SCOPES
 
-ROOM_SCOPES = ("rooms:create", "rooms:update", "rooms:close", "rooms:guests")
+ROOM_SCOPES = (
+    "rooms:create",
+    "rooms:update",
+    "rooms:close",
+    "rooms:guests",
+    "rooms:kick",
+    "rooms:mute",
+    "rooms:lock",
+    "rooms:hands",
+)
 WEBRTC = Path(__file__).resolve().parents[2] / "bundles" / "rust" / "webrtc"
 
 
