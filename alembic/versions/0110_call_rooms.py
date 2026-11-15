@@ -12,7 +12,7 @@ Town Hall creation race-safe (the loser's insert conflicts and it deletes only i
 Nothing here is PII (opaque ids and flags only).
 
 Revision ID: 0110_call_rooms
-Revises: 0107_bundle_config_db_reads
+Revises: 0109_platform_vault, 0108_bundle_precompile_requests (merges both heads)
 Create Date: 2026-11-14
 """
 
@@ -21,7 +21,7 @@ from __future__ import annotations
 from alembic import op
 
 revision = "0110_call_rooms"
-down_revision = "0107_bundle_config_db_reads"
+down_revision = ("0109_platform_vault", "0108_bundle_precompile_requests")
 branch_labels = None
 depends_on = None
 
