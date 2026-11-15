@@ -151,6 +151,16 @@ def _seed(container: str) -> dict[str, int]:
     ids["admin_user"] = int(
         _sql(container, "INSERT INTO hub_users (username) VALUES ('live-admin') RETURNING id")
     )
+    # Channel-ownership proof (#1271): binding a Twitch channel requires the installing hub user to
+    # have OAuth-linked the broadcaster's Twitch account (a `hub_user_identities` row, which the
+    # social-login / account-linking flow writes). The harness's admin is that linked owner of both
+    # fake channels -- the real `_prove_ownership` path still runs; nothing is bypassed.
+    for channel_id in (CHANNEL_ID, OTHER_CHANNEL_ID):
+        _sql(
+            container,
+            "INSERT INTO hub_user_identities (hub_user_id, platform, platform_user_id) "  # noqa: S608
+            f"VALUES ({ids['admin_user']}, 'twitch', '{channel_id}')",
+        )
     for key, name, tenant in (
         ("a", "live-a", "tenant"),
         ("b", "live-b", "tenant"),

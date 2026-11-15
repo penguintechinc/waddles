@@ -71,7 +71,7 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: core-bundle-seeder
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "seeder" "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "seeder") }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         # Explicit (not a `toYaml .Values.securityContext` reference) for the same reason as
         # the pod-level securityContext above -- also adds a container-level seccompProfile,

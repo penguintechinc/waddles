@@ -3356,7 +3356,8 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         // Tenant 7 is the default tenant here, so the env-token sender serves it.
-        crate::tenant_discord::set_default_tenant_id(7);
+        let _default =
+            crate::tenant_discord::test_default_tenant::DefaultTenantGuard::hold(7).await;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/channels/1/messages"))
@@ -3690,6 +3691,13 @@ GRANT SELECT (tenant_id, pseudonym, handle) ON ephemeral_pseudonyms TO {role};
         async fn drain_one(egress: &Egress, text: &str, tenant: i64) -> String {
             use wiremock::matchers::{method, path};
             use wiremock::{Mock, MockServer, ResponseTemplate};
+            // The env-token sender serves ONLY the default tenant (fail-closed since #1289), and
+            // this drain has no per-tenant executor: make the op's tenant the default for this
+            // run. What is under test is the detokenizer's tenant scoping, not that gate (which
+            // `tenant_discord`/the drain's own tests cover); the guard keeps parallel tests from
+            // racing the process-wide default id.
+            let _default =
+                crate::tenant_discord::test_default_tenant::DefaultTenantGuard::hold(tenant).await;
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/channels/1/messages"))

@@ -28,6 +28,7 @@ touching the DB.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -47,6 +48,8 @@ from services import install_state_binding as binding
 from services.community_common import community_in_tenant
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, conflict, not_found, payment_required
+
+logger = logging.getLogger(__name__)
 
 guild_pairing_bp = Blueprint("v1_guild_pairing", __name__, url_prefix="/api/v1")
 
@@ -222,6 +225,7 @@ async def create_pairing(
             actor_user_id=actor_user_id,
         )
     except ApiError as exc:
+        logger.warning("create_pairing rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return GuildPairingResponse(success=True, pairing=pairing), 201
 
@@ -279,6 +283,9 @@ async def start_server_install(
             binding_nonce=nonce,
         )
     except ApiError as exc:
+        logger.warning(
+            "start_server_install rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
 
     @after_this_request
@@ -334,6 +341,7 @@ async def update_pairing(
             ),
         )
     except ApiError as exc:
+        logger.warning("update_pairing rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return GuildPairingResponse(success=True, pairing=pairing)
 
@@ -412,6 +420,7 @@ async def create_binding(
             community_role=body.get("community_role"),
         )
     except ApiError as exc:
+        logger.warning("create_binding rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return RoleSyncBindingResponse(success=True, binding=binding), 201
 
@@ -513,6 +522,7 @@ async def create_role_mirror(
             list_roles=_list_roles_for_mirror,
         )
     except ApiError as exc:
+        logger.warning("create_role_mirror rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return RoleMirrorMappingResponse(success=True, mapping=mapping), 201
 

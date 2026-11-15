@@ -61,7 +61,10 @@ class TestRoleAndTableConstants:
         module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
         spec.loader.exec_module(module)  # type: ignore[union-attr]
 
-        assert bundle_reader_role.TABLES == module._READER_TABLES
+        # 0032 grants on the base tables; `bundle_disabled_apps` is a VIEW that migration 0095
+        # creates (and grants itself), so reconcile's list carries it but 0032's must not --
+        # 0032 runs before the view exists. Any other divergence is a real drift.
+        assert bundle_reader_role.TABLES == (*module._READER_TABLES, "bundle_disabled_apps")
         assert bundle_reader_role.ROLE == module._READER_ROLE
         assert bundle_reader_role.PASSWORD_ENV == module._READER_PASSWORD_ENV
 
