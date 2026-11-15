@@ -186,8 +186,8 @@ securityContext:
     secretKeyRef:
       name: {{ include "waddlebot.fullname" $root }}-secrets
       key: {{ .secretKey }}
-- name: OTEL_SERVICE_NAME
-  value: svc-bundles-precompiler
+{{- /* No OTEL_* env here: the pod has no OTLP endpoint/egress rule, so a lone OTEL_SERVICE_NAME was inert
+       and broke the "disabled => zero OTEL_* env" contract (test_otel_signoz_render). */}}
 {{- end }}
 
 {{/*

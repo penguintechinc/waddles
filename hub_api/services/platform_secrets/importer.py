@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -67,6 +68,8 @@ _KID_RE: Final = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 OUTCOME_OK: Final = "ok"
 OUTCOME_ABSENT: Final = "absent"
 OUTCOME_PLACEHOLDER: Final = "rejected_placeholder"
+logger = logging.getLogger(__name__)
+
 OUTCOME_INVALID: Final = "rejected_invalid"
 
 
@@ -144,6 +147,13 @@ def import_candidate(spec: SecretSpec, environ: Mapping[str, str]) -> ImportDeci
             kid = supplied
     try:
         material = platform_key_material_from_private(int(spec.algorithm), decoded, kid=kid)
-    except PlatformSecretInputError:
+    except PlatformSecretInputError as exc:
+        # Refused loudly: the recorded outcome is `rejected_invalid` and the caller generates a
+        # fresh key. Log the env var NAME and exception type only -- never the value or its detail.
+        logger.warning(
+            "platform secret import rejected: key material invalid env=%s error_type=%s",
+            source.private_env,
+            type(exc).__name__,
+        )
         return ImportDecision(OUTCOME_INVALID, source.private_env)
     return ImportDecision(OUTCOME_OK, source.private_env, material)
