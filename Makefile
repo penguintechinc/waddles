@@ -9,7 +9,8 @@
         test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
-        test-data-plane-parity test-connector-parity gen-connector-parity-expected
+        test-data-plane-parity test-connector-parity gen-connector-parity-expected \
+        test-helm-matrix test-helm-matrix-quick
 
 dev:
 	$(error dev: docker-compose is deprecated -- deploy to Kubernetes via scripts/deploy-alpha.sh)
@@ -55,6 +56,15 @@ check-helm-hook-phases:
 
 check-wait-for-hub-api:
 	@python3 scripts/check_wait_for_hub_api.py
+
+# Helm matrix: every environment x helm v3 + v4 -- lint, template, kubeconform, the CI render
+# scripts, the chart tests. Zero items examined fails. `-quick` skips the chart tests (~5 min per
+# helm major). See k8s/helm/waddlebot/README.md "Helm matrix gate".
+test-helm-matrix:
+	@bash scripts/ci/helm_matrix.sh
+
+test-helm-matrix-quick:
+	@bash scripts/ci/helm_matrix.sh --quick
 
 # USER DECISION (2026-10-01, fix/chart-fresh-install-hooks): db-migrate now runs
 # post-install -- helm upgrade --install in alpha-deploy.sh must never pass

@@ -984,3 +984,16 @@ The executor boot-pins `connectors/<p>/<digest>.wasm` plus a signed sidecar
   needs `BUNDLE_SIGNING_KEY_FILE` (0600 file with the base64 seed -- user-held), `BUNDLE_SIGNING_KEY_ID`,
   `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`.
 - Digests are build outputs and are not committed per environment. Verify with `make test-connector-publish`.
+
+## Helm matrix gate (`make test-helm-matrix`)
+
+One command runs what CI and review need for this chart: for every helm major present (v3 and v4,
+the chart must work with both) and every environment (alpha, dal2alpha, beta, gamma, production,
+local, ci) it runs `helm lint`, `helm template` and `kubeconform -strict`, then the render
+scripts in `scripts/ci/` (hook dependency ordering, placeholder credentials, manifest invariants,
+seeder Valkey TLS), `check_helm_hook_phases.py`, `check_wait_for_hub_api.py`, the executor render
+test and the chart tests. It prints counts, and zero items examined (no helm, no documents, no
+hooks, no passing tests) is a failure. `make test-helm-matrix-quick` skips the chart tests.
+Point it at specific binaries with `HELM3=` / `HELM4=`; keep renders and logs with
+`HELM_MATRIX_OUT=dir`. Beta/gamma/production/ci render with `--set global.deploymentTier=alpha`,
+as CI does, because those tiers need real secrets.
