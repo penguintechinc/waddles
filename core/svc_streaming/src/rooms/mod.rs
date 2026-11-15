@@ -319,6 +319,11 @@ impl Ledger {
     }
 }
 
+/// Default live-session lease once a WebRTC peer connection is established,
+/// decoupled from the short-lived join token TTL (revocation/kick still
+/// tears down the session immediately).
+const DEFAULT_SESSION_LEASE_SECS: i64 = 86_400;
+
 /// Revoked jti -> (community, expiry), plus insertion order for eviction.
 type RevokedSet = (HashMap<Uuid, (String, i64)>, VecDeque<Uuid>);
 
@@ -406,12 +411,17 @@ pub struct RoomInfo {
     /// Effective empty-room expiry in seconds (0 = never).
     #[serde(default)]
     pub empty_timeout_secs: u32,
+    #[serde(default)]
+    pub participant_count: usize,
+    #[serde(default)]
+    pub hand_count: usize,
 }
 
 /// The credential a live session was opened with: bounds its lifetime and lets
 /// token revocation find and close it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SessionGrant {
+    #[allow(dead_code)]
     pub expires_at: i64,
     pub jti: Uuid,
 }
@@ -617,6 +627,8 @@ impl RoomService {
             subscriber_count: r.subscribers.len(),
             locked: r.locked,
             empty_timeout_secs: r.empty_timeout_secs,
+            participant_count: r.members.len(),
+            hand_count: r.hands.len(),
         }
     }
 
@@ -759,7 +771,7 @@ impl RoomService {
             let mut rooms = self.rooms.write().await;
             match rooms.get_mut(&room_id) {
                 Some(r) if r.community_id == community_id => {
-                    if r.locked {
+                    if r.locked && !req.staff {
                         return Err(RoomError::Forbidden("room is locked"));
                     }
                     if r.kicked.contains(&req.participant) {
@@ -1017,7 +1029,7 @@ impl RoomService {
                     pc,
                     session,
                     ended,
-                    expires_at: grant.expires_at,
+                    expires_at: now().saturating_add(DEFAULT_SESSION_LEASE_SECS),
                     jti: grant.jti,
                 },
             );
@@ -1084,7 +1096,7 @@ impl RoomService {
                     pc,
                     participant,
                     ended,
-                    expires_at: grant.expires_at,
+                    expires_at: now().saturating_add(DEFAULT_SESSION_LEASE_SECS),
                     jti: grant.jti,
                 },
             );
@@ -1366,7 +1378,7 @@ impl RoomService {
 
     /// Refuses a join into a locked room or by a kicked participant.
     fn join_allowed(room: &Room, participant: Uuid) -> Result<(), RoomError> {
-        if room.locked {
+        if room.locked && !room.members.get(&participant).is_some_and(|m| m.staff) {
             return Err(RoomError::Forbidden("room is locked"));
         }
         if room.kicked.contains(&participant) {

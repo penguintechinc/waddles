@@ -303,6 +303,8 @@ fn room_pb(r: RoomInfo) -> Room {
         subscriber_count: r.subscriber_count as u32,
         locked: r.locked,
         empty_timeout_secs: r.empty_timeout_secs,
+        participant_count: r.participant_count as u32,
+        hand_count: r.hand_count as u32,
     }
 }
 

@@ -314,21 +314,33 @@ async fn subscriber_sessions_are_replaced_per_participant_and_reaped() {
     .await;
     assert_eq!(info["subscriber_count"], 2);
 
-    // Reaping. A session may not outlive its token: sweeping past the short-lived
-    // token's expiry removes exactly that session (webrtc-rs gives no reliable
-    // signal when a client silently vanishes, so the credential bounds it).
-    let _ = pc2.close().await;
-    let reaped = svc.sweep_at(chrono::Utc::now().timestamp() + 60).await;
-    assert_eq!(reaped, 1, "only the 30s-token session had expired");
+    // Reaping. Live WebRTC sessions use a 24h session lease decoupled from the
+    // short-lived join token TTL: sweeping past the 30s join token expiry does
+    // not kill the active session, while sweeping past the 24h lease reaps it.
+    let reaped_at_token_ttl = svc.sweep_at(chrono::Utc::now().timestamp() + 60).await;
+    assert_eq!(reaped_at_token_ttl, 0, "active session outlives join token");
     let (_, info) = host_call(
         &host,
         "room.get",
         json!({"community_id":"7","room_id":room_id}),
     )
     .await;
-    assert_eq!(info["subscriber_count"], 1);
-    // Nothing else is reaped while sessions are live and tokens valid.
+    assert_eq!(info["subscriber_count"], 2);
+    // Nothing else is reaped while sessions are live and within the 24h lease.
     assert_eq!(svc.sweep().await, 0);
+    let _ = pc2.close().await;
+    let reaped_at_lease = svc.sweep_at(chrono::Utc::now().timestamp() + 86_401).await;
+    assert_eq!(
+        reaped_at_lease, 3,
+        "publisher + 2 subscribers reaped after 24h lease"
+    );
+    let (_, info) = host_call(
+        &host,
+        "room.get",
+        json!({"community_id":"7","room_id":room_id}),
+    )
+    .await;
+    assert_eq!(info["subscriber_count"], 0);
     let _ = ppc.close().await;
     for v in viewers {
         let _ = v.close().await;
