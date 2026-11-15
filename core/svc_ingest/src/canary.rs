@@ -13,7 +13,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use command_latency::canary::{self, CanaryConfig};
+use command_latency::canary::{self, CanaryConfig, SinkMode};
 use command_latency::metrics::metrics;
 use command_latency::Outcome;
 use penguin_spine::{PlatformEvent, Source};
@@ -23,10 +23,10 @@ use crate::outbound_ops::{OutboundAction, OutboundEntry};
 /// The poll cadence while waiting for the result list.
 const POLL: Duration = Duration::from_millis(100);
 
-/// `true` only for an outbound `chat.send` that is exactly the canary's: the configured numeric
-/// tenant, numeric community and sentinel channel (all three, every time). Anything else -- including
-/// an absent config -- is a normal send. This is the ONLY condition under which the drain skips the
-/// platform call.
+/// `true` only in `swallow` mode, for an outbound `chat.send` that is exactly the canary's: the
+/// configured numeric tenant, numeric community and channel (all three, every time). Anything else
+/// -- including an absent config and every `post`-mode send -- is a normal send. This is the ONLY
+/// condition under which the drain skips the platform call.
 pub fn sink_matches(entry: &OutboundEntry) -> bool {
     sink_matches_with(CanaryConfig::from_env_cached(), entry)
 }
@@ -36,6 +36,9 @@ pub fn sink_matches_with(cfg: Option<&CanaryConfig>, entry: &OutboundEntry) -> b
     let Some(cfg) = cfg else {
         return false;
     };
+    if cfg.sink_mode != SinkMode::Swallow {
+        return false;
+    }
     match &entry.action {
         OutboundAction::ChatSend { channel, .. } => {
             cfg.is_sink_target(entry.tenant_id, entry.community_id, channel)
@@ -94,12 +97,18 @@ pub trait CanaryPublisher: Send + Sync {
 /// The Valkey-backed [`CanaryStore`].
 pub struct ValkeyCanaryStore {
     conn: redis::aio::MultiplexedConnection,
+    lock_ttl_secs: u64,
 }
 
 impl ValkeyCanaryStore {
-    /// Wraps an established connection.
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
-        Self { conn }
+    /// Wraps an established connection. The one-driver lock expires after 80% of the configured
+    /// interval, so the next (jittered, at least 90% of the interval) tick can always take it while
+    /// two replicas never fire within the same interval.
+    pub fn new(conn: redis::aio::MultiplexedConnection, interval: Duration) -> Self {
+        Self {
+            conn,
+            lock_ttl_secs: (interval.as_secs() * 8 / 10).max(1),
+        }
     }
 }
 
@@ -111,7 +120,7 @@ impl CanaryStore for ValkeyCanaryStore {
             .arg("1")
             .arg("NX")
             .arg("EX")
-            .arg(55)
+            .arg(self.lock_ttl_secs)
             .query_async(&mut c)
             .await
             .map_err(|e| e.to_string())?;
@@ -170,6 +179,11 @@ impl<S: CanaryStore, P: CanaryPublisher> CanaryRunner<S, P> {
             publisher,
             timeout: canary::TIMEOUT,
         }
+    }
+
+    /// The configured driver cadence (before jitter and backoff).
+    pub fn interval(&self) -> Duration {
+        self.cfg.interval
     }
 
     /// Overrides the timeout (tests).
@@ -324,9 +338,20 @@ impl CanaryPublisher for SpineCanaryPublisher {
     }
 }
 
-/// Spawns the canary loop (one tick per [`canary::INTERVAL`]). The Valkey/spine machinery is built
-/// lazily on the first enabled tick, so a deployment with the flag OFF pays nothing. Every
-/// configuration problem is an ERROR + `waddles_canary_failures_total{misconfigured}` per tick.
+/// A cheap 0.0..=1.0 jitter sample from the clock's sub-second nanoseconds (no RNG dependency; the
+/// jitter only has to de-align replicas, it is not security relevant).
+fn jitter_frac() -> f64 {
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    f64::from(ns % 1_000_000) / 1_000_000.0
+}
+
+/// Spawns the canary loop: one tick per configured interval (default 60 s) with +-10% jitter,
+/// doubling backoff after consecutive failures, strictly sequential (single in flight). The
+/// Valkey/spine machinery is built lazily on the first enabled tick, so a deployment with the flag
+/// OFF pays nothing. Every configuration problem (missing/invalid ids, wrong environment) is an
+/// ERROR + `waddles_canary_failures_total{misconfigured}` per tick -- never silent.
 pub fn spawn(
     config: crate::config::Config,
     ingest_metrics: std::sync::Arc<crate::telemetry::IngestMetrics>,
@@ -335,10 +360,14 @@ pub fn spawn(
 ) {
     tokio::spawn(async move {
         let mut runner: Option<CanaryRunner<ValkeyCanaryStore, SpineCanaryPublisher>> = None;
-        let mut tick = tokio::time::interval(canary::INTERVAL);
+        let mut failures: u32 = 0;
         loop {
-            tick.tick().await;
+            let base = runner
+                .as_ref()
+                .map_or(canary::DEFAULT_INTERVAL, CanaryRunner::interval);
+            tokio::time::sleep(canary::next_delay(base, failures, jitter_frac())).await;
             if !canary_enabled(license.as_ref()).await {
+                failures = 0;
                 continue;
             }
             if runner.is_none() {
@@ -347,6 +376,7 @@ pub fn spawn(
                     Err(why) => {
                         tracing::error!(reason = %why, "canary enabled but cannot start");
                         metrics().record_canary_failure("misconfigured");
+                        failures = 0;
                         continue;
                     }
                 }
@@ -354,6 +384,11 @@ pub fn spawn(
             if let Some(r) = &runner {
                 let outcome = r.run_once().await;
                 tracing::debug!(?outcome, "canary tick finished");
+                match outcome {
+                    RunOutcome::Failed(_) => failures = failures.saturating_add(1),
+                    RunOutcome::Confirmed { .. } => failures = 0,
+                    RunOutcome::NotLeader => {}
+                }
             }
         }
     });
@@ -365,6 +400,14 @@ async fn build(
     dek: &crate::identity_crypto::ConfiguredDekProvider,
 ) -> Result<CanaryRunner<ValkeyCanaryStore, SpineCanaryPublisher>, String> {
     let cfg = CanaryConfig::from_env().map_err(|e| e.0)?;
+    let interval = cfg.interval;
+    tracing::info!(
+        tenant_id = cfg.tenant_id,
+        community_id = cfg.community_id,
+        sink_mode = ?cfg.sink_mode,
+        interval_secs = interval.as_secs(),
+        "canary starting (alpha only)"
+    );
     if !crate::publish::scope_resolver_installed() {
         return Err(
             "the dataplane scope resolver is not installed (the canary needs v3 scope resolution)"
@@ -406,7 +449,7 @@ async fn build(
     };
     Ok(CanaryRunner::new(
         cfg,
-        ValkeyCanaryStore::new(conn),
+        ValkeyCanaryStore::new(conn, interval),
         publisher,
     ))
 }
@@ -425,6 +468,8 @@ mod tests {
                     "CANARY_COMMUNITY_ID" => "901",
                     "CANARY_GUILD_ID" => "1000000000000000001",
                     "CANARY_CHANNEL_ID" => "1000000000000000002",
+                    "CANARY_ENVIRONMENT" => "alpha",
+                    "CANARY_SINK_MODE" => "swallow",
                     _ => return None,
                 }
                 .to_string(),
@@ -620,6 +665,40 @@ mod tests {
             !sink_matches_with(Some(&c), &delete),
             "only chat.send is sunk"
         );
+    }
+
+    #[test]
+    fn post_mode_never_swallows_so_the_reply_really_goes_to_discord() {
+        let c = CanaryConfig::from_lookup(|k| {
+            Some(
+                match k {
+                    "CANARY_TENANT_ID" => "1",
+                    "CANARY_COMMUNITY_ID" => "5",
+                    "CANARY_GUILD_ID" => "1000000000000000001",
+                    "CANARY_CHANNEL_ID" => "1000000000000000002",
+                    "CANARY_ENVIRONMENT" => "alpha",
+                    _ => return None,
+                }
+                .to_string(),
+            )
+        })
+        .unwrap();
+        assert_eq!(c.sink_mode, SinkMode::Post);
+        assert!(
+            !sink_matches_with(
+                Some(&c),
+                &chat_send(Some(1), Some(5), "1000000000000000002")
+            ),
+            "default post mode: the exact canary triple is sent for real"
+        );
+    }
+
+    #[test]
+    fn jitter_sample_is_a_unit_fraction() {
+        for _ in 0..50 {
+            let j = jitter_frac();
+            assert!((0.0..1.0).contains(&j), "{j}");
+        }
     }
 
     #[test]

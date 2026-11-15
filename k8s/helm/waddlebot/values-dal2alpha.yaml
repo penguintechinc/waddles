@@ -691,6 +691,20 @@ config:
   guildPairingEnabled: true
   webuiRoleSyncMappingEnabled: true
 
+# Command-latency canary against the DEDICATED TESTING DISCORD GUILD (owner decision 2026-11-15).
+# OWNER: fill the three placeholders below, then flip `enabled: true`. Runbook:
+# docs/observability/command-latency.md "Owner runbook". While any value is a placeholder and
+# enabled=true, `helm template/upgrade` FAILS LOUD (by design). No secrets here.
+latencyCanary:
+  enabled: false          # <- OWNER flips to true after the ids below are filled
+  tenantId: 1             # the DEFAULT tenant (pipeline.defaultTenantId): its env bot is in the guild
+  communityId: 0          # <- OWNER: id printed by `make seed-latency-canary`
+  guildId: ""             # <- OWNER: QUOTED snowflake of the testing guild
+  channelId: ""           # <- OWNER: QUOTED snowflake of the dedicated canary channel
+  commandText: "!ping"
+  sinkMode: "post"
+  intervalSeconds: 60
+
 # Bundle storage v2 (references only; Secrets are created out-of-band). Enable once the
 # Secrets exist -- off here so the pods keep starting without them:
 # bundleStorageV2:

@@ -5461,6 +5461,7 @@ mod tests {
                     "CANARY_COMMUNITY_ID" => "1",
                     "CANARY_GUILD_ID" => "1000000000000000001",
                     "CANARY_CHANNEL_ID" => "123456789012345678",
+                    "CANARY_ENVIRONMENT" => "alpha",
                     _ => return None,
                 }
                 .to_string(),

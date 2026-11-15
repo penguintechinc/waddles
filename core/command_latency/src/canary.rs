@@ -15,9 +15,20 @@
 //!
 //! Safety properties (each tested): the sink matches ONLY the exact configured
 //! `(tenant, community, sentinel channel)` triple, so it can never swallow a real community's send;
-//! the canary never posts to Discord, never uses a real user account or token, and is OFF unless the
-//! flag `waddles.command-latency-canary` is ON AND every config variable is present and valid
-//! (otherwise it fails LOUD instead of silently doing nothing).
+//! the canary never uses a real user account or token, and is OFF unless the flag
+//! `waddles.command-latency-canary` is ON AND every config variable is present and valid (otherwise it
+//! fails LOUD instead of silently doing nothing).
+//!
+//! Two egress modes ([`SinkMode`], `CANARY_SINK_MODE`):
+//! - `post` (default, the dedicated-testing-guild setup): the reply is REALLY posted to the dedicated
+//!   canary channel of the testing guild, so the measurement includes the Discord API ack. Rate-limit
+//!   safe: one message per [`DEFAULT_INTERVAL`] (>= [`MIN_INTERVAL`]) with jitter, one in flight (a
+//!   Valkey lock + a sequential driver), and failure backoff.
+//! - `swallow`: the legacy sink; the drain acks the exact canary triple WITHOUT calling Discord.
+//!
+//! Hard guard: the canary runs ONLY in the alpha environment ([`ALLOWED_ENVIRONMENT`]). A config
+//! without `CANARY_ENVIRONMENT=alpha`, or contradicting `WADDLES_ENVIRONMENT`/`SPIFFE_ID`, is rejected,
+//! so a stray values file can never start a canary against beta/gamma/production.
 
 use std::time::Duration;
 
@@ -29,14 +40,31 @@ pub const ENV_BASELINE: &str = "FLAG_WADDLES_COMMAND_LATENCY_CANARY";
 pub const RESULT_KEY: &str = "waddles:canary:latency:result";
 /// Valkey key guarding one-driver-per-minute across ingest replicas (`SET NX EX`).
 pub const LOCK_KEY: &str = "waddles:canary:latency:lock";
-/// How often the driver fires.
-pub const INTERVAL: Duration = Duration::from_secs(60);
+/// Default driver cadence (one real Discord message per interval in `post` mode).
+pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
+/// Floor for `CANARY_INTERVAL_SECS`: Discord channel rate limits are never approached below this.
+pub const MIN_INTERVAL: Duration = Duration::from_secs(30);
+/// Ceiling for `CANARY_INTERVAL_SECS`.
+pub const MAX_INTERVAL: Duration = Duration::from_secs(600);
+/// The only environment the canary may run in.
+pub const ALLOWED_ENVIRONMENT: &str = "alpha";
+/// Longest backoff after consecutive failures (a broken channel/permission never gets hammered).
+pub const MAX_BACKOFF: Duration = Duration::from_secs(600);
 /// A canary slower than this (or never confirmed) is a loud failure.
 pub const TIMEOUT: Duration = Duration::from_secs(5);
 /// TTL of the result key, seconds.
 pub const RESULT_TTL_SECS: u64 = 30;
 
-/// The owner-provisioned canary identity. All fields are required; none is a secret.
+/// Where the canary's reply goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SinkMode {
+    /// The reply is really posted to the canary channel (true end-to-end incl. the Discord ack).
+    Post,
+    /// The drain acknowledges the exact canary triple without calling Discord.
+    Swallow,
+}
+
+/// The owner-provisioned canary identity. All identity fields are required; none is a secret.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanaryConfig {
     /// Numeric `tenants.id` of the DEDICATED canary tenant.
@@ -49,6 +77,21 @@ pub struct CanaryConfig {
     pub channel_id: String,
     /// The harmless registered command text to drive, e.g. `!ping`.
     pub command_text: String,
+    /// `post` (default) or `swallow`.
+    pub sink_mode: SinkMode,
+    /// Driver cadence (before jitter), within [`MIN_INTERVAL`]..=[`MAX_INTERVAL`].
+    pub interval: Duration,
+}
+
+/// The delay before the next tick: the base `interval` doubled per consecutive failure (capped at
+/// [`MAX_BACKOFF`]) with +-10% jitter from `jitter_frac` (0.0..=1.0) so replicas and restarts never
+/// align. Pure, so it is unit-tested.
+pub fn next_delay(interval: Duration, consecutive_failures: u32, jitter_frac: f64) -> Duration {
+    let backoff = interval
+        .saturating_mul(1u32 << consecutive_failures.min(6))
+        .min(MAX_BACKOFF.max(interval));
+    let j = 1.0 + (jitter_frac.clamp(0.0, 1.0) - 0.5) * 0.2;
+    backoff.mul_f64(j)
 }
 
 fn is_snowflake(s: &str) -> bool {
@@ -61,7 +104,9 @@ pub struct ConfigError(pub String);
 
 impl CanaryConfig {
     /// Builds the config from `CANARY_TENANT_ID`, `CANARY_COMMUNITY_ID`, `CANARY_GUILD_ID`,
-    /// `CANARY_CHANNEL_ID` and `CANARY_COMMAND_TEXT` (default `!ping`).
+    /// `CANARY_CHANNEL_ID`, `CANARY_ENVIRONMENT` (must be `alpha`), and optionally
+    /// `CANARY_COMMAND_TEXT` (default `!ping`), `CANARY_SINK_MODE` (`post`|`swallow`, default
+    /// `post`), `CANARY_INTERVAL_SECS` (30..=600, default 60).
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_lookup(|k| std::env::var(k).ok())
     }
@@ -96,7 +141,67 @@ impl CanaryConfig {
                 Err(ConfigError(format!("{k} must be a numeric snowflake")))
             }
         };
+        // Hard environment guard: alpha only, positively declared, never contradicted.
+        let declared = req("CANARY_ENVIRONMENT")?;
+        if declared != ALLOWED_ENVIRONMENT {
+            return Err(ConfigError(format!(
+                "CANARY_ENVIRONMENT={declared} -- the canary only runs in {ALLOWED_ENVIRONMENT}"
+            )));
+        }
+        if let Some(env) = get("WADDLES_ENVIRONMENT")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty() && v != ALLOWED_ENVIRONMENT)
+        {
+            return Err(ConfigError(format!(
+                "WADDLES_ENVIRONMENT={env} -- the canary refuses to run outside {ALLOWED_ENVIRONMENT}"
+            )));
+        }
+        if let Some(id) = get("SPIFFE_ID")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        {
+            let marker = format!("/{ALLOWED_ENVIRONMENT}/");
+            if !id.contains(&marker) {
+                return Err(ConfigError(format!(
+                    "SPIFFE_ID is not an {ALLOWED_ENVIRONMENT} identity -- the canary refuses to run"
+                )));
+            }
+        }
+        let sink_mode = match get("CANARY_SINK_MODE")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty())
+            .as_deref()
+        {
+            None | Some("post") => SinkMode::Post,
+            Some("swallow") => SinkMode::Swallow,
+            Some(other) => {
+                return Err(ConfigError(format!(
+                    "CANARY_SINK_MODE={other} must be `post` or `swallow`"
+                )))
+            }
+        };
+        let interval = match get("CANARY_INTERVAL_SECS")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        {
+            None => DEFAULT_INTERVAL,
+            Some(raw) => {
+                let secs: u64 = raw.parse().map_err(|_| {
+                    ConfigError("CANARY_INTERVAL_SECS must be a positive integer".into())
+                })?;
+                Duration::from_secs(secs)
+            }
+        };
+        if !(MIN_INTERVAL..=MAX_INTERVAL).contains(&interval) {
+            return Err(ConfigError(format!(
+                "CANARY_INTERVAL_SECS must be {}..={} (Discord rate-limit safety)",
+                MIN_INTERVAL.as_secs(),
+                MAX_INTERVAL.as_secs()
+            )));
+        }
         let cfg = Self {
+            sink_mode,
+            interval,
             tenant_id: id("CANARY_TENANT_ID")?,
             community_id: id("CANARY_COMMUNITY_ID")?,
             guild_id: snow("CANARY_GUILD_ID")?,
@@ -185,6 +290,7 @@ mod tests {
             ("CANARY_COMMUNITY_ID", "901"),
             ("CANARY_GUILD_ID", "1000000000000000001"),
             ("CANARY_CHANNEL_ID", "1000000000000000002"),
+            ("CANARY_ENVIRONMENT", "alpha"),
         ]))
         .unwrap()
     }
@@ -199,12 +305,23 @@ mod tests {
             ("CANARY_COMMUNITY_ID", "-1"),
             ("CANARY_GUILD_ID", "not-a-snowflake"),
             ("CANARY_CHANNEL_ID", ""),
+            ("CANARY_ENVIRONMENT", ""),
+            ("CANARY_ENVIRONMENT", "beta"),
+            ("CANARY_ENVIRONMENT", "production"),
+            ("WADDLES_ENVIRONMENT", "beta"),
+            ("SPIFFE_ID", "spiffe://penguintech.io/beta/svc-ingest"),
+            ("CANARY_SINK_MODE", "both"),
+            ("CANARY_INTERVAL_SECS", "5"),
+            ("CANARY_INTERVAL_SECS", "99999"),
+            ("CANARY_INTERVAL_SECS", "x"),
+            ("CANARY_GUILD_ID", "REPLACE_ME"),
         ] {
             let mut pairs = vec![
                 ("CANARY_TENANT_ID", "900"),
                 ("CANARY_COMMUNITY_ID", "901"),
                 ("CANARY_GUILD_ID", "1000000000000000001"),
                 ("CANARY_CHANNEL_ID", "1000000000000000002"),
+                ("CANARY_ENVIRONMENT", "alpha"),
             ];
             pairs.retain(|(pk, _)| *pk != k);
             pairs.push((k, v));
@@ -248,5 +365,42 @@ mod tests {
         assert_eq!(parse_result("weird:5"), None);
         assert_eq!(parse_result("ok:x"), None);
         assert_eq!(parse_result("ok"), None);
+    }
+
+    #[test]
+    fn defaults_are_post_mode_and_sixty_seconds_and_alpha_ids_pass() {
+        let c = good();
+        assert_eq!(c.sink_mode, SinkMode::Post);
+        assert_eq!(c.interval, DEFAULT_INTERVAL);
+        let mut pairs = vec![
+            ("CANARY_TENANT_ID", "1"),
+            ("CANARY_COMMUNITY_ID", "5"),
+            ("CANARY_GUILD_ID", "1000000000000000001"),
+            ("CANARY_CHANNEL_ID", "1000000000000000002"),
+            ("CANARY_ENVIRONMENT", "alpha"),
+            ("WADDLES_ENVIRONMENT", "alpha"),
+            ("SPIFFE_ID", "spiffe://penguintech.io/alpha/svc-ingest"),
+            ("CANARY_SINK_MODE", "Swallow"),
+            ("CANARY_INTERVAL_SECS", "120"),
+        ];
+        let c = CanaryConfig::from_lookup(lookup(&pairs)).unwrap();
+        assert_eq!(c.sink_mode, SinkMode::Swallow);
+        assert_eq!(c.interval, Duration::from_secs(120));
+        pairs.retain(|(k, _)| *k != "CANARY_ENVIRONMENT");
+        assert!(
+            CanaryConfig::from_lookup(lookup(&pairs)).is_err(),
+            "the alpha declaration is mandatory even when other signals say alpha"
+        );
+    }
+
+    #[test]
+    fn backoff_doubles_is_capped_and_jitter_stays_within_ten_percent() {
+        let base = Duration::from_secs(60);
+        assert_eq!(next_delay(base, 0, 0.5), base);
+        assert_eq!(next_delay(base, 1, 0.5), Duration::from_secs(120));
+        assert_eq!(next_delay(base, 3, 0.5), Duration::from_secs(480));
+        assert_eq!(next_delay(base, 20, 0.5), MAX_BACKOFF);
+        assert_eq!(next_delay(base, 0, 0.0), Duration::from_secs(54));
+        assert_eq!(next_delay(base, 0, 1.0), Duration::from_secs(66));
     }
 }

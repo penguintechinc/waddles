@@ -118,30 +118,72 @@ per hop, flags the slowest hop and whether p99 < 1 s. Exit 0 ok, 1 over budget, 
 
 ## Synthetic canary (flag `waddles.command-latency-canary`, default OFF)
 
-Once a minute (one driver across replicas via `SET NX EX`) svc-ingest publishes a synthetic Discord chat message
-(`!ping` by default) in a dedicated canary tenant/community/guild through the REAL `publish_event` funnel (identity
-encryption, v3 binding, consumer groups) -> process -> action -> the REAL executor bundle -> relay `chat.send` to a
-**sentinel channel id**. svc-ingest's Discord outbound drain acknowledges exactly that `(tenant_id, community_id,
-channel)` triple **without calling Discord** (`canary::sink_matches`), svc-action records
-`waddles_canary_e2e_seconds` at the confirm point (so it measures the same endpoint as a user command, never polluting
-the user histograms) and pushes the result to a Valkey list the driver polls. No result within 5 s -> ERROR log +
-`waddles_canary_failures_total{reason="timeout"}`; a misconfigured-but-enabled canary is a per-minute ERROR +
-`{reason="misconfigured"}`, never silent. Config env on svc-ingest AND svc-action: `CANARY_TENANT_ID`,
-`CANARY_COMMUNITY_ID`, `CANARY_GUILD_ID`, `CANARY_CHANNEL_ID` (+ optional `CANARY_COMMAND_TEXT`). The canary flag
-ignores the license bypass domain (default OFF everywhere until deliberately enabled).
+Every interval (default 60 s, `CANARY_INTERVAL_SECS` 30..600, +-10% jitter, one driver across replicas via
+`SET NX EX`, strictly one in flight) svc-ingest publishes a synthetic Discord chat message (`!ping` by default) in
+the **dedicated testing Discord guild** through the REAL `publish_event` funnel (identity encryption, v3 binding,
+consumer groups) -> process -> action -> the REAL executor bundle -> relay `chat.send` to the dedicated canary
+channel. svc-action records `waddles_canary_e2e_seconds` at the outbound-confirm point (the same endpoint as a user
+command, never polluting the user histograms) and pushes the result to a Valkey list the driver polls. No result
+within 5 s -> ERROR log + `waddles_canary_failures_total{reason="timeout"}`; a misconfigured-but-enabled canary is a
+per-interval ERROR + `{reason="misconfigured"}`, never silent. After consecutive failures the driver backs off
+(doubling, max 10 min) so a broken channel or missing bot permission is never hammered. The flag ignores the
+license bypass domain (default OFF everywhere until deliberately enabled).
 
-### Owner decisions needed before it can run (nothing was guessed)
+### Egress mode: `CANARY_SINK_MODE` (decision and justification)
 
-1. A **dedicated canary tenant + community** (numeric ids) with their own per-tenant DEK, and a **sentinel guild id**
-   paired to that community in hub-api (so the v3 scope resolver maps `dg-<guild>` to it). Real communities must
-   never share them.
-2. A **sentinel channel snowflake** that is not a real Discord channel (the sink swallows sends to it).
-3. Which **registered command** to drive (default `!ping`) and that its bundle is **activated for the canary
-   community** (the ping bundle consumes `discord chat.message`).
-4. Is minting an **ephemeral pseudonym for the synthetic author** (the sentinel guild id as `author_id`) in the canary
-   tenant acceptable, or should the tokenizer skip a configured synthetic author?
-5. Canary traffic goes through reputation/economy/analytics like any command in that community; confirm that is fine
-   for a dedicated community.
+| Mode | Behaviour | Why |
+|---|---|---|
+| `post` (**default**) | the reply is really posted to the canary channel; the measurement includes the Discord API ack | the SLA is "first door -> outbound platform call completed"; swallowing at the sink would leave the slowest external leg (Discord REST) unmeasured, and a dead bot token/permission would go unnoticed. Rate-limit safe: 1 message per >= 30 s (default 60 s) is far below Discord's per-channel limit (5 msgs / 5 s); jitter + single in flight + failure backoff; the channel is a dedicated one |
+| `swallow` | the drain acks the exact `(tenant, community, channel)` triple WITHOUT calling Discord (`canary::sink_matches`) | kept as an option for a no-Discord-traffic run; never matches in `post` mode |
+
+`post` mode sends through the normal outbound path, so the canary tenant must be the **default tenant** (tenant id
+`pipeline.defaultTenantId`, 1 on alpha): only it uses the env-token bot that is a member of the testing guild. A
+non-default tenant without its own Discord app is refused loudly (`not_ok`).
+
+### Hard guards
+
+* **Alpha only, three independent signals**: `CANARY_ENVIRONMENT` must be `alpha` (the chart renders it only when
+  `global.deploymentTier=alpha`; any other tier FAILS the helm render), `WADDLES_ENVIRONMENT` and `SPIFFE_ID` (when
+  set) must not contradict it. Any mismatch makes `CanaryConfig::from_env` fail, so the canary neither drives nor
+  matches anything (svc-action never treats traffic as canary, the drain never swallows).
+* **Only the configured guild/channel**: the event is built solely from `CANARY_GUILD_ID` / `CANARY_CHANNEL_ID`;
+  swallow matching is the exact numeric tenant + community + channel triple.
+* **Fail loud**: flag ON with any id missing/invalid -> `helm template` fails (chart `latencyCanary.*`), and at runtime
+  every tick logs ERROR + `{reason="misconfigured"}`.
+* No secret anywhere in values: ids are non-secret; the bot token stays in `waddlebot-platform-credentials`.
+
+### Owner runbook
+
+Provide these four values (the only owner inputs):
+
+| Value | Where it comes from | Goes in |
+|---|---|---|
+| Testing guild id (snowflake) | Discord: Developer Mode -> right-click the testing server -> Copy Server ID | `latencyCanary.guildId` (**quoted string**) and `CANARY_GUILD_ID` for the seeder |
+| Canary channel id (snowflake) | a dedicated, otherwise unused text channel in that guild the bot can read and post in -> Copy Channel ID | `latencyCanary.channelId` (**quoted string**) |
+| Canary community id (int) | printed by the seeder below | `latencyCanary.communityId` |
+| Default tenant id (int) | already `1` on alpha | `latencyCanary.tenantId` (pre-filled) |
+
+1. Make sure the Waddles bot is in the testing guild with View Channel + Send Messages + Read History on the canary
+   channel (no other permissions needed).
+2. Seed the community through the hub-api control plane (idempotent, alpha-only, GETs only with `DRY=1`):
+   ```bash
+   kubectl --context dal2alpha -n waddlebot port-forward svc/waddlebot-hub-api-v3 18080:8080 &
+   export WADDLES_ADMIN_TOKEN=...   # default-tenant admin JWT from env, never an argument; the script never prints it
+   make seed-latency-canary HUB_API_URL=http://127.0.0.1:18080 CANARY_GUILD_ID=<guild snowflake>
+   ```
+   It creates (or finds) the `latency-canary` community bound to the guild, activates `waddles.core.example.ping`,
+   deactivates any reputation/economy/loyalty/raffle/giveaway/dungeon bundle (app bundles are activation-only, so
+   "none active" is "disabled"), then re-lists the activations and fails if ping is missing, a denied bundle is
+   active, or zero activations were examined. It prints `latencyCanary.communityId: <n>`.
+3. Edit `k8s/helm/waddlebot/values-dal2alpha.yaml` -> `latencyCanary`: set `communityId`, `guildId`, `channelId`,
+   then `enabled: true`. (`enabled: true` with any placeholder left makes `helm upgrade` fail loud.)
+4. Deploy (`make dal2alpha-deploy`). Verify: `waddles_canary_e2e_seconds` has samples, a `!ping` reply appears in the
+   canary channel about once a minute, and `make command-latency-report` shows the canary line.
+5. To turn it off: `enabled: false` and redeploy (or the PostHog/ENV flag `waddles.command-latency-canary` OFF).
+
+Owner decisions of 2026-11-15 applied: canary approved; dedicated testing guild instead of a sentinel guild; `!ping`
+(Rust) driven; ephemeral pseudonym for the synthetic author accepted (the identity pipeline mints it from the
+non-user author id = the guild id); reputation/economy disabled in the canary community (seeder enforces).
 
 ## First door on the HTTP / ingress path (read-only findings, nothing applied)
 
@@ -177,7 +219,7 @@ ignores the license bypass domain (default OFF everywhere until deliberately ena
    ```
 4. **Per-service env:** `WADDLES_COMMAND_LATENCY_COMMANDS` (svc-process), `WADDLES_BUNDLE_LANGS` (svc-action),
    `OTEL_EXPORTER_OTLP_ENDPOINT` + a collector allowed by the executor's egress policy if executor metrics are wanted.
-5. Canary provisioning (owner decisions above) and its `CANARY_*` env on svc-ingest and svc-action.
+5. Canary provisioning: see "Owner runbook" above (the chart renders `CANARY_*` into the shared ConfigMap).
 
 ## Latency suspects in the hot path (code reading; nothing measured, nothing optimized in this PR)
 

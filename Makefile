@@ -156,6 +156,15 @@ command-latency-report:
 	@test -n "$(strip $(METRICS_URLS)$(METRICS_FILES))" || { echo 'usage: make command-latency-report METRICS_URLS="http://127.0.0.1:19090/metrics ..." [METRICS_FILES="a.txt ..."]' >&2; exit 2; }
 	@python3 -I scripts/ops/command_latency_report.py $(foreach u,$(METRICS_URLS),--url $(u)) $(foreach f,$(METRICS_FILES),--file $(f))
 
+# Alpha-only, idempotent: create/find the latency-canary community bound to the testing guild via the
+# hub-api control plane, activate the Rust !ping bundle, ensure no reputation/economy bundle is active,
+# print the community id for helm `latencyCanary.communityId`. Token only from $WADDLES_ADMIN_TOKEN.
+#   make seed-latency-canary HUB_API_URL=http://127.0.0.1:18080 CANARY_GUILD_ID=<snowflake> [DRY=1]
+.PHONY: seed-latency-canary
+seed-latency-canary:
+	@test -n "$(HUB_API_URL)" -a -n "$(CANARY_GUILD_ID)" || { echo 'usage: make seed-latency-canary HUB_API_URL=http://127.0.0.1:18080 CANARY_GUILD_ID=<snowflake> [DRY=1]' >&2; exit 2; }
+	@python3 -I scripts/ops/seed_latency_canary.py --hub-api-url "$(HUB_API_URL)" --guild-id "$(CANARY_GUILD_ID)" --confirm-alpha $(if $(DRY),--dry-run,)
+
 # Verify + merge a PR into release/*: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]
 release-merge:
 	@test -n "$(PR)" || { echo "usage: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]" >&2; exit 2; }

@@ -2463,6 +2463,19 @@ waddleai:
   baseUrl: ""
 
 # Connector Configuration (svc-ingest channels and overrides)
+# Command-latency synthetic canary (alpha ONLY; runbook docs/observability/command-latency.md).
+# Default OFF. Rendering with enabled=true outside global.environment=alpha, or with any id below
+# unset, FAILS the helm render (never a silently dead canary). Nothing here is a secret.
+latencyCanary:
+  enabled: false
+  tenantId: 0        # numeric tenants.id; post mode requires the DEFAULT tenant (its env bot is in the guild)
+  communityId: 0     # numeric communities.id from scripts/ops/seed_latency_canary.py
+  guildId: ""        # QUOTED Discord guild snowflake of the dedicated testing guild
+  channelId: ""      # QUOTED Discord channel snowflake of the dedicated canary channel
+  commandText: "!ping"
+  sinkMode: "post"   # post = really reply in the channel (true e2e); swallow = ack without Discord
+  intervalSeconds: 60  # 30..600; jittered +-10%, doubles on consecutive failures
+
 config:
   # Twitch IRC receiver — comma-separated list of channel names to monitor
   twitchChannels: ""

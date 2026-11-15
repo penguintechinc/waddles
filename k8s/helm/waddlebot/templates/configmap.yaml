@@ -106,6 +106,10 @@ data:
   # Gates the per-community Discord/Twitch connect authorize route (hub-api); also tier-gated
   # (Professional) -- tier is bypassed only on *.penguintech.cloud hosts.
   FLAG_WADDLES_COMMUNITY_CONNECTIONS: {{ .Values.config.communityConnectionsEnabled | default false | quote }}
+  # Command-latency canary (alpha only; docs/observability/command-latency.md "Synthetic canary").
+  # Rendered ONLY when latencyCanary.enabled, and then fail-loud (missing ids / non-alpha fail the
+  # render). Read by svc-ingest (driver) and svc-action (confirm point) via envFrom. No secrets.
+{{- include "waddlebot.latencyCanary.env" . }}
   # hub-api login-OAuth redirect-back origin. Only rendered when set (hub-api defaults to localhost:5173).
   {{- if .Values.webui.frontendOrigin }}
   FRONTEND_ORIGIN: {{ .Values.webui.frontendOrigin | quote }}
