@@ -33,12 +33,12 @@ def _render() -> list[dict[str, Any]]:
 
 
 def test_public_urls_carry_port() -> None:
-    """Every public/callback/CORS value in the configmap includes :8443."""
+    """Every public/callback value in the configmap includes :8443."""
     cms = [d for d in _render() if d["kind"] == "ConfigMap" and "IDENTITY_CALLBACK_BASE_URL" in d.get("data", {})]
     assert len(cms) == 1, f"expected 1 config ConfigMap, got {len(cms)}"
     data = cms[0]["data"]
     keys = ("IDENTITY_CALLBACK_BASE_URL", "CONNECTIONS_CALLBACK_BASE_URL", "PUBLIC_WEBUI_URL",
-            "FRONTEND_ORIGIN", "CORS_ORIGIN")
+            "FRONTEND_ORIGIN")
     for k in keys:
         assert data.get(k) == _ORIGIN, f"{k}={data.get(k)!r}"
 

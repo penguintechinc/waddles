@@ -223,36 +223,6 @@ Usage: {{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_p
 {{- end }}
 
 {{/*
-Redis connection URL
-Constructs the Redis connection URL from values.
-Supports both external and internal Redis instances.
-Format: redis://[:password@]host:port[/database]
-*/}}
-{{- define "waddlebot.redis.url" -}}
-{{- if .Values.redis.enabled }}
-{{- $host := printf "%s-redis-master" (include "waddlebot.fullname" .) }}
-{{- $port := .Values.redis.master.service.port | default 6379 }}
-{{- $password := .Values.redis.auth.password | default "" }}
-{{- $database := .Values.redis.database | default 0 }}
-{{- if $password }}
-{{- printf "redis://:%s@%s:%v/%v" $password $host $port $database }}
-{{- else }}
-{{- printf "redis://%s:%v/%v" $host $port $database }}
-{{- end }}
-{{- else }}
-{{- $host := .Values.redis.external.host | required "redis.external.host is required when redis.enabled is false" }}
-{{- $port := .Values.redis.external.port | default 6379 }}
-{{- $password := .Values.redis.external.password | default "" }}
-{{- $database := .Values.redis.external.database | default 0 }}
-{{- if $password }}
-{{- printf "redis://:%s@%s:%v/%v" $password $host $port $database }}
-{{- else }}
-{{- printf "redis://%s:%v/%v" $host $port $database }}
-{{- end }}
-{{- end }}
-{{- end }}
-
-{{/*
 Module image helper
 Simplified image helper for module-specific images.
 Uses global registry and chart version as defaults.
@@ -297,30 +267,6 @@ Usage: {{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "action-
 {{- printf "%s/%s:%s" $registry $repository $tag }}
 {{- else }}
 {{- printf "%s:%s" $repository $tag }}
-{{- end }}
-{{- end }}
-
-{{/*
-Redis host
-Returns the Redis host name.
-*/}}
-{{- define "waddlebot.redis.host" -}}
-{{- if .Values.redis.enabled }}
-{{- printf "%s-redis-master" (include "waddlebot.fullname" .) }}
-{{- else }}
-{{- .Values.redis.external.host | required "redis.external.host is required when redis.enabled is false" }}
-{{- end }}
-{{- end }}
-
-{{/*
-Redis port
-Returns the Redis port.
-*/}}
-{{- define "waddlebot.redis.port" -}}
-{{- if .Values.redis.enabled }}
-{{- .Values.redis.master.service.port | default 6379 }}
-{{- else }}
-{{- .Values.redis.external.port | default 6379 }}
 {{- end }}
 {{- end }}
 

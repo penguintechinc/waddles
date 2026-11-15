@@ -375,27 +375,6 @@ global:
   imageRegistry: "ghcr.io/penguintechinc/waddlebot"
   imageTag: "latest"
   imagePullPolicy: IfNotPresent
-  storageClass: "standard"
-```
-
-**Resource Presets**:
-```yaml
-resourcePresets:
-  small:
-    cpu: "100m"
-    memory: "128Mi"
-    cpuLimit: "500m"
-    memoryLimit: "512Mi"
-  medium:
-    cpu: "250m"
-    memory: "256Mi"
-    cpuLimit: "1000m"
-    memoryLimit: "1Gi"
-  large:
-    cpu: "500m"
-    memory: "512Mi"
-    cpuLimit: "2000m"
-    memoryLimit: "2Gi"
 ```
 
 **Module Configuration Example**:
@@ -423,41 +402,9 @@ processing:
 
 ### Environment Variables
 
-**Shared Environment Variables** (applied to all modules):
-```yaml
-sharedEnv:
-  # Database
-  DB_HOST: "postgresql"
-  DB_PORT: "5432"
-  DB_NAME: "waddlebot"
-  DB_USER: "waddlebot"
-  DB_POOL_SIZE: "20"
-
-  # Redis
-  REDIS_HOST: "redis"
-  REDIS_PORT: "6379"
-  REDIS_DB: "0"
-
-  # SeaweedFS S3 gateway
-  S3_ENDPOINT_URL: "http://infra-seaweedfs:8333"
-  S3_FORCE_PATH_STYLE: "true"
-
-  # Ollama
-  OLLAMA_HOST: "http://ollama:11434"
-  OLLAMA_MODEL: "llama3.1"
-
-  # Qdrant
-  QDRANT_HOST: "qdrant"
-  QDRANT_PORT: "6333"
-
-  # Service URLs
-  ROUTER_URL: "http://router:8000"
-  HUB_URL: "http://hub:8060"
-
-  # Logging
-  LOG_LEVEL: "INFO"
-  LOG_FORMAT: "json"
-```
+**Shared configuration**: the chart renders one `waddlebot-config` ConfigMap
+(`templates/configmap.yaml`) from the `infrastructure.*`, `global.*` and `config.*` values;
+there is no free-form shared env map (the old `sharedEnv` key was removed -- nothing read it).
 
 ### Secrets Management
 
@@ -488,31 +435,15 @@ kubectl create secret generic waddlebot-secrets \
 
 ### Storage Classes
 
-**MicroK8s**:
+Set per component (there is no global storage class key; empty = cluster default):
 ```yaml
-global:
-  storageClass: "microk8s-hostpath"
-```
-
-**kind/minikube**:
-```yaml
-global:
-  storageClass: "standard"
-```
-
-**Cloud Providers**:
-```yaml
-# AWS
-global:
-  storageClass: "gp3"
-
-# GCP
-global:
-  storageClass: "standard-rwo"
-
-# Azure
-global:
-  storageClass: "managed-premium"
+infrastructure:
+  postgresql:
+    persistence:
+      storageClass: "gp3"   # AWS; GCP standard-rwo; Azure managed-premium
+  seaweedfs:
+    persistence:
+      storageClass: "microk8s-hostpath"
 ```
 
 ### Ingress Configuration
@@ -1168,20 +1099,9 @@ spec:
 
 ### External Databases
 
-**Use Managed Services** (recommended):
-```yaml
-sharedEnv:
-  DB_HOST: "postgres.rds.amazonaws.com"
-  REDIS_HOST: "redis.cache.amazonaws.com"
-```
-
-**Connection Pooling**:
-```yaml
-sharedEnv:
-  DB_POOL_SIZE: "50"
-  DB_MAX_OVERFLOW: "20"
-  DB_POOL_TIMEOUT: "30"
-```
+The chart wires every workload to its in-cluster PostgreSQL/Valkey (TLS, verify-full against the
+chart's internal CA); there are no external-database values. The old `sharedEnv.DB_HOST` /
+`REDIS_HOST` overrides were removed -- nothing read them.
 
 ### TLS/SSL Configuration
 

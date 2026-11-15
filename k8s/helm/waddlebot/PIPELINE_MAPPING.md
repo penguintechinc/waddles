@@ -74,11 +74,9 @@ collided — only the object names did. Confirmed no duplicate `metadata.name` r
 
 ## What remains (NOT done by this skeleton)
 
-- **Per-module App-bundle wiring inside each container.** The env vars this skeleton renders
-  (`MODULE_LOAD_BOT`, `MODULE_LOAD_SOCIAL`, etc.) are a values→env passthrough proving the
-  toggle reaches every stage a Module touches. The Python-side conditional import of each
-  Module's App bundle behind those env vars does not exist yet — that's the larger remaining
-  build referenced in the task.
+- **Per-module App-bundle wiring inside each container.** The skeleton's `MODULE_LOAD_*`
+  env passthrough (`modules.{bot,customer,marketing}.enabled`) was removed: nothing read it.
+  Features ship as app bundles instead; `modules.social.enabled` still gates svc-rtc.
 - **No Dockerfiles/CI images exist yet** for `svc-ingest`/`svc-process`/`svc-action`/
   `svc-core`/`hub-api`/`hub-webui`/`svc-rtc`. The skeleton pins each container's `image:` to
   the repo's existing base-image digest (`python:3.13-slim-bookworm@sha256:...` for the

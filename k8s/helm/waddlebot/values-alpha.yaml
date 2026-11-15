@@ -56,7 +56,6 @@ infrastructure:
       limits: { cpu: "1000m", memory: "1Gi" }
   redis:
     enabled: true
-    replicas: 1
     persistence: {size: 512Mi}
     # fix/valkey-tls-alpha -- dual-listener TLS port for the 3 Rust data-plane pods, whose
     # `penguin_spine::SpineConfig::validate()` fail-closes on plaintext VALKEY_URL. Real CA/

@@ -23,8 +23,6 @@ webui:
   frontendOrigin: "https://waddles-alpha.penguintech.cloud:8443"
 
 global:
-  # Public origin incl. :8443 (CF -> NAT :8443 -> Gateway:443; plain :443 is beta): hub-api CORS_ORIGIN.
-  corsOrigin: "https://waddles-alpha.penguintech.cloud:8443"
   # fix/alpha-helm-deploy -- was "" (empty), which (a) rendered every
   # pipeline app container on its shared stock base image instead of its own
   # app image (templates/hub-api.yaml et al now use waddlebot.legacyModuleImage
@@ -97,7 +95,6 @@ infrastructure:
       limits: { cpu: "1000m", memory: "1Gi" }
   redis:
     enabled: true
-    replicas: 1
     persistence: {size: 512Mi}
     # fix/valkey-tls-alpha -- dual-listener TLS port for the 3 Rust data-plane pods, whose
     # `penguin_spine::SpineConfig::validate()` fail-closes on plaintext VALKEY_URL. Real CA/

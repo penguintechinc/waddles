@@ -42,9 +42,6 @@ global:
   # Secrets for pulling from private registries (if needed)
   imagePullSecrets: []
 
-  # Default storage class for persistent volumes
-  storageClass: "standard"
-
   # OVERRIDE REQUIRED: override via --set or values override file
   # Security secrets (set via kubectl create secret or values override)
   # Defaults match docker-compose.yml for local development consistency
@@ -436,24 +433,6 @@ serviceAccount:
   name: "waddlebot"
   annotations: {}
 
-# Resource presets
-resourcePresets:
-  small:
-    cpu: "100m"
-    memory: "128Mi"
-    cpuLimit: "500m"
-    memoryLimit: "512Mi"
-  medium:
-    cpu: "250m"
-    memory: "256Mi"
-    cpuLimit: "1000m"
-    memoryLimit: "1Gi"
-  large:
-    cpu: "500m"
-    memory: "512Mi"
-    cpuLimit: "2000m"
-    memoryLimit: "2Gi"
-
 # Infrastructure Services
 infrastructure:
   # PostgreSQL Database
@@ -622,7 +601,6 @@ infrastructure:
       runAsGroup: 999
       capabilities:
         drop: ["ALL"]
-    port: 6379
     password: "REPLACE_ME"  # Only used for secrets, actual Redis already running
     # Module-specific Redis passwords (matches docker-compose.yml ACL setup)
     modulePasswords:
@@ -684,7 +662,6 @@ infrastructure:
       name: "infra-redis"
       port: 6379
       type: ClusterIP
-    replicas: 1
     resources:
       requests:
         cpu: "100m"
@@ -903,7 +880,6 @@ infrastructure:
       type: ClusterIP
       s3Port: 8333
       masterPort: 9333
-    replicas: 1
     resources:
       requests:
         cpu: "250m"
@@ -917,7 +893,6 @@ infrastructure:
     # too, which is cosmetic only (see README.md Migration Notes for the
     # documented rename-and-copy path if a clean name is ever wanted).
     persistence:
-      enabled: true
       name: "minio-data"
       accessMode: ReadWriteOnce
       storageClass: ""
@@ -966,13 +941,9 @@ infrastructure:
       runAsGroup: 1000
       capabilities:
         drop: ["ALL"]
-    port: 11434
-    defaultProvider: "ollama"
-    defaultModel: "tinyllama"
     service:
       name: "ai-ollama"
       port: 11434
-    replicas: 1
     resources:
       requests:
         cpu: "500m"
@@ -981,7 +952,6 @@ infrastructure:
         cpu: "2000m"
         memory: "2Gi"
     persistence:
-      enabled: true
       name: "ollama-data"   # templates/infrastructure/ollama.yaml PVC name (was unset: empty-name PVC, `helm lint` warning)
       accessMode: ReadWriteOnce
       size: 30Gi
@@ -1010,12 +980,9 @@ infrastructure:
       runAsGroup: 1000
       capabilities:
         drop: ["ALL"]
-    port: 6333
-    grpcPort: 6334
     service:
       name: "infra-qdrant"
       port: 6333
-    replicas: 1
     resources:
       requests:
         cpu: "250m"
@@ -1024,17 +991,9 @@ infrastructure:
         cpu: "1000m"
         memory: "1Gi"
     persistence:
-      enabled: true
       name: "qdrant-data"   # templates/infrastructure/qdrant.yaml PVC name (was unset: empty-name PVC, `helm lint` warning)
       accessMode: ReadWriteOnce
       size: 10Gi
-
-  # Apache OpenWhisk (Serverless)
-  openwhisk:
-    enabled: false
-    # OpenWhisk requires complex setup - typically deployed separately
-    apiHost: ""
-    apiKey: ""
 
 # PostHog (Community Edition, trimmed) — self-hosted feature-flag execution
 # plane. DISABLED by default; enable per-env by setting posthog.enabled: true
@@ -1255,7 +1214,6 @@ bundleAdminRequest:
 
 pipeline:
   pythonBaseImage: "python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb"
-  nodeBaseImage: "node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0"
 
   # T10 (v3 demo) — shared runner identity across svc-ingest/svc-process/svc-action.
   # RUNNER_TENANT_SLUG scopes stage_runner.py to one tenant; deliberately NOT paired
@@ -2350,42 +2308,13 @@ bundleExecutor:
 
 # Module verticals + migrations image
 modules:
-  # v3.0.x Task 0.5 — Module verticals (Bot/Social/Customer/Marketing) that load into the
-  # pipeline containers above via modules.<name>.enabled. NOT per-module pods — see
-  # docs/architecture/core-boundary.md and docs/plans/2026-08-26-v3-scbm-apps-design.md
-  # "## Deployment" > "### Modules cut across stages".
-  bot:
-    enabled: true
+  # Social module: gates svc-rtc (templates/svc-rtc.yaml, with pipeline.svcRtc.enabled).
   social:
     enabled: true
-  customer:
-    enabled: false
-  marketing:
-    enabled: false
 
   migrations:
-    enabled: true
-    name: migrations
     image: migrations
     imageTag: ""
-    port: 8999
-    replicas: 1
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 8999
-    env:
-      MODULE_NAME: "migrations_module"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8999"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "100m"
-        memory: "128Mi"
-      limits:
-        cpu: "500m"
-        memory: "512Mi"
 
 # Ingress Configuration
 ingress:
@@ -2464,26 +2393,6 @@ waddleai:
 
 # Connector Configuration (svc-ingest channels and overrides)
 config:
-  # Twitch IRC receiver — comma-separated list of channel names to monitor
-  twitchChannels: ""
-  # Kick Pusher receiver — comma-separated list of channel slugs to monitor
-  kickChannels: ""
-  # Kick Pusher PUBLIC client key (not a secret, Kick's public key for websocket)
-  kickPusherKey: ""
-  # Kick Pusher cluster (e.g. "mt1" — empty uses Kick's default)
-  kickPusherCluster: ""
-  # YouTube Live poll receiver — comma-separated list of channel IDs to monitor
-  youtubeLiveChannels: ""
-  # RSI Spectrum one-way ingest (gh #101) — comma-separated forum channel ids / lobby ids
-  spectrumForumChannels: ""
-  spectrumLobbies: ""
-  # ENV baseline for flag waddles.spectrum-integration (default OFF; PostHog overrides when connected)
-  spectrumIntegrationEnabled: false
-  # Spectrum org sync (gh #101) — comma-separated Spectrum community ids; each gets a roster + an
-  # events poller (snapshot-diffed in Valkey). Needs spectrumIntegrationEnabled AND spectrumOrgSyncEnabled.
-  spectrumOrgCommunities: ""
-  # ENV baseline for flag waddles.spectrum-org-sync (default OFF; PostHog overrides when connected)
-  spectrumOrgSyncEnabled: false
   # ENV baseline for flag waddles.calendar.event_discord_sync (default OFF; PostHog overrides when connected)
   eventDiscordSyncEnabled: false
   # ENV baseline for flag waddles.role_sync -> FLAG_WADDLES_ROLE_SYNC (default OFF;
@@ -2492,86 +2401,6 @@ config:
   # ENV baselines for waddles.community.guild_pairing / waddles.webui.role_sync_mapping (default OFF).
   guildPairingEnabled: false
   webuiRoleSyncMappingEnabled: false
-  spectrumOrgPollIntervalS: 300
-  # A roster shrinking by more than this fraction in one poll is held back as an RSI glitch, not emitted
-  spectrumRosterMaxDepartureRatio: 0.5
-  # Emit the whole current roster/event list as joined/created on the first poll (bootstrap only)
-  spectrumOrgEmitBacklog: false
-
-# Dependencies Configuration
-dependencies:
-  ollama:
-    enabled: true  # Use existing K8s daemonset/service
-    host: "ollama-service"  # K8s service name
-    port: 11434
-  qdrant:
-    enabled: true  # Use existing K8s service
-    host: "infra-qdrant"
-    port: 6333
-
-# Shared Environment Variables (applied to all modules)
-sharedEnv:
-  # Database Configuration
-  DB_HOST: "postgresql"
-  DB_PORT: "5432"
-  DB_NAME: "waddlebot"
-  DB_USER: "waddlebot"
-  # DB_PASSWORD should be set via secrets
-  DB_POOL_SIZE: "20"
-  DB_MAX_OVERFLOW: "10"
-
-  # Redis Configuration
-  REDIS_HOST: "redis"
-  REDIS_PORT: "6379"
-  REDIS_DB: "0"
-  # REDIS_PASSWORD should be set via secrets
-
-  # SeaweedFS S3 gateway configuration (was MinIO)
-  MINIO_ENDPOINT: "seaweedfs:8333"
-  MINIO_SECURE: "false"
-  # MINIO_ACCESS_KEY and MINIO_SECRET_KEY should be set via secrets
-
-  # Ollama Configuration
-  OLLAMA_HOST: "http://ollama:11434"
-  OLLAMA_MODEL: "llama3.1"
-
-  # Qdrant Configuration
-  QDRANT_HOST: "qdrant"
-  QDRANT_PORT: "6333"
-  QDRANT_GRPC_PORT: "6334"
-
-
-
-  # Logging Configuration
-  LOG_LEVEL: "INFO"
-  LOG_FORMAT: "json"
-  LOG_FILE_ENABLED: "true"
-  LOG_FILE_PATH: "/var/log/waddlebotlog"
-  LOG_FILE_MAX_BYTES: "10485760"
-  LOG_FILE_BACKUP_COUNT: "5"
-
-  # License Server
-  LICENSE_SERVER_URL: "https://license.penguintech.io"
-  RELEASE_MODE: "false"
-
-  # Feature Flags
-  ENABLE_METRICS: "true"
-  ENABLE_TRACING: "false"
-  ENABLE_PROFILING: "false"
-
-# Persistent Volume Claims
-persistence:
-  logs:
-    enabled: true
-    size: 10Gi
-    storageClass: ""
-    accessMode: ReadWriteMany
-
-# Service Account
-serviceAccount:
-  create: true
-  annotations: {}
-  name: "waddlebot"
 
 # Pod Security Context
 # Graceful shutdown (templates/_resilience.tpl), applied to EVERY Deployment: a preStop sleep
@@ -2716,19 +2545,6 @@ waitForHubApi:
   stableChecks: 3
   stableIntervalSeconds: 5
   maxBackoffSeconds: 30
-
-# Monitoring & Observability
-monitoring:
-  prometheus:
-    enabled: false
-    serviceMonitor:
-      enabled: false
-      interval: 30s
-
-  grafana:
-    enabled: false
-    dashboards:
-      enabled: false
 
 # HTTPRoute Configuration (Cilium Gateway API)
 httproute:

@@ -314,22 +314,6 @@ spec:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: VALKEY_DURABLE_PASSWORD
         {{- end }}
-        {{- if .Values.modules.bot.enabled }}
-        - name: MODULE_LOAD_BOT
-          value: "true"
-        {{- end }}
-        {{- if .Values.modules.social.enabled }}
-        - name: MODULE_LOAD_SOCIAL
-          value: "true"
-        {{- end }}
-        {{- if .Values.modules.customer.enabled }}
-        - name: MODULE_LOAD_CUSTOMER
-          value: "true"
-        {{- end }}
-        {{- if .Values.modules.marketing.enabled }}
-        - name: MODULE_LOAD_MARKETING
-          value: "true"
-        {{- end }}
         # Per-environment env baseline (e.g. FLAG_<KEY> feature-flag fallbacks honoured by
         # flask_core when PostHog is unresolved). Free-tier flags only -- license flags are
         # never env-bypassable. Rendered last so an explicit entry here wins on collision.
