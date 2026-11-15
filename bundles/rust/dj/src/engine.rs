@@ -1,32 +1,30 @@
-//! The DJ engine: storage, song requests, queue moderation, advance/playback
-//! and the AI DJ fill. Generic over [`Host`], so the identical code runs in
-//! the component and natively under test.
+//! The DJ engine: storage, audit, the policy pipeline, old-queue migration and
+//! the AI DJ planner over the shared music-requests queue. Generic over [`Host`],
+//! so the identical code runs in the component and natively under test.
 //!
-//! User-facing denials are `Ok(reply text)`; only infrastructure failures
-//! (kv down, corrupt state) are `Err(DjError)` and fail loud.
+//! The DJ owns NO request queue: it reads the shared queue (`requests.list`),
+//! adds `kind: "dj"` picks (`requests.add`) and reads/sets the single stored
+//! AI DJ switch (`dj.get`/`dj.set`). User-facing denials are `Ok(reply text)`;
+//! only infrastructure failures (kv down, corrupt state) are `Err(DjError)`.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::ai;
 use crate::host::{Host, Level};
 use crate::model::*;
 use crate::music;
 use crate::policy::{self, Config, Violation};
+use crate::requests::{self, ReqError};
 
 pub const KEY_CONFIG: &str = "dj.config";
 pub const KEY_STATE: &str = "dj.state";
 pub const KEY_AUDIT: &str = "dj.audit";
-pub const KEY_PUBLIC: &str = "dj.public_state";
-/// Overlay surfaces this bundle OWNS (`<app_id>.<name>`, declared in `owned_surfaces`).
-pub const SURFACE_NOW_PLAYING: &str = "waddles.core.example.dj.now_playing";
-/// Up-next surface (at most [`SURFACE_QUEUE_MAX`] tracks).
-pub const SURFACE_QUEUE: &str = "waddles.core.example.dj.queue";
-/// Contract bounds (`bundles/contracts/surfaces.v1.json`).
-pub const SURFACE_QUEUE_MAX: usize = 25;
-const SURFACE_TEXT_MAX: usize = 200;
-pub const ECONOMY_TARGET: &str = "waddles.core.service.economy";
+/// Set once the pre-1.1.0 kv queue has been exported to the service.
+pub const KEY_MIGRATED: &str = "dj.migrated";
+/// Old overlay snapshot key (deleted by the migration; music owns the overlay now).
+const KEY_OLD_PUBLIC: &str = "dj.public_state";
 
 /// Infrastructure failure (never a user mistake).
 #[derive(Debug, thiserror::Error)]
@@ -75,8 +73,11 @@ fn fmt_track(t: &Track) -> String {
     format!("{} - {} [{}]", t.title, t.artist, fmt_dur(t.duration_s))
 }
 
-fn parse_id(tok: Option<&&str>) -> Option<u64> {
-    tok?.trim_start_matches('#').parse().ok()
+/// What the shared queue holds right now, as dedupe keys + titles.
+#[derive(Default)]
+struct Live {
+    keys: Vec<String>,
+    titles: Vec<String>,
 }
 
 impl<'a> Engine<'a> {
@@ -108,57 +109,9 @@ impl<'a> Engine<'a> {
         self.load(KEY_STATE)
     }
 
-    /// Persists state and refreshes the overlay-facing public snapshot.
+    /// Persists the DJ state (bans, recent picks, cursors).
     pub(crate) fn save_state(&self, st: &State) -> Result<(), DjError> {
-        self.save(KEY_STATE, st, 0)?;
-        let public = PublicState {
-            now_playing: st.now.as_ref().map(PublicTrack::from),
-            queue: st
-                .queue
-                .iter()
-                .filter(|i| i.status == Status::Queued)
-                .take(25)
-                .map(PublicTrack::from)
-                .collect(),
-            updated_ms: self.host.now_ms(),
-        };
-        self.save(KEY_PUBLIC, &public, 0)?;
-        self.publish_overlay(&public);
-        Ok(())
-    }
-
-    /// Publishes the public snapshot to this bundle's own overlay surfaces. State is already
-    /// persisted, so a refusal is logged loudly (surface + code only) and never fails the
-    /// command; the next state change republishes the full snapshot.
-    fn publish_overlay(&self, public: &PublicState) {
-        let queue: Vec<_> = public
-            .queue
-            .iter()
-            .take(SURFACE_QUEUE_MAX)
-            .map(surface_track)
-            .collect();
-        let frames = [
-            (
-                SURFACE_NOW_PLAYING,
-                serde_json::json!({
-                    "now_playing": public.now_playing.as_ref().map(surface_track),
-                    "updated_ms": public.updated_ms,
-                }),
-            ),
-            (
-                SURFACE_QUEUE,
-                serde_json::json!({ "queue": queue, "updated_ms": public.updated_ms }),
-            ),
-        ];
-        for (surface, payload) in frames {
-            if let Err(code) = self.host.publish_surface(surface, &payload.to_string()) {
-                self.host.log(
-                    Level::Error,
-                    "dj surface publish failed",
-                    serde_json::json!({ "surface": surface, "error": code }),
-                );
-            }
-        }
+        self.save(KEY_STATE, st, 0)
     }
 
     /// Appends one PII-free audit row and a matching log line.
@@ -189,7 +142,8 @@ impl<'a> Engine<'a> {
 
     // ---- dispatch ------------------------------------------------------
 
-    /// Routes one chat line. `Ok(None)` = not a DJ command.
+    /// Routes one chat line. `Ok(None)` = not a DJ command. Only `!dj` exists:
+    /// viewer request commands belong to the music bundle.
     pub fn handle(&self, text: &str) -> Result<Option<String>, DjError> {
         let text = text.trim();
         let first = match text.split_whitespace().next() {
@@ -198,9 +152,10 @@ impl<'a> Engine<'a> {
         };
         let args = text[first.len()..].trim();
         match first.to_ascii_lowercase().as_str() {
-            "!sr" | "!songrequest" => self.request(args).map(Some),
-            "!music" | "!queue" => self.music(args).map(Some),
-            "!dj" => self.dj(args).map(Some),
+            "!dj" => {
+                self.migrate_old_queue()?;
+                self.dj(args).map(Some)
+            }
             _ => Ok(None),
         }
     }
@@ -215,18 +170,11 @@ impl<'a> Engine<'a> {
 
     // ---- policy pipeline ----------------------------------------------
 
-    /// Deterministic policy, approval gate, then the optional AI judge for
-    /// fuzzy rules. AI failure or low confidence holds for a moderator.
-    pub fn decide(&self, cfg: &Config, st: &State, track: &Track) -> Decision {
-        if let Some(v) = policy::evaluate(cfg, st, track, self.host.now_ms(), None) {
+    /// Deterministic policy, then the optional AI judge for fuzzy rules. AI failure
+    /// or low confidence HOLDS: the pick is not made and the decision is audited.
+    pub fn decide(&self, cfg: &Config, st: &State, track: &Track, live: &[String]) -> Decision {
+        if let Some(v) = policy::evaluate(cfg, st, track, self.host.now_ms(), live) {
             return Decision::Reject(v);
-        }
-        if cfg.approval_required {
-            return Decision::Hold {
-                rule: "approval_required".into(),
-                reason: "waiting for moderator approval".into(),
-                by: DecidedBy::Deterministic,
-            };
         }
         let meta = format!(
             "{} - {} (channel: {}) provider: {}",
@@ -240,19 +188,11 @@ impl<'a> Engine<'a> {
                 Ok((violates, conf)) if conf >= ai::MIN_CONFIDENCE => {
                     if violates {
                         let reason = format!("does not fit the channel rules ({rule})");
-                        return if cfg.auto_remove {
-                            Decision::Reject(Violation {
-                                rule: "ai_fuzzy",
-                                reason,
-                                decided_by: DecidedBy::Ai,
-                            })
-                        } else {
-                            Decision::Hold {
-                                rule: "ai_fuzzy".into(),
-                                reason,
-                                by: DecidedBy::Ai,
-                            }
-                        };
+                        return Decision::Reject(Violation {
+                            rule: "ai_fuzzy",
+                            reason,
+                            decided_by: DecidedBy::Ai,
+                        });
                     }
                 }
                 Ok(_) => {
@@ -274,534 +214,230 @@ impl<'a> Engine<'a> {
         Decision::Allow
     }
 
-    // ---- song requests --------------------------------------------------
+    // ---- old-queue migration ----------------------------------------------
 
-    fn resolve_candidates(&self, cfg: &Config, query: &str) -> Result<Vec<Track>, String> {
-        if query.starts_with("http://") || query.starts_with("https://") {
-            let provider =
-                music::provider_for_url(query).ok_or("that link is not a supported music site")?;
-            if !cfg.providers.iter().any(|p| p == provider) {
-                return Err(format!("{provider} is not enabled here"));
-            }
-            return match music::resolve(self.host, provider, query) {
-                Ok(Some(t)) => Ok(vec![t]),
-                Ok(None) => Err("I could not find that song".into()),
-                Err(e) => Err(e.to_string()),
-            };
-        }
-        let mut last_err = None;
-        for provider in &cfg.providers {
-            match music::search(self.host, provider, query, 3) {
-                Ok(t) if !t.is_empty() => return Ok(t),
-                Ok(_) => {}
-                Err(e) => last_err = Some(e.to_string()),
-            }
-        }
-        Err(last_err.unwrap_or_else(|| "no songs found".to_string()))
-    }
-
-    fn charge(&self, cfg: &Config, actor: &str) -> Result<u64, String> {
-        if cfg.request_cost == 0 {
-            return Ok(0);
-        }
-        let key = format!("dj.sr.{}", self.ctx.message_id);
-        self.host
-            .invoke(
-                ECONOMY_TARGET,
-                "adjust_balance",
-                &json!({"user": actor, "delta": -(cfg.request_cost as i64)}),
-                Some(&key),
-            )
-            .map(|_| cfg.request_cost)
-            .map_err(|e| {
-                self.host.log(
-                    Level::Warn,
-                    "request charge failed",
-                    json!({"error": e.to_string()}),
-                );
-                "you cannot afford that request (or points are unavailable)".to_string()
-            })
-    }
-
-    /// Refunds an item's cost (idempotent per item id). Returns a reply suffix.
-    pub(crate) fn refund(&self, item: &Item) -> String {
-        let Some(user) = item.requester.as_deref().filter(|_| item.paid > 0) else {
-            return String::new();
-        };
-        let key = format!("dj.refund.{}", item.id);
-        match self.host.invoke(
-            ECONOMY_TARGET,
-            "adjust_balance",
-            &json!({"user": user, "delta": item.paid as i64}),
-            Some(&key),
-        ) {
-            Ok(_) => " (refunded)".to_string(),
-            Err(e) => {
-                self.host.log(
-                    Level::Error,
-                    "refund failed",
-                    json!({"item": item.id, "error": e.to_string()}),
-                );
-                " (refund failed - a moderator will fix it)".to_string()
-            }
-        }
-    }
-
-    /// `!sr <query|url>`.
-    pub fn request(&self, args: &str) -> Reply {
-        let cfg = self.config()?;
-        if !cfg.requests_enabled {
-            return Ok("song requests are closed".into());
-        }
-        let Some(actor) = self.ctx.actor.clone() else {
-            return Ok("link your account to request songs".into());
-        };
-        let query = clean_text(args, 200);
-        if query.is_empty() {
-            return Ok("usage: !sr <song name or link>".into());
-        }
-        let cd_key = format!("dj.cd.{actor}");
-        if cfg.cooldown_s > 0
-            && self
-                .host
-                .kv_get(&cd_key)
-                .map_err(DjError::Storage)?
-                .is_some()
+    /// One-shot, per community: exports the pre-1.1.0 kv queue to the service via
+    /// `requests.import`, then drops it from `dj.state` and sets `dj.migrated`. An
+    /// "already imported" refusal counts as done; any other failure keeps the old
+    /// queue and retries on the next invocation. Never fails the command itself.
+    pub(crate) fn migrate_old_queue(&self) -> Result<(), DjError> {
+        if self
+            .host
+            .kv_get(KEY_MIGRATED)
+            .map_err(DjError::Storage)?
+            .is_some()
         {
-            return Ok(format!(
-                "slow down, you can request again every {}s",
-                cfg.cooldown_s
-            ));
+            return Ok(());
         }
-        let mut st = self.state()?;
-        if st.queue.len() >= cfg.max_queue as usize {
-            return Ok("the queue is full".into());
-        }
-        let mine = st
-            .queue
-            .iter()
-            .filter(|i| i.requester.as_deref() == Some(actor.as_str()))
-            .count();
-        if mine >= cfg.max_per_user as usize {
-            return Ok(format!(
-                "you already have {mine} requests queued (max {})",
-                cfg.max_per_user
-            ));
-        }
-        let candidates = match self.resolve_candidates(&cfg, &query) {
-            Ok(c) => c,
-            Err(msg) => return Ok(msg),
+        let mut raw: Value = match self.host.kv_get(KEY_STATE).map_err(DjError::Storage)? {
+            None => json!({}),
+            Some(b) => {
+                serde_json::from_slice(&b).map_err(|_| DjError::Corrupt(KEY_STATE.to_string()))?
+            }
         };
-
-        let mut first_hold: Option<(Track, String, String, DecidedBy)> = None;
-        let mut first_reject: Option<(Track, Violation)> = None;
-        let mut chosen: Option<Track> = None;
-        for t in candidates {
-            match self.decide(&cfg, &st, &t) {
-                Decision::Allow => {
-                    chosen = Some(t);
-                    break;
-                }
-                Decision::Hold { rule, reason, by } => {
-                    if first_hold.is_none() {
-                        first_hold = Some((t, rule, reason, by));
-                    }
-                }
-                Decision::Reject(v) => {
-                    if first_reject.is_none() {
-                        first_reject = Some((t, v));
-                    }
+        let items = old_queue_items(&raw);
+        if !items.is_empty() {
+            match requests::import(self.host, &items, "dj.migrate.queue") {
+                Ok(n) => self.host.log(
+                    Level::Info,
+                    "dj old queue migrated",
+                    json!({"imported": n, "old": items.len()}),
+                ),
+                Err(e) if requests::import_already_done(&e) => self.host.log(
+                    Level::Info,
+                    "dj old queue already imported",
+                    json!({"old": items.len()}),
+                ),
+                Err(e) => {
+                    self.host.log(
+                        Level::Warn,
+                        "dj old queue migration deferred",
+                        json!({"error": e.to_string()}),
+                    );
+                    return Ok(());
                 }
             }
         }
-
-        let (track, status, reason, rule, by) = if let Some(t) = chosen {
-            (
-                t,
-                Status::Queued,
-                None,
-                "allowed".to_string(),
-                DecidedBy::Deterministic,
-            )
-        } else if let Some((t, rule, reason, by)) = first_hold {
-            (t, Status::Pending, Some(reason), rule, by)
-        } else if let Some((t, v)) = first_reject {
-            let id = st.next_id + 1;
-            st.next_id = id;
-            let item = Item {
-                id,
-                track: t,
-                requester: Some(actor),
-                status: Status::Pending,
-                source: Source::Request,
-                added_ms: self.host.now_ms(),
-                reason: Some(v.reason.clone()),
-                paid: 0,
-            };
-            st.rejected.push(Rejected {
-                item,
-                rule: v.rule.to_string(),
-            });
-            if st.rejected.len() > REJECTED_CAP {
-                st.rejected.remove(0);
+        if let Some(o) = raw.as_object_mut() {
+            for k in ["queue", "now", "rejected", "next_id"] {
+                o.remove(k);
             }
-            self.save_state(&st)?;
-            self.audit(id, v.rule, v.decided_by, Outcome::Rejected)?;
-            return Ok(format!("request #{id} removed: {}", v.reason));
-        } else {
-            return Ok("no songs found".into());
-        };
-
-        let paid = match self.charge(&cfg, &actor) {
-            Ok(p) => p,
-            Err(msg) => return Ok(msg),
-        };
-        let id = st.next_id + 1;
-        st.next_id = id;
-        let line = fmt_track(&track);
-        let item = Item {
-            id,
-            track,
-            requester: Some(actor),
-            status,
-            source: Source::Request,
-            added_ms: self.host.now_ms(),
-            reason: reason.clone(),
-            paid,
-        };
-        st.queue.push(item.clone());
-        let pos = st
-            .queue
-            .iter()
-            .filter(|i| i.status == Status::Queued)
-            .count();
-        if let Err(e) = self.save_state(&st) {
-            // Do not keep the user's points for a request that was never stored.
-            self.refund(&item);
-            return Err(e);
-        }
-        if cfg.cooldown_s > 0 {
+            let bytes = serde_json::to_vec(&raw).map_err(|e| DjError::Storage(e.to_string()))?;
             self.host
-                .kv_set(&cd_key, b"1", cfg.cooldown_s)
+                .kv_set(KEY_STATE, &bytes, 0)
                 .map_err(DjError::Storage)?;
         }
-        let outcome = if status == Status::Queued {
-            Outcome::Enqueued
-        } else {
-            Outcome::Held
+        self.host
+            .kv_delete(KEY_OLD_PUBLIC)
+            .map_err(DjError::Storage)?;
+        self.host
+            .kv_set(KEY_MIGRATED, b"1", 0)
+            .map_err(DjError::Storage)
+    }
+
+    // ---- planner (fill / next) -------------------------------------------
+
+    /// Plans DJ picks from the SHARED queue. Every invocation re-reads the queue
+    /// (`advance_due` then `list`) before deciding; a periodic hook is still a host gap.
+    /// When the service says the AI DJ is off (or the DJ is not granted) NO pick is made.
+    pub fn plan(&self, cfg: &Config) -> Reply {
+        const OFF: &str = "the AI DJ is off, so no picks were made (turn it on with !dj ai on)";
+        let on = match requests::dj_get(self.host) {
+            Ok(b) => b,
+            Err(e) => return Ok(e.user_msg()),
         };
-        self.audit(id, &rule, by, outcome)?;
-        Ok(match status {
-            Status::Queued => format!("queued #{id}: {line} (position {pos})"),
-            Status::Pending => format!("request #{id} is waiting for moderator approval: {line}"),
-        })
-    }
-
-    // ---- !music ----------------------------------------------------------
-
-    fn music(&self, args: &str) -> Reply {
-        let toks: Vec<&str> = args.split_whitespace().collect();
-        let verb = toks
-            .first()
-            .map_or_else(String::new, |s| s.to_ascii_lowercase());
-        match verb.as_str() {
-            "" | "list" | "queue" => self.show(),
-            "now" => self.now_playing(),
-            "remove" => self.remove(parse_id(toks.get(1))),
-            "next" | "skip" => match self.need_mod() {
-                Some(m) => Ok(m),
-                None => self.skip(),
-            },
-            "approve" => self.mod_only(|| self.approve(parse_id(toks.get(1)))),
-            "ban" => self.mod_only(|| self.ban(parse_id(toks.get(1)))),
-            "restore" => self.mod_only(|| self.restore(parse_id(toks.get(1)))),
-            "clear" => self.mod_only(|| self.clear()),
-            "move" => self.mod_only(|| self.move_item(parse_id(toks.get(1)), toks.get(2).and_then(|t| t.parse::<usize>().ok()))),
-            _ => Ok("usage: !music [now|remove <id>|skip|approve <id>|ban <id>|restore <id>|move <id> <pos>|clear]".into()),
+        if !on {
+            return Ok(OFF.into());
         }
-    }
-
-    pub(crate) fn mod_only(&self, f: impl FnOnce() -> Reply) -> Reply {
-        match self.need_mod() {
-            Some(m) => Ok(m),
-            None => f(),
+        if let Err(e) = requests::advance_due(self.host) {
+            return Ok(e.user_msg());
         }
-    }
-
-    fn now_playing(&self) -> Reply {
-        let st = self.state()?;
-        Ok(match st.now {
-            Some(i) => format!("now playing: {}", fmt_track(&i.track)),
-            None => "nothing is playing".into(),
-        })
-    }
-
-    fn show(&self) -> Reply {
-        let st = self.state()?;
-        let mut parts = Vec::new();
-        if let Some(n) = &st.now {
-            parts.push(format!("now: {}", fmt_track(&n.track)));
-        }
-        let queued: Vec<String> = st
-            .queue
-            .iter()
-            .filter(|i| i.status == Status::Queued)
-            .take(5)
-            .map(|i| format!("#{} {}", i.id, fmt_track(&i.track)))
-            .collect();
-        if queued.is_empty() {
-            parts.push("queue is empty".into());
-        } else {
-            parts.push(format!("next: {}", queued.join(" | ")));
-        }
-        let pending = st
-            .queue
-            .iter()
-            .filter(|i| i.status == Status::Pending)
-            .count();
-        if pending > 0 && self.ctx.is_mod {
-            parts.push(format!("{pending} awaiting approval"));
-        }
-        Ok(parts.join(" || "))
-    }
-
-    fn remove(&self, id: Option<u64>) -> Reply {
-        let Some(id) = id else {
-            return Ok("usage: !music remove <id>".into());
+        let snap = match requests::list(self.host, 100) {
+            Ok(s) => s,
+            Err(e) => return Ok(e.user_msg()),
         };
+        if !snap.ai_dj_on {
+            return Ok(OFF.into());
+        }
+        let viewer = snap.queue.iter().filter(|i| i.kind != "dj").count() as u32;
+        let dj_queued = snap.queue.iter().filter(|i| i.kind == "dj").count() as u32;
+        if viewer >= cfg.dj_min_queue {
+            return Ok(format!(
+                "{viewer} viewer requests are queued (the DJ steps in below {}); no pick needed",
+                cfg.dj_min_queue
+            ));
+        }
+        let want = cfg.dj_min_queue - viewer;
+        // Interleave: after N viewer requests the DJ may hold one more pick; with fewer
+        // it may still hold one so an idle queue is never silent. Viewer requests are
+        // never displaced: picks are only ever appended.
+        let allowed = (viewer / cfg.dj_requests_per_pick.max(1)).max(1);
+        let picks = want.min(allowed.saturating_sub(dj_queued));
+        if picks == 0 {
+            return Ok(format!(
+                "the queue already has {dj_queued} DJ pick(s) for {viewer} viewer request(s); waiting"
+            ));
+        }
+        let mut live = Live::default();
+        for i in snap.queue.iter().chain(snap.now_playing.iter()) {
+            live.keys.push(policy::live_key(&i.title, &i.artist));
+            live.titles.push(i.title.clone());
+        }
         let mut st = self.state()?;
-        let Some(pos) = st.queue.iter().position(|i| i.id == id) else {
-            return Ok(format!("no request #{id}"));
-        };
-        let owner = st.queue[pos].requester.is_some() && st.queue[pos].requester == self.ctx.actor;
-        if !(owner || self.ctx.is_mod) {
-            return Ok("you can only remove your own requests".into());
-        }
-        let item = st.queue.remove(pos);
-        self.save_state(&st)?;
-        self.audit(
-            id,
-            if owner { "owner_remove" } else { "mod_remove" },
-            DecidedBy::Moderator,
-            Outcome::Removed,
-        )?;
-        Ok(format!("removed #{id}{}", self.refund(&item)))
-    }
-
-    fn skip(&self) -> Reply {
-        let cfg = self.config()?;
-        let mut st = self.state()?;
-        if let Some(n) = &st.now {
-            self.audit(n.id, "mod_skip", DecidedBy::Moderator, Outcome::Skipped)?;
-        }
-        self.advance(&cfg, &mut st)
-    }
-
-    fn approve(&self, id: Option<u64>) -> Reply {
-        let Some(id) = id else {
-            return Ok("usage: !music approve <id>".into());
-        };
-        let mut st = self.state()?;
-        let Some(item) = st
-            .queue
-            .iter_mut()
-            .find(|i| i.id == id && i.status == Status::Pending)
-        else {
-            return Ok(format!("no pending request #{id}"));
-        };
-        item.status = Status::Queued;
-        item.reason = None;
-        self.save_state(&st)?;
-        self.audit(id, "mod_approve", DecidedBy::Moderator, Outcome::Approved)?;
-        Ok(format!("approved #{id}"))
-    }
-
-    fn ban(&self, id: Option<u64>) -> Reply {
-        let Some(id) = id else {
-            return Ok("usage: !music ban <id>".into());
-        };
-        let mut st = self.state()?;
-        let key = st
-            .queue
-            .iter()
-            .find(|i| i.id == id)
-            .or(st.now.as_ref().filter(|i| i.id == id))
-            .map(|i| i.track.key())
-            .or_else(|| {
-                st.rejected
-                    .iter()
-                    .find(|r| r.item.id == id)
-                    .map(|r| r.item.track.key())
-            });
-        let Some(key) = key else {
-            return Ok(format!("no request #{id}"));
-        };
-        if st.banned.len() >= 200 {
-            return Ok("the ban list is full".into());
-        }
-        if !st.banned.contains(&key) {
-            st.banned.push(key.clone());
-        }
-        let mut suffix = String::new();
-        let removed: Vec<Item> = st
-            .queue
-            .iter()
-            .filter(|i| i.track.key() == key)
-            .cloned()
-            .collect();
-        st.queue.retain(|i| i.track.key() != key);
-        for r in &removed {
-            suffix.push_str(&self.refund(r));
-        }
-        self.save_state(&st)?;
-        self.audit(id, "mod_ban", DecidedBy::Moderator, Outcome::Banned)?;
-        Ok(format!("banned that song{suffix}"))
-    }
-
-    fn restore(&self, id: Option<u64>) -> Reply {
-        let Some(id) = id else {
-            return Ok("usage: !music restore <id>".into());
-        };
-        let cfg = self.config()?;
-        let mut st = self.state()?;
-        let Some(pos) = st.rejected.iter().position(|r| r.item.id == id) else {
-            return Ok(format!("no removed request #{id}"));
-        };
-        if st.queue.len() >= cfg.max_queue as usize {
-            return Ok("the queue is full".into());
-        }
-        let rej = st.rejected.remove(pos);
-        if st.banned.contains(&rej.item.track.key()) {
-            st.rejected.insert(pos, rej);
-            return Ok("that song is banned; use !dj unban first".into());
-        }
-        let mut item = rej.item;
-        item.status = Status::Queued;
-        item.reason = None;
-        st.queue.push(item);
-        self.save_state(&st)?;
-        // A moderator override skips the AI judge by design; the decision is audited.
-        self.audit(id, &rej.rule, DecidedBy::Moderator, Outcome::Restored)?;
-        Ok(format!("restored #{id}"))
-    }
-
-    fn clear(&self) -> Reply {
-        let mut st = self.state()?;
-        let items: Vec<Item> = std::mem::take(&mut st.queue);
-        self.save_state(&st)?;
-        for i in &items {
-            self.refund(i);
-        }
-        self.audit(0, "mod_clear", DecidedBy::Moderator, Outcome::Removed)?;
-        Ok(format!("cleared {} requests", items.len()))
-    }
-
-    fn move_item(&self, id: Option<u64>, pos: Option<usize>) -> Reply {
-        let (Some(id), Some(pos)) = (id, pos) else {
-            return Ok("usage: !music move <id> <position>".into());
-        };
-        let mut st = self.state()?;
-        let Some(from) = st.queue.iter().position(|i| i.id == id) else {
-            return Ok(format!("no request #{id}"));
-        };
-        let to = pos.saturating_sub(1).min(st.queue.len() - 1);
-        let item = st.queue.remove(from);
-        st.queue.insert(to, item);
-        self.save_state(&st)?;
-        Ok(format!("moved #{id} to position {}", to + 1))
-    }
-
-    // ---- advance / playback ----------------------------------------------
-
-    /// Finishes the current track and starts the next playable one.
-    pub fn advance(&self, cfg: &Config, st: &mut State) -> Reply {
-        let now = self.host.now_ms();
-        if let Some(cur) = st.now.take() {
-            st.history.push(Played {
-                key: cur.track.key(),
-                ms: now,
-            });
-            if st.history.len() > HISTORY_CAP {
-                st.history.remove(0);
-            }
-        }
+        let mut lines: Vec<String> = Vec::new();
         let mut note = String::new();
-        let mut next = self.take_queued(st);
-        if next.is_none() && cfg.mode == Mode::Playlist {
-            next = self.playlist_next(cfg, st)?;
+        let mut serial = 0u32;
+        if cfg.mode == Mode::Playlist {
+            note = self.feed_playlist(cfg, &mut st, &mut live, picks, &mut serial, &mut lines)?;
         }
-        if next.is_none() && (cfg.ai.enabled || cfg.mode == Mode::Ai) {
-            if !cfg.ai.enabled {
-                self.save_state(st)?;
-                return Ok("the AI DJ is off; turn it on with !dj ai on".into());
-            }
-            match self.ai_fill(cfg, st) {
-                Ok(n) if n > 0 => next = self.take_queued(st),
-                Ok(_) => note = " (AI DJ found nothing playable)".into(),
-                Err(msg) => note = format!(" (AI DJ: {msg})"),
-            }
+        if (lines.len() as u32) < picks && note.is_empty() {
+            let want_ai = picks - lines.len() as u32;
+            note = match self.feed_ai(cfg, &mut st, &mut live, want_ai, &mut serial, &mut lines) {
+                Ok(n) => n,
+                Err(msg) => format!(" (AI DJ: {msg})"),
+            };
         }
-        let reply = match next {
-            Some(item) => {
-                if let Err(e) = music::handoff_play(self.host, &item.track, item.id) {
-                    note.push_str(&format!(" (player handoff unavailable: {e})"));
+        self.save_state(&st)?;
+        self.host.log(
+            Level::Info,
+            "dj plan",
+            json!({"viewer": viewer, "dj_queued": dj_queued, "added": lines.len()}),
+        );
+        Ok(if lines.is_empty() {
+            format!("the DJ found nothing to add{note}")
+        } else {
+            format!("DJ picked: {}{note}", lines.join(" | "))
+        })
+    }
+
+    /// Adds one policy-approved track to the shared queue as `kind: "dj"`.
+    /// `Ok(Some(line))` = added, `Ok(None)` = skipped, `Err(note)` = stop feeding.
+    fn push_pick(
+        &self,
+        st: &mut State,
+        live: &mut Live,
+        track: Track,
+        by: DecidedBy,
+        rule: &str,
+        serial: &mut u32,
+    ) -> Result<Option<String>, String> {
+        *serial += 1;
+        let idem = format!("dj.add.{}.{}", self.ctx.message_id, serial);
+        match requests::add_dj(self.host, &track, &idem) {
+            Ok(pos) => {
+                live.keys
+                    .push(policy::live_key(&track.title, &track.artist));
+                live.titles.push(track.title.clone());
+                st.history.push(Played {
+                    key: track.key(),
+                    ms: self.host.now_ms(),
+                });
+                if st.history.len() > HISTORY_CAP {
+                    st.history.remove(0);
                 }
-                let line = fmt_track(&item.track);
-                st.now = Some(item);
-                format!("now playing: {line}{note}")
+                let _ = self.audit(0, rule, by, Outcome::Filled);
+                Ok(Some(format!("{} (position {pos})", fmt_track(&track))))
             }
-            None => format!("the queue is empty{note}"),
-        };
-        self.save_state(st)?;
-        Ok(reply)
+            Err(ReqError::Rejected(c)) if c == "queue_full" => Err(" (queue is full)".into()),
+            Err(ReqError::Rejected(c)) if c == "duplicate" || c == "invalid_url" => Ok(None),
+            Err(e) => Err(format!(" ({})", e.user_msg())),
+        }
     }
 
-    fn take_queued(&self, st: &mut State) -> Option<Item> {
-        let pos = st.queue.iter().position(|i| i.status == Status::Queued)?;
-        Some(st.queue.remove(pos))
-    }
-
-    /// Next playable track of the active playlist (static checks only: bans,
-    /// deny-lists, duration, explicit; replay/duplicate guards do not apply to
-    /// curated loops).
-    fn playlist_next(&self, cfg: &Config, st: &mut State) -> Result<Option<Item>, DjError> {
+    /// Feeds picks from the active playlist (static checks: bans, deny-lists, duration,
+    /// explicit, replay cooldown on prior DJ picks, live-queue duplicates).
+    fn feed_playlist(
+        &self,
+        cfg: &Config,
+        st: &mut State,
+        live: &mut Live,
+        picks: u32,
+        serial: &mut u32,
+        lines: &mut Vec<String>,
+    ) -> Result<String, DjError> {
         let Some(name) = cfg.active_playlist.clone() else {
-            return Ok(None);
+            return Ok(String::new());
         };
         let tracks = self.playlist_tracks(&name)?;
         if tracks.is_empty() {
-            return Ok(None);
+            return Ok(String::new());
         }
-        let probe = State {
-            banned: st.banned.clone(),
-            ..State::default()
-        };
         for _ in 0..tracks.len() {
+            if lines.len() as u32 >= picks {
+                break;
+            }
             let t = tracks[st.cursor % tracks.len()].clone();
             st.cursor = (st.cursor + 1) % tracks.len();
-            if policy::evaluate(cfg, &probe, &t, self.host.now_ms(), None).is_none() {
-                st.next_id += 1;
-                return Ok(Some(Item {
-                    id: st.next_id,
-                    track: t,
-                    requester: None,
-                    status: Status::Queued,
-                    source: Source::Playlist,
-                    added_ms: self.host.now_ms(),
-                    reason: None,
-                    paid: 0,
-                }));
+            if policy::evaluate(cfg, st, &t, self.host.now_ms(), &live.keys).is_some() {
+                continue;
+            }
+            match self.push_pick(
+                st,
+                live,
+                t,
+                DecidedBy::Deterministic,
+                "playlist_pick",
+                serial,
+            ) {
+                Ok(Some(l)) => lines.push(l),
+                Ok(None) => {}
+                Err(note) => return Ok(note),
             }
         }
-        Ok(None)
+        Ok(String::new())
     }
 
-    // ---- AI DJ -------------------------------------------------------------
-
-    /// Fills the queue with AI-suggested tracks, resolved through real
-    /// provider searches and pushed through the same policy as any request.
-    /// Returns the number added, or a user-facing reason it could not.
-    pub fn ai_fill(&self, cfg: &Config, st: &mut State) -> Result<u32, String> {
+    /// Feeds AI-suggested picks, resolved through real provider searches and pushed
+    /// through the same policy. Returns a note suffix, or a user-facing failure reason.
+    fn feed_ai(
+        &self,
+        cfg: &Config,
+        st: &mut State,
+        live: &mut Live,
+        want: u32,
+        serial: &mut u32,
+        lines: &mut Vec<String>,
+    ) -> Result<String, String> {
         let now = self.host.now_ms();
         if now.saturating_sub(st.fill_window_ms) >= 3_600_000 {
             st.fill_window_ms = now;
@@ -811,41 +447,39 @@ impl<'a> Engine<'a> {
         if room == 0 {
             return Err("hourly limit reached".into());
         }
-        let want = cfg.ai.batch.min(room);
-        let avoid: Vec<String> = st
-            .queue
-            .iter()
-            .chain(st.now.iter())
-            .map(|i| i.track.title.clone())
-            .collect();
-        let hints = ai::suggest(self.host, &cfg.ai.genre, &cfg.ai.instructions, want, &avoid)
-            .map_err(|e| e.to_string())?;
-        let mut added = 0u32;
+        // Ask for a full batch (spare candidates for policy rejections); stop at `want` adds.
+        let want = want.min(room);
+        let n = cfg.ai.batch.max(want).min(room);
+        let hints = ai::suggest(
+            self.host,
+            &cfg.ai.genre,
+            &cfg.ai.instructions,
+            n,
+            &live.titles,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut note = String::new();
         for (title, artist) in hints {
-            if st.queue.len() >= cfg.max_queue as usize {
+            if lines.len() as u32 >= want {
                 break;
             }
             let query = format!("{title} {artist}");
             let Some(track) = self.resolve_hint(cfg, &query, &title) else {
                 continue;
             };
-            match self.decide(cfg, st, &track) {
+            match self.decide(cfg, st, &track, &live.keys) {
                 Decision::Allow => {
-                    st.next_id += 1;
-                    let id = st.next_id;
-                    st.queue.push(Item {
-                        id,
-                        track,
-                        requester: None,
-                        status: Status::Queued,
-                        source: Source::Ai,
-                        added_ms: now,
-                        reason: None,
-                        paid: 0,
-                    });
-                    st.fill_count += 1;
-                    added += 1;
-                    let _ = self.audit(id, "ai_fill", DecidedBy::Ai, Outcome::Filled);
+                    match self.push_pick(st, live, track, DecidedBy::Ai, "ai_fill", serial) {
+                        Ok(Some(l)) => {
+                            st.fill_count += 1;
+                            lines.push(l);
+                        }
+                        Ok(None) => {}
+                        Err(n) => {
+                            note = n;
+                            break;
+                        }
+                    }
                 }
                 Decision::Hold { rule, .. } => {
                     let _ = self.audit(0, &rule, DecidedBy::Ai, Outcome::Rejected);
@@ -855,7 +489,7 @@ impl<'a> Engine<'a> {
                 }
             }
         }
-        Ok(added)
+        Ok(note)
     }
 
     /// Resolves an AI hint to a REAL provider track whose title matches the
@@ -881,25 +515,31 @@ fn clean_text(s: &str, max: usize) -> String {
     s.chars().filter(|c| !c.is_control()).take(max).collect()
 }
 
-/// `true` for a URL the contract's `https_url` definition accepts.
-fn https_url_ok(u: &str) -> bool {
-    u.len() > 8
-        && u.len() <= 512
-        && u.starts_with("https://")
-        && !u
-            .chars()
-            .any(|c| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\''))
-}
-
-/// One public track as the contract's `public_track`: text only, https-only URL, no requester.
-pub fn surface_track(t: &PublicTrack) -> serde_json::Value {
-    serde_json::json!({
-        "id": t.id,
-        "provider": clean_text(&t.provider, 32),
-        "track_id": clean_text(&t.track_id, 128),
-        "title": clean_text(&t.title, SURFACE_TEXT_MAX),
-        "artist": clean_text(&t.artist, SURFACE_TEXT_MAX),
-        "duration_s": t.duration_s.min(86_400),
-        "url": t.url.as_deref().filter(|u| https_url_ok(u)),
-    })
+/// Queued (status 0) items of a pre-1.1.0 `dj.state` value, as `requests.import` items.
+fn old_queue_items(raw: &Value) -> Vec<Value> {
+    let Some(q) = raw.get("queue").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    q.iter()
+        .filter(|i| i.get("status").and_then(Value::as_u64) == Some(0))
+        .filter_map(|i| {
+            let t = i.get("track")?;
+            let title = clean_text(t.get("title")?.as_str()?, 200);
+            if title.is_empty() {
+                return None;
+            }
+            let artist = clean_text(t.get("artist").and_then(Value::as_str).unwrap_or(""), 200);
+            let url = t
+                .get("url")
+                .and_then(Value::as_str)
+                .filter(|u| u.starts_with("https://") && u.len() <= 500)
+                .unwrap_or("");
+            let secs = t.get("duration_s").and_then(Value::as_u64).unwrap_or(0);
+            Some(json!({
+                "title": title, "artist": artist, "source_url": url,
+                "duration_ms": secs.saturating_mul(1000),
+            }))
+        })
+        .take(100)
+        .collect()
 }

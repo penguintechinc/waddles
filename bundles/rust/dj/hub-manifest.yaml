@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.example.dj
 name: DJ Bundle (Rust)
-version: 1.0.1
+version: 1.1.0
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -21,10 +21,6 @@ stages:
       - chat.message
       filters:
         command_prefix: &id001
-        - '!sr'
-        - '!songrequest'
-        - '!music'
-        - '!queue'
         - '!dj'
     - platform: discord
       event_types:
@@ -33,10 +29,6 @@ stages:
         command_prefix: *id001
   action:
     entry: waddle:bundle/action-stage#dispatch
-  presentation:
-    owned_surfaces:
-    - waddles.core.example.dj.now_playing
-    - waddles.core.example.dj.queue
 egress: []
 data:
   tables: []
@@ -45,10 +37,6 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions:
-- id: overlay.media
-  justification: Publishes structured, text-only now-playing and queue state to this bundle's own overlay surfaces via overlay.publish-surface (data-only envelopes, no media)
-  params:
-    mode: data
 - id: chat.send:discord
   justification: Reply to the invoking user/channel via relay.push
 - id: chat.send:twitch
@@ -56,9 +44,9 @@ permissions:
 - id: identity.resolve
   justification: Resolve the verified requester to a community user UUID (never store handles)
 - id: storage.kv
-  justification: Community-scoped queue, now-playing, playlists, policy, audit log and public overlay snapshot
+  justification: Community-scoped DJ config, bans, recent picks, playlists, policy, audit log (the request queue lives in music-requests)
 - id: tool.call:waddles.core.service.music-youtube:music.youtube.search
-  justification: Resolve viewer song requests and AI DJ hints against youtube (metadata only)
+  justification: Resolve AI DJ hints against youtube (metadata only)
   params:
     write: false
 - id: tool.call:waddles.core.service.music-youtube:music.youtube.resolve
@@ -70,7 +58,7 @@ permissions:
   params:
     write: false
 - id: tool.call:waddles.core.service.music-spotify:music.spotify.search
-  justification: Resolve viewer song requests and AI DJ hints against spotify (metadata only)
+  justification: Resolve AI DJ hints against spotify (metadata only)
   params:
     write: false
 - id: tool.call:waddles.core.service.music-spotify:music.spotify.resolve
@@ -81,12 +69,8 @@ permissions:
   justification: Import a spotify playlist into a static DJ playlist
   params:
     write: false
-- id: tool.call:waddles.core.service.music-spotify:music.spotify.player.play
-  justification: Hand the now-playing track to the streamer Spotify Connect device (moderator scope enforced host-side)
-  params:
-    write: true
 - id: tool.call:waddles.core.service.music-soundcloud:music.soundcloud.search
-  justification: Resolve viewer song requests and AI DJ hints against soundcloud (metadata only)
+  justification: Resolve AI DJ hints against soundcloud (metadata only)
   params:
     write: false
 - id: tool.call:waddles.core.service.music-soundcloud:music.soundcloud.resolve
@@ -105,8 +89,28 @@ permissions:
   justification: Judge track metadata against fuzzy channel rules; fixed labels, untrusted data field
   params:
     write: false
-- id: tool.call:waddles.core.service.economy:adjust_balance
-  justification: Optional per-request cost and refund of the actor's own balance (idempotent)
+- id: tool.call:waddles.core.service.music-requests:requests.list
+  justification: Re-read the shared queue (now playing + queued, no requester) before every DJ plan
+  params:
+    write: false
+- id: tool.call:waddles.core.service.music-requests:requests.advance_due
+  justification: Advance the shared queue when the playing track has elapsed (idempotent) before planning
+  params:
+    write: false
+- id: tool.call:waddles.core.service.music-requests:requests.add
+  justification: Add a policy-approved DJ pick with kind dj (never ahead of viewer requests)
+  params:
+    write: true
+- id: tool.call:waddles.core.service.music-requests:requests.import
+  justification: One-shot migration of the pre-1.1.0 DJ kv queue into the shared queue
+  params:
+    write: true
+- id: tool.call:waddles.core.service.music-requests:dj.get
+  justification: Read the single stored AI DJ on/off setting
+  params:
+    write: false
+- id: tool.call:waddles.core.service.music-requests:dj.set
+  justification: Flip the single stored AI DJ setting (music:dj.manage enforced host-side)
   params:
     write: true
 routes_to: []
@@ -129,9 +133,6 @@ requested_tools:
 - tool: music.spotify.playlist.get
   access: read
   target_app_id: waddles.core.service.music-spotify
-- tool: music.spotify.player.play
-  access: write
-  target_app_id: waddles.core.service.music-spotify
 - tool: music.soundcloud.search
   access: read
   target_app_id: waddles.core.service.music-soundcloud
@@ -147,6 +148,21 @@ requested_tools:
 - tool: ai.classify
   access: read
   target_app_id: waddles.core.service.ai
-- tool: adjust_balance
+- tool: requests.list
+  access: read
+  target_app_id: waddles.core.service.music-requests
+- tool: requests.advance_due
+  access: read
+  target_app_id: waddles.core.service.music-requests
+- tool: requests.add
   access: write
-  target_app_id: waddles.core.service.economy
+  target_app_id: waddles.core.service.music-requests
+- tool: requests.import
+  access: write
+  target_app_id: waddles.core.service.music-requests
+- tool: dj.get
+  access: read
+  target_app_id: waddles.core.service.music-requests
+- tool: dj.set
+  access: write
+  target_app_id: waddles.core.service.music-requests

@@ -1666,10 +1666,11 @@ bundles:
       - tenant_slug: default
         community_id: null
 
-  # DJ app bundle (Rust, `stage-next-tools`): playlists, !sr song requests, mod queue controls,
-  # deterministic song policy + optional AI DJ. Flag waddles.command-dj defaults OFF.
+  # DJ app bundle (Rust, `stage-next-tools`): OPTIONAL AI DJ layer over the shared
+  # music-requests queue (picks, playlists, policy, `!dj` only; no request commands).
+  # Flag waddles.command-dj defaults OFF.
   - app_id: waddles.core.example.dj
-    version: "1.0.1"
+    version: "1.1.0"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/dj

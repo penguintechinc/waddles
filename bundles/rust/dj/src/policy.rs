@@ -2,7 +2,7 @@
 //!
 //! Everything in [`evaluate`] is pure and AI-free: provider allowlists
 //! (DMCA-safe mode), deny-lists, duration, explicit flag, replay cooldown,
-//! duplicate guard and the ban list. The AI judge in `engine` only runs on
+//! live-queue duplicate guard and the ban list. The AI judge in `engine` only runs on
 //! tracks that survive this layer and only for rules that cannot be
 //! expressed deterministically.
 
@@ -29,6 +29,11 @@ pub fn norm(s: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+/// Dedupe key for a track the shared queue knows only by title + artist.
+pub fn live_key(title: &str, artist: &str) -> String {
+    norm(&format!("{title} {artist}"))
 }
 
 /// One allowlist entry; every field that is set must match.
@@ -143,11 +148,11 @@ impl Rules {
     }
 }
 
-/// AI DJ settings (off by default).
+/// AI DJ tuning. On/off is NOT stored here: it is the single shared setting in the
+/// music-requests service (`dj.get` / `dj.set`). A legacy `enabled` key is ignored.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiConfig {
-    pub enabled: bool,
     pub genre: String,
     pub instructions: String,
     /// Hard cap on AI-sourced tracks added per rolling hour.
@@ -159,7 +164,6 @@ pub struct AiConfig {
 impl Default for AiConfig {
     fn default() -> Self {
         AiConfig {
-            enabled: false,
             genre: String::new(),
             instructions: String::new(),
             hourly_cap: 10,
@@ -172,18 +176,15 @@ impl Default for AiConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub requests_enabled: bool,
     pub providers: Vec<String>,
-    pub max_per_user: u32,
-    pub cooldown_s: u32,
     pub max_duration_s: u32,
-    pub max_queue: u32,
     pub replay_cooldown_s: u32,
     pub explicit_allowed: bool,
     pub dmca_safe: bool,
-    pub approval_required: bool,
-    pub auto_remove: bool,
-    pub request_cost: u64,
+    /// DJ picks only while queued viewer requests are below this (1-50).
+    pub dj_min_queue: u32,
+    /// After this many queued viewer requests the DJ may add one more pick (1-20).
+    pub dj_requests_per_pick: u32,
     pub sources_allow: Vec<SourceAllow>,
     pub deny_artists: Vec<String>,
     pub deny_title_terms: Vec<String>,
@@ -200,18 +201,13 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            requests_enabled: true,
             providers: vec!["youtube".to_string()],
-            max_per_user: 3,
-            cooldown_s: 30,
             max_duration_s: 600,
-            max_queue: 50,
             replay_cooldown_s: 3600,
             explicit_allowed: true,
             dmca_safe: false,
-            approval_required: false,
-            auto_remove: false,
-            request_cost: 0,
+            dj_min_queue: 3,
+            dj_requests_per_pick: 2,
             sources_allow: Vec::new(),
             deny_artists: Vec::new(),
             deny_title_terms: Vec::new(),
@@ -253,19 +249,12 @@ impl Config {
     /// Sets one scalar setting by key; bounds-checked, nothing is applied on error.
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), ConfigError> {
         match key {
-            "requests" => self.requests_enabled = parse_bool(value)?,
             "explicit" => self.explicit_allowed = parse_bool(value)?,
             "dmca_safe" => self.dmca_safe = parse_bool(value)?,
-            "approval" => self.approval_required = parse_bool(value)?,
-            "auto_remove" => self.auto_remove = parse_bool(value)?,
-            "max_per_user" => self.max_per_user = parse_num(value, 1, 20)? as u32,
-            "cooldown_s" => self.cooldown_s = parse_num(value, 0, 3600)? as u32,
+            "dj_min_queue" => self.dj_min_queue = parse_num(value, 1, 50)? as u32,
+            "dj_requests_per_pick" => self.dj_requests_per_pick = parse_num(value, 1, 20)? as u32,
             "max_duration_s" => self.max_duration_s = parse_num(value, 30, 7200)? as u32,
-            "max_queue" => {
-                self.max_queue = parse_num(value, 1, crate::model::MAX_QUEUE_HARD as u64)? as u32
-            }
             "replay_cooldown_s" => self.replay_cooldown_s = parse_num(value, 0, 86_400)? as u32,
-            "cost" => self.request_cost = parse_num(value, 0, 1_000_000)?,
             "ai_hourly_cap" => self.ai.hourly_cap = parse_num(value, 0, 60)? as u32,
             "ai_batch" => self.ai.batch = parse_num(value, 1, 5)? as u32,
             "providers" => {
@@ -375,13 +364,13 @@ fn contains_term(haystack_norm: &str, term: &str) -> bool {
 }
 
 /// Runs the deterministic policy against `track`. `None` = passes every rule.
-/// `skip_dup_id` lets a restore/approve ignore the queue entry being acted on.
+/// `live` holds the [`live_key`]s of what the shared queue already has (queued + playing).
 pub fn evaluate(
     cfg: &Config,
     state: &State,
     track: &Track,
     now_ms: u64,
-    skip_dup_id: Option<u64>,
+    live: &[String],
 ) -> Option<Violation> {
     let default_rules = Rules::default();
     let rules = cfg.rules.as_ref().unwrap_or(&default_rules);
@@ -481,12 +470,7 @@ pub fn evaluate(
     {
         return v("replay_cooldown", "that song was played recently");
     }
-    let in_queue = state
-        .queue
-        .iter()
-        .any(|i| i.track.key() == key && Some(i.id) != skip_dup_id);
-    let is_now = state.now.as_ref().is_some_and(|i| i.track.key() == key);
-    if in_queue || is_now {
+    if live.contains(&live_key(&track.title, &track.artist)) {
         return v("duplicate", "that song is already in the queue");
     }
     None
