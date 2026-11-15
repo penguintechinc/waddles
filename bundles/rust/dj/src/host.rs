@@ -52,9 +52,6 @@ pub trait Host {
         args: &Value,
         idempotency_key: Option<&str>,
     ) -> Result<Value, ToolErr>;
-    /// `overlay.publish-surface`: publishes structured state to one of THIS bundle's own
-    /// surfaces (the community is host-derived). Err carries the host's stable code.
-    fn publish_surface(&self, surface_id: &str, payload_json: &str) -> Result<(), String>;
     /// PII-free structured log line.
     fn log(&self, level: Level, message: &str, fields: Value);
 }

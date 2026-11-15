@@ -6,6 +6,12 @@
 //! own result) against them, so a contract change breaks this build instead of
 //! drifting silently. Spotify player + economy have no shared contract file;
 //! their minimal schemas (taken from the producers' manifests) are inline.
+//!
+//! The shared queue service `waddles.core.service.music-requests` is mocked
+//! from `docs/music-requests-service.md`: one [`Svc`] per COMMUNITY (the host
+//! derives the community, the DJ never names one), host-enforced scopes
+//! (`music:dj.manage` for `dj.set`), `NotGranted` without a grant, and item
+//! JSON that never carries a requester.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -147,6 +153,57 @@ fn capability() -> Value {
     json!({"playback": "embed", "server_audio": false, "queue_add": false})
 }
 
+/// One stored queue row of the mocked service (requester is stored, NEVER emitted).
+#[derive(Clone, Debug)]
+pub struct SRow {
+    pub id: u64,
+    pub title: String,
+    pub artist: String,
+    pub source_url: String,
+    pub duration_ms: u64,
+    pub kind: &'static str,
+    pub requester: Option<String>,
+}
+
+/// Per-community state of the mocked music-requests service.
+#[derive(Clone, Debug)]
+pub struct Svc {
+    pub ai_on: bool,
+    pub queue: Vec<SRow>,
+    pub now: Option<SRow>,
+    pub history_len: usize,
+    pub imported: bool,
+    pub max_queue: usize,
+    pub next_id: u64,
+    /// The service's single DMCA-safe flag; rows are safe only when the url starts `https://safe.`.
+    pub dmca_safe: bool,
+    /// `music.stats.top` data: (artist, plays) and (title, artist, plays).
+    pub stats_artists: Vec<(String, u64)>,
+    pub stats_songs: Vec<(String, String, u64)>,
+}
+
+impl Default for Svc {
+    fn default() -> Self {
+        Svc {
+            ai_on: false,
+            queue: vec![],
+            now: None,
+            history_len: 0,
+            imported: false,
+            max_queue: 100,
+            next_id: 0,
+            dmca_safe: false,
+            stats_artists: vec![],
+            stats_songs: vec![],
+        }
+    }
+}
+
+fn item_json(r: &SRow) -> Value {
+    json!({"id": r.id, "title": r.title, "artist": r.artist, "source_url": r.source_url,
+           "duration_ms": r.duration_ms, "kind": r.kind, "queued_at": "2026-11-15T00:00:00Z"})
+}
+
 /// One recorded tool call: (target, tool, args, idempotency key).
 pub type Call = (String, String, Value, Option<String>);
 
@@ -162,11 +219,22 @@ pub struct FakeHost {
     /// `ai.classify`: (label, confidence) or None => ToolErr::TargetUnavailable.
     pub ai_classify: RefCell<Option<(String, f64)>>,
     pub fail_tools: RefCell<Vec<String>>,
-    /// Surface frames published via `overlay.publish-surface` (surface id, payload).
-    pub published: RefCell<Vec<(String, Value)>>,
-    /// When set, every publish is refused with this host code.
-    pub publish_fail: RefCell<Option<String>>,
-    pub balance: Cell<i64>,
+    /// Mocked service state keyed by community id.
+    pub svcs: RefCell<BTreeMap<u64, Svc>>,
+    /// The community the host derives for this invocation.
+    pub community: Cell<u64>,
+    /// No grant for music-requests: every call is `NotGranted`.
+    pub deny_service: Cell<bool>,
+    /// The invoking actor holds `music:dj.manage` (host-enforced for `dj.set`).
+    pub has_dj_manage: Cell<bool>,
+    /// The actor lacks `music:stats.read` (host answers Forbidden).
+    pub deny_stats: Cell<bool>,
+    /// The actor lacks `music:settings.write` (host answers Forbidden for `settings.set`).
+    pub deny_settings: Cell<bool>,
+    /// How `requests.list` reports `dmca_safe`: 0 = real value, 1 = field missing, 2 = garbage.
+    pub dmca_list_mode: Cell<u8>,
+    /// Every `requests.add` args seen (for asserting no requester/actor is ever sent).
+    pub add_args: RefCell<Vec<Value>>,
     /// When > 0, `playlist.get` serves pages of this many tracks.
     pub page_size: Cell<usize>,
     music: Value,
@@ -184,13 +252,46 @@ impl FakeHost {
             ai_complete: RefCell::default(),
             ai_classify: RefCell::new(Some(("allowed".into(), 0.95))),
             fail_tools: RefCell::default(),
-            published: RefCell::default(),
-            publish_fail: RefCell::default(),
-            balance: Cell::new(100),
+            svcs: RefCell::default(),
+            community: Cell::new(1),
+            deny_service: Cell::new(false),
+            has_dj_manage: Cell::new(true),
+            deny_stats: Cell::new(false),
+            deny_settings: Cell::new(false),
+            dmca_list_mode: Cell::new(0),
+            add_args: RefCell::default(),
             page_size: Cell::new(0),
             music: serde_json::from_str(MUSIC_CONTRACT).expect("music contract parses"),
             ai: serde_json::from_str(AI_CONTRACT).expect("ai contract parses"),
         }
+    }
+
+    /// Runs `f` on the current community's mocked service state.
+    pub fn svc<R>(&self, f: impl FnOnce(&mut Svc) -> R) -> R {
+        let mut all = self.svcs.borrow_mut();
+        f(all.entry(self.community.get()).or_default())
+    }
+
+    /// Seeds a queued viewer request (requester stored, never emitted).
+    pub fn viewer(&self, title: &str, artist: &str) {
+        self.svc(|s| {
+            s.next_id += 1;
+            let id = s.next_id;
+            s.queue.push(SRow {
+                id,
+                title: title.into(),
+                artist: artist.into(),
+                source_url: String::new(),
+                duration_ms: 180_000,
+                kind: "viewer",
+                requester: Some(USER_A.into()),
+            });
+        });
+    }
+
+    /// Kinds currently queued, in order.
+    pub fn kinds(&self) -> Vec<&'static str> {
+        self.svc(|s| s.queue.iter().map(|r| r.kind).collect())
     }
 
     pub fn add(&self, t: Value) {
@@ -283,6 +384,161 @@ impl FakeHost {
     }
 }
 
+impl FakeHost {
+    /// The mocked `waddles.core.service.music-requests` (contract: docs/music-requests-service.md).
+    fn requests_call(
+        &self,
+        tool: &str,
+        args: &Value,
+        idem: Option<&str>,
+    ) -> Result<Value, ToolErr> {
+        if self.deny_service.get() {
+            return Err(ToolErr::NotGranted);
+        }
+        let obj = args.as_object().expect("args are an object");
+        let unknown = |allowed: &[&str]| {
+            for k in obj.keys() {
+                assert!(allowed.contains(&k.as_str()), "{tool}: unexpected arg {k}");
+            }
+        };
+        match tool {
+            "dj.get" => {
+                unknown(&[]);
+                Ok(json!({"enabled": self.svc(|s| s.ai_on)}))
+            }
+            "dj.set" => {
+                unknown(&["enabled"]);
+                assert!(idem.is_some(), "dj.set is a write: idempotency key");
+                if !self.has_dj_manage.get() {
+                    return Err(ToolErr::Forbidden);
+                }
+                let on = args["enabled"].as_bool().expect("enabled bool");
+                self.svc(|s| s.ai_on = on);
+                Ok(json!({"enabled": on}))
+            }
+            "requests.advance_due" => {
+                unknown(&[]);
+                Ok(json!({"finished": null, "now_playing": null}))
+            }
+            "requests.list" => {
+                unknown(&["limit"]);
+                let lim = obj.get("limit").and_then(Value::as_u64).unwrap_or(50);
+                assert!((1..=100).contains(&lim), "limit bounds");
+                let mode = self.dmca_list_mode.get();
+                let mut out = self.svc(|s| {
+                    json!({"now_playing": s.now.as_ref().map(item_json),
+                           "queue": s.queue.iter().take(lim as usize).map(item_json).collect::<Vec<_>>(),
+                           "total_queued": s.queue.len(), "ai_dj_on": s.ai_on,
+                           "dmca_safe": s.dmca_safe})
+                });
+                match mode {
+                    1 => {
+                        out.as_object_mut().unwrap().remove("dmca_safe");
+                    }
+                    2 => out["dmca_safe"] = json!("maybe"),
+                    _ => {}
+                }
+                Ok(out)
+            }
+            "requests.add" => {
+                unknown(&["title", "artist", "source_url", "duration_ms", "kind"]);
+                assert!(idem.is_some(), "requests.add is a write: idempotency key");
+                self.add_args.borrow_mut().push(args.clone());
+                assert_eq!(args["kind"], "dj", "the DJ only ever adds kind dj");
+                assert!(args["title"].as_str().unwrap().chars().count() <= 200);
+                let url = obj.get("source_url").and_then(Value::as_str).unwrap_or("");
+                if !url.is_empty() && !url.starts_with("https://") {
+                    return Err(ToolErr::InvalidArgs("invalid_url".into()));
+                }
+                self.svc(|s| {
+                    if s.dmca_safe && !url.starts_with("https://safe.") {
+                        return Err(ToolErr::InvalidArgs(
+                            "not_dmca_safe: source is not safe-listed".into(),
+                        ));
+                    }
+                    if s.queue.len() >= s.max_queue {
+                        return Err(ToolErr::InvalidArgs("queue_full".into()));
+                    }
+                    let (t, a) = (
+                        args["title"].as_str().unwrap(),
+                        args["artist"].as_str().unwrap_or(""),
+                    );
+                    if s.queue.iter().any(|r| r.title == t && r.artist == a) {
+                        return Err(ToolErr::InvalidArgs("duplicate".into()));
+                    }
+                    s.next_id += 1;
+                    let row = SRow {
+                        id: s.next_id,
+                        title: t.into(),
+                        artist: a.into(),
+                        source_url: url.into(),
+                        duration_ms: args["duration_ms"].as_u64().unwrap_or(0),
+                        kind: "dj",
+                        requester: None,
+                    };
+                    s.queue.push(row.clone());
+                    Ok(json!({"item": item_json(&row), "position": s.queue.len()}))
+                })
+            }
+            "settings.set" => {
+                unknown(&["dmca_safe"]);
+                assert!(idem.is_some(), "settings.set is a write: idempotency key");
+                if self.deny_settings.get() {
+                    return Err(ToolErr::Forbidden);
+                }
+                let on = args["dmca_safe"].as_bool().expect("dmca_safe bool");
+                self.svc(|s| s.dmca_safe = on);
+                Ok(json!({"dmca_safe": on, "purged": 0}))
+            }
+            "music.stats.top" => {
+                unknown(&["kind", "limit"]);
+                if self.deny_stats.get() {
+                    return Err(ToolErr::Forbidden);
+                }
+                let lim = obj.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+                assert!((1..=25).contains(&lim), "limit bounds");
+                Ok(self.svc(|s| match args["kind"].as_str() {
+                    Some("artist") => json!({"items": s.stats_artists.iter().take(lim)
+                        .map(|(a, p)| json!({"artist": a, "plays": p})).collect::<Vec<_>>()}),
+                    Some("song") => json!({"items": s.stats_songs.iter().take(lim)
+                        .map(|(t, a, p)| json!({"title": t, "artist": a, "plays": p})).collect::<Vec<_>>()}),
+                    other => panic!("bad stats kind {other:?}"),
+                }))
+            }
+            "requests.import" => {
+                unknown(&["items"]);
+                assert!(
+                    idem.is_some(),
+                    "requests.import is a write: idempotency key"
+                );
+                let items = args["items"].as_array().expect("items");
+                assert!(items.len() <= 100);
+                self.svc(|s| {
+                    if s.imported || !s.queue.is_empty() || s.history_len > 0 {
+                        return Err(ToolErr::InvalidArgs("already_imported".into()));
+                    }
+                    for i in items {
+                        s.next_id += 1;
+                        let id = s.next_id;
+                        s.queue.push(SRow {
+                            id,
+                            title: i["title"].as_str().unwrap().into(),
+                            artist: i["artist"].as_str().unwrap().into(),
+                            source_url: i["source_url"].as_str().unwrap().into(),
+                            duration_ms: i["duration_ms"].as_u64().unwrap(),
+                            kind: "imported",
+                            requester: None,
+                        });
+                    }
+                    s.imported = true;
+                    Ok(json!({"imported": items.len()}))
+                })
+            }
+            other => panic!("dj must not call music-requests tool {other}"),
+        }
+    }
+}
+
 impl Host for FakeHost {
     fn kv_get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         assert!(!key.contains(':'), "kv key must not contain ':' : {key}");
@@ -299,16 +555,6 @@ impl Host for FakeHost {
     }
     fn now_ms(&self) -> u64 {
         self.now.get()
-    }
-    fn publish_surface(&self, surface_id: &str, payload_json: &str) -> Result<(), String> {
-        if let Some(code) = self.publish_fail.borrow().clone() {
-            return Err(code);
-        }
-        let v: Value = serde_json::from_str(payload_json).expect("payload is JSON");
-        self.published
-            .borrow_mut()
-            .push((surface_id.to_string(), v));
-        Ok(())
     }
     fn invoke(
         &self,
@@ -331,21 +577,12 @@ impl Host for FakeHost {
         {
             return Err(ToolErr::TargetUnavailable);
         }
+        if target == "waddles.core.service.music-requests" {
+            return self.requests_call(tool, args, idem);
+        }
         if let Some(rest) = tool.strip_prefix("music.") {
             let (provider, op) = rest.split_once('.').expect("music.<provider>.<op>");
             assert_eq!(target, format!("waddles.core.service.music-{provider}"));
-            if provider == "spotify" && op == "player.play" {
-                assert!(
-                    idem.is_some(),
-                    "player.play is a write: needs an idempotency key"
-                );
-                let uris = args["uris"].as_array().expect("uris array");
-                assert!(
-                    uris.iter()
-                        .all(|u| u.as_str().unwrap().starts_with("spotify:track:"))
-                );
-                return Ok(json!({"ok": true, "action": "play", "capability": capability()}));
-            }
             return self.music_call(provider, op, args);
         }
         let result = match tool {
@@ -362,21 +599,6 @@ impl Host for FakeHost {
                     Some((l, c)) => json!({"label": l, "confidence": c, "reason": "scripted"}),
                     None => return Err(ToolErr::TargetUnavailable),
                 }
-            }
-            "adjust_balance" => {
-                // Producer: bundles/rust/economy (`adjust_balance {user, delta}`; delta<0 debits,
-                // insufficient funds is a tool error; writes need an idempotency key).
-                assert_eq!(target, "waddles.core.service.economy");
-                assert!(idem.is_some(), "writes need an idempotency key");
-                let keys: Vec<&String> = args.as_object().unwrap().keys().collect();
-                assert_eq!(keys.len(), 2, "only user+delta: {keys:?}");
-                let d = args["delta"].as_i64().unwrap();
-                assert!(d != 0 && args["user"].as_str().unwrap().len() == 36);
-                if self.balance.get() + d < 0 {
-                    return Err(ToolErr::InvalidArgs("insufficient_funds".into()));
-                }
-                self.balance.set(self.balance.get() + d);
-                json!({"user": args["user"], "balance": self.balance.get(), "alias": "wb"})
             }
             _ => panic!("unexpected tool call {target} {tool}"),
         };

@@ -11,6 +11,20 @@ use serde_json::Value;
 const HUB_MANIFEST: &str = include_str!("../hub-manifest.yaml");
 const BUNDLE_MANIFEST: &str = include_str!("../bundle.yaml");
 
+/// Tools of `waddles.core.service.music-requests` the DJ may request (from
+/// `docs/music-requests-service.md`): every one must be granted, and nothing else.
+const REQUESTS_TARGET: &str = "waddles.core.service.music-requests";
+const REQUESTS_TOOLS: [&str; 8] = [
+    "settings.set",
+    "music.stats.top",
+    "requests.list",
+    "requests.advance_due",
+    "requests.add",
+    "requests.import",
+    "dj.get",
+    "dj.set",
+];
+
 /// `tool.call:<target>:<tool>` ids requested by a manifest (denominator returned too).
 fn requested(manifest: &str) -> Vec<(String, String)> {
     manifest
@@ -32,18 +46,21 @@ fn every_requested_tool_exists_in_its_producers_contract() {
     let ai_target = ai["target_app_id"].as_str().unwrap();
     let reqs = requested(HUB_MANIFEST);
     assert!(
-        reqs.len() >= 13,
+        reqs.len() >= 19,
         "examined too few tool grants: {}",
         reqs.len()
     );
     for (target, tool) in &reqs {
-        if let Some(rest) = tool.strip_prefix("music.") {
+        if target == REQUESTS_TARGET {
+            assert!(
+                REQUESTS_TOOLS.contains(&tool.as_str()),
+                "unexpected music-requests tool {tool}"
+            );
+        } else if let Some(rest) = tool.strip_prefix("music.") {
             let (provider, op) = rest.split_once('.').unwrap();
             assert_eq!(target, &format!("waddles.core.service.music-{provider}"));
-            // Spotify player control is the single non-contract tool (producer manifest, PR #1111).
-            if provider == "spotify" && op == "player.play" {
-                continue;
-            }
+            // The DJ never plays media: no player tools may be requested.
+            assert_ne!(op, "player.play", "DJ must not request playback tools");
             assert!(
                 music["tools"].get(op).is_some(),
                 "{tool}: op `{op}` is not in music-tool-contract.v1 (generic `playback` does not exist)"
@@ -51,14 +68,38 @@ fn every_requested_tool_exists_in_its_producers_contract() {
         } else if tool.starts_with("ai.") {
             assert_eq!(target, ai_target);
             assert!(ai["tools"].get(tool).is_some(), "{tool} not in ai-tools.v1");
-        } else {
-            assert_eq!(
-                (target.as_str(), tool.as_str()),
-                ("waddles.core.service.economy", "adjust_balance"),
-                "unexpected grant {target}:{tool}"
-            );
         }
     }
+    for t in REQUESTS_TOOLS {
+        assert!(
+            reqs.iter().any(|(g, x)| g == REQUESTS_TARGET && x == t),
+            "missing grant for {t}"
+        );
+    }
+}
+
+#[test]
+fn manifests_drop_request_commands_overlay_and_economy_and_bump_the_version() {
+    for m in [HUB_MANIFEST, BUNDLE_MANIFEST] {
+        for gone in [
+            "'!sr'",
+            "'!songrequest'",
+            "'!music'",
+            "'!queue'",
+            "overlay",
+            "owned_surfaces",
+            "economy",
+        ] {
+            assert!(!m.contains(gone), "manifest still mentions {gone}");
+        }
+        assert!(m.contains("- '!dj'"), "!dj prefix kept");
+        assert!(m.contains("version: 1.1.0"));
+    }
+    let catalog = include_str!("../../../core-bundles.yaml");
+    let at = catalog
+        .find("app_id: waddles.core.example.dj")
+        .expect("dj catalog entry");
+    assert!(catalog[at..].lines().nth(1).unwrap().contains("\"1.1.0\""));
 }
 
 #[test]

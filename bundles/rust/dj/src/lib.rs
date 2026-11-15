@@ -1,8 +1,9 @@
-//! DJ APP bundle: playlists, viewer song requests, mod queue controls, a
-//! deterministic song policy and an optional AI DJ.
+//! DJ APP bundle: an OPTIONAL AI DJ layer over the shared music request queue
+//! (`waddles.core.service.music-requests`): playlists, a deterministic song
+//! policy and an AI judge. It owns no request queue and no request commands.
 //!
-//! Layout: `model`/`policy` (pure data + rules), `music`/`ai` (typed clients
-//! over gated tool calls), `engine`/`admin` (behaviour, generic over `Host`),
+//! Layout: `model`/`policy` (pure data + rules), `music`/`ai`/`requests` (typed
+//! clients over gated tool calls), `engine`/`admin` (behaviour, generic over `Host`),
 //! `chat` (event parsing), and `component` (the wasm-only WIT glue, the only
 //! code that touches real host imports). Process-stage does all work (identity
 //! + tool calls are wired there); action-stage only relays the finished reply.
@@ -18,6 +19,7 @@ pub mod host;
 pub mod model;
 pub mod music;
 pub mod policy;
+pub mod requests;
 
 #[cfg(target_arch = "wasm32")]
 mod component {
@@ -33,7 +35,7 @@ mod component {
         PlatformEvent, StageEnvelope, TransportError, TransportResult, UnsupportedStage,
     };
     use super::bindings::waddle::bundle::{
-        clock, context, flags, identity, kv, log, overlay, relay, tool,
+        clock, context, flags, identity, kv, log, relay, tool,
     };
     use super::chat;
     use super::engine::{Ctx, Engine};
@@ -57,11 +59,6 @@ mod component {
         }
         fn now_ms(&self) -> u64 {
             clock::now_millis()
-        }
-        fn publish_surface(&self, surface_id: &str, payload_json: &str) -> Result<(), String> {
-            overlay::publish_surface(surface_id, payload_json)
-                .map(|_| ())
-                .map_err(|e| e.code)
         }
         fn invoke(
             &self,

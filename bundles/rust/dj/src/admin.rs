@@ -1,6 +1,7 @@
 //! Moderator-only `!dj ...` commands: settings, lists, static playlists
-//! (add / remove / reorder / import from a provider playlist), AI DJ setup
-//! and the instruction-policy confirmation flow.
+//! (add / remove / reorder / import from a provider playlist), the AI DJ switch
+//! (stored in the music-requests service), `fill`/`next` planning and the
+//! instruction-policy confirmation flow. There are no viewer request commands.
 
 use serde_json::json;
 
@@ -10,6 +11,7 @@ use crate::host::Level;
 use crate::model::*;
 use crate::music;
 use crate::policy::{self, Config};
+use crate::requests;
 
 const KEY_PL_INDEX: &str = "dj.pl_index";
 
@@ -51,11 +53,15 @@ impl Engine<'_> {
             "ai" => self.ai_cmd(rest, &toks),
             "policy" => self.policy_cmd(toks.get(1).copied()),
             "playlist" | "pl" => self.playlist_cmd(&toks, rest),
-            "fill" => self.fill(),
+            "fill" | "next" => self.fill(),
             "audit" => self.audit_show(toks.get(1).and_then(|t| t.parse().ok()).unwrap_or(5)),
+            "ban" => self.ban(toks.get(1).copied()),
             "unban" => self.unban(toks.get(1).copied()),
             "config" | "" => self.config_summary(),
-            _ => Ok("usage: !dj set|list|mode|ai|policy|playlist|fill|audit|unban|config".into()),
+            _ => Ok(
+                "usage: !dj set|list|mode|ai|policy|playlist|fill|next|audit|ban|unban|config"
+                    .into(),
+            ),
         }
     }
 
@@ -101,9 +107,6 @@ impl Engine<'_> {
             Some("ai") => Mode::Ai,
             _ => return Ok("usage: !dj mode requests|playlist|ai".into()),
         };
-        if cfg.mode == Mode::Ai && !cfg.ai.enabled {
-            return Ok("turn the AI DJ on first: !dj ai on".into());
-        }
         self.save(crate::engine::KEY_CONFIG, &cfg, 0)?;
         Ok(format!("mode set to {}", arg.unwrap_or("")))
     }
@@ -114,19 +117,30 @@ impl Engine<'_> {
             .map_or_else(String::new, |s| s.to_ascii_lowercase());
         let mut cfg = self.config()?;
         match sub.as_str() {
-            "on" => {
-                cfg.ai.enabled = true;
-                self.save(crate::engine::KEY_CONFIG, &cfg, 0)?;
-                Ok("AI DJ is on (it fills gaps and obeys the same policy as requests)".into())
-            }
-            "off" => {
-                cfg.ai.enabled = false;
-                if cfg.mode == Mode::Ai {
-                    cfg.mode = Mode::Requests;
+            "on" | "off" => {
+                let want = sub == "on";
+                // The service stores the single switch and enforces `music:dj.manage`.
+                let idem = format!("dj.set.{}", self.ctx.message_id);
+                match requests::dj_set(self.host, want, &idem) {
+                    Ok(now) => {
+                        if !now && cfg.mode == Mode::Ai {
+                            cfg.mode = Mode::Requests;
+                            self.save(crate::engine::KEY_CONFIG, &cfg, 0)?;
+                        }
+                        Ok(if now {
+                            "AI DJ is on for everyone (it adds picks only when viewer requests run low, after them)".into()
+                        } else {
+                            "AI DJ is off for everyone (no picks)".to_string()
+                        })
+                    }
+                    Err(e) => Ok(e.user_msg()),
                 }
-                self.save(crate::engine::KEY_CONFIG, &cfg, 0)?;
-                Ok("AI DJ is off".into())
             }
+            "status" | "" => Ok(match requests::dj_get(self.host) {
+                Ok(true) => "AI DJ is on".to_string(),
+                Ok(false) => "AI DJ is off".to_string(),
+                Err(e) => e.user_msg(),
+            }),
             "genre" => {
                 let g = clean_text(text.strip_prefix("genre").unwrap_or(text), 80);
                 if g.is_empty() {
@@ -155,7 +169,7 @@ impl Engine<'_> {
                     Err(e) => Ok(format!("could not compile those instructions: {e}")),
                 }
             }
-            _ => Ok("usage: !dj ai on|off|genre <g>|instructions <text>".into()),
+            _ => Ok("usage: !dj ai on|off|status|genre <g>|instructions <text>".into()),
         }
     }
 
@@ -205,18 +219,10 @@ impl Engine<'_> {
         }
     }
 
+    /// `!dj fill` / `!dj next`: re-reads the shared queue and adds DJ picks if allowed.
     fn fill(&self) -> Reply {
         let cfg = self.config()?;
-        if !cfg.ai.enabled {
-            return Ok("the AI DJ is off".into());
-        }
-        let mut st = self.state()?;
-        let r = self.ai_fill(&cfg, &mut st);
-        self.save_state(&st)?;
-        Ok(match r {
-            Ok(n) => format!("AI DJ queued {n} songs"),
-            Err(m) => format!("AI DJ: {m}"),
-        })
+        self.plan(&cfg)
     }
 
     fn audit_show(&self, n: usize) -> Reply {
@@ -243,6 +249,27 @@ impl Engine<'_> {
         })
     }
 
+    fn ban(&self, key: Option<&str>) -> Reply {
+        let Some(key) = key.filter(|k| {
+            k.len() <= 140
+                && k.split_once('/')
+                    .is_some_and(|(p, _)| PROVIDERS.contains(&p))
+                && !k.chars().any(|c| c.is_control() || c.is_whitespace())
+        }) else {
+            return Ok("usage: !dj ban <provider/id>".into());
+        };
+        let mut st = self.state()?;
+        if st.banned.len() >= 200 {
+            return Ok("the ban list is full".into());
+        }
+        if !st.banned.iter().any(|b| b == key) {
+            st.banned.push(key.to_string());
+        }
+        self.save_state(&st)?;
+        self.audit(0, "mod_ban", DecidedBy::Moderator, Outcome::Banned)?;
+        Ok("banned for DJ picks".into())
+    }
+
     fn unban(&self, key: Option<&str>) -> Reply {
         let Some(key) = key else {
             return Ok("usage: !dj unban <provider/id>".into());
@@ -259,22 +286,28 @@ impl Engine<'_> {
 
     fn config_summary(&self) -> Reply {
         let c = self.config()?;
+        let ai = match requests::dj_get(self.host) {
+            Ok(true) => "on",
+            Ok(false) => "off",
+            Err(_) => "unavailable",
+        };
+        let legacy = c.dmca_safe == Some(true);
+        let safe = match requests::list(self.host, 1) {
+            Ok(s) if s.safe_flag() == Some(true) => "on (service)",
+            Ok(s) if s.safe_flag() == Some(false) && !legacy => "off (service)",
+            _ => "on (fail-closed)",
+        };
         Ok(format!(
-            "requests {} | providers {} | max/user {} | cooldown {}s | max {} | queue {} | replay {}s | explicit {} | dmca_safe {} | approval {} | auto_remove {} | cost {} | mode {} | ai {}",
-            if c.requests_enabled { "on" } else { "off" },
+            "providers {} | dj_min_queue {} | dj_requests_per_pick {} | max {} | replay {}s | explicit {} | mode {} | ai {} | dmca_safe {}",
             c.providers.join(","),
-            c.max_per_user,
-            c.cooldown_s,
+            c.dj_min_queue,
+            c.dj_requests_per_pick,
             fmt_dur(c.max_duration_s),
-            c.max_queue,
             c.replay_cooldown_s,
             c.explicit_allowed,
-            c.dmca_safe,
-            c.approval_required,
-            c.auto_remove,
-            c.request_cost,
             u8::from(c.mode),
-            if c.ai.enabled { "on" } else { "off" },
+            ai,
+            safe,
         ))
     }
 
@@ -398,7 +431,7 @@ impl Engine<'_> {
         st.cursor = 0;
         self.save_state(&st)?;
         Ok(format!(
-            "active playlist is {name}; switch playback with !dj mode playlist"
+            "active playlist is {name}; feed picks from it with !dj mode playlist"
         ))
     }
 
@@ -409,7 +442,7 @@ impl Engine<'_> {
             banned: st.banned.clone(),
             ..State::default()
         };
-        policy::evaluate(cfg, &probe, t, self.host.now_ms(), None).map(|v| v.reason)
+        policy::evaluate(cfg, &probe, t, self.host.now_ms(), &[]).map(|v| v.reason)
     }
 
     fn pl_add(&self, name: &str, query: &str) -> Reply {
