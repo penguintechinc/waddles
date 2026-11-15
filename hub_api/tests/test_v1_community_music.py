@@ -51,9 +51,6 @@ class RecordingDal:
 
 @pytest.fixture(autouse=True)
 def _patches(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    # The contract id contains a hyphen, which `derive_v2_table_identity` rejects today (see
-    # `test_contract_app_id_derives`); tests use the underscore spelling to exercise the reader.
-    monkeypatch.setattr(svc, "MUSIC_REQUESTS_APP_ID", "waddles.core.service.music_requests")
     monkeypatch.setattr(svc, "_qualified_table", lambda logical: f'"{_table(logical)}"')
     flag = AsyncMock(return_value=True)
     monkeypatch.setattr(music_module, "feature_enabled", flag)
@@ -465,11 +462,6 @@ def test_unsafe_identifier_refused() -> None:
         svc._quote('x"; DROP TABLE y; --')
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BLOCKER: derive_v2_table_identity rejects '-' so the contract app_id "
-    "'waddles.core.service.music-requests' cannot get physical tables; flips when fixed",
-)
 def test_contract_app_id_derives() -> None:
     """The real service app_id must be derivable, or its tables can never be provisioned."""
     derive_v2_table_identity("waddles.core.service.music-requests", "requests", provider="builtin")

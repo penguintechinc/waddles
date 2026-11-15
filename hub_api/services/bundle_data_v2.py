@@ -224,7 +224,10 @@ def derive_v2_table_identity(app_id: str, logical: str, *, provider: str) -> Tab
     families cannot collide either. Provisioning and teardown additionally verify the
     registry row, so even a hash collision fails closed instead of squatting a table.
     """
-    base = derive_table_identity(app_id, provider=provider)
+    # `-` is legal in an app_id (e.g. `...service.music-requests`) but not in the v1
+    # sanitiser; map it to `_` for the readable PREFIX only. Injectivity is unaffected:
+    # the suffix hashes the exact app_id.
+    base = derive_table_identity(app_id.replace("-", "_"), provider=provider)
     if not _LOGICAL_NAME_RE.fullmatch(logical) or _TABLE_SEPARATOR in logical:
         raise TableDeclarationError("invalid_table_name", f"bad logical name {logical!r}")
     digest = hashlib.sha256(app_id.encode("utf-8")).hexdigest()[:APP_HASH_LEN]
