@@ -10,6 +10,7 @@ is no shared-secret fallback anywhere.
 from __future__ import annotations
 
 import logging
+import re
 
 from flask_core.jwt_keyring import (
     JwtSigningKey,
@@ -31,6 +32,10 @@ from services.provider_connections.vault import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The only kid shape the vault mints for JWT keys (`platform_kid`: "k" + 16 hex). Anything else
+#: is refused BEFORE the cache, so hostile kids never reach a lookup, a reload or a negative entry.
+_KID_RE = re.compile(r"k[0-9a-f]{16}")
 
 
 class PlatformVaultJwtKeyring:
@@ -56,6 +61,8 @@ class PlatformVaultJwtKeyring:
 
     def verify_key(self, kid: str) -> JwtVerifyKey:
         """The servable public key for `kid`; unknown / retired / expired fails closed."""
+        if not isinstance(kid, str) or _KID_RE.fullmatch(kid) is None:
+            raise UnknownKidError("no servable JWT key has that key id")
         try:
             entry = self._cache.by_kid(int(SecretType.JWT_SIGNING), kid)
         except UnknownKeyIdError:

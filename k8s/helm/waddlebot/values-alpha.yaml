@@ -26,7 +26,7 @@ global:
   # login. The password is NOT committed here (fix/alpha-helm-deploy) -- it
   # comes from the required WADDLEBOT_ALPHA_ADMIN_PASSWORD env var via
   # scripts/deploy-alpha.sh's generated secrets values file, same as
-  # secretKey/moduleSecretKey/serviceApiKey/minio root creds below. NEVER
+  # sessionMacKey/moduleSecretKey/serviceApiKey/minio root creds below. NEVER
   # reused in beta/gamma/production (see values.yaml global.initialAdmin).
   initialAdmin:
     email: "admin@waddlebot.localhost.local"

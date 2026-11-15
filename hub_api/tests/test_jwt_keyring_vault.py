@@ -262,3 +262,85 @@ def test_corrupt_published_public_key_is_refused(vault: dict[str, Any]) -> None:
 
 def _mint_with(private: ec.EllipticCurvePrivateKey, kid: str) -> str:
     return jwt.encode(_claims(), private, algorithm="ES256", headers={"kid": kid})
+
+
+class _CountingLoader:
+    """A loader that counts reloads and serves a fixed set of entries."""
+
+    def __init__(self, entries: list[CachedSecret]) -> None:
+        self.entries = entries
+        self.calls = 0
+
+    def __call__(self) -> list[CachedSecret]:
+        self.calls += 1
+        return list(self.entries)
+
+
+def _forged_kid_token(kid: str) -> str:
+    key = ec.generate_private_key(ec.SECP256R1())
+    return jwt.encode(_claims(), key, algorithm="ES256", headers={"kid": kid})
+
+
+def test_bogus_kids_cause_at_most_one_reload_per_interval(clock: _Clock) -> None:
+    """N distinct well-formed unknown kids => <= 1 vault reload per negative-TTL interval."""
+    active, _ = _entry(2, STATE_ACTIVE)
+    loader = _CountingLoader([active])
+    cache = PlatformSecretCache(loader=loader, clock=clock)
+    cache.seed([active])
+    jk.set_jwt_keyring(PlatformVaultJwtKeyring(cache))
+    for i in range(200):
+        assert verify_jwt_token(_forged_kid_token(f"k{i:016x}")) is None
+    assert loader.calls <= 1
+    clock.now = clock.now + timedelta(seconds=31)
+    for i in range(200, 400):
+        assert verify_jwt_token(_forged_kid_token(f"k{i:016x}")) is None
+    assert loader.calls <= 2  # one more interval, one more reload
+
+
+def test_reload_does_not_reset_the_negative_cache(clock: _Clock) -> None:
+    active, _ = _entry(2, STATE_ACTIVE)
+    loader = _CountingLoader([active])
+    cache = PlatformSecretCache(loader=loader, clock=clock)
+    cache.seed([active])
+    jk.set_jwt_keyring(PlatformVaultJwtKeyring(cache))
+    bogus = f"k{1:016x}"
+    assert verify_jwt_token(_forged_kid_token(bogus)) is None
+    cache.refresh()  # a reload (e.g. the 60 s poll) must not forget the remembered miss
+    before = loader.calls
+    assert verify_jwt_token(_forged_kid_token(bogus)) is None
+    assert loader.calls == before
+
+
+def test_negative_cache_is_bounded(clock: _Clock) -> None:
+    from services.platform_secrets.cache import MAX_NEGATIVE_ENTRIES, UnknownKeyIdError
+
+    active, _ = _entry(2, STATE_ACTIVE)
+    cache = PlatformSecretCache(loader=_CountingLoader([active]), clock=clock)
+    cache.seed([active])
+    for i in range(MAX_NEGATIVE_ENTRIES * 2):
+        with pytest.raises(UnknownKeyIdError):
+            cache.by_kid(JWT_TYPE, f"k{i:016x}")
+        clock.now = clock.now + timedelta(milliseconds=1)
+    assert len(cache._negative) <= MAX_NEGATIVE_ENTRIES  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "bad_kid",
+    ["../../etc/passwd", "k", "K0123456789abcdef", "k0123456789abcdeg", "k" + "0" * 17, "hs256-v1"],
+)
+def test_malformed_kid_never_reaches_the_cache(bad_kid: str, clock: _Clock) -> None:
+    class _Spy(PlatformSecretCache):
+        lookups = 0
+
+        def by_kid(self, secret_type: int, kid: str, scope_id: int | None = None) -> CachedSecret:
+            type(self).lookups += 1
+            return super().by_kid(secret_type, kid, scope_id)
+
+    active, _ = _entry(2, STATE_ACTIVE)
+    loader = _CountingLoader([active])
+    cache = _Spy(loader=loader, clock=clock)
+    cache.seed([active])
+    ring = PlatformVaultJwtKeyring(cache)
+    with pytest.raises(jk.UnknownKidError):
+        ring.verify_key(bad_kid)
+    assert _Spy.lookups == 0 and loader.calls == 0

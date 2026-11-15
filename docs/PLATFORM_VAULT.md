@@ -73,18 +73,19 @@ Helm value, Secret key, script or code path accepts or mints HS256, and a CI gat
 | Rotation | new version active, previous version **verify-only** until `rotated_at + 2 h` (`verify_window_s`), then refused even if no refresh happened (M6); a Rust cache additionally refuses verify-only keys when its snapshot is > 15 min stale |
 | Kill-switch | `waddles.disable-db-platform-keys` ON skips the vault bootstrap: JWTs then fail CLOSED (no signing key). It is not an HS256 fallback |
 
-`SECRET_KEY` remains only as the Flask session-cookie / refresh-token MAC key (independent random value, Helm
-`global.secretKey`, generated on first run); it can sign no JWT.
+`SESSION_MAC_KEY` is the Flask session-cookie / refresh-token MAC key (independent random value, Helm
+`global.sessionMacKey`, generated create-if-absent on first run). It is a NEW key name on purpose: the old `SECRET_KEY`
+was derived from the retired shared JWT secret, so its value is never reused. It can sign no JWT.
 
 ### Migration notes (HS256 -> ES256)
 
 1. Deploy: hub-api bootstraps the ES256 key on start; every previously issued access/refresh JWT is refused, so
    **users re-login once** (access tokens live <= 15 min; sessions refresh-rotate after re-login).
 2. There is deliberately **no dual-accept window** (security review H3): HS256 acceptance is removed in code.
-3. Remove the orphaned `JWT_SECRET` / `JWT_SECRET_KEY` entries from the `waddlebot-secrets` Secret in each cluster
-   (`kubectl patch secret waddlebot-secrets --type=json -p '[{"op":"remove","path":"/data/JWT_SECRET"},{"op":"remove","path":"/data/JWT_SECRET_KEY"}]'`);
+3. Remove the orphaned `JWT_SECRET` / `JWT_SECRET_KEY` / `SECRET_KEY` entries from the `waddlebot-secrets` Secret in each cluster
+   (`kubectl patch secret waddlebot-secrets --type=json -p '[{"op":"remove","path":"/data/JWT_SECRET"},{"op":"remove","path":"/data/JWT_SECRET_KEY"},{"op":"remove","path":"/data/SECRET_KEY"}]'`);
    leaked copies verify nothing, but they should not linger.
-4. Helm: `global.jwtSecret` / `WADDLEBOT_ALPHA_JWT_SECRET` are removed; `global.secretKey` / `WADDLEBOT_ALPHA_SECRET_KEY` replace them.
+4. Helm: `global.jwtSecret` / `WADDLEBOT_ALPHA_JWT_SECRET` are removed; `global.sessionMacKey` / `WADDLEBOT_ALPHA_SESSION_MAC_KEY` replace them; a values file that still sets `global.jwtSecret` now FAILS the render.
 
 ## Data-plane verifying keys (`core/platform_keys`, design T5)
 

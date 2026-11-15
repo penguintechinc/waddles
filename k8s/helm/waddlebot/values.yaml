@@ -49,8 +49,9 @@ global:
   # Security secrets (set via kubectl create secret or values override)
   # Defaults match docker-compose.yml for local development consistency
   # No jwtSecret: platform JWTs are ES256, keys live in platform_vault (docs/PLATFORM_VAULT.md).
-  # secretKey is the Flask session-cookie / refresh-token MAC key; empty = generated on first run.
-  secretKey: ""
+  # sessionMacKey is the session-cookie / refresh-token MAC key (NOT a JWT key); empty = generated on first run.
+  # It must be fresh material: never reuse the retired jwtSecret / old SECRET_KEY value (setting jwtSecret fails the render).
+  sessionMacKey: ""
   moduleSecretKey: "REPLACE_ME_module_secret"
   serviceApiKey: "REPLACE_ME_service_key"
 

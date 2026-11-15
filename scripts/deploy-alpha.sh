@@ -32,7 +32,7 @@
 #   Required secrets — never defaulted, never committed, never passed as CLI
 #   args (see docs/SECRETS_SETUP.md and ~/.claude/rules/critical-rules.md
 #   Token & Secret Hygiene). The script fails loudly if any is unset:
-#     WADDLEBOT_ALPHA_SECRET_KEY
+#     WADDLEBOT_ALPHA_SESSION_MAC_KEY
 #     WADDLEBOT_ALPHA_MODULE_SECRET_KEY
 #     WADDLEBOT_ALPHA_SERVICE_API_KEY
 #     WADDLEBOT_ALPHA_ADMIN_PASSWORD
@@ -103,7 +103,7 @@ declare -A SERVICE_DOCKERFILE=(
 # alpha release was actually deployed with; none of these may ever be
 # defaulted or committed (critical-rules.md Token & Secret Hygiene).
 readonly REQUIRED_SECRET_VARS=(
-    "WADDLEBOT_ALPHA_SECRET_KEY"
+    "WADDLEBOT_ALPHA_SESSION_MAC_KEY"
     "WADDLEBOT_ALPHA_MODULE_SECRET_KEY"
     "WADDLEBOT_ALPHA_SERVICE_API_KEY"
     "WADDLEBOT_ALPHA_ADMIN_PASSWORD"
@@ -236,7 +236,7 @@ check_required_secrets() {
 
 These are never defaulted and never committed. Set them before deploying, e.g.:
 
-    export WADDLEBOT_ALPHA_SECRET_KEY="$(openssl rand -hex 32)"
+    export WADDLEBOT_ALPHA_SESSION_MAC_KEY="$(openssl rand -hex 32)"
     export WADDLEBOT_ALPHA_MODULE_SECRET_KEY="$(openssl rand -hex 32)"
     export WADDLEBOT_ALPHA_SERVICE_API_KEY="$(openssl rand -hex 32)"
     export WADDLEBOT_ALPHA_ADMIN_PASSWORD="$(openssl rand -base64 24)"
@@ -255,7 +255,7 @@ EOF
     SECRETS_VALUES_FILE="$(mktemp "${TMPDIR:-/tmp}/waddlebot-alpha-secrets-XXXXXX.yaml")"
     cat > "${SECRETS_VALUES_FILE}" <<EOF
 global:
-  secretKey: "${WADDLEBOT_ALPHA_SECRET_KEY}"
+  sessionMacKey: "${WADDLEBOT_ALPHA_SESSION_MAC_KEY}"
   moduleSecretKey: "${WADDLEBOT_ALPHA_MODULE_SECRET_KEY}"
   serviceApiKey: "${WADDLEBOT_ALPHA_SERVICE_API_KEY}"
   initialAdmin:
@@ -470,7 +470,7 @@ ENVIRONMENT:
     REGISTRY:       ${REGISTRY}
 
 REQUIRED SECRETS (env vars, never defaulted/committed — see docs/SECRETS_SETUP.md):
-    WADDLEBOT_ALPHA_SECRET_KEY
+    WADDLEBOT_ALPHA_SESSION_MAC_KEY
     WADDLEBOT_ALPHA_MODULE_SECRET_KEY
     WADDLEBOT_ALPHA_SERVICE_API_KEY
     WADDLEBOT_ALPHA_ADMIN_PASSWORD

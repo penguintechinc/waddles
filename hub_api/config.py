@@ -12,7 +12,7 @@ every data structure, `frozen=True` for a value object built once at
 startup and never mutated.
 
 Two field names deliberately mirror `flask_core` verbatim rather than
-inventing a hub-api-local name: `secret_key` reads `SECRET_KEY`. It is NOT a JWT key (platform
+inventing a hub-api-local name: `secret_key` reads `SESSION_MAC_KEY`. It is NOT a JWT key (platform
 JWTs are ES256 with keys in `platform_vault`, see `flask_core.jwt_keyring`); it only keys the
 Flask session cookie and the refresh-token MAC, and `require_secret_key()` fails closed (raises
 `InsecureSecretError`) rather than silently falling back to the `"change-me-in-production"`
@@ -109,7 +109,7 @@ class HubAPIConfig:
     db_max_retries: int
     db_retry_delay: int
 
-    # Session-cookie / refresh-token MAC key (SECRET_KEY) -- NOT a JWT key; see module docstring.
+    # Session-cookie / refresh-token MAC key (SESSION_MAC_KEY) -- NOT a JWT key.
     secret_key: str
     default_tenant_slug: str
 
@@ -330,7 +330,7 @@ class HubAPIConfig:
             db_pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
             db_max_retries=int(os.getenv("DB_MAX_RETRIES", "5")),
             db_retry_delay=int(os.getenv("DB_RETRY_DELAY", "5")),
-            secret_key=require_secret_key(),
+            secret_key=require_secret_key("SESSION_MAC_KEY"),
             default_tenant_slug=os.getenv("DEFAULT_TENANT_SLUG", "default"),
             posthog_api_key=os.getenv("POSTHOG_API_KEY") or os.getenv("POSTHOG_KEY"),
             posthog_host=os.getenv("POSTHOG_HOST", "https://license.penguintech.io"),

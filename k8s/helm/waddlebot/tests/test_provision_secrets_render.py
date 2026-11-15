@@ -129,9 +129,9 @@ def test_no_template_time_generation_left() -> None:
 
 def test_explicit_values_go_to_inputs_secret_never_the_spec_cm() -> None:
     marker = "explicit-secret-value-0123456789abcdef"
-    docs = _render("production", [f"global.secretKey={marker}", "global.moduleSecretKey=REPLACE_ME_x"])
+    docs = _render("production", [f"global.sessionMacKey={marker}", "global.moduleSecretKey=REPLACE_ME_x"])
     inputs = _one(docs, "Secret", "waddlebot-provision-secrets-inputs")["stringData"]
-    assert inputs["waddlebot-secrets__SECRET_KEY"] == marker
+    assert inputs["waddlebot-secrets__SESSION_MAC_KEY"] == marker
     assert "waddlebot-secrets__MODULE_SECRET_KEY" not in inputs  # placeholder is never an explicit value
     cm = json.dumps(_one(docs, "ConfigMap", "waddlebot-provision-secrets")["data"])
     job = json.dumps(_one(docs, "Job", "waddlebot-provision-secrets"))
@@ -183,10 +183,41 @@ def test_rendered_spec_drives_script_end_to_end_second_run_unchanged(env: str, t
     assert pw in e.val("waddlebot-db-migrate-secret", "DATABASE_URL")
     roles = json.loads(e.val("waddlebot-db-migrate-secret", "WADDLES_DB_SERVICE_ROLE_PASSWORDS"))
     assert roles and all(len(v) == 43 for v in roles.values())
-    # T10: no shared JWT secret is generated; SECRET_KEY is independent random material.
+    # T10: no shared JWT secret is generated; SESSION_MAC_KEY is independent random material.
     assert e.get("waddlebot-secrets")["data"].get("JWT_SECRET") is None
     assert e.get("waddlebot-secrets")["data"].get("JWT_SECRET_KEY") is None
-    assert len(base64.b64decode(e.get("waddlebot-secrets")["data"]["SECRET_KEY"])) >= 32
+    assert e.get("waddlebot-secrets")["data"].get("SECRET_KEY") is None
+    assert len(base64.b64decode(e.get("waddlebot-secrets")["data"]["SESSION_MAC_KEY"])) >= 32
     assert f":{e.val('waddlebot-secrets', 'REDIS_PASSWORD')}@" in e.val("waddlebot-secrets", "REDIS_URL")
     base64.b64decode(e.get("waddlebot-tenant-kek")["data"]["TENANT_KEK_HEX"])
     assert "waddles.penguintech.io/root-marker" in e.get("waddlebot-tenant-kek")["annotations"]
+
+
+def test_removed_jwt_secret_value_fails_the_render_loudly() -> None:
+    """A stale values file that still sets global.jwtSecret must not be silently ignored."""
+    args = ["helm", "template", "waddlebot", str(_CHART), "--kube-version", "1.30.0",
+            "-f", str(_CHART / "values-production.yaml"), "--set", "global.jwtSecret=stale-leaked-value-0123456789abcdef"]
+    res = subprocess.run(args, capture_output=True, text=True, check=False)  # noqa: S603
+    assert res.returncode != 0
+    assert "global.jwtSecret was removed" in res.stderr
+    assert "stale-leaked-value" not in res.stderr  # the value is never echoed
+
+
+@pytest.mark.parametrize("env", ["alpha", "production"])
+def test_legacy_secret_key_value_is_never_reused_as_the_session_mac_key(env: str, tmp_path: Path) -> None:
+    """Upgrade case: waddlebot-secrets already holds SECRET_KEY == the retired shared JWT secret.
+
+    The hook must mint a fresh, different SESSION_MAC_KEY (compared by digest, never printed) and
+    leave the legacy keys untouched (operators delete them per docs/PLATFORM_VAULT.md).
+    """
+    import hashlib
+
+    legacy = "legacy-shared-jwt-secret-value-0123456789abcdefghijkl"
+    e = Env(tmp_path)
+    e.put("waddlebot-secrets", {"SECRET_KEY": legacy, "JWT_SECRET": legacy, "JWT_SECRET_KEY": legacy})
+    r = e.run(_spec(_render(env)), {"LABEL_RELEASE": "waddlebot"})
+    assert r.returncode == 0, r.stderr
+    fresh = e.val("waddlebot-secrets", "SESSION_MAC_KEY")
+    assert hashlib.sha256(fresh.encode()).digest() != hashlib.sha256(legacy.encode()).digest()
+    assert legacy not in fresh and legacy not in r.stdout and legacy not in r.stderr
+    assert e.val("waddlebot-secrets", "SECRET_KEY") == legacy  # never overwritten by the hook
