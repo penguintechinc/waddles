@@ -57,3 +57,37 @@ KEK (`TENANT_KEK_HEX`, with `TENANT_KEK_HEX_PREVIOUS` during a rotation).
 The seal-callers guard (`hub_api/tests/test_seal_callers_guard.py`) pins that the AEAD, KEK subkey
 derivation and `hmac` run only inside these functions, that the namespace label appears only in the
 vault, and ratchets the set of modules allowed to import `cryptography` / `hmac`.
+
+## Data-plane verifying keys (`core/platform_keys`, design T5)
+
+Data-plane services verify signatures against the PUBLIC keys in the view `public_keys`, read with
+their existing read-only replica role (schema USAGE + view SELECT only; **no new grants**). The Rust
+crate `core/platform_keys` is the cache between the two (README in the crate):
+
+- seed at startup with bounded backoff; readiness (`KeyCache::ready`) is false until every required
+  key type has a usable row;
+- lazy-load one kid on a miss, 30 s negative cache; unknown kid **fails closed**;
+- 60 s poll replaces the snapshot (a retired key disappears at the next poll); on a database outage
+  the last-known keys are kept;
+- verify-only keys are honoured until `verify_until = rotated_at + window` and only while the last
+  successful read is < 15 min old (security review M6), so a retired/compromised key cannot keep
+  verifying because hub-api or the database is down; active keys are not affected by staleness;
+- statements are fixed literals with the kid as a bound parameter (`pg::ALL_SQL`, `pg::KID_SQL`).
+
+**Key-source switch.** `*_KEY_SOURCE=db|configmap` is a migration switch evaluated once at startup
+(`KeySource::resolve`): explicit value wins, a typo is an error, unset follows the kill-switch flag
+`waddles.disable-db-platform-keys` (OFF/unseen = `db`). With `db` selected there is no fallback to
+the ConfigMap: an unreadable store fails readiness and lookups.
+
+**Bundle executor.** Artifact/precompile signature verification
+(`core/bundle_executor/src/signing.rs`) resolves the signing key through
+`verify_artifact_signature_async`, which uses either the static `BUNDLE_SIGNING_PUBLIC_KEYS` set or,
+for `db`, the cache (`Executor::with_key_cache`) -- never both. The standalone executor binary is
+credential-less and its dependency policy bans sqlx/sea-orm, so it links only the cache core:
+`BUNDLE_SIGNING_KEY_SOURCE` defaults to `configmap` there and an explicit `db` is refused at startup
+until an embedder supplies a `KeyLoader` (see the PR's open questions).
+
+**Telemetry.** Counters `platform_keys_{cache_hits,cache_misses,refresh_failures,unknown_kid,
+rejected,refreshes}_total` (labels: `key_type`, closed `reason` set -- never a kid), histogram
+`platform_keys_refresh_duration_seconds`, span `platform_keys.refresh`. Logs carry key type, a
+sanitised kid and version only.

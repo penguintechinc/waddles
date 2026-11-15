@@ -1004,6 +1004,15 @@ pub enum DrainOutcome {
 }
 
 impl<S: ComponentSource> Executor<S> {
+    /// Switches artifact-signature verification to the database-backed key cache
+    /// (`BUNDLE_SIGNING_KEY_SOURCE=db`, design T5). The static ConfigMap set is dropped, not
+    /// kept as a fallback: an unknown kid or an unreadable store fails the `load` closed.
+    #[must_use]
+    pub fn with_key_cache(mut self, cache: Arc<platform_keys::KeyCache>, key_type: i16) -> Self {
+        self.signing_keys = PlatformPublicKeys::from_cache(cache, key_type);
+        self
+    }
+
     /// An executor with its OWN [`SharedRuntime`] (tests, single-stage
     /// processes). A multi-stage process builds one runtime and calls
     /// [`Executor::with_runtime`] per stage so stages share compiled code.

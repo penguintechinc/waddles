@@ -15,6 +15,7 @@ on:
       - 'core/egress_detokenizer/**'
       - 'core/hub_client/**'
       - 'core/bundle_config_db/**'
+      - 'core/platform_keys/**'
       - 'core/overlay_auth/**'
       - 'proto/**'
       - '.github/workflows/rust-core-libs.yml'
@@ -64,6 +65,7 @@ jobs:
             core/egress_detokenizer/**
             core/hub_client/**
             core/bundle_config_db/**
+            core/platform_keys/**
             core/overlay_auth/**
             proto/**
             .github/workflows/rust-core-libs.yml
@@ -75,7 +77,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [bundle_active_set, bundle_capability_gate, bundle_config_db, bundle_tool_call, circuit_breaker, command_latency, egress_detokenizer, hub_client, overlay_auth]
+        crate: [bundle_active_set, bundle_capability_gate, bundle_config_db, bundle_tool_call, circuit_breaker, command_latency, egress_detokenizer, hub_client, overlay_auth, platform_keys]
     uses: ./.github/workflows/rust-crate-ci.yml
     with:
       crate_name: ${{ matrix.crate }}
@@ -85,7 +87,7 @@ jobs:
       extra_apt_reason: 'for hub_client build.rs (protoc; also reached by bundle_config_db) + aws-lc-sys'
       # bundle_config_db's reader tests (tests/bundle_config_db_pg.rs) need a real Postgres via
       # TEST_DATABASE_URL and fail loudly without one.
-      postgres: ${{ matrix.crate == 'bundle_config_db' }}
+      postgres: ${{ matrix.crate == 'bundle_config_db' || matrix.crate == 'platform_keys' }}
       # command_latency's tests/valkey_pipeline.rs drives real XADD entry ids + consumer groups and
       # fails loudly without a real Valkey (VALKEY_URL).
       valkey: ${{ matrix.crate == 'command_latency' }}

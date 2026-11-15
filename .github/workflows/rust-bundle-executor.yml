@@ -5,6 +5,7 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/bundle_executor/**'
+      - 'core/platform_keys/**'
       - 'wit/waddle-bundle/**'
       - 'wit/waddle-connector/**'
       - 'tests/data_plane_parity/**'
@@ -49,6 +50,7 @@ jobs:
           area: rust
           globs: |
             core/bundle_executor/**
+            core/platform_keys/**
             wit/waddle-bundle/**
             wit/waddle-connector/**
             tests/data_plane_parity/**
