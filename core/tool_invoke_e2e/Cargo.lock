@@ -648,11 +648,13 @@ name = "bundle-active-set"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures-util",
  "sea-orm",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -1050,6 +1052,16 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "command-latency"
+version = "0.1.0"
+dependencies = [
+ "opentelemetry",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
 ]
 
 [[package]]
@@ -4773,6 +4785,7 @@ dependencies = [
  "chrono",
  "circuit-breaker",
  "clap",
+ "command-latency",
  "connection_resolver",
  "futures-util",
  "governor",

@@ -26,7 +26,10 @@ _ENVS = ["values-alpha.yaml", "values-dal2alpha.yaml"]
 def _render(values: str, sets: list[str]) -> subprocess.CompletedProcess[str]:
     """Run helm template for a values file plus --set overrides."""
     args = ["helm", "template", "waddlebot", str(_CHART_DIR), "--kube-version", "1.30.0",
-            "--values", str(_CHART_DIR / values)]
+            "--values", str(_CHART_DIR / values),
+            # Baseline = the single default pool; the shipped env pools are covered by
+            # test_executor_language_partition_render.py.
+            "--set-json", "pipeline.rustDataPlane.bundleExecutor.pools=[]"]
     for s in sets:
         flag = "--set-string" if "nodeSelector" in s else "--set"
         args += [flag, s]

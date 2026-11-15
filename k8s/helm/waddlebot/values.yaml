@@ -1747,6 +1747,11 @@ pipeline:
   #   dm.send. Setting pipeline.rustDataPlane.enabled=true alone yields an INERT svc-ingest-rust
   #   pod -- the flag must also be ON in PostHog (or a domain bypass applies).
   rustDataPlane:
+    # Per-app drain concurrency of svc-process / svc-action (latency suspect #4): how many ordering
+    # groups of one drained batch run at once (1 = serial). `drainOrdering`: `actor` (default: one user's
+    # commands in one channel stay ordered, other users overlap) or `stream` (a source never overlaps).
+    drainConcurrency: 4
+    drainOrdering: actor
     enabled: false
 
     # Security review fix (PR #468, MEDIUM): bundle_host_http::egress::EgressGuard's
@@ -2160,6 +2165,16 @@ pipeline:
       # boot burst OOM-killed the pod at 16Gi.
       maxConcurrentCompiles: 0
       poolWaitMs: 500
+      # Warm instance pool (latency suspect #2, docs/observability/command-latency.md): the executor keeps
+      # up to `warmPoolSize` one-shot, pre-instantiated guests per bundle digest so an invoke skips
+      # instantiation (50-300 ms for Python). 0 = off (default, flag-style opt-in per pool; override per
+      # pool with pools[].warmPoolSize / warmPoolMaxTotal). Each guest is used exactly once (no state
+      # can leak across tenants), then dropped. Memory: worst case warmPoolMaxTotal x
+      # EXECUTOR_MEMORY_LIMIT_MB on top of the module budget, so keep it inside the pool's memory
+      # limit. Kill switch: FLAG_WADDLES_DISABLE_EXECUTOR_WARM_POOL=true on the pod.
+      warmPoolSize: 0
+      warmPoolMaxTotal: 16
+      warmPoolIdleSecs: 120
       precompileDir: "/var/cache/waddles/wasm"
       wasmCollector: "drc"
       sandboxGvisor: true

@@ -735,6 +735,20 @@ impl DigestSource {
         }
     }
 
+    /// Where this source's bundle may be placed on the executor partition: the legacy
+    /// `Static` path is unpartitioned; `Active` classifies the scope's recorded language and
+    /// fails closed (`UnknownLanguage`) when none is recorded or it is in no class.
+    fn placement(&self) -> bundle_active_set::Placement {
+        match self {
+            DigestSource::Static(_) => bundle_active_set::Placement::Unpartitioned,
+            DigestSource::Active { scope, digests } => digests
+                .language(scope)
+                .map_or(bundle_active_set::Placement::UnknownLanguage, |l| {
+                    bundle_active_set::partition::table().placement(&l)
+                }),
+        }
+    }
+
     /// Like [`Self::current`], but additionally treats an `Active`-path
     /// digest that resolved to an empty string the same as "no active
     /// digest known" (`None`) -- the one call [`handle_delivered`]'s own
@@ -1478,7 +1492,10 @@ async fn handle_delivered_inner<S: SpineOps>(
     // (legacy round-robin when sharding is off or an executor has no id);
     // a non-owner pick is still served via the on-demand `ensure_loaded`
     // below.
-    let Some(connection) = deps.connections.pick_dispatch_for_app(&deps.app_id) else {
+    let Some(connection) = deps
+        .connections
+        .pick_dispatch_for_app(&deps.app_id, deps.digest_source.placement())
+    else {
         // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
         // 2026-10-02 incident: svc-process/svc-action were rolled and each
         // bundle-executor stayed bound to its old, terminated pod; the new
@@ -1842,10 +1859,33 @@ async fn drain_batch<R: StreamReader, S: SpineOps>(
     }
     let batch = reader.read().await?;
     stage_metrics::stage_metrics().record_batch(batch.len());
-    for d in &batch {
-        handle_delivered(d, deps).await?;
-    }
+    // Bounded per-app concurrency (latency suspect #4): entries with different ordering keys
+    // overlap, entries sharing one never do; `APP_DRAIN_CONCURRENCY=1` is the old serial loop.
+    let tuning = bundle_active_set::concurrent::tuning();
+    bundle_active_set::concurrent::run_keyed(
+        &batch,
+        tuning.concurrency,
+        |d| drain_ordering_key(d, tuning.ordering),
+        |d| async move { handle_delivered(d, deps).await.map(|_| ()) },
+    )
+    .await?;
     Ok(batch.len())
+}
+
+/// The key two entries must share to be handled strictly in arrival order: their source stream
+/// (which already encodes tenant/community/platform/channel), plus -- in the default `actor`
+/// mode -- the event's actor, so one user's commands in one channel stay ordered while other
+/// users are served concurrently.
+fn drain_ordering_key(
+    d: &Delivered,
+    ordering: bundle_active_set::concurrent::Ordering,
+) -> (String, Option<String>) {
+    match ordering {
+        bundle_active_set::concurrent::Ordering::Stream => (d.stream.clone(), None),
+        bundle_active_set::concurrent::Ordering::Actor => {
+            (d.stream.clone(), d.env.event.actor.clone())
+        }
+    }
 }
 
 /// Runs [`drain_batch`] in a loop until `shutdown` resolves.
@@ -2683,6 +2723,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
             declared_capabilities: Vec::new(),
             egress: Vec::new(),
             egress_rps: None,
@@ -3089,6 +3130,10 @@ mod tests {
             test_scope("waddles.bot.commands.default"),
             active_digest.clone(),
         );
+        digests.set_language(
+            test_scope("waddles.bot.commands.default"),
+            "rust".to_string(),
+        );
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, connections);
         deps.digest_source = DigestSource::Active {
@@ -3105,6 +3150,40 @@ mod tests {
         assert_eq!(load_body.digest, active_digest);
         assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
         assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+    }
+
+    /// Executor partition fail-closed: an `Active` scope whose language was never recorded (or is
+    /// in no class) has no eligible executor, so the delivery is dead-lettered loudly and never
+    /// invoked on whichever executor happens to be connected.
+    #[tokio::test]
+    async fn handle_delivered_active_scope_without_a_known_language_never_reaches_an_executor() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let (connections, load_count, _last_load) =
+            connected_registry_with_fake_executor_expecting_load_first(serde_json::json!(null), 0)
+                .await;
+        let digests = Arc::new(ActiveDigests::new());
+        let scope = test_scope("waddles.bot.commands.default");
+        digests.set(scope.clone(), format!("sha256:{}", "a".repeat(64)));
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.digest_source = DigestSource::Active {
+            scope: scope.clone(),
+            digests: Arc::clone(&digests),
+        };
+        assert_eq!(
+            deps.digest_source.placement(),
+            bundle_active_set::Placement::UnknownLanguage
+        );
+        handle_delivered(&d, &deps).await.unwrap();
+        assert_eq!(load_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(deps.spine.dead_lettered.lock().unwrap().len(), 1);
+        assert!(deps.spine.acked.lock().unwrap().is_empty());
+        digests.set_language(scope, "cobol".to_string());
+        assert_eq!(
+            deps.digest_source.placement(),
+            bundle_active_set::Placement::UnknownLanguage
+        );
     }
 
     // regression: multi-tenant consumers invoked with empty legacy digest,
@@ -3525,6 +3604,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,
@@ -3584,6 +3664,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,
@@ -3692,6 +3773,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,
@@ -3754,6 +3836,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,

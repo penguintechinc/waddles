@@ -27,7 +27,11 @@ _VALUES = "values-dal2alpha.yaml"
 def _helm(extra_set: list[str], api_versions: list[str] | None = None, values: str = _VALUES) -> subprocess.CompletedProcess[str]:
     """Run `helm template` with the given values file, --set overrides and --api-versions."""
     args = ["helm", "template", "waddlebot", str(_CHART_DIR), "--kube-version", "1.30.0",
-            "--values", str(_CHART_DIR / values)]
+            "--values", str(_CHART_DIR / values),
+            # The shipped env values define the compiled/scripted pools (tested in
+            # test_executor_language_partition_render.py); these tests build their own pool layouts
+            # from the single-default-pool baseline.
+            "--set-json", "pipeline.rustDataPlane.bundleExecutor.pools=[]"]
     for kv in extra_set:
         # "json:" prefix -> --set-json (helm's --set REPLACES a list with a sparse one on index).
         args += ["--set-json", kv[5:]] if kv.startswith("json:") else ["--set", kv]
@@ -136,21 +140,26 @@ def test_policies_still_select_statefulset_pods() -> None:
 
 
 def test_otlp_endpoint_absent_without_collector_but_service_name_set() -> None:
-    docs = _render()
+    # The executor takes OTEL_* from the shared waddlebot.otel.env helper only (global.otel); with
+    # global.otel disabled it renders no exporter env at all. The two stages still render their
+    # service name through the legacy rustOtelEnv path.
+    docs = _render(["global.otel.enabled=false"])
     checked = 0
     for name, container in ((_EXEC, "svc-bundles-executor"),
                             ("waddlebot-svc-process-rust", "svc-process-rust"),
                             ("waddlebot-svc-action-rust", "svc-action-rust")):
         wl = next(d for d in docs if d["kind"] in ("Deployment", "StatefulSet") and d["metadata"]["name"] == name)
         env = _env(wl, container)
-        assert "OTEL_SERVICE_NAME" in env
+        if container != "svc-bundles-executor":
+            assert "OTEL_SERVICE_NAME" in env
         assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in env
         checked += 1
     assert checked == 3
 
 
 def test_otlp_endpoint_from_values_on_executor_and_stages() -> None:
-    docs = _render(["otel.exporter.endpoint=http://otel.example.svc:4317"])
+    docs = _render(["global.otel.enabled=true", "global.otel.endpoint=http://otel.example.svc:4317",
+                    "otel.exporter.endpoint=http://otel.example.svc:4317"])
     checked = 0
     for name, container in ((_EXEC, "svc-bundles-executor"),
                             ("waddlebot-svc-process-rust", "svc-process-rust"),
@@ -163,15 +172,24 @@ def test_otlp_endpoint_from_values_on_executor_and_stages() -> None:
     assert checked == 3
 
 
-def test_otlp_collector_enabled_derives_endpoint_and_cnp_egress() -> None:
-    docs = _render(["otel.collector.enabled=true"])
-    env = _env(_executors(docs)[0], "svc-bundles-executor")
-    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://waddlebot-otel-collector:4317"
+def test_executor_has_no_duplicate_env_names() -> None:
+    """A duplicated env var is silently last-wins in Kubernetes; the executor must render each once."""
+    sts = _executors(_render())[0]
+    names = [e["name"] for c in sts["spec"]["template"]["spec"]["containers"] for e in c.get("env", [])]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    assert names, "no env examined"
+    assert not dupes, dupes
+
+
+def test_otlp_collector_egress_rule_is_rendered_to_the_collector_port() -> None:
+    docs = _render(["global.otel.enabled=true", "global.otel.endpoint=http://otel.example.svc:4317",
+                    "otel.collector.enabled=true"])
     cnp = _named(docs, "CiliumNetworkPolicy", _EXEC)
     otel = [r for r in cnp["spec"]["egress"]
             if r.get("toEndpoints", [{}])[0].get("matchLabels", {}).get("app.kubernetes.io/component") == "otel-collector"]
-    assert len(otel) == 1
-    assert otel[0]["toPorts"][0]["ports"] == [{"port": "4317", "protocol": "TCP"}]
+    assert otel, "no collector egress rule"
+    for rule in otel:
+        assert rule["toPorts"][0]["ports"] == [{"port": "4317", "protocol": "TCP"}]
 
 
 _KEDA = ["pipeline.rustDataPlane.bundleExecutor.autoscaling.mode=keda",

@@ -149,6 +149,17 @@ spec:
         # (`crate::host_api::run_zero_executor_watchdog`).
         - name: EXECUTOR_GRACE_SECONDS
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.executorGraceSeconds | default 60 | quote }}
+        # Executor language partition table (compiled|scripted -> languages), rendered from
+        # bundleExecutor.languageClasses so the stages and the executor pools cannot drift. Read by
+        # bundle_active_set::partition (core/bundle_active_set); malformed => the stage refuses to start.
+        # Bounded per-app drain concurrency (latency suspect #4): entries with different ordering keys
+        # overlap, one key never does. 1 = the old serial loop. Read by bundle_active_set::concurrent.
+        - name: APP_DRAIN_CONCURRENCY
+          value: {{ .Values.pipeline.rustDataPlane.drainConcurrency | default 4 | quote }}
+        - name: APP_DRAIN_ORDERING
+          value: {{ .Values.pipeline.rustDataPlane.drainOrdering | default "actor" | quote }}
+        - name: EXECUTOR_LANGUAGE_CLASSES
+          value: {{ include "waddlebot.executorLanguageClassSpec" . | quote }}
         # Security review fix (PR #468, MEDIUM): the bundle `http` egress guard's
         # cluster-CIDR denylist and instance-wide private-IP policy
         # (bundle_host_http::egress::{ClusterCidrDenylist,InstanceEgressPolicy}) -- shared

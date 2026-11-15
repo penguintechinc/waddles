@@ -102,6 +102,7 @@ fn row(app: &str, version_id: i64, wasm: &[u8], tools: ToolManifestInfo) -> Acti
         artifact_signature: None,
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
+        language: "rust".to_string(),
         declared_capabilities: Vec::new(),
         egress: Vec::new(),
         egress_rps: None,

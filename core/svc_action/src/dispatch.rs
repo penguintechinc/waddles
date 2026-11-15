@@ -1329,10 +1329,31 @@ async fn drain_batch<R: StreamReader, A: AuditSink, T: TenantResolver, S: SpineO
 ) -> Result<usize, SpineError> {
     let batch = reader.read().await?;
     stage_metrics::stage_metrics().record_batch(batch.len());
-    for d in &batch {
-        handle_delivered(d, stream_key, deps).await?;
-    }
+    // Bounded per-app concurrency (latency suspect #4) -- same ordering contract as
+    // `core/svc_process/src/spine.rs::drain_batch`; `APP_DRAIN_CONCURRENCY=1` is the old serial loop.
+    let tuning = bundle_active_set::concurrent::tuning();
+    bundle_active_set::concurrent::run_keyed(
+        &batch,
+        tuning.concurrency,
+        |d| drain_ordering_key(d, tuning.ordering),
+        |d| async move { handle_delivered(d, stream_key, deps).await.map(|_| ()) },
+    )
+    .await?;
     Ok(batch.len())
+}
+
+/// See `core/svc_process/src/spine.rs::drain_ordering_key`: source stream, plus the event actor
+/// in the default `actor` mode.
+fn drain_ordering_key(
+    d: &Delivered,
+    ordering: bundle_active_set::concurrent::Ordering,
+) -> (String, Option<String>) {
+    match ordering {
+        bundle_active_set::concurrent::Ordering::Stream => (d.stream.clone(), None),
+        bundle_active_set::concurrent::Ordering::Actor => {
+            (d.stream.clone(), d.env.event.actor.clone())
+        }
+    }
 }
 
 /// Runs [`drain_batch`] in a loop until `shutdown` resolves -- identical
@@ -2200,6 +2221,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
             declared_capabilities: Vec::new(),
             egress: Vec::new(),
             egress_rps: None,
@@ -2659,6 +2681,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,

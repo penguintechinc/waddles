@@ -221,7 +221,7 @@ spec:
             drop:
             - ALL
         env:
-        {{- include "waddlebot.otel.env" (dict "root" $ "service" "svc-bundles-executor") | nindent 8 }}
+        {{- include "waddlebot.otel.env" (dict "root" $ "service" "svc-bundles-executor" "extraResourceAttributes" (dict "executor.pool" $pool.name "executor.language_class" $pool.languageClass "service.instance.id" "$(K8S_POD_NAME)")) | nindent 8 }}
         # Comma-separated list: one dial loop per stage (core/bundle_executor/src/config.rs
         # stage_targets). Every stage shares the HOST_API_* mTLS material + identity below.
         - name: STAGE_HOST_API_ADDR
@@ -244,7 +244,9 @@ spec:
         - name: EXECUTOR_POOL
           value: {{ $pool.name | quote }}
         # Language partition contract (values: bundleExecutor.languageClasses + pools[].languageClass).
-        # Read by the language-partition layer; the executor binary ignores both until then.
+        # Read by the executor (core/bundle_executor/src/config.rs): a compiled|scripted pool reports a
+        # class-qualified executor_id (`compiled:<pod>`) so the stages only load bundles of that class
+        # onto it; an invalid class or an empty list for a partitioned pool refuses to start.
         - name: EXECUTOR_LANGUAGE_CLASS
           value: {{ $pool.languageClass | quote }}
         - name: EXECUTOR_LANGUAGES
@@ -270,7 +272,7 @@ spec:
               name: {{ $psCmName }}
               key: PRECOMPILE_SIGNING_PUBLIC_KEYS
               optional: false
-        {{- include "waddlebot.rustOtelEnv" (dict "root" $ "service" "svc-bundles-executor") | nindent 8 }}
+        {{- /* OTEL_* comes ONLY from waddlebot.otel.env above (one service.name, pool in resource attrs); the legacy rustOtelEnv duplicate was removed so no env var is rendered twice. */}}
         - name: EXECUTOR_STAGE_CONNECTIONS
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.stageConnections | quote }}
         - name: EXECUTOR_CALL_TIMEOUT_MS
@@ -289,6 +291,15 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.maxConcurrentCompiles | default 0 | quote }}
         - name: EXECUTOR_POOL_WAIT_MS
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.poolWaitMs | quote }}
+        # Warm instance pool (latency suspect #2): one-shot pre-instantiated guests per digest, 0 = off.
+        # Per pool (warmPoolSize / warmPoolMaxTotal), so the scripted pool can warm while compiled does not.
+        # Each warm guest holds up to EXECUTOR_MEMORY_LIMIT_MB of linear memory: size with the pool limit.
+        - name: EXECUTOR_WARM_POOL_SIZE
+          value: {{ $pool.warmPoolSize | quote }}
+        - name: EXECUTOR_WARM_POOL_MAX_TOTAL
+          value: {{ $pool.warmPoolMaxTotal | quote }}
+        - name: EXECUTOR_WARM_POOL_IDLE_SECS
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.warmPoolIdleSecs | default 120 | quote }}
         - name: EXECUTOR_PRECOMPILE_DIR
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.precompileDir | quote }}
         - name: EXECUTOR_WASM_COLLECTOR

@@ -269,6 +269,7 @@ pub struct StageMetrics {
     queue_wait: Histogram<f64>,
     pool_exhausted: Counter<u64>,
     slot_owner_changes: Counter<u64>,
+    partition_unroutable: Counter<u64>,
     identity_decrypt_failures: Counter<u64>,
     tokenize_memo: Counter<u64>,
     tokenize_mint_calls: Counter<u64>,
@@ -388,6 +389,10 @@ impl StageMetrics {
                 "executor_slot_owner_changes_total",
                 "Hash slots whose owner executor set changed after a membership change",
             ),
+            partition_unroutable: counter(
+                "executor_partition_unroutable_total",
+                "Active bundles, per reconcile tick, that no live executor of the right language class can host (class = compiled|scripted|unknown_language)",
+            ),
             identity_decrypt_failures: counter(
                 "waddles_identity_decrypt_failures_total",
                 "Inbound identity-field decrypt failures (event dead-lettered, never dropped), by reason",
@@ -422,6 +427,18 @@ impl StageMetrics {
     /// Counts one `pool_exhausted` executor refusal (`pool_exhausted_total`).
     pub fn record_pool_exhausted(&self, app_id: &str) {
         self.pool_exhausted.add(1, &scale_labels(app_id));
+    }
+
+    /// Adds `n` bundles that no live executor of their language class can host
+    /// (`executor_partition_unroutable_total`); `class` is the closed
+    /// `Placement::label` vocabulary (`compiled`, `scripted`, `unknown_language`).
+    pub fn record_partition_unroutable(&self, class: &'static str, n: u64) {
+        if n > 0 {
+            self.partition_unroutable.add(
+                n,
+                &[KeyValue::new("stage", STAGE), KeyValue::new("class", class)],
+            );
+        }
     }
 
     /// Adds `changed` slot-owner changes (`executor_slot_owner_changes_total`).
@@ -974,6 +991,8 @@ mod tests {
         m.set_load_inflight(3);
         m.record_slot_owner_changes(0);
         m.record_slot_owner_changes(7);
+        m.record_partition_unroutable("scripted", 0);
+        m.record_partition_unroutable("scripted", 3);
         let pool = [("stage", "process"), ("executor_pool", executor_pool())];
         assert_eq!(h.count("queue_wait_seconds", &pool), 1.0);
         assert_eq!(h.count("pool_exhausted_total", &pool), 1.0);
@@ -985,6 +1004,13 @@ mod tests {
         assert_eq!(
             h.count("executor_slot_owner_changes_total", &[("stage", "process")]),
             7.0
+        );
+        assert_eq!(
+            h.count(
+                "executor_partition_unroutable_total",
+                &[("stage", "process"), ("class", "scripted")]
+            ),
+            3.0
         );
     }
 

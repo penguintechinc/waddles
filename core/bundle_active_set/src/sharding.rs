@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use xxhash_rust::xxh64::xxh64;
 
+use crate::partition::{parse_executor_id, ExecutorClass, LanguageClass, Placement};
 use crate::session_sync::SessionId;
 
 /// Fixed number of hash slots (user decision 2026-11-12: 1024, small map,
@@ -130,6 +131,7 @@ pub struct SessionRouter {
     executors: Vec<String>,
     sessions_by_executor: BTreeMap<String, Vec<SessionId>>,
     missing: Vec<SessionId>,
+    class_of_executor: BTreeMap<String, ExecutorClass>,
 }
 
 impl SessionRouter {
@@ -160,7 +162,11 @@ impl SessionRouter {
         } else {
             RoutingMode::Sharded
         };
-        let executors = sessions_by_executor.keys().cloned().collect();
+        let executors: Vec<String> = sessions_by_executor.keys().cloned().collect();
+        let class_of_executor = executors
+            .iter()
+            .map(|e| (e.clone(), parse_executor_id(e).0))
+            .collect();
         Self {
             mode,
             replicas: replicas.max(1),
@@ -168,6 +174,7 @@ impl SessionRouter {
             executors,
             sessions_by_executor,
             missing,
+            class_of_executor,
         }
     }
 
@@ -182,31 +189,74 @@ impl SessionRouter {
         &self.missing
     }
 
+    /// Number of live sessions the router was built over.
+    pub fn session_count(&self) -> usize {
+        self.all.len()
+    }
+
     /// Distinct live executor ids, sorted.
     pub fn executors(&self) -> &[String] {
         &self.executors
     }
 
-    /// The owner executor ids of `app_id` (empty when not sharded).
-    pub fn owner_executors(&self, app_id: &str) -> Vec<String> {
+    /// Distinct live executors eligible for `placement`, sorted: every executor for
+    /// [`Placement::Unpartitioned`], those whose class accepts the bundle class for
+    /// [`Placement::Class`], none for [`Placement::UnknownLanguage`] (fail closed).
+    pub fn eligible_executors(&self, placement: Placement) -> Vec<String> {
+        self.executors
+            .iter()
+            .filter(|e| self.executor_accepts(e, placement))
+            .cloned()
+            .collect()
+    }
+
+    fn executor_accepts(&self, executor: &str, placement: Placement) -> bool {
+        match placement {
+            Placement::Unpartitioned => true,
+            Placement::UnknownLanguage => false,
+            Placement::Class(c) => self
+                .class_of_executor
+                .get(executor)
+                .copied()
+                .unwrap_or_default()
+                .accepts(c),
+        }
+    }
+
+    /// The owner executor ids of `app_id` among the executors eligible for `placement`
+    /// (empty when not sharded).
+    pub fn owner_executors(&self, app_id: &str, placement: Placement) -> Vec<String> {
         if self.mode != RoutingMode::Sharded {
             return Vec::new();
         }
-        owners(slot(app_id), &self.executors, self.replicas)
+        let eligible = self.eligible_executors(placement);
+        owners(slot(app_id), &eligible, self.replicas)
             .into_iter()
             .map(str::to_string)
             .collect()
     }
 
-    /// Every live session `app_id` must be loaded on / may be dispatched to,
-    /// sorted: all sessions of its owner executors when sharded, every live
-    /// session otherwise.
-    pub fn target_sessions(&self, app_id: &str) -> Vec<SessionId> {
+    /// Every live session `app_id` must be loaded on / may be dispatched to, sorted: all
+    /// sessions of its owner executors (among those eligible for `placement`) when sharded,
+    /// every eligible live session otherwise. A session that reported no executor id predates
+    /// the handshake (and the partition) and counts as class `any`. Empty when nothing
+    /// eligible is live -- callers treat that as unroutable and fail loud, never fall back.
+    pub fn target_sessions(&self, app_id: &str, placement: Placement) -> Vec<SessionId> {
         if self.mode != RoutingMode::Sharded {
-            return self.all.clone();
+            let mut out: Vec<SessionId> = self.missing.clone();
+            if placement == Placement::UnknownLanguage {
+                return Vec::new();
+            }
+            for (e, sessions) in &self.sessions_by_executor {
+                if self.executor_accepts(e, placement) {
+                    out.extend(sessions.iter().copied());
+                }
+            }
+            out.sort_unstable();
+            return out;
         }
         let mut out: Vec<SessionId> = self
-            .owner_executors(app_id)
+            .owner_executors(app_id, placement)
             .iter()
             .filter_map(|e| self.sessions_by_executor.get(e))
             .flatten()
@@ -217,8 +267,16 @@ impl SessionRouter {
     }
 
     /// Whether `session` is a target for `app_id` (see [`Self::target_sessions`]).
-    pub fn is_target(&self, session: SessionId, app_id: &str) -> bool {
-        self.target_sessions(app_id).binary_search(&session).is_ok()
+    pub fn is_target(&self, session: SessionId, app_id: &str, placement: Placement) -> bool {
+        self.target_sessions(app_id, placement)
+            .binary_search(&session)
+            .is_ok()
+    }
+
+    /// Whether any live session could host a bundle of `placement` (always true for
+    /// [`Placement::Unpartitioned`] when anything is live).
+    pub fn has_eligible_session(&self, placement: Placement) -> bool {
+        !self.target_sessions("", placement).is_empty()
     }
 }
 
@@ -230,9 +288,52 @@ impl SessionRouter {
 pub struct RoutingObserver {
     last: Option<(RoutingMode, Vec<SessionId>)>,
     owner_table: Vec<Vec<String>>,
+    unroutable_last: BTreeMap<&'static str, u64>,
 }
 
 impl RoutingObserver {
+    /// Fail-loud partition check: counts, per [`Placement::label`], the active bundles that
+    /// no live session can host -- a language in no class, or a class with no live eligible
+    /// executor -- and logs at ERROR whenever that set changes (not per tick; the caller's
+    /// counter metric carries the per-tick rate). Returns the per-label counts of THIS tick.
+    /// Nothing is counted while no session is live at all (the stage's existing
+    /// no-executor handling owns that outage). `bundles` yields `(app_id, language)`.
+    pub fn observe_unroutable<'a>(
+        &mut self,
+        router: &SessionRouter,
+        table: &crate::partition::LanguageTable,
+        bundles: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> BTreeMap<&'static str, u64> {
+        let mut counts: BTreeMap<&'static str, u64> = BTreeMap::new();
+        let mut sample: Vec<String> = Vec::new();
+        if !router.all.is_empty() {
+            for (app, language) in bundles {
+                let placement = table.placement(language);
+                if !router.has_eligible_session(placement) {
+                    *counts.entry(placement.label()).or_default() += 1;
+                    if sample.len() < 5 {
+                        sample.push(format!("{app}({language})"));
+                    }
+                }
+            }
+        }
+        if counts != self.unroutable_last {
+            if counts.is_empty() {
+                tracing::info!("executor partition: every active bundle is routable again");
+            } else {
+                tracing::error!(
+                    unroutable = ?counts,
+                    sample = ?sample,
+                    "executor partition: active bundles with NO eligible executor -- a language \
+                     in no class, or no live executor of the bundle's class; they are NOT loaded \
+                     anywhere (never placed on the other class)"
+                );
+            }
+            self.unroutable_last = counts.clone();
+        }
+        counts
+    }
+
     /// Observes this tick's `router`; returns how many slots changed owner
     /// set since the previous sharded membership (0 on the first sharded
     /// tick and in broadcast modes) for `executor_slot_owner_changes_total`.
@@ -261,7 +362,25 @@ impl RoutingObserver {
         if mode != RoutingMode::Sharded {
             return 0;
         }
-        let table = slot_owner_table(router.executors(), router.replicas);
+        // Unpartitioned fleet (every executor `any`): one table. Partitioned: one table per
+        // class, so a scripted join registers without disturbing the compiled count.
+        let partitioned = router
+            .class_of_executor
+            .values()
+            .any(|c| *c != ExecutorClass::Any);
+        let table = if partitioned {
+            let mut t = slot_owner_table(
+                &router.eligible_executors(Placement::Class(LanguageClass::Compiled)),
+                router.replicas,
+            );
+            t.extend(slot_owner_table(
+                &router.eligible_executors(Placement::Class(LanguageClass::Scripted)),
+                router.replicas,
+            ));
+            t
+        } else {
+            slot_owner_table(router.executors(), router.replicas)
+        };
         if table == self.owner_table {
             return 0;
         }
@@ -412,16 +531,18 @@ mod tests {
         let r = router(&[1, 2, 3, 4, 5], &ids, true);
         assert_eq!(r.mode(), RoutingMode::Sharded);
         for app in ["waddles.ping", "a", "b", "c", "d", "e"] {
-            let owners = r.owner_executors(app);
+            let owners = r.owner_executors(app, Placement::Unpartitioned);
             assert_eq!(owners.len(), 2);
-            let targets = r.target_sessions(app);
+            let targets = r.target_sessions(app, Placement::Unpartitioned);
             let want: Vec<SessionId> = ids
                 .iter()
                 .filter(|(_, e)| owners.iter().any(|o| o == e))
                 .map(|(s, _)| *s)
                 .collect();
             assert_eq!(targets, want, "{app}");
-            assert!(targets.iter().all(|s| r.is_target(*s, app)));
+            assert!(targets
+                .iter()
+                .all(|s| r.is_target(*s, app, Placement::Unpartitioned)));
         }
     }
 
@@ -432,8 +553,13 @@ mod tests {
         let r = router(&[1, 2, 3], &[(1, "e0"), (2, "e1")], true);
         assert_eq!(r.mode(), RoutingMode::BroadcastMissingExecutorId);
         assert_eq!(r.sessions_missing_executor_id(), &[3]);
-        assert_eq!(r.target_sessions("waddles.ping"), vec![1, 2, 3]);
-        assert!(r.owner_executors("waddles.ping").is_empty());
+        assert_eq!(
+            r.target_sessions("waddles.ping", Placement::Unpartitioned),
+            vec![1, 2, 3]
+        );
+        assert!(r
+            .owner_executors("waddles.ping", Placement::Unpartitioned)
+            .is_empty());
         // An empty id counts as absent too.
         let r = router(&[1], &[(1, "")], true);
         assert_eq!(r.mode(), RoutingMode::BroadcastMissingExecutorId);
@@ -445,7 +571,10 @@ mod tests {
     fn router_kill_switch_forces_broadcast() {
         let r = router(&[1, 2, 3], &[(1, "e0"), (2, "e1"), (3, "e2")], false);
         assert_eq!(r.mode(), RoutingMode::BroadcastDisabled);
-        assert_eq!(r.target_sessions("x"), vec![1, 2, 3]);
+        assert_eq!(
+            r.target_sessions("x", Placement::Unpartitioned),
+            vec![1, 2, 3]
+        );
     }
 
     #[test]
@@ -488,5 +617,133 @@ mod tests {
         );
         assert_eq!(stream_entry_age("2000-3", 1500), Some(Duration::ZERO));
         assert_eq!(stream_entry_age("garbage", 1500), None);
+    }
+
+    fn qualified(class: ExecutorClass, n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| crate::partition::qualify_executor_id(class, &format!("exec-{i}")))
+            .collect()
+    }
+
+    /// Router over compiled executors (sessions 1..) then scripted (sessions 11..).
+    fn partitioned(nc: usize, ns: usize, enabled: bool) -> SessionRouter {
+        let mut map = HashMap::new();
+        let mut live = Vec::new();
+        for (i, id) in qualified(ExecutorClass::Compiled, nc)
+            .into_iter()
+            .enumerate()
+        {
+            map.insert(1 + i as u64, id);
+            live.push(1 + i as u64);
+        }
+        for (i, id) in qualified(ExecutorClass::Scripted, ns)
+            .into_iter()
+            .enumerate()
+        {
+            map.insert(11 + i as u64, id);
+            live.push(11 + i as u64);
+        }
+        SessionRouter::new(&live, &map, enabled, DEFAULT_REPLICAS)
+    }
+
+    const COMPILED: Placement = Placement::Class(LanguageClass::Compiled);
+    const SCRIPTED: Placement = Placement::Class(LanguageClass::Scripted);
+
+    /// Sharded: a compiled bundle lands ONLY on compiled executors, scripted ONLY on scripted --
+    /// for every one of 400 app ids, in both directions.
+    #[test]
+    fn sharded_placement_never_crosses_classes() {
+        let r = partitioned(3, 3, true);
+        assert_eq!(r.mode(), RoutingMode::Sharded);
+        for i in 0..400 {
+            let app = format!("app.{i}");
+            let c = r.target_sessions(&app, COMPILED);
+            let s = r.target_sessions(&app, SCRIPTED);
+            assert_eq!(c.len(), 2, "{app}: R=2 owners");
+            assert_eq!(s.len(), 2);
+            assert!(c.iter().all(|x| (1..=3).contains(x)), "{c:?}");
+            assert!(s.iter().all(|x| (11..=13).contains(x)), "{s:?}");
+        }
+    }
+
+    /// Kill-switch / broadcast modes still honour the partition: eligible sessions only.
+    #[test]
+    fn broadcast_modes_still_filter_by_class() {
+        let r = partitioned(2, 2, false);
+        assert_eq!(r.mode(), RoutingMode::BroadcastDisabled);
+        assert_eq!(r.target_sessions("a", COMPILED), vec![1, 2]);
+        assert_eq!(r.target_sessions("a", SCRIPTED), vec![11, 12]);
+        assert_eq!(
+            r.target_sessions("a", Placement::Unpartitioned),
+            vec![1, 2, 11, 12]
+        );
+    }
+
+    /// An unknown language, or a class with no live executor, routes to NOTHING (fail closed,
+    /// never to the other class).
+    #[test]
+    fn unroutable_placements_yield_no_targets() {
+        let only_compiled = partitioned(2, 0, true);
+        assert!(only_compiled.target_sessions("a", SCRIPTED).is_empty());
+        assert!(!only_compiled.has_eligible_session(SCRIPTED));
+        assert!(only_compiled.has_eligible_session(COMPILED));
+        assert!(only_compiled
+            .target_sessions("a", Placement::UnknownLanguage)
+            .is_empty());
+        let r = partitioned(2, 2, false);
+        assert!(r
+            .target_sessions("a", Placement::UnknownLanguage)
+            .is_empty());
+    }
+
+    /// An unqualified (`any` / pre-partition) executor hosts both classes.
+    #[test]
+    fn any_executors_host_both_classes() {
+        let ids = [(1, "exec-0"), (2, "exec-1")];
+        let r = router(&[1, 2], &ids, true);
+        assert_eq!(r.target_sessions("x", COMPILED).len(), 2);
+        assert_eq!(r.target_sessions("x", SCRIPTED).len(), 2);
+    }
+
+    /// A scripted executor joining or leaving never moves a compiled bundle's owners.
+    #[test]
+    fn scripted_membership_change_does_not_move_compiled_owners() {
+        let before = partitioned(3, 2, true);
+        let after = partitioned(3, 3, true);
+        for i in 0..300 {
+            let app = format!("app.{i}");
+            assert_eq!(
+                before.target_sessions(&app, COMPILED),
+                after.target_sessions(&app, COMPILED)
+            );
+        }
+    }
+
+    /// The observer counts owner moves per class table, so a scripted join registers.
+    #[test]
+    fn observer_counts_partitioned_owner_moves() {
+        let mut obs = RoutingObserver::default();
+        assert_eq!(obs.observe(&partitioned(3, 2, true)), 0);
+        assert!(obs.observe(&partitioned(3, 3, true)) > 0);
+    }
+
+    /// Fail-loud accounting: an unknown language and a class with no live executor are both
+    /// counted per placement label; a fully routable set counts nothing; no live session at
+    /// all counts nothing (the no-executor outage is reported elsewhere).
+    #[test]
+    fn observe_unroutable_counts_by_placement_label() {
+        let table = crate::partition::LanguageTable::default();
+        let bundles = [("a", "rust"), ("b", "python"), ("c", "cobol"), ("d", "go")];
+        let mut obs = RoutingObserver::default();
+        let only_compiled = partitioned(2, 0, true);
+        let counts = obs.observe_unroutable(&only_compiled, &table, bundles);
+        assert_eq!(counts.get("scripted"), Some(&1));
+        assert_eq!(counts.get("unknown_language"), Some(&1));
+        assert_eq!(counts.get("compiled"), None);
+        let both = partitioned(2, 2, true);
+        let counts = obs.observe_unroutable(&both, &table, [("a", "rust"), ("b", "python")]);
+        assert!(counts.is_empty());
+        let none = SessionRouter::new(&[], &HashMap::new(), true, DEFAULT_REPLICAS);
+        assert!(obs.observe_unroutable(&none, &table, bundles).is_empty());
     }
 }

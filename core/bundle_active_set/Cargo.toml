@@ -48,9 +48,12 @@ sha2 = "=0.10.9"
 # every stage replica. Already in svc_process's/svc_action's lockfiles at
 # this exact version (transitive), so no second pin of the same package.
 xxhash-rust = { version = "=0.8.18", features = ["xxh64"] }
+# Bounded per-app drain concurrency (`crate::concurrent`): `buffer_unordered`. Same exact pin
+# `core/svc_action`/`core/svc_process` already use (std only, no default features).
+futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread", "time"] }
 sea-orm = { version = "=2.0.2", default-features = false, features = ["mock"] }
 # Test-only: parses `reader::connection_url`'s output with the same URL
 # parser `sqlx_postgres::PgConnectOptions::parse_from_url` uses, so the

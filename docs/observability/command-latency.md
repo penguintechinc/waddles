@@ -196,5 +196,7 @@ pre-instrumentation images, so there are no per-hop numbers yet: deploy this, th
 | 8 | **Egress proxy hop**: only `http.send` (outside calls) goes through `core/egress_proxy`; relay `chat.send` goes Valkey -> ingest drain directly, not through it | `svc_action/src/capabilities.rs` relay path vs `egress_proxy` | n/a for the non-external SLA | 0 |
 | 9 | **Gateway-frame leg**: `permissions.resolve(guild, author)` runs before publish on the legacy Discord loop; it is TTL-cached, but a miss does a Discord REST fetch INSIDE the first-door leg | `svc_ingest/src/ingest/discord.rs` (`permissions.resolve`; resolver `cache_get`/`fetch`) | refresh-ahead, or publish first and attach permissions later; watch `ingest_publish` p99 | one Discord REST RTT (~50-200 ms) per cold or expired author |
 
+**Status (feature/set-executor-perf):** suspect #2 is addressed by the executor warm instance pool (`EXECUTOR_WARM_POOL_SIZE`, off by default, on per pool in alpha/dal2alpha; watch `waddles_executor_warm_pool_total{result}` hit ratio and `waddles_executor_instantiate_seconds`), and #4 by bounded per-app drain concurrency (`APP_DRAIN_CONCURRENCY`, default 4, per-source ordering kept). Neither was measured against a live `!ping` baseline in this change; confirm with the hop histograms before relying on them.
+
 Order to attack once the report names the slowest hop: (1) outbound drain concurrency, (2) bundle warm pools,
 (3) ack wake-up, (4) per-app batch concurrency. Do not apply any before the hop histograms confirm it.

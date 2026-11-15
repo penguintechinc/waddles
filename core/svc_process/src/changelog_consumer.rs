@@ -263,6 +263,26 @@ fn note_routing(state: &mut ConsumerState, router: &bundle_active_set::SessionRo
     crate::stage_metrics::stage_metrics().record_slot_owner_changes(changed);
 }
 
+/// Fail-loud executor-partition check (see `bundle_active_set::partition`): logs at ERROR when
+/// the unroutable set changes and counts `executor_partition_unroutable_total` per tick.
+fn note_unroutable(
+    state: &mut ConsumerState,
+    router: &bundle_active_set::SessionRouter,
+    table: &bundle_active_set::LanguageTable,
+    active: &HashMap<AppScope, bundle_active_set::ActiveBundleRow>,
+) {
+    let counts = state.routing_observer.observe_unroutable(
+        router,
+        table,
+        active
+            .iter()
+            .map(|(scope, row)| (scope.2.as_str(), row.language.as_str())),
+    );
+    for (label, n) in counts {
+        crate::stage_metrics::stage_metrics().record_partition_unroutable(label, n);
+    }
+}
+
 impl ConsumerState {
     /// Test/startup-only constructor for an empty state seeded with a
     /// given `initial_seq` -- production code only ever obtains a
@@ -606,11 +626,13 @@ async fn apply_active_set(
         bundle_active_set::DEFAULT_REPLICAS,
     );
     note_routing(state, &router);
+    let language_table = bundle_active_set::partition::table();
+    note_unroutable(state, &router, language_table, &active);
     let mut plan = bundle_active_set::plan_sessions_routed(
         &state.loaded,
         &active,
         live_sessions,
-        |scope, _| router.target_sessions(&scope.2),
+        |scope, row| router.target_sessions(&scope.2, language_table.placement(&row.language)),
         |row| row.digest.as_str(),
     );
     // T2: never resend a Load that is still in flight, and hold a failed /
@@ -757,6 +779,9 @@ async fn apply_active_set(
                 // own doc. regression: multi-tenant consumers invoked with
                 // empty legacy digest, UnknownBundle (alpha 2026-10-03).
                 state.active_digests.set(scope.clone(), row.digest.clone());
+                state
+                    .active_digests
+                    .set_language(scope.clone(), row.language.clone());
             }
             Ok(Err(err)) => {
                 // Per-session failure (e.g. a connection reset mid-load,
@@ -1709,6 +1734,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
         }
     }
 
@@ -2831,7 +2857,10 @@ mod tests {
             bundle_active_set::DEFAULT_REPLICAS,
         );
         assert_eq!(got.len(), 2, "{got:?}");
-        assert_eq!(got, router.target_sessions("waddles.a"));
+        assert_eq!(
+            got,
+            router.target_sessions("waddles.a", bundle_active_set::Placement::Unpartitioned)
+        );
     }
 
     /// T6: broadcast fallback ONLY when an executor id is absent.
@@ -3251,6 +3280,7 @@ mod tests {
                     artifact_signature: None,
                     artifact_signature_key_id: None,
                     artifact_signed_approval_id: None,
+                    language: "rust".to_string(),
                     declared_capabilities: Vec::new(),
                     egress: Vec::new(),
                     egress_rps: None,
@@ -3468,6 +3498,7 @@ mod tests {
                     artifact_signature: None,
                     artifact_signature_key_id: None,
                     artifact_signed_approval_id: None,
+                    language: "rust".to_string(),
                     declared_capabilities: Vec::new(),
                     egress: Vec::new(),
                     egress_rps: None,

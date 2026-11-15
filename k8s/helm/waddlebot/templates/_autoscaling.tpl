@@ -49,6 +49,19 @@ values-only change.
 {{- end -}}
 
 {{/*
+waddlebot.executorLanguageClassSpec -- the validated language classes as `compiled=a,b;scripted=c,d`
+(the form bundle_active_set::partition::LanguageTable::parse reads from EXECUTOR_LANGUAGE_CLASSES).
+*/}}
+{{- define "waddlebot.executorLanguageClassSpec" -}}
+{{- $lc := include "waddlebot.executorLanguageClasses" . | fromJson -}}
+{{- $parts := list -}}
+{{- range $class := (list "compiled" "scripted") -}}
+{{- $parts = append $parts (printf "%s=%s" $class (join "," (get $lc $class))) -}}
+{{- end -}}
+{{- join ";" $parts -}}
+{{- end -}}
+
+{{/*
 waddlebot.executorPools -- JSON list of executor pools (one StatefulSet each). Empty
 `bundleExecutor.pools` => ONE pool "default" (languageClass any) serving every stage and every
 language, named exactly `<fullname>-svc-bundles-executor` (so executor_id =
@@ -73,7 +86,7 @@ work changes only this helper.
 {{- end -}}
 {{- $lc := include "waddlebot.executorLanguageClasses" . | fromJson -}}
 {{- $anyLangs := concat $lc.compiled $lc.scripted -}}
-{{- $base := dict "replicas" (int $be.replicas) "resources" $be.resources "memoryBudgetMb" (int $be.memoryBudgetMb) "autoscaling" ($be.autoscaling | default dict) -}}
+{{- $base := dict "replicas" (int $be.replicas) "resources" $be.resources "memoryBudgetMb" (int $be.memoryBudgetMb) "autoscaling" ($be.autoscaling | default dict) "warmPoolSize" (int ($be.warmPoolSize | default 0)) "warmPoolMaxTotal" (int ($be.warmPoolMaxTotal | default 16)) -}}
 {{- $out := list -}}
 {{- if not $be.pools -}}
 {{- $out = append $out (merge (dict "name" "default" "suffix" "" "stages" $all "languageClass" "any" "languages" $anyLangs) (deepCopy $base)) -}}
@@ -102,7 +115,7 @@ work changes only this helper.
 {{- end -}}
 {{- if not $st -}}{{- fail (printf "bundleExecutor.pools[%s].stages must list at least one stage" $p.name) -}}{{- end -}}
 {{- $suffix := ternary "" (printf "-%s" $p.name) (eq $p.name "default") -}}
-{{- $pool := dict "name" $p.name "suffix" $suffix "stages" $st "languageClass" $class "languages" $langs "replicas" (int ($p.replicas | default $base.replicas)) "resources" ($p.resources | default $base.resources) "memoryBudgetMb" (int ($p.memoryBudgetMb | default $base.memoryBudgetMb)) "autoscaling" (merge (deepCopy ($p.autoscaling | default dict)) (deepCopy $base.autoscaling)) -}}
+{{- $pool := dict "name" $p.name "suffix" $suffix "stages" $st "languageClass" $class "languages" $langs "replicas" (int ($p.replicas | default $base.replicas)) "resources" ($p.resources | default $base.resources) "memoryBudgetMb" (int ($p.memoryBudgetMb | default $base.memoryBudgetMb)) "autoscaling" (merge (deepCopy ($p.autoscaling | default dict)) (deepCopy $base.autoscaling)) "warmPoolSize" (int ($p.warmPoolSize | default $base.warmPoolSize)) "warmPoolMaxTotal" (int ($p.warmPoolMaxTotal | default $base.warmPoolMaxTotal)) -}}
 {{- $out = append $out $pool -}}
 {{- end -}}
 {{- range $s := $all -}}

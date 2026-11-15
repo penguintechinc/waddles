@@ -466,6 +466,37 @@ pipeline:
         limits: { cpu: "8000m", memory: "24Gi" }
       autoscaling:
         mode: none
+      # Language partition (owner decision 2026-11-14, approved architecture exception, revisit):
+      # compiled (rust, csharp, go) and scripted (python, javascript, nodejs, typescript, ruby)
+      # bundles run on SEPARATE StatefulSet pools; each pool serves both stages and has its own
+      # PDB (maxUnavailable 1), replicas and sizing (autoscaling stays mode none: no KEDA here).
+      # The scripted pool carries the interpreter-bearing bundles (largest working set, the
+      # likelier Kata candidate later), so it keeps the 24Gi / 8 CPU ceiling; compiled bundles
+      # are small AOT components, so 12Gi is already generous. Worst case 2x12 + 2x24 = 72Gi
+      # spread across workers (spreadAcrossNodes); requests stay minimal (owner policy), limits
+      # are the headroom. Budgets are ~5/8 of each limit (the render check requires < limit).
+      pools:
+        - name: native
+          languageClass: compiled
+          stages: [svc-process-rust, svc-action-rust]
+          replicas: 2
+          memoryBudgetMb: 7680
+          # One-shot warm instances (headroom = limit - budget must cover maxTotal x 64Mi).
+          warmPoolSize: 2
+          warmPoolMaxTotal: 8
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { cpu: "8000m", memory: "12Gi" }
+        - name: script
+          languageClass: scripted
+          stages: [svc-process-rust, svc-action-rust]
+          replicas: 2
+          memoryBudgetMb: 15360
+          warmPoolSize: 2
+          warmPoolMaxTotal: 16
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { cpu: "8000m", memory: "24Gi" }
 
 presentation:
   # Rust svc-presentation (overlay + image surface). Overlay view/SSE port reachable on-host at

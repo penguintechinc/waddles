@@ -170,6 +170,16 @@ where
     // would bind to the no-op default provider and silently record nothing.
     // Every later `stage_metrics::stage_metrics()` call returns this same set.
     let _ = stage_metrics::stage_metrics();
+    // Executor language partition: parse EXECUTOR_LANGUAGE_CLASSES now and refuse to start on a
+    // malformed table -- a silent default would route bundles to the wrong executor class.
+    bundle_active_set::concurrent::init_tuning_from_env()
+        .map_err(|e| anyhow::anyhow!("invalid drain tuning: {e}"))?;
+    bundle_active_set::init_table_from_env().map_err(|e| {
+        anyhow::anyhow!(
+            "invalid {}: {e}",
+            bundle_active_set::partition::ENV_LANGUAGE_CLASSES
+        )
+    })?;
     // Command-latency kill switch: ENV baseline now, live PostHog value via the refresher.
     command_latency::switch::init_from_env();
     let _ = command_latency::metrics::metrics();
@@ -1637,6 +1647,7 @@ fn try_start_dispatch(
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,

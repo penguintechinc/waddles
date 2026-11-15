@@ -34,6 +34,9 @@ use bundle_active_set::AppScope;
 #[derive(Default)]
 pub struct ActiveDigests {
     inner: RwLock<HashMap<AppScope, String>>,
+    /// Bundle language per scope (`app_versions.language`), the executor language-partition
+    /// key: the dispatch path must route an on-demand `load` to the right executor class.
+    languages: RwLock<HashMap<AppScope, String>>,
 }
 
 impl ActiveDigests {
@@ -93,6 +96,23 @@ impl ActiveDigests {
             .insert(scope, digest);
     }
 
+    /// Records the bundle `language` for `scope` (written with [`Self::set`]).
+    pub fn set_language(&self, scope: AppScope, language: String) {
+        self.languages
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(scope, language);
+    }
+
+    /// The bundle language recorded for `scope`, if any.
+    pub fn language(&self, scope: &AppScope) -> Option<String> {
+        self.languages
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(scope)
+            .cloned()
+    }
+
     /// Clears `scope`'s entry -- called by `apply_active_set` on every
     /// successful `unload` (and, transitively, whenever a scope drops out
     /// of the active set and the next diff naturally unloads it), in
@@ -100,6 +120,10 @@ impl ActiveDigests {
     /// scope.
     pub fn remove(&self, scope: &AppScope) {
         self.inner
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(scope);
+        self.languages
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .remove(scope);
@@ -189,5 +213,16 @@ mod tests {
         assert_eq!(digests.get(&scope_a), Some("sha256:aa".to_string()));
         assert_eq!(digests.get(&scope_b), Some("sha256:bb".to_string()));
         assert_eq!(digests.len(), 2);
+    }
+
+    #[test]
+    fn language_is_recorded_and_cleared_with_the_scope() {
+        let d = ActiveDigests::new();
+        let scope: AppScope = (1, 0, "waddles.a".to_string());
+        assert_eq!(d.language(&scope), None);
+        d.set_language(scope.clone(), "python".to_string());
+        assert_eq!(d.language(&scope).as_deref(), Some("python"));
+        d.remove(&scope);
+        assert_eq!(d.language(&scope), None);
     }
 }

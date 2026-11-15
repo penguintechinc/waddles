@@ -302,6 +302,47 @@ pub struct CliConfig {
     )]
     pub executor_require_id: bool,
 
+    /// Warm instance pool: up to this many fresh, never-used instances kept pre-instantiated
+    /// per bundle digest (latency suspect #2). `0` (default) = off. Each is one-shot -- see
+    /// `crate::warm_pool` for the isolation guarantee -- and holds guest linear memory (up to
+    /// `EXECUTOR_MEMORY_LIMIT_MB`), so size it with the pool's memory limit in mind.
+    #[arg(long, env = "EXECUTOR_WARM_POOL_SIZE", default_value_t = 0)]
+    pub executor_warm_pool_size: u32,
+
+    /// Process-wide ceiling on warm instances across every digest and stage.
+    #[arg(long, env = "EXECUTOR_WARM_POOL_MAX_TOTAL", default_value_t = 16)]
+    pub executor_warm_pool_max_total: u32,
+
+    /// Warm entries for a digest nobody invoked for this long are dropped (frees memory).
+    #[arg(long, env = "EXECUTOR_WARM_POOL_IDLE_SECS", default_value_t = 120)]
+    pub executor_warm_pool_idle_secs: u64,
+
+    /// Kill switch `waddles.disable-executor-warm-pool` (opt-out, unseen = pool as configured
+    /// by `EXECUTOR_WARM_POOL_SIZE`): read from the ENV baseline like the AOT switch, since this
+    /// credential-less sandbox has no PostHog egress. `true` = never prewarm, always cold.
+    #[arg(
+        long,
+        env = "FLAG_WADDLES_DISABLE_EXECUTOR_WARM_POOL",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub flag_disable_executor_warm_pool: bool,
+
+    /// Language class this executor pool serves: `compiled`, `scripted` or `any`
+    /// (default). A `compiled`/`scripted` executor reports a class-qualified
+    /// `executor_id` (`compiled:<pod>`) in `hello`, so the stages
+    /// (`bundle_active_set::partition`) only ever load bundles of that class onto it;
+    /// `any` keeps the bare pod name (pre-partition wire shape). Anything else
+    /// refuses to start (see [`CliConfig::validate_language_partition`]).
+    #[arg(long, env = "EXECUTOR_LANGUAGE_CLASS", default_value = "any")]
+    pub executor_language_class: String,
+
+    /// Comma-separated languages this pool serves (`rust,csharp,go`), informational
+    /// for logs/telemetry and validated for shape; required non-empty for a
+    /// `compiled`/`scripted` pool so a misrendered chart cannot ship an empty pool.
+    #[arg(long, env = "EXECUTOR_LANGUAGES", default_value = "")]
+    pub executor_languages: String,
+
     /// JSON object mapping `key_id -> base64(32-byte Ed25519 public key)`
     /// (spec SS5.6/Gemini condition 9) -- the platform key(s)
     /// `crate::signing::verify_artifact_signature` checks a bundle's
@@ -522,6 +563,70 @@ impl CliConfig {
             .filter(|s| !s.is_empty())
     }
 
+    /// The pool's class label, strictly parsed: `"compiled"`, `"scripted"` or `"any"`.
+    pub fn language_class(&self) -> Result<&'static str, ExecutorError> {
+        match self
+            .executor_language_class
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "any" => Ok("any"),
+            "compiled" => Ok("compiled"),
+            "scripted" => Ok("scripted"),
+            other => Err(ExecutorError::Config(format!(
+                "EXECUTOR_LANGUAGE_CLASS {other:?} is not one of compiled, scripted, any"
+            ))),
+        }
+    }
+
+    /// The languages in `EXECUTOR_LANGUAGES`, trimmed and lower-cased, blanks dropped.
+    #[must_use]
+    pub fn language_list(&self) -> Vec<String> {
+        self.executor_languages
+            .split(',')
+            .map(|l| l.trim().to_ascii_lowercase())
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    /// Startup validation of the language partition: a valid class, and for a
+    /// `compiled`/`scripted` pool a non-empty list of well-formed language tokens.
+    /// Fail loud -- a typo must never silently widen a pool to `any`.
+    pub fn validate_language_partition(&self) -> Result<(), ExecutorError> {
+        let class = self.language_class()?;
+        let langs = self.language_list();
+        if class != "any" && langs.is_empty() {
+            return Err(ExecutorError::Config(format!(
+                "EXECUTOR_LANGUAGE_CLASS={class} requires a non-empty EXECUTOR_LANGUAGES"
+            )));
+        }
+        for l in &langs {
+            let ok = l
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "+#.-".contains(c));
+            if !ok {
+                return Err(ExecutorError::Config(format!(
+                    "EXECUTOR_LANGUAGES token {l:?} must be lower-case letters, digits or + # . -"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The identity reported in `hello`: the resolved pod identity, class-qualified
+    /// (`compiled:<pod>` / `scripted:<pod>`) for a partitioned pool, bare for `any`.
+    /// MUST stay in lock-step with `bundle_active_set::partition::qualify_executor_id`
+    /// (pinned by a test here and one there). `None` when no identity resolves.
+    #[must_use]
+    pub fn reported_executor_id(&self) -> Option<String> {
+        let id = self.resolved_executor_id()?;
+        Some(match self.language_class().unwrap_or("any") {
+            "any" => id,
+            class => format!("{class}:{id}"),
+        })
+    }
+
     /// Fails startup loudly when `EXECUTOR_REQUIRE_ID=true` (StatefulSet mode,
     /// slot sharding) and no identity resolves -- an anonymous executor in a
     /// sharded pool would silently degrade every stage to broadcast.
@@ -603,6 +708,12 @@ impl CliConfig {
             precompile_signing_public_keys: None,
             executor_id: None,
             executor_require_id: false,
+            executor_warm_pool_size: 0,
+            executor_warm_pool_max_total: 16,
+            executor_warm_pool_idle_secs: 120,
+            flag_disable_executor_warm_pool: false,
+            executor_language_class: "any".to_string(),
+            executor_languages: String::new(),
             bundle_signing_public_keys: None,
             executor_heartbeat_interval_secs: 5,
             executor_heartbeat_enabled: true,
@@ -973,6 +1084,80 @@ mod tests {
         // unlimited budget under a known limit, or unknown limit: warns
         assert!(check_memory_budget(0, Some(12_288)).unwrap().is_some());
         assert!(check_memory_budget(8192, None).unwrap().is_some());
+    }
+
+    fn partition_cfg(class: &str, langs: &str) -> CliConfig {
+        let mut cfg = CliConfig::for_healthcheck();
+        cfg.executor_id = Some("pod-0".to_string());
+        cfg.executor_language_class = class.to_string();
+        cfg.executor_languages = langs.to_string();
+        cfg
+    }
+
+    /// The reported identity is class-qualified for a partitioned pool and bare for `any`
+    /// (the exact strings `bundle_active_set::partition::parse_executor_id` expects).
+    #[test]
+    fn reported_executor_id_is_class_qualified() {
+        assert_eq!(
+            partition_cfg("compiled", "rust")
+                .reported_executor_id()
+                .as_deref(),
+            Some("compiled:pod-0")
+        );
+        assert_eq!(
+            partition_cfg("SCRIPTED", "python")
+                .reported_executor_id()
+                .as_deref(),
+            Some("scripted:pod-0")
+        );
+        assert_eq!(
+            partition_cfg("any", "").reported_executor_id().as_deref(),
+            Some("pod-0")
+        );
+        assert_eq!(
+            partition_cfg("", "").reported_executor_id().as_deref(),
+            Some("pod-0")
+        );
+        let mut anon = partition_cfg("compiled", "rust");
+        anon.executor_id = None;
+        if std::env::var("POD_NAME").is_err() {
+            assert_eq!(anon.reported_executor_id(), None);
+        }
+    }
+
+    #[test]
+    fn language_partition_validation_fails_loud() {
+        assert!(partition_cfg("compiled", "rust, csharp ,go")
+            .validate_language_partition()
+            .is_ok());
+        assert!(partition_cfg("any", "")
+            .validate_language_partition()
+            .is_ok());
+        let typo = partition_cfg("compilled", "rust").validate_language_partition();
+        assert!(matches!(typo, Err(ExecutorError::Config(m)) if m.contains("compilled")));
+        let empty = partition_cfg("scripted", " , ").validate_language_partition();
+        assert!(matches!(empty, Err(ExecutorError::Config(m)) if m.contains("non-empty")));
+        let bad = partition_cfg("scripted", "Py thon").validate_language_partition();
+        assert!(matches!(bad, Err(ExecutorError::Config(m)) if m.contains("py thon")));
+        assert_eq!(
+            partition_cfg("scripted", "Python, RUBY").language_list(),
+            vec!["python".to_string(), "ruby".to_string()]
+        );
+    }
+
+    #[test]
+    fn language_class_env_is_read_by_clap() {
+        let cfg = CliConfig::try_parse_from([
+            "bundle-executor",
+            "--stage-host-api-addr",
+            "svc-process:8301",
+            "--executor-language-class",
+            "scripted",
+            "--executor-languages",
+            "python",
+        ])
+        .unwrap();
+        assert_eq!(cfg.language_class().unwrap(), "scripted");
     }
 
     #[test]

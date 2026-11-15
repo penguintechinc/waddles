@@ -407,6 +407,32 @@ pipeline:
       resources:
         requests: { cpu: "500m", memory: "1Gi" }
         limits: { cpu: "4000m", memory: "2560Mi" }
+      # Language partition (owner decision 2026-11-14, approved architecture exception): compiled
+      # and scripted bundles run on SEPARATE pools, 2 replicas each (both slot owners, and the
+      # per-pool PDB renders). Worst case 2x1536Mi + 2x2560Mi = 8Gi vs the old shared 2x2560Mi:
+      # requests stay small, limits are the headroom.
+      pools:
+        - name: native
+          languageClass: compiled
+          stages: [svc-process-rust, svc-action-rust]
+          replicas: 2
+          memoryBudgetMb: 1024
+          # One-shot warm instances (headroom = limit - budget must cover maxTotal x 64Mi).
+          warmPoolSize: 1
+          warmPoolMaxTotal: 4
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "2000m", memory: "1536Mi" }
+        - name: script
+          languageClass: scripted
+          stages: [svc-process-rust, svc-action-rust]
+          replicas: 2
+          memoryBudgetMb: 1536
+          warmPoolSize: 2
+          warmPoolMaxTotal: 8
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "4000m", memory: "2560Mi" }
 
 presentation:
   # Rust svc-presentation (overlay + image surface). Overlay view/SSE port reachable on-host at

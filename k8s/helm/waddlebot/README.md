@@ -1061,9 +1061,26 @@ pipeline:
   otherwise). Adding a scripted language (for example `ruby`) is a values change only.
 - A pool has `languageClass: compiled | scripted | any` (default `any`). Each executor pod gets
   `EXECUTOR_LANGUAGE_CLASS` and `EXECUTOR_LANGUAGES` (comma-separated; `any` = union of both
-  classes). The executor binary does not read them yet: they are the contract the
-  language-partition layer (router + executor) will consume. Nothing else changes for the default
-  single `any` pool.
+  classes). The executor validates them at startup (a typo or an empty list for a partitioned
+  pool refuses to start) and reports a class-qualified `executor_id` (`compiled:<pod>` /
+  `scripted:<pod>`) in `hello`; the stages (`bundle_active_set::partition`) read the same table
+  from `EXECUTOR_LANGUAGE_CLASSES` (rendered from `languageClasses`) and only ever load/dispatch
+  a bundle onto an executor whose class accepts its `app_versions.language`. A bundle whose
+  language is in no class, or whose class has no live executor, is placed nowhere: the stage
+  logs ERROR and counts `executor_partition_unroutable_total` (never a fallback to the other
+  class). Nothing else changes for the default single `any` pool.
+- alpha and dal2alpha ship both pools (`native` compiled, `script` scripted) with their own
+  replicas, resources, PDB, `warmPoolSize` and memory budget; beta/gamma/production keep one `any`
+  pool until their values opt in.
+- **Warm instance pool** (`warmPoolSize`, `warmPoolMaxTotal`, `warmPoolIdleSecs`, per pool): the
+  executor keeps up to `warmPoolSize` one-shot pre-instantiated guests per digest so an invoke
+  skips instantiation. `0` = off (default). Each guest serves exactly one invocation, so no state
+  crosses tenants. Worst-case warm memory is `warmPoolMaxTotal x EXECUTOR_MEMORY_LIMIT_MB`; keep it
+  inside `limit - memoryBudgetMb` (a render test enforces this for the shipped envs). Kill switch:
+  `FLAG_WADDLES_DISABLE_EXECUTOR_WARM_POOL=true`.
+- **Drain concurrency** (`pipeline.rustDataPlane.drainConcurrency`, `drainOrdering`): svc-process and
+  svc-action handle up to N ordering groups of a drained batch at once; entries sharing an ordering
+  key (default: stream + actor) stay strictly in arrival order. `1` = the old serial loop.
 - **Coverage rule:** every stage must be served by exactly one pool **per language class**; an
   `any` pool covers both classes. So the same stage may be listed by a compiled pool and a
   scripted pool, but not by two pools of the same class, and never by none. The rule lives in one

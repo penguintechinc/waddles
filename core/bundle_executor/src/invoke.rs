@@ -60,7 +60,7 @@ use penguin_bundle_host::wire::{
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
-use tracing::{error, info, warn, Instrument};
+use tracing::{debug, error, info, warn, Instrument};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
@@ -74,6 +74,7 @@ use crate::host::{ExecState, HostBridge};
 use crate::metrics::{self, ExecutorMetrics};
 use crate::module_cache::ModuleCache;
 use crate::signing::PlatformPublicKeys;
+use crate::warm_pool::{FillTicket, WarmPool};
 use crate::wire::{Connection, RequestHandler};
 
 /// Supplies a bundle version's component bytes and signed sidecar bytes
@@ -196,6 +197,14 @@ enum GuestInstance {
     V2(StageV2),
     /// Serves `ExportKind::ToolCall` via its `tool-provider.call` export.
     Tools(StageTools),
+}
+
+/// One pre-instantiated, never-yet-invoked guest (see `crate::warm_pool`): its `Store` holds NO
+/// per-call state until [`ExecState::rebind_for_call`] binds it at checkout, and it serves
+/// exactly one invocation before being dropped.
+pub(crate) struct WarmGuest {
+    store: Store<ExecState>,
+    stage: GuestInstance,
 }
 
 struct LoadedBundle {
@@ -441,6 +450,11 @@ pub struct SharedRuntime {
     /// Advances `engine`'s epoch every `EPOCH_TICK` so per-call deadlines
     /// fire (see the `Executor` doc's heartbeat-safety note). Aborted on drop.
     epoch_ticker: tokio::task::JoinHandle<()>,
+    /// Pre-instantiated one-shot guests, process-wide (shared by every stage). Disabled
+    /// (inert) unless `EXECUTOR_WARM_POOL_SIZE > 0` and the kill switch is off.
+    warm: WarmPool<WarmGuest>,
+    /// Bounds concurrent background prewarm instantiations so they never starve real calls.
+    warm_fill_limiter: Arc<Semaphore>,
 }
 
 impl SharedRuntime {
@@ -482,7 +496,30 @@ impl SharedRuntime {
             max_concurrent_compiles = max_compiles,
             "shared executor runtime built (one engine + module cache for all stages)"
         );
-        Ok(Arc::new(Self {
+        let warm_size = if cfg.flag_disable_executor_warm_pool {
+            0
+        } else {
+            cfg.executor_warm_pool_size as usize
+        };
+        let warm_ttl = Duration::from_secs(cfg.executor_warm_pool_idle_secs.max(1));
+        let warm = WarmPool::new(
+            warm_size,
+            cfg.executor_warm_pool_max_total as usize,
+            warm_ttl,
+        );
+        if warm.enabled() {
+            info!(
+                per_digest = warm_size,
+                max_total = cfg.executor_warm_pool_max_total,
+                idle_secs = warm_ttl.as_secs(),
+                "warm instance pool ENABLED (one-shot pre-instantiated guests)"
+            );
+        } else if cfg.flag_disable_executor_warm_pool {
+            warn!(
+                "warm instance pool forced OFF by kill switch waddles.disable-executor-warm-pool"
+            );
+        }
+        let runtime = Arc::new(Self {
             engine,
             linker,
             engine_fingerprint,
@@ -499,7 +536,11 @@ impl SharedRuntime {
             aot_loads_total: AtomicU64::new(0),
             aot_fallbacks_total: AtomicU64::new(0),
             epoch_ticker,
-        }))
+            warm,
+            warm_fill_limiter: Arc::new(Semaphore::new(2)),
+        });
+        runtime.start_warm_sweeper();
+        Ok(runtime)
     }
 
     /// This runtime's engine fingerprint (precompiled artifact key).
@@ -880,6 +921,161 @@ impl Drop for SharedRuntime {
     }
 }
 
+impl SharedRuntime {
+    /// Takes one prewarmed guest for `digest` (one-shot: it is consumed). `None` when the pool
+    /// is off or empty; the caller records the hit/miss against its own metrics handle.
+    fn take_warm(&self, digest: &str) -> Option<WarmGuest> {
+        if !self.warm.enabled() {
+            return None;
+        }
+        self.warm.take(digest, Instant::now())
+    }
+
+    /// Drops every warm guest of `digest` (bundle unloaded / superseded) and invalidates any
+    /// fill still in flight for it.
+    fn evict_warm(&self, digest: &str) {
+        let dropped = self.warm.evict(digest);
+        if !dropped.is_empty() {
+            debug!(
+                digest,
+                dropped = dropped.len(),
+                "warm pool: evicted on unload"
+            );
+        }
+        drop(dropped);
+        self.metrics.set_warm_pool_size(self.warm.total_ready());
+    }
+
+    /// Starts the idle sweeper (needs the `Arc`, so it is spawned after construction).
+    fn start_warm_sweeper(self: &Arc<Self>) {
+        if !self.warm.enabled() {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        // Detached on purpose: it holds only a `Weak`, so it exits on its own once the runtime drops.
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                tick.tick().await;
+                let Some(rt) = weak.upgrade() else { return };
+                let dropped = rt.warm.sweep(Instant::now());
+                if !dropped.is_empty() {
+                    debug!(dropped = dropped.len(), "warm pool: idle entries dropped");
+                }
+                drop(dropped);
+                rt.metrics.set_warm_pool_size(rt.warm.total_ready());
+            }
+        });
+    }
+
+    /// After an invoke of `digest`, tops the pool back up in the background: reserves the
+    /// fills the bounds allow and instantiates each OFF the request path.
+    fn refill_warm(
+        self: &Arc<Self>,
+        digest: &str,
+        pre: &GuestPre,
+        app_id: &str,
+        memory_limit_mb: u32,
+        fuel_budget: u64,
+        deadline_ms: u64,
+    ) {
+        for ticket in self.warm.reserve_fills(digest, Instant::now()) {
+            let rt = Arc::clone(self);
+            let pre = pre.clone();
+            let app_id = app_id.to_string();
+            tokio::spawn(async move {
+                let Ok(_permit) = Arc::clone(&rt.warm_fill_limiter).acquire_owned().await else {
+                    rt.warm.fill_failed(&ticket, false);
+                    return;
+                };
+                rt.fill_one(
+                    ticket,
+                    pre,
+                    app_id,
+                    memory_limit_mb,
+                    fuel_budget,
+                    deadline_ms,
+                )
+                .await;
+            });
+        }
+    }
+
+    async fn fill_one(
+        self: &Arc<Self>,
+        ticket: FillTicket,
+        pre: GuestPre,
+        app_id: String,
+        memory_limit_mb: u32,
+        fuel_budget: u64,
+        deadline_ms: u64,
+    ) {
+        let engine = self.engine.clone();
+        let handle = tokio::runtime::Handle::current();
+        let started = Instant::now();
+        let built = tokio::task::spawn_blocking(move || {
+            handle.block_on(prewarm_one(
+                &engine,
+                &pre,
+                app_id,
+                memory_limit_mb,
+                fuel_budget,
+                deadline_ms,
+            ))
+        })
+        .await;
+        match built {
+            Ok(Ok(guest)) => {
+                self.metrics.record_prewarm(started.elapsed());
+                // A refused put (evicted / full meanwhile) just drops the instance.
+                let _ = self.warm.put(&ticket, guest, Instant::now());
+                self.metrics.set_warm_pool_size(self.warm.total_ready());
+            }
+            Ok(Err(reason)) => {
+                self.metrics.record_warm_pool("fill_failed");
+                warn!(
+                    digest = ticket.digest(),
+                    %reason,
+                    "warm pool: prewarm instantiate failed; this digest now serves cold \
+                     (a start function that needs a host call cannot be prewarmed)"
+                );
+                self.warm.fill_failed(&ticket, true);
+            }
+            Err(join) => {
+                self.metrics.record_warm_pool("fill_failed");
+                error!(digest = ticket.digest(), error = %join, "warm pool: prewarm task failed");
+                self.warm.fill_failed(&ticket, false);
+            }
+        }
+    }
+}
+
+/// Instantiates one guest with NO per-call state (no bridge, no scope, no invoke id), armed with
+/// the same bounds as a real call (epoch deadline, memory cap, fuel), so a hostile start
+/// function cannot hang or balloon the background fill either.
+async fn prewarm_one(
+    engine: &Engine,
+    pre: &GuestPre,
+    app_id: String,
+    memory_limit_mb: u32,
+    fuel_budget: u64,
+    deadline_ms: u64,
+) -> Result<WarmGuest, String> {
+    let exec_state = ExecState::new(None, app_id, 0).with_memory_limit_mb(memory_limit_mb);
+    let mut store = new_bounded_store(engine, exec_state, deadline_ms);
+    store.set_fuel(fuel_budget).map_err(|e| e.to_string())?;
+    let stage = match pre {
+        GuestPre::V1(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V1),
+        GuestPre::V2(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V2),
+        GuestPre::Tools(p) => p
+            .instantiate_async(&mut store)
+            .await
+            .map(GuestInstance::Tools),
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(WarmGuest { store, stage })
+}
+
 /// Resolves `PRECOMPILE_SIGNING_PUBLIC_KEYS` into the key set `.cwasm`
 /// signatures are checked against, plus a human-readable problem when the
 /// configuration is unusable. FAIL-CLOSED: a malformed value, or a key set that
@@ -1025,7 +1221,7 @@ impl<S: ComponentSource> Executor<S> {
         Ok(Self {
             engine,
             runtime,
-            executor_id: cfg.resolved_executor_id(),
+            executor_id: cfg.reported_executor_id(),
             source,
             max_call_timeout_ms: cfg.executor_max_call_timeout_ms,
             default_memory_limit_mb: cfg.executor_memory_limit_mb,
@@ -1559,6 +1755,9 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     if loaded.scopes.is_empty() {
                         bundles.remove(&body.digest);
                         self.runtime.release_ref(&body.digest);
+                        // Last scope gone (unload / version change = new digest): drop its warm
+                        // guests and invalidate in-flight fills so the old version never lingers.
+                        self.runtime.evict_warm(&body.digest);
                         self.metrics.record_unload("evicted");
                         self.metrics.set_bundles_loaded(bundles.len());
                         info!(
@@ -1882,6 +2081,23 @@ impl<S: ComponentSource> Executor<S> {
                 ));
             }
         };
+        // Warm pool: take a prewarmed one-shot guest for this digest if one is ready (a hit skips
+        // instantiation entirely), then top the pool back up in the background. Off by default.
+        let warm = self.runtime.take_warm(&body.digest);
+        if self.runtime.warm.enabled() {
+            self.metrics
+                .record_warm_pool(if warm.is_some() { "hit" } else { "miss" });
+            self.metrics
+                .set_warm_pool_size(self.runtime.warm.total_ready());
+            self.runtime.refill_warm(
+                &body.digest,
+                &pre,
+                &body.app_id,
+                memory_limit_mb,
+                self.fuel_limit_transform,
+                self.max_call_timeout_ms,
+            );
+        }
         let job = GuestJob {
             engine: self.engine.clone(),
             pre,
@@ -1893,6 +2109,7 @@ impl<S: ComponentSource> Executor<S> {
             deadline_ms,
             fuel_budget,
             allowed_scopes,
+            warm,
         };
         // Guest execution is synchronous CPU between host-call awaits (the
         // epoch deadline traps rather than yields), so it runs on a
@@ -1931,6 +2148,8 @@ struct GuestJob {
     /// `(tenant_id, community_id)` scopes the invoked `app_id` was `Load`ed
     /// under; the confused-deputy guard checks v2 frame ids against it.
     allowed_scopes: Vec<(i32, i32)>,
+    /// A prewarmed one-shot guest taken for this call (`None` = instantiate inline).
+    warm: Option<WarmGuest>,
 }
 
 /// Instantiates (from the pre-linked component, in a fresh bounded `Store`)
@@ -1948,6 +2167,7 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
         deadline_ms,
         fuel_budget,
         allowed_scopes,
+        warm,
     } = job;
     let bridge = HostBridge::new(connection);
     let exec_state = ExecState::new(Some(bridge), body.app_id.clone(), invoke_id)
@@ -2012,54 +2232,75 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
         }
         v2_dispatch = Some(envelope);
     }
-    let mut store = new_bounded_store(&engine, exec_state, deadline_ms);
-    // The engine was built with `consume_fuel(true)`
-    // (`crate::engine::build_engine`) so a `Store` starts at zero fuel and
-    // traps immediately unless armed here on every call -- armed BEFORE
-    // instantiation so a heavy start function is metered too.
-    store.set_fuel(fuel_budget).map_err(|e| {
-        // A set_fuel failure means fuel accounting is OFF on an engine that
-        // `build_engine` always configures with `consume_fuel(true)` -- a
-        // host/executor invariant breach, NOT a guest trap. Report it as an
-        // internal failure (never `WasmTrap`, which stage circuit breakers
-        // count against the guest) and shout about it.
-        error!(
-            app_id = %body.app_id,
-            invoke_id,
-            error = %e,
-            "invariant breach: could not arm the fuel budget (fuel accounting disabled?)"
-        );
-        fuel_invariant_error_body(format!("failed to arm fuel budget: {e}"))
-    })?;
-
     let start = std::time::Instant::now();
-    let instantiated = match &pre {
-        GuestPre::V1(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V1),
-        GuestPre::V2(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V2),
-        GuestPre::Tools(p) => p
-            .instantiate_async(&mut store)
-            .await
-            .map(GuestInstance::Tools),
-    };
-    let stage = match instantiated {
-        Ok(stage) => stage,
-        Err(err) => {
-            // Instantiation itself can trap (a heavy/looping start function
-            // burning the fuel budget, hitting the epoch deadline, or growing
-            // memory past the cap) exactly like an export call can --
-            // classify identically via `trap_to_error_body` rather than
-            // always bucketing an instantiate failure as `LOAD_FAILED`, which
-            // would hide a genuine guest fault from `svc_process::spine`'s
-            // DLQ-kind mapping and its per-source circuit breaker (both key
-            // off the typed `ErrorCode`, connector spec SS0 condition 5).
-            let memory_cap_hit = store.data().memory_cap_hit();
-            if memory_cap_hit || err.downcast_ref::<wasmtime::Trap>().is_some() {
-                return Err(trap_to_error_body(err, memory_cap_hit));
+    let (mut store, stage) = if let Some(WarmGuest { mut store, stage }) = warm {
+        // Warm hit: the guest was instantiated off the request path with NO per-call state; bind
+        // this call's identity now and re-arm the bounds relative to NOW. One-shot, so nothing
+        // of any earlier invocation (tenant/community) can be present.
+        let started = Instant::now();
+        let mut exec_state = exec_state;
+        let bridge = exec_state.bridge.take();
+        let v2_scope = exec_state.v2_scope.take();
+        store
+            .data_mut()
+            .rebind_for_call(bridge, body.app_id.clone(), invoke_id, v2_scope);
+        store.set_epoch_deadline(ticks_for_deadline(deadline_ms));
+        store
+            .set_fuel(fuel_budget)
+            .map_err(|e| fuel_invariant_error_body(format!("failed to arm fuel budget: {e}")))?;
+        metrics.record_instantiate(&body.app_id, started.elapsed());
+        (store, stage)
+    } else {
+        let mut store = new_bounded_store(&engine, exec_state, deadline_ms);
+        // The engine was built with `consume_fuel(true)`
+        // (`crate::engine::build_engine`) so a `Store` starts at zero fuel and
+        // traps immediately unless armed here on every call -- armed BEFORE
+        // instantiation so a heavy start function is metered too.
+        store.set_fuel(fuel_budget).map_err(|e| {
+            // A set_fuel failure means fuel accounting is OFF on an engine that
+            // `build_engine` always configures with `consume_fuel(true)` -- a
+            // host/executor invariant breach, NOT a guest trap. Report it as an
+            // internal failure (never `WasmTrap`, which stage circuit breakers
+            // count against the guest) and shout about it.
+            error!(
+                app_id = %body.app_id,
+                invoke_id,
+                error = %e,
+                "invariant breach: could not arm the fuel budget (fuel accounting disabled?)"
+            );
+            fuel_invariant_error_body(format!("failed to arm fuel budget: {e}"))
+        })?;
+
+        let inst_start = std::time::Instant::now();
+        let instantiated = match &pre {
+            GuestPre::V1(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V1),
+            GuestPre::V2(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V2),
+            GuestPre::Tools(p) => p
+                .instantiate_async(&mut store)
+                .await
+                .map(GuestInstance::Tools),
+        };
+        let stage = match instantiated {
+            Ok(stage) => stage,
+            Err(err) => {
+                // Instantiation itself can trap (a heavy/looping start function
+                // burning the fuel budget, hitting the epoch deadline, or growing
+                // memory past the cap) exactly like an export call can --
+                // classify identically via `trap_to_error_body` rather than
+                // always bucketing an instantiate failure as `LOAD_FAILED`, which
+                // would hide a genuine guest fault from `svc_process::spine`'s
+                // DLQ-kind mapping and its per-source circuit breaker (both key
+                // off the typed `ErrorCode`, connector spec SS0 condition 5).
+                let memory_cap_hit = store.data().memory_cap_hit();
+                if memory_cap_hit || err.downcast_ref::<wasmtime::Trap>().is_some() {
+                    return Err(trap_to_error_body(err, memory_cap_hit));
+                }
+                return Err(error_body(ErrorCode::LoadFailed, err.to_string()));
             }
-            return Err(error_body(ErrorCode::LoadFailed, err.to_string()));
-        }
+        };
+        metrics.record_instantiate(&body.app_id, inst_start.elapsed());
+        (store, stage)
     };
-    metrics.record_instantiate(&body.app_id, start.elapsed());
     let guest_started = Instant::now();
 
     let result = match body.export {
@@ -4534,6 +4775,246 @@ mod tests {
                     .expect("gauge exported")
                     .value,
                 0.0
+            );
+        }
+
+        fn warm_config(per_digest: u32) -> CliConfig {
+            let mut cfg = test_config();
+            cfg.executor_warm_pool_size = per_digest;
+            cfg.executor_warm_pool_max_total = 8;
+            cfg
+        }
+
+        /// Waits (bounded) until `n` prewarmed guests are ready for the fixture digest.
+        async fn wait_warm_ready(executor: &Executor<impl ComponentSource>, n: usize) {
+            for _ in 0..400 {
+                if executor.runtime.warm.ready_len(&fixture_digest()) >= n {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            panic!(
+                "warm pool never reached {n} ready (have {})",
+                executor.runtime.warm.ready_len(&fixture_digest())
+            );
+        }
+
+        /// First invoke is a miss (pool empty) and schedules the fill; once filled the next invoke
+        /// is a hit that skips instantiation, and the pool tops itself back up afterwards.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn warm_pool_misses_first_then_hits_and_refills() {
+            let (h, executor) = executor_with_config(FixtureSource, warm_config(2));
+            executor
+                .on_load(fixture_load_body("waddles.mx.warm"))
+                .await
+                .expect("load");
+            invoke_event(
+                &executor,
+                "waddles.mx.warm",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("cold invoke ok");
+            assert_eq!(
+                h.count("waddles_executor_warm_pool_total", &[("result", "miss")]),
+                1.0
+            );
+            wait_warm_ready(&executor, 2).await;
+
+            invoke_event(
+                &executor,
+                "waddles.mx.warm",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("warm invoke ok");
+            assert_eq!(
+                h.count("waddles_executor_warm_pool_total", &[("result", "hit")]),
+                1.0
+            );
+            assert_eq!(
+                h.count("waddles_executor_warm_pool_total", &[("result", "miss")]),
+                1.0
+            );
+            // Every invoke (hit or miss) still records its on-path instantiate time.
+            assert_eq!(
+                h.count(
+                    "waddles_executor_instantiate_seconds",
+                    &[("app_id", "waddles.mx.warm")]
+                ),
+                2.0
+            );
+            wait_warm_ready(&executor, 2).await; // refilled to the per-digest bound
+            assert!(
+                executor.runtime.warm.ready_len(&fixture_digest()) <= 2,
+                "bounded"
+            );
+        }
+
+        /// Isolation proof: a prewarmed guest is consumed by exactly one take -- two takes drain a
+        /// pool of two, a third misses, and nothing is ever handed back -- so no guest instance (and
+        /// no state in it) can serve two invocations, let alone two tenants.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_taken_warm_guest_is_never_returned_to_the_pool() {
+            let (_h, executor) = executor_with_config(FixtureSource, warm_config(2));
+            executor
+                .on_load(fixture_load_body("waddles.mx.once"))
+                .await
+                .expect("load");
+            invoke_event(
+                &executor,
+                "waddles.mx.once",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("seed invoke");
+            wait_warm_ready(&executor, 2).await;
+            assert!(executor.runtime.take_warm(&fixture_digest()).is_some());
+            assert!(executor.runtime.take_warm(&fixture_digest()).is_some());
+            assert!(
+                executor.runtime.take_warm(&fixture_digest()).is_none(),
+                "drained: nothing reused"
+            );
+            assert_eq!(executor.runtime.warm.ready_len(&fixture_digest()), 0);
+        }
+
+        /// Cross-tenant: two tenants share one digest (one compiled module, one warm pool). Both
+        /// are served from warm guests, each guest consumed by exactly one of them, and each call
+        /// is bound to ITS OWN app/scope at checkout.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn two_tenants_sharing_a_digest_each_consume_their_own_warm_guest() {
+            let (h, executor) = executor_with_config(FixtureSource, warm_config(2));
+            executor
+                .on_load(fixture_load_body_scoped("waddles.mx.ta", 1, 0))
+                .await
+                .expect("load tenant A");
+            executor
+                .on_load(fixture_load_body_scoped("waddles.mx.tb", 2, 7))
+                .await
+                .expect("load tenant B");
+            invoke_event(
+                &executor,
+                "waddles.mx.ta",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("seed invoke");
+            wait_warm_ready(&executor, 2).await;
+            let before = executor.runtime.warm.ready_len(&fixture_digest());
+            assert_eq!(before, 2);
+            invoke_event(
+                &executor,
+                "waddles.mx.ta",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("tenant A warm");
+            invoke_event(
+                &executor,
+                "waddles.mx.tb",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("tenant B warm");
+            assert_eq!(
+                h.count("waddles_executor_warm_pool_total", &[("result", "hit")]),
+                2.0,
+                "both tenants were served from the pool, one guest each"
+            );
+            // A tenant that was never loaded for this digest cannot borrow a warm guest.
+            let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
+            let conn = crate::wire::Connection::new(tx);
+            let stranger = executor
+                .on_invoke(
+                    InvokeBody {
+                        app_id: "waddles.mx.stranger".to_string(),
+                        digest: format!("sha256:{}", "e".repeat(64)),
+                        export: ExportKind::Transform,
+                        payload: event("noop"),
+                        deadline_ms: 1000,
+                        trace: None,
+                    },
+                    3,
+                    conn,
+                )
+                .await;
+            assert!(stranger.is_err(), "unknown digest never reaches the pool");
+        }
+
+        /// Version change / unload: the last scope unloading evicts the digest's warm guests.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn unloading_the_last_scope_evicts_the_warm_pool() {
+            let (_h, executor) = executor_with_config(FixtureSource, warm_config(2));
+            executor
+                .on_load(fixture_load_body("waddles.mx.evict"))
+                .await
+                .expect("load");
+            invoke_event(
+                &executor,
+                "waddles.mx.evict",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("seed invoke");
+            wait_warm_ready(&executor, 2).await;
+            executor
+                .on_unload(fixture_unload_body(
+                    "waddles.mx.evict",
+                    1,
+                    0,
+                    &fixture_digest(),
+                ))
+                .await
+                .expect("unload");
+            assert_eq!(executor.runtime.warm.ready_len(&fixture_digest()), 0);
+            assert!(executor.runtime.take_warm(&fixture_digest()).is_none());
+        }
+
+        /// The kill switch forces the pool off even when a size is configured: every invoke is
+        /// cold, nothing is prewarmed, no warm-pool series is emitted.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn kill_switch_forces_the_warm_pool_off() {
+            let mut cfg = warm_config(2);
+            cfg.flag_disable_executor_warm_pool = true;
+            let (h, executor) = executor_with_config(FixtureSource, cfg);
+            assert!(!executor.runtime.warm.enabled());
+            executor
+                .on_load(fixture_load_body("waddles.mx.off"))
+                .await
+                .expect("load");
+            for _ in 0..2 {
+                invoke_event(
+                    &executor,
+                    "waddles.mx.off",
+                    ExportKind::Transform,
+                    event("noop"),
+                    1000,
+                )
+                .await
+                .expect("cold invoke ok");
+            }
+            assert_eq!(h.count("waddles_executor_warm_pool_total", &[]), 0.0);
+            assert_eq!(executor.runtime.warm.total_ready(), 0);
+            assert_eq!(
+                h.count(
+                    "waddles_executor_instantiate_seconds",
+                    &[("app_id", "waddles.mx.off")]
+                ),
+                2.0
             );
         }
 

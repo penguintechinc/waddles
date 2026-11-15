@@ -627,6 +627,7 @@ name = "bundle-active-set"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures-util",
  "sea-orm",
  "serde_json",
  "sha2 0.10.9",
