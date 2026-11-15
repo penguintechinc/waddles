@@ -268,7 +268,7 @@ exported_tools:
     additionalProperties: false
   output_schema:
     type: object
-  required_scope: music:requests.write
+  required_scope: music:requests.manage
 - name: history.list
   access: read
   risk: normal

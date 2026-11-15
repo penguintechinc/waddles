@@ -1022,6 +1022,7 @@ impl Service {
 
     /// `requests.import`: one-shot seed of an empty community from a legacy queue.
     fn import(&self, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+        need_scope(ctx, SCOPE_MANAGE)?;
         write(ctx)?;
         fields(&args, &["items"])?;
         let arr = args
@@ -1037,6 +1038,10 @@ impl Service {
         let st = self.settings()?;
         if st.find("imported").is_some() {
             return Err(invalid("already_imported"));
+        }
+        // The whole batch must fit the community's queue cap: refuse before any write.
+        if arr.len() as i64 > st.config().max_queue {
+            return Err(invalid("queue_full"));
         }
         if st.config().dmca_safe && items.iter().any(|i| i.provider == PROVIDER_OTHER) {
             return Err(not_dmca_safe());

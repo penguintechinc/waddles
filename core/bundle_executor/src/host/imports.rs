@@ -194,31 +194,38 @@ impl context_v2::Host for ExecState {
     }
 }
 
+/// Removes the host-reserved `web_base_url` key from a parsed config at every depth.
+fn strip_reserved_key(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    obj.remove("web_base_url");
+    for v in obj.values_mut() {
+        strip_reserved_value(v);
+    }
+}
+
+/// Recursive step of [`strip_reserved_key`] over arrays and nested objects.
+fn strip_reserved_value(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(o) => strip_reserved_key(o),
+        serde_json::Value::Array(a) => a.iter_mut().for_each(strip_reserved_value),
+        _ => {}
+    }
+}
+
 impl BundleContextWire {
-    /// The guest-visible `config-json`: the community config object (`{}` when empty) with the
-    /// host-injected `web_base_url` merged in. The host key always wins over a community-set
-    /// one, so a community admin can never spoof the platform link base.
+    /// The guest-visible `config-json`. The config is ALWAYS parsed and re-serialised (so the
+    /// guest can never see bytes this function did not produce, and there is no parser
+    /// differential): a non-object or malformed config becomes `{}`, every `web_base_url` key
+    /// (any depth; JSON unicode escapes are already decoded by the parser) is removed, and only
+    /// THEN is the host-provided `web_base_url` inserted. The key is host-reserved.
     fn effective_config_json(&self) -> String {
-        let base = self.config_json.trim();
-        let Some(url) = self.web_base_url.as_deref().filter(|u| !u.is_empty()) else {
-            if base.is_empty() {
-                return "{}".to_string();
-            }
-            // The key is host-reserved: a community-set `web_base_url` is dropped, never
-            // trusted as the platform link base.
-            if base.contains("web_base_url") {
-                if let Ok(serde_json::Value::Object(mut o)) = serde_json::from_str(base) {
-                    o.remove("web_base_url");
-                    return serde_json::Value::Object(o).to_string();
-                }
-            }
-            return self.config_json.clone();
-        };
-        let mut obj = match serde_json::from_str::<serde_json::Value>(base) {
+        let mut obj = match serde_json::from_str::<serde_json::Value>(self.config_json.trim()) {
             Ok(serde_json::Value::Object(o)) => o,
             _ => serde_json::Map::new(),
         };
-        obj.insert("web_base_url".to_string(), serde_json::json!(url));
+        strip_reserved_key(&mut obj);
+        if let Some(url) = self.web_base_url.as_deref().filter(|u| !u.is_empty()) {
+            obj.insert("web_base_url".to_string(), serde_json::json!(url));
+        }
         serde_json::Value::Object(obj).to_string()
     }
 
@@ -834,11 +841,50 @@ pub(crate) mod tests {
             serde_json::from_str(&w("not json", Some("https://a.example")).effective_config_json()).unwrap();
         assert_eq!(v, serde_json::json!({"web_base_url": "https://a.example"}));
         assert_eq!(w("", Some("")).effective_config_json(), "{}");
-        // Host-reserved key: a community-supplied value is stripped when the host sets none.
-        assert_eq!(
-            w("{\"a\":1,\"web_base_url\":\"https://evil.example\"}", None).effective_config_json(),
-            "{\"a\":1}"
-        );
+        // Host-reserved key: a community-supplied value never reaches the guest, whatever the
+        // spelling (unicode escapes decode to the same key), nesting, or host setting.
+        for cfg in [
+            r#"{"a":1,"web_base_url":"https://evil.example"}"#,
+            r#"{"a":1,"web_base_url":"https://evil.example"}"#,
+            r#"{"a":1,"web_base_url":"https://evil.example"}"#,
+            r#"  {"a":1, "web_base_url" : "https://evil.example" }  "#,
+            r#"{"web_base_url":"https://x.example","a":1,"web_base_url":"https://evil.example"}"#,
+        ] {
+            let out: serde_json::Value =
+                serde_json::from_str(&w(cfg, None).effective_config_json()).unwrap();
+            assert_eq!(out, serde_json::json!({"a": 1}), "{cfg}");
+            let out: serde_json::Value = serde_json::from_str(
+                &w(cfg, Some("https://app.example.org")).effective_config_json(),
+            )
+            .unwrap();
+            assert_eq!(
+                out,
+                serde_json::json!({"a": 1, "web_base_url": "https://app.example.org"}),
+                "{cfg}"
+            );
+        }
+        // Nested occurrences are stripped too.
+        let nested = r#"{"a":{"web_base_url":"https://evil.example","b":2},"l":[{"web_base_url":1}]}"#;
+        let out: serde_json::Value =
+            serde_json::from_str(&w(nested, None).effective_config_json()).unwrap();
+        assert_eq!(out, serde_json::json!({"a": {"b": 2}, "l": [{}]}));
+        // Malformed or non-object config becomes `{}` (never passed through raw).
+        for bad in [
+            "not json",
+            r#"{"web_base_url":"https://evil.example""#,
+            "[1,2]",
+            r#""s""#,
+            "null",
+            "7",
+        ] {
+            assert_eq!(w(bad, None).effective_config_json(), "{}", "{bad}");
+        }
+        let out: serde_json::Value = serde_json::from_str(
+            &w(r#"{"web_base_url":"https://evil.example""#, Some("https://app.example.org"))
+                .effective_config_json(),
+        )
+        .unwrap();
+        assert_eq!(out, serde_json::json!({"web_base_url": "https://app.example.org"}));
     }
 
     #[tokio::test]

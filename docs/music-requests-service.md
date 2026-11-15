@@ -30,8 +30,8 @@ No platform alembic table is needed (bundle tables are provisioned by the instal
 | scope | tools | role bundles |
 |---|---|---|
 | `music:requests.read` | `requests.list`, `requests.advance_due`, `history.list`, `config.get`, `dj.get`, `page.link` | member, vip, moderator, admin, owner |
-| `music:requests.write` | `requests.add`, `requests.cancel_own`, `requests.import` | member+ |
-| `music:requests.manage` | `requests.remove`, `requests.advance`, `config.set` | moderator, admin, owner |
+| `music:requests.write` | `requests.add`, `requests.cancel_own` | member+ |
+| `music:requests.manage` | `requests.remove`, `requests.advance`, `requests.import`, `config.set` | moderator, admin, owner |
 | `music:dj.manage` | `dj.set` | moderator, admin, owner |
 | `music:stats.read` | `music.stats.top` | member, vip, moderator, admin, owner |
 | `music:settings.write` | `settings.set` | moderator, admin, owner |
@@ -98,4 +98,4 @@ dropped). `page.link` returns `{base}/community/{numeric community_id}/music`, o
   `transact` as the insert (a race fails the batch and the tool re-reads). Duplicate detection (same title+artist, or same
   non-empty URL, among queued + playing) is a pre-check, not a unique index.
 - `history` is bounded to the newest 500 rows (oldest pruned best-effort after each advance) so the community row quota is not exhausted.
-- `requests.import` claims the one-shot marker first (guards: queue and history empty), then inserts in chunks of 16; a failure after the claim returns `import_partial`.
+- `requests.import` needs `music:requests.manage` (a moderator-level actor must trigger the legacy-queue migration), is refused with `queue_full` when the batch exceeds `max_queue` or 100 (before any write), and claims the one-shot marker first (guards: queue and history empty), then inserts in chunks of 16; a failure after the claim returns `import_partial`.

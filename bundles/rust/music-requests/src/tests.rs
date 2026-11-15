@@ -627,7 +627,7 @@ fn import_is_one_shot_validated_and_requires_empty_community() {
     let r = rig();
     let items: Vec<Value> = (0..20).map(|i| json!({"title": format!("T{i}"), "artist": "A", "source_url": "", "duration_ms": 100})).collect();
     assert_eq!(
-        r.ok(&member(ALICE), "requests.import", json!({"items": items}))["imported"],
+        r.ok(&admin(), "requests.import", json!({"items": items}))["imported"],
         20
     );
     let list = r.ok(&member(ALICE), "requests.list", json!({"limit": 100}));
@@ -637,7 +637,7 @@ fn import_is_one_shot_validated_and_requires_empty_community() {
     assert_eq!(list["queue"][19]["title"], "T19");
     assert_eq!(
         r.err(
-            &member(ALICE),
+            &admin(),
             "requests.import",
             json!({"items": [{"title": "Z"}]})
         ),
@@ -648,7 +648,7 @@ fn import_is_one_shot_validated_and_requires_empty_community() {
     r2.add(ALICE, "Existing");
     assert_eq!(
         r2.err(
-            &member(ALICE),
+            &admin(),
             "requests.import",
             json!({"items": [{"title": "Z"}]})
         ),
@@ -661,7 +661,7 @@ fn import_is_one_shot_validated_and_requires_empty_community() {
         .collect();
     assert!(
         r3.err(
-            &member(ALICE),
+            &admin(),
             "requests.import",
             json!({"items": too_many})
         )
@@ -669,7 +669,7 @@ fn import_is_one_shot_validated_and_requires_empty_community() {
     );
     assert_eq!(
         r3.err(
-            &member(ALICE),
+            &admin(),
             "requests.import",
             json!({"items": [{"title": "Z", "requester": ALICE}]})
         ),
@@ -677,7 +677,7 @@ fn import_is_one_shot_validated_and_requires_empty_community() {
     );
     assert_eq!(
         r3.err(
-            &member(ALICE),
+            &admin(),
             "requests.import",
             json!({"items": [{"title": "Z", "source_url": "http://x.io/a"}]})
         ),
@@ -814,7 +814,7 @@ fn dmca_safe_mode_refuses_non_safe_including_dj_and_forged_provider() {
     );
     assert!(
         r.err(
-            &member(BOB),
+            &admin(),
             "requests.import",
             json!({"items": [{"title": "Q", "source_url": OTHER}]})
         )
@@ -1016,4 +1016,37 @@ fn every_exported_tool_is_registered() {
             assert_ne!(m, "unknown tool", "{t}");
         }
     }
+}
+
+#[test]
+fn import_requires_manage_scope_and_respects_max_queue() {
+    let r = rig();
+    let one = json!({"items": [{"title": "Z"}]});
+    assert!(matches!(
+        r.call(&member(ALICE), "requests.import", one.clone()),
+        Err(ToolError::Forbidden)
+    ));
+    // A write-only scope set is not enough either.
+    let write_only = ctx(Some(ALICE), &[SCOPE_READ, SCOPE_WRITE]);
+    assert!(matches!(
+        r.call(&write_only, "requests.import", one.clone()),
+        Err(ToolError::Forbidden)
+    ));
+    // Nothing was written by the refused calls: the one-shot marker is still free.
+    assert_eq!(
+        r.ok(&admin(), "requests.list", json!({}))["total_queued"],
+        0
+    );
+
+    r.ok(&admin(), "config.set", json!({"max_queue": 2}));
+    let three = json!({"items": [{"title": "A"}, {"title": "B"}, {"title": "C"}]});
+    assert_eq!(r.err(&admin(), "requests.import", three), "queue_full");
+    assert_eq!(
+        r.ok(&admin(), "requests.list", json!({}))["total_queued"],
+        0
+    );
+    // The refusal did not burn the one-shot marker.
+    let two = json!({"items": [{"title": "A"}, {"title": "B"}]});
+    assert_eq!(r.ok(&admin(), "requests.import", two)["imported"], 2);
+    assert_eq!(r.err(&admin(), "requests.import", one), "already_imported");
 }

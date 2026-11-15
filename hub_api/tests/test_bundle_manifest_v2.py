@@ -576,6 +576,7 @@ def test_music_requests_service_manifests_parse_and_agree() -> None:
     assert len(scopes) == 15 and None not in scopes.values()
     assert scopes["requests.add"] == "music:requests.write"
     assert scopes["requests.remove"] == "music:requests.manage"
+    assert scopes["requests.import"] == "music:requests.manage"
     assert scopes["dj.set"] == "music:dj.manage"
     assert scopes["music.stats.top"] == "music:stats.read"
     assert scopes["settings.set"] == "music:settings.write"
