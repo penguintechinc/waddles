@@ -360,8 +360,12 @@ const DISCORD_OP_ACK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Poll interval while waiting for the drain's result. Polling (`GETDEL`)
 /// rather than a blocking pop: a blocking command would stall every other
 /// command multiplexed on this stage's shared Valkey connection (`kv`,
-/// usage metering, relay pushes).
-const DISCORD_OP_ACK_POLL: Duration = Duration::from_millis(50);
+/// usage metering, relay pushes) -- a dedicated connection per waiting op is
+/// not worth it, so the interval is tightened instead: 5 ms bounds the added
+/// ack latency to ~2.5 ms on average (was ~25 ms at 50 ms) for a cheap
+/// `GETDEL` per tick. The overall [`DISCORD_OP_ACK_TIMEOUT`] and the
+/// fail-loud `relay_unconfirmed` path are unchanged.
+const DISCORD_OP_ACK_POLL: Duration = Duration::from_millis(5);
 
 /// Discord's hard limit on a message's `content`. A `dm.send` longer than this
 /// can never be delivered, so it is refused up front rather than queued (the
@@ -1788,6 +1792,82 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     /// (down, wedged, dropped it) is `relay_unconfirmed`, never success -- a
     /// bundle must not treat "queued" as "done" (the `!secret` bundle would
     /// otherwise DM a link while the plaintext was still public).
+    /// Command-latency report at the outbound-confirm point: the e2e histogram (or the canary
+    /// histogram + result for the synthetic canary), the per-hop samples, the over-budget WARN and
+    /// the span error. Never fails the op: telemetry trouble is logged and dropped.
+    async fn report_outbound_latency(
+        &self,
+        scope: &InvokeScope,
+        ack: &Result<(), HostResultError>,
+        outbound_request_ms: u64,
+        send_span: &tracing::Span,
+    ) {
+        self.report_outbound_latency_with(
+            command_latency::canary::CanaryConfig::from_env_cached(),
+            scope,
+            ack,
+            outbound_request_ms,
+            send_span,
+        )
+        .await;
+    }
+
+    /// [`Self::report_outbound_latency`] over an explicit canary config (the test seam).
+    async fn report_outbound_latency_with(
+        &self,
+        canary_cfg: Option<&command_latency::canary::CanaryConfig>,
+        scope: &InvokeScope,
+        ack: &Result<(), HostResultError>,
+        outbound_request_ms: u64,
+        send_span: &tracing::Span,
+    ) {
+        use command_latency::stage::{report_confirmed, Kind};
+        use command_latency::Outcome;
+        let outcome = match ack {
+            Ok(()) => Outcome::Ok,
+            Err(e) => match e.code.as_str() {
+                "relay_unconfirmed" => Outcome::Timeout,
+                "relay_unavailable" | "relay_failed" => Outcome::Error,
+                _ => Outcome::Refused,
+            },
+        };
+        if let Err(e) = ack {
+            command_latency::span::record_error(send_span, &e.code, &e.message);
+        }
+        let is_canary = canary_cfg.is_some_and(|c| {
+            c.is_canary_origin(
+                scope.tenant_id,
+                scope.community_id,
+                scope.origin_channel_id.as_deref(),
+            )
+        });
+        let tracestate = scope.trace.as_ref().and_then(|t| t.tracestate.as_deref());
+        let reported = report_confirmed(
+            if is_canary { Kind::Canary } else { Kind::User },
+            tracestate,
+            &scope.app_id,
+            scope.tenant_id,
+            scope.community_id,
+            outcome,
+            outbound_request_ms,
+            command_latency::stamp::now_ms(),
+        );
+        if is_canary {
+            // The canary driver BRPOPs this list; no result == a loud timeout on its side.
+            let value = match reported {
+                Some(r) => command_latency::canary::render_result(outcome.label(), r.e2e_ms),
+                None => command_latency::canary::render_result("error", 0),
+            };
+            if let Err(e) = self
+                .relay_queue
+                .lpush(command_latency::canary::RESULT_KEY, value)
+                .await
+            {
+                tracing::error!(error = %e, "canary result could not be queued for the driver");
+            }
+        }
+    }
+
     async fn await_discord_ack(
         &self,
         scope: &InvokeScope,
@@ -2169,11 +2249,34 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         self.sign_envelope(&mut payload)?;
         let payload = payload.to_string();
         let outbound_bytes = payload.len() as u64;
-        self.relay_queue
-            .lpush(&outbound_relay_queue_key("discord"), payload)
+        // Command-latency: `outbound.send` covers the relay LPUSH through the platform ack (relay
+        // queue + svc-ingest drain + the platform REST call + the ack write). `outbound_request_ms`
+        // is the instant the outbound request is issued, splitting the executor leg from this one.
+        let send_span = tracing::info_span!(
+            "outbound.send",
+            provider = "discord",
+            op = op.as_str(),
+            app_id = %scope.app_id,
+            tenant_id = scope.tenant_id,
+            community_id = scope.community_id,
+            "otel.kind" = "client",
+        );
+        let outbound_request_ms = command_latency::stamp::now_ms();
+        let ack = {
+            use tracing::Instrument as _;
+            async {
+                self.relay_queue
+                    .lpush(&outbound_relay_queue_key("discord"), payload)
+                    .await
+                    .map_err(|e| denied("relay_unavailable", e))?;
+                self.await_discord_ack(scope, op, &op_id).await
+            }
+            .instrument(send_span.clone())
             .await
-            .map_err(|e| denied("relay_unavailable", e))?;
-        self.await_discord_ack(scope, op, &op_id).await?;
+        };
+        self.report_outbound_latency(scope, &ack, outbound_request_ms, &send_span)
+            .await;
+        ack?;
         tracing::info!(
             provider = "discord",
             op = op.as_str(),
@@ -5264,6 +5367,14 @@ mod tests {
         assert_eq!(DISCORD_OP_ACK_KEY_PREFIX, "waddles:transport:discord:ack:");
     }
 
+    /// Latency-SLA pin: the ack poll stays at or under 5 ms and well inside
+    /// the overall ack deadline (the fail-loud timeout still bounds the wait).
+    #[test]
+    fn ack_poll_interval_is_tight_and_bounded_by_the_timeout() {
+        assert!(DISCORD_OP_ACK_POLL <= Duration::from_millis(5));
+        assert!(DISCORD_OP_ACK_POLL * 100 <= DISCORD_OP_ACK_TIMEOUT);
+    }
+
     fn discord_call(message: &serde_json::Value) -> HostCallBody {
         call(
             CapabilityKind::Relay,
@@ -5332,6 +5443,83 @@ mod tests {
             );
         }
         assert_ne!(d["op_id"], m["op_id"], "each op gets its own id");
+    }
+
+    /// Command-latency at the outbound-confirm point (real `StageCapabilities` relay path, fake
+    /// queue): a confirmed op reports against the stamped first door; the SYNTHETIC canary (exact
+    /// sentinel triple) additionally pushes its result for the driver; a real community's op never
+    /// does.
+    #[tokio::test]
+    async fn outbound_confirm_reports_latency_and_only_the_canary_pushes_a_result() {
+        use command_latency::canary::{CanaryConfig, RESULT_KEY};
+        use command_latency::stamp::{now_ms, Door, Stamps};
+        command_latency::switch::set_disabled(false);
+        let cfg = CanaryConfig::from_lookup(|k| {
+            Some(
+                match k {
+                    "CANARY_TENANT_ID" => "1",
+                    "CANARY_COMMUNITY_ID" => "1",
+                    "CANARY_GUILD_ID" => "1000000000000000001",
+                    "CANARY_CHANNEL_ID" => "123456789012345678",
+                    _ => return None,
+                }
+                .to_string(),
+            )
+        })
+        .unwrap();
+        let tracestate = Stamps {
+            t0_ms: Some(now_ms().saturating_sub(300)),
+            door: Some(Door::Gateway),
+            invoke_ms: Some(now_ms().saturating_sub(200)),
+            command: Some("ping".into()),
+            ..Stamps::default()
+        }
+        .merge_into_tracestate(None);
+        let mut scope = discord_scope();
+        scope.trace = Some(penguin_bundle_host::wire::TraceContext {
+            traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".to_string(),
+            tracestate: Some(tracestate),
+        });
+        let span = tracing::Span::none();
+        let caps = caps(FakeRelayQueue::with_live_drain());
+
+        // A real community (scope() ids differ from the canary triple): nothing pushed.
+        let mut real = scope.clone();
+        real.tenant_id = 77;
+        real.community_id = 88;
+        caps.report_outbound_latency_with(Some(&cfg), &real, &Ok(()), now_ms(), &span)
+            .await;
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+
+        // The canary triple: the result is pushed for the driver, `ok:<e2e ms>`.
+        let mut canary = scope.clone();
+        canary.tenant_id = 1;
+        canary.community_id = 1;
+        caps.report_outbound_latency_with(Some(&cfg), &canary, &Ok(()), now_ms(), &span)
+            .await;
+        {
+            let pushed = caps.relay_queue.pushed.lock().unwrap();
+            assert_eq!(pushed.len(), 1);
+            assert_eq!(pushed[0].0, RESULT_KEY);
+            let (outcome, e2e_ms) = command_latency::canary::parse_result(&pushed[0].1).unwrap();
+            assert_eq!(outcome, "ok");
+            assert!(
+                (290..5_000).contains(&e2e_ms),
+                "e2e {e2e_ms} ms covers the stamped 300 ms"
+            );
+        }
+
+        // A canary whose op was NOT confirmed reports the failure outcome, loudly.
+        let err: Result<(), HostResultError> = Err(denied("relay_unconfirmed", "no ack"));
+        caps.report_outbound_latency_with(Some(&cfg), &canary, &err, now_ms(), &span)
+            .await;
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        assert_eq!(
+            command_latency::canary::parse_result(&pushed[1].1)
+                .unwrap()
+                .0,
+            "timeout"
+        );
     }
 
     const UUID_A: &str = "3f2b8c1e-9d4a-4c55-8a10-0a1b2c3d4e5f";

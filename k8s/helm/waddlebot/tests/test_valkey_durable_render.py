@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from provision_harness import materialize, spec_of, with_provisioned  # type: ignore[import-not-found]
 
 _CHART = Path(__file__).resolve().parent.parent
 _ENVS = (
@@ -60,6 +61,11 @@ def _docs(values, extra=()):
     docs = [d for d in yaml.safe_load_all(r.stdout) if d]
     assert docs
     return docs
+
+
+def _pdocs(values, extra=()):
+    """Rendered docs + the Secrets the RUNTIME provision-secrets hook creates from them (real hook)."""
+    return with_provisioned(_docs(values, extra))
 
 
 @pytest.mark.parametrize("values", _ENVS)
@@ -142,7 +148,7 @@ def _durable_cmd(docs):
 
 def test_tls_on_disables_plaintext_listener_and_url():
     """Security review MEDIUM: TLS on => --port 0, no plaintext Service port, no plaintext URL."""
-    docs = _docs("values-alpha.yaml")
+    docs = _pdocs("values-alpha.yaml")
     cmd = _durable_cmd(docs)
     assert "--port 0" in cmd and "--tls-port" in cmd
     svcs = [
@@ -214,7 +220,7 @@ def test_acl_default_user_is_allow_list():
 def test_admin_password_isolated_from_workloads():
     """The admin password Secret is read ONLY by the valkey-durable StatefulSet -- never
     envFrom'd/referenced elsewhere."""
-    docs = _docs("values-alpha.yaml")
+    docs = _pdocs("values-alpha.yaml")
     admin = [
         d
         for d in docs
@@ -318,7 +324,7 @@ def test_durable_disabled_without_tls_is_exempt():
 def test_admin_password_not_migrated_and_statefulset_restarts_on_rotation(values):
     """No legacy migration source; pod carries a NON-secret revision annotation, never a password
     hash."""
-    docs = _docs(values)
+    docs = _pdocs(values)
     admin = [
         d
         for d in docs
@@ -328,11 +334,10 @@ def test_admin_password_not_migrated_and_statefulset_restarts_on_rotation(values
     assert len(admin) == 1
     pw = admin[0]["stringData"]["VALKEY_DURABLE_ADMIN_PASSWORD"]
     assert "waddlebot-secrets" not in yaml.safe_dump(admin[0])
-    src = (_CHART / "templates" / "secrets.yaml").read_text()
     line = next(
-        ln for ln in src.splitlines() if '"key" "VALKEY_DURABLE_ADMIN_PASSWORD"' in ln
+        ln for ln in spec_of(docs).splitlines() if ln.startswith("key|VALKEY_DURABLE_ADMIN_PASSWORD|gen|")
     )
-    assert "legacySecret" not in line
+    assert "legacy=" not in line  # the leaked shared-Secret copy is never an import source
     sts = next(
         d
         for d in docs
@@ -366,60 +371,54 @@ def test_revision_bump_changes_annotation():
 
 
 _FRESH = "fresh-admin-pw-0123456789abcdef"
-_ADMIN_MSG = "Set a FRESH infrastructure.valkeyDurable.adminPassword"
+_LEAKED = "leaked-old-admin-value-0123456789"
+_TIER_FLAGS = ("global.valkeyTls.externalSecret=true", "global.transitTls.externalSecret=true")
 
 
 @pytest.mark.parametrize("tier", ("beta", "gamma", "production"))
 @pytest.mark.parametrize("pw", (None, "", "REPLACE_ME", "REPLACE_ME_please"))
-def test_admin_password_required_fails_closed_outside_alpha(tier, pw):
-    """beta/gamma/prod: unset/empty/placeholder adminPassword => render FAILS closed with the
-    rotation message."""
-    extra = [
-        "global.deploymentTier=" + tier,
-        "global.valkeyTls.externalSecret=true",
-        "global.transitTls.externalSecret=true",  # skip the transit-cert fail so the admin-password message is asserted
-    ]
+def test_admin_password_unset_is_freshly_generated_never_the_leaked_value(tier, pw):
+    """beta/gamma/prod, unset/empty/placeholder adminPassword: the previous admin password was
+    exposed in waddlebot-secrets, so it must be ROTATED, never reused. Formerly enforced by failing
+    the render until an operator supplied a fresh value; owner policy now generates internal secrets
+    on first run in every tier, so the runtime hook mints a FRESH value (no legacy import source)
+    and blanks the leaked shared copy -- proven with the real hook against a cluster that still
+    holds the leaked value."""
+    extra = ["global.deploymentTier=" + tier, *_TIER_FLAGS]
     if pw is not None:
         extra.append("infrastructure.valkeyDurable.adminPassword=" + pw)
-    r = _helm("values-beta.yaml", extra)
-    assert (
-        r.returncode != 0 and _ADMIN_MSG in r.stderr and "must be rotated" in r.stderr
-    ), r.stderr
+    docs = _docs("values-beta.yaml", extra)
+    out = materialize(docs, {"waddlebot-secrets": {"VALKEY_DURABLE_ADMIN_PASSWORD": _LEAKED}})
+    admin = out["w-waddlebot-valkey-durable-admin"]["data"]["VALKEY_DURABLE_ADMIN_PASSWORD"]
+    assert len(admin) == 43 and admin != _LEAKED
+    assert out["waddlebot-secrets"]["data"]["VALKEY_DURABLE_ADMIN_PASSWORD"] == ""
 
 
 @pytest.mark.parametrize("tier", ("beta", "gamma", "production"))
-def test_fresh_admin_password_passes_admin_gate_outside_alpha(tier):
-    """A fresh explicit value clears the admin gate (admin is resolved first; any later failure is
-    a different, unrelated required secret)."""
-    r = _helm(
+def test_fresh_admin_password_is_used_verbatim_outside_alpha(tier):
+    """A fresh explicit value is what the dedicated admin Secret gets (and the render succeeds)."""
+    docs = _docs(
         "values-beta.yaml",
-        (
-            "global.deploymentTier=" + tier,
-            "global.valkeyTls.externalSecret=true",
-            "global.transitTls.externalSecret=true",
-            "infrastructure.valkeyDurable.adminPassword=" + _FRESH,
-        ),
+        ("global.deploymentTier=" + tier, *_TIER_FLAGS, "infrastructure.valkeyDurable.adminPassword=" + _FRESH),
     )
-    assert _ADMIN_MSG not in r.stderr, r.stderr
-    assert r.returncode != 0 and "outside alpha/local" in r.stderr, (
-        "expected the NEXT required-secret failure, proving the admin gate passed"
-    )
+    out = materialize(docs)
+    assert out["w-waddlebot-valkey-durable-admin"]["data"]["VALKEY_DURABLE_ADMIN_PASSWORD"] == _FRESH
 
 
 def test_no_legacy_reuse_detection_left():
-    """The stateful lookup/compare against waddlebot-secrets is gone (it drifted once the key was
-    blanked)."""
-    src = (_CHART / "templates" / "secrets.yaml").read_text()
+    """No stateful lookup/compare against waddlebot-secrets anywhere (it drifted once the key was
+    blanked); the admin key's spec line has no legacy import source."""
+    src = (_CHART / "templates" / "provision-secrets.yaml").read_text()
     assert "vdLegacy" not in src and "legacyAdminPassword" not in src
-    head = src[
-        src.index("$vdAdminPassword := ") : src.index("$postgresPassword :=")
-    ]  # admin-resolution block only
-    assert "lookup" not in head and "b64dec" not in head
+    code = "\n".join(ln for ln in src.splitlines() if "lookup" in ln and not ln.lstrip().startswith(("#", "{{- /*", "`")))
+    assert " lookup \"" not in code
+    line = next(ln for ln in src.splitlines() if '"key" "VALKEY_DURABLE_ADMIN_PASSWORD"' in ln)
+    assert "legacy=" not in line
     assert "legacyAdminPassword" not in (_CHART / "values.yaml").read_text()
 
 
 def test_alpha_autogenerates_fresh_admin_password():
-    docs = _docs("values-alpha.yaml")
+    docs = _pdocs("values-alpha.yaml")
     admin = [
         d
         for d in docs
@@ -428,7 +427,7 @@ def test_alpha_autogenerates_fresh_admin_password():
     ]
     assert (
         len(admin) == 1
-        and len(admin[0]["stringData"]["VALKEY_DURABLE_ADMIN_PASSWORD"]) == 32
+        and len(admin[0]["stringData"]["VALKEY_DURABLE_ADMIN_PASSWORD"]) == 43  # 256-bit base64url
     )
     shared = [
         d

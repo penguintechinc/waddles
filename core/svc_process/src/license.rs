@@ -913,6 +913,20 @@ fn shared_flags_license_client() -> Option<Arc<LicenseClient>> {
         .clone()
 }
 
+/// The command-latency kill-switch resolver (`waddles.disable-command-latency-telemetry`): `true`
+/// means telemetry is DISABLED. Opt-out convention: an unseen flag leaves the mechanism ON. Under the
+/// license bypass domain `flag_enabled` reads ON for every flag, which for an opt-OUT flag would
+/// switch the mechanism off, so the bypass answer is the ENV baseline only.
+pub async fn command_latency_kill_switch_wanted() -> bool {
+    let env = command_latency::switch::env_baseline_disabled();
+    match shared_flags_license_client() {
+        Some(c) if !c.bypass_active() => {
+            env || c.flag_enabled(command_latency::switch::FLAG_KEY).await
+        }
+        _ => env,
+    }
+}
+
 /// `crate::telemetry::register_flags_metrics`'s counter, wired in here --
 /// `svc_process_flags_evaluated_total{result}` counts every
 /// `flags.enabled` host-call resolution by its `result` source
@@ -1808,5 +1822,67 @@ mod tests {
             .with_bypass_domain(BYPASS_DOMAIN);
         let near_miss = apply_deployment_domain(near_miss, Some("evil-waddles.app"));
         assert!(!near_miss.domain_bypassed());
+    }
+}
+
+#[cfg(test)]
+mod capability_gate_default_tests {
+    use super::*;
+
+    /// A client that has never reached a license server (no network is touched at build).
+    fn unseen_client() -> Arc<LicenseClient> {
+        let cfg = LicenseConfig::new("svc-process-test-capability-gates")
+            .expect("default LicenseConfig::new never fails");
+        LicenseClient::new(cfg).expect("LicenseClient::new with a valid default config")
+    }
+
+    /// Every opt-in capability gate is fail-closed (OFF) when its flag was never seen.
+    #[tokio::test]
+    async fn every_opt_in_capability_gate_defaults_off_for_an_unseen_flag() {
+        let c = unseen_client();
+        let gates: Vec<(&str, Box<dyn FeatureGate>)> = vec![
+            ("db", Box::new(BundleDbCapabilityGate::new(Arc::clone(&c)))),
+            (
+                "reputation",
+                Box::new(BundleReputationCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "economy",
+                Box::new(BundleEconomyCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "platform_table",
+                Box::new(BundlePlatformTableCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "gameserver_net",
+                Box::new(BundleGameServerNetCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "object_storage",
+                Box::new(BundleObjectStorageCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "identity",
+                Box::new(BundleIdentityCapabilityGate::new(Arc::clone(&c))),
+            ),
+            ("ai", Box::new(BundleAiCapabilityGate::new(Arc::clone(&c)))),
+            (
+                "media",
+                Box::new(HarnessMediaGenerationGate::new(Arc::clone(&c))),
+            ),
+        ];
+        assert_eq!(gates.len(), 9);
+        for (name, gate) in gates {
+            assert!(!gate.enabled().await, "{name} gate must default OFF");
+        }
+    }
+
+    /// The bundle egress flag is fail-closed (OFF) for a never-seen flag.
+    #[tokio::test]
+    async fn bundle_egress_flag_defaults_off_for_an_unseen_flag() {
+        use bundle_host_http::egress::FeatureFlag;
+        let flag = BundleEgressFlag::new(unseen_client());
+        assert!(!flag.enabled().await);
     }
 }

@@ -69,6 +69,7 @@ from services.schema import (
     bind_token_billing_tables,
 )
 from services.session_cookie import bearer_token_from_cookie
+from services.source_group_reconciler import run_reconcile_loop
 
 logger = logging.getLogger(__name__)
 
@@ -447,6 +448,16 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             app.config["suppression_purge_task"] = asyncio.create_task(
                 run_purge_loop(async_dal, dal, is_ready=lambda: bootstrap_status.is_ready)
             )
+        # Level-triggered reconcile of every app_source_bindings row to a live Valkey consumer
+        # group (a slug/name rename or a missed best-effort provision otherwise leaves
+        # svc-process on NOGROUP forever). Runs in every replica (idempotent); a failed pass is
+        # logged at ERROR + counted and retried, never a request failure. Waits for schema
+        # readiness. Postgres-only: sqlite configs are test harnesses with no Valkey.
+        app.config["source_group_reconcile_task"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["source_group_reconcile_task"] = asyncio.create_task(
+                run_reconcile_loop(install_dal, is_ready=lambda: bootstrap_status.is_ready)
+            )
         logger.system("hub-api started", action="startup", result="SUCCESS")
 
     @app.after_serving
@@ -488,6 +499,14 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
                 if not isinstance(exc, asyncio.CancelledError):
                     logger.warning(f"Error stopping suppression purge task on shutdown: {exc}")
+        reconcile_task = app.config.get("source_group_reconcile_task")
+        if reconcile_task is not None:
+            reconcile_task.cancel()
+            try:
+                await reconcile_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Error stopping source group reconcile task on shutdown: {exc}")
         watermark_job = app.config.get("bundle_active_set_watermark_job")
         if watermark_job is not None:
             try:

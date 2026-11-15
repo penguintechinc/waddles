@@ -11,13 +11,20 @@
 //!
 //! **What is read.** For every requested `(tenant_id, community_id, app_id)` ONE statement
 //! ([`CONFIG_SQL`]) answers, exactly as hub-api's `get_runtime_config` did:
-//! * the community must belong to the tenant (`community_id = 0` is the tenant-wide scope);
 //! * the app must be active for the scope (a community activation beats the tenant-wide one);
 //! * the manifest `community_config_schema.properties.*.default` values overlaid with the latest
 //!   saved config (a saved key always wins).
 //!
-//! A scope that fails the first two checks is simply absent from the answer (lazy-load `get`
-//! reports it as `NOT_FOUND`, like hub-api for an inactive bundle).
+//! A scope whose app is not active is simply absent from the answer (lazy-load `get` reports it
+//! as `NOT_FOUND`, like hub-api for an inactive bundle).
+//!
+//! **Tenant isolation without `communities`.** hub-api additionally checked that the community
+//! belongs to the tenant because its caller supplied arbitrary ids. Here the `(tenant, community)`
+//! pair is the stage's own verified envelope scope, and every table read is filtered by that
+//! `tenant_id` (the activation and the saved config rows each carry it, written only by hub-api).
+//! A scope can therefore only ever see its OWN tenant's defaults and saved config; a mismatched
+//! pair resolves to that tenant's defaults at worst, never another tenant's data. Dropping the
+//! check keeps the roles off `communities` entirely (least privilege, `test_0055`; alembic 0108).
 //!
 //! **Batching.** [`DbConfigSource::batch_get`] sends all scopes as three parallel arrays into a
 //! single `unnest(...)` query -- one round trip for the whole warm-up, never one per scope.
@@ -112,10 +119,7 @@ SELECT r.tenant_id::bigint AS tenant_id,
            AND c.app_id = r.app_id
          ORDER BY c.version DESC
          LIMIT 1
-       ) cfg ON TRUE
- WHERE r.community_id = 0
-    OR EXISTS (SELECT 1 FROM communities co
-                WHERE co.id = r.community_id AND co.tenant_id = r.tenant_id)";
+       ) cfg ON TRUE";
 
 /// Where the database DSN came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

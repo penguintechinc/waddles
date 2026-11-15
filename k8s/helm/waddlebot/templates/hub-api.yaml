@@ -109,6 +109,7 @@ spec:
         # kms.enabled -- the platform-managed baseline needs none of it.
         {{- with (include "waddlebot.kms.hubApiEnvFrom" .) }}{{ . | nindent 8 }}{{- end }}
         env:
+        {{- include "waddlebot.otel.env" (dict "root" $ "service" "hub-api") | nindent 8 }}
         {{- if .Values.hubApi.trustForwardedHost }}
         {{- range .Values.httproute.rules }}
         {{- if contains "hub-api" (.service | toString) }}{{ fail "hubApi.trustForwardedHost=true but an HTTPRoute rule targets hub-api directly; only hub-webui may front it" }}{{ end }}
