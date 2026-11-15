@@ -20,6 +20,7 @@ from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 
+from services.community_authz import resolve_editor_scopes
 from services.community_common import (
     api_error,
     community_in_tenant,
@@ -46,6 +47,8 @@ from services.community_interaction import (
     update_community_role,
     update_hub_channel,
 )
+from services.errors import ApiError, forbidden
+from services.scope_registry import SCOPE_ROLES_MANAGE, describe_scopes
 
 interaction_admin_bp = Blueprint(
     "v1_community_interaction_admin", __name__, url_prefix="/api/v1/admin"
@@ -187,15 +190,33 @@ async def admin_list_roles(community_id: int) -> tuple[dict[str, object], int]:
     }, 200
 
 
+def _roles_manage_scopes(community_id: int) -> frozenset[str]:
+    """Editor's effective scopes; 403 unless they hold the `roles:manage` scope."""
+    editor = resolve_editor_scopes(request, current_app.config["dal"], community_id=community_id)
+    if SCOPE_ROLES_MANAGE not in editor:
+        raise forbidden(f"Missing required scope: {SCOPE_ROLES_MANAGE}")
+    return editor
+
+
+def _guard_error(exc: ApiError) -> tuple[dict[str, object], int]:
+    """Map a role-guard `ApiError` to the legacy `{success, error}` body plus a machine `code`."""
+    return {"success": False, "error": exc.message, "code": exc.code}, exc.status_code
+
+
 @interaction_admin_bp.route("/<int:community_id>/interaction/roles", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:manage_roles")  # type: ignore[misc]
 async def admin_create_role(community_id: int) -> tuple[dict[str, object], int]:
-    """`POST /api/v1/admin/<id>/interaction/roles`."""
+    """`POST /api/v1/admin/<id>/interaction/roles` (requires `roles:manage`)."""
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
-    payload = await request.get_json(force=True, silent=True) or {}
-    dto, err = create_community_role(current_app.config["dal"], community_id, payload)
+    try:
+        editor = _roles_manage_scopes(community_id)
+        payload = await request.get_json(force=True, silent=True) or {}
+        dto, err = create_community_role(
+            current_app.config["dal"], community_id, payload, editor_scopes=editor
+        )
+    except ApiError as exc:
+        return _guard_error(exc)
     if err:
         status = 409 if "already exists" in err else 400
         return {"success": False, "error": err}, status
@@ -204,13 +225,18 @@ async def admin_create_role(community_id: int) -> tuple[dict[str, object], int]:
 
 @interaction_admin_bp.route("/<int:community_id>/interaction/roles/<int:role_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:manage_roles")  # type: ignore[misc]
 async def admin_update_role(community_id: int, role_id: int) -> tuple[dict[str, object], int]:
-    """`PUT /api/v1/admin/<id>/interaction/roles/<roleId>`."""
+    """`PUT /api/v1/admin/<id>/interaction/roles/<roleId>` (requires `roles:manage`)."""
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
-    payload = await request.get_json(force=True, silent=True) or {}
-    err = update_community_role(current_app.config["dal"], community_id, role_id, payload)
+    try:
+        editor = _roles_manage_scopes(community_id)
+        payload = await request.get_json(force=True, silent=True) or {}
+        err = update_community_role(
+            current_app.config["dal"], community_id, role_id, payload, editor_scopes=editor
+        )
+    except ApiError as exc:
+        return _guard_error(exc)
     if err == "__not_found__":
         return {"success": False, "error": "Role not found"}, 404
     return {"success": True, "message": "Role updated"}, 200
@@ -220,17 +246,31 @@ async def admin_update_role(community_id: int, role_id: int) -> tuple[dict[str, 
     "/<int:community_id>/interaction/roles/<int:role_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:manage_roles")  # type: ignore[misc]
 async def admin_delete_role(community_id: int, role_id: int) -> tuple[dict[str, object], int]:
-    """`DELETE /api/v1/admin/<id>/interaction/roles/<roleId>`."""
+    """`DELETE /api/v1/admin/<id>/interaction/roles/<roleId>` (requires `roles:manage`).
+
+    Predefined roles (admin, moderator, ...) are refused with 409 `ROLE_PROTECTED`.
+    """
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
-    err = delete_community_role(current_app.config["dal"], community_id, role_id)
+    try:
+        _roles_manage_scopes(community_id)
+        err = delete_community_role(current_app.config["dal"], community_id, role_id)
+    except ApiError as exc:
+        return _guard_error(exc)
     if err == "__not_found__":
         return {"success": False, "error": "Role not found"}, 404
-    if err:
-        return {"success": False, "error": err}, 403
     return {"success": True, "message": "Role deleted, members reassigned to member role"}, 200
+
+
+@interaction_admin_bp.route("/<int:community_id>/interaction/scopes", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:read")  # type: ignore[misc]
+async def admin_list_scopes(community_id: int) -> tuple[dict[str, object], int]:
+    """`GET /api/v1/admin/<id>/interaction/scopes` -- the scope registry for the role editor."""
+    if not _tenant_ok(community_id):
+        return api_error("Community not found", status_code=404)
+    return {"success": True, "scopes": describe_scopes()}, 200
 
 
 # ── Admin: channel permission overrides ───────────────────────────────

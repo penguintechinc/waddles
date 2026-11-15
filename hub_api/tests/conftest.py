@@ -792,6 +792,14 @@ def make_user_token(*, user_id: int, scope: str = "", tenant: str = TENANT_SLUG)
     )
 
 
+_LEGACY_ADMIN_ROLES = {"super_admin", "platform-admin"}
+
+
+def _with_global_admin_scope(scope: str) -> str:
+    """Add the `users:admin` global-admin scope (the real token bypass authority, not `roles`)."""
+    return " ".join(sorted({*scope.split(), "users:admin"}))
+
+
 def make_super_admin_token(*, user_id: int, scope: str = "", tenant: str = TENANT_SLUG) -> str:
     """Mint a JWT with `roles=["super_admin"]` -- `sub` matches a `seed_super_admin()` row.
 
@@ -811,7 +819,7 @@ def make_super_admin_token(*, user_id: int, scope: str = "", tenant: str = TENAN
         roles=["super_admin"],
         secret_key=SECRET_KEY,
         tenant=tenant,
-        scope=scope,
+        scope=_with_global_admin_scope(scope),
     )
 
 
@@ -832,7 +840,7 @@ def make_user_token_with_roles(
         roles=roles,
         secret_key=SECRET_KEY,
         tenant=tenant,
-        scope=scope,
+        scope=_with_global_admin_scope(scope) if set(roles) & _LEGACY_ADMIN_ROLES else scope,
     )
 
 

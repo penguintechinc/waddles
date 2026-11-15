@@ -500,13 +500,13 @@ pub async fn handle_one<B: AdminBackend, E: AdminExecutor>(
 
 /// Valkey [`AdminBackend`].
 pub struct ValkeyBackend {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
 }
 
 impl ValkeyBackend {
     /// Wraps a (non-blocking) connection.
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self { conn }
     }
 }

@@ -232,7 +232,7 @@ class TestCommunityRoles:
         response = await _post_json(
             client,
             f"/api/v1/admin/{community_id}/interaction/roles",
-            auth_headers(scope="community.interaction:manage_roles"),
+            auth_headers(scope="users:admin", user_id="1"),
             {"name": "vip", "priority": 99},
         )
         assert response.status_code == 400
@@ -248,7 +248,7 @@ class TestCommunityRoles:
         )
         dal.commit()
 
-        manage_headers = auth_headers(scope="community.interaction:manage_roles")
+        manage_headers = auth_headers(scope="users:admin", user_id="1")
         create_resp = await _post_json(
             client,
             f"/api/v1/admin/{community_id}/interaction/roles",
@@ -264,7 +264,7 @@ class TestCommunityRoles:
         )
         assert delete_resp.status_code == 200
 
-    async def test_delete_system_role_is_403(
+    async def test_delete_system_role_is_409(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         dal, community_id = community_db
@@ -275,9 +275,9 @@ class TestCommunityRoles:
 
         response = await client.delete(
             f"/api/v1/admin/{community_id}/interaction/roles/{role_id}",
-            headers=auth_headers(scope="community.interaction:manage_roles"),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
-        assert response.status_code == 403
+        assert response.status_code == 409
 
 
 class TestInternalRelay:
@@ -657,7 +657,7 @@ class TestRolesAdditional:
             community_id=community_id, name="vip", is_system=False, priority=5
         )
         dal.commit()
-        manage_headers = auth_headers(scope="community.interaction:manage_roles")
+        manage_headers = auth_headers(scope="users:admin", user_id="1")
 
         update_resp = await client.put(
             f"/api/v1/admin/{community_id}/interaction/roles/{role_id}",
@@ -679,7 +679,7 @@ class TestRolesAdditional:
         _, community_id = community_db
         response = await client.delete(
             f"/api/v1/admin/{community_id}/interaction/roles/9999",
-            headers=auth_headers(scope="community.interaction:manage_roles"),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         assert response.status_code == 404
 

@@ -37,11 +37,12 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from services.community_authz import member_scopes_sync
 from services.errors import bad_request, conflict, forbidden, not_found
 from services.global_identity import is_global_admin_sync
 
-#: Community roles Node's `requireCommunityAdmin` treats as admin-equivalent.
-_COMMUNITY_ADMIN_ROLES = ("community-owner", "community-admin", "moderator")
+#: Scopes Node's `requireCommunityAdmin` treats as admin-equivalent (any one suffices).
+_COMMUNITY_ADMIN_SCOPES = frozenset({"community:manage_members", "community:manage_channels"})
 
 _VALID_DISCOUNT_TYPES = ("percentage", "fixed_amount", "free")
 
@@ -51,22 +52,13 @@ def is_community_admin(dal: Any, community_id: int, user_id: int) -> bool:
 
     Super admins bypass (matches Node's `req.user.isSuperAdmin` check);
     everyone else needs an active `community_members` row for THIS
-    community with an admin-equivalent role. Returns `False` (never
+    community whose role carries an admin-equivalent scope. Returns `False` (never
     raises) on any lookup miss -- callers convert that into a 403.
     """
     if is_global_admin_sync(dal, user_id):
         return True
 
-    member = (
-        dal(
-            (dal.community_members.community_id == community_id)
-            & (dal.community_members.user_id == str(user_id))
-            & (dal.community_members.is_active == True)  # noqa: E712 - pydal Field comparison
-        )
-        .select(dal.community_members.role)
-        .first()
-    )
-    return member is not None and member.role in _COMMUNITY_ADMIN_ROLES
+    return bool(member_scopes_sync(dal, community_id, user_id) & _COMMUNITY_ADMIN_SCOPES)
 
 
 # ---------------------------------------------------------------------------

@@ -43,11 +43,11 @@ from services import community_authz
 from services import community_reputation_service as reputation_svc
 from services.errors import bad_request, forbidden, not_found
 from services.schema import bind_admin_tables
+from services.scope_registry import KIND_ADMIN, effective_scopes
 
 SALT_ROUNDS = 12  # matches adminController.js's own SALT_ROUNDS
 
 VALID_MEMBER_ROLES = ("community-admin", "moderator", "vip", "member")
-ADMIN_PROMOTION_ROLES = ("community-owner", "community-admin")
 
 
 def _ensure_tables(dal: Any) -> None:
@@ -278,22 +278,6 @@ async def get_members(
     return members, total, total_pages
 
 
-async def _caller_community_role(
-    async_dal: Any, dal: Any, *, community_id: int, caller_id: int | None
-) -> str | None:
-    if caller_id is None:
-        return None
-    rows = await async_dal.select_async(
-        dal(
-            (dal.community_members.community_id == community_id)
-            & (dal.community_members.user_id == str(caller_id))
-            & (dal.community_members.is_active == True)  # noqa: E712
-        )
-    )
-    row = rows.first()
-    return row.role if row else None
-
-
 async def update_member_role(
     async_dal: Any,
     dal: Any,
@@ -324,18 +308,25 @@ async def update_member_role(
     if target.role == "community-owner":
         raise forbidden("Cannot change owner role")
 
-    if role == "community-admin":
-        caller_role = await _caller_community_role(
-            async_dal, dal, community_id=community_id, caller_id=caller_id
-        )
-        if caller_role not in ADMIN_PROMOTION_ROLES:
-            raise forbidden("Only owners can promote to admin")
-
     role_rows = await async_dal.select_async(
         dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == role))
     )
     role_row = role_rows.first()
     community_role_id = role_row.id if role_row else None
+    if role_row is not None:
+        # Scope-based escalation guard (never a role-name check): the caller must hold every scope
+        # of the role being assigned.
+        stored = (role_row.base_claims or {}).get("scopes", [])
+        target_scopes = effective_scopes(getattr(role_row, "role_kind", None), stored)
+        caller_role = await community_authz.get_caller_community_role(
+            async_dal, dal, community_id=community_id, user_id=caller_id or -1
+        )
+        # A caller with no membership here (tenant/global admin bypass) may assign anything except
+        # an admin-kind role, which needs a member who themselves hold the full scope set.
+        enforce = caller_role is not None or getattr(role_row, "role_kind", None) == KIND_ADMIN
+        held = caller_role.scopes if caller_role is not None else frozenset()
+        if enforce and not target_scopes <= held:
+            raise forbidden("Cannot assign a role holding scopes you do not hold")
 
     await async_dal.update_async(
         (dal.community_members.community_id == community_id)

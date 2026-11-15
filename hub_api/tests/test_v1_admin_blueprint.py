@@ -240,19 +240,72 @@ class TestMembers:
         )
         assert response.status_code == 403
 
-    async def test_update_member_role_promote_to_admin_requires_owner(
+    @staticmethod
+    def _seed_role(
+        admin_db: Any, community_id: int, name: str, kind: int, scopes: list[str]
+    ) -> int:
+        dal = admin_db.dal
+        role_id: int = dal.community_roles.insert(
+            community_id=community_id,
+            name=name,
+            is_system=True,
+            role_kind=kind,
+            base_claims={"scopes": scopes},
+        )
+        dal.commit()
+        return role_id
+
+    async def test_update_member_role_promote_to_admin_requires_admin_scopes(
         self, client: Any, admin_db: Any
     ) -> None:
         community_id = _seed_community(admin_db)
+        self._seed_role(admin_db, community_id, "community-admin", 1, [])
         _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
         # Caller (user_id=1) is not a member of this community at all --
-        # cannot promote someone to community-admin.
+        # cannot promote someone to an admin-kind role.
         response = await client.put(
             f"/api/v1/admin/{community_id}/members/42/role",
             headers=_headers(user_id=1),
             json={"role": "community-admin"},
         )
         assert response.status_code == 403
+
+    async def test_moderator_cannot_promote_to_admin_but_admin_can(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        """Scope-based escalation guard: the assigner must hold every scope of the assigned role."""
+        community_id = _seed_community(admin_db)
+        admin_role = self._seed_role(admin_db, community_id, "community-admin", 1, [])
+        mod_role = self._seed_role(
+            admin_db, community_id, "moderator", 2, ["community:manage_channels"]
+        )
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=7,
+            role="moderator",
+            community_role_id=mod_role,
+        )
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=8,
+            role="community-admin",
+            community_role_id=admin_role,
+        )
+        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        by_mod = await client.put(
+            f"/api/v1/admin/{community_id}/members/42/role",
+            headers=_headers(user_id=7),
+            json={"role": "community-admin"},
+        )
+        assert by_mod.status_code == 403
+        by_admin = await client.put(
+            f"/api/v1/admin/{community_id}/members/42/role",
+            headers=_headers(user_id=8),
+            json={"role": "community-admin"},
+        )
+        assert by_admin.status_code == 200
 
     async def test_update_member_role_not_found_is_404(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
