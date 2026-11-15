@@ -708,6 +708,67 @@ def bind_overlay_tables(dal: Any, *, migrate: bool = False) -> None:
             migrate=migrate,
         )
 
+    # alembic 0113: composite-scene tables. Kind/status/canvas are int codes (see
+    # `services/overlay_scene_service.py` for the mappings); `public_id` is the only external id.
+    if "overlay_widget_registry" not in dal.tables:
+        dal.define_table(
+            "overlay_widget_registry",
+            Field("public_id", "string", length=36, notnull=True, unique=True),
+            Field("tenant_id", "integer", notnull=True),
+            Field("community_id", "integer", notnull=True),
+            Field("bundle_app_id", "string", length=128, notnull=True),
+            Field("widget_id", "string", length=128, notnull=True),
+            Field("display_name", "string", length=120, notnull=True),
+            Field("description", "string", length=280, default=""),
+            Field("category", "string", length=64, default="custom"),
+            Field("output_kind_code", "integer", notnull=True, default=1),
+            Field("surface_id", "string", length=64),
+            Field("allow_standalone_output", "boolean", default=True),
+            Field("default_x_px", "integer", default=48),
+            Field("default_y_px", "integer", default=48),
+            Field("default_width_px", "integer", default=400),
+            Field("default_height_px", "integer", default=200),
+            Field("default_z_index", "integer", default=10),
+            Field("props_schema", "json", default={}),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
+
+    if "overlay_scene_components" not in dal.tables:
+        dal.define_table(
+            "overlay_scene_components",
+            Field("public_id", "string", length=36, notnull=True, unique=True),
+            Field("tenant_id", "integer", notnull=True),
+            Field("community_id", "integer", notnull=True),
+            Field("bundle_app_id", "string", length=128, notnull=True),
+            Field("widget_id", "string", length=128, notnull=True),
+            Field("surface_id", "string", length=64, default="custom"),
+            Field("output_kind_code", "integer", notnull=True, default=1),
+            Field("display_name", "string", length=120, notnull=True),
+            Field("x_px", "integer", default=48),
+            Field("y_px", "integer", default=48),
+            Field("width_px", "integer", default=400),
+            Field("height_px", "integer", default=200),
+            Field("z_index", "integer", default=10),
+            Field("status_code", "integer", notnull=True, default=1),
+            Field("props", "json", default={}),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
+
+    # Owned by svc-presentation (legacy SQL 073); hub-api only writes the canvas code (0113).
+    if "presentation_config" not in dal.tables:
+        dal.define_table(
+            "presentation_config",
+            Field("community_id", "integer", notnull=True, unique=True),
+            Field("canvas_resolution_code", "integer", notnull=True, default=1),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
+
 
 def bind_streaming_tables(dal: Any, *, migrate: bool = False) -> None:
     """Define every table the M7 Streaming group (music/stream/streaming) queries.

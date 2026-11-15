@@ -219,6 +219,9 @@ roles:
       communities: [SELECT]
       overlay_surfaces: [SELECT]
       presentation_config: [SELECT]
+      # composite scene (alembic 0113, read by core/svc_presentation scene + widget pages)
+      overlay_widget_registry: [SELECT]
+      overlay_scene_components: [SELECT]
       overlay_view_credentials: [SELECT]
       overlay_images: [SELECT, INSERT]
       caption_events: [SELECT, INSERT, DELETE]
