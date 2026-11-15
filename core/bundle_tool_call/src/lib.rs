@@ -99,11 +99,15 @@ impl ActorContext {
 ///
 /// | role | scopes |
 /// |---|---|
-/// | `community-owner`, `owner` | member, vip, moderate, admin, owner |
-/// | `community-admin` | member, vip, moderate, admin |
-/// | `moderator` | member, moderate |
-/// | `vip` | member, vip |
-/// | `member` | member |
+/// | `community-owner`, `owner` | member, vip, moderate, admin, owner + all music scopes |
+/// | `community-admin` | member, vip, moderate, admin + all music scopes |
+/// | `moderator` | member, moderate + all music scopes |
+/// | `vip` | member, vip + music read/write/stats |
+/// | `member` | member + music read/write/stats |
+///
+/// Music scopes (`waddles.core.service.music-requests`): `music:requests.read`,
+/// `music:requests.write` and `music:stats.read` for every member; moderator and above also get
+/// `music:requests.manage`, `music:dj.manage` and `music:settings.write`.
 pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
     match role {
         // SuperadminService::create_community persists the initial member as
@@ -114,16 +118,48 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
             "community:moderate",
             "community:admin",
             "community:owner",
+            "music:requests.read",
+            "music:requests.write",
+            "music:stats.read",
+            "music:requests.manage",
+            "music:dj.manage",
+            "music:settings.write",
         ],
         "community-admin" => &[
             "community:member",
             "community:vip",
             "community:moderate",
             "community:admin",
+            "music:requests.read",
+            "music:requests.write",
+            "music:stats.read",
+            "music:requests.manage",
+            "music:dj.manage",
+            "music:settings.write",
         ],
-        "moderator" => &["community:member", "community:moderate"],
-        "vip" => &["community:member", "community:vip"],
-        "member" => &["community:member"],
+        "moderator" => &[
+            "community:member",
+            "community:moderate",
+            "music:requests.read",
+            "music:requests.write",
+            "music:stats.read",
+            "music:requests.manage",
+            "music:dj.manage",
+            "music:settings.write",
+        ],
+        "vip" => &[
+            "community:member",
+            "community:vip",
+            "music:requests.read",
+            "music:requests.write",
+            "music:stats.read",
+        ],
+        "member" => &[
+            "community:member",
+            "music:requests.read",
+            "music:requests.write",
+            "music:stats.read",
+        ],
         _ => &[],
     }
 }

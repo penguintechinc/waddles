@@ -1747,6 +1747,21 @@ bundles:
       - tenant_slug: default
         community_id: null
 
+  # music-requests SERVICE bundle (Rust, stage-tools): the single per-community song-request queue,
+  # history, play counters and DMCA-safe mode (db-v2 tables). The music app owns the user commands;
+  # the optional AI DJ layer reads/adds through these tools. Contract: docs/music-requests-service.md.
+  - app_id: waddles.core.service.music-requests
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-tools
+    kind: service
+    source_dir: rust/music-requests
+    manifest_path: music-requests.manifest.yaml
+    artifact_path: music-requests.wasm
+    activation_targets:
+      - tenant_slug: default
+        community_id: null
+
   # live-now APP bundle (Rust, stage-next-tools): community who's-live + !live + go-live announcements,
   # consuming <platform>.live.channels from the platform service bundles (live-channels contract v1).
   # Chat commands/announcements gated by PostHog flags live-now.command / live-now.announce (default OFF).

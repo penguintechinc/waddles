@@ -153,8 +153,8 @@ RESERVED_NAMES: frozenset[str] = frozenset(
     blackjack chatguard hit hypetrain level lottery stand
     kgiveaway permit vqueue
     ai ai-teammates ban calendar community_feed dj economy feed game-servers
-    gameserver kick live live-now modlog music-soundcloud music-spotify
-    music-youtube purge rep reputation reputation-accrual rooms spectrum
+    gameserver kick live live-now modlog music-requests music-soundcloud
+    music-spotify music-youtube purge rep reputation reputation-accrual rooms spectrum
     superpenguin-alias superpenguin-audiocommand superpenguin-balloon
     superpenguin-bonustickets superpenguin-channelpoints superpenguin-curling
     superpenguin-dailycounter superpenguin-deathcounter superpenguin-defuse

@@ -589,6 +589,14 @@ TOOL_REQUIRED_SCOPES = frozenset(
         "community:moderate",
         "community:admin",
         "community:owner",
+        # waddles.core.service.music-requests (see `docs/music-requests-service.md`);
+        # mirrors the music entries in `core/bundle_tool_call::scopes_for_role`.
+        "music:requests.read",
+        "music:requests.write",
+        "music:requests.manage",
+        "music:dj.manage",
+        "music:stats.read",
+        "music:settings.write",
     }
 )
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
