@@ -1351,7 +1351,10 @@ mod tests {
         let inv = actor_inv(Some("123"), vec![]);
         let w = basis_wiring(Ok(CallBasis::Hub(42)));
         let a = resolve_participant(&w, &inv, SCOPE, "acme").await.unwrap();
-        let other = IdentityScope { community_id: SCOPE.community_id + 1, ..SCOPE };
+        let other = IdentityScope {
+            community_id: SCOPE.community_id + 1,
+            ..SCOPE
+        };
         let b = resolve_participant(&w, &inv, other, "acme").await.unwrap();
         assert_ne!(a, b, "same person, different community => different id");
         assert_eq!(a, call_participant_id("acme", SCOPE.community_id, 42));
@@ -1362,7 +1365,10 @@ mod tests {
         let inv = actor_inv(Some("123"), vec![]);
         let p = Uuid::new_v4();
         let w = basis_wiring(Ok(CallBasis::Pseudonym(p)));
-        assert_eq!(resolve_participant(&w, &inv, SCOPE, "acme").await.unwrap(), p);
+        assert_eq!(
+            resolve_participant(&w, &inv, SCOPE, "acme").await.unwrap(),
+            p
+        );
         let w = basis_wiring(Ok(CallBasis::Pseudonym(Uuid::nil())));
         assert!(resolve_participant(&w, &inv, SCOPE, "acme").await.is_err());
         let w = basis_wiring(Err(|| IdentityError::NotAMember));

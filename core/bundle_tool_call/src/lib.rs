@@ -642,7 +642,8 @@ pub fn nested_payload(plan: &ToolPlan) -> Result<serde_json::Value, ToolRefusal>
     if let Some(obj) = args.as_object_mut() {
         obj.remove(CTX_ARG);
         if plan.actor.actor.is_some() {
-            let mut ctx = serde_json::json!({"actor": plan.actor.actor, "scopes": plan.actor.scopes});
+            let mut ctx =
+                serde_json::json!({"actor": plan.actor.actor, "scopes": plan.actor.scopes});
             if let Some(participant) = &plan.actor.participant {
                 ctx["participant"] = serde_json::Value::String(participant.clone());
             }
