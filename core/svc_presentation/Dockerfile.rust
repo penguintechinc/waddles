@@ -32,7 +32,9 @@ FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcb
 
 # protobuf-compiler (protoc) is required by `hub_client`'s build.rs
 # (tonic-prost-build, compiling `proto/waddles/hub/internal/v1/*.proto`) --
-# `egress_detokenizer` (`overlay::detok`) depends on `hub_client`. Version
+# `egress_detokenizer` (`overlay::detok`) depends on `hub_client`, and
+# `bundle_host_surface`'s build.rs compiles the surface gRPC contract the same
+# way (`proto/waddles/presentation/internal/v1/*.proto`). Version
 # pinned like every other apt package in this repo's Dockerfiles.
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
@@ -47,6 +49,8 @@ COPY overlay_auth ./overlay_auth
 COPY service_auth ./service_auth
 COPY egress_detokenizer ./egress_detokenizer
 COPY hub_client ./hub_client
+# Surface gRPC stubs (server side) shared with the stage hosts; its build.rs reads `/proto` too.
+COPY bundle_host_surface ./bundle_host_surface
 # `hub_client`'s build.rs resolves protos at `CARGO_MANIFEST_DIR/../../
 # proto` -- for `/build/hub_client`, that's `/proto` (image root, NOT under
 # `/build`); supplied as the named `proto` build context, not COPY'd from

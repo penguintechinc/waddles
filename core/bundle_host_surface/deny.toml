@@ -1,9 +1,8 @@
-# cargo-deny configuration for the reputation service Rust bundle. Run: cargo deny check  (advisories + licenses + bans + sources)
+# cargo-deny configuration for bundle-host-surface.
+# Run: cargo deny check  (advisories + licenses + bans + sources)
 # See rules/critical-rules.md Dependency Pinning + rules/general.md Supply
 # Chain Security for the policy this enforces. Mirrors
-# bundles/rust/example/deny.toml and sdk/waddle-sdk-rs/deny.toml (this
-# crate's only non-path dependency, `serde`, is already covered by that
-# allowlist).
+# core/svc_action/deny.toml (the crate this pipeline was extracted from).
 
 [graph]
 all-features = false
@@ -25,6 +24,7 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
     "ISC",
     "Zlib",
     "MPL-2.0",
@@ -58,7 +58,7 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = ["https://github.com/penguintechinc/penguin-libs.git"]
 
 [sources.allow-org]
 github = []

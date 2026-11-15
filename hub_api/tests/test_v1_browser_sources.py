@@ -104,11 +104,13 @@ class TestGetBrowserSources:
         assert r.status_code == 200
         body = await r.get_json()
         assert set(body) == {"success", "sources"}
-        assert [s["sourceType"] for s in body["sources"]] == ["ticker", "media", "general"]
+        assert [s["sourceType"] for s in body["sources"]] == ["ticker", "media", "general", "scene"]
         code = overlay_db.dal.executesql(
             f"SELECT overlay_code FROM communities WHERE id = {cid}"  # noqa: S608
         )[0][0]
-        for s, surface in zip(body["sources"], ["ticker", "media", "full_screen"], strict=True):
+        for s, surface in zip(
+            body["sources"], ["ticker", "media", "full_screen", "scene"], strict=True
+        ):
             assert set(s) == {"sourceType", "url", "isActive", "createdAt"}
             assert s["isActive"] is True
             assert s["url"].startswith(f"https://overlay.example.test/{code}/{surface}?key=")

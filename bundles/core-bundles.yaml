@@ -1484,20 +1484,6 @@ bundles:
       - tenant_slug: default
         community_id: null
 
-  # Overlay SERVICE bundle (Rust, always-on `kind: service`). Full-screen composite overlay
-  # designer backing service: manages scene layouts, component placement, and widget registration.
-  - app_id: waddles.core.service.overlay
-    version: "1.0.0"
-    language: rust
-    wit_world: stage-tools
-    kind: service
-    source_dir: rust/overlay-service
-    manifest_path: overlay-service.manifest.yaml
-    artifact_path: overlay-service.wasm
-    activation_targets:
-      - tenant_slug: default
-        community_id: null
-
   # bundle-MCP-tools P6b: twitch platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-twitch defaults OFF.
   - app_id: waddles.core.service.twitch

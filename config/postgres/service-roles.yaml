@@ -222,6 +222,9 @@ roles:
       # composite scene (alembic 0113, read by core/svc_presentation scene + widget pages)
       overlay_widget_registry: [SELECT]
       overlay_scene_components: [SELECT]
+      # widget push is refused unless the owning bundle is enabled for the community
+      # (core/svc_presentation/src/scene.rs `find_widget`)
+      app_activations: [SELECT]
       overlay_view_credentials: [SELECT]
       overlay_images: [SELECT, INSERT]
       caption_events: [SELECT, INSERT, DELETE]

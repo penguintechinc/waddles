@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="no-referrer">
+<title>Waddles Widget</title>
+<style>
+  :root { --primary: #1db954; --font: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: transparent; overflow: hidden; color: #fff; font-family: var(--font); }
+  #widget-container { width: 100%; height: 100%; }
+  #status { position: fixed; top: 8px; right: 8px; z-index: 99999; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: bold; background: rgba(244, 67, 54, 0.85); }
+  #status[hidden] { display: none; }
+  .card { display: flex; align-items: center; gap: 16px; width: 100%; height: 100%; background: rgba(18, 18, 24, 0.85); border-left: 4px solid var(--primary); border-radius: 12px; padding: 12px 16px; }
+  .art { width: 80px; height: 80px; border-radius: 8px; object-fit: cover; }
+  .info { flex: 1; overflow: hidden; }
+  .title { font-size: 18px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sub { font-size: 14px; color: #b3b3b3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div id="widget-container"></div>
+<div id="status" hidden>Connecting...</div>
+<script>
+'use strict';
+(function () {
+  var container = document.getElementById('widget-container');
+  var statusEl = document.getElementById('status');
+  var params = new URLSearchParams(window.location.search);
+  var key = params.get('key') || '';
+  // /<overlay_code>/widget/<bundle_app_id>/<widget_id>
+  var parts = window.location.pathname.split('/').filter(Boolean);
+  var overlayCode = parts[0] || '';
+  var bundleAppId = decodeURIComponent(parts[2] || '');
+  var widgetId = decodeURIComponent(parts[3] || '');
+  var wantedKey = 'widget/' + bundleAppId + '/' + widgetId;
+
+  function showStatus(text) { statusEl.textContent = text; statusEl.hidden = !text; }
+  function httpsUrl(value) { return typeof value === 'string' && value.indexOf('https://') === 0; }
+  function clear(el) { while (el.firstChild) { el.removeChild(el.firstChild); } }
+  function textDiv(cls, text) {
+    var d = document.createElement('div');
+    d.className = cls;
+    d.textContent = String(text == null ? '' : text);
+    return d;
+  }
+
+  /* The ONLY markup sink: the string was sanitized server-side (ammonia allowlist) before fan-out. */
+  function setSanitizedHtml(el, html) { clear(el); el.innerHTML = html; }
+
+  function renderSurface(surface, p) {
+    clear(container);
+    if (surface === 'waddles.core.example.music.now_playing' && p.now_playing) {
+      var t = p.now_playing;
+      var card = document.createElement('div');
+      card.className = 'card';
+      if (httpsUrl(t.artwork_url)) {
+        var art = new Image();
+        art.className = 'art';
+        art.src = t.artwork_url;
+        art.alt = '';
+        card.appendChild(art);
+      }
+      var info = document.createElement('div');
+      info.className = 'info';
+      info.appendChild(textDiv('title', t.title));
+      info.appendChild(textDiv('sub', t.artist));
+      card.appendChild(info);
+      container.appendChild(card);
+    } else if (surface === 'alert') {
+      var a = document.createElement('div');
+      a.className = 'card';
+      a.appendChild(textDiv('title', p.message));
+      container.appendChild(a);
+    }
+  }
+
+  function onFrame(frame) {
+    var p = frame.payload || {};
+    if (frame.surface === wantedKey) {
+      if (p.output_kind === 'sanitized_html' && typeof p.html === 'string') {
+        setSanitizedHtml(container, p.html);
+      } else if (p.output_kind === 'image' && httpsUrl(p.image_url)) {
+        clear(container);
+        var img = new Image();
+        img.src = p.image_url;
+        img.alt = '';
+        img.style.maxWidth = '100%';
+        img.style.maxHeight = '100%';
+        container.appendChild(img);
+      } else if (p.output_kind === 'text') {
+        clear(container);
+        container.textContent = String(p.text == null ? '' : p.text);
+      }
+    } else if (String(frame.surface).indexOf('widget/') !== 0) {
+      // A contract surface frame: the server only streams the widget's own surface here.
+      renderSurface(frame.surface, p);
+    }
+  }
+
+  var live = '/' + overlayCode + '/scene/live?key=' + encodeURIComponent(key) +
+    '&widget=' + encodeURIComponent(bundleAppId + '/' + widgetId);
+  var es = new EventSource(live);
+  es.onopen = function () { showStatus(''); };
+  es.onmessage = function (ev) {
+    try { var frame = JSON.parse(ev.data); if (frame.surface) { onFrame(frame); } } catch (e) { /* skip unparseable frame */ }
+  };
+  es.onerror = function () { showStatus('Disconnected, reconnecting...'); };
+})();
+</script>
+</body>
+</html>

@@ -29,8 +29,6 @@ pub use push::{
 };
 pub use surface::Surface;
 pub use widget::{
-    validate_coordinates, validate_coordinates_for_canvas, CanvasResolution, CanvasThemeDto,
-    ComponentStatusCode, SceneComponentDto, SceneLayoutDto, WidgetDescriptorDto, WidgetOutputKind,
-    CANVAS_HEIGHT, CANVAS_WIDTH, MAX_CANVAS_HEIGHT, MAX_CANVAS_WIDTH, MAX_SCENE_COMPONENTS,
-    MAX_WIDGET_HTML_BYTES,
+    CanvasDto, CanvasResolution, SceneComponentDto, SceneLayoutDto, WidgetOutputKind,
+    MAX_SCENE_COMPONENTS, MAX_WIDGET_HTML_BYTES, STATUS_HIDDEN, STATUS_VISIBLE,
 };

@@ -46,7 +46,7 @@
     }
   },
   "surfaces": {
-    "music.now_playing": {
+    "waddles.core.example.music.now_playing": {
       "doc": "Music Station 'now playing' card (dj `PublicState.now_playing`). `now_playing: null` = nothing playing.",
       "replay": true,
       "max_payload_bytes": 4096,
@@ -61,7 +61,7 @@
         "additionalProperties": false
       }
     },
-    "music.queue": {
+    "waddles.core.example.music.queue": {
       "doc": "Music Station 'up next' list (dj `PublicState.queue`), at most 50 tracks.",
       "replay": true,
       "max_payload_bytes": 16384,

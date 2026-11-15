@@ -188,6 +188,13 @@ bundle-config-db = { path = "../bundle_config_db", version = "=0.1.0" }
 # `crate::platform_user` classifies `hub_client`'s gRPC status codes (producer-side user
 # detokenization) -- same exact pin hub_client already resolves, no new version in the graph.
 tonic = { version = "=0.14.6", default-features = false }
+# `crate::surface`: the stage side of `overlay.publish-surface` (gRPC delivery to svc-presentation,
+# host-derived community + app-id namespace ownership). Same-repo path dependency; its build.rs
+# compiles `proto/waddles/presentation/internal/v1` with the same protoc/`proto` context as
+# `hub_client` (see Dockerfile.rust).
+bundle-host-surface = { path = "../bundle_host_surface", version = "=0.1.0" }
+# Community-bound machine JWT (`BoundMachineJwtClient`) for the surface delivery host.
+service_auth = { path = "../service_auth", version = "=0.1.0" }
 
 # `src/stage_metrics.rs`: OTel instruments built from the global meter
 # provider `penguin-logging` installs (never a provider of its own). Same
@@ -202,6 +209,9 @@ opentelemetry = "=0.32.0"
 metrics = "=0.24.6"
 
 [dev-dependencies]
+# `crate::surface` tests run a real in-process tonic `SurfaceService` on loopback.
+async-trait = "=0.1.89"
+tokio-stream = { version = "=0.1.19", features = ["net"] }
 # `InMemoryMetricExporter` (the SDK's `testing` feature) so tests read back
 # the metric data points a collector would actually receive -- proving the
 # instruments EMIT, not merely exist. Same exact version `penguin-logging`

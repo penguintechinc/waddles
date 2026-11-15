@@ -696,6 +696,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-host-surface"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "prost",
+ "serde",
+ "serde_json",
+ "service_auth",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
+]
+
+[[package]]
 name = "bundle-tool-call"
 version = "0.1.0"
 dependencies = [
@@ -3978,6 +3995,7 @@ name = "svc-action"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "bundle-active-set",
@@ -3987,6 +4005,7 @@ dependencies = [
  "bundle-host-db",
  "bundle-host-http",
  "bundle-host-kv",
+ "bundle-host-surface",
  "bundle-tool-call",
  "chrono",
  "circuit-breaker",
@@ -4013,12 +4032,14 @@ dependencies = [
  "sea-orm",
  "serde",
  "serde_json",
+ "service_auth",
  "sha2 0.10.9",
  "socket2",
  "subtle",
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
+ "tokio-stream",
  "tonic",
  "tower",
  "tower-http 0.7.1",
