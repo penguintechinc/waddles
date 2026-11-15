@@ -11,11 +11,24 @@ per-channel permission overrides. Ported close to 1:1 -- see
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
 from .community_common import ensure_community_tables, sql_bool
 from .community_relay import relay_message
+from .scope_registry import (
+    KIND_CUSTOM,
+    KIND_FIXED,
+    KIND_MODERATOR,
+    effective_scopes,
+    guard_delete,
+    guard_grant,
+    guard_scope_edit,
+    normalize_scopes,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _iso(value: Any) -> str | None:
@@ -496,8 +509,18 @@ async def internal_relay_incoming(dal: Any, payload: dict[str, Any]) -> str | No
 # ── Community roles CRUD ─────────────────────────────────────────────────
 
 
+def role_kind_of(row: Any) -> int:
+    """Effective `role_kind` of a role row; a kind-less `is_system` row counts as FIXED."""
+    kind = getattr(row, "role_kind", None) or KIND_CUSTOM
+    if kind == KIND_CUSTOM and row.is_system:
+        return KIND_FIXED
+    return int(kind)
+
+
 def _role_dto(row: Any) -> dict[str, Any]:
     claims = row.base_claims or {}
+    kind = role_kind_of(row)
+    scopes = sorted(effective_scopes(kind, claims.get("scopes", [])))
     return {
         "id": row.id,
         "community_id": row.community_id,
@@ -505,8 +528,11 @@ def _role_dto(row: Any) -> dict[str, Any]:
         "display_name": row.display_name,
         "description": row.description,
         "is_system": bool(row.is_system),
+        "role_kind": kind,
         "priority": row.priority,
-        "scopes": claims.get("scopes", []),
+        "scopes": scopes,
+        "scopes_editable": kind in (KIND_CUSTOM, KIND_MODERATOR),
+        "deletable": kind == KIND_CUSTOM,
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
     }
@@ -521,10 +547,27 @@ def get_community_roles(dal: Any, community_id: int) -> list[dict[str, Any]]:
     return [_role_dto(r) for r in rows]
 
 
+def _log_role_change(
+    action: str, community_id: int, role_id: int, scopes: list[str] | None
+) -> None:
+    """Structured, PII-free trace of a role mutation (the audit chain row is written per-route)."""
+    logger.info(
+        "community_role.%s community_id=%s role_id=%s scope_count=%s",
+        action,
+        community_id,
+        role_id,
+        "n/a" if scopes is None else len(scopes),
+    )
+
+
 def create_community_role(
-    dal: Any, community_id: int, payload: dict[str, Any]
+    dal: Any,
+    community_id: int,
+    payload: dict[str, Any],
+    *,
+    editor_scopes: frozenset[str],
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Create a custom (non-system) role. Custom-role priority is capped at 0-49."""
+    """Create a custom role. Priority is capped 0-49; granted scopes must be held by the editor."""
     ensure_community_tables(dal)
     name = (payload.get("name") or "").strip()
     if not name:
@@ -532,6 +575,8 @@ def create_community_role(
     priority = payload.get("priority", 0)
     if priority is not None and not (0 <= priority <= 49):
         return None, "Custom role priority must be between 0 and 49"
+    scopes = normalize_scopes(payload.get("scopes") or [])
+    guard_grant(editor_scopes, scopes)
 
     existing = (
         dal(
@@ -550,19 +595,31 @@ def create_community_role(
         display_name=payload.get("displayName") or name,
         description=payload.get("description") or "",
         is_system=False,
+        role_kind=KIND_CUSTOM,
         priority=priority or 0,
-        base_claims={"scopes": payload.get("scopes") or []},
+        base_claims={"scopes": scopes},
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
     dal.commit()
+    _log_role_change("created", community_id, role_id, scopes)
     return _role_dto(dal.community_roles[role_id]), None
 
 
 def update_community_role(
-    dal: Any, community_id: int, role_id: int, payload: dict[str, Any]
+    dal: Any,
+    community_id: int,
+    role_id: int,
+    payload: dict[str, Any],
+    *,
+    editor_scopes: frozenset[str],
 ) -> str | None:
-    """Update a role. System roles may only have `display_name`/`description` changed."""
+    """Update a role under the role-kind guards.
+
+    Admin-kind scopes are never editable (always the full registry); fixed predefined roles keep
+    their scopes; the moderator-kind and custom roles accept a scope edit, but only for scopes
+    the editor holds (a scope the role already carries and the editor lacks is left untouched).
+    """
     ensure_community_tables(dal)
     existing = (
         dal(
@@ -573,32 +630,36 @@ def update_community_role(
     )
     if existing is None:
         return "__not_found__"
+    kind = role_kind_of(existing)
 
     fields: dict[str, Any] = {"updated_at": datetime.utcnow()}
     if "displayName" in payload:
         fields["display_name"] = payload["displayName"]
     if "description" in payload:
         fields["description"] = payload["description"]
-    scopes_changed = False
-    if not existing.is_system:
-        if "priority" in payload:
-            fields["priority"] = payload["priority"]
-        if "scopes" in payload:
-            fields["base_claims"] = {"scopes": payload["scopes"]}
-            scopes_changed = True
+    new_scopes: list[str] | None = None
+    if "scopes" in payload:
+        guard_scope_edit(kind)
+        new_scopes = normalize_scopes(payload["scopes"])
+        current = set((existing.base_claims or {}).get("scopes", []))
+        guard_grant(editor_scopes, set(new_scopes) - current)
+        fields["base_claims"] = {"scopes": new_scopes}
+    if "priority" in payload and kind == KIND_CUSTOM:
+        fields["priority"] = payload["priority"]
 
     dal(dal.community_roles.id == role_id).update(**fields)
-    if scopes_changed:
+    if new_scopes is not None:
         dal(
             (dal.community_members.community_id == community_id)
             & (dal.community_members.community_role_id == role_id)
         ).update(claims_cache=None)
     dal.commit()
+    _log_role_change("updated", community_id, role_id, new_scopes)
     return None
 
 
 def delete_community_role(dal: Any, community_id: int, role_id: int) -> str | None:
-    """Delete a custom role, reassigning its members to `member`."""
+    """Delete a custom role (members move to `member`); predefined roles are refused (409)."""
     ensure_community_tables(dal)
     existing = (
         dal(
@@ -609,8 +670,7 @@ def delete_community_role(dal: Any, community_id: int, role_id: int) -> str | No
     )
     if existing is None:
         return "__not_found__"
-    if existing.is_system:
-        return "Cannot delete system roles"
+    guard_delete(role_kind_of(existing))
 
     member_role = (
         dal(
@@ -627,6 +687,7 @@ def delete_community_role(dal: Any, community_id: int, role_id: int) -> str | No
         ).update(community_role_id=member_role.id, claims_cache=None)
     dal(dal.community_roles.id == role_id).delete()
     dal.commit()
+    _log_role_change("deleted", community_id, role_id, None)
     return None
 
 

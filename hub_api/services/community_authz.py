@@ -82,6 +82,7 @@ from services.current_user import get_current_user_id
 from services.errors import ApiError, forbidden, unauthorized
 from services.global_identity import is_global_admin
 from services.schema import bind_community_authz_tables
+from services.scope_registry import KIND_ADMIN, SCOPE_GLOBAL_ADMIN, all_scopes, effective_scopes
 
 
 @dataclass(slots=True, frozen=True)
@@ -109,6 +110,11 @@ async def is_super_admin(async_dal: Any, dal: Any, *, user_id: int) -> bool:
     within the token's validity window, where this DB lookup cannot.
     """
     return await is_global_admin(async_dal, dal, user_id=user_id)
+
+
+def _row_kind(role_row: Any) -> int | None:
+    """`community_roles.role_kind` of a joined role row (None when the member has no role row)."""
+    return getattr(role_row, "role_kind", None) if role_row is not None else None
 
 
 async def get_caller_community_role(
@@ -143,7 +149,8 @@ async def get_caller_community_role(
         return None
     cm, cr = rows[0].community_members, rows[0].community_roles
     base_claims = cr.base_claims if cr is not None else None
-    scopes = base_claims.get("scopes", []) if isinstance(base_claims, dict) else []
+    stored = base_claims.get("scopes", []) if isinstance(base_claims, dict) else []
+    scopes = effective_scopes(_row_kind(cr), stored)
     role_name = (cr.name if cr is not None and cr.name else None) or cm.role or "member"
     priority = (cr.priority if cr is not None and cr.priority is not None else 0) or 0
     return CommunityRole(name=role_name, priority=priority, scopes=frozenset(scopes))
@@ -228,7 +235,7 @@ async def require_community_admin(
         ):
             return
 
-    if "platform-admin" in _jwt_roles(request):
+    if SCOPE_GLOBAL_ADMIN in _jwt_scopes(request):
         return
 
     role = await get_caller_community_role(
@@ -238,18 +245,16 @@ async def require_community_admin(
         raise forbidden("Community admin access required")
 
 
-def _jwt_roles(request: Request) -> frozenset[str]:
-    """Return the bearer JWT's `roles` claim as a set -- empty if absent/malformed."""
+def _jwt_scopes(request: Request) -> frozenset[str]:
+    """Return the bearer JWT's `scope` claim as a set -- empty if absent/malformed."""
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         return frozenset()
     payload = verify_jwt_token(auth_header[7:], require_secret_key())
     if payload is None:
         return frozenset()
-    roles = payload.get("roles")
-    if not isinstance(roles, list):
-        return frozenset()
-    return frozenset(str(r) for r in roles)
+    raw = payload.get("scope")
+    return frozenset(raw.split()) if isinstance(raw, str) else frozenset()
 
 
 def require_valid_community_id(raw: str) -> int:
@@ -335,7 +340,7 @@ async def resolve_community_membership_scoped(
     community_id: int,
     user_id: int,
     tenant_id: int,
-    roles_claim: list[str],
+    scopes_claim: frozenset[str],
 ) -> CommunityMembership | None:
     """Resolve the caller's role/scopes for `community_id`, or `None` if not a member.
 
@@ -349,7 +354,7 @@ async def resolve_community_membership_scoped(
     `user_id` is compared as `str(user_id)`, matching how Node's pg driver
     serializes the JWT `sub` claim into that column.
     """
-    if any(r in _BYPASS_ROLES for r in roles_claim):
+    if SCOPE_GLOBAL_ADMIN in scopes_claim:
         return CommunityMembership(
             role="super-admin", scopes=frozenset(), is_admin=True, bypass=True
         )
@@ -389,9 +394,14 @@ async def resolve_community_membership_scoped(
 
     row = rows[0]
     member, role_row = row.community_members, row.community_roles
-    scopes = _parse_claims_scopes(member.claims_cache)
-    if not scopes and role_row is not None:
-        scopes = _parse_claims_scopes(role_row.base_claims)
+    kind = _row_kind(role_row)
+    if kind == KIND_ADMIN:
+        # Admin-kind scopes are computed from the registry, never from a stored/cached list.
+        scopes = effective_scopes(kind, None)
+    else:
+        scopes = _parse_claims_scopes(member.claims_cache)
+        if not scopes and role_row is not None:
+            scopes = _parse_claims_scopes(role_row.base_claims)
     role_name = (role_row.name if role_row is not None else None) or member.role
     return CommunityMembership(
         role=role_name, scopes=scopes, is_admin=bool(scopes & ADMIN_SCOPES), bypass=False
@@ -405,7 +415,7 @@ async def require_community_member_scoped(
     community_id: int,
     user_id: int,
     tenant_id: int,
-    roles_claim: list[str],
+    scopes_claim: frozenset[str],
 ) -> CommunityMembership:
     """Port of `requireMember` -- raise 403 unless the caller is an active member."""
     membership = await resolve_community_membership_scoped(
@@ -414,7 +424,7 @@ async def require_community_member_scoped(
         community_id=community_id,
         user_id=user_id,
         tenant_id=tenant_id,
-        roles_claim=roles_claim,
+        scopes_claim=scopes_claim,
     )
     if membership is None:
         raise forbidden("Community membership required")
@@ -430,12 +440,6 @@ async def require_community_member_scoped(
 #: for music-station admin actions.
 ADMIN_SCOPES: frozenset[str] = frozenset({"community:manage_members", "community:manage_channels"})
 
-#: JWT `roles` claim entries that bypass the per-community DB check
-#: entirely -- mirrors Node's `req.user.isSuperAdmin` /
-#: `req.user.roles.includes('platform-admin')` bypasses in both
-#: `requireMember` and `requireCommunityAdmin`.
-_BYPASS_ROLES: frozenset[str] = frozenset({"super_admin", "platform-admin"})
-
 
 async def require_community_admin_scoped(
     async_dal: Any,
@@ -444,7 +448,7 @@ async def require_community_admin_scoped(
     community_id: int,
     user_id: int,
     tenant_id: int,
-    roles_claim: list[str],
+    scopes_claim: frozenset[str],
 ) -> CommunityMembership:
     """Port of `requireCommunityAdmin` -- raise 403 unless bypass or an admin/moderator scope."""
     membership = await resolve_community_membership_scoped(
@@ -453,21 +457,21 @@ async def require_community_admin_scoped(
         community_id=community_id,
         user_id=user_id,
         tenant_id=tenant_id,
-        roles_claim=roles_claim,
+        scopes_claim=scopes_claim,
     )
     if membership is None or not (membership.bypass or membership.is_admin):
         raise forbidden("Community admin access required")
     return membership
 
 
-def _decode_caller(request: Any) -> tuple[int, list[str]]:
-    """Re-decode the bearer JWT for `(user_id, roles)`.
+def _decode_caller(request: Any) -> tuple[int, frozenset[str]]:
+    """Re-decode the bearer JWT for `(user_id, scopes)`.
 
     Same self-contained, independent-of-`tenant_middleware`-state pattern
     `services.current_user`/`flask_core.authz.require_scope` already use
     (see their own docstrings) -- kept local here rather than importing
     `services.current_user.get_current_user_id` so this module also
-    recovers the `roles` claim in the same decode, without a second
+    recovers the `scope` claim in the same decode, without a second
     round-trip through the token.
     """
     auth_header = request.headers.get("Authorization")
@@ -481,8 +485,9 @@ def _decode_caller(request: Any) -> tuple[int, list[str]]:
         user_id = int(payload["sub"])
     except (KeyError, TypeError, ValueError) as exc:
         raise unauthorized("Token missing subject claim") from exc
-    roles = payload.get("roles") or []
-    return user_id, [str(r) for r in roles]
+    raw_scope = payload.get("scope")
+    scopes = frozenset(raw_scope.split()) if isinstance(raw_scope, str) else frozenset()
+    return user_id, scopes
 
 
 async def authorize_community(
@@ -499,7 +504,7 @@ async def authorize_community(
     ctx = get_tenant_context(request)
     if ctx is None:
         raise forbidden("Tenant context not resolved")
-    user_id, roles = _decode_caller(request)
+    user_id, scopes = _decode_caller(request)
     check = require_community_admin_scoped if admin else require_community_member_scoped
     return await check(
         async_dal,
@@ -507,5 +512,59 @@ async def authorize_community(
         community_id=community_id,
         user_id=user_id,
         tenant_id=ctx.tenant_id,
-        roles_claim=roles,
+        scopes_claim=scopes,
     )
+
+
+def resolve_editor_scopes(request: Any, dal: Any, *, community_id: int) -> frozenset[str]:
+    """The caller's effective community scopes, for role-management guards (sync DAL).
+
+    A global admin (`users:admin` on the token) or a tenant admin of the community's tenant holds
+    every registered scope; anyone else holds the scopes of their own community role (admin-kind
+    computed). The token's own `scope` claim is unioned in, so a token-level grant also counts.
+    A caller that is not a member simply holds the token scopes only -- never raises for that.
+    """
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        raise forbidden("Tenant context not resolved")
+    user_id, token_scopes = _decode_caller(request)
+    if SCOPE_GLOBAL_ADMIN in token_scopes:
+        return all_scopes()
+    if "tenant_admins" in dal.tables:
+        is_tenant_admin = (
+            dal(
+                (dal.tenant_admins.user_id == user_id)
+                & (dal.tenant_admins.tenant_id == ctx.tenant_id)
+            )
+            .select()
+            .first()
+            is not None
+        )
+        if is_tenant_admin:
+            return all_scopes()
+    return frozenset(member_scopes_sync(dal, community_id, user_id) | token_scopes)
+
+
+def member_scopes_sync(dal: Any, community_id: int, user_id: int) -> frozenset[str]:
+    """Sync twin of the membership scope lookup: scopes of the caller's active community role.
+
+    Admin-kind roles resolve to the full registry; a member with no role row, or no active
+    membership, holds no scopes (fail closed). Replaces ad-hoc `member.role in (...)` name checks.
+    """
+    member = (
+        dal(
+            (dal.community_members.community_id == community_id)
+            & (dal.community_members.user_id == str(user_id))
+            & (dal.community_members.is_active == True)  # noqa: E712
+        )
+        .select()
+        .first()
+    )
+    if member is None or not member.community_role_id:
+        return frozenset()
+    role_row = dal(dal.community_roles.id == member.community_role_id).select().first()
+    if role_row is None:
+        return frozenset()
+    if _row_kind(role_row) == KIND_ADMIN:
+        return effective_scopes(KIND_ADMIN, None)
+    return _parse_claims_scopes(member.claims_cache) or _parse_claims_scopes(role_row.base_claims)

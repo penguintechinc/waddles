@@ -54,6 +54,7 @@ import httpx
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from services.community_authz import ADMIN_SCOPES, get_caller_community_role
 from services.errors import ApiError, bad_request, forbidden, not_found
 from services.schema import bind_github_sync_tables
 
@@ -382,15 +383,10 @@ async def delete_repo_connection(
     if conn.community_id != community_id:
         raise forbidden("Forbidden")
 
-    member_rows = await async_dal.select_async(
-        dal(
-            (dal.community_members.community_id == community_id)
-            & (dal.community_members.user_id == str(user_id))
-            & (dal.community_members.is_active == True)  # noqa: E712
-            & (dal.community_members.role.belongs(["admin", "owner"]))
-        )
+    caller_role = await get_caller_community_role(
+        async_dal, dal, community_id=community_id, user_id=user_id
     )
-    if not member_rows:
+    if caller_role is None or not (caller_role.scopes & ADMIN_SCOPES):
         raise forbidden("Forbidden")
 
     await async_dal.update_async(dal.github_repo_connections.id == connection_id, is_active=False)
