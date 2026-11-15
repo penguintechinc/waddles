@@ -5,7 +5,7 @@
 schema_version: 2
 app_id: waddles.core.example.music
 name: Song Request Queue Bundle (Python)
-version: 1.0.7
+version: 1.0.8
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -36,6 +36,33 @@ stages:
           command_prefix: ["!sr", "!songrequest", "!music", "!queue"]
   action:
     entry: "waddle:bundle/action-stage#dispatch"
+  presentation:
+    owned_surfaces:
+      - waddles.core.example.music.now_playing
+      - waddles.core.example.music.queue
+    overlay_widgets:
+      - widget_id: dj.music.album_now_playing
+        display_name: "Now Playing (Album Cover)"
+        description: "Overlay widget showing current song, artist, and album artwork"
+        category: music
+        output_kind: surface
+        surface_id: waddles.core.example.music.now_playing
+        default_x: 48
+        default_y: 860
+        default_width: 460
+        default_height: 160
+        allow_standalone_output: true
+      - widget_id: dj.music.song_request_queue
+        display_name: "Song Request Queue"
+        description: "Overlay widget showing upcoming song requests from viewers"
+        category: music
+        output_kind: surface
+        surface_id: waddles.core.example.music.queue
+        default_x: 48
+        default_y: 500
+        default_width: 460
+        default_height: 340
+        allow_standalone_output: true
 egress: []
 data:
   tables: []

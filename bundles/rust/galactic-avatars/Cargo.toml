@@ -1,0 +1,25 @@
+[package]
+name = "waddle-bundle-galactic-avatars"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Galactic Avatars Presentation Bundle: Star Wars-inspired avatar overlay strip walking across the stream stage."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+waddle-sdk-rs = { path = "../../../sdk/waddle-sdk-rs", version = "=0.1.0" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[package.metadata.component]
+package = "waddle:bundle-galactic-avatars"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-bundle"
+world = "stage"
+
+[package.metadata.component.dependencies]
