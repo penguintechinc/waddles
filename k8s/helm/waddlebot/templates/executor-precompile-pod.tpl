@@ -30,8 +30,8 @@ Usage: include "waddlebot.executorPrecompile.podSpec" (dict "root" $ "mode" "que
 {{- $ps := $root.Values.autoProvisionedKeys.precompileSigning -}}
 {{- $psSecretName := $ps.secretName | default (printf "%s-executor-precompile-signing" $fullname) -}}
 {{- $psCmName := $ps.publicKeyConfigMapName | default (printf "%s-executor-precompile-signing-public" $fullname) -}}
-{{- $hubImage := include "waddlebot.legacyModuleImage" (dict "root" $root "module" "hub-api" "imageTag" ($root.Values.hubApi.imageTag | default $root.Values.global.imageTag)) -}}
-{{- $execImage := printf "%s:%s" $root.Values.bundleExecutor.image.repository ($root.Values.bundleExecutor.image.tag | default $root.Values.global.imageTag | toString) -}}
+{{- $hubImage := include "waddlebot.legacyModuleImage" (dict "root" $root "module" "hub-api" "imageTag" $root.Values.hubApi.imageTag) -}}
+{{- $execImage := printf "%s:%s" $root.Values.bundleExecutor.image.repository (include "waddlebot.resolveImageTag" (dict "root" $root "image" "svc-bundles-executor" "explicit" $root.Values.bundleExecutor.image.tag)) -}}
 restartPolicy: Never
 serviceAccountName: {{ include "waddlebot.executorPrecompile.serviceAccountName" $root }}
 automountServiceAccountToken: false
@@ -186,8 +186,8 @@ securityContext:
     secretKeyRef:
       name: {{ include "waddlebot.fullname" $root }}-secrets
       key: {{ .secretKey }}
-- name: OTEL_SERVICE_NAME
-  value: svc-bundles-precompiler
+{{- /* No OTEL_* env here: the pod has no OTLP endpoint/egress rule, so a lone OTEL_SERVICE_NAME was inert
+       and broke the "disabled => zero OTEL_* env" contract (test_otel_signoz_render). */}}
 {{- end }}
 
 {{/*

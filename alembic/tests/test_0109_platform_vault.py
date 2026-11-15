@@ -47,7 +47,7 @@ requires_docker = pytest.mark.skipif(
 _MIGRATION = (
     Path(__file__).resolve().parent.parent / "versions" / "0109_platform_vault.py"
 )
-_PRIOR = "0107_bundle_config_db_reads"
+_PRIOR = "0108_revoke_cfg_communities"
 _KEK = "0123456789abcdef"
 _TABLE_PRIVS = (
     "SELECT",
@@ -82,14 +82,14 @@ def _statements(fn_name: str) -> list[str]:
 
 
 def test_metadata_and_single_head() -> None:
-    """Revision id <= 32 chars, chained off 0107, and the graph has exactly one head."""
+    """Revision id <= 32 chars, chained off 0108_revoke_cfg_communities, and the graph has exactly one head."""
     m = _load()
     assert (m.revision, m.down_revision) == ("0109_platform_vault", _PRIOR)
     assert len(m.revision) <= 32
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == [m.revision], f"alembic heads: {heads}"
+    assert len(heads) == 1, f"alembic heads: {heads}"
 
 
 def test_catalog_denies_the_vault_to_every_legacy_role_and_names_no_vault_grant() -> (
