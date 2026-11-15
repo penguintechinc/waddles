@@ -275,7 +275,7 @@ return rem
 /// (hash: total/remaining/max_concurrency, TTL = reset) and
 /// `...:{identity_hex}:b{bucket}` (the 5s window).
 pub struct RedisIdentifyBudget {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
     scope: &'static str,
     window: Duration,
     store_timeout: Duration,
@@ -287,7 +287,7 @@ impl RedisIdentifyBudget {
     /// Wraps a connected Valkey connection. `scope` namespaces the platform
     /// (`"discord"`), a host constant.
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection, scope: &'static str) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager, scope: &'static str) -> Self {
         Self {
             conn,
             scope,

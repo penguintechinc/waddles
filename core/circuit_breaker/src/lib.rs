@@ -31,6 +31,8 @@
 //! blast-radius containment the spec asks for -- no cross-pod coordination
 //! needed.
 
+pub mod valkey_resilience;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

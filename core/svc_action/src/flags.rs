@@ -183,6 +183,42 @@ pub fn db_bundle_config_flag(
     }
 }
 
+/// Opt-out kill switch for executor slot sharding
+/// (`bundle_active_set::sharding`, executor scale-out phase 1): unseen /
+/// OFF / license server unreachable = sharding ON (each app loads only on
+/// its 2 owner executors); ON = legacy broadcast to every executor. Same
+/// key `core/svc_process/src/license.rs` gates on.
+pub const DISABLE_EXECUTOR_SHARDING_FLAG: &str = "waddles.disable-executor-sharding";
+
+/// Production [`FeatureFlag`] for [`DISABLE_EXECUTOR_SHARDING_FLAG`]:
+/// `enabled()` answers "is sharding on?" (negated raw flag); a bypassed
+/// client reads as sharding ON (see [`DisableDbBundleConfigFlag`] for why
+/// bypass must be checked first).
+pub struct ExecutorShardingFlag(Arc<penguin_licensing::LicenseClient>);
+
+impl FeatureFlag for ExecutorShardingFlag {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            if self.0.bypass_active() {
+                return true;
+            }
+            !self.0.flag_enabled(DISABLE_EXECUTOR_SHARDING_FLAG).await
+        })
+    }
+}
+
+/// The sharding [`FeatureFlag`] for `crate::changelog_consumer::run`: the
+/// real kill switch over a license client, or "sharding ON" (= flag unseen)
+/// when no license client is available.
+pub fn executor_sharding_flag(
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+) -> Arc<dyn FeatureFlag> {
+    match license {
+        Some(client) => boxed(ExecutorShardingFlag(Arc::clone(client))),
+        None => boxed(StaticFlag(true)),
+    }
+}
+
 /// Opt-out kill-switch for the multi-tenant, change-log-driven active-set
 /// loader (`crate::changelog_consumer`) -- dataplane scale design rev 4,
 /// §8 step 2: "Multi-tenant watermark polling ...

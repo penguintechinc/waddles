@@ -121,3 +121,44 @@ def test_parse_revision_raises_without_revision_assignment() -> None:
     not silently resolve to a false revision id."""
     with pytest.raises(ValueError):
         mod.parse_revision("# no revision here\n")
+
+
+def test_parse_revision_handles_merge_tuple_down_revision() -> None:
+    """A merge revision's `down_revision = (a, b)` parses to both parents."""
+    source = 'revision = "0110_m"\ndown_revision = ("0108_a", "0109_b")\n'
+    assert mod.parse_revision(source) == ("0110_m", ("0108_a", "0109_b"))
+
+
+def test_multi_head_base_joined_by_new_merge_revision_resolves_all_parents() -> None:
+    """Base has two heads; the PR's merge revision joins them. Both parents
+    are the entry points (the old code saw `down_revision` as None -> exit 1)."""
+    base = {"0107_x": None, "0108_a": "0107_x", "0109_b": "0107_x"}
+    head = {**base, "0110_m": ("0108_a", "0109_b")}
+    exit_code, output = mod.resolve_prior_base_revision(base, head)
+    assert exit_code == 0
+    assert output == "0108_a,0109_b"
+
+
+def test_new_revision_stacked_on_a_new_merge_still_resolves() -> None:
+    """Merge + a follow-up revision on top: one new head, two entry points."""
+    base = {"0108_a": "0107_x", "0109_b": "0107_x"}
+    head = {**base, "0110_m": ("0108_a", "0109_b"), "0111_n": "0110_m"}
+    exit_code, output = mod.resolve_prior_base_revision(base, head)
+    assert exit_code == 0
+    assert output == "0108_a,0109_b"
+
+
+def test_two_new_heads_without_merge_remain_a_real_error() -> None:
+    """Fail-loud guard: independent new branches (no merge) are still fatal."""
+    base = {"0108_a": "0107_x", "0109_b": "0107_x"}
+    head = {**base, "0110_p": "0108_a", "0110_q": "0109_b"}
+    exit_code, _output = mod.resolve_prior_base_revision(base, head)
+    assert exit_code == 1
+
+
+def test_merge_leaving_two_new_heads_is_a_real_error() -> None:
+    """A merge plus another stray new head is not a single converged stack."""
+    base = {"0108_a": "0107_x", "0109_b": "0107_x"}
+    head = {**base, "0110_m": ("0108_a", "0109_b"), "0111_stray": "0108_a"}
+    exit_code, _output = mod.resolve_prior_base_revision(base, head)
+    assert exit_code == 1

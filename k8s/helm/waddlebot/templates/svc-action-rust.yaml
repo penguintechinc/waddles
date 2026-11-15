@@ -124,6 +124,7 @@ spec:
         # waddles.disable-db-bundle-config-reads ON = legacy hub-api gRPC path.
 {{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_action") | nindent 8 }}
 {{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
+        {{- include "waddlebot.rustOtelEnv" (dict "root" $ "service" "svc-action") | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcAction.port | quote }}
         - name: METRICS_PORT
