@@ -157,6 +157,11 @@ async def get_public_live_status(community_id: int) -> Any:
         async_dal, dal = _dal()
         status = await svc.get_live_status(async_dal, dal, community_id=community_id)
     except ApiError as exc:
+        logger.debug(
+            "get_public_live_status.api_error status=%s",
+            exc.status_code,
+            extra={"community_id": community_id},
+        )
         return _err(exc)
     except Exception as exc:  # noqa: BLE001 - last-resort 500 must still be JSON, never an empty body
         logger.exception(
@@ -195,6 +200,11 @@ async def get_internal_live_status() -> Any:
         async_dal, dal = _dal()
         status = await svc.get_live_status(async_dal, dal, community_id=community_id)
     except ApiError as exc:
+        logger.debug(
+            "get_internal_live_status.api_error status=%s",
+            exc.status_code,
+            extra={"community_id": community_id},
+        )
         return _err(exc)
     except Exception as exc:  # noqa: BLE001 - last-resort 500 must still be JSON, never an empty body
         logger.exception(

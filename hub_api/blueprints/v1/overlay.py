@@ -300,6 +300,7 @@ async def get_overlay_stats(community_id: int) -> Any:
             async_dal, dal, community_id=community_id, days=days
         )
     except ApiError as exc:
+        logger.debug("overlay_stats.api_error status=%s", exc.status_code)
         return _err(exc)
     return jsonify_dto(OverlayStatsResponse(success=True, stats=stats))
 

@@ -348,6 +348,7 @@ async def get_spotlighted_communities() -> (
     try:
         ctx = await _default_tenant_or_500(async_dal, dal)
     except ApiError as exc:
+        logger.debug("public.api_error status=%s", exc.status_code)
         return _err(exc)
     rows = await svc.get_spotlighted_communities(async_dal, dal, ctx)
     return SpotlightedCommunitiesResponse(
@@ -377,6 +378,7 @@ async def list_communities() -> ListCommunitiesResponse | tuple[dict[str, object
     try:
         ctx = await _default_tenant_or_500(async_dal, dal)
     except ApiError as exc:
+        logger.debug("public.api_error status=%s", exc.status_code)
         return _err(exc)
     page = int(request.args.get("page", "1"))
     limit = parse_limit(request.args.get("limit"), default=12)
@@ -414,6 +416,7 @@ async def get_community(community_id: int) -> GetCommunityResponse | tuple[dict[
         ctx = await _default_tenant_or_500(async_dal, dal)
         row = await svc.get_community(async_dal, dal, ctx, community_id=community_id)
     except ApiError as exc:
+        logger.debug("public.api_error status=%s", exc.status_code)
         return _err(exc)
     return GetCommunityResponse(
         success=True,
@@ -469,6 +472,7 @@ async def get_stream_details(
     try:
         row = await svc.get_stream_details(async_dal, dal, entity_id=entity_id)
     except ApiError as exc:
+        logger.debug("public.api_error status=%s", exc.status_code)
         return _err(exc)
     return StreamDetailsResponse(
         success=True,
