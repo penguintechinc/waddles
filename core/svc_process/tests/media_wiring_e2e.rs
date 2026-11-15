@@ -38,7 +38,7 @@ async fn build_media_wiring_fails_closed_per_missing_dependency_and_wires_when_c
     let conn_for = || async {
         redis::Client::open(format!("redis://{}:{}/", valkey.host(), valkey.port()))
             .unwrap()
-            .get_multiplexed_async_connection()
+            .get_connection_manager()
             .await
             .unwrap()
     };

@@ -3455,7 +3455,7 @@ mod tests {
             .expect("VALKEY_URL must be set: this test needs a REAL Valkey (no silent skip)");
         let client = redis::Client::open(url).unwrap();
         let guard =
-            ValkeyReplayGuard::new(client.get_multiplexed_async_connection().await.unwrap());
+            ValkeyReplayGuard::new(client.get_connection_manager().await.unwrap());
         let queue = FakeQueue {
             payloads: payloads.into_iter().map(|p| Ok(Some(p))).collect(),
             idx: AtomicUsize::new(0),
@@ -3736,7 +3736,7 @@ GRANT SELECT (tenant_id, pseudonym, handle) ON ephemeral_pseudonyms TO {role};
             };
             let guard = ValkeyReplayGuard::new(
                 client
-                    .get_multiplexed_async_connection()
+                    .get_connection_manager()
                     .await
                     .expect("valkey"),
             );

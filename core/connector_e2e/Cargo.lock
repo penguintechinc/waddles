@@ -646,6 +646,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "command-latency"
+version = "0.1.0"
+dependencies = [
+ "opentelemetry",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+]
+
+[[package]]
 name = "connection_resolver"
 version = "0.1.0"
 dependencies = [
@@ -3925,6 +3935,7 @@ dependencies = [
  "chrono",
  "circuit-breaker",
  "clap",
+ "command-latency",
  "connection_resolver",
  "discord-mentions",
  "egress_detokenizer",
