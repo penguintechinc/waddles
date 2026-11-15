@@ -625,8 +625,13 @@ fn moderation_call(
     let actor = verified_actor_scope(ctx, scope)?;
     let mut req = json!({
         "room_id": room, "actor_id": actor.id, "actor_role": role_wire(actor.role),
-        "actor_scopes": room_scopes(ctx),
     });
+    // The verified per-action scopes ride along so the host re-checks the one it needs
+    // (`actor_role` is a display/audit label only); nothing is sent for a plain member.
+    let held = room_scopes(ctx);
+    if !held.is_empty() {
+        req["actor_scopes"] = json!(held);
+    }
     // `room.leave` acts on the verified caller only; the others name their target.
     match (&target, tool == LEAVE_TOOL) {
         (Some(t), _) => req["participant_id"] = json!(t),
@@ -1001,11 +1006,24 @@ mod tests {
         let f = Fake::ok(room_json());
         let facts = json!({"kind": "stage", "closed": false, "allow_guests": true,
                            "starts_at": 10, "ends_at": 20});
-        call(&f, "room.create", ctx(USER, &ROOM_ADMIN_SCOPES, facts.clone())).unwrap();
+        call(
+            &f,
+            "room.create",
+            ctx(USER, &ROOM_ADMIN_SCOPES, facts.clone()),
+        )
+        .unwrap();
         let mut sent = facts.clone();
-        sent["actor_scopes"] =
-            json!(["rooms:create", "rooms:update", "rooms:close", "rooms:guests"]);
-        assert_eq!(f.calls()[0].1, sent, "facts + verified scopes reach the host");
+        sent["actor_scopes"] = json!([
+            "rooms:create",
+            "rooms:update",
+            "rooms:close",
+            "rooms:guests"
+        ]);
+        assert_eq!(
+            f.calls()[0].1,
+            sent,
+            "facts + verified scopes reach the host"
+        );
         for bad in [
             json!({"kind": "town_hall"}),
             json!({"kind": "nope"}),
@@ -1015,12 +1033,10 @@ mod tests {
             json!({"ends_at": "x"}),
         ] {
             let g = Fake::ok(room_json());
-            assert!(
-                matches!(
-                    call(&g, "room.create", ctx(USER, &ROOM_ADMIN_SCOPES, bad)),
-                    Err(ToolError::InvalidArgs(_))
-                ),
-            );
+            assert!(matches!(
+                call(&g, "room.create", ctx(USER, &ROOM_ADMIN_SCOPES, bad)),
+                Err(ToolError::InvalidArgs(_))
+            ),);
             assert!(g.calls().is_empty());
         }
     }
@@ -1079,30 +1095,45 @@ mod tests {
         for args in [
             ctx(USER, &MEMBER_SCOPES, facts.clone()),
             ctx(USER, &MOD_SCOPES, facts.clone()),
-            ctx(USER, &["rooms:create", "rooms:close", "rooms:guests"], facts.clone()),
+            ctx(
+                USER,
+                &["rooms:create", "rooms:close", "rooms:guests"],
+                facts.clone(),
+            ),
             facts.clone(),
             json!({"__ctx": {"actor": GLOBAL, "scopes": ROOM_ADMIN_SCOPES}, "room_id": ROOM,
                    "kind": "stage"}),
         ] {
-            assert!(
-                matches!(
-                    call(&f, "room.update", args),
-                    Err(ToolError::NotGranted | ToolError::Forbidden)
-                )
-            );
+            assert!(matches!(
+                call(&f, "room.update", args),
+                Err(ToolError::NotGranted | ToolError::Forbidden)
+            ));
         }
         assert!(f.calls().is_empty(), "nothing reached the host");
         // A caller cannot name an actor or a community.
-        for extra in [json!({"actor_id": USER}), json!({"actor_role": "admin"}), json!({"community_id": "8"})] {
+        for extra in [
+            json!({"actor_id": USER}),
+            json!({"actor_role": "admin"}),
+            json!({"community_id": "8"}),
+        ] {
             let mut a = facts.clone();
-            a.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            a.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
             assert!(call(&f, "room.update", ctx(USER, &ROOM_ADMIN_SCOPES, a)).is_err());
         }
         assert!(f.calls().is_empty());
         // Bad facts / missing room id never reach the host.
-        for bad in [json!({"kind": "town_hall"}), json!({"starts_at": -1}), json!({"allow_guests": "y"}), json!({})] {
+        for bad in [
+            json!({"kind": "town_hall"}),
+            json!({"starts_at": -1}),
+            json!({"allow_guests": "y"}),
+            json!({}),
+        ] {
             let mut a = json!({"room_id": ROOM});
-            a.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+            a.as_object_mut()
+                .unwrap()
+                .extend(bad.as_object().unwrap().clone());
             if bad.as_object().unwrap().is_empty() {
                 a = json!({});
             }
@@ -1114,27 +1145,59 @@ mod tests {
         assert!(f.calls().is_empty());
         // An update naming no fact is refused (nothing to change).
         assert!(matches!(
-            call(&f, "room.update", ctx(USER, &ROOM_ADMIN_SCOPES, json!({"room_id": ROOM}))),
+            call(
+                &f,
+                "room.update",
+                ctx(USER, &ROOM_ADMIN_SCOPES, json!({"room_id": ROOM}))
+            ),
             Err(ToolError::InvalidArgs(_))
         ));
         assert!(f.calls().is_empty());
         // Admin: forwarded with the pseudonym as actor, never the global uuid.
-        let out = call(&f, "room.update", ctx(USER, &ROOM_ADMIN_SCOPES, facts.clone())).unwrap();
+        let out = call(
+            &f,
+            "room.update",
+            ctx(USER, &ROOM_ADMIN_SCOPES, facts.clone()),
+        )
+        .unwrap();
         assert_eq!(out["room_id"], ROOM);
         let (op, sent) = f.calls()[0].clone();
         assert_eq!(op, "room.update");
         assert_eq!(sent["actor_id"], USER);
-        assert_eq!(sent["actor_scopes"], json!(["rooms:create", "rooms:update", "rooms:close", "rooms:guests"]));
+        assert_eq!(
+            sent["actor_scopes"],
+            json!([
+                "rooms:create",
+                "rooms:update",
+                "rooms:close",
+                "rooms:guests"
+            ])
+        );
         assert!(sent.get("actor_role").is_none());
         // rooms:update ALONE (no admin) is enough for a non-guest patch; enabling guests then
         // additionally needs rooms:guests.
         let only = Fake::ok(room_json());
-        call(&only, "room.update", ctx(USER, &["rooms:update"],
-            json!({"room_id": ROOM, "kind": "stage"}))).unwrap();
+        call(
+            &only,
+            "room.update",
+            ctx(
+                USER,
+                &["rooms:update"],
+                json!({"room_id": ROOM, "kind": "stage"}),
+            ),
+        )
+        .unwrap();
         assert_eq!(only.calls()[0].1["actor_scopes"], json!(["rooms:update"]));
         assert!(matches!(
-            call(&only, "room.update", ctx(USER, &["rooms:update"],
-                json!({"room_id": ROOM, "allow_guests": true}))),
+            call(
+                &only,
+                "room.update",
+                ctx(
+                    USER,
+                    &["rooms:update"],
+                    json!({"room_id": ROOM, "allow_guests": true})
+                )
+            ),
             Err(ToolError::NotGranted)
         ));
         assert_eq!(only.calls().len(), 1);
@@ -1142,20 +1205,46 @@ mod tests {
         assert!(!format!("{sent}").contains(GLOBAL));
         // PATCH: omitted facts are not sent; an explicit null clears a bound.
         let g = Fake::ok(room_json());
-        call(&g, "room.update", ctx(USER, &ROOM_ADMIN_SCOPES, json!({"room_id": ROOM, "closed": true})))
-            .unwrap();
+        call(
+            &g,
+            "room.update",
+            ctx(
+                USER,
+                &ROOM_ADMIN_SCOPES,
+                json!({"room_id": ROOM, "closed": true}),
+            ),
+        )
+        .unwrap();
         let sent = g.calls()[0].1.clone();
         for k in ["kind", "allow_guests", "starts_at", "ends_at"] {
             assert!(sent.get(k).is_none(), "{k} must stay omitted: {sent}");
         }
         assert_eq!(sent["closed"], true);
         let h = Fake::ok(room_json());
-        call(&h, "room.update", ctx(USER, &ROOM_ADMIN_SCOPES, json!({"room_id": ROOM, "ends_at": null})))
-            .unwrap();
+        call(
+            &h,
+            "room.update",
+            ctx(
+                USER,
+                &ROOM_ADMIN_SCOPES,
+                json!({"room_id": ROOM, "ends_at": null}),
+            ),
+        )
+        .unwrap();
         assert_eq!(h.calls()[0].1["ends_at"], Value::Null);
         // A town hall is never settable through the tool.
-        assert!(call(&h, "room.update", ctx(USER, &ROOM_ADMIN_SCOPES,
-            json!({"room_id": ROOM, "kind": "town_hall"}))).is_err());
+        assert!(
+            call(
+                &h,
+                "room.update",
+                ctx(
+                    USER,
+                    &ROOM_ADMIN_SCOPES,
+                    json!({"room_id": ROOM, "kind": "town_hall"})
+                )
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1360,7 +1449,8 @@ mod tests {
             (
                 "room.kick".to_string(),
                 json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD,
-                       "actor_role": "moderator"})
+                       "actor_role": "moderator",
+                       "actor_scopes": ["rooms:kick", "rooms:mute", "rooms:lock", "rooms:hands"]})
             )
         );
         let f = Fake::ok(json!({"room_id": ROOM, "muted": 3, "x": 1}));
@@ -1373,7 +1463,8 @@ mod tests {
         assert_eq!(out, json!({"room_id": ROOM, "muted": 3}));
         assert_eq!(
             f.calls()[0].1,
-            json!({"room_id": ROOM, "actor_id": MOD, "actor_role": "admin"}),
+            json!({"room_id": ROOM, "actor_id": MOD, "actor_role": "admin",
+                   "actor_scopes": ["rooms:kick", "rooms:mute", "rooms:lock", "rooms:hands"]}),
             "mute_all names the caller so the server can exclude them"
         );
         let f = Fake::ok(json!({"room_id": ROOM, "locked": true}));
@@ -1981,6 +2072,6 @@ mod tests {
         for op in HandOp::ALL {
             assert!(TOOL_NAMES.contains(&op.tool()), "{}", op.tool());
         }
-        assert_eq!(TOOL_NAMES.len(), 22 + HandOp::ALL.len());
+        assert_eq!(TOOL_NAMES.len(), 23 + HandOp::ALL.len());
     }
 }

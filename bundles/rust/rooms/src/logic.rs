@@ -1032,6 +1032,7 @@ mod tests {
                     json!({"room_id": args["room_id"], "hand": {"participant_id": args["participant_id"], "raised_at": 1, "acknowledged_at": 2, "acknowledged_by": args["actor_id"]}}),
                 ),
                 "room.hand.reset" => Ok(json!({"room_id": args["room_id"], "cleared": 1})),
+                "participant.self" => Ok(json!({"participant": USER})),
                 other => panic!("unexpected tool {other}"),
             }
         }
@@ -1518,6 +1519,9 @@ mod tests {
             0,
         )
         .unwrap();
+        // `WasmIdent` (lib.rs, wasm-only) resolves the actor through this tool; the logic tests
+        // use a fake identity, so the call is made here to keep the fixture exhaustive.
+        s.invoke("participant.self", &json!({}), None).unwrap();
         chat(&format!("!room close {id}"), &s, &k, ADMIN);
         let mut seen: HashMap<String, Value> = HashMap::new();
         for (tool, args, _) in s.calls.borrow().iter() {
@@ -1578,7 +1582,10 @@ mod tests {
         // The host refuses the push: the error surfaces and nothing is saved locally.
         *s.fail.borrow_mut() = Some(ToolFail::Forbidden);
         for (op, args) in [
-            ("room.set_access", json!({"room_id": id, "allow_guests": false})),
+            (
+                "room.set_access",
+                json!({"room_id": id, "allow_guests": false}),
+            ),
             ("room.set_schedule", json!({"room_id": id})),
         ] {
             assert!(admin(op, &args, &s, &k, "a3", 0).is_err(), "{op}");

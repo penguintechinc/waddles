@@ -72,7 +72,11 @@ impl Ident for WasmIdent {
         WasmTools
             .invoke("participant.self", &json!({}), None)
             .ok()
-            .and_then(|v| v.get("participant").and_then(Value::as_str).map(str::to_string))
+            .and_then(|v| {
+                v.get("participant")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
             .filter(|p| logic::is_uuid(p))
             .ok_or_else(|| "actor unresolved".to_string())
     }

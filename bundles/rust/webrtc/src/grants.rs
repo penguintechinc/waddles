@@ -358,11 +358,7 @@ mod tests {
         assert_eq!(min_role.len(), MODERATOR_TOOLS.len());
         for tool in MODERATOR_TOOLS {
             assert_eq!(min_role[tool], "moderator", "{tool}");
-            assert_eq!(
-                moderation_scope(tool),
-                m["scopes"][tool].as_str(),
-                "{tool}"
-            );
+            assert_eq!(moderation_scope(tool), m["scopes"][tool].as_str(), "{tool}");
         }
         assert_eq!(m["self_service"], serde_json::json!([LEAVE_TOOL]));
         assert_eq!(moderation_scope(LEAVE_TOOL), m["leave_scope"].as_str());
