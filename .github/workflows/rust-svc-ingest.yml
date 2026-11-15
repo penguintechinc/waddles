@@ -100,6 +100,8 @@ jobs:
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/hub-venv"
           "$RUNNER_TEMP/hub-venv/bin/pip" install --require-hashes -r hub_api/requirements-dev.txt
+          # requirements-dev.txt predates the OTel ASGI/SQLAlchemy instrumentation deps; the runtime lock carries them
+          "$RUNNER_TEMP/hub-venv/bin/pip" install --require-hashes -r hub_api/requirements.txt
           "$RUNNER_TEMP/hub-venv/bin/pip" install --require-hashes -r libs/flask_core/requirements.txt
 
       - name: Install Rust 1.97.1

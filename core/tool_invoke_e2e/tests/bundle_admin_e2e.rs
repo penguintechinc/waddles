@@ -472,7 +472,7 @@ async fn start(
     // The backend gets its OWN connection: the reader below BLPOPs on `conn`, and a blocking
     // command stalls every other user of a multiplexed connection (production hub-api opens a
     // fresh connection per call for the same reason).
-    let backend_conn = client.get_multiplexed_async_connection().await.unwrap();
+    let backend_conn = client.get_connection_manager().await.unwrap();
     let backend = Arc::new(ValkeyBackend::new(backend_conn));
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(run_consumer(
