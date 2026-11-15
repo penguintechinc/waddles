@@ -211,7 +211,7 @@ spec:
                   (and the core-bundle-seeder, which shares this identity) writes bundle
                   components/sidecars to pipeline.rustDataPlane.bundleExecutor.bucketName
                   ("waddles-bundles"), NOT bucketName above -- without a grant here every
-                  publish 403s even though bundle-executor's own Read/List-only grant on this
+                  publish 403s even though svc-bundles-executor's own Read/List-only grant on this
                   SAME bucket (below) is correctly scoped. */}}
                   "Read:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}",
                   "Write:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}",
@@ -219,13 +219,24 @@ spec:
                 ]
               },
               {
-                "name": "bundle-executor",
+                "name": "svc-bundles-executor",
                 "credentials": [
                   {"accessKey": "${DATAPLANE_S3_ACCESS_KEY_ID}", "secretKey": "${DATAPLANE_S3_SECRET_ACCESS_KEY}"}
                 ],
                 "actions": [
                   "Read:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}",
                   "List:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}"
+                ]
+              },
+              {
+                "name": "svc-bundles-precompiler",
+                "credentials": [
+                  {"accessKey": "${PRECOMPILER_S3_ACCESS_KEY_ID}", "secretKey": "${PRECOMPILER_S3_SECRET_ACCESS_KEY}"}
+                ],
+                "actions": [
+                  "Read:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}",
+                  "List:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}",
+                  "Write:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}/precompiled"
                 ]
               },
               {
@@ -311,6 +322,16 @@ spec:
             secretKeyRef:
               name: waddlebot-secrets
               key: BUCKET_INIT_S3_SECRET_ACCESS_KEY
+        - name: PRECOMPILER_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: PRECOMPILER_S3_ACCESS_KEY_ID
+        - name: PRECOMPILER_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: PRECOMPILER_S3_SECRET_ACCESS_KEY
         - name: STREAMING_S3_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:

@@ -22,10 +22,17 @@ use super::super::tests::{caps, discord_scope, scope, FakeRelayQueue};
 use super::super::{
     ActorId, CapabilityHandler, InvokeScope, RelayOp, StageCapabilities, ToolWiring,
 };
-use super::{transitional_decl, validate_args, OpClass};
+use super::{validate_args, OpClass};
 use crate::actor::{ActorDirectory, ActorError, BoxFuture as ActorFuture};
 use crate::host_api::ConnectionRegistry;
 use crate::platform_user::{BoxFuture as UserFuture, PlatformUserResolver, ResolveError};
+
+#[path = "host_tools_discord_manifest_tests.rs"]
+mod discord_manifest_tests;
+#[path = "host_tools_twitch_manifest_tests.rs"]
+mod twitch_manifest_tests;
+#[path = "host_tools_youtube_manifest_tests.rs"]
+mod youtube_manifest_tests;
 
 const APP: &str = "waddles.test.app.caller";
 const TWITCH_SVC: &str = "waddles.core.service.twitch";
@@ -101,6 +108,28 @@ fn exported(name: &str, scope: Option<&str>, host_op: Option<HostOpDecl>) -> Exp
     }
 }
 
+/// The host-op tools of a platform bundle's REAL manifest, loaded from the consent summary the
+/// hub approval pipeline derives from it (`scripts/host_tool_summary.py` regenerates the
+/// fixture; a Python test fails when it drifts). Zero tools is a failure, never an empty pass.
+pub(crate) fn manifest_tools(platform: &str) -> Vec<ExportedToolInfo> {
+    let path = format!(
+        "{}/tests/fixtures/host_tools/{platform}.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let exported: Value = serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let info = ToolManifestInfo::from_summary(
+        &json!({"capabilities": ["mcp.tools"], "exportedTools": exported}),
+    );
+    let tools: Vec<ExportedToolInfo> = info
+        .exported
+        .into_iter()
+        .filter(|t| t.host_op.is_some())
+        .collect();
+    assert!(!tools.is_empty(), "{path}: no host-op tools parsed");
+    tools
+}
+
 fn row(app: &str, version_id: i64, tools: ToolManifestInfo) -> ActiveBundleRow {
     ActiveBundleRow {
         app_id: app.to_string(),
@@ -113,6 +142,8 @@ fn row(app: &str, version_id: i64, tools: ToolManifestInfo) -> ActiveBundleRow {
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
         declared_capabilities: Vec::new(),
+        egress: Vec::new(),
+        egress_rps: None,
         tools,
     }
 }
@@ -749,7 +780,15 @@ fn plan_for(tool: &str, args: Value) -> ToolPlan {
     }
 }
 
-/// Runs a transitional-declared Discord tool through the generic engine (as `tool.invoke` does
+/// The REAL manifest declaration of a Discord tool (consent-summary fixture).
+fn discord_decl(tool: &str) -> Option<HostOpDecl> {
+    manifest_tools("discord")
+        .into_iter()
+        .find(|t| t.name == tool)
+        .and_then(|t| t.host_op)
+}
+
+/// Runs a manifest-declared Discord tool through the generic engine (as `tool.invoke` does
 /// after the planner).
 async fn run_role(
     c: &StageCapabilities<FakeRelayQueue>,
@@ -757,7 +796,7 @@ async fn run_role(
     tool: &str,
     args: Value,
 ) -> Result<Value, ToolRefusal> {
-    let d = transitional_decl(DISCORD_SVC, tool).unwrap_or_else(|| panic!("no decl for {tool}"));
+    let d = discord_decl(tool).unwrap_or_else(|| panic!("no decl for {tool}"));
     c.run_host_tool(sc, &plan_for(tool, args), &d).await
 }
 
@@ -775,7 +814,7 @@ fn role_args(extra: Value) -> Value {
 }
 
 #[tokio::test]
-async fn transitional_declarations_cover_exactly_the_pre_declaration_discord_tools() {
+async fn the_discord_manifest_declares_every_role_and_event_tool() {
     for t in [
         ROLES_ADD,
         ROLES_REMOVE,
@@ -786,13 +825,13 @@ async fn transitional_declarations_cover_exactly_the_pre_declaration_discord_too
         "discord.scheduled_event.cancel",
         "discord.scheduled_event.delete",
     ] {
-        assert!(transitional_decl(DISCORD_SVC, t).is_some(), "{t}");
-        assert!(
-            transitional_decl(TWITCH_SVC, t).is_none(),
-            "{t} is discord-only"
-        );
+        let d = discord_decl(t).unwrap_or_else(|| panic!("{t} has no manifest host_op"));
+        assert_eq!(d.platform, "discord", "{t} is discord-only");
     }
-    assert!(transitional_decl(DISCORD_SVC, "classify_frame").is_none());
+    assert!(
+        discord_decl("classify_frame").is_none(),
+        "guest tools stay guest-served"
+    );
 }
 
 #[tokio::test]
@@ -1279,10 +1318,10 @@ async fn stable_refusal_codes_are_the_message_prefix() {
         err.message
     );
 
-    // not_supported: kick registers no ops; an unregistered op is explicit.
+    // not_supported: kick registers no `mod.kick` op; an unregistered op is explicit.
     let c = build(
         rig_for("kick"),
-        mod_tools("kick", "mod.ban"),
+        mod_tools("kick", "mod.kick"),
         FakeRelayQueue::with_live_drain(),
     );
     let err = c
@@ -1414,6 +1453,53 @@ async fn relay_push_can_never_reach_host_tool_only_ops_even_with_every_grant() {
 }
 
 #[tokio::test]
+async fn relay_push_refuses_eventsub_create_and_delete_but_list_still_queues() {
+    // The host reconcile path alone may create/delete EventSub subscriptions; `caps()` holds
+    // every grant, so the refusal must be `host_tool_only`, before any grant check or queueing.
+    let mut refused = 0;
+    for op in ["eventsub.create", "eventsub.delete"] {
+        let c = caps(FakeRelayQueue::with_live_drain());
+        let err = c
+            .handle(
+                &scope(),
+                HostCallBody {
+                    app_id: "waddles.bot.commands.default".to_string(),
+                    capability: CapabilityKind::Relay,
+                    op: "send".to_string(),
+                    args: json!({
+                        "provider": "twitch",
+                        "message_json": json!({"op": op}).to_string(),
+                    }),
+                    call_id: 1,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_tool_only", "{op}");
+        assert!(c.relay_queue.envelopes().is_empty(), "{op}");
+        refused += 1;
+    }
+    assert_eq!(refused, 2, "denominator: eventsub ops refused");
+    let c = caps(FakeRelayQueue::with_live_drain());
+    c.handle(
+        &scope(),
+        HostCallBody {
+            app_id: "waddles.bot.commands.default".to_string(),
+            capability: CapabilityKind::Relay,
+            op: "send".to_string(),
+            args: json!({
+                "provider": "twitch",
+                "message_json": json!({"op": "eventsub.list"}).to_string(),
+            }),
+            call_id: 1,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.relay_queue.envelopes().len(), 1);
+}
+
+#[tokio::test]
 async fn chat_clear_needs_its_own_permission_not_chat_delete() {
     let tools = vec![exported(
         "twitch.chat.clear",
@@ -1533,7 +1619,7 @@ async fn role_and_event_host_ops_require_the_service_bundles_moderation_grant() 
 }
 
 #[tokio::test]
-async fn a_placeholder_user_wire_cannot_smuggle_a_destructive_op_past_the_protected_check() {
+async fn a_placeholder_user_wire_still_clears_the_protected_check_before_a_destructive_op() {
     let tools = vec![exported(
         "twitch.moderation.ban",
         None,
@@ -1543,11 +1629,52 @@ async fn a_placeholder_user_wire_cannot_smuggle_a_destructive_op_past_the_protec
         }))),
     )];
     let c = build(Rig::default(), tools, FakeRelayQueue::with_live_drain());
-    // UUID_C is an admin: with a placeholder wire the check would have been skipped.
+    // UUID_C is an admin: the placeholder wire must not skip the host-side check.
     let err = c
         .handle(
             &twitch_event(Some("500")),
             invoke("twitch.moderation.ban", json!({"user": UUID_C})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "forbidden");
+    assert!(err.message.contains("protected_target"), "{}", err.message);
+    assert!(c.relay_queue.envelopes().is_empty());
+    // A non-protected target passes the check and rides the wire as the placeholder only.
+    c.handle(
+        &twitch_event(Some("500")),
+        invoke("twitch.moderation.ban", json!({"user": UUID_B})),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{}: {}", e.code, e.message));
+    let envs = c.relay_queue.envelopes();
+    assert_eq!(envs.len(), 1);
+    assert_eq!(envs[0]["user_id"], format!("{{user:{UUID_B}}}"));
+    assert!(
+        !envs[0].to_string().contains("999000111"),
+        "raw id never queued"
+    );
+}
+
+#[tokio::test]
+async fn a_placeholder_user_wire_is_refused_for_non_role_non_moderation_ops() {
+    let tools = vec![exported(
+        "twitch.chat.delete_by_user",
+        None,
+        Some(decl(json!({
+            "platform": "twitch", "op": "chat.delete", "user": "user",
+            "userWire": "placeholder", "required": ["user"], "origin": "channel"
+        }))),
+    )];
+    let rig = Rig {
+        svc_grants: vec!["chat.delete:twitch".to_string()],
+        ..Rig::default()
+    };
+    let c = build(rig, tools, FakeRelayQueue::with_live_drain());
+    let err = c
+        .handle(
+            &twitch_event(Some("500")),
+            invoke("twitch.chat.delete_by_user", json!({"user": UUID_A})),
         )
         .await
         .unwrap_err();
@@ -1572,6 +1699,7 @@ async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() 
             "youtube",
             vec!["mod.ban", "mod.unban", "mod.add", "mod.remove"],
         ),
+        ("kick", vec!["mod.ban", "mod.timeout", "mod.unban"]),
     ] {
         for op in ops {
             let c = caps(FakeRelayQueue::with_live_drain());
@@ -1596,8 +1724,12 @@ async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() 
             checked += 1;
         }
     }
-    assert_eq!(checked, 3 + 4 + 4, "denominator: moderation ops attempted");
-    // Kick registers no ops and is not a relay provider: refused outright, never queued.
+    assert_eq!(
+        checked,
+        3 + 4 + 4 + 3,
+        "denominator: moderation ops attempted"
+    );
+    // A platform that is not a relay provider is refused outright, never queued.
     let c = caps(FakeRelayQueue::with_live_drain());
     let err = c
         .handle(
@@ -1607,7 +1739,7 @@ async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() 
                 capability: CapabilityKind::Relay,
                 op: "send".to_string(),
                 args: json!({
-                    "provider": "kick",
+                    "provider": "nosuchplatform",
                     "message_json": json!({"op": "mod.ban", "user_id": "1"}).to_string(),
                 }),
                 call_id: 1,

@@ -51,6 +51,7 @@ function buildPages({ communityId, tenantSlug }) {
   { name: 'admin-overview', path: `/admin/${communityId}` },
   { name: 'admin-members', path: `/admin/${communityId}/members` },
   { name: 'admin-modules', path: `/admin/${communityId}/modules` },
+  { name: 'admin-app-settings', path: `/admin/${communityId}/settings` },
   { name: 'admin-stream-overlays', path: `/admin/${communityId}/stream-overlays` },
   { name: 'admin-domains', path: `/admin/${communityId}/domains` },
   { name: 'admin-servers', path: `/admin/${communityId}/servers` },

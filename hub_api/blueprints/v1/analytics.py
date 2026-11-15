@@ -233,7 +233,7 @@ async def get_member_reputation(community_id: int, user_id: int) -> Any:
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
 async def get_platform_overview() -> Any:
     """`GET /api/v1/analytics/platform/overview`."""
-    return await svc.platform_overview(_proxy_client)
+    return await svc.platform_overview(_proxy_client, current_app.config["async_dal"])
 
 
 @analytics_bp.route("/platform/reputation", methods=["GET"])
@@ -241,7 +241,7 @@ async def get_platform_overview() -> Any:
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
 async def get_platform_reputation() -> Any:
     """`GET /api/v1/analytics/platform/reputation`."""
-    return await svc.reputation_distribution(_proxy_client)
+    return await svc.reputation_distribution(current_app.config["async_dal"])
 
 
 @analytics_bp.route("/platform/growth", methods=["GET"])

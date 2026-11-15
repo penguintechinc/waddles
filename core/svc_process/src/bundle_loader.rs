@@ -290,6 +290,17 @@ pub async fn run_tick(
     for row in &active {
         kv_capabilities.update(row.app_id.clone(), row.declared_capabilities.clone());
     }
+    // The approved manifest egress feeds the bundle http guard (no other
+    // production writer exists for its catalog): THIS scope's rows are
+    // replaced wholesale every tick, so a deactivated bundle drops out and no
+    // other scope's rows are ever touched or merged.
+    bundle_host_http::grants::ActiveEgressSnapshot::global().replace_scope(
+        i64::from(tenant_id),
+        i64::from(community_id),
+        active
+            .iter()
+            .map(|r| (r.app_id.clone(), r.egress.clone(), r.egress_rps)),
+    );
     // Wholesale-replace the shared `app_version` snapshot from this SAME
     // read, before the load/unload decision below -- `crate::spine`/
     // `crate::source_supervisor`'s per-invocation resolution (spec SS4/
@@ -408,6 +419,8 @@ mod tests {
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
             declared_capabilities: Vec::new(),
+            egress: Vec::new(),
+            egress_rps: None,
             tools: Default::default(),
         }
     }
@@ -1161,5 +1174,36 @@ mod tests {
         )
         .await;
         assert!(!kv_capabilities.declares("waddles.a", "kv"));
+    }
+
+    /// The poll loop ticks with no executor connected, issues no DB work while the kill-switch
+    /// is on, and returns once its shutdown signal fires.
+    #[tokio::test]
+    async fn run_ticks_with_no_executor_and_stops_on_shutdown() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(run(
+            db,
+            1,
+            0,
+            std::time::Duration::from_millis(10),
+            1000,
+            Arc::new(FixedGate(false)),
+            Arc::new(crate::host_api::ConnectionRegistry::new()),
+            test_metric(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+            rx,
+            test_snapshot(),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert!(
+            !handle.is_finished(),
+            "the loop keeps polling until told to stop"
+        );
+        tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("loop must exit on shutdown")
+            .unwrap();
     }
 }

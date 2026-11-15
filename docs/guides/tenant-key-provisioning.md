@@ -22,36 +22,42 @@ Metrics: `waddles_tenant_key_provisioning_total{trigger,result}`,
 Proto: `proto/waddles/hub/internal/v1/key.proto`; served by hub-api's existing internal gRPC server
 (`hub_api/grpc_internal`). REST was rejected: all intra-cluster calls are gRPC.
 
-**Request** `GetTenantDekRequest`: `uint32 tenant_id` (numeric, >= 1), `TenantDekPurpose purpose`
-(`AT_REST=1`, `INGEST_STREAM=2`; 0 invalid), `uint32 dek_version` (0 = active; non-zero = a specific,
-possibly retired version), `bytes caller_ephemeral_public_key` (32 raw bytes, X25519, fresh per call).
+**Request** `GetTenantDekRequest`: `uint32 tenant_id` (numeric, >= 1; never a slug), `TenantDekPurpose purpose`
+(`AT_REST=1` only -- `INGEST_STREAM` keys come from `GetStreamDek`; 0 is invalid), `uint32 dek_version`
+(0 = active; non-zero = a specific, possibly retired version), `bytes caller_ephemeral_public_key`
+(32 raw bytes, X25519, fresh per call).
 
 **Response** `GetTenantDekResponse`: `bytes enc` (32, server one-time X25519 public key),
-`bytes ciphertext` (48 = DEK + GCM tag), `uint32 dek_version`, `uint32 ttl_seconds`.
+`bytes ciphertext` (48 = key + GCM tag), `uint32 dek_version`, `uint32 ttl_seconds`.
 
-**Seal** (identical to `hpke_seal_open`): `shared = X25519(client_secret, enc)`;
+**One broker, not two.** `GetTenantDek` is served by the same `StreamDekBroker`
+(`hub_api/services/stream_dek_broker.py`) as `GetStreamDek`: same authorization, sealing and audit
+path, different key lineage (`at-rest` via `runtime.service`, `ingest-stream` via
+`runtime.stream_service`). The raw DEK never leaves hub-api: the data plane receives the
+HKDF-derived data subkey (`TenantEnvelopeService.data_key`), which is domain-separated per lineage,
+so an at-rest key can never open stream ciphertext and vice versa.
+
+**Seal** (identical to `GetStreamDek` and `hpke_seal_open`): `shared = X25519(client_secret, enc)`;
 `key||nonce = HKDF-SHA256(salt none, ikm shared, info context)` (44 bytes: 32 + 12);
-`DEK = AES-256-GCM-open(key, nonce, aad = context, ciphertext)`;
-`context = "<service_id>|<tenant_id>|<purpose_label>|1"` where `service_id` is the caller's service
-name (last SPIFFE path segment of the JWT `sub`, e.g. `svc-process`), `purpose_label` is `at-rest` or
-`ingest-stream`, and the trailing `1` is fixed.
+`key = AES-256-GCM-open(key, nonce, aad = context, ciphertext)`;
+`context = "<service_id>|<tenant_id>|at-rest|<dek_version>"` where `service_id` is the caller's
+service name (last SPIFFE path segment of the JWT `sub`, e.g. `svc-process`) and `dek_version` is the
+version in the response.
 
-**Auth**: scope `keys:tenant-dek:read` + `tenant == system` in the machine JWT (`authorization:
-Bearer`), caller allow-list (`svc-ingest`, `svc-process`, `svc-action`; `KEYS_BROKER_ALLOWED_SERVICES`
-overrides), and, when the listener runs mTLS (`GRPC_TLS_CLIENT_CA_PATH`), the client X.509-SVID URI SAN
-must equal the JWT `sub`. Helm grants the scope to those three identities only
+**Auth**: scope `keys:tenant-dek:read` in the machine JWT (`authorization: Bearer`); the `sub` must be
+a SPIFFE id in this deployment's env (`SPIFFE_ENV`) naming `svc-ingest`, `svc-gateway`,
+`svc-process` or `svc-action`; a tenant-bound token may only ask for its own tenant, the `system`
+tenant for any existing one. Helm grants the scope to the data-plane identities only
 (`serviceJwt.identities`). A client deadline <= 5 s is required (server-wide rule).
 
-**Status codes**: `UNAUTHENTICATED` (bad/missing token or scope), `PERMISSION_DENIED` (not
-allow-listed / non-system tenant / SVID mismatch), `INVALID_ARGUMENT`, `NOT_FOUND` (no usable key;
-the broker never provisions), `UNAVAILABLE` (KMS down or revoked: retryable, no fallback key),
-`RESOURCE_EXHAUSTED` (per-caller bucket `GRPC_TENANT_DEK_RPS`=5 / `GRPC_TENANT_DEK_BURST`=30),
-`INTERNAL` (audit write failed; key withheld).
+**Status codes**: `UNAUTHENTICATED` (bad/missing token or scope), `PERMISSION_DENIED` (service not
+allowed / tenant mismatch), `INVALID_ARGUMENT` (bad tenant, purpose or public key), `NOT_FOUND`
+(no such key version), `UNAVAILABLE` (KMS down or revoked, key store unwired, or the audit write
+failed -- retryable, no fallback key, key withheld), `RESOURCE_EXHAUSTED` (per-caller bucket
+`GRPC_TENANT_DEK_RPS`=5 / `GRPC_TENANT_DEK_BURST`=30).
 
-Every release writes an `audit_log` row (`keys.tenant_dek.release`: caller, tenant id, version,
-outcome) before the key is returned. Key material, the caller's public key and sealed bytes are
-never logged or put in telemetry. Metrics: `waddles_tenant_dek_broker_requests_total{result}`,
-`waddles_tenant_dek_broker_duration_seconds{result}`; span `tenant_dek.release`; the existing gRPC
-OTel interceptor adds per-method latency.
-
-`GetStreamDek` (#442) is unchanged and still `UNIMPLEMENTED`.
+Every decision (issued or refused) writes `keystore.stream_dek_issuances` (alembic 0100/0110: caller
+service, tenant id, lineage, version, outcome); a key is returned only after its `issued` row
+commits. Key material, the caller's public key and sealed bytes are never logged. Metrics and spans
+are the broker's (`waddles_stream_dek_requests`, `waddles_stream_dek_duration_ms`, span
+`stream_dek.issue`) plus the gRPC OTel interceptor's per-method latency.

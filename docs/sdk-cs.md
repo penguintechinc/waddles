@@ -1,6 +1,6 @@
 # Building a C# app bundle on the newer WIT worlds (`waddle-sdk-cs`)
 
-For the SuperPenguin port wave. Reference bundle: `bundles/csharp/superpenguin-roll` (economy wager, identity, tool call, kv).
+For the SuperPenguin port wave. Reference bundles: `bundles/csharp/superpenguin-roll` (wager), `bundles/csharp/superpenguin-fishing` (multi-module stateful game: replay protocol, overlay, tournaments) (economy wager, identity, tool call, kv).
 Older `stage`-world bundle (relay only): `bundles/csharp/csping`. SDK: `sdk/waddle-sdk-cs`.
 
 ## 1. Pick the world
@@ -53,7 +53,7 @@ pin its JSON schema in a contract-fixture test. Today use WIT `Ai.Generate`.
 ### Money rules every port must follow
 - Exactly ONE host economy call per logical settlement; the host de-duplicates per (event, call ordinal), so a redelivery that replays the same calls moves nothing.
 - Anything random is rolled ONCE and recorded BEFORE the money call and reused on redelivery, or the reply will not match the ledger. ALWAYS use `State.IdempotentOutcome` (see `RollLogic`): it refuses a blank `MessageId`, keys on message id + platform + actor uuid + command (length-prefixed), and `TryReplay` takes a `matches` predicate so the stored record must carry the same actor/command (store them in your record). Anything that does not match is a FRESH request: full validation (max bet), cooldown, new roll. Never key replay on the message id alone.
-- `actor`-only debit: `Wager`/`Debit`/`Transfer(from)` must name the invocation's actor (`identity.ResolveActor()`); victim-debit games (steal) need a redesign (pot/fine).
+- `actor`-only debit: `Wager`/`Debit`/`Transfer(from)` must name the invocation's actor (`identity.ResolveActor()`); victim-debit games (steal) use the economy SERVICE tool `transfer_from` via `EconomyServiceClient.TransferFrom(from, to, amount, reason)` (dangerous, admin-approved grant; not-granted surfaces as `Denied`/`not_granted`, which the app must turn into a loud refusal). See `bundles/csharp/superpenguin-steal`. Multi-entrant pot games (ffa, heist) claim one kv slot per entrant and settle from a write-ahead plan; see their READMEs.
 - Handle `InsufficientFunds`/`OverCap` with a chat reply; let `Denied`/`Unavailable`/`Backend`/`NotAMember` propagate (fail loud, never an "unpaid" reply).
 - Currency name = economy service alias (`EconomyServiceTools.PointsView`); fall back to `DefaultAlias` only with a logged warning. Names of people = `UserPlaceholder.For(uuid)` (host renders the display name at egress; no name lookup exists or is needed).
 - Logs: ids/op/outcome/counts only. State keys: `[A-Za-z0-9_.-]`, <=256 bytes, hash identifiers (`StateKey`).
@@ -71,6 +71,11 @@ Use `IStateStore` in game code so either store works.
 **Scheduling.** No WIT world has a scheduler for app bundles. `TickScheduler` emulates one: persist tasks (`Schedule(id, dueAtMillis, kind, payload)`), call `TakeDue()` at the top of every
 `transform`. Limitations to document in each bundle: (1) a deadline only resolves when ANOTHER event reaches the bundle, and a bundle only receives events matching its own `consumes` filters (its command prefixes);
 (2) so a join window nobody touches again settles late - use `LateByMillis` to void stale windows; (3) one board <= 64 tasks; (4) exactly-once across racing events on db (CAS), best-effort+claim on kv.
+
+**Timers in practice (`superpenguin-timers`).** Announcement timers are the worked example of the no-scheduler rule: the schedule is one kv
+document and every chat message the bundle receives is a "tick" that announces at most one due group (claimed per group and due time, so
+racing events announce once). A quiet channel announces late, the announcement goes to the channel of the triggering message, and
+online-only / stream-start behavior is absent until a scheduled export and a stream-online signal exist.
 
 ## 5. Build and verify
 
@@ -121,3 +126,14 @@ atomic host ledger primitive. They are not economy service tools.
 `EconomyServiceClient` invokes existing service tools for balance and credit/debit
 operations, with an explicit operation identity for multiple writes in one Duel plan.
 No private currency ledger or synthesized fallback replaces a failed tool call.
+
+## Lessons from the fishing port (`superpenguin-fishing`)
+
+- **No `System.Security.Cryptography` in the NativeAOT-wasi build**: `RandomNumberGenerator` throws `PlatformNotSupportedException` at runtime (host unit tests pass, the real-executor test traps). Use `System.Random.Shared`/`WaddleRandom`; record a seed so replays reproduce.
+- **kv is per app id**: bundles cannot share state and app->app calls are forbidden, so a game whose modules share state (gold, inventory, tournaments) ships as ONE bundle; keep module boundaries behind a store interface (`IFishingStore`).
+- **Replay protocol for multi-write commands**: record the outcome under the replay key BEFORE the state write, mark the key applied inside the single-value state write (keep the last N keys), repair a crash from the recorded seed; follow-up writes (tournament, boards) must be idempotent upserts.
+- **No CAS on kv**: serialize per-player mutations with `TryClaim` + `finally Delete` (short TTL self-heals).
+- **Settlement from `TickScheduler`**: use `Pending()` then `Cancel()` after a successful, idempotent payout (not `TakeDue()`, which claims before the side effect and loses the payout on a crash). Money via service tools needs a key derived from the window id, not the event id.
+- **Overlay**: declarative only, opt-in flag default OFF, and a refused push is surfaced in the reply (the host import is `not_implemented` in the executor today).
+- **Real-executor matrix**: `SUPERPENGUIN_ONLY=<game>` runs a single port; cold compile of a ~10.8 MB component is minutes on a debug wasmtime build.
+- kv budget per command: keep reads/writes well under 64 ops (a 10-cast fishing command with two tournaments is ~26).

@@ -68,13 +68,16 @@ jobs:
         crate:
           - bundle_active_set
           - bundle_capability_gate
+          - bundle_config_db
           - bundle_compiler
           - bundle_executor
+          - bundle_host_credentials
           - bundle_host_db
           - bundle_host_http
           - bundle_host_kv
           - bundle_tool_call
           - circuit_breaker
+          - command_latency
           - connector_e2e
           - discord_mentions
           - egress_assertion

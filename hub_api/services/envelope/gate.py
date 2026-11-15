@@ -28,8 +28,9 @@ import logging
 from typing import Protocol
 
 from flask_core.entitlement import EntitlementClient, get_entitlement_client
+from flask_core.feature_flags import current_request_host as _trusted_host
 from flask_core.tier_catalog import TIER_ENTERPRISE
-from quart import has_request_context, request
+from quart import has_request_context
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ def current_request_host() -> str | None:
     """
     if not has_request_context():
         return None
-    return str(request.host)
+    return _trusted_host()
 
 
 class ExternalKmsEntitlement(Protocol):

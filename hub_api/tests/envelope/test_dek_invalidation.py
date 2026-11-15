@@ -42,6 +42,13 @@ def _recorder(client: FakeStreamClient):
     return publish
 
 
+def _drop_cached_keys(service) -> None:  # type: ignore[no-untyped-def]
+    """Force the next `data_key` to unwrap from the stored row (a cold data-key cache)."""
+    state = service._state(TENANT_A)
+    state.keys.clear()
+    state.active_version = None
+
+
 async def test_publish_uses_the_exact_stream_and_fields_the_rust_listener_reads() -> None:
     client = FakeStreamClient()
     await publish_dek_invalidation(7, "rotated", client=client)
@@ -89,8 +96,9 @@ async def test_revocation_publishes_and_still_raises_unavailable(make_harness) -
         raise KmsAccessDeniedError("denied", code="AccessDenied")
 
     h.kek.unwrap = deny  # type: ignore[method-assign]
+    _drop_cached_keys(h.service)
     with pytest.raises(TenantKeyUnavailableError):
-        await h.service.export_dek(TENANT_A)
+        await h.service.data_key(TENANT_A)
     assert [f for _, f in client.entries] == [
         {"tenant": str(TENANT_A), "purpose": "at-rest", "reason": "revoked"}
     ]
@@ -105,5 +113,6 @@ async def test_revocation_publish_failure_does_not_mask_the_revocation(make_harn
         raise KmsAccessDeniedError("denied", code="AccessDenied")
 
     h.kek.unwrap = deny  # type: ignore[method-assign]
+    _drop_cached_keys(h.service)
     with pytest.raises(TenantKeyUnavailableError):
-        await h.service.export_dek(TENANT_A)
+        await h.service.data_key(TENANT_A)

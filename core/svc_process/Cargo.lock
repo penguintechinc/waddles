@@ -632,6 +632,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -644,6 +645,33 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "bundle-config-db"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hub_client",
+ "opentelemetry",
+ "redis",
+ "sea-orm",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
+name = "bundle-host-credentials"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bundle-host-http",
+ "connection_resolver",
+ "redis",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -671,6 +699,20 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "bundle-host-gameserver-net"
+version = "0.1.0"
+dependencies = [
+ "bundle-host-http",
+ "connection_resolver",
+ "opentelemetry",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -711,6 +753,7 @@ dependencies = [
  "bundle-host-http",
  "bytes",
  "http",
+ "hub_client",
  "object_store",
  "opentelemetry",
  "redis",
@@ -719,6 +762,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tonic",
  "tracing",
  "uuid",
  "zeroize",
@@ -931,6 +975,30 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "command-latency"
+version = "0.1.0"
+dependencies = [
+ "opentelemetry",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+]
+
+[[package]]
+name = "connection_resolver"
+version = "0.1.0"
+dependencies = [
+ "hub_client",
+ "serde",
+ "service_auth",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -1788,9 +1856,14 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 name = "hub_client"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "async-trait",
+ "hkdf 0.12.4",
+ "opentelemetry",
  "prost",
+ "redis",
  "service_auth",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
  "tokio",
  "tonic",
@@ -1798,6 +1871,8 @@ dependencies = [
  "tonic-prost-build",
  "tower",
  "tracing",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -2722,8 +2797,8 @@ dependencies = [
 
 [[package]]
 name = "penguin-bundle-host"
-version = "0.5.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=53e95619f1b3e49e1150b78a125981fcc5905d8a#53e95619f1b3e49e1150b78a125981fcc5905d8a"
+version = "0.6.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=96a5065f1d379ea0cfc7c7716c6eab628138330a#96a5065f1d379ea0cfc7c7716c6eab628138330a"
 dependencies = [
  "regex",
  "serde",
@@ -3846,6 +3921,7 @@ dependencies = [
  "hyper-util",
  "jsonwebtoken",
  "opentelemetry",
+ "opentelemetry_sdk",
  "prost",
  "rustls",
  "rustls-pki-types",
@@ -4237,8 +4313,11 @@ dependencies = [
  "base64 0.22.1",
  "bundle-active-set",
  "bundle-capability-gate",
+ "bundle-config-db",
+ "bundle-host-credentials",
  "bundle-host-db",
  "bundle-host-economy",
+ "bundle-host-gameserver-net",
  "bundle-host-http",
  "bundle-host-kv",
  "bundle-host-media",
@@ -4249,9 +4328,13 @@ dependencies = [
  "chrono",
  "circuit-breaker",
  "clap",
+ "command-latency",
+ "connection_resolver",
  "futures-util",
  "governor",
+ "hex",
  "hkdf 0.12.4",
+ "hmac 0.12.1",
  "http-body-util",
  "hub_client",
  "hyper",
@@ -4283,7 +4366,6 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "uuid",
- "x25519-dalek",
  "zeroize",
 ]
 

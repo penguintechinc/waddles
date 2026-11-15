@@ -97,6 +97,12 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     "storage.tables": "normal",
     "storage.objects": "normal",
     "overlay.media": "dangerous",
+    #: Control plane of svc-streaming's WebRTC rooms/SFU (`webrtc` host capability):
+    #: create/close rooms, mint short-lived room join tokens, route tracks. `dangerous`:
+    #: it opens real-time media ingress/egress and mints credentials. Host wiring
+    #: (gate PermissionFamily + stage forwarding) is separate work -- see the webrtc
+    #: service bundle PR ("Needs from host seams (S0)").
+    "webrtc.control": "dangerous",
     #: Read-only subscribe to svc-streaming-rust's stream-lifecycle hooks
     #: (`on-start`/`on-stop`/`on-segment`/`on-recording-ready`,
     #: `wit/waddle-bundle/stage.wit`'s `streaming-lifecycle` export,
@@ -129,6 +135,12 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     #: (`core/bundle_capability_gate`'s `reputation.community.admin`).
     #: `dangerous` -- an admin must explicitly approve the grant.
     "reputation.community.admin": "dangerous",
+    #: Core-only reputation families mirrored from `core/bundle_capability_gate`
+    #: (the host refuses non-`waddles.core.` apps): own/admin ledger page, the
+    #: tenant aggregate + auto-ban policy, and MODERATION-class deltas (cap 200).
+    "reputation.history.read": "normal",
+    "reputation.tenant.read": "normal",
+    "reputation.moderation.write": "dangerous",
     #: Shared community currency (issue #714), `core/bundle_capability_gate`'s
     #: `economy.*` families. `read` = balance/leaderboard; `wager` = atomic
     #: stake-debit/payout-credit (+ `max-bet`); `transfer` = member-to-member.
@@ -147,6 +159,16 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     "economy.debit": "dangerous",
     "economy.admin_adjust": "dangerous",
     "economy.pot.pay": "dangerous",
+    #: ELEVATED app-caller primitives of the economy SERVICE bundle
+    #: (`core/bundle_capability_gate`'s `economy.transfer_from` /
+    #: `economy.app_mint`). The grant that matters is the CALLING app's: an app
+    #: needs `transfer_from` to move/burn a NON-actor member's funds and
+    #: `app_mint` to create/set currency through the service. `dangerous` ->
+    #: bold-red per-app community-admin approval, recorded with the approver;
+    #: the grant `params` carry the admin-set host caps (see
+    #: `bundle_manifest_v2._ECONOMY_ELEVATED_CAP_PARAMS`).
+    "economy.transfer_from": "dangerous",
+    "economy.app_mint": "dangerous",
     #: Resolves the invocation's triggering actor (and an @mention target the
     #: triggering message carried) to the community `user_uuid` that
     #: `economy.*`/`reputation.*` name their targets by -- UUID-only, never a
@@ -167,6 +189,12 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     "platform.context": "normal",
     "platform.clock": "normal",
     "platform.log": "normal",
+    #: Host-mediated game-server network access (`gameserver-net` WIT
+    #: interface: rcon-open / tcp-open / udp-exchange). `dangerous`, global-admin
+    #: approved, first-party-core only. The guest names an admin-registered
+    #: connection by UUID; the host resolves address + RCON password, runs the
+    #: SSRF guard on the resolved IP, and never returns either to the guest.
+    "gameserver.net": "dangerous",
 }
 
 #: Compiled-in relay providers `chat.send:<platform>`/`moderation.<platform>`

@@ -1,0 +1,16 @@
+{
+  "tool": "twitch.schedule.delete",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "segment_id": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "required": [
+      "segment_id"
+    ],
+    "additionalProperties": false
+  }
+}

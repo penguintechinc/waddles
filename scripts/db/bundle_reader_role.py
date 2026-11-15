@@ -47,6 +47,9 @@ TABLES = (
     "communities",
     "bundle_active_set_changes",
     "bundle_active_set_watermark",
+    # Narrow view (app_id of globally disabled bundles only) -- the reader never reads
+    # `app_catalog` itself. Migration 0095.
+    "bundle_disabled_apps",
 )
 
 

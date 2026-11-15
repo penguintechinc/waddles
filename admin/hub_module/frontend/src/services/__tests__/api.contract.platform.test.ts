@@ -3,7 +3,7 @@
  */
 import { afterAll, describe, it } from 'vitest';
 
-import api, { publicApi, communityApi, supportApi, platformApi, superAdminApi, marketplaceApi, unifiedMarketplaceApi, vendorApi, vendorPublicApi, oauthApi, marketplaceAdminApi } from '../api';
+import api, { publicApi, communityApi, supportApi, platformApi, superAdminApi, unifiedMarketplaceApi, vendorApi, vendorPublicApi, oauthApi, marketplaceAdminApi } from '../api';
 import { assertContractRow, recordRequests, type ContractRow } from '../../test/apiContract';
 
 const rec = recordRequests(api);
@@ -49,7 +49,6 @@ const PLATFORMAPI_ROWS: readonly ContractRow[] = [
   ['updateCommunity(id, data)', 'PUT /api/v1/platform/communities/{id}', { body: '@data' }],
   ['deactivateCommunity(id, reason)', 'DELETE /api/v1/platform/communities/{id}', { body: { reason: '@reason' } }],
   ['getHealth()', 'GET /api/v1/platform/health'],
-  ['getModules()', 'GET /api/v1/platform/modules'],
   ['getAuditLog(params)', 'GET /api/v1/platform/audit-log'],
   ['getStats()', 'GET /api/v1/platform/stats'],
 ];
@@ -62,11 +61,6 @@ const SUPERADMINAPI_ROWS: readonly ContractRow[] = [
   ['updateCommunity(id, data)', 'PUT /api/v1/superadmin/communities/{id}', { body: '@data' }],
   ['deleteCommunity(id)', 'DELETE /api/v1/superadmin/communities/{id}'],
   ['reassignOwner(id, data)', 'POST /api/v1/superadmin/communities/{id}/reassign', { body: '@data' }],
-  ['getAllModules(params)', 'GET /api/v1/superadmin/marketplace/modules'],
-  ['createModule(data)', 'POST /api/v1/superadmin/marketplace/modules', { body: '@data' }],
-  ['updateModule(id, data)', 'PUT /api/v1/superadmin/marketplace/modules/{id}', { body: '@data' }],
-  ['publishModule(id, isPublished)', 'PUT /api/v1/superadmin/marketplace/modules/{id}/publish', { body: { isPublished: '@isPublished' } }],
-  ['deleteModule(id)', 'DELETE /api/v1/superadmin/marketplace/modules/{id}'],
   ['getPlatformConfigs()', 'GET /api/v1/superadmin/platform-config'],
   ['updatePlatformConfig(platform, data)', 'PUT /api/v1/superadmin/platform-config/{platform}', { body: '@data' }],
   ['testPlatformConnection(platform)', 'POST /api/v1/superadmin/platform-config/{platform}/test'],
@@ -99,24 +93,11 @@ const SUPERADMINAPI_ROWS: readonly ContractRow[] = [
   ['generatePasswordReset(userId)', 'POST /api/v1/superadmin/users/{userId}/password-reset'],
 ];
 
-const MARKETPLACEAPI_ROWS: readonly ContractRow[] = [
-  ['browseModules(communityId, params)', 'GET /api/v1/admin/{communityId}/marketplace/modules'],
-  ['getModuleDetails(communityId, moduleId)', 'GET /api/v1/admin/{communityId}/marketplace/modules/{moduleId}'],
-  ['installModule(communityId, moduleId)', 'POST /api/v1/admin/{communityId}/marketplace/modules/{moduleId}/install'],
-  ['uninstallModule(communityId, moduleId)', 'DELETE /api/v1/admin/{communityId}/marketplace/modules/{moduleId}'],
-  ['configureModule(communityId, moduleId, data)', 'PUT /api/v1/admin/{communityId}/marketplace/modules/{moduleId}/config', { body: '@data' }],
-  ['addReview(communityId, moduleId, data)', 'POST /api/v1/admin/{communityId}/marketplace/modules/{moduleId}/review', { body: '@data' }],
-];
-
 const UNIFIEDMARKETPLACEAPI_ROWS: readonly ContractRow[] = [
   ['getCatalog(params)', 'GET /api/v1/marketplace/catalog'],
   ['getCatalogEntry(source, id, params)', 'GET /api/v1/marketplace/catalog/{source}/{id}'],
   ['getCategories()', 'GET /api/v1/marketplace/catalog/categories'],
   ['getFeatured(params)', 'GET /api/v1/marketplace/catalog/featured'],
-  ['getInstalled(communityId)', 'GET /api/v1/marketplace/communities/{communityId}/installed'],
-  ['installModule(communityId, data)', 'POST /api/v1/marketplace/communities/{communityId}/install', { body: '@data' }],
-  ['uninstallModule(communityId, moduleId, source)', 'DELETE /api/v1/marketplace/communities/{communityId}/install/{moduleId}', { params: { source: '@source' } }],
-  ['toggleModule(communityId, moduleId, data)', 'PUT /api/v1/marketplace/communities/{communityId}/install/{moduleId}', { body: '@data' }],
   ['getPricing(params)', 'GET /api/v1/marketplace/premium/pricing'],
   ['getPremiumStatus(communityId)', 'GET /api/v1/marketplace/premium/status/{communityId}'],
   ['subscribePremium(data)', 'POST /api/v1/marketplace/premium/subscribe', { body: '@data' }],
@@ -203,12 +184,6 @@ describe('platformApi request contract', () => {
 describe('superAdminApi request contract', () => {
   for (const row of SUPERADMINAPI_ROWS) {
     it(row[0], () => assertContractRow(superAdminApi, row, rec.calls));
-  }
-});
-
-describe('marketplaceApi request contract', () => {
-  for (const row of MARKETPLACEAPI_ROWS) {
-    it(row[0], () => assertContractRow(marketplaceApi, row, rec.calls));
   }
 });
 

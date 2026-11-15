@@ -31,14 +31,17 @@
 //! `role.add`/`role.remove` and the guild scheduled-event ops
 //! (`event.create|update|cancel|delete`) run as host duties.
 
+pub mod app_credentials;
 pub mod discord_duties;
 pub mod discord_slots;
+pub mod kick_slots;
 pub mod policy;
 pub mod router;
 pub mod subst;
 pub mod twitch_slots;
 pub mod verify;
 pub mod wire_builder;
+pub mod youtube_duties;
 pub mod youtube_slots;
 
 use std::collections::{BTreeMap, HashMap};
@@ -192,6 +195,19 @@ pub enum SlotError {
 /// Per-community slot / credential resolution, invoked on EVERY send. An
 /// implementation must not cache secrets and must never fall back to another
 /// community's credential.
+/// Stable refusal code for an app-credential kind with no host-side broadcaster binding.
+pub const APP_KIND_UNBOUND_CODE: &str = "slot_app_kind_unbound";
+
+/// Whether `(platform, kind)` would use the APP credential on per-broadcaster resources
+/// without any host-side proof the requesting community owns the broadcaster. Twitch
+/// EventSub subscriptions are app-wide: with the app token any community could list,
+/// delete or create another broadcaster's. Every `eventsub.*` kind is refused until an
+/// ownership binding exists (the Twitch-side check lands separately).
+#[must_use]
+pub fn app_kind_lacks_broadcaster_binding(platform: &str, kind: &str) -> bool {
+    platform == "twitch" && kind.starts_with("eventsub.")
+}
+
 #[allow(async_fn_in_trait)] // service-binary-internal
 pub trait SlotSource: Send + Sync {
     /// Resolves `req.handles`; every requested handle must be present in the
@@ -272,6 +288,10 @@ pub trait DutyHook: Send + Sync {
     async fn role_bulk(&self, _cx: &DutyCx<'_>) -> Result<RoleBulkPlan, ExecError> {
         Err(ExecError::HostDutyMissing)
     }
+
+    /// Runs after a duty kind's request succeeded (2xx), with the outcome -- lets a hook
+    /// remember host-created resource ids. Never fails the op; the default does nothing.
+    async fn after_send(&self, _cx: &DutyCx<'_>, _outcome: &ExecOutcome) {}
 
     /// Value for a [`SlotOrigin::Duty`] slot (e.g. the DM channel id from
     /// the reply to the host's own `POST /users/@me/channels`).
@@ -810,6 +830,17 @@ where
         for c in &verified.header_creds {
             handles.push(c.handle);
         }
+        // An app credential acts for the whole application, so a kind that reaches
+        // per-broadcaster resources with it needs a HOST-side broadcaster ownership
+        // binding. None exists yet: refuse every such kind (stable code) rather than let
+        // one community list/delete/create another broadcaster's subscriptions.
+        if handles
+            .iter()
+            .any(|h| h.starts_with(policy::APP_HANDLE_PREFIX))
+            && app_kind_lacks_broadcaster_binding(req.platform, kind_name)
+        {
+            return Err(ExecError::Slot(SlotError::Refused(APP_KIND_UNBOUND_CODE)));
+        }
         // Credential scope: an app-scoped kind may not also resolve a user-scoped slot, and
         // runs only on a source that declares app-credential support.
         let app_slots = verified
@@ -882,7 +913,13 @@ where
         let prepared =
             subst::render(policy, &verified, &values, &creds).map_err(ExecError::Subst)?;
         drop((values, creds));
-        self.send(prepared, kind.result).await
+        subst::check_distinct_body_ints(&kind.distinct_body_ints, prepared.body.as_deref())
+            .map_err(ExecError::Subst)?;
+        let outcome = self.send(prepared, kind.result).await?;
+        if kind.needs_duty {
+            self.duties.after_send(&cx, &outcome).await;
+        }
+        Ok(outcome)
     }
 
     /// The ONLY egress call in the executor: the SSRF-guarded client.
@@ -1041,7 +1078,10 @@ pub(crate) fn role_guild_scope(origin: &str) -> Option<Option<&str>> {
 /// The connector payload for a plain (non-duty) kind: ONLY the text / message
 /// id from the verified queue entry -- never a channel, guild, user or
 /// credential field (connectors reject those outright).
-fn default_payload(kind: &KindPolicy, action: &OutboundAction) -> Result<String, ExecError> {
+pub(crate) fn default_payload(
+    kind: &KindPolicy,
+    action: &OutboundAction,
+) -> Result<String, ExecError> {
     let v = match action {
         OutboundAction::ChatSend { text, .. } => {
             serde_json::json!({ kind.text_key: text })

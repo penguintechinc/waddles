@@ -13,6 +13,20 @@ use crate::entities::{
     app_active_versions, app_install_approvals, app_source_bindings, app_versions,
 };
 
+/// SQL predicate excluding apps globally disabled by a super-admin
+/// (`app_catalog.status = 'disabled'`, `hub_api/services/bundle_global_state_service.py`),
+/// read through the `bundle_disabled_apps` view because the restricted
+/// `waddles_bundle_reader` role has no SELECT on `app_catalog` (migration 0095).
+/// Folded into the existing active-set queries (no extra round trip) so a disabled
+/// bundle is never runnable even if the disable cascade has not yet removed its
+/// `app_active_versions` rows -- fail closed on the race.
+pub(crate) fn not_globally_disabled() -> sea_orm::sea_query::SimpleExpr {
+    sea_orm::sea_query::Expr::cust(
+        "app_active_versions.app_id NOT IN \
+         (SELECT app_id FROM bundle_disabled_apps)",
+    )
+}
+
 #[derive(Debug, Error)]
 pub enum ActiveSetError {
     #[error("database query failed: {0}")]
@@ -62,6 +76,12 @@ pub struct ActiveBundleRow {
     /// validate further than "is this valid JSON shaped like the summary
     /// schema".
     pub declared_capabilities: Vec<String>,
+    /// The approved manifest's `egress` allowlist (`(host_or_ip, methods)`)
+    /// from `summary_json.egress` -- feeds the bundle `http.send` egress
+    /// guard. Empty (fail closed: no egress) when absent or malformed.
+    pub egress: Vec<(String, Vec<String>)>,
+    /// `summary_json.egressRps`, the manifest's per-bundle egress rate limit.
+    pub egress_rps: Option<u32>,
     /// The tool-relevant facts of this version's approved manifest
     /// (`crate::tools`) -- feeds the stage's `tool.invoke` matrix check
     /// (`ActiveVersionSnapshot::tool_entry`). `Default` (not a tool service,
@@ -84,6 +104,37 @@ fn declared_capabilities_from_summary(summary_json: &sea_orm::JsonValue) -> Vec<
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Extracts `summary_json.egress` (`[{host, methods}]`) and `egressRps`.
+/// Malformed entries are dropped (fail closed: less egress, never more).
+fn egress_from_summary(
+    summary_json: &sea_orm::JsonValue,
+) -> (Vec<(String, Vec<String>)>, Option<u32>) {
+    // nosemgrep: rust-silent-unwrap-or-default -- Option<Vec> when egress field is absent (fail closed: zero egress allowed)
+    let egress = summary_json
+        .get("egress")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let host = e.get("host")?.as_str()?.to_string();
+                    let methods: Vec<String> = e
+                        .get("methods")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|m| m.as_str().map(str::to_string))
+                        .collect();
+                    Some((host, methods))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let rps = summary_json
+        .get("egressRps")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok());
+    (egress, rps)
 }
 
 /// A cheap change signal for one `(tenant_id, community_id)` scope: a
@@ -359,7 +410,8 @@ pub async fn read_active_set(
 ) -> Result<ActiveSetRead, ActiveSetError> {
     let mut active_q = app_active_versions::Entity::find()
         .filter(app_active_versions::Column::TenantId.eq(tenant_id))
-        .filter(app_active_versions::Column::CommunityId.eq(community_id));
+        .filter(app_active_versions::Column::CommunityId.eq(community_id))
+        .filter(not_globally_disabled());
     if let Some(app_id) = app_id {
         active_q = active_q.filter(app_active_versions::Column::AppId.eq(app_id));
     }
@@ -516,6 +568,7 @@ pub(crate) fn assemble_active_set(
         };
         let declared_capabilities = declared_capabilities_from_summary(&approval.summary_json);
         let tools = crate::tools::ToolManifestInfo::from_summary(&approval.summary_json);
+        let (egress, egress_rps) = egress_from_summary(&approval.summary_json);
         // Structural guard (regression: multi_tenant path sent bare-hex
         // digest to Invoke, UnknownBundle despite loaded bundle (alpha
         // 2026-10-03)): this is the ONE sanctioned production construction
@@ -546,6 +599,8 @@ pub(crate) fn assemble_active_set(
             artifact_signature_key_id: version_row.artifact_signature_key_id.clone(),
             artifact_signed_approval_id: version_row.artifact_signed_approval_id,
             declared_capabilities,
+            egress,
+            egress_rps,
             tools,
         });
     }
@@ -657,6 +712,20 @@ mod tests {
             community_id,
             version_id,
         }
+    }
+
+    /// The active-set read excludes globally disabled bundles in SQL (same query, no extra
+    /// round trip), so a disabled service can never be loaded even mid-cascade.
+    #[tokio::test]
+    async fn read_active_set_excludes_globally_disabled_apps() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<app_active_versions::Model>::new()])
+            .into_connection();
+        let read = read_active_set(&db, 1, 1, None).await.unwrap();
+        assert!(read.rows.is_empty());
+        let log = format!("{:?}", db.into_transaction_log());
+        assert!(log.contains("bundle_disabled_apps"), "{log}");
+        assert!(!log.contains("app_catalog"), "{log}");
     }
 
     #[tokio::test]
@@ -1506,6 +1575,39 @@ mod tests {
             declared_capabilities_from_summary(&summary),
             vec!["context", "kv", "flags", "log", "clock", "http"]
         );
+    }
+
+    /// The approved manifest's egress list + rate limit reach the active-set
+    /// row (they feed the bundle http guard); malformed shapes fail closed.
+    #[test]
+    fn egress_from_summary_reads_hosts_methods_and_rps_and_drops_malformed() {
+        let summary: sea_orm::JsonValue = serde_json::json!({
+            "egress": [
+                {"host": "api.spotify.com", "methods": ["GET", "POST", "PUT"]},
+                {"host": 5, "methods": []},
+                {"host": "no-methods.example"},
+                {"methods": ["GET"]},
+            ],
+            "egressRps": 12,
+        });
+        let (egress, rps) = egress_from_summary(&summary);
+        assert_eq!(
+            egress,
+            vec![(
+                "api.spotify.com".to_string(),
+                vec!["GET".to_string(), "POST".to_string(), "PUT".to_string()]
+            )]
+        );
+        assert_eq!(rps, Some(12));
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({"egress": "x", "egressRps": "fast"}),
+            serde_json::json!({"egressRps": 99999999999u64}),
+        ] {
+            let (e, r) = egress_from_summary(&bad);
+            assert!(e.is_empty(), "{bad}");
+            assert_eq!(r, None, "{bad}");
+        }
     }
 
     #[test]

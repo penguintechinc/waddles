@@ -40,6 +40,7 @@ use super::sink::{check_event_limits, EventSink, SinkError};
 use super::transport::{FrameDropReason, FrameOutcome, Transport};
 use super::types::{ConnectionCtx, ConnectorEvent, RawFrame};
 use crate::ingest::{Backoff, STABILITY_WINDOW};
+use crate::interaction_tap::{FrameTap, TapVerdict};
 
 /// A fatal driver error: a configuration/programming fault that retrying
 /// cannot fix, so [`ConnectorDriver::run`] returns it instead of looping.
@@ -220,6 +221,7 @@ pub struct ConnectorDriver<I: ConnectorInvoker, S: EventSink> {
     heartbeat_enabled: bool,
     heartbeat_send_timeout: Duration,
     gate: Arc<dyn HandshakeGate>,
+    tap: Option<Arc<dyn FrameTap>>,
 }
 
 impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
@@ -240,7 +242,17 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
             heartbeat_enabled: false,
             heartbeat_send_timeout: DEFAULT_HEARTBEAT_SEND_TIMEOUT,
             gate: Arc::new(NoopGate),
+            tap: None,
         }
+    }
+
+    /// Installs a host-side frame tap run BEFORE the connector sees a frame (the Discord
+    /// interaction intake: token capture, dedupe, 3-second ack). Without one the driver
+    /// behaves exactly as before.
+    #[must_use]
+    pub fn with_frame_tap(mut self, tap: Arc<dyn FrameTap>) -> Self {
+        self.tap = Some(tap);
+        self
     }
 
     /// Installs the pre-handshake admission gate (e.g. the Discord IDENTIFY
@@ -889,6 +901,10 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
     /// only the invoker/sink (never the transport), so the pump can write a
     /// heartbeat while this is in flight; the transport is told the verdict
     /// afterwards.
+    ///
+    /// The command-latency first door is taken HERE: the instant the transport handed the frame to
+    /// the driver. The whole in-task chain (`on-frame` -> sink -> `publish_event`) runs inside the
+    /// scope, so the publish funnel stamps `t0` into the envelope's tracestate (metadata only).
     async fn process_frame(
         &self,
         platform: &str,
@@ -897,6 +913,49 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         bytes: Vec<u8>,
         logs: &mut PumpLogs,
     ) -> FrameVerdict {
+        command_latency::first_door::with_first_door(
+            command_latency::stamp::now_ms(),
+            command_latency::Door::Gateway,
+            self.process_frame_inner(platform, pinned, ctx, bytes, logs)
+                .instrument(tracing::info_span!(
+                    "ingest.receive",
+                    platform = %platform,
+                    "otel.kind" = "consumer",
+                )),
+        )
+        .await
+    }
+
+    /// The body of [`Self::process_frame`], unchanged by the first-door wrapper.
+    async fn process_frame_inner(
+        &self,
+        platform: &str,
+        pinned: &PinnedConnector,
+        ctx: &ConnectionCtx,
+        bytes: Vec<u8>,
+        logs: &mut PumpLogs,
+    ) -> FrameVerdict {
+        if let Some(tap) = &self.tap {
+            match tap.on_frame(platform, &bytes).await {
+                TapVerdict::Pass => {}
+                // Already handled (redelivery): the frame is accounted for; do not route again.
+                TapVerdict::Duplicate => {
+                    return FrameVerdict {
+                        outcome: FrameOutcome::Published,
+                        fault: None,
+                        ok: true,
+                    };
+                }
+                TapVerdict::Refuse(reason) => {
+                    self.metrics.frame(platform, reason);
+                    return FrameVerdict {
+                        outcome: FrameOutcome::Dropped(FrameDropReason::PublishIncomplete),
+                        fault: None,
+                        ok: false,
+                    };
+                }
+            }
+        }
         let frame = RawFrame {
             ctx: ctx.clone(),
             bytes,

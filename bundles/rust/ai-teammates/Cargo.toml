@@ -1,0 +1,28 @@
+[package]
+name = "waddle-bundle-ai-teammates"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "AI Teammates APP bundle (Researcher, Receptionist, Producer) on the `stage-next-tools` world. Each teammate is enabled/disabled and configured per community; all model access goes through the AI service tools (ai.complete / ai.classify / ai.rag.query) invoked from code -- the model never selects tools -- and chat text is always treated as untrusted data."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "=0.44.0", features = ["bitflags"] }
+# Sibling-crate path dependency (same repo, moves together): idiomatic stage types and the
+# `ToolError` vocabulary; the `stage-next-tools` bindings live in this crate.
+waddle-sdk-rs = { path = "../../../sdk/waddle-sdk-rs", version = "=0.1.0" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[package.metadata.component]
+package = "waddle:bundle-ai-teammates"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-bundle"
+world = "stage-next-tools"
+
+[package.metadata.component.dependencies]

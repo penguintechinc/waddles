@@ -1,0 +1,7 @@
+{
+  "admin.verify": {},
+  "room.create": {"label": "Game Night"},
+  "room.close": {"room_id": "00000000-0000-0000-0000-000000000001"},
+  "whip.endpoint": {"room_id": "00000000-0000-0000-0000-000000000001", "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"},
+  "whep.endpoint": {"room_id": "00000000-0000-0000-0000-000000000001", "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}
+}

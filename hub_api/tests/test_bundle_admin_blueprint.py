@@ -144,4 +144,36 @@ async def test_response_matches_dto_shape(app: Quart, install_dal: Any) -> None:
         "requestedBy",
         "createdAt",
         "rejectReason",
+        "installedVersion",
     }
+    assert body["versions"][0]["installedVersion"] is None
+
+
+async def test_pending_upgrade_reports_installed_version(app: Quart, install_dal: Any) -> None:
+    """A pending 1.1.0 for an app whose live install is 1.0.0 reports installedVersion 1.0.0."""
+    app_id = "waddles.integrations.vendor-1.a"
+    version_id = await install_dal.app_versions.async_insert(
+        app_id=app_id,
+        version="1.0.0",
+        artifact_digest="sha256:" + "a" * 64,
+        language="python",
+        artifact_kind="source",
+        scan_status="scanned",
+    )
+    await install_dal.app_global_installs.async_insert(
+        app_id=app_id,
+        version="1.0.0",
+        version_id=version_id,
+        permission_hash="sha256:" + "b" * 64,
+        summary_json={},
+        install_source="human",
+        installed_at=datetime.now(UTC),
+    )
+    await _insert_upload(install_dal, app_id=app_id, version="1.1.0", status="PUBLISHED")
+    token = make_token(scope="platform:admin")
+    response = await app.test_client().get(
+        "/api/v1/admin/bundle-versions", headers={"Authorization": f"Bearer {token}"}
+    )
+    body = await response.get_json()
+    assert body["versions"][0]["version"] == "1.1.0"
+    assert body["versions"][0]["installedVersion"] == "1.0.0"

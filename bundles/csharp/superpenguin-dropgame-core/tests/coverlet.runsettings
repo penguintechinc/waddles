@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Measures DropGameCore itself (a real referenced module here, so IncludeTestAssembly stays false). The SDK has its own gate
+     (`test-waddle-sdk-cs`) and is excluded so it cannot dilute this number; generated code is excluded. -->
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat code coverage">
+        <Configuration>
+          <Include>[DropGameCore]*</Include>
+          <Exclude>[*]*.g,[WaddleSdk]*</Exclude>
+          <ExcludeByFile>**/obj/**/*.g.cs</ExcludeByFile>
+          <ExcludeByAttribute>GeneratedCodeAttribute,CompilerGeneratedAttribute</ExcludeByAttribute>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>

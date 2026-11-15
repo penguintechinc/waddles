@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useLeaderboard } from '../../hooks/useCommunityActivity';
 import type { LeaderboardEntry, LeaderboardPeriod, LeaderboardType } from '../../services/communityActivityApi';
-import { EmptyState, QueryBoundary } from '../ui';
+import { PanelState } from '../ui';
 import { avatarInitial, formatEntryValue } from './leaderboardFormat';
 import { PeriodSelector } from './PeriodSelector';
 
@@ -11,6 +11,8 @@ export interface LeaderboardCardProps {
   type?: LeaderboardType;
   title?: string;
   limit?: number;
+  /** Connection-settings link offered in the empty state (only pass for users who can manage connections). */
+  connectTo?: string;
 }
 
 const RANK_STYLE: Record<number, string> = {
@@ -47,7 +49,7 @@ function EntryRow({ entry, type }: { entry: LeaderboardEntry; type: LeaderboardT
  * Compact top-N leaderboard for the community dashboard sidebar. Reads the served
  * `/community/:id/leaderboard/*` routes; failure shows a retryable error, never a blank card.
  */
-export function LeaderboardCard({ communityId, type = 'watch-time', title, limit = 5 }: LeaderboardCardProps) {
+export function LeaderboardCard({ communityId, type = 'watch-time', title, limit = 5, connectTo }: LeaderboardCardProps) {
   const [period, setPeriod] = useState<LeaderboardPeriod>('weekly');
   const query = useLeaderboard(communityId, type, { period, limit, offset: 0 });
   const heading = title ?? (type === 'watch-time' ? 'Watch Time' : 'Messages');
@@ -58,12 +60,14 @@ export function LeaderboardCard({ communityId, type = 'watch-time', title, limit
         <h3 className="font-semibold text-fg">{heading}</h3>
         <PeriodSelector value={period} onChange={setPeriod} compact />
       </div>
-      <QueryBoundary
+      <PanelState
         query={query}
-        loadingLabel={`Loading ${heading}`}
-        errorTitle={`We could not load ${heading}`}
+        feature={heading}
         isEmpty={(page) => page.entries.length === 0}
-        empty={<EmptyState title="No data yet for this period" headingLevel={4} className="py-8" />}
+        emptyTitle="No data yet for this period"
+        emptyDescription={type === 'watch-time' ? 'Watch time is recorded once a streaming platform is connected.' : 'Messages are counted once a chat platform is connected.'}
+        {...(connectTo ? { emptyAction: { to: connectTo, label: 'Connect a platform' } } : {})}
+        className="py-8"
       >
         {(page) => (
           <ol className="space-y-2" aria-label={`${heading} ranking`}>
@@ -72,7 +76,7 @@ export function LeaderboardCard({ communityId, type = 'watch-time', title, limit
             ))}
           </ol>
         )}
-      </QueryBoundary>
+      </PanelState>
       <Link
         to={`/dashboard/community/${communityId}/leaderboard?type=${type}`}
         className="mt-4 block text-center text-sm text-interactive hover:text-interactive-hover"

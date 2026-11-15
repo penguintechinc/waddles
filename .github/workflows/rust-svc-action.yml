@@ -6,12 +6,15 @@ on:
     paths:
       - 'core/svc_action/**'
       - 'core/bundle_host_kv/**'
+      - 'core/bundle_host_credentials/**'
+      - 'core/connection_resolver/**'
       - 'core/bundle_capability_gate/**'
       - 'core/bundle_tool_call/**'
       - 'core/circuit_breaker/**'
+      - 'core/command_latency/**'
       - 'core/discord_mentions/**'
       - 'core/hub_client/**'
-      - 'core/egress_detokenizer/**'
+      - 'core/bundle_config_db/**'
       - '.github/workflows/rust-svc-action.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
@@ -53,12 +56,15 @@ jobs:
           globs: |
             core/svc_action/**
             core/bundle_host_kv/**
+            core/bundle_host_credentials/**
+            core/connection_resolver/**
             core/bundle_capability_gate/**
             core/bundle_tool_call/**
             core/circuit_breaker/**
+            core/command_latency/**
             core/discord_mentions/**
             core/hub_client/**
-            core/egress_detokenizer/**
+            core/bundle_config_db/**
 
   lint-test:
     needs: changes
@@ -72,3 +78,5 @@ jobs:
       # needed by hub_client's build.rs (tonic-prost-build).
       extra_apt_packages: build-essential protobuf-compiler
       extra_apt_reason: 'for ring (C compiler) + hub_client (protoc)'
+      # tests/relay_pii_boundary_real.rs needs a REAL Valkey (VALKEY_URL) and fails loudly without one.
+      valkey: true

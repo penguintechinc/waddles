@@ -58,6 +58,10 @@ pub enum SubstError {
     /// A body pointer recorded by the verifier no longer resolves.
     #[error("the body slot position is invalid")]
     BodyPosition,
+    /// A protected-target pair is not two integers, or both name the same id (moderating the
+    /// broadcaster the token belongs to).
+    #[error("the request names a protected target")]
+    ProtectedTarget,
 }
 
 impl SubstError {
@@ -70,8 +74,34 @@ impl SubstError {
             Self::UrlInvalid => "url_invalid",
             Self::BodyTooLarge => "body_too_large",
             Self::BodyPosition => "body_position",
+            Self::ProtectedTarget => "protected_target",
         }
     }
+}
+
+/// Enforces a kind's protected-target rule on the finished request body: for every
+/// `(a, b)` pointer pair both values must be JSON integers and must differ.
+///
+/// # Errors
+/// [`SubstError::ProtectedTarget`] on a missing/non-integer value or an equal pair, and
+/// [`SubstError::BodyPosition`] when the kind demands a pair but there is no JSON body.
+pub fn check_distinct_body_ints(
+    pairs: &[(&'static str, &'static str)],
+    body: Option<&[u8]>,
+) -> Result<(), SubstError> {
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    let doc: Value = serde_json::from_slice(body.ok_or(SubstError::BodyPosition)?)
+        .map_err(|_| SubstError::BodyPosition)?;
+    for (a, b) in pairs {
+        let get = |p: &str| doc.pointer(p).and_then(Value::as_u64);
+        match (get(a), get(b)) {
+            (Some(x), Some(y)) if x != y => {}
+            _ => return Err(SubstError::ProtectedTarget),
+        }
+    }
+    Ok(())
 }
 
 /// The finished request: ready for the guarded client, never loggable.
@@ -301,10 +331,32 @@ mod tests {
             SubstError::UrlInvalid,
             SubstError::BodyTooLarge,
             SubstError::BodyPosition,
+            SubstError::ProtectedTarget,
         ];
         let codes: std::collections::BTreeSet<_> = all.iter().map(|e| e.code()).collect();
         assert_eq!(codes.len(), all.len());
         assert!(all.iter().all(|e| !e.to_string().is_empty()));
+    }
+
+    #[test]
+    fn distinct_body_ints_refuse_equal_missing_or_non_integer_targets() {
+        let pairs = [("/broadcaster_user_id", "/user_id")];
+        let ok = |b: &str| check_distinct_body_ints(&pairs, Some(b.as_bytes()));
+        assert_eq!(ok(r#"{"broadcaster_user_id":1,"user_id":2}"#), Ok(()));
+        for bad in [
+            r#"{"broadcaster_user_id":7,"user_id":7}"#,
+            r#"{"broadcaster_user_id":7}"#,
+            r#"{"broadcaster_user_id":7,"user_id":"8"}"#,
+            r#"{"broadcaster_user_id":7,"user_id":-8}"#,
+            r#"{"broadcaster_user_id":7,"user_id":8.5}"#,
+        ] {
+            assert_eq!(ok(bad), Err(SubstError::ProtectedTarget), "{bad}");
+        }
+        assert_eq!(
+            check_distinct_body_ints(&pairs, None),
+            Err(SubstError::BodyPosition)
+        );
+        assert_eq!(check_distinct_body_ints(&[], None), Ok(()));
     }
 
     #[test]

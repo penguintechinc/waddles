@@ -41,6 +41,9 @@ const SHIPPED_DDL: &str = include_str!("../../../scripts/db/bundle_economy_store
 const IDEMPOTENCY_DDL: &str = include_str!("../../../scripts/db/bundle_economy_idempotency.sql");
 /// Alembic 0069's DDL (compound-op ledger kinds), applied after the above.
 const LEDGER_KINDS_DDL: &str = include_str!("../../../scripts/db/bundle_economy_ledger_kinds.sql");
+/// Alembic 0082's DDL (elevated app-caller primitives: `transfer_from` ledger
+/// kinds, the audit table, the stable `grant_id`), applied last.
+const ELEVATED_DDL: &str = include_str!("../../../scripts/db/bundle_economy_elevated.sql");
 
 const TENANT: i32 = 1;
 const COMMUNITY: i32 = 10;
@@ -131,6 +134,18 @@ async fn fixture() -> Fixture {
              left_at TIMESTAMP,
              removed_at TIMESTAMP);
          CREATE TABLE hub_users (id SERIAL PRIMARY KEY);
+         CREATE TABLE community_permission_grants (
+             community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+             tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+             app_id VARCHAR(255) NOT NULL,
+             permission_id VARCHAR(255) NOT NULL,
+             params_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+             granted_by INTEGER REFERENCES hub_users(id),
+             granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+             revoked_by INTEGER REFERENCES hub_users(id),
+             revoked_at TIMESTAMPTZ,
+             PRIMARY KEY (community_id, app_id, permission_id));
+         INSERT INTO hub_users (id) VALUES (41), (42);
          INSERT INTO tenants (id, slug) VALUES (1, 't1'), (2, 't2');
          INSERT INTO communities (id, tenant_id) VALUES (10, 1), (20, 2);",
     )
@@ -148,10 +163,12 @@ async fn fixture() -> Fixture {
     exec(&su, SHIPPED_DDL).await;
     exec(&su, IDEMPOTENCY_DDL).await;
     exec(&su, LEDGER_KINDS_DDL).await;
+    exec(&su, ELEVATED_DDL).await;
     // Shipped DDL is idempotent: a second application must succeed.
     exec(&su, SHIPPED_DDL).await;
     exec(&su, IDEMPOTENCY_DDL).await;
     exec(&su, LEDGER_KINDS_DDL).await;
+    exec(&su, ELEVATED_DDL).await;
 
     let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
     exec(
@@ -3357,3 +3374,9 @@ async fn a_keyed_credit_waits_on_the_community_mint_lock_before_its_replay_read(
     assert_eq!(task.await.unwrap(), Ok(40));
     assert_eq!(ledger_count(&f).await, 1);
 }
+
+// Elevated app-caller primitives (`transfer_from`, reserve/settle) -- a child
+// module so it shares this file's real-Postgres fixture; kept under
+// `tests/elevated/` so cargo does not discover it as its own test target.
+#[path = "elevated/cases.rs"]
+mod elevated;

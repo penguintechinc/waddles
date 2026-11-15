@@ -136,22 +136,18 @@ def _current_db_heads(conn: Any) -> tuple[str, ...]:
 
 
 def _run_first_run_scripts(engine: Engine) -> None:
-    """Idempotent, schema-at-head-only first-run steps -- currently none.
+    """Idempotent, schema-at-head-only first-run steps, run while the advisory lock is held.
 
-    Extension point, run once the schema is confirmed at head and while the
-    advisory lock is still held (so a future addition here is automatically
-    serialized across replicas the same way the old create_all()+stamp path
-    was). Nothing lives here today: the admin-seed step
-    (`config/postgres/migrations/081_seed_default_hub_admin.sql`) ships as
-    part of the `db-migrate` Job's own migration chain, which now runs on
-    fresh install too (post-install hook, not just pre-upgrade) per the
-    2026-10-01 user decision -- so there is no longer a gap between "schema
-    exists" and "admin seeded" for this module to fill. Kept as an explicit
-    no-op (not simply omitted) so the next genuinely-idempotent first-run
-    requirement has an obvious, already-locked home instead of being bolted
-    onto `_sync_bootstrap_attempt` directly.
+    Today this is the platform secret store: marker / wipe / root-change guards, event-chain
+    verification, one-time import and generation of the platform's own secrets
+    (`services.platform_secrets.bootstrap`, design in docs/PLATFORM_VAULT.md). It raises
+    `PlatformVaultRefusedError` (fatal, the pod crash-loops visibly) when the store cannot be
+    trusted -- a changed root KEK, a wiped or rolled-back store, a broken audit chain. The
+    admin-seed step still ships with the `db-migrate` Job's migration chain, not here.
     """
-    return
+    from services.platform_secrets.bootstrap import run_platform_secrets_bootstrap
+
+    run_platform_secrets_bootstrap(engine)
 
 
 def _sync_bootstrap_attempt(engine: Engine, script_location: str) -> tuple[BootstrapState, str]:
@@ -192,6 +188,19 @@ def _sync_bootstrap_attempt(engine: Engine, script_location: str) -> tuple[Boots
             lock_conn.close()
 
 
+def _start_platform_secret_refresher(database_url: str, logger: Any) -> None:
+    """Start the platform-secret cache refresher; a failure is logged (class only), not fatal."""
+    try:
+        from services.platform_secrets.bootstrap import start_cache_refresher
+
+        start_cache_refresher(database_url)
+    except Exception as exc:  # noqa: BLE001 -- the seeded cache still serves; refresh is best effort
+        logger.error(
+            f"bootstrap: platform secret refresher not started ({type(exc).__name__})",
+            extra={"action": "platform_secrets_refresher_failed"},
+        )
+
+
 async def run_bootstrap_loop(
     status: BootstrapStatus,
     database_url: str,
@@ -216,7 +225,8 @@ async def run_bootstrap_loop(
     crashloop visibly rather than silently serve a stale/broken state.
     """
     sync_url = database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
-    engine = sqlalchemy.create_engine(sync_url, pool_pre_ping=True)
+    # hide_parameters: a driver error must never echo bound values (sealed secrets are parameters).
+    engine = sqlalchemy.create_engine(sync_url, pool_pre_ping=True, hide_parameters=True)
     backoff = initial_backoff_seconds
     attempt = 0
     try:
@@ -251,6 +261,7 @@ async def run_bootstrap_loop(
                         f"bootstrap: {detail}",
                         extra={"action": "bootstrap_ready"},
                     )
+                    _start_platform_secret_refresher(database_url, logger)
                     return
                 if state is BootstrapState.WAITING_FOR_MIGRATION:
                     # Routine, expected on every fresh install -- INFO, not ERROR.

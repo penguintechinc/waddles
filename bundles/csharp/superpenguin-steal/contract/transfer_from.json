@@ -1,0 +1,16 @@
+{
+  "_comment": "Contract fixture for the economy service tool transfer_from (branch feature/economy-transfer-from). Steal codes to this; the C# SDK pins the same wire shape in sdk/waddle-sdk-cs/tests/EconomyServiceClientTests.cs. When the economy service exports the tool, scripts/ci/tests/test_superpenguin_service_boundaries.py checks it against this file.",
+  "tool": "transfer_from",
+  "target_app_id": "waddles.core.service.economy",
+  "access": "write",
+  "risk": "dangerous",
+  "args": {
+    "from": "community user uuid debited (need not be the invoking actor)",
+    "to": "community user uuid credited",
+    "amount": "integer >= 1",
+    "reason": "short stable reason code, e.g. steal.success | steal.failed | steal.poor"
+  },
+  "idempotency_key": "carried in the tool-invoke key slot (the host injects __idempotency_key), derived from message id + operation + from + to",
+  "refusals": ["insufficient_funds", "over_cap", "not_a_member", "not_granted (no dangerous grant)"],
+  "example_args": "{\"from\":\"22222222-2222-4222-8222-222222222222\",\"to\":\"11111111-1111-4111-8111-111111111111\",\"amount\":500,\"reason\":\"steal.success\"}"
+}

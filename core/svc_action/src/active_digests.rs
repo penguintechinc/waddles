@@ -150,6 +150,9 @@ impl ActiveDigests {
 #[derive(Default)]
 pub struct LoadedSessions {
     inner: RwLock<bundle_active_set::SessionLoaded<AppScope>>,
+    /// Monotonic counter feeding [`Self::pick_session_with_digest`]'s
+    /// round-robin, so N executor replicas holding a digest share the work.
+    rotation: std::sync::atomic::AtomicU64,
 }
 
 impl LoadedSessions {
@@ -214,7 +217,7 @@ impl LoadedSessions {
     }
 
     /// The live session (if any) that has `scope` loaded at exactly
-    /// `digest`, preferring newest -- the exact lookup
+    /// `digest`, round-robin across the holders -- the exact lookup
     /// `crate::dispatch::handle_delivered` performs on every single
     /// delivered entry before ever invoking. `None` means no live session
     /// can serve this digest right now; callers MUST dead-letter
@@ -225,10 +228,14 @@ impl LoadedSessions {
         scope: &AppScope,
         digest: &str,
     ) -> Option<bundle_active_set::SessionId> {
+        let rotation = self
+            .rotation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         bundle_active_set::pick_session_with_digest(
             &self.inner.read().unwrap_or_else(|e| e.into_inner()),
             scope,
             digest,
+            rotation,
         )
     }
 
@@ -335,16 +342,25 @@ mod tests {
         }
 
         #[test]
-        fn pick_session_with_digest_prefers_newest_among_sessions_holding_the_digest() {
+        fn pick_session_with_digest_round_robins_among_sessions_holding_the_digest() {
             let sessions = LoadedSessions::new();
             sessions.mark_loaded(1, scope("waddles.a"), "sha256:aa".to_string());
             sessions.mark_loaded(3, scope("waddles.a"), "sha256:aa".to_string());
             // Session 5 is newer overall but holds a DIFFERENT digest -- must
             // never be picked for a dispatch targeting "sha256:aa".
             sessions.mark_loaded(5, scope("waddles.a"), "sha256:other".to_string());
+            let picks: Vec<_> = (0..4)
+                .map(|_| sessions.pick_session_with_digest(&scope("waddles.a"), "sha256:aa"))
+                .collect();
             assert_eq!(
-                sessions.pick_session_with_digest(&scope("waddles.a"), "sha256:aa"),
-                Some(3)
+                picks.iter().filter(|p| **p == Some(1)).count(),
+                2,
+                "each holder gets half the picks: {picks:?}"
+            );
+            assert_eq!(picks.iter().filter(|p| **p == Some(3)).count(), 2);
+            assert!(
+                !picks.contains(&Some(5)),
+                "a session on a different digest is never picked"
             );
         }
 

@@ -421,7 +421,7 @@ async def _connection_dto(
 @validate_response(SsoOptionsResponse)
 async def sso_options() -> SsoOptionsResponse | tuple[dict[str, object], int]:
     """`GET /options?tenant=<slug>` -- enabled, currently-entitled SSO buttons for a tenant."""
-    slug = (request.args.get("tenant") or "global").strip()[:100]
+    slug = (request.args.get("tenant") or "default").strip()[:100]
     try:
         options = await list_login_options(_ctx(), slug)
     except SsoError as exc:

@@ -10,6 +10,14 @@ use clap::Parser;
 
 use crate::error::ExecutorError;
 
+/// One stage host-API listener this executor serves: `label` names the stage
+/// in metrics/logs, `addr` is the `host:port` it dials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageTarget {
+    pub label: String,
+    pub addr: String,
+}
+
 /// CLI/env configuration surface. `clap`'s `env` feature reads the SS12.7
 /// variable of the same name when the flag is not passed explicitly --
 /// this binary is started by its Deployment with env vars only, never
@@ -18,8 +26,13 @@ use crate::error::ExecutorError;
 #[derive(Debug, Parser, Clone)]
 #[command(name = "bundle-executor")]
 pub struct CliConfig {
-    /// The stage's host-API listener this executor dials, e.g.
-    /// `svc-process:8301` or `svc-action:8302` (spec SS6.6/SS7.1).
+    /// The stage host-API listener(s) this executor dials, e.g.
+    /// `svc-process:8301` or `svc-action:8302` (spec SS6.6/SS7.1). A
+    /// comma-separated list (`svc-process:8301,svc-action:8302`) serves every
+    /// listed stage from this one process: each gets its own dial loop,
+    /// reconnect/backoff, bundle registry and metrics `stage` label, so one
+    /// stage failing never blocks another. All stages share the
+    /// `HOST_API_*` mTLS material and `HOST_API_STAGE_IDENTITY`.
     #[arg(long, env = "STAGE_HOST_API_ADDR")]
     pub stage_host_api_addr: String,
 
@@ -222,6 +235,73 @@ pub struct CliConfig {
     #[arg(long, env = "BUNDLE_MAX_COMPONENT_BYTES", default_value_t = 33_554_432)]
     pub bundle_max_component_bytes: u64,
 
+    /// Upper bound on a precompiled `.cwasm` artifact fetched from the bundle
+    /// bucket (`precompiled/<engine_fp>/<digest>.cwasm`). Compiled code is
+    /// several times larger than the source component, hence its own cap
+    /// (default 256 MiB); an oversized object fails the AOT path and falls
+    /// back (loudly) to a local compile.
+    #[arg(
+        long,
+        env = "BUNDLE_MAX_PRECOMPILED_BYTES",
+        default_value_t = 268_435_456
+    )]
+    pub bundle_max_precompiled_bytes: u64,
+
+    /// Resident compiled-module budget for the whole process, in MiB, shared
+    /// by every stage this executor serves. Above it, idle modules no
+    /// in-flight invoke is using are evicted least-recently-used first and
+    /// new loads only verify (compile/deserialize happens on first call).
+    /// `0` = unlimited (unreferenced modules are then dropped immediately).
+    #[arg(long, env = "EXECUTOR_MEMORY_BUDGET_MB", default_value_t = 8192)]
+    pub executor_memory_budget_mb: u64,
+
+    /// The container's memory limit in MiB, used ONLY to validate
+    /// `EXECUTOR_MEMORY_BUDGET_MB` at startup (the budget must leave room for
+    /// linear memories, Cranelift state and the runtime inside the limit).
+    /// Unset = auto-detected from the cgroup (`memory.max`); when neither is
+    /// known the check is skipped with a WARN. Set it explicitly under gVisor,
+    /// where the cgroup file may not reflect the pod limit.
+    #[arg(long, env = "EXECUTOR_CONTAINER_MEMORY_LIMIT_MB")]
+    pub executor_container_memory_limit_mb: Option<u64>,
+
+    /// JSON map `{key_id: base64 Ed25519 public key}` of the DEDICATED
+    /// precompiler signing key(s) (ConfigMap
+    /// `<fullname>-executor-precompile-signing-public`). The ONLY keys a
+    /// `.cwasm` signature is verified against -- never the bundle-approval
+    /// `BUNDLE_SIGNING_PUBLIC_KEYS`. Unset = every load JIT-compiles (each
+    /// one logged at ERROR + `executor_precompile_fallback_total`).
+    #[arg(long, env = "PRECOMPILE_SIGNING_PUBLIC_KEYS")]
+    pub precompile_signing_public_keys: Option<String>,
+
+    /// Kill switch `waddles.disable-aot-precompile` (opt-out, unseen = AOT on).
+    /// This credential-less sandbox has no PostHog egress, so the flag is read
+    /// from its Docker/Helm ENV baseline (`FLAG_` + key, `.`/`-` -> `_`), the
+    /// same convention every stage uses. `true` = never load `.cwasm`
+    /// artifacts; always JIT-compile.
+    #[arg(
+        long,
+        env = "FLAG_WADDLES_DISABLE_AOT_PRECOMPILE",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub flag_disable_aot_precompile: bool,
+
+    /// Stable executor identity (StatefulSet pod name, e.g.
+    /// `waddlebot-svc-bundles-executor-0`) sent to stages in the `hello` frame
+    /// for slot ownership. Unset = `POD_NAME` (downward API).
+    #[arg(long, env = "EXECUTOR_ID")]
+    pub executor_id: Option<String>,
+
+    /// StatefulSet (sharded) mode: refuse to start without a resolvable
+    /// executor identity (see [`CliConfig::validate_executor_id`]).
+    #[arg(
+        long,
+        env = "EXECUTOR_REQUIRE_ID",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub executor_require_id: bool,
+
     /// JSON object mapping `key_id -> base64(32-byte Ed25519 public key)`
     /// (spec SS5.6/Gemini condition 9) -- the platform key(s)
     /// `crate::signing::verify_artifact_signature` checks a bundle's
@@ -287,7 +367,9 @@ pub struct CliConfig {
     /// of cold digests from many tenants queues instead of saturating every
     /// core. Compiles are CPU-heavy (~3-4s for a large component, spec
     /// SS7.2), hence the small default.
-    #[arg(long, env = "EXECUTOR_MAX_CONCURRENT_COMPILES", default_value_t = 2)]
+    /// `0` = auto: `min(4, available CPUs)`. Shared by app-bundle AND
+    /// connector compiles so boot never JIT-compiles every bundle at once.
+    #[arg(long, env = "EXECUTOR_MAX_CONCURRENT_COMPILES", default_value_t = 0)]
     pub executor_max_concurrent_compiles: u32,
 
     /// On SIGTERM/SIGINT: how long to wait for in-flight invokes/compiles to
@@ -327,9 +409,10 @@ pub struct CliConfig {
     #[arg(long, env = "CONNECTOR_HOST_API_CLIENT_KEY_FILE")]
     pub connector_host_api_client_key_file: Option<PathBuf>,
 
-    /// Connections held to the connector listener. MUST be 1: the listener's
-    /// `ExecutorLink::attach` REPLACES the previous session, so a second
-    /// connection would silently kill the first (validated in `validate()`).
+    /// Connections THIS replica holds to the connector listener. Fixed at 1: the
+    /// executor runs exactly one connector dial loop. Scale out by replicas --
+    /// svc-ingest keeps one session per replica and round-robins across them
+    /// (validated in `validate()`).
     #[arg(long, env = "EXECUTOR_CONNECTOR_CONNECTIONS", default_value_t = 1)]
     pub executor_connector_connections: u32,
 
@@ -351,7 +434,133 @@ pub struct CliConfig {
     pub connector_pin_digest_spectrum: Option<String>,
 }
 
+/// Share of the container limit above which a budget is flagged as tight.
+const BUDGET_WARN_PERCENT: u64 = 70;
+
+/// Pure budget-vs-limit rule: a budget at or above the container limit can only
+/// end in an OOM kill, so it refuses to start; a budget above
+/// [`BUDGET_WARN_PERCENT`] of the limit, an unlimited budget (`0`) under a
+/// known limit, or an unknown limit each return a warning string.
+pub fn check_memory_budget(
+    budget_mb: u64,
+    container_limit_mb: Option<u64>,
+) -> Result<Option<String>, ExecutorError> {
+    let Some(limit) = container_limit_mb else {
+        return Ok(Some(
+            "container memory limit unknown (no EXECUTOR_CONTAINER_MEMORY_LIMIT_MB, no readable \
+             cgroup limit); EXECUTOR_MEMORY_BUDGET_MB was not validated"
+                .to_string(),
+        ));
+    };
+    if budget_mb == 0 {
+        return Ok(Some(format!(
+            "EXECUTOR_MEMORY_BUDGET_MB=0 (unlimited) under a {limit} MiB container limit: \
+             resident compiled modules are unbounded"
+        )));
+    }
+    if budget_mb >= limit {
+        return Err(ExecutorError::Config(format!(
+            "EXECUTOR_MEMORY_BUDGET_MB={budget_mb} must be below the container memory limit \
+             ({limit} MiB): compiled modules share the limit with linear memories and compile \
+             state"
+        )));
+    }
+    if budget_mb.saturating_mul(100) > limit.saturating_mul(BUDGET_WARN_PERCENT) {
+        return Ok(Some(format!(
+            "EXECUTOR_MEMORY_BUDGET_MB={budget_mb} is above {BUDGET_WARN_PERCENT}% of the \
+             {limit} MiB container limit; little headroom remains for instances and compiles"
+        )));
+    }
+    Ok(None)
+}
+
+/// Reads the container memory limit (MiB) from the cgroup v2 `memory.max` or v1
+/// `memory.limit_in_bytes`; `None` when unlimited or unreadable.
+fn cgroup_memory_limit_mb() -> Option<u64> {
+    [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ]
+    .iter()
+    .find_map(|path| std::fs::read_to_string(path).ok())
+    .and_then(|raw| parse_cgroup_limit_mb(&raw))
+}
+
+/// Parses one cgroup limit file body into MiB (`max`/huge v1 sentinel = none).
+fn parse_cgroup_limit_mb(raw: &str) -> Option<u64> {
+    let bytes: u64 = raw.trim().parse().ok()?;
+    // cgroup v1 reports "unlimited" as a value near i64::MAX.
+    if bytes == 0 || bytes >= (1 << 60) {
+        return None;
+    }
+    Some(bytes / (1024 * 1024))
+}
+
 impl CliConfig {
+    /// Resolved compile-concurrency cap: the explicit value when >= 1,
+    /// else `min(4, available CPUs)`. Kept small because each in-flight
+    /// JIT compile holds hundreds of MiB of Cranelift state.
+    #[must_use]
+    pub fn effective_max_concurrent_compiles(&self) -> u32 {
+        if self.executor_max_concurrent_compiles >= 1 {
+            return self.executor_max_concurrent_compiles;
+        }
+        let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        u32::try_from(cpus.min(4)).unwrap_or(4).max(1)
+    }
+
+    /// The executor identity reported in `hello`: `EXECUTOR_ID` when set and
+    /// non-blank, else `POD_NAME` (the StatefulSet pod name via the downward
+    /// API), else `None` (stages then fall back to broadcast for this
+    /// executor, logging WARN).
+    #[must_use]
+    pub fn resolved_executor_id(&self) -> Option<String> {
+        self.executor_id
+            .clone()
+            .or_else(|| std::env::var("POD_NAME").ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Fails startup loudly when `EXECUTOR_REQUIRE_ID=true` (StatefulSet mode,
+    /// slot sharding) and no identity resolves -- an anonymous executor in a
+    /// sharded pool would silently degrade every stage to broadcast.
+    pub fn validate_executor_id(&self) -> Result<(), ExecutorError> {
+        if self.executor_require_id && self.resolved_executor_id().is_none() {
+            return Err(ExecutorError::Config(
+                "EXECUTOR_REQUIRE_ID is set (StatefulSet mode) but neither EXECUTOR_ID nor \
+                 POD_NAME is set; wire POD_NAME from metadata.name via the downward API"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The process-wide resident module budget in bytes (`0` = unlimited).
+    #[must_use]
+    pub fn memory_budget_bytes(&self) -> u64 {
+        self.executor_memory_budget_mb.saturating_mul(1024 * 1024)
+    }
+
+    /// The container memory limit in MiB: the explicit
+    /// `EXECUTOR_CONTAINER_MEMORY_LIMIT_MB`, else the cgroup limit, else `None`.
+    #[must_use]
+    pub fn container_memory_limit_mb(&self) -> Option<u64> {
+        self.executor_container_memory_limit_mb
+            .filter(|v| *v > 0)
+            .or_else(cgroup_memory_limit_mb)
+    }
+
+    /// Startup validation of `EXECUTOR_MEMORY_BUDGET_MB` against the container
+    /// limit (see [`check_memory_budget`]). `Ok(Some(msg))` is a warning the
+    /// caller must log; `Err` refuses to start.
+    pub fn validate_memory_budget(&self) -> Result<Option<String>, ExecutorError> {
+        check_memory_budget(
+            self.executor_memory_budget_mb,
+            self.container_memory_limit_mb(),
+        )
+    }
+
     /// A config good enough to build the wasmtime `Engine`/`Linker` with
     /// but nothing else -- used only by `run_healthcheck`, which probes
     /// exactly that (this process has no HTTP surface to probe, spec
@@ -387,13 +596,20 @@ impl CliConfig {
             bundle_bucket_ca_file: None,
             bundle_fetch_timeout_s: 30,
             bundle_max_component_bytes: 33_554_432,
+            bundle_max_precompiled_bytes: 268_435_456,
+            executor_memory_budget_mb: 8192,
+            executor_container_memory_limit_mb: None,
+            flag_disable_aot_precompile: false,
+            precompile_signing_public_keys: None,
+            executor_id: None,
+            executor_require_id: false,
             bundle_signing_public_keys: None,
             executor_heartbeat_interval_secs: 5,
             executor_heartbeat_enabled: true,
             executor_self_ping_enabled: false,
             executor_probe_file: PathBuf::from("/tmp/executor-live"),
             executor_grace_secs: 60,
-            executor_max_concurrent_compiles: 2,
+            executor_max_concurrent_compiles: 0,
             executor_shutdown_drain_secs: 25,
             connector_host_api_addr: None,
             connector_host_api_identity: None,
@@ -414,6 +630,7 @@ impl CliConfig {
                 "STAGE_HOST_API_ADDR must not be empty".to_string(),
             ));
         }
+        self.validate_stage_targets()?;
         if self.executor_call_timeout_ms == 0
             || self.executor_call_timeout_ms > self.executor_max_call_timeout_ms
         {
@@ -450,16 +667,11 @@ impl CliConfig {
                 "EXECUTOR_CONNECTOR_POOL_SIZE must be > 0".to_string(),
             ));
         }
-        if self.executor_instances_per_bundle == 0
-            || self.executor_max_concurrent_calls == 0
-            || self.executor_max_concurrent_compiles == 0
-        {
+        if self.executor_instances_per_bundle == 0 || self.executor_max_concurrent_calls == 0 {
             return Err(ExecutorError::Config(format!(
-                "EXECUTOR_INSTANCES_PER_BUNDLE ({}), EXECUTOR_MAX_CONCURRENT_CALLS ({}) and \
-                 EXECUTOR_MAX_CONCURRENT_COMPILES ({}) must all be >= 1",
-                self.executor_instances_per_bundle,
-                self.executor_max_concurrent_calls,
-                self.executor_max_concurrent_compiles
+                "EXECUTOR_INSTANCES_PER_BUNDLE ({}) and \
+                 EXECUTOR_MAX_CONCURRENT_CALLS ({}) must both be >= 1",
+                self.executor_instances_per_bundle, self.executor_max_concurrent_calls,
             )));
         }
         if self.executor_wasm_collector != "drc" {
@@ -473,6 +685,63 @@ impl CliConfig {
             )));
         }
         self.validate_connector_link()
+    }
+
+    /// Every stage host-API listener this executor dials, parsed from
+    /// `STAGE_HOST_API_ADDR` (a single `host:port`, or a comma-separated list
+    /// to serve several stages from ONE process). Blank entries are skipped
+    /// here; [`Self::validate`] rejects them before this is ever used.
+    #[must_use]
+    pub fn stage_targets(&self) -> Vec<StageTarget> {
+        self.stage_host_api_addr
+            .split(',')
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(|addr| StageTarget {
+                label: addr.split(':').next().unwrap_or(addr).to_string(),
+                addr: addr.to_string(),
+            })
+            .collect()
+    }
+
+    /// A copy of this config bound to exactly one stage: its
+    /// `STAGE_HOST_API_ADDR` becomes that stage's address, so every
+    /// single-stage code path (dial, metrics label) works unchanged.
+    #[must_use]
+    pub fn for_stage(&self, target: &StageTarget) -> Self {
+        let mut cfg = self.clone();
+        cfg.stage_host_api_addr = target.addr.clone();
+        cfg
+    }
+
+    /// The metrics/log label of this (single-stage) config's stage: the host
+    /// part of its first address.
+    #[must_use]
+    pub fn stage_label(&self) -> String {
+        self.stage_targets()
+            .into_iter()
+            .next()
+            .map_or_else(|| "unknown".to_string(), |t| t.label)
+    }
+
+    /// Rejects a malformed multi-stage list: a blank entry (`a:1,,b:2`) or the
+    /// same address twice (two dial loops on one listener would fight).
+    fn validate_stage_targets(&self) -> Result<(), ExecutorError> {
+        let mut seen = std::collections::HashSet::new();
+        for raw in self.stage_host_api_addr.split(',') {
+            let addr = raw.trim();
+            if addr.is_empty() {
+                return Err(ExecutorError::Config(
+                    "STAGE_HOST_API_ADDR has a blank entry in its comma-separated list".to_string(),
+                ));
+            }
+            if !seen.insert(addr.to_string()) {
+                return Err(ExecutorError::Config(format!(
+                    "STAGE_HOST_API_ADDR lists {addr:?} more than once"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// The configured connector listener address, `None` when unset/empty
@@ -491,9 +760,8 @@ impl CliConfig {
     fn validate_connector_link(&self) -> Result<(), ExecutorError> {
         if self.executor_connector_connections != 1 {
             return Err(ExecutorError::Config(format!(
-                "EXECUTOR_CONNECTOR_CONNECTIONS ({}) must be exactly 1: the connector listener \
-                 replaces the previous session on every attach, so a second connection would \
-                 kill the first",
+                "EXECUTOR_CONNECTOR_CONNECTIONS ({}) must be exactly 1: each replica runs one \
+                 connector dial loop (scale out with replicas, not connections per replica)",
                 self.executor_connector_connections
             )));
         }
@@ -694,6 +962,38 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn memory_budget_must_be_below_the_container_limit() {
+        // at or above the limit: refuse to start
+        assert!(check_memory_budget(12_288, Some(12_288)).is_err());
+        assert!(check_memory_budget(16_384, Some(12_288)).is_err());
+        // default budget under the shipped 12Gi limit: fine, no warning
+        assert_eq!(check_memory_budget(8192, Some(12_288)).unwrap(), None);
+        // tight (>70%): starts, warns
+        assert!(check_memory_budget(10_000, Some(12_288)).unwrap().is_some());
+        // unlimited budget under a known limit, or unknown limit: warns
+        assert!(check_memory_budget(0, Some(12_288)).unwrap().is_some());
+        assert!(check_memory_budget(8192, None).unwrap().is_some());
+    }
+
+    #[test]
+    fn explicit_container_limit_overrides_and_is_validated() {
+        let mut cfg = CliConfig::for_healthcheck();
+        cfg.executor_memory_budget_mb = 4096;
+        cfg.executor_container_memory_limit_mb = Some(4096);
+        assert!(cfg.validate_memory_budget().is_err());
+        cfg.executor_container_memory_limit_mb = Some(6144);
+        assert_eq!(cfg.validate_memory_budget().unwrap(), None);
+    }
+
+    #[test]
+    fn cgroup_limit_parsing_handles_max_and_v1_sentinel() {
+        assert_eq!(parse_cgroup_limit_mb("max\n"), None);
+        assert_eq!(parse_cgroup_limit_mb("9223372036854771712\n"), None);
+        assert_eq!(parse_cgroup_limit_mb("12884901888\n"), Some(12_288));
+        assert_eq!(parse_cgroup_limit_mb("garbage"), None);
+    }
+
+    #[test]
     fn for_healthcheck_produces_a_valid_config() -> Result<(), ExecutorError> {
         let cfg = CliConfig::for_healthcheck();
         cfg.validate()?;
@@ -787,7 +1087,6 @@ mod tests {
         for flag in [
             "--executor-instances-per-bundle",
             "--executor-max-concurrent-calls",
-            "--executor-max-concurrent-compiles",
         ] {
             let mut a = base_args();
             a.extend([flag, "0"]);
@@ -800,10 +1099,29 @@ mod tests {
         Ok(())
     }
 
+    /// Compile cap: `0` = auto (1..=4), explicit values pass through.
+    #[test]
+    fn compile_cap_auto_and_explicit() -> Result<(), Box<dyn std::error::Error>> {
+        let mut a = base_args();
+        a.extend(["--executor-max-concurrent-compiles", "0"]);
+        let cfg = CliConfig::try_parse_from(a)?;
+        assert!(cfg.validate().is_ok(), "0 = auto must validate");
+        assert!((1..=4).contains(&cfg.effective_max_concurrent_compiles()));
+        let mut a = base_args();
+        a.extend(["--executor-max-concurrent-compiles", "7"]);
+        assert_eq!(
+            CliConfig::try_parse_from(a)?.effective_max_concurrent_compiles(),
+            7
+        );
+        Ok(())
+    }
+
     #[test]
     fn concurrency_and_drain_defaults() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = CliConfig::try_parse_from(base_args())?;
-        assert_eq!(cfg.executor_max_concurrent_compiles, 2);
+        assert_eq!(cfg.executor_max_concurrent_compiles, 0);
+        let eff = cfg.effective_max_concurrent_compiles();
+        assert!((1..=4).contains(&eff), "auto cap {eff} must be in 1..=4");
         assert_eq!(cfg.executor_shutdown_drain_secs, 25);
         Ok(())
     }

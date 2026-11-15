@@ -549,7 +549,7 @@ fn is_full_copy(profile: &TranscodeProfile) -> bool {
 /// A pure-copy WHIP input feeding only Whep outputs whose profiles are
 /// also full-copy needs no `ffmpeg` process at all (spec §1, §7 case 6) --
 /// `webrtc-rs` forwards RTP directly, SFU-style.
-fn is_pure_whip_to_whep_copy(
+pub(crate) fn is_pure_whip_to_whep_copy(
     spec: &PipelineSpec,
     input: &InputSpec,
 ) -> Result<bool, PipelineError> {

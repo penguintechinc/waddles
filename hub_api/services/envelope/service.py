@@ -51,7 +51,7 @@ import os
 import secrets
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from services.envelope import metrics
@@ -206,12 +206,20 @@ class TenantEnvelopeService:
         slug_resolver: SlugResolver | None = None,
         clock: Callable[[], float] = time.monotonic,
         invalidation_publisher: DekInvalidationPublisher | None = None,
+        lineage: str | None = None,
+        sibling_keys: Sequence[EnvelopeKeyRepository] = (),
     ) -> None:
         """Wire the service; every collaborator is injectable (tests use in-memory fakes).
 
-        ``invalidation_publisher`` emits the data-plane `dek-rotated` event after a DEK rotation
-        commits or a key is revoked; production wiring (``runtime.py``) always supplies it.
+        `lineage` (``None`` = at-rest) domain-separates this service's data subkeys (see
+        :func:`derive_data_subkey`). `sibling_keys` are the OTHER lineages' key repositories
+        of the same tenants: BYOK activate/disable/re-wrap move their rows onto the target
+        KEK together with this service's own, and a pending BYOK state counts their
+        customer-wrapped rows -- one tenant KMS config always covers every lineage, so a
+        disable can never strand a sibling lineage's DEKs under a dropped customer key.
         """
+        self._lineage = lineage
+        self._siblings = tuple(sibling_keys)
         self._keys = keys
         self._configs = configs
         self._registry = registry
@@ -302,8 +310,8 @@ class TenantEnvelopeService:
                 "the customer KMS key was revoked; re-activate or disable external KMS",
                 reason="kms_access_denied",
             )
-        rows = await self._keys.list_keys(tenant_id)
-        if any(row.kek_kind == KEK_KIND_CUSTOMER for row in rows):
+        rows = await self._rows_all_lineages(tenant_id)
+        if any(row.kek_kind == KEK_KIND_CUSTOMER for _, row in rows):
             raise TenantKeyUnavailableError(
                 "external KMS reconfiguration is pending; activate it before new key material",
                 reason="kms_pending",
@@ -342,7 +350,7 @@ class TenantEnvelopeService:
             raise TenantKeyNotFoundError("data key has been destroyed")
         adapter = await self._adapter_for_record(tenant_id, record)
         dek = await adapter.unwrap(record.wrapped_dek, context=wrap_context(tenant_id))
-        return derive_data_subkey(dek, tenant_id)
+        return derive_data_subkey(dek, tenant_id, lineage=self._lineage)
 
     async def _load_subkey(
         self,
@@ -492,7 +500,9 @@ class TenantEnvelopeService:
                 kek_ref=adapter.key_ref,
             )
         now = self._clock()
-        state.keys[record.dek_version] = _CachedKey(derive_data_subkey(dek, tenant_id), now)
+        state.keys[record.dek_version] = _CachedKey(
+            derive_data_subkey(dek, tenant_id, lineage=self._lineage), now
+        )
         state.active_version = record.dek_version
         state.active_checked_at = now
         state.pending_usage = 0
@@ -692,57 +702,6 @@ class TenantEnvelopeService:
                 record = await self._provision_first_key(state, tenant_id, tenant_slug)
             return record
 
-    async def export_dek(
-        self, tenant_id: int, *, dek_version: int | None = None
-    ) -> tuple[int, bytearray]:
-        """Unwrap a tenant DEK for the internal data-plane broker (the ONLY raw-DEK exit).
-
-        Returns ``(dek_version, raw_dek)``; ``dek_version=None`` selects the active version, an
-        explicit one may name a retired version (old ciphertext must stay readable). The raw DEK
-        is returned as a ``bytearray`` so the caller can zero it in place once sealed. It is never
-        cached, logged, or stored here. Same failure policy as encrypt/decrypt: a revoked key or
-        unreachable KMS raises :class:`TenantKeyUnavailableError`, a missing/destroyed version
-        :class:`TenantKeyNotFoundError`; there is no fallback key.
-        """
-        state = self._state(tenant_id)
-        if state.blocked_until > self._clock():
-            raise self._blocked_error(state)
-        if dek_version is None:
-            record = await self._keys.get_active(tenant_id)
-        else:
-            record = await self._keys.get_version(tenant_id, dek_version)
-        if record is None or record.wrapped_dek is None or record.status == KEY_DESTROYED:
-            raise TenantKeyNotFoundError("no usable data key for this tenant")
-        try:
-            adapter = await self._adapter_for_record(tenant_id, record)
-            dek = await adapter.unwrap(record.wrapped_dek, context=wrap_context(tenant_id))
-        except KmsAccessDeniedError as exc:
-            await self._on_revoked(state, tenant_id, record, exc)
-            raise TenantKeyUnavailableError(
-                "tenant encryption key unavailable: access denied by the key provider",
-                reason="kms_access_denied",
-            ) from exc
-        except KmsUnavailableError as exc:
-            reason: UnavailableReason = (
-                "kms_platform_credentials"
-                if isinstance(exc, KmsCredentialsError)
-                else "kms_unavailable"
-            )
-            self._start_backoff(state, reason, self._settings.transient_backoff_s)
-            metrics.record_kms_failure(record.kek_kind, "unavailable", tenant_id)
-            raise TenantKeyUnavailableError(
-                "tenant encryption key unavailable: key provider unreachable", reason=reason
-            ) from exc
-        except (KmsError, EnvelopeIntegrityError) as exc:
-            self._start_backoff(state, "kms_rejected", self._settings.transient_backoff_s)
-            metrics.record_kms_failure(record.kek_kind, "rejected", tenant_id)
-            raise TenantKeyUnavailableError(
-                "tenant encryption key unavailable: key provider rejected the key",
-                reason="kms_rejected",
-            ) from exc
-        metrics.record_operation("export_dek", "ok")
-        return record.dek_version, bytearray(dek)
-
     async def rotate_dek(
         self, tenant_id: int, *, tenant_slug: str | None = None, reason: str = "manual"
     ) -> DekRecord:
@@ -777,6 +736,36 @@ class TenantEnvelopeService:
         await self._publish_invalidation(tenant_id, "rotated")
         return record
 
+    async def _rows_all_lineages(
+        self, tenant_id: int
+    ) -> list[tuple[EnvelopeKeyRepository, DekRecord]]:
+        """Every non-destroyed key row of this tenant across this lineage and its siblings."""
+        out: list[tuple[EnvelopeKeyRepository, DekRecord]] = []
+        for repo in (self._keys, *self._siblings):
+            out.extend((repo, row) for row in await repo.list_keys(tenant_id))
+        return out
+
+    async def data_key(self, tenant_id: int, version: int | None = None) -> tuple[int, bytes]:
+        """Return ``(dek_version, data subkey)`` for a broker that hands the key out sealed.
+
+        ``version=None`` returns the active version (provisioning version 1 on first use,
+        under the tenant's current target KEK); an explicit version returns that version
+        (active or retired -- old ciphertext must stay decryptable). Same caching and
+        fail-closed KMS policy as :meth:`encrypt`/:meth:`decrypt`. The returned bytes are
+        key material: callers must seal them for transport and never log or persist them.
+
+        Raises:
+            EnvelopeInputError: bad tenant id or version.
+            TenantKeyNotFoundError: the requested version does not exist / was destroyed.
+            TenantKeyUnavailableError: the KEK cannot currently be used (fail closed).
+        """
+        validate_tenant_id(tenant_id)
+        if version is None:
+            return await self._active_subkey(tenant_id)
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            raise EnvelopeInputError("dek_version must be a positive integer")
+        return version, await self._subkey_for_version(tenant_id, version)
+
     async def _rewrap_rows(self, tenant_id: int, target: KmsAdapter) -> RewrapReport:
         """Re-wrap every DEK version onto `target`; per-row, verified, CAS, resumable.
 
@@ -784,11 +773,11 @@ class TenantEnvelopeService:
         that fails stays on its previous KEK (still readable); re-running
         picks up exactly the rows not yet on `target`.
         """
-        rows = await self._keys.list_keys(tenant_id)
+        rows = await self._rows_all_lineages(tenant_id)
         context = wrap_context(tenant_id)
         rewrapped = current = 0
         failed: list[int] = []
-        for row in rows:
+        for repo, row in rows:
             if row.kek_kind == target.kek_kind and row.kek_ref == target.key_ref:
                 current += 1
                 metrics.record_rewrap_row("current")
@@ -801,7 +790,7 @@ class TenantEnvelopeService:
                 new_wrapped = await target.wrap(dek, context=context)
                 if not hmac.compare_digest(await target.unwrap(new_wrapped, context=context), dek):
                     raise KmsRejectedError("re-wrapped DEK failed its unwrap check")
-                swapped = await self._keys.replace_wrapped(
+                swapped = await repo.replace_wrapped(
                     row, new_wrapped=new_wrapped, kek_kind=target.kek_kind, kek_ref=target.key_ref
                 )
                 if not swapped:
@@ -887,7 +876,7 @@ class TenantEnvelopeService:
         )
         existing = await self._configs.get(tenant_id)
         if existing is not None and existing.provider != provider:
-            rows = await self._keys.list_keys(tenant_id)
+            rows = [row for _, row in await self._rows_all_lineages(tenant_id)]
             if any(row.kek_kind == KEK_KIND_CUSTOMER for row in rows):
                 raise EnvelopeInputError(
                     "provider cannot change while DEKs are wrapped by the current provider; "
@@ -941,19 +930,10 @@ class TenantEnvelopeService:
             raise
         state = self._state(tenant_id)
         async with state.lock:
-            existing = await self._keys.list_keys(tenant_id)
-            if not existing:
+            if not await self._keys.list_keys(tenant_id):
                 await self._create_key(state, tenant_id, adapter, expected_version=None)
-                report = RewrapReport(
-                    tenant_id=tenant_id,
-                    target_kind=adapter.kek_kind,
-                    target_ref=adapter.key_ref,
-                    total=1,
-                    rewrapped=0,
-                    already_current=1,
-                )
-            else:
-                report = await self._rewrap_rows(tenant_id, adapter)
+            # Covers this lineage AND its siblings (stream DEKs): one config, every lineage.
+            report = await self._rewrap_rows(tenant_id, adapter)
         status = CONFIG_ACTIVE if report.ok else CONFIG_PENDING
         await self._configs.set_status(tenant_id, status, verified=True)
         self.invalidate(tenant_id)

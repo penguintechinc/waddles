@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    xUnit tests for the `superpenguin-quotes` bundle's business logic
+    (`QuotesLogic`/`QuotesDispatch`), run on the normal host CLR - NOT a
+    ProjectReference to `../superpenguin-quotes.csproj`, which pins
+    `RuntimeIdentifier=wasi-wasm`/`SelfContained=true` for its
+    componentize-dotnet build and cannot be restored or executed as a normal
+    `dotnet test` host target. Instead this project links the bundle's own
+    pure-logic source files directly (`<Compile Include="../QuotesLogic.cs" />`)
+    - real source, not a copy - while excluding `WaddleHostAdapter.cs`/
+    `ProcessStageExportsImpl.cs`/`ActionStageExportsImpl.cs`, which reference
+    wit-bindgen-generated types that exist only inside an actual
+    componentize-dotnet build (see `bundles/csharp/csping/README.md`
+    "Spike results" for why no xUnit-testable C# bundle project exists
+    upstream of this one). End-to-end compiled-component behavior (the parts
+    this project cannot exercise) is covered instead by
+    `core/bundle_executor/tests/csharp_superpenguin_quotes_integration.rs`,
+    mirroring `csharp_bundle_integration.rs`'s role for csping.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>WaddleBundleSuperpenguinQuotes.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="coverlet.collector" Version="10.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../../sdk/waddle-sdk-cs/waddle-sdk-cs.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../QuotesLogic.cs" Link="QuotesLogic.cs" />
+    <Compile Include="../QuotesJson.cs" Link="QuotesJson.cs" />
+    <Compile Include="../BundleKit.cs" Link="BundleKit.cs" />
+    <Compile Include="../QuotesDispatch.cs" Link="QuotesDispatch.cs" />
+    <!-- The SDK's own in-memory fakes (ledger with host-faithful wager idempotency, identity, tool, ...): real shared
+         test source, linked rather than copied so the bundle tests exercise the same host model the SDK tests do. -->
+    <Compile Include="../../../../sdk/waddle-sdk-cs/tests/Fakes.cs" Link="SdkFakes.cs" />
+    <Compile Include="../../../../sdk/waddle-sdk-cs/tests/FakesNext.cs" Link="SdkFakesNext.cs" />
+  </ItemGroup>
+
+</Project>

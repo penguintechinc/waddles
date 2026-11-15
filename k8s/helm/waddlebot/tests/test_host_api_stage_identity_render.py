@@ -2,14 +2,15 @@
 
 # regression: executor required HOST_API_STAGE_IDENTITY, chart never set it (alpha 2026-10-02)
 
-The alpha bundle-executor crash-looped with `Error: Config("HOST_API_STAGE_IDENTITY is
+The alpha svc-bundles-executor crash-looped with `Error: Config("HOST_API_STAGE_IDENTITY is
 required ...")` (core/bundle_executor/src/config.rs's `validate_host_api_tls`) because the
 chart never rendered that env var at all. This asserts, against the real rendered manifest
 text -- not a hand-read of the templates -- that:
 
-1. Both `bundle-executor` and `bundle-executor-action` Deployments carry a non-empty
-   `HOST_API_STAGE_IDENTITY` env var with the SAME value (the shared host-api-tls identity
-   cert serves both executors, see `_helpers.tpl`'s `waddlebot.hostApiTlsClientEnv`).
+1. The ONE `svc-bundles-executor` Deployment (it serves every stage) carries a non-empty
+   `HOST_API_STAGE_IDENTITY` env var, and dials BOTH stage listeners via
+   `STAGE_HOST_API_ADDR` (the shared host-api-tls identity cert serves both stage listeners,
+   see `_helpers.tpl`'s `waddlebot.hostApiTlsClientEnv`).
 2. That value is byte-for-byte the Subject CN actually baked into the alpha-generated
    `<fullname>-host-api-tls` Secret's `tls.crt` -- i.e. `core/bundle_executor/src/tls.rs`'s
    `PinnedIdentityVerifier` (CN-fallback branch) will actually accept the stage's real
@@ -30,6 +31,7 @@ from typing import Any
 import pytest
 import yaml
 from cryptography import x509
+from provision_harness import with_provisioned  # type: ignore[import-not-found]
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _ALPHA_VALUES = _CHART_DIR / "values-alpha.yaml"
@@ -58,7 +60,7 @@ def _helm_template() -> list[dict[str, Any]]:
 def rendered_docs() -> list[dict[str, Any]]:
     if not _shutil_which("helm"):
         pytest.skip("helm CLI not available in this environment")
-    return _helm_template()
+    return with_provisioned(_helm_template())
 
 
 def _shutil_which(cmd: str) -> str | None:
@@ -72,7 +74,7 @@ def _find_container_env(
 ) -> list[dict[str, Any]]:
     """Returns the named container's `env[]` list from the Deployment whose name ends with the suffix."""
     for doc in docs:
-        if doc.get("kind") != "Deployment":
+        if doc.get("kind") not in ("Deployment", "StatefulSet"):
             continue
         name = doc.get("metadata", {}).get("name", "")
         if not name.endswith(deployment_name_suffix):
@@ -122,11 +124,9 @@ class TestExecutorsGetHostApiStageIdentity:
     @pytest.mark.parametrize(
         ("deployment_suffix", "container_name"),
         [
-            # Both Deployments name their container "bundle-executor" (see
-            # templates/bundle-executor.yaml / bundle-executor-action.yaml) -- only the
-            # Deployment name itself distinguishes the process-stage vs. action-stage pod.
-            ("bundle-executor", "bundle-executor"),
-            ("bundle-executor-action", "bundle-executor"),
+            # The single executor Deployment names its container "svc-bundles-executor"
+            # (templates/svc-bundles-executor.yaml); it dials every stage with this identity.
+            ("svc-bundles-executor", "svc-bundles-executor"),
         ],
     )
     def test_stage_identity_env_matches_generated_cert_cn(
@@ -151,17 +151,25 @@ class TestExecutorsGetHostApiStageIdentity:
             "PinnedIdentityVerifier would reject every real connection"
         )
 
-    def test_both_executors_share_the_same_identity(
+    def test_one_executor_deployment_dials_both_stages_with_the_shared_identity(
         self, rendered_docs: list[dict[str, Any]]
     ) -> None:
-        process_env = _find_container_env(rendered_docs, "bundle-executor", "bundle-executor")
-        action_env = _find_container_env(
-            rendered_docs, "bundle-executor-action", "bundle-executor"
+        executors = [
+            d
+            for d in rendered_docs
+            if d.get("kind") in ("Deployment", "StatefulSet") and "executor" in d.get("metadata", {}).get("name", "")
+        ]
+        assert [d["metadata"]["name"] for d in executors] == ["waddlebot-svc-bundles-executor"], (
+            "exactly ONE executor Deployment must render, and no -action twin"
         )
-        assert process_env and action_env, "both executor Deployments must render"
-        assert _env_value(process_env, "HOST_API_STAGE_IDENTITY") == _env_value(
-            action_env, "HOST_API_STAGE_IDENTITY"
-        ), "both executors dial the same shared host-api-tls identity cert -- their expected identity must match"
+        env = _find_container_env(rendered_docs, "svc-bundles-executor", "svc-bundles-executor")
+        assert env, "the executor container must render"
+        addrs = (_env_value(env, "STAGE_HOST_API_ADDR") or "").split(",")
+        assert addrs == [
+            "waddlebot-svc-process-rust:8301",
+            "waddlebot-svc-action-rust:8302",
+        ], f"one executor must dial BOTH stage host-API listeners, got {addrs}"
+        assert _env_value(env, "HOST_API_STAGE_IDENTITY"), "shared stage identity must be pinned"
 
 
 if __name__ == "__main__":

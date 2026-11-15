@@ -1,0 +1,48 @@
+{
+  "context": {},
+  "frame": {
+    "author_id": "1",
+    "badges": [
+      "broadcaster"
+    ],
+    "channel_slug": "acme",
+    "chatroom_id": 12345,
+    "created_at": "2026-09-11T12:00:00.000000Z",
+    "display_name": "Acme",
+    "is_mod": false,
+    "is_owner": true,
+    "is_subscriber": false,
+    "message_id": "msg-1",
+    "platform": "kick",
+    "text": "welcome"
+  },
+  "golden": {
+    "actor": "1",
+    "event_type": "message",
+    "payload": {
+      "author_id": "1",
+      "badges": [
+        "broadcaster"
+      ],
+      "channel_slug": "acme",
+      "chatroom_id": 12345,
+      "created_at": "2026-09-11T12:00:00.000000Z",
+      "display_name": "Acme",
+      "is_mod": false,
+      "is_owner": true,
+      "is_subscriber": false,
+      "message_id": "msg-1",
+      "text": "welcome"
+    },
+    "platform": "kick"
+  },
+  "golden_origin": "python",
+  "id": "kick/chat_owner_badge",
+  "outcome": "event",
+  "path": "kick_pusher",
+  "pii_classifier": "reject:channel_slug,chatroom_id,created_at,is_owner",
+  "platform": "kick",
+  "python_divergences": [],
+  "rust_path": null,
+  "seed": "core/svc_ingest/tests/test_builtin_kick_ingest.py"
+}

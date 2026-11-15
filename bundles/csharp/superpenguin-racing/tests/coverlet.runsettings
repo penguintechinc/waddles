@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The bundle's pure sources are linked into the test assembly (it cannot reference the wasi-wasm bundle project), so
+     IncludeTestAssembly=true is required or coverlet would report 0% for the very code under test. The SDK and the shared
+     DropGameCore library have their own gates and are excluded so they cannot dilute this number; the shared test world and
+     the test classes themselves are excluded so the gate measures RacingLogic/RacingSimulation/RacingBoard/RacingDispatch. -->
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat code coverage">
+        <Configuration>
+          <IncludeTestAssembly>true</IncludeTestAssembly>
+          <Exclude>[*]*.g,[WaddleSdk]*,[DropGameCore]*,[SuperpenguinRacing.Tests]WaddleBundleSuperpenguinRacing.Tests.*,[SuperpenguinRacing.Tests]WaddleSdk.Tests.*,[SuperpenguinRacing.Tests]SuperPenguin.DropGameCore.TestSupport.*</Exclude>
+          <ExcludeByFile>**/obj/**/*.g.cs</ExcludeByFile>
+          <ExcludeByAttribute>GeneratedCodeAttribute,CompilerGeneratedAttribute</ExcludeByAttribute>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>

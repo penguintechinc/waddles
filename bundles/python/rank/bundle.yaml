@@ -7,7 +7,7 @@ name: Chat Rank/Level Bundle (Python)
 # automatic per-message XP accrual (not implemented here).
 # 1.0.3: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
 # 1.0.4: activation-gated only -- removed the in-bundle waddles.command-rank feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.6
+version: 1.0.7
 feature: waddles.core.example
 module: core
 provider: builtin

@@ -144,6 +144,9 @@ class AuditAction(StrEnum):
     LICENSE_PROVIDER_EVENT = "license.provider_event"
     ADMIN_ACTION = "admin.action"
     ADMIN_PLATFORM_CONFIG_CHANGED = "admin.platform_config_changed"
+    ADMIN_REPUTATION_POLICY_CHANGED = "admin.reputation_policy_changed"
+    ADMIN_REPUTATION_OVERRIDDEN = "admin.reputation_overridden"
+    ADMIN_REPUTATION_SOFT_BAN_CHANGED = "admin.reputation_soft_ban_changed"
     AUDIT_EXPORTED = "audit.exported"
     AUDIT_VERIFY_FAILED = "audit.verify_failed"
     # --- credential / secret lifecycle (inline-authz routes; the secret value is never logged) ---
@@ -356,9 +359,6 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("PUT", "/api/v1/tenant/<tenant_slug>/settings"): RouteAudit(
         AuditCategory.TENANT, AuditAction.TENANT_SETTINGS_CHANGED
     ),
-    ("PUT", "/api/v1/tenant/<tenant_slug>/modules"): RouteAudit(
-        AuditCategory.TENANT, AuditAction.TENANT_MODULES_CHANGED
-    ),
     ("POST", "/api/v1/tenant/<tenant_slug>/admins"): RouteAudit(
         AuditCategory.ROLE, AuditAction.TENANT_ADMIN_ADDED
     ),
@@ -393,6 +393,9 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ),
     ("PUT", "/api/v1/platform/users/<int:user_id>/role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_PLATFORM_USER_CHANGED
+    ),
+    ("POST", "/api/v1/communities/<int:community_id>/join"): RouteAudit(
+        AuditCategory.ROLE, AuditAction.ROLE_MEMBER_CHANGED
     ),
     ("PUT", "/api/v1/admin/<int:community_id>/members/<int:user_id>/role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_MEMBER_CHANGED
@@ -457,6 +460,13 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("PUT", "/api/v1/superadmin/settings"): RouteAudit(
         AuditCategory.ADMIN, AuditAction.ADMIN_PLATFORM_CONFIG_CHANGED
     ),
+    # --- reputation: tenant policy + admin score override ---
+    ("PUT", "/api/v1/tenant/<tenant_slug>/reputation/config"): RouteAudit(
+        AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_POLICY_CHANGED
+    ),
+    ("PUT", "/api/v1/admin/<int:community_id>/members/<int:user_id>/reputation"): RouteAudit(
+        AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_OVERRIDDEN
+    ),
 }
 
 
@@ -485,6 +495,17 @@ _APPS = "/api/v1/apps/community/<int:community_id>"
 #: ``require_scope`` is either here or in :data:`INLINE_AUTHZ_UNAUDITED`, and that every key
 #: names a live route.
 _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]], ...]] = (
+    (
+        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_POLICY_CHANGED),
+        (("PUT", f"{_ADM}/reputation/config"),),
+    ),
+    (
+        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_SOFT_BAN_CHANGED),
+        (
+            ("PUT", f"{_ADM}/reputation/soft-bans/<int:user_id>"),
+            ("DELETE", f"{_ADM}/reputation/soft-bans/<int:user_id>"),
+        ),
+    ),
     (
         _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_BYOK_KEY_SET),
         (("PUT", f"{_ADM}/ai/byok-keys"), ("PUT", f"{_ADM}/media/byok-keys")),

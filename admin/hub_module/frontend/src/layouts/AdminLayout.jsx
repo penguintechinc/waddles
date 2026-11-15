@@ -17,7 +17,6 @@ import {
   DocumentTextIcon,
   ShieldCheckIcon,
   Cog6ToothIcon,
-  BuildingStorefrontIcon,
   ServerStackIcon,
   RectangleGroupIcon,
   ArrowsRightLeftIcon,
@@ -104,14 +103,6 @@ function AdminLayout() {
           ],
         },
         {
-          key: 'modules',
-          label: 'Modules',
-          icon: PuzzlePieceIcon,
-          items: [
-            { to: `/admin/${communityId}/modules`, icon: PuzzlePieceIcon, label: 'Modules & Marketplace' },
-          ],
-        },
-        {
           key: 'loyalty',
           label: 'Loyalty',
           icon: CurrencyDollarIcon,
@@ -144,7 +135,8 @@ function AdminLayout() {
           items: [
             { to: `/admin/${communityId}/security`, icon: FireIcon, label: 'Security' },
             { to: `/admin/${communityId}/bot-detection`, icon: ShieldCheckIcon, label: 'Bot Detection' },
-            { to: `/admin/${communityId}/reputation`, icon: ScaleIcon, label: 'Reputation' },
+            { to: `/admin/${communityId}/reputation/policy`, icon: ScaleIcon, label: 'Reputation Policy' },
+            { to: `/admin/${communityId}/reputation/bans`, icon: ShieldCheckIcon, label: 'Soft Bans' },
             { to: `/admin/${communityId}/commands`, icon: HashtagIcon, label: 'Commands' },
           ],
         },
@@ -178,7 +170,10 @@ function AdminLayout() {
             { to: `/admin/${communityId}/analytics`, icon: ChartBarIcon, label: 'Analytics' },
             { to: `/admin/${communityId}/workflows`, icon: CommandLineIcon, label: 'Workflows', premium: true },
             ...(bundlesEnabled
-              ? [{ to: `/admin/${communityId}/bundles`, icon: PuzzlePieceIcon, label: 'Bundle Apps' }]
+              ? [
+                  { to: `/admin/${communityId}/bundles`, icon: PuzzlePieceIcon, label: 'Bundle Apps' },
+                  { to: `/admin/${communityId}/settings`, icon: AdjustmentsHorizontalIcon, label: 'App Settings' },
+                ]
               : []),
             { to: `/admin/${communityId}/domains`, icon: GlobeAltIcon, label: 'Custom Domains' },
             { to: `/admin/${communityId}/translation`, icon: LanguageIcon, label: 'Translation' },
@@ -201,7 +196,6 @@ function AdminLayout() {
   const superAdminNav = useMemo(() => [
     { to: '/superadmin', icon: ChartBarIcon, label: 'Dashboard', exact: true },
     { to: '/superadmin/communities', icon: HomeIcon, label: 'Communities' },
-    { to: '/superadmin/modules', icon: BuildingStorefrontIcon, label: 'Module Registry' },
     { to: '/superadmin/analytics', icon: ChartBarIcon, label: 'Analytics' },
     { to: '/superadmin/platform-config', icon: Cog6ToothIcon, label: 'Platform Config' },
     { to: '/superadmin/tenants', icon: ServerStackIcon, label: 'Tenants' },

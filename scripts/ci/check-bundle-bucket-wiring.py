@@ -73,7 +73,7 @@ def main() -> int:
             objects_examined += 1
             hub_api_configmap_refs = _configmap_refs(containers)
 
-        if component == "bundle-executor":
+        if component == "svc-bundles-executor":
             objects_examined += 1
             executor_bucket = _env_value(containers, "BUNDLE_BUCKET_NAME")
 
@@ -88,7 +88,7 @@ def main() -> int:
 
     print(
         f"Examined {objects_examined} relevant object(s) "
-        f"(ConfigMap, hub-api Deployment, bundle-executor Deployment, seaweedfs Deployment)."
+        f"(ConfigMap, hub-api Deployment, svc-bundles-executor Deployment, seaweedfs Deployment)."
     )
     if objects_examined == 0:
         print(
@@ -107,11 +107,11 @@ def main() -> int:
             f"(found: {sorted(hub_api_configmap_refs)!r}) -- it would never see BUNDLE_BUCKET_NAME"
         )
     if not executor_bucket:
-        errors.append("bundle-executor Deployment has no BUNDLE_BUCKET_NAME env var")
+        errors.append("svc-bundles-executor Deployment has no BUNDLE_BUCKET_NAME env var")
     if configmap_bucket and executor_bucket and configmap_bucket != executor_bucket:
         errors.append(
             f"hub-api's ConfigMap BUNDLE_BUCKET_NAME={configmap_bucket!r} != "
-            f"bundle-executor BUNDLE_BUCKET_NAME={executor_bucket!r}"
+            f"svc-bundles-executor BUNDLE_BUCKET_NAME={executor_bucket!r}"
         )
     if seaweedfs_command is None:
         errors.append("could not find the seaweedfs Deployment's hub-api identity block")
@@ -131,7 +131,7 @@ def main() -> int:
         return 1
 
     print(
-        f"PASS: hub-api (via ConfigMap {configmap_name!r}) and bundle-executor both target "
+        f"PASS: hub-api (via ConfigMap {configmap_name!r}) and svc-bundles-executor both target "
         f"BUNDLE_BUCKET_NAME={configmap_bucket!r}, hub-api identity has Read/Write/List on it."
     )
     return 0

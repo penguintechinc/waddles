@@ -25,6 +25,7 @@ version: 3.0.1
 feature: waddles.socials.music
 module: socials
 provider: builtin
+author: github:penguintechinc
 language: python
 artifact: source
 stages:

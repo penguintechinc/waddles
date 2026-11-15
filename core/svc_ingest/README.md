@@ -192,6 +192,23 @@ Entries without an `op_id` are refused `no_op_id` (the verifier needs a per-op i
 svc-ingest job (`VALKEY_URL`, same as the other real-Valkey suites; unset FAILS, never skips; no `#[ignore]`). Locally:
 `VALKEY_URL=redis://127.0.0.1:<port> cargo test --lib real_valkey` against a throwaway `valkey/valkey:8-alpine` container.
 
+## Egress detokenization (`src/egress.rs`)
+
+svc-ingest's outbound drain is the ONLY platform egress and, with svc-presentation, the only
+service that may hold real names. `chat.send`/`dm.send` text arrives as `{user:<token>}`
+placeholders (svc-action never resolves them); `Egress::prepare` substitutes them
+**immediately before each platform send**:
+
+| Property | Behaviour |
+|---|---|
+| Lookup | ONE batched read-only Postgres query per message (`src/display_names.rs`) under svc-ingest's own column-scoped role `waddles_svc_ingest` (`DATABASE_URL`; grants in `config/postgres/service-roles.yaml` + alembic `0100`) -- hub-api (control-plane writer) is not in the send path. Scoped to the entry's MAC-bound numeric `tenant_id`: a hub user resolves only while a member of one of that tenant's communities, a pseudonym only in its tenant; erasure deletes membership so an erased user resolves to `Unknown User`. Pool connects lazily and retries after a failure |
+| Caching | none -- names live in the `DetokenizedAction` for that one send |
+| Escaping | per sink (`egress_detokenizer::Sink`: Discord markdown/mention escaping, Twitch/other control-char strip) |
+| Type gate | platform sink send fns (`IrcOutbound::send`, `PlatformSender::send_*`, `DiscordRestClient::send_message`/`send_dm*`) accept only `egress_detokenizer::DetokenizedText`; executors take `DetokenizedAction` |
+| Fail-safe | kill switch `waddles.core.disable-pii-detokenization` ON, `PII_DETOKENIZATION_ENABLED=false`, no `DATABASE_URL`, no tenant on the entry, or a database error (WARN + `svc_ingest_egress_display_name_db_errors_total`) => the tokens are sent unchanged, never a guessed name; a token the database does not resolve becomes `Unknown User` |
+| Telemetry | `svc_ingest_egress_detokenize_total{outcome}` (`resolved`, `tokens_sent`, `no_tokens`, `no_resolver`, `kill_switch`, `no_tenant`); no names/tokens in logs |
+| Boundary gate | `make check-pii-egress` (`scripts/ci/check-pii-egress-boundary.sh`): no crate outside svc-ingest's drain/sender_exec and svc-presentation may reference `egress_detokenizer` |
+
 ## Connector heartbeat (P6a T5)
 
 The connector driver schedules `receiver.on-heartbeat-due` per connection when a transport declares
@@ -258,7 +275,8 @@ queue entry --(drain: pin_sig HMAC + expiry, FIRST gate)--> ActionExecutor::exec
 | `discord_duties.rs` | `DiscordDuties`: the Discord `DutyHook` (T6d-2) for `dm.send`, `role.add`, `role.remove` |
 | `../platform_users.rs` | `HubPlatformUserResolver`: production `PlatformUserResolver` over `hub_client` `IdentityService.ResolvePlatformUser` |
 
-**Supported kinds:** `chat.send`, `chat.delete` (Twitch, Discord), `chat.send` (YouTube); Discord `dm.send`, `role.add`, `role.remove` once
+**Supported kinds:** `chat.send`, `chat.delete` (Twitch, Discord), `chat.send` (YouTube); Kick `chat.send`, `mod.ban`,
+`mod.timeout`, `mod.unban` (below); Discord `dm.send`, `role.add`, `role.remove` once
 `DiscordDuties` is registered (`SenderExecutor::with_duties`). With no hook (`NoDuties`) a duty kind returns `ExecError::HostDutyMissing`
 (`SenderError::Unsupported`).
 
@@ -398,7 +416,7 @@ key allowlist, `needs_duty`, `requires_pin`, `ResultMode`). A platform bundle on
 | Guild / broadcaster / moderator / live-chat / application ids are host slots, never literals | `verify` (`query_is_host_slot` / `body_is_host_slot`, duty slots) |
 | Body keys outside the kind's allowlist (e.g. roles on a timeout) refused | `verify` (`BodyKeyNotAllowed`) |
 | App-scoped credentials (`app.` handles: EventSub, command registration) never mix with user-scoped slots and need `SlotSource::supports_app_credentials` | `mod.rs` executor (`slot_credential_scope_mixed` / `slot_app_credential_unsupported`) |
-| Kick is declared with NO kinds; its transport placeholder (`UnsupportedTransport`) fails loud | `policy/kick.rs`, `transport.rs` |
+| Kick: `chat.send`, `mod.ban|timeout|unban` (`chat.delete` unregistered: fail closed) (integer body slot + protected target) | `policy/kick.rs`, `kick_slots.rs` |
 
 The producer twin is `bundle_capability_gate::platform_ops` (op -> permission id); both tables
 are parity-tested against `core/bundle_capability_gate/tests/fixtures/platform_relay_ops.json`.
@@ -512,10 +530,29 @@ Opt-in per platform by the env baselines `CONNECTOR_{TWITCH,DISCORD,YOUTUBE}_ENA
 | Twitch secrets | `ResolverSecrets::with_wrapper("twitch", TwitchFieldSecrets)`: `pass` via the community-bound source, `nick`/`channel` from the validated config only. |
 | Host calls | `ConnectionCtx.connection_id` is pinned to the hub connection row id (what the executor stamps into `_scope`); `TableActivator` registers `(platform, community, tenant, connection)`. A different scope for a live id is refused (`activation_failed` park) and `deactivate` is compare-and-remove (refcounted per exact scope), so a stale guard never removes a newer registration. |
 | Rotation | `BindingSummary.secret_version` (hub-api `secretVersion`, >= 1) is in every fingerprint; a bump restarts the connection. |
-| Webhooks | `IngressAttach`: `activate_plan` for Webhook plans, `deactivate_route` on end; listed by `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`. |
+| Webhooks | `IngressAttach`: `activate_plan` for Webhook plans, `deactivate_route` on end; listed by `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`. A Kick route additionally starts the host-side events subscription (`connector/kick_subscribe.rs`) and stops it on detach. |
+| Kick lanes | A Kick binding with `kick` listed as a webhook platform runs TWO supervised connections: the Pusher socket (`Lane::Primary`) and its webhook route (`Lane::Webhook`), each with its own supervisor slot and lease (`...:kick:<id>` / `...:kick-webhook:<id>`). The webhook lane needs binding metadata `broadcaster_user_id` (missing/invalid refuses the binding, loudly); two communities binding one broadcaster are both dropped (Kick signs with one global key). |
 | Readiness | `/readyz` per platform: enabled, executor attached, pinned ok, desired/live, discovery failed. Connector ON with the data plane OFF or a prerequisite missing is a fatal named boot error. |
 
 Env (helm #1012 names): `CONNECTOR_<P>_ENABLED`, `SENDER_EXEC_DIGEST_<P>`, `HOST_API_{SERVER_CERT,SERVER_KEY,CLIENT_CA}_FILE`, `HOST_API_CLIENT_IDENTITY`,
 `SENDER_EXEC_HOST_API_PORT`, `HUB_API_GRPC_ENDPOINT`/`HUB_API_GRPC_CA_FILE`, `CONNECTOR_RECONCILE_INTERVAL_SECS`, `CONNECTOR_MAX_CONNECTIONS`,
 `CONNECTOR_START_CONCURRENCY`, `CONNECTOR_DISCORD_START_PACE_MS`, `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`, `CONNECTOR_ROUTE_KEY_SECRET`,
 `CONNECTOR_HEARTBEAT_ENABLED` (new, default false). Twitch connector now declares `platform.log` (manifest + host-call grants + executor pin grants, subset-of-manifest tests) for its debug-level, PII-free lifecycle log.
+
+## Kick outbound ops and webhook subscription
+
+**Outbound (`sender_exec/policy/kick.rs`, `kick_slots.rs`, `outbound_creds_kick.rs`).** `chat.send` (bot post), `chat.delete`
+(`DELETE /public/v1/chat/{id}`, `requires_pin`: the stamped channel is proven first), and `mod.ban` / `mod.timeout` / `mod.unban`
+(`/public/v1/moderation/bans`). Moderation bodies carry JSON integers: `broadcaster_user_id` is the host slot `{{KICK_BROADCASTER_ID}}`
+(`SlotShape::Int`, handle `broadcaster_id`, from the community connection's binding metadata `broadcaster_user_id`; a binding without a valid
+one refuses with `broadcaster_id_unbound`), the target `user_id` is a literal integer the bundle shapes. **Protected target:** the kind's
+`distinct_body_ints` rule refuses (`protected_target`) any rendered body whose `user_id` equals the broadcaster or is not an integer, before
+anything is sent. The producer (`svc_action`) lists `kick` among the relay providers and queues to `waddles:transport:irc:kick:outbound`
+(`SenderStatus::ExecutorQueue`).
+
+**Webhook subscription (`connector/kick_subscribe.rs`).** Kick posts to the single callback configured on the Kick application, only for
+events the broadcaster subscribed to. `KickSubscriber::ensure(community_id)` resolves the community's token + broadcaster id host-side,
+lists existing subscriptions (`GET /public/v1/events/subscriptions?broadcaster_user_id=`), and creates only the missing ones
+(`POST` with an integer `broadcaster_user_id`, `method: "webhook"`, the six events the bundle normalizes). It is idempotent, fails loud
+(per-event error / non-2xx / malformed reply are typed `SubscribeError`s), retries transient errors with bounded backoff in the background
+when a Kick route activates, and exports `svc_ingest_kick_subscribe_total{outcome}`. The token never appears in a log, error or metric.

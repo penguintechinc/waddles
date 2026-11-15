@@ -17,6 +17,7 @@ import pytest
 
 from services import marketplace_billing_service as svc
 from services.errors import ApiError
+from tests.conftest import insert_global_admin
 
 
 @pytest.fixture
@@ -27,7 +28,7 @@ def seeded(marketplace_billing_db: Any) -> tuple[Any, int, int]:
 class TestIsCommunityAdmin:
     def test_super_admin_bypasses_membership(self, seeded: Any) -> None:
         dal, _tenant_id, community_id = seeded
-        user_id = int(dal.hub_users.insert(username="sa", email="sa@x.com", is_super_admin=True))
+        user_id = insert_global_admin(dal, username="sa", email="sa@x.com")
         dal.commit()
         assert svc.is_community_admin(dal, community_id, user_id) is True
 

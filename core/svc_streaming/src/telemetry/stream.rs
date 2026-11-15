@@ -233,6 +233,8 @@ pub enum SessionFailure {
     EngineStartFailed,
     WhipSdpMissing,
     StdinUnavailable,
+    /// A WHEP output was requested for a source the service cannot serve it from.
+    WhepNotWired,
 }
 
 impl SessionFailure {
@@ -246,6 +248,7 @@ impl SessionFailure {
             SessionFailure::EngineStartFailed => "engine_start_failed",
             SessionFailure::WhipSdpMissing => "whip_sdp_missing",
             SessionFailure::StdinUnavailable => "stdin_unavailable",
+            SessionFailure::WhepNotWired => "whep_not_wired",
         }
     }
 }

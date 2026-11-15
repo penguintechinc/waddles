@@ -10,6 +10,22 @@ namespace WaddleSdk.Economy;
 public sealed record EconomyAdjustArgs(
     [property: JsonPropertyName("user")] string User,
     [property: JsonPropertyName("delta")] long Delta);
+/// <summary>
+/// Arguments of the economy service's `transfer_from` tool (a DANGEROUS, admin-approved grant). `from` is the account debited (it
+/// need NOT be the invoking actor), `to` is credited. The idempotency key travels in the tool-invoke key slot (the host injects it
+/// as `__idempotency_key`), exactly as for `adjust_balance`.
+/// </summary>
+public sealed record EconomyTransferFromArgs(
+    [property: JsonPropertyName("from")] string From,
+    [property: JsonPropertyName("to")] string To,
+    [property: JsonPropertyName("amount")] long Amount,
+    [property: JsonPropertyName("reason")] string Reason);
+
+/// <summary>Result of `transfer_from`. Fields are optional on purpose: success is the absence of a refusal; the shape is pinned by the contract fixture test.</summary>
+public sealed record EconomyTransferResult(
+    [property: JsonPropertyName("from_balance")] long? FromBalance = null,
+    [property: JsonPropertyName("to_balance")] long? ToBalance = null);
+
 public sealed record EconomyAmountResult(
     [property: JsonRequired, JsonPropertyName("user")] string User,
     [property: JsonRequired, JsonPropertyName("balance")] long Balance);
@@ -26,6 +42,37 @@ public sealed class EconomyServiceClient(IToolClient tools, string messageId, st
     public long Balance(string user) => Read("get_balance", user);
     public long Credit(string user, ulong amount) => Adjust(user, amount, false);
     public long Debit(string user, ulong amount) => Adjust(user, amount, true);
+
+    /// <summary>
+    /// Moves <paramref name="amount"/> from <paramref name="from"/> to <paramref name="to"/> through `transfer_from`. Needs the
+    /// dangerous `tool.call:waddles.core.service.economy:transfer_from` grant; without it the host answers not-granted, which
+    /// surfaces as <see cref="EconomyErrorKind.Denied"/> with message `not_granted` (callers must refuse loudly, never fake it).
+    /// </summary>
+    public void TransferFrom(string from, string to, ulong amount, string reason)
+    {
+        if (amount == 0 || amount > long.MaxValue || from == to || string.IsNullOrWhiteSpace(reason))
+            throw new WaddleEconomyException(EconomyErrorKind.Invalid, "invalid_transfer");
+        var args = new EconomyTransferFromArgs(from, to, (long)amount, reason);
+        try
+        {
+            tools.Invoke(EconomyServiceTools.Target, "transfer_from", args, WaddleSdkJsonContext.Default.EconomyTransferFromArgs,
+                WaddleSdkJsonContext.Default.EconomyTransferResult, Key("transfer", from + "\u001f" + to));
+        }
+        catch (WaddleToolException ex) when (ex.Kind == ToolErrorKind.InvalidArgs &&
+            ex.Message is "insufficient_funds" or "over_cap" or "not_a_member")
+        {
+            throw new WaddleEconomyException(ex.Message switch {
+                "insufficient_funds" => EconomyErrorKind.InsufficientFunds,
+                "over_cap" => EconomyErrorKind.OverCap,
+                _ => EconomyErrorKind.NotAMember,
+            }, ex.Message);
+        }
+        catch (WaddleToolException ex) when (ex.Kind is ToolErrorKind.NotGranted or ToolErrorKind.Forbidden or ToolErrorKind.TargetUnavailable or ToolErrorKind.Timeout)
+        {
+            throw new WaddleEconomyException(ex.Kind is ToolErrorKind.NotGranted or ToolErrorKind.Forbidden
+                ? EconomyErrorKind.Denied : EconomyErrorKind.Unavailable, ex.Code);
+        }
+    }
 
     private long Read(string name, string user) => Call(name, user, new EconomyViewArgs(user),
         WaddleSdkJsonContext.Default.EconomyViewArgs, null);

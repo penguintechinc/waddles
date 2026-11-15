@@ -1,0 +1,50 @@
+{
+  "tool": "wix.event.create",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      },
+      "description": {
+        "type": "string",
+        "maxLength": 500
+      },
+      "starts_at": {
+        "type": "string",
+        "description": "RFC 3339 timestamp"
+      },
+      "ends_at": {
+        "type": "string",
+        "description": "RFC 3339 timestamp"
+      },
+      "timezone": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100,
+        "description": "IANA time-zone id"
+      },
+      "location_name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 50
+      },
+      "location_type": {
+        "type": "string",
+        "enum": [
+          "VENUE",
+          "ONLINE"
+        ]
+      }
+    },
+    "required": [
+      "title",
+      "starts_at",
+      "ends_at",
+      "timezone"
+    ],
+    "additionalProperties": false
+  }
+}

@@ -418,7 +418,10 @@ mod tests {
             *v += 1;
             let ver = *v;
             let mut d = self.data.borrow_mut();
-            let cur = d.get(key).map(|(b, _)| b.clone()).unwrap_or_default();
+            let cur = match d.get(key) {
+                Some((b, _)) => b.clone(),
+                None => Vec::new(),
+            };
             d.insert(key.to_string(), (cur, ver));
         }
     }

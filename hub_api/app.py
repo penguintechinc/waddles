@@ -37,11 +37,11 @@ from flask_core.service_jwt import (
     load_issuer_from_env,
 )
 from flask_core.token_revocation import get_token_revocation
-from pydal import Field
 from quart import Quart, request
 from quart_schema import Info, QuartSchema
 from werkzeug.exceptions import HTTPException
 
+import telemetry as hub_telemetry
 from blueprints import register_blueprints
 from bootstrap import BootstrapState, BootstrapStatus, run_bootstrap_loop
 from config import HubAPIConfig
@@ -65,9 +65,11 @@ from services.schema import (
     bind_marketplace_module_tables,
     bind_music_tables,
     bind_platform_tables,
+    bind_reference_tenants_table,
     bind_token_billing_tables,
 )
 from services.session_cookie import bearer_token_from_cookie
+from services.source_group_reconciler import run_reconcile_loop
 from services.tenant_key_provisioning import run_startup_provisioning
 
 logger = logging.getLogger(__name__)
@@ -122,16 +124,7 @@ def _bind_reference_tables(dal: Any) -> None:
     function; M3 is the first group after M1 with its own new tables, so
     this is a net-new call site, not a redefinition of M1's own tables.
     """
-    dal.define_table(
-        "tenants",
-        Field("slug", "string", length=100),
-        Field("display_name", "string", length=255),
-        Field("logo_url", "text"),
-        Field("is_global", "boolean", default=False),
-        Field("is_active", "boolean", default=True),
-        Field("config", "json"),
-        migrate=False,
-    )
+    bind_reference_tenants_table(dal)
     bind_platform_tables(dal)
     # Shared marketplace/module table family (hub_modules, reviews,
     # installations, marketplace_catalog, subscriptions, settings, discount
@@ -203,6 +196,12 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     app = Quart(__name__)
     app.config["HUB_API_CONFIG"] = cfg
     app.secret_key = cfg.secret_key
+    # OpenTelemetry request hooks + late-bound ASGI middleware shim (telemetry.py). Registered
+    # FIRST so its before_request runs before every other hook (the rate limiter can short-circuit
+    # later ones) and its after_request runs last, seeing the final status. Providers/exporters
+    # are built in startup() below; until then (and whenever telemetry is disabled) this is a
+    # passthrough.
+    hub_telemetry.install(app)
     # security.md Input Validation -- this app never set its own cap, so
     # Quart's built-in default (16 MiB) was the only thing standing between
     # a request and unbounded memory use, and it happens to sit exactly at
@@ -296,6 +295,11 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
 
         Also binds reference tables.
         """
+        # Telemetry first: SQLAlchemy/gRPC instrumentation must be installed before the DAL
+        # engines and the internal gRPC server are created below. Never raises; a missing
+        # endpoint, the `waddles.disable-hub-api-otel` kill switch or a bad config just leaves it
+        # a logged no-op.
+        app.config["telemetry_runtime"] = await hub_telemetry.start(app, cfg)
         logger.system("Starting hub-api", action="startup", extra={"port": cfg.module_port})
         # Fired as a background task, not awaited to completion: a fresh/behind
         # schema can legitimately take longer than any reasonable startup
@@ -429,7 +433,7 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
                 app.config["grpc_server"] = await start_internal_grpc_server(
                     issuer=issuer,
                     async_dal=async_dal,
-                    envelope_service=envelope_runtime.service,
+                    app_config=app.config,
                     audit_logger=app.config.get("logger"),
                 )
             except Exception as exc:  # noqa: BLE001 - see fail-open/fail-closed note above
@@ -457,6 +461,16 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         if cfg.database_url.startswith("postgres"):
             app.config["suppression_purge_task"] = asyncio.create_task(
                 run_purge_loop(async_dal, dal, is_ready=lambda: bootstrap_status.is_ready)
+            )
+        # Level-triggered reconcile of every app_source_bindings row to a live Valkey consumer
+        # group (a slug/name rename or a missed best-effort provision otherwise leaves
+        # svc-process on NOGROUP forever). Runs in every replica (idempotent); a failed pass is
+        # logged at ERROR + counted and retried, never a request failure. Waits for schema
+        # readiness. Postgres-only: sqlite configs are test harnesses with no Valkey.
+        app.config["source_group_reconcile_task"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["source_group_reconcile_task"] = asyncio.create_task(
+                run_reconcile_loop(install_dal, is_ready=lambda: bootstrap_status.is_ready)
             )
         logger.system("hub-api started", action="startup", result="SUCCESS")
 
@@ -507,6 +521,14 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
                 if not isinstance(exc, asyncio.CancelledError):
                     logger.warning(f"Error stopping suppression purge task on shutdown: {exc}")
+        reconcile_task = app.config.get("source_group_reconcile_task")
+        if reconcile_task is not None:
+            reconcile_task.cancel()
+            try:
+                await reconcile_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Error stopping source group reconcile task on shutdown: {exc}")
         watermark_job = app.config.get("bundle_active_set_watermark_job")
         if watermark_job is not None:
             try:
@@ -546,6 +568,11 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             except Exception as exc:  # noqa: BLE001 - shutdown must not raise
                 logger.warning(f"Error stopping internal gRPC server on shutdown: {exc}")
         logger.system("hub-api shutdown complete", action="shutdown", result="SUCCESS")
+        telemetry_runtime = app.config.get("telemetry_runtime")
+        if telemetry_runtime is not None:
+            # Last, so every shutdown log/span above is still exported; bounded flush (a dead
+            # collector cannot hold shutdown).
+            await telemetry_runtime.shutdown()
 
     return app
 

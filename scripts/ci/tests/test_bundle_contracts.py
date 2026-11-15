@@ -41,6 +41,14 @@ def _inline(node, defs):
     return node
 
 
+def _inline_local(schema):
+    """Inlines a schema's own root-level `definitions` (`#/definitions/x` is relative to that root)."""
+    if not isinstance(schema, dict) or "definitions" not in schema:
+        return schema
+    defs = schema["definitions"]
+    return _inline({k: v for k, v in schema.items() if k != "definitions"}, defs)
+
+
 def contract_tools() -> dict[str, dict]:
     """Flattens all contracts to {full_tool_name_or_pattern: schema-dict} keyed by family."""
     out: dict[str, dict] = {}
@@ -49,7 +57,7 @@ def contract_tools() -> dict[str, dict]:
         out[n] = t
     clip = _load("twitch-clip-tools.v1.json")
     for n, t in clip["tools"].items():
-        out[n] = t
+        out[n] = {k: _inline_local(v) for k, v in t.items()}
     live = _load("live-channels-contract.v1.json")
     tool = _inline(live["tools"]["channels"], live["definitions"])
     for p in live["platforms"]:
@@ -147,6 +155,14 @@ def test_contracts_are_well_formed() -> None:
         assert t["input_schema"].get("additionalProperties") is False, f"{n} input must be closed"
 
 
+def test_clip_contract_refs_are_inlined() -> None:
+    """Manifest schemas carry no refs, so the flattened clip contract must not either."""
+    flat = contract_tools()
+    for n in ("twitch.clip.get", "twitch.clip.list"):
+        dumped = json.dumps(flat[n]["output_schema"])
+        assert "$ref" not in dumped and "definitions" not in dumped, n
+
+
 def test_incompat_detector_can_fail() -> None:
     """The consumer comparison must flag a drifting fixture."""
     prod = _load("ai-tools.v1.json")["tools"]["ai.complete"]["input_schema"]
@@ -205,25 +221,68 @@ def test_producer_fixtures_match_contract() -> None:
     assert not drift, "\n".join(drift)
 
 
+def _producer_exports() -> dict[str, list[tuple[Path, dict]]]:
+    """Every exported tool across bundle.yaml manifests: {tool name: [(manifest, tool entry)]}."""
+    out: dict[str, list[tuple[Path, dict]]] = {}
+    for m in _manifests():
+        if m.name != "bundle.yaml":
+            continue
+        for t in _exported(m):
+            out.setdefault(t["name"], []).append((m, t))
+    return out
+
+
+def _snapshot_drift(p: Path, d: dict, producers: dict[str, list[tuple[Path, dict]]]) -> list[str]:
+    """Checks a producer-schema snapshot fixture (`{tool, input_schema}`) against the producer.
+
+    Tools outside every shared contract family have exactly one producer bundle; the consumer's
+    fixture is a copy of that bundle's exported input_schema and must equal it.
+    """
+    owners = producers.get(d["tool"], [])
+    if not owners:
+        return [f"{p}: tool {d['tool']} is not in any contract or producer manifest"]
+    if len(owners) > 1:
+        return [f"{p}: tool {d['tool']} exported by {len(owners)} bundles; it needs a shared contract"]
+    m, t = owners[0]
+    if d["input_schema"] != t.get("input_schema"):
+        return [f"{p}: input_schema differs from producer {m}"]
+    return []
+
+
 def test_consumer_fixtures_match_contract() -> None:
-    """Each consumer fixture's request/response is compatible with the producer's contract schema."""
+    """Each consumer fixture is compatible with its contract, or equals its single producer's schema."""
     fixtures = _consumer_fixtures()
+    producers = _producer_exports()
     drift = []
+    snapshots = 0
     for p in fixtures:
         d = json.loads(p.read_text())
         exp = _expected_for(d["tool"])
         if exp is None:
-            drift.append(f"{p}: tool {d['tool']} is not in any contract")
+            if _in_family(d["tool"]) or "input_schema" not in d:
+                drift.append(f"{p}: tool {d['tool']} is not in any contract")
+            else:
+                snapshots += 1
+                drift += _snapshot_drift(p, d, producers)
             continue
-        if "target" in d and not (
-            d["target"] == "waddles.core.service." + d["tool"].split(".")[0]
-        ):
+        if "target" in d and d["target"] != "waddles.core.service." + d["tool"].split(".")[0]:
             drift.append(f"{p}: target {d['target']} does not match tool family")
         drift += [f"{p}: {e}" for e in _incompat(d["request"], exp["input_schema"], "request", request=True)]
         drift += [f"{p}: {e}" for e in _incompat(d.get("response", {}), exp["output_schema"], "response", request=False)]
     if not drift and not fixtures:
         pytest.skip("no consumer fixtures merged under scan roots yet")
     assert not drift, "\n".join(drift)
+
+
+def test_snapshot_drift_detector_can_fail() -> None:
+    """A snapshot that diverges from (or lacks) its producer must be flagged."""
+    prod = {"x.tool": [(Path("m"), {"input_schema": {"type": "object", "required": ["a"]}})]}
+    ok = {"tool": "x.tool", "input_schema": {"type": "object", "required": ["a"]}}
+    assert _snapshot_drift(Path("f"), ok, prod) == []
+    bad = {"tool": "x.tool", "input_schema": {"type": "object", "required": []}}
+    assert _snapshot_drift(Path("f"), bad, prod)
+    assert _snapshot_drift(Path("f"), {"tool": "y.tool", "input_schema": {}}, prod)
+    assert _snapshot_drift(Path("f"), ok, {"x.tool": prod["x.tool"] * 2})
 
 
 def test_requested_tools_exist_in_contracts() -> None:

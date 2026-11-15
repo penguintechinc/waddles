@@ -118,9 +118,21 @@ class AdapterSpec:
     #: The data-plane metadata contract (flat string->string). Empty = the provider's facts ride
     #: elsewhere (static kinds: the resolve ``endpoint``), so its binding metadata is ``{}``.
     binding_metadata: tuple[BindingKey, ...] = ()
+    #: Most live (non-revoked) connections of this provider one community may hold; ``None`` =
+    #: unlimited. Enforced by the service (fast, friendly refusal) AND, for a provider whose data
+    #: plane would otherwise be ambiguous (Kick), by a database trigger (the race-proof backstop).
+    max_connections_per_community: int | None = None
     #: For a kind-1 provider that also needs an outbound API credential beside its OAuth/public
     #: token (Wix): the secret scheme of that sealed document. ``None`` = the provider has none.
     api_credential_scheme: SecretScheme | None = None
+    #: Proof-of-ownership policy (security finding: unverified channel binding). ``True`` = a
+    #: create is refused unless the resolved resource's owner is proven (the token owner IS the
+    #: owner, or the installing hub user has OAuth-linked that owner account on
+    #: ``ownership_identity_platform``). ``False`` = no ownership notion (static/webhook kinds).
+    requires_ownership: bool = False
+    #: ``hub_user_identities.platform`` holding the installer's linked account, or ``None`` when
+    #: the platform has no account-linking flow (only token ownership can prove it then).
+    ownership_identity_platform: str | None = None
 
     def __post_init__(self) -> None:
         """Reject a malformed spec at registration time rather than at first request."""
@@ -130,6 +142,11 @@ class AdapterSpec:
             raise ValueError(f"resource_type {self.resource_type!r} is malformed")
         if not self.platform:
             raise ValueError("platform must be non-empty")
+        if (
+            self.max_connections_per_community is not None
+            and self.max_connections_per_community < 1
+        ):
+            raise ValueError("max_connections_per_community must be at least 1")
         names = [item.name for item in self.credential_fields]
         names += [item.name for item in self.metadata_fields]
         for name in names:
@@ -172,6 +189,12 @@ class ResolvedResource:
 
     resource_id: str
     facts: Mapping[str, Any]
+    #: Provider-issued id of the account that OWNS the resource (Twitch/Kick broadcaster, YouTube
+    #: channel). ``None`` = the adapter has no ownership notion.
+    owner_platform_user_id: str | None = None
+    #: ``True`` when the verified credential itself belongs to the owner (the token was minted by
+    #: the broadcaster, or the provider scoped the lookup to the token's own resource).
+    owner_proven_by_token: bool = False
 
 
 @dataclass(slots=True, frozen=True)

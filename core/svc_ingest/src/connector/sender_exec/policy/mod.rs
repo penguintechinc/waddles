@@ -167,6 +167,10 @@ pub struct KindPolicy {
     /// Non-empty = the EXACT set of top-level body keys the template may carry (anything else
     /// is refused). Empty = no key restriction (legacy kinds).
     pub body_keys: Vec<&'static str>,
+    /// Pairs of JSON pointers whose rendered values must both be integers and must DIFFER
+    /// (a protected-target rule: a moderation call may never name the broadcaster the token
+    /// belongs to). Checked on the finished body, after host slots are substituted.
+    pub distinct_body_ints: Vec<(&'static str, &'static str)>,
 }
 
 impl KindPolicy {
@@ -188,6 +192,7 @@ impl KindPolicy {
             requires_pin: false,
             array_body: false,
             body_keys: vec![],
+            distinct_body_ints: vec![],
         }
     }
 }

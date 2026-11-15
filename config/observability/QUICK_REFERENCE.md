@@ -5,9 +5,10 @@
 ### 1. Minimal Setup (3 lines)
 
 ```python
-from flask_core import init_tracing, init_correlation, init_metrics
+from flask_core import init_correlation, init_metrics
 
-tracing = init_tracing("my-service", "1.0.0")
+# Tracing: standard OTEL_* env only (OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_SERVICE_NAME, ...);
+# flask_core no longer ships a tracing manager (see hub_api/telemetry.py).
 correlation = init_correlation(app)
 metrics = init_metrics("my-service", "1.0.0")
 ```
@@ -16,18 +17,16 @@ metrics = init_metrics("my-service", "1.0.0")
 
 ```python
 from flask_core import (
-    init_tracing, init_correlation, init_metrics,
+    init_correlation, init_metrics,
     setup_aaa_logging, setup_correlation_logging
 )
 
 # Initialize
-tracing = init_tracing("my-service", "1.0.0")
 correlation = init_correlation(app)
 metrics = init_metrics("my-service", "1.0.0")
 logger = setup_aaa_logging("my-service", "1.0.0")
 
 # Integrate
-tracing.instrument_app(app)
 setup_correlation_logging(correlation)
 ```
 
@@ -36,22 +35,13 @@ setup_correlation_logging(correlation)
 ### Manual Tracing
 
 ```python
-from flask_core import get_tracing_manager
+from opentelemetry import trace
 
-tracing = get_tracing_manager()
+tracer = trace.get_tracer(__name__)
 
-with tracing.start_span("operation_name") as span:
+with tracer.start_as_current_span("operation_name") as span:
     span.set_attribute("key", "value")
     # ... do work ...
-```
-
-### Decorator Tracing
-
-```python
-@tracing.trace_function(name="custom_name", attributes={"platform": "twitch"})
-async def my_function():
-    # Automatically traced
-    pass
 ```
 
 ### Get Correlation IDs
@@ -90,13 +80,13 @@ metrics.track_http_request("POST", "/api/command", 200, 0.250)
 
 ```python
 import httpx
-from flask_core import get_tracing_manager, get_correlation_manager
+from opentelemetry import propagate
+from flask_core import get_correlation_manager
 
-tracing = get_tracing_manager()
 correlation = get_correlation_manager()
 
 headers = {"Content-Type": "application/json"}
-tracing.inject_context(headers)
+propagate.inject(headers)  # httpx is auto-instrumented in hub-api; manual only if needed
 correlation.inject_into_headers(headers)
 
 async with httpx.AsyncClient() as client:
@@ -128,9 +118,9 @@ histogram.labels(label1="value").observe(0.125)
 ### Quick Setup (Development)
 
 ```bash
-# Tracing
-export TRACING_ENABLED=true
-export TRACING_EXPORTER=console
+# Tracing (standard OpenTelemetry env)
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_SERVICE_NAME=my-service
 
 # Correlation
 export CORRELATION_HEADER=X-Correlation-ID
@@ -143,12 +133,11 @@ export METRICS_ENABLED=true
 ### Production Setup
 
 ```bash
-# Tracing - Jaeger
-export TRACING_ENABLED=true
-export TRACING_EXPORTER=jaeger
-export JAEGER_HOST=jaeger
-export JAEGER_PORT=6831
-export TRACING_SAMPLE_RATE=0.1
+# Tracing - OTLP collector (SigNoz / Jaeger OTLP receiver), 10% head sampling
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+export OTEL_SERVICE_NAME=my-service
+export OTEL_TRACES_SAMPLER=parentbased_traceidratio
+export OTEL_TRACES_SAMPLER_ARG=0.1
 
 # Correlation
 export CORRELATION_HEADER=X-Correlation-ID
@@ -242,9 +231,9 @@ docker ps | grep jaeger
 # Check service logs
 docker logs waddlebot-jaeger
 
-# Verify JAEGER_HOST and sampling rate
-echo $JAEGER_HOST
-echo $TRACING_SAMPLE_RATE
+# Verify the OTLP endpoint and sampler
+echo $OTEL_EXPORTER_OTLP_ENDPOINT
+echo $OTEL_TRACES_SAMPLER_ARG
 ```
 
 ### Metrics not showing?
@@ -273,7 +262,7 @@ curl -i http://localhost:8000/api/example/simple
 
 ```
 Python Modules:
-  /home/penguin/code/Waddles/libs/flask_core/flask_core/tracing.py
+  /home/penguin/code/Waddles/hub_api/telemetry.py
   /home/penguin/code/Waddles/libs/flask_core/flask_core/correlation.py
   /home/penguin/code/Waddles/libs/flask_core/flask_core/custom_metrics.py
 
@@ -318,21 +307,18 @@ curl -X POST http://localhost:8000/api/example/traced -H "Content-Type: applicat
 # Everything you need
 from flask_core import (
     # Initialization
-    init_tracing,
     init_correlation,
     init_metrics,
     setup_aaa_logging,
     setup_correlation_logging,
 
     # Getters
-    get_tracing_manager,
     get_correlation_manager,
     get_metrics_manager,
     get_correlation_id,
     get_request_id,
 
     # Classes (if needed)
-    TracingManager,
     CorrelationIDManager,
     MetricsManager,
 )

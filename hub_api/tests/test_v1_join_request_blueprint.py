@@ -80,7 +80,6 @@ def _seed_user(auth_db: Any, *, email: str, username: str) -> int:
         password_hash="x",
         is_active=True,
         email_verified=True,
-        is_super_admin=False,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )

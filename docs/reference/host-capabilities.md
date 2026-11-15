@@ -35,13 +35,14 @@ Verified against `release/v3.0.X` (`1e6b0056`) plus in-flight PRs #741, #749, #7
 | Chat relay | `chat.send:<platform>` | Normal | `relay` (action-stage only) | MERGED (`twitch`, `discord`) |
 | Flags | `flags.read` | Normal | `%flags` | MERGED (`enabled`); `tier` not wired |
 | Reputation | `reputation.read`, `reputation.community.write`, `reputation.tenant.write` | Normal / Dangerous / Dangerous | `reputation` (stage-next) | IN-FLIGHT #741; `reputation.tenant.write` CATALOG-ONLY |
-| Economy | `economy.read`, `economy.wager`, `economy.transfer`, `economy.credit`, `economy.debit`, `economy.admin_adjust`, `economy.pot.pay` | Normal / Dangerous (x6) | `economy` (stage-next) | IN-FLIGHT #751 (stacked on #741) |
+| Economy | `economy.read`, `economy.wager`, `economy.transfer`, `economy.credit`, `economy.debit`, `economy.admin_adjust`, `economy.pot.pay`, `economy.transfer_from`, `economy.app_mint` | Normal / Dangerous (x8) | `economy` (stage-next) | IN-FLIGHT #751 (stacked on #741); the last two are ELEVATED app-caller grants (see *Elevated app-caller primitives* in `bundle-host-imports.md`) |
 | Overlay widgets | `overlay.media` | Dangerous | `overlay` (stage-next) | WIT MERGED; no host handler |
 | Connector PII read | `connector.pii.read` | Dangerous | `identity.lookup` (connector worlds; core-namespace only) | MERGED catalog id; global-approved, never vendor-grantable |
 | Streaming hooks | `streaming.lifecycle.subscribe` | Normal | `streaming-lifecycle` export (stage-next) | WIT MERGED; host registration deferred |
 | Moderation | `moderation.<platform>` | Dangerous | none | CATALOG-ONLY |
 | AI generation | `ai.generate` | Dangerous | `ai` (stage-next) | NOT PRODUCTION-READY -- do not enable `waddles.bundle-ai-capability` in any environment until issue #858 is resolved (`svc_process` only; self-hosted model) |
 | Object storage | `storage.objects` | Normal | none | CATALOG-ONLY |
+| Game-server network | `gameserver.net` | Dangerous | `gameserver-net` (stage-tools world only; `core/bundle_host_gameserver_net`) | host-mediated RCON/TCP/UDP to admin-registered connections; first-party core only; flag `waddles.bundle-gameserver-net`, default OFF |
 | User profile read | `users.profile.read` | Normal | none | CATALOG-ONLY |
 | Telemetry | `telemetry.logs`, `telemetry.metrics` | Normal | none | CATALOG-ONLY |
 | Raw PII in interaction inputs | `interaction.pii.receive` | Dangerous | none | CATALOG-ONLY (default NO) |
@@ -110,7 +111,23 @@ Note: the `bundle_host_db/src/lib.rs` header describes an older insert/get/updat
 | Header | `Authorization` (plain name) | MERGED | Resolved value sent as that request header |
 | Query param | `?key` | IN-FLIGHT #749 | Appends `key=VALUE`; first hop only, to granted FQDN; dropped on redirect; scrubbed from errors and responses; unresolvable → denied, never sent unauthenticated |
 
-Resolution (MERGED, `egress.rs` ~L441–460): guest names a symbolic ref → must exist in the activation's `granted_secret_refs` map → only the mapped env-var name is read via `CredentialBroker`. Unknown ref → `secret_not_granted`. Secret value never enters the component.
+Resolution: guest names a symbolic ref → must exist in the bundle's `granted_secret_refs` map → the grant value says where it resolves from. Unknown ref → `secret_not_granted`. Secret value never enters the component, is injected only after hop-0 egress allowlist passes, and is scrubbed from every response/error.
+
+| Grant value | Source | Notes |
+|---|---|---|
+| `NAME` / `env:NAME` | process env | platform-default / shared app credential (e.g. `YOUTUBE_API_KEY`) |
+| `connection:<provider>` | the INVOKING community's platform connection (hub-api `connections:resolve`; hub refreshes OAuth under lock) | community = MAC-verified envelope scope (never guest input); no connection → `secret_unresolved`; never falls back to env |
+| `connection:<provider>#raw` | the connection's secret with no scheme prefix (Google API key for a `?key` slot, Wix API key for `Authorization: <key>`) | |
+| `connection:<provider>#field.<name>` | a named field of a multi-field credential (Wix scheme-6 `siteId`/`apiKey`) | needs `connections:resolve:static`; the http-egress host's resolver requests it, svc-ingest generally never |
+| `connection:<provider>#meta.<key>` | non-secret connection metadata | missing key → `secret_unresolved` |
+| `cc:<provider>` | the community's own OAuth client id (metadata `client_id`) + secret; the HOST does the client-credentials exchange and caches the token per community (SoundCloud → `OAuth <token>`) | cache invalidated on secret rotation |
+| `app:<name>` | host-minted + cached platform-level client-credentials token (`spotify.app`) | client id/secret from host env; 60s early re-mint, single-flight |
+
+Grants for first-party bundles come from the PLATFORM table `bundle_host_http::grants::FIRST_PARTY_GRANTS` (keyed by the reserved `waddles.core.*` app id), never from bundle-declared data. Egress rows come from the approved install summary (`egress`/`egressRps`) via `ActiveEgressSnapshot` (before this, no production writer populated any egress catalog, so every bundle `http.send` was `host_not_declared`). Rows are keyed by activation scope `(tenant_id, community_id)` then `app_id`, resolved with the host-verified `CallScope` (own community's activation, else the tenant's tenant-wide `community_id=0` one, else nothing — never merged, never another tenant's), and rebuilt wholesale each active-set tick so a deactivated bundle drops out. Unscoped `resolve()` fails closed.
+
+**Quota** (`bundle_host_http::credentials::QuotaGuard`, Valkey counters via `bundle_host_credentials::ValkeyQuotaStore`): per secret ref, global per-minute + per-day budgets plus a per-community share of the day budget; atomic multi-counter charge (refused charges consume nothing); exhausted → `quota_exhausted`; store down for a metered ref → `quota_unavailable` (fail closed). Defaults in `grants::default_quota_policies`, override with `BUNDLE_SECRET_QUOTAS_JSON`.
+
+**Unfollowed redirects**: a first-party row may list FQDNs (`unfollowed_redirect_hosts`, e.g. `api.soundcloud.com`) whose first-hop 3xx is returned to the bundle verbatim (status + `Location`) instead of being followed.
 
 ## Chat Relay (`chat.send:<platform>`)
 
@@ -145,6 +162,7 @@ No `dm.*` permission family exists in source.
 | Caps (catalog) | Per call \|delta\| ≤5; per user rolling-24h ≤5; per community rolling-24h ≤50 |
 | `reputation.tenant.write` | Per scope rolling-24h ≤200; CATALOG-ONLY in #741 (no WIT op maps to it) |
 | P5 ops (bundle-MCP-tools) | `override-score(user, absolute-score: s64, reason) -> result<s64, error>` — ADMIN-ONLY, needs `reputation.community.admin` (Dangerous, 10 calls/min), absolute score clamped to ±1,000,000, ledgered `admin_override`, outside the daily caps; `adjust-many(adjustments: list<adjustment>, reason) -> result<_, error>` — one txn, every item gated as a `community.write` delta + capped, ≤100 items, no duplicate users, all-or-nothing; `get-many(users: list<string>) -> result<list<score-entry>, error>` — ≤100 users, any non-member fails the call; `leaderboard(limit: u32) -> result<list<score-entry>, error>` — 1..=100, active members with a score row, ties by user id |
+| Unification ops (v3.0.X) | `apply(user, delta, reason)` — ACTIVITY class (`reputation.community.write`, +/-5), idempotent via `reputation_apply()`; `apply-moderation(user, delta, reason)` — MODERATION class (`reputation.moderation.write`, +/-200, core/approved only, human callers need `community:moderate` unless the invocation is system-originated by the event-type allowlist); `get-tenant(user)` / `get-tenant-policy()` (`reputation.tenant.read`, core only); `history(user, limit, before)` (`reputation.history.read`, core only); `below-threshold(threshold, limit)` (`reputation.read`); `is-soft-banned(user)` (`reputation.read`); `soft-ban(user, reason)` / `lift-soft-ban(user, only-reason)` (`reputation.moderation.write`; lifts quota-limited, a ban never is). Scale 300..850, start 600. Wire ops `reputation.apply`, `apply_moderation`, `get_tenant`, `get_tenant_policy`, `history`, `below_threshold`, `is_soft_banned`, `soft_ban`, `lift_soft_ban`. Details: `docs/bundle-reputation-service.md` |
 | Idempotency | `override` and `adjust-many` are keyed host-side by `<event_id>:reputation_override\|reputation_adjust_many:<ordinal>` (ledger `idempotency_key`): a redelivered event applies once, a replay with changed parameters is `denied("idempotency_conflict")`; no event id → `not_implemented` |
 | Clamp | Every write is clamped into ±1,000,000 (`MIN_SCORE`/`MAX_SCORE`); DB CHECK `ck_bundle_reputation_scores_balance_range` (alembic 0071) is the backstop. Caps meter the REQUESTED magnitude, so a call pinned at a bound still consumes quota |
 | Scope | Community-scoped only. The tenant-wide / FICO reputation is a separate legacy system, NOT exposed here (follow-up) |

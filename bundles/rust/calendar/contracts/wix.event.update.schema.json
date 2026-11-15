@@ -1,0 +1,56 @@
+{
+  "tool": "wix.event.update",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "event_id": {
+        "type": "string",
+        "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "title": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      },
+      "description": {
+        "type": "string",
+        "maxLength": 500
+      },
+      "starts_at": {
+        "type": "string",
+        "description": "RFC 3339 timestamp"
+      },
+      "ends_at": {
+        "type": "string",
+        "description": "RFC 3339 timestamp"
+      },
+      "timezone": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100,
+        "description": "IANA time-zone id"
+      },
+      "location_name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 50
+      },
+      "location_type": {
+        "type": "string",
+        "enum": [
+          "VENUE",
+          "ONLINE"
+        ]
+      }
+    },
+    "required": [
+      "event_id",
+      "revision"
+    ],
+    "additionalProperties": false
+  }
+}

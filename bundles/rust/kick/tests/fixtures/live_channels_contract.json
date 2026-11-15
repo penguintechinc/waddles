@@ -1,0 +1,16 @@
+{
+  "source": "docs/superpowers/specs/2026-11-07-bundle-catalog-target.md S8 (`*.live.channels` contract); replace with bundles/contracts/live-channels-contract.v1.json when that file lands",
+  "top_level": ["channels", "cursor", "as_of"],
+  "row_required": ["channel_ref", "display_name", "is_live"],
+  "row_fields": {
+    "channel_ref": "string (opaque)",
+    "display_name": "string",
+    "is_live": "bool",
+    "title": "string?",
+    "category": "string?",
+    "viewers": "int?",
+    "started_at": "RFC3339?",
+    "thumbnail_ref": "string?"
+  },
+  "errors": ["platform_unavailable", "rate_limited", "not_connected"]
+}

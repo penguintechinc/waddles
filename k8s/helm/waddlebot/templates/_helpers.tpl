@@ -147,31 +147,6 @@ Args (dict): root (the root "."), role.
 {{- end -}}
 {{- end }}
 
-{{/*
-Resolve + validate one role's password (secrets.yaml calls this exactly once per role).
-Args (dict): ctx (root "."), role. Precedence: explicit infrastructure.postgresql.
-serviceRoles.passwords.<role> > existing key in the credentials Secret (KEEP) > generate
-(alpha/local only) > fail closed -- the shared waddlebot.autoSecretValue policy. The value
-must be URL-safe ([A-Za-z0-9._~-], it is embedded in DATABASE_URL) and >= 16 chars, and
-must not look like a placeholder / repo default: the same rules scripts/db/
-service_roles.py enforces at migration time, so a bad value fails here, at render.
-*/}}
-{{- define "waddlebot.db.rolePassword" -}}
-{{- $ctx := .ctx -}}
-{{- $role := .role -}}
-{{- $key := include "waddlebot.db.passwordKey" $role -}}
-{{- $explicit := index ($ctx.Values.infrastructure.postgresql.serviceRoles.passwords | default dict) $role | default "" | toString -}}
-{{- $explicit = ternary "" $explicit (hasPrefix "REPLACE_ME" $explicit) -}}
-{{- $value := include "waddlebot.autoSecretValue" (dict "ctx" $ctx "key" $key "explicit" $explicit "length" 32 "secret" (include "waddlebot.db.credentialsSecretName" $ctx)) -}}
-{{- if not (regexMatch "^[A-Za-z0-9._~-]{16,}$" $value) -}}
-{{- fail (printf "PostgreSQL password for role %q must be >=16 chars of [A-Za-z0-9._~-] (it is embedded in DATABASE_URL)" $role) -}}
-{{- end -}}
-{{- if regexMatch "(?i)(changeme|change_me|replace_me|example|password|dev_)" $value -}}
-{{- fail (printf "PostgreSQL password for role %q looks like a placeholder / repo default -- refusing" $role) -}}
-{{- end -}}
-{{- $value -}}
-{{- end }}
-
 {{/* Connection target pieces (the in-chart Postgres Service). */}}
 {{- define "waddlebot.postgres.host" -}}
 {{- /* FQDN (feature/transit-tls-core F8): always in the server cert's SANs and inside the internal CA's nameConstraints suffix, so sslmode=verify-full holds. */ -}}
@@ -230,6 +205,24 @@ Usage inside a container's `env:` list:
 {{- end }}
 
 {{/*
+Read-only REPLICA DSN for a data-plane workload's direct bundle-config reads (issue #1306;
+core/bundle_config_db/src/lib.rs). Renders `DATABASE_REPLICA_URL` ONLY when
+infrastructure.postgresql.readReplicas.host is set -- same role + `$(DB_PASSWORD)` expansion as
+waddlebot.dbEnv (NEVER the secret itself), so it MUST be included AFTER waddlebot.dbEnv in the
+container's `env:` list. Unset (alpha/local: no replica) renders nothing and the stage falls back
+to the primary `DATABASE_URL` with a WARN log; the SAME column-scoped role works on both.
+Usage: {{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
+*/}}
+{{- define "waddlebot.dbReplicaEnv" -}}
+{{- include "waddlebot.db.requireRole" . -}}
+{{- $host := .root.Values.infrastructure.postgresql.readReplicas.host | default "" -}}
+{{- if $host }}
+- name: DATABASE_REPLICA_URL
+  value: {{ printf "postgresql://%s:$(DB_PASSWORD)@%s:%v/%s" .role $host (include "waddlebot.postgres.port" .root) (include "waddlebot.postgres.database" .root) | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
 Redis connection URL
 Constructs the Redis connection URL from values.
 Supports both external and internal Redis instances.
@@ -278,6 +271,19 @@ Usage: {{ include "waddlebot.moduleImage" (dict "root" . "module" "router" "tag"
 {{- end }}
 
 {{/*
+Per-image tag resolution
+Precedence: explicit per-component tag > global.imageTags[<image>] > global.imageTag > "latest".
+global.imageTags (default empty) lets a deploy pin each image independently, so an image that
+was not rebuilt keeps its old tag string and its pods are NOT restarted. Unset = unchanged
+behaviour (every image reads global.imageTag).
+Usage: {{ include "waddlebot.resolveImageTag" (dict "root" . "image" "svc-ingest" "explicit" .Values.x.imageTag) }}
+*/}}
+{{- define "waddlebot.resolveImageTag" -}}
+{{- $per := get (.root.Values.global.imageTags | default dict) (.image | toString) | default "" -}}
+{{- .explicit | default $per | default .root.Values.global.imageTag | default "latest" | toString -}}
+{{- end }}
+
+{{/*
 Legacy Module Image (for templates still using global.imageRegistry concatenation)
 Builds image reference for legacy modules with correct registry handling.
 Same as moduleImage but kept separate for clarity in legacy template conversions.
@@ -286,7 +292,7 @@ Usage: {{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "action-
 {{- define "waddlebot.legacyModuleImage" -}}
 {{- $registry := .root.Values.global.imageRegistry | default "" }}
 {{- $repository := .module | required "module name is required" }}
-{{- $tag := .imageTag | default .root.Values.global.imageTag | default "latest" | toString }}
+{{- $tag := include "waddlebot.resolveImageTag" (dict "root" .root "image" $repository "explicit" .imageTag) }}
 {{- if $registry }}
 {{- printf "%s/%s:%s" $registry $repository $tag }}
 {{- else }}
@@ -544,83 +550,7 @@ imagePullSecrets:
 {{- end }}
 
 {{/*
-gRPC transport TLS (PR #264, A02 HIGH) -- shared helpers for the services/*
-Deployments whose app.py now calls flask_core.grpc_tls.bind_secure_port /
-secure_channel, which fail closed (GrpcTlsConfigError) if cert material
-isn't wired. See templates/grpc-tls-secret.yaml / grpc-tls-certificate.yaml
-for how the {{ fullname }}-grpc-tls Secret this mounts gets populated.
-*/}}
-
-{{/*
-True only when real cert material will exist in the {{ fullname }}-grpc-tls
-Secret at deploy time -- either cert-manager mints it (grpcTls.certManager.
-enabled) or a full CA+server cert/key was supplied via values. False means
-don't render the volume/env block at all, so grpc_tls.py's own fail-closed
-GrpcTlsConfigError raises with its clear "GRPC_TLS_CERT_PATH ... required"
-message instead of a mounted-but-empty cert file producing an opaque
-low-level TLS parse error at the grpc layer.
-*/}}
-{{- define "waddlebot.grpcTlsMaterialAvailable" -}}
-{{- if or .Values.global.grpcTls.certManager.enabled (and .Values.global.grpcTls.ca.crt .Values.global.grpcTls.tls.crt .Values.global.grpcTls.tls.key) -}}
-true
-{{- end -}}
-{{- end }}
-
-{{/*
-GRPC_TLS_INSECURE_DEV passthrough -- flask_core's own explicit, dev-only
-plaintext escape hatch (refused outright under production posture even if
-set). Rendered unconditionally and defaults to "false"; only values-alpha.yaml
-overrides global.grpcTls.insecureDev to true, as the documented interim so
-alpha doesn't need real cert material.
-*/}}
-{{- define "waddlebot.grpcTlsInsecureDevEnv" -}}
-- name: GRPC_TLS_INSECURE_DEV
-  value: {{ .Values.global.grpcTls.insecureDev | default false | quote }}
-{{- end }}
-
-{{/*
-Server-role env vars: this pod binds a gRPC server (bind_secure_port). Points at
-tls.crt/tls.key -- one identity cert (usages: server auth + client auth) serves both
-roles, matching cert-manager's fixed Secret key names natively; the static Secret path
-(grpc-tls-secret.yaml) mirrors the same 3 keys for that reason.
-*/}}
-{{- define "waddlebot.grpcTlsServerEnv" -}}
-- name: GRPC_TLS_CERT_PATH
-  value: /etc/waddlebot/grpc-tls/tls.crt
-- name: GRPC_TLS_KEY_PATH
-  value: /etc/waddlebot/grpc-tls/tls.key
-- name: GRPC_TLS_CA_PATH
-  value: /etc/waddlebot/grpc-tls/ca.crt
-- name: GRPC_TLS_REQUIRE_CLIENT_CERT
-  value: {{ .Values.global.grpcTls.requireClientCert | quote }}
-{{- end }}
-
-{{/* Client-role env vars: this pod dials another module's gRPC server (secure_channel). */}}
-{{- define "waddlebot.grpcTlsClientEnv" -}}
-- name: GRPC_TLS_CA_PATH
-  value: /etc/waddlebot/grpc-tls/ca.crt
-- name: GRPC_TLS_CLIENT_CERT_PATH
-  value: /etc/waddlebot/grpc-tls/tls.crt
-- name: GRPC_TLS_CLIENT_KEY_PATH
-  value: /etc/waddlebot/grpc-tls/tls.key
-{{- end }}
-
-{{/* Cert volume, sourced from the chart-managed {{ fullname }}-grpc-tls Secret. */}}
-{{- define "waddlebot.grpcTlsVolume" -}}
-- name: grpc-tls
-  secret:
-    secretName: {{ include "waddlebot.fullname" . }}-grpc-tls
-    defaultMode: 0440
-{{- end }}
-
-{{- define "waddlebot.grpcTlsVolumeMount" -}}
-- name: grpc-tls
-  mountPath: /etc/waddlebot/grpc-tls
-  readOnly: true
-{{- end }}
-
-{{/*
-feature/e2e-helm-rust-dataplane -- host-API mTLS helpers (the bundle-executor<->stage wire
+feature/e2e-helm-rust-dataplane -- host-API mTLS helpers (the svc-bundles-executor<->stage wire
 protocol, core/bundle_executor/src/tls.rs + core/svc_action/src/host_api.rs), a separate
 identity from the gRPC helpers above -- different wire protocol, different port, mounted
 from the {{ fullname }}-host-api-tls Secret (templates/host-api-tls-secret.yaml /
@@ -658,7 +588,7 @@ true
   value: /etc/waddlebot/host-api-tls/ca.crt
 {{- end }}
 
-{{/* Client-role env vars: this pod dials a stage's host-API listener (bundle-executor). */}}
+{{/* Client-role env vars: this pod dials the stages' host-API listeners (svc-bundles-executor). */}}
 {{- define "waddlebot.hostApiTlsClientEnv" -}}
 - name: HOST_API_CA_FILE
   value: /etc/waddlebot/host-api-tls/ca.crt
@@ -669,11 +599,12 @@ true
 # fix/chart-host-api-stage-identity -- core/bundle_executor/src/config.rs::
 # validate_host_api_tls hard-requires this (Config error, immediate crashloop, if unset);
 # core/bundle_executor/src/tls.rs's PinnedIdentityVerifier matches it against the stage
-# cert's URI SAN / DNS SAN / Subject CN. Both bundle-executor.yaml and
-# bundle-executor-action.yaml pull this helper, so they always get the SAME identity -- the
-# shared host-api-tls Secret's one identity cert serves both stages (see that Secret's own
-# "one identity cert ... serves both roles" comment), so one expected identity is correct
-# for both executors regardless of which stage (svc-process-rust/svc-action-rust) they dial.
+# cert's URI SAN / DNS SAN / Subject CN. The single svc-bundles-executor pod dials BOTH
+# stages with this one identity -- the shared host-api-tls Secret's one identity cert
+# serves both stage listeners (see that Secret's own "one identity cert ... serves both
+# roles" comment), so one expected identity is correct for every stage
+# (svc-process-rust/svc-action-rust) it dials. The listeners verify the executor's client
+# cert by CA chain only (no per-client SAN pin), so the same cert satisfies both.
 - name: HOST_API_STAGE_IDENTITY
   value: {{ include "waddlebot.hostApiStageIdentity" . | quote }}
 {{- end }}
@@ -765,8 +696,8 @@ host-api-tls-certificate.yaml's own comments. Used as:
   - the CN argument to genSignedCert in templates/host-api-tls-secret.yaml (alpha/local
     auto-generate path)
   - the `commonName` field in templates/host-api-tls-certificate.yaml (cert-manager path)
-  - HOST_API_STAGE_IDENTITY in waddlebot.hostApiTlsClientEnv above (bundle-executor and
-    bundle-executor-action, the two consumers of that helper)
+  - HOST_API_STAGE_IDENTITY in waddlebot.hostApiTlsClientEnv above (svc-bundles-executor,
+    the consumer of that helper)
 so whichever provisioning path is live, the cert's CN and the executor's expected identity
 are byte-for-byte the same string and can never drift apart.
 
@@ -824,7 +755,7 @@ joined: a stable hash input for waddlebot.hostApiTlsSansSha256, and directly
 {{- $fullname := include "waddlebot.fullname" . -}}
 {{- $ns := .Values.namespace -}}
 {{- /* Explicit FQDNs, never a `*.<ns>.svc.cluster.local` wildcard: a wildcard cert from the shared internal CA would let any pod holding it impersonate Postgres/Valkey/S3 (security review HIGH). */ -}}
-{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-bundle-executor" $fullname) (printf "%s-svc-process-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-action-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-bundle-executor.%s.svc.cluster.local" $fullname $ns) | sortAlpha | join "," -}}
+{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-svc-process-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-action-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-bundles-executor.%s.svc.cluster.local" $fullname $ns) | sortAlpha | join "," -}}
 {{- end }}
 
 {{/* sha256 of waddlebot.hostApiTlsDesiredDnsNames -- the waddlebot.io/cert-sans-sha256
@@ -885,7 +816,7 @@ true
 
 {{/* checksum/host-api-tls pod-template annotation value -- derived from the desired
 identity+SANs ONLY, never key material, so an identity/SAN change rolls every consumer pod
-(svc-process-rust, svc-action-rust, bundle-executor, bundle-executor-action) even though
+(svc-process-rust, svc-action-rust, svc-bundles-executor) even though
 the Secret object itself is reused by name when kept. */}}
 {{- define "waddlebot.hostApiTlsPodChecksum" -}}
 {{- printf "%s|%s" (include "waddlebot.hostApiStageIdentity" .) (include "waddlebot.hostApiTlsSansSha256" .) | sha256sum -}}
@@ -1034,58 +965,10 @@ regenerated, closing the gap where #541 added the drift *detection*
 {{- end }}
 
 {{/*
-fix/helm-alpha-self-provisioning -- lookup-then-generate-or-require for a single key
-inside the monolithic waddlebot-secrets Secret (templates/secrets.yaml). Mirrors
-templates/auto-provisioned-secrets.yaml's KEEP-vs-GENERATE policy but at per-key
-granularity, since waddlebot-secrets also carries user-supplied pass-through values
-(OAuth tokens, AWS/GCP creds, etc.) that must always reflect current .Values and are
-therefore never routed through this helper.
-
-Args (dict): ctx (the root "."), key (Secret data key name, e.g. "JWT_SECRET"),
-explicit (the value already resolved from .Values, "" if unset/placeholder), length
-(random byte-string length, default 32), optional secret (the Secret to look the key up
-in; default "waddlebot-secrets"), optional legacySecret/legacyKey (a SECOND Secret/key
-read ONLY as a one-way migration source when `secret` has no value yet -- how
-POSTGRES_PASSWORD moves out of waddlebot-secrets into waddlebot-db-admin on `helm upgrade`
-without minting a new password that the Postgres PVC's initdb-time password would reject).
-
-Precedence: explicit non-placeholder value from .Values wins outright (operator/
-ExternalSecret already deliberately set it) > existing Secret key (KEEP, never
-rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
+Per-key lookup-then-generate (waddlebot.autoSecretValue) was REMOVED: template-time `lookup` is empty under
+`helm template | kubectl apply` / ArgoCD and would regenerate every secret. Generation is now runtime,
+create-if-absent, in every tier -- templates/provision-secrets.yaml + files/provision-secrets.sh.
 */}}
-{{- define "waddlebot.autoSecretValue" -}}
-{{- $ctx := .ctx -}}
-{{- $key := .key -}}
-{{- $explicit := .explicit | default "" -}}
-{{- $length := .length | default 32 -}}
-{{- $hex := .hex | default false -}}
-{{- $secretName := .secret | default "waddlebot-secrets" -}}
-{{- if ne $explicit "" -}}
-{{- $explicit -}}
-{{- else -}}
-{{- $tier := $ctx.Values.global.deploymentTier -}}
-{{- $canGenerate := or (eq $tier "alpha") (eq $tier "local") (.alwaysGenerate | default false) -}}
-{{- $existing := lookup "v1" "Secret" $ctx.Values.namespace $secretName -}}
-{{- $legacy := dict -}}
-{{- if .legacySecret -}}
-{{- $legacy = lookup "v1" "Secret" $ctx.Values.namespace .legacySecret | default dict -}}
-{{- end -}}
-{{- $legacyKey := .legacyKey | default $key -}}
-{{- if (include "waddlebot.secretKeyNonEmpty" (dict "existing" $existing "key" $key)) -}}
-{{- index $existing.data $key | b64dec -}}
-{{- else if (include "waddlebot.secretKeyNonEmpty" (dict "existing" $legacy "key" $legacyKey)) -}}
-{{- index $legacy.data $legacyKey | b64dec -}}
-{{- else if $canGenerate -}}
-{{- if $hex -}}
-{{- sha256sum (randBytes 32) -}}
-{{- else -}}
-{{- randAlphaNum (int $length) -}}
-{{- end -}}
-{{- else -}}
-{{- fail (printf "%s: key %q has no value and global.deploymentTier=%q is outside alpha/local -- auto-generation is alpha/local only. Set the corresponding value explicitly (or pre-populate this Secret via ExternalSecret/SealedSecret) before deploying." $secretName $key $tier) -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
 
 {{/* Server-role volume: full cert+key+CA bundle, mounted by templates/infrastructure/redis.yaml. */}}
 {{- define "waddlebot.valkeyTlsServerVolume" -}}
@@ -1232,3 +1115,112 @@ true
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Kata Containers isolation for the bundle executors (bundleExecutor.runtimeClass).
+Renders pod-spec lines (runtimeClassName, nodeSelector, affinity) for the svc-bundles-executor
+Deployment ONLY -- never included by any other data-plane workload. Empty output when
+disabled. Fails the render if enabled with an empty name (no silent fallback to runc).
+Call: include "waddlebot.executorKataPodSpec" .
+*/}}
+{{- define "waddlebot.executorKataPodSpec" -}}
+{{- $rc := .Values.bundleExecutor.runtimeClass | default dict -}}
+{{- if $rc.enabled -}}
+{{- if not $rc.name -}}
+{{- fail "bundleExecutor.runtimeClass.enabled=true requires a non-empty bundleExecutor.runtimeClass.name (the RuntimeClass, e.g. \"kata\", must exist in the cluster)" -}}
+{{- end -}}
+runtimeClassName: {{ $rc.name | quote }}
+{{- with .Values.bundleExecutor.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.bundleExecutor.affinity }}
+affinity:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Bundle storage v2 (docs/bundle-storage-v2.md): BUNDLE_DB_* env for svc-process-rust / svc-action-rust.
+Off by default (bundleStorageV2.db.enabled=false -> renders nothing, db capability stays
+not_implemented). Enabled -> the password is read by secretKeyRef from an operator-managed
+existingSecret (required; the chart never renders or defaults a value). Host/port/name fall back to the
+chart's own Postgres service. Usage: include "waddlebot.bundleDbEnv" .
+*/}}
+{{- define "waddlebot.bundleDbEnv" -}}
+{{- $v := .Values.bundleStorageV2.db -}}
+{{- if $v.enabled -}}
+- name: BUNDLE_DB_HOST
+  value: {{ $v.host | default .Values.infrastructure.postgresql.service.name | quote }}
+- name: BUNDLE_DB_PORT
+  value: {{ $v.port | default .Values.infrastructure.postgresql.service.port | quote }}
+- name: BUNDLE_DB_NAME
+  value: {{ $v.name | default .Values.infrastructure.postgresql.database | quote }}
+- name: BUNDLE_DB_USER
+  value: {{ $v.user | default "waddles_bundle_runtime" | quote }}
+- name: BUNDLE_DB_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ required "bundleStorageV2.db.existingSecret is required when bundleStorageV2.db.enabled=true" $v.existingSecret }}
+      key: {{ $v.passwordKey | default "BUNDLE_DB_PASSWORD" }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Effective executor sizing for ONE pool, as JSON {"resources": {...}, "memoryBudgetMb": N}.
+Default: the pool's own resources + memoryBudgetMb. When Kata is enabled
+(bundleExecutor.runtimeClass.enabled) and bundleExecutor.runtimeClass.resources is set, those
+requests/limits REPLACE the pool's (they size the workload inside the guest VM; the RuntimeClass
+`overhead` is added by Kubernetes on top automatically) and the LRU budget becomes
+bundleExecutor.runtimeClass.memoryBudgetMb (0/unset fails the budget < limit render check).
+The caller validates budget < memory LIMIT on the EFFECTIVE values.
+Call: include "waddlebot.executorEffective" (dict "root" $ "pool" $pool) | fromJson
+*/}}
+{{- define "waddlebot.executorEffective" -}}
+{{- $rc := .root.Values.bundleExecutor.runtimeClass | default dict -}}
+{{- if and $rc.enabled $rc.resources -}}
+{{- dict "resources" $rc.resources "memoryBudgetMb" (int ($rc.memoryBudgetMb | default 0)) | toJson -}}
+{{- else -}}
+{{- dict "resources" .pool.resources "memoryBudgetMb" (int .pool.memoryBudgetMb) | toJson -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Bundle storage v2: BUNDLE_MIGRATOR_* env for hub-api only (DDL provisioning at install/upgrade/uninstall).
+Off by default; password only ever from an operator-managed existingSecret (required when enabled).
+*/}}
+{{- define "waddlebot.bundleMigratorEnv" -}}
+{{- $v := .Values.bundleStorageV2.migrator -}}
+{{- if $v.enabled -}}
+{{- if $v.user }}
+- name: BUNDLE_MIGRATOR_USER
+  value: {{ $v.user | quote }}
+{{- end }}
+- name: BUNDLE_MIGRATOR_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ required "bundleStorageV2.migrator.existingSecret is required when bundleStorageV2.migrator.enabled=true" $v.existingSecret }}
+      key: {{ $v.passwordKey | default "BUNDLE_MIGRATOR_PASSWORD" }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+svc-bundles-executor stage dial list -- the comma-separated `host:port` value of
+STAGE_HOST_API_ADDR: one entry per stage of ONE executor pool (waddlebot.executorPools)
+(`<fullname>-<target>:<port>`), in order. The executor runs one independent dial loop per
+entry (core/bundle_executor/src/config.rs). Fails the render on an empty list -- an executor
+that dials no stage would serve nothing. Call with (dict "root" $ "stages" $pool.stages).
+*/}}
+{{- define "waddlebot.bundleExecutorStageAddrs" -}}
+{{- $stages := .stages | default list -}}
+{{- if not $stages -}}
+{{- fail "pipeline.rustDataPlane.bundleExecutor.stages must list at least one stage ({target, port}) for svc-bundles-executor to dial" -}}
+{{- end -}}
+{{- $fullname := include "waddlebot.fullname" .root -}}
+{{- $addrs := list -}}
+{{- range $stage := $stages -}}
+{{- $addrs = append $addrs (printf "%s-%s:%v" $fullname $stage.target $stage.port) -}}
+{{- end -}}
+{{- join "," $addrs -}}
+{{- end }}

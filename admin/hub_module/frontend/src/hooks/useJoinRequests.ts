@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient, type UseMutationResult, type Use
 import {
   fetchJoinRequests,
   fetchMyJoinRequest,
+  joinOpenCommunity,
   reviewJoinRequest,
   submitJoinRequest,
   type JoinRequestPage,
@@ -30,6 +31,15 @@ export function useSubmitJoinRequest(communityId: number): UseMutationResult<MyJ
   return useMutation({
     mutationFn: (message: string) => submitJoinRequest(communityId, message),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: joinRequestKeys.mine(communityId) }),
+  });
+}
+
+/** Join an open community directly, then refresh the caller's community list. */
+export function useJoinOpenCommunity(communityId: number): UseMutationResult<{ joined: boolean }, Error, void> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => joinOpenCommunity(communityId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: communityKeys.mine }),
   });
 }
 

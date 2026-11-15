@@ -54,7 +54,7 @@ use uuid::Uuid;
 use webrtc::media_stream::track_local::TrackLocal;
 
 use rtc_common::*;
-use svc_streaming::egress::whep::{self, WhepState, DEFAULT_MAX_VIEWERS};
+use svc_streaming::egress::whep::{self, DEFAULT_MAX_VIEWERS};
 use svc_streaming::ingest::whip::{self, WhipState};
 use svc_streaming::rtc::metrics::RtcMetrics;
 use svc_streaming::rtc::pc_factory::PeerConnectionFactory;
@@ -96,7 +96,7 @@ async fn whip_publish_negotiates_and_feeds_a_whep_viewer_session() {
     ));
     let whip_router = whip::router(Arc::clone(&whip_state));
 
-    let whep_state = Arc::new(WhepState::new(
+    let whep_state = Arc::new(whep_with_auth(
         whep_factory,
         whep_metrics,
         DEFAULT_MAX_VIEWERS,
@@ -173,8 +173,9 @@ async fn whip_publish_negotiates_and_feeds_a_whep_viewer_session() {
     // onto a `PipelineId` a WHEP viewer can subscribe to. ---
     let pipeline_id = Uuid::new_v4();
     whep_state
-        .register_fanout(pipeline_id, fanout.clone())
+        .register_fanout(pipeline_id, "community-x", fanout.clone())
         .await;
+    let viewer_token = viewer_token("community-x", pipeline_id, 60, "pipeline", Uuid::new_v4());
     assert_eq!(whep_state.viewer_count(pipeline_id).await, 0);
 
     // --- Viewer: negotiate against the WHEP router. ---
@@ -182,7 +183,11 @@ async fn whip_publish_negotiates_and_feeds_a_whep_viewer_session() {
     let viewer_offer = offer_sdp(&viewer_pc, &viewer_handler.gather_complete).await;
     let viewer_response = oneshot(
         whep_router.clone(),
-        post_sdp(&format!("/whep/community-x/{pipeline_id}"), viewer_offer),
+        post_sdp_auth(
+            &format!("/whep/community-x/{pipeline_id}"),
+            &viewer_token,
+            viewer_offer,
+        ),
     )
     .await;
     assert_status(&viewer_response, StatusCode::CREATED);
@@ -256,7 +261,7 @@ async fn whip_publish_negotiates_and_feeds_a_whep_viewer_session() {
         "sdp_path_for must stop resolving once the bridge is unregistered from state"
     );
 
-    let whep_delete = oneshot(whep_router, delete_request(&viewer_location)).await;
+    let whep_delete = oneshot(whep_router, delete_auth(&viewer_location, &viewer_token)).await;
     assert_status(&whep_delete, StatusCode::NO_CONTENT);
     assert_eq!(whep_state.viewer_count(pipeline_id).await, 0);
 

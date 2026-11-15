@@ -26,9 +26,7 @@
 # update /bundle_active_set" (or the equivalent path for any of the other
 # five) (no such file) -- same failure class as gh-425/gh-498. Run from
 # core/:
-#   docker build -f svc_action/Dockerfile.rust -t localhost:32000/waddlebot/svc-action-rust:alpha-<epoch> .
-# ("svc-action-rust", not "svc-action" -- fix/helm-alpha-self-provisioning, see
-# core/svc_ingest/Dockerfile.rust's identical comment.)
+#   docker build -f svc_action/Dockerfile.rust -t localhost:32000/waddlebot/svc-action:alpha-<epoch> .
 
 FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
 
@@ -41,7 +39,7 @@ FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcb
 # regardless.
 # protobuf-compiler (protoc) is required by `hub_client`'s build.rs
 # (tonic-prost-build, compiling `proto/waddles/hub/internal/v1/*.proto`) --
-# `egress_detokenizer` (outbound PII-detokenization) depends on `hub_client`.
+# `platform_user` (host-tool user resolution) uses `hub_client`.
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
         cmake=3.25.1-1 build-essential=12.9 ca-certificates=20250419~deb12u2 \
@@ -55,13 +53,17 @@ COPY bundle_active_set ./bundle_active_set
 COPY bundle_host_kv ./bundle_host_kv
 COPY bundle_host_db ./bundle_host_db
 COPY bundle_host_http ./bundle_host_http
+COPY bundle_host_credentials ./bundle_host_credentials
+COPY connection_resolver ./connection_resolver
 COPY bundle_capability_gate ./bundle_capability_gate
 COPY bundle_tool_call ./bundle_tool_call
 COPY circuit_breaker ./circuit_breaker
+COPY command_latency ./command_latency
 COPY discord_mentions ./discord_mentions
 COPY egress_assertion ./egress_assertion
 COPY hub_client ./hub_client
-COPY egress_detokenizer ./egress_detokenizer
+# Live bundle-config DB reader (issue #1306): path dependency of this crate.
+COPY bundle_config_db ./bundle_config_db
 COPY service_auth ./service_auth
 # `hub_client`'s build.rs resolves protos at `CARGO_MANIFEST_DIR/../../
 # proto` -- for `/build/hub_client`, that's `/proto` (image root, NOT
@@ -71,7 +73,26 @@ COPY service_auth ./service_auth
 # rather than COPY'd from `.`.
 COPY --from=proto . /proto
 WORKDIR /build/svc_action
-RUN cargo build --release --locked
+# Bump CACHE_EPOCH (workflow build-arg, repo variable ALPHA_CACHE_EPOCH) to abandon every cache mount id
+# below and force a clean rebuild; the value is also part of the RUN layer cache key.
+ARG CACHE_EPOCH=1
+# BuildKit cache mounts (bounded, explicit ids; none of this reaches the image layers):
+#  - cargo registry/git: downloaded crates, PRIVATE to this image (id carries the image name, sharing=locked).
+#    Never share these between images: cargo's package-cache lock lives outside the mounted dirs, so two
+#    concurrent builds on one shared git db corrupt it ("revision ... not found", deploy run 43637937508).
+#    Content is checksum-verified against Cargo.lock, so it cannot change build output.
+#  - target dir: ONE per image (id waddles-target-<image>) so a source change recompiles only
+#    the changed first-party crates, not every third-party dependency. Lives in the BuildKit
+#    pod's local store, which the pod's GC policy caps (exec.cachemount kept 6h, 40GB total).
+#    The binary is copied out inside the same RUN because cache mounts are not in the layer.
+# `--locked` stays: a stale/poisoned cache can never change the resolved dependency set, and cargo
+# re-verifies every registry crate against the checksum in Cargo.lock. Trust boundary: only the
+# deploy-set runners (release pushes) can reach the BuildKit pod -- docs/ALPHA_CHANGED_ONLY_BUILDS.md.
+RUN --mount=type=cache,id=waddles-cargo-registry-svc-action-v${CACHE_EPOCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=waddles-cargo-git-svc-action-v${CACHE_EPOCH},target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=waddles-target-svc-action-v${CACHE_EPOCH},target=/build/svc_action/target,sharing=locked \
+    cargo build --release --locked \
+    && install -D -m 0755 target/release/svc-action /out/svc-action
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 
@@ -90,7 +111,7 @@ RUN groupadd --system --gid 10001 appuser \
     && useradd --system --uid 10001 --gid appuser --home-dir /nonexistent \
        --shell /usr/sbin/nologin appuser
 
-COPY --from=builder --chown=appuser:appuser /build/svc_action/target/release/svc-action /app/svc-action
+COPY --from=builder --chown=appuser:appuser /out/svc-action /app/svc-action
 
 WORKDIR /app
 USER appuser

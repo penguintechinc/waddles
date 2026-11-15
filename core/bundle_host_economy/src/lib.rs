@@ -261,6 +261,19 @@ pub enum EconomyError {
     /// admin-authorization guarantee. Never applied.
     #[error("operation requires admin authorization")]
     NotAuthorized,
+    /// An elevated call (see [`ElevatedRequest`]): the CALLING app holds no live
+    /// `economy.transfer_from` / `economy.app_mint` grant in this community
+    /// (never approved, or revoked). Never applied.
+    #[error("the calling app holds no approved elevated economy grant")]
+    ElevatedNotGranted,
+    /// An elevated call exceeded the grant's per-call maximum `cap`. Wire
+    /// `over_cap`, carrying the cap.
+    #[error("amount exceeds the app's approved per-call cap ({cap})")]
+    ElevatedOverCap { cap: i64 },
+    /// An elevated call would pass the grant's rolling-24h per-app or
+    /// per-target-member total `cap`. Wire `quota_exceeded`.
+    #[error("the app's approved rolling-24h elevated cap ({cap}) would be exceeded")]
+    ElevatedQuotaExceeded { cap: i64 },
     /// Malformed argument (non-positive amount, self-transfer, bad limit, ...).
     #[error("invalid argument: {0}")]
     Invalid(String),
@@ -275,9 +288,14 @@ impl EconomyError {
         match self {
             Self::NotAMember => "not_a_member",
             Self::InsufficientFunds { .. } => "insufficient_funds",
-            Self::OverCap { .. } | Self::SupplyCapReached { .. } => "over_cap",
+            Self::OverCap { .. } | Self::SupplyCapReached { .. } | Self::ElevatedOverCap { .. } => {
+                "over_cap"
+            }
             Self::NotAuthorized => "admin_required",
-            Self::UserQuotaExceeded { .. } | Self::ScopeQuotaExceeded { .. } => "quota_exceeded",
+            Self::ElevatedNotGranted => "elevated_not_granted",
+            Self::UserQuotaExceeded { .. }
+            | Self::ScopeQuotaExceeded { .. }
+            | Self::ElevatedQuotaExceeded { .. } => "quota_exceeded",
             Self::IdempotencyConflict => "idempotency_conflict",
             Self::Invalid(_) => "invalid_args",
             Self::Backend(_) => "backend",
@@ -290,7 +308,9 @@ impl EconomyError {
     pub fn wire_message(&self) -> String {
         match self {
             Self::InsufficientFunds { balance } => balance.to_string(),
-            Self::OverCap { cap } | Self::SupplyCapReached { cap } => cap.to_string(),
+            Self::OverCap { cap }
+            | Self::SupplyCapReached { cap }
+            | Self::ElevatedOverCap { cap } => cap.to_string(),
             other => other.to_string(),
         }
     }
@@ -320,6 +340,138 @@ pub fn pot_account(scope: &EconomyScope) -> uuid::Uuid {
     b[9..12].copy_from_slice(b"POT");
     b[12..16].copy_from_slice(&scope.community_id.to_be_bytes());
     uuid::Uuid::from_bytes(b)
+}
+
+/// Hard ceilings the admin-tunable elevated caps are clamped to (mirrored by
+/// hub-api's `_ECONOMY_ELEVATED_CAP_PARAMS` approval-time check).
+pub const ELEVATED_MAX_PER_OP_CEILING: i64 = 10_000;
+/// See [`ELEVATED_MAX_PER_OP_CEILING`]: per-app rolling-24h total.
+pub const ELEVATED_MAX_PER_DAY_CEILING: i64 = 100_000;
+/// See [`ELEVATED_MAX_PER_OP_CEILING`]: per-target-member rolling-24h total.
+pub const ELEVATED_MAX_PER_TARGET_DAY_CEILING: i64 = 50_000;
+/// Conservative defaults when the admin's grant params leave a cap unset.
+pub const ELEVATED_DEFAULT_MAX_PER_OP: i64 = 100;
+/// See [`ELEVATED_DEFAULT_MAX_PER_OP`].
+pub const ELEVATED_DEFAULT_MAX_PER_DAY: i64 = 1_000;
+/// See [`ELEVATED_DEFAULT_MAX_PER_OP`].
+pub const ELEVATED_DEFAULT_MAX_PER_TARGET_DAY: i64 = 500;
+
+/// Longest accepted audit `reason` code.
+pub const MAX_REASON_LEN: usize = 64;
+
+/// The two ELEVATED permissions an APP bundle needs, on top of the economy
+/// service bundle's own grants, to use the service's dangerous primitives.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ElevatedPermission {
+    /// Move or burn a NON-actor member's funds.
+    TransferFrom,
+    /// Create or set currency through the service.
+    AppMint,
+}
+
+impl ElevatedPermission {
+    /// The catalog permission id (`community_permission_grants.permission_id`).
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::TransferFrom => "economy.transfer_from",
+            Self::AppMint => "economy.app_mint",
+        }
+    }
+}
+
+/// The admin-set host caps of one elevated grant (from the grant's
+/// `params_json`: `max_per_op`, `max_per_day`, `max_per_target_per_day`),
+/// already defaulted and clamped to the hard ceilings.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ElevatedCaps {
+    /// Max amount of ONE call.
+    pub max_per_op: i64,
+    /// Max rolling-24h total for the calling app in this community.
+    pub max_per_day: i64,
+    /// Max rolling-24h total against ONE target member (the victim of a
+    /// `transfer_from`, the recipient of a mint) for the calling app.
+    pub max_per_target_per_day: i64,
+}
+
+impl ElevatedCaps {
+    /// Builds caps from optional raw grant values: absent/invalid -> default,
+    /// anything above the hard ceiling -> the ceiling.
+    pub fn from_raw(per_op: Option<i64>, per_day: Option<i64>, per_target: Option<i64>) -> Self {
+        let pick = |raw: Option<i64>, default: i64, ceiling: i64| {
+            raw.filter(|v| *v >= 1).map_or(default, |v| v.min(ceiling))
+        };
+        Self {
+            max_per_op: pick(
+                per_op,
+                ELEVATED_DEFAULT_MAX_PER_OP,
+                ELEVATED_MAX_PER_OP_CEILING,
+            ),
+            max_per_day: pick(
+                per_day,
+                ELEVATED_DEFAULT_MAX_PER_DAY,
+                ELEVATED_MAX_PER_DAY_CEILING,
+            ),
+            max_per_target_per_day: pick(
+                per_target,
+                ELEVATED_DEFAULT_MAX_PER_TARGET_DAY,
+                ELEVATED_MAX_PER_TARGET_DAY_CEILING,
+            ),
+        }
+    }
+}
+
+/// One elevated call by an APP bundle (`caller_app`) through the economy
+/// service bundle (the [`EconomyScope::app_id`]). Everything here is
+/// host-derived except the amounts/users/reason the app chose.
+#[derive(Clone, Debug)]
+pub struct ElevatedRequest<'a> {
+    /// The calling app (host-derived from the tool-call chain, never guest input).
+    pub caller_app: &'a str,
+    /// Which approval the call needs.
+    pub permission: ElevatedPermission,
+    /// Short op label for the audit row (`transfer_from`, `credit`, ...).
+    pub op: &'static str,
+    /// The member whose funds move/burn (`transfer_from`: the victim) or who
+    /// receives/is set (mint ops).
+    pub target: uuid::Uuid,
+    /// The other side of a `transfer_from` (the recipient).
+    pub counterparty: Option<uuid::Uuid>,
+    /// Amount the call moves/mints (metered against the caps); `>= 0`.
+    pub amount: i64,
+    /// PII-free reason code (`[a-z0-9_.-]{1,64}`) the app supplies for the audit.
+    pub reason: &'a str,
+    /// The caller-namespaced, replay-stable key of this call.
+    pub key: &'a IdempotencyKey,
+}
+
+/// Result of an applied (or replayed) `transfer_from`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TransferFromOutcome {
+    /// The victim's balance after the move.
+    pub from_balance: i64,
+    /// The recipient's balance after the move.
+    pub to_balance: i64,
+    /// The `economy_elevated_audit` row of the call.
+    pub audit_id: i64,
+    /// The approving grant (`community_permission_grants.grant_id`).
+    pub grant_id: i64,
+}
+
+/// Validates an audit reason code (pure): `[a-z0-9_.-]{1,64}`. The reason is
+/// app-supplied free-ish text that lands in an audit table, so it is limited to
+/// a code alphabet that cannot carry PII-shaped prose.
+pub fn validate_reason(reason: &str) -> Result<(), EconomyError> {
+    if reason.is_empty()
+        || reason.len() > MAX_REASON_LEN
+        || !reason.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'.' | b'-')
+        })
+    {
+        return Err(EconomyError::Invalid(format!(
+            "reason must be a code of 1..={MAX_REASON_LEN} chars from [a-z0-9_.-]"
+        )));
+    }
+    Ok(())
 }
 
 /// The durable, community-scoped currency store.
@@ -503,6 +655,49 @@ pub trait EconomyStore: Send + Sync {
         caps: EconomyCaps,
         key: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<i64, EconomyError>>;
+
+    /// ELEVATED PRIMITIVE: atomically moves `req.amount` from `req.target` (the
+    /// victim, who need NOT be the invocation's actor) to `req.counterparty`.
+    /// ONE transaction under the per-(community, calling app) advisory lock:
+    /// the calling app's live `economy.transfer_from` grant is read from
+    /// `community_permission_grants` (absent/revoked ->
+    /// [`EconomyError::ElevatedNotGranted`]); the admin-set caps are enforced
+    /// (per call, per app per 24h, per victim per 24h); idempotent by
+    /// `req.key` (same parameters replay the prior balances, different ones are
+    /// [`EconomyError::IdempotencyConflict`]); both sides must be active
+    /// members; `balance >= amount` (the `CHECK (balance >= 0)` stays the
+    /// backstop); ledger kinds `transfer_from` / `transfer_from_in`; and the
+    /// `economy_elevated_audit` row (caller app, approving grant + admin,
+    /// from/to, amount, reason, balances) is written in the same transaction.
+    fn transfer_from<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        req: &'a ElevatedRequest<'a>,
+    ) -> BoxFuture<'a, Result<TransferFromOutcome, EconomyError>>;
+
+    /// Admits one elevated call that another primitive (`credit`, `debit` of a
+    /// non-actor, `admin_adjust`, `pay_pot`, ...) will then perform: reads the
+    /// calling app's live grant, enforces the same caps and writes a RESERVED
+    /// audit row (counted against the caps immediately) in one transaction
+    /// under the advisory lock. Idempotent by `req.key`. Returns the audit id
+    /// to pass to [`Self::elevated_settle`].
+    fn elevated_reserve<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        req: &'a ElevatedRequest<'a>,
+    ) -> BoxFuture<'a, Result<i64, EconomyError>>;
+
+    /// Settles a reservation after the primitive ran: `applied = true` marks
+    /// it applied, `false` marks it failed (no longer counted against the
+    /// caps). Only a still-RESERVED row transitions; a replay never rewrites
+    /// an applied row. Not called on an indeterminate backend failure, so the
+    /// reservation stays counted (conservative).
+    fn elevated_settle<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        audit_id: i64,
+        applied: bool,
+    ) -> BoxFuture<'a, Result<(), EconomyError>>;
 }
 
 /// Validates the arithmetic preconditions of a wager (pure, no I/O) so the
@@ -859,5 +1054,80 @@ mod tests {
             "9"
         );
         assert_eq!(EconomyError::NotAuthorized.wire_code(), "admin_required");
+    }
+
+    #[test]
+    fn elevated_error_wire_codes_and_numeric_messages() {
+        assert_eq!(
+            EconomyError::ElevatedNotGranted.wire_code(),
+            "elevated_not_granted"
+        );
+        let over = EconomyError::ElevatedOverCap { cap: 50 };
+        assert_eq!(
+            (over.wire_code(), over.wire_message()),
+            ("over_cap", "50".to_string())
+        );
+        assert_eq!(
+            EconomyError::ElevatedQuotaExceeded { cap: 9 }.wire_code(),
+            "quota_exceeded"
+        );
+    }
+
+    #[test]
+    fn elevated_permission_ids_match_the_catalog() {
+        assert_eq!(
+            ElevatedPermission::TransferFrom.id(),
+            "economy.transfer_from"
+        );
+        assert_eq!(ElevatedPermission::AppMint.id(), "economy.app_mint");
+    }
+
+    #[test]
+    fn elevated_caps_default_when_unset_or_invalid_and_clamp_to_the_ceiling() {
+        let d = ElevatedCaps::from_raw(None, None, None);
+        assert_eq!(
+            d,
+            ElevatedCaps {
+                max_per_op: ELEVATED_DEFAULT_MAX_PER_OP,
+                max_per_day: ELEVATED_DEFAULT_MAX_PER_DAY,
+                max_per_target_per_day: ELEVATED_DEFAULT_MAX_PER_TARGET_DAY
+            }
+        );
+        assert_eq!(ElevatedCaps::from_raw(Some(0), Some(-4), Some(0)), d);
+        let set = ElevatedCaps::from_raw(Some(7), Some(70), Some(30));
+        assert_eq!(
+            (set.max_per_op, set.max_per_day, set.max_per_target_per_day),
+            (7, 70, 30)
+        );
+        let big = ElevatedCaps::from_raw(Some(i64::MAX), Some(i64::MAX), Some(i64::MAX));
+        assert_eq!(
+            big,
+            ElevatedCaps {
+                max_per_op: ELEVATED_MAX_PER_OP_CEILING,
+                max_per_day: ELEVATED_MAX_PER_DAY_CEILING,
+                max_per_target_per_day: ELEVATED_MAX_PER_TARGET_DAY_CEILING
+            }
+        );
+    }
+
+    #[test]
+    fn reason_is_a_pii_free_code() {
+        for ok in ["steal", "a", "game.steal-v2_x", &"a".repeat(MAX_REASON_LEN)] {
+            assert!(validate_reason(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "Steal",
+            "free text",
+            "a@b.c",
+            "名前",
+            "a\nb",
+            &"a".repeat(MAX_REASON_LEN + 1),
+        ] {
+            assert!(
+                matches!(validate_reason(bad), Err(EconomyError::Invalid(_))),
+                "{bad:?}"
+            );
+        }
     }
 }

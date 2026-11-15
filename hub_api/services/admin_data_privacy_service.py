@@ -54,6 +54,7 @@ Uses the pydal query builder throughout (never raw `%s` SQL) -- Gotcha
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -69,6 +70,12 @@ from services.cookie_consent_service import (
     log_audit_event,
 )
 from services.errors import ApiError, bad_request
+from services.global_identity import is_global_admin
+from services.platform_account import (
+    PLATFORM_ACCOUNT_CODE,
+    PLATFORM_ACCOUNT_MESSAGE,
+    is_platform_account_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +111,7 @@ class DsarStatus(StrEnum):
     ALREADY_DONE = "already_done"
     NOT_FOUND = "not_found"
     CONFLICT = "conflict"
+    FORBIDDEN = "forbidden"
     FAILED = "failed"
     AUDIT_UNAVAILABLE = "audit_unavailable"
 
@@ -173,9 +181,8 @@ async def resolve_scope(
     user_rows = await async_dal.select_async(
         dal(dal.hub_users.id.belongs(list(user_ids))),
         dal.hub_users.id,
-        dal.hub_users.is_super_admin,
     )
-    users = {int(r.id): bool(r.is_super_admin) for r in user_rows}
+    users = {int(r.id): await is_global_admin(async_dal, dal, user_id=int(r.id)) for r in user_rows}
 
     member_rows = await async_dal.select_async(
         dal(dal.community_members.user_id.belongs([str(u) for u in user_ids])),
@@ -475,6 +482,24 @@ async def _process_user(
             reason="not_in_tenant",
         )
         return DsarResult(user_id=user_id, status=DsarStatus.NOT_FOUND, detail="User not found")
+
+    if action is DsarAction.ERASE and await asyncio.get_running_loop().run_in_executor(
+        async_dal.executor, is_platform_account_sync, dal, user_id
+    ):
+        await _audit_denied(
+            async_dal,
+            dal,
+            actor,
+            action=action,
+            target_user_id=user_id,
+            bulk_id=bulk_id,
+            reason="platform_account",
+        )
+        return DsarResult(
+            user_id=user_id,
+            status=DsarStatus.FORBIDDEN,
+            detail=f"{PLATFORM_ACCOUNT_CODE}: {PLATFORM_ACCOUNT_MESSAGE}",
+        )
 
     if action is DsarAction.ERASE:
         refusal = _erase_refusal(actor, user_id, scope)

@@ -28,7 +28,7 @@ use crate::config::CliConfig;
 pub const IDENTIFY_BUDGET_READY: bool = true;
 
 /// Platforms the selector knows, in validation order.
-pub const PLATFORMS: [&str; 5] = ["twitch", "discord", "youtube", "wix", "spectrum"];
+pub const PLATFORMS: [&str; 6] = ["twitch", "discord", "youtube", "wix", "spectrum", "kick"];
 
 /// Platforms whose webhook routes the runtime can own.
 pub const WEBHOOK_CAPABLE: [&str; 3] = ["twitch", "discord", "wix"];
@@ -76,10 +76,11 @@ pub struct ConnectorSelector {
     youtube: bool,
     wix: bool,
     spectrum: bool,
+    kick: bool,
 }
 
 impl ConnectorSelector {
-    /// Reads `CONNECTOR_{TWITCH,DISCORD,YOUTUBE,WIX,SPECTRUM}_ENABLED` via `lookup` (env in
+    /// Reads `CONNECTOR_{TWITCH,DISCORD,YOUTUBE,WIX,SPECTRUM,KICK}_ENABLED` via `lookup` (env in
     /// production). Default OFF; malformed is fatal; Discord ON is fatal
     /// while [`IDENTIFY_BUDGET_READY`] is `false`.
     ///
@@ -100,6 +101,7 @@ impl ConnectorSelector {
             youtube: parse_bool(lookup, "CONNECTOR_YOUTUBE_ENABLED")?,
             spectrum: parse_bool(lookup, "CONNECTOR_SPECTRUM_ENABLED")?,
             wix: parse_bool(lookup, "CONNECTOR_WIX_ENABLED")?,
+            kick: parse_bool(lookup, "CONNECTOR_KICK_ENABLED")?,
         };
         if sel.discord && !identify_budget_ready {
             return Err(BootError::Blocked(
@@ -118,6 +120,7 @@ impl ConnectorSelector {
             "youtube" => self.youtube,
             "wix" => self.wix,
             "spectrum" => self.spectrum,
+            "kick" => self.kick,
             _ => false,
         }
     }
@@ -131,7 +134,7 @@ impl ConnectorSelector {
     /// `true` when any platform runs on the connector runtime.
     #[must_use]
     pub fn any_connector(&self) -> bool {
-        self.twitch || self.discord || self.youtube || self.wix || self.spectrum
+        self.twitch || self.discord || self.youtube || self.wix || self.spectrum || self.kick
     }
 
     /// Platforms with the connector ON, in [`PLATFORMS`] order.
@@ -293,6 +296,7 @@ fn digest_name(platform: &str) -> &'static str {
         "discord" => "SENDER_EXEC_DIGEST_DISCORD",
         "spectrum" => "SENDER_EXEC_DIGEST_SPECTRUM",
         "wix" => "SENDER_EXEC_DIGEST_WIX",
+        "kick" => "SENDER_EXEC_DIGEST_KICK",
         _ => "SENDER_EXEC_DIGEST_YOUTUBE",
     }
 }

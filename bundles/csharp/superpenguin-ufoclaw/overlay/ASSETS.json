@@ -1,0 +1,121 @@
+{
+  "upstream_repo": "https://github.com/Psychoboy/PenguinTwitchBot",
+  "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+  "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)",
+  "files": [
+    {
+      "path": "help/ufoclaw/automation.md",
+      "sha256": "4a93e40ec03c4a5666c8231c6f36ea1c4222b5344f0bfb7d975f1c5fadea423d",
+      "size": 2404,
+      "upstream_path": "PenguinTwitchBot/wwwroot/help/ufoclaw/automation.md",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "help/ufoclaw/draws.md",
+      "sha256": "4292e22f1497945187958587d0e07b0e3fe9569dfe6504f1163cc82b54b5eb47",
+      "size": 1604,
+      "upstream_path": "PenguinTwitchBot/wwwroot/help/ufoclaw/draws.md",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "help/ufoclaw/overlay.md",
+      "sha256": "8baf0de416c2b9ae495f9bb309abaf3dc761ff89194a9cd401b7b1111f0a0e78",
+      "size": 3369,
+      "upstream_path": "PenguinTwitchBot/wwwroot/help/ufoclaw/overlay.md",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "js/ufo.js",
+      "sha256": "12d35564f373ea292bcd0887f951acb74af949142f0955f064d58f859e33fddb",
+      "size": 38289,
+      "upstream_path": "PenguinTwitchBot/wwwroot/js/ufo.js",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/ufo_claw_catch.wav",
+      "sha256": "b92a328be994f4af019a72f8d9de5a37dfec4a6910497fdb21daa520d4d23aef",
+      "size": 42380,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/ufo_claw_catch.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/ufo_claw_drop.wav",
+      "sha256": "9fa1fde3a2e755859059d88b9993c5625d2abed349cbdbc6cd3e00f1181a557d",
+      "size": 63548,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/ufo_claw_drop.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/ufo_claw_grab.wav",
+      "sha256": "6d9e147c3400e1359534227df9db6c95f92552cce75e5e87f42c56028282a5d8",
+      "size": 42380,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/ufo_claw_grab.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/ufo_claw_lift.wav",
+      "sha256": "536ad2d461922bba44b0ef1550c9600638d2107bda50d641b18fc3fa84e78c23",
+      "size": 68840,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/ufo_claw_lift.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/ufo_claw_motor.wav",
+      "sha256": "f45a7125a63dd61bf9d96ae4ca6bb0b371b7859c18a7ff4281a959c1bed8e731",
+      "size": 220544,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/ufo_claw_motor.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/ufo_claw_reveal.wav",
+      "sha256": "0232cdf5b9bfac782f36ac744c97ea199d0892eeb24e961316a910e817acf3e6",
+      "size": 158804,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/ufo_claw_reveal.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "ufo.html",
+      "sha256": "8d2aeaa255705e0f57467fc62617c2473314e7b4bca2df2bc9fbc4c0d8f31740",
+      "size": 2414,
+      "upstream_path": "PenguinTwitchBot/wwwroot/ufo.html",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    }
+  ],
+  "third_party_or_unclear": [
+    {
+      "path": "js/reconnecting-websocket/reconnectingWS.min.js",
+      "reason": "referenced by ufo.html; third-party library with its own license, not vendored",
+      "vendored": false
+    },
+    {
+      "path": "js/ws-client.js",
+      "reason": "referenced by ufo.html; shared bot websocket client outside the UFO claw scope, not vendored",
+      "vendored": false
+    },
+    {
+      "path": "js/ws-status.js",
+      "reason": "referenced by ufo.html; shared bot connection indicator outside the UFO claw scope, not vendored",
+      "vendored": false
+    },
+    {
+      "path": "fonts.googleapis.com Rubik",
+      "reason": "ufo.html links the Rubik web font from Google Fonts (SIL OFL, third party); not vendored",
+      "vendored": false
+    }
+  ],
+  "notes": [
+    "Upstream ufo.js/ufo.html fetch /api/overlay/ufoclaw-state and POST /api/overlay/ufoclaw-complete (the upstream bot server); those endpoints do not exist in Waddles, see overlay/SCHEMA.md for the envelope that replaces them.",
+    "help/ufoclaw/*.md is upstream operator documentation for the free-play draw, kept for reference; it describes features this port defers (see README)."
+  ]
+}

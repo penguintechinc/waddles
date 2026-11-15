@@ -30,6 +30,10 @@ async fn run_with_shutdown_binds_serves_and_stops_cleanly() {
     // SAFETY: single test in this process, before any await point.
     unsafe {
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        // The data plane refuses to start without a tenant-DEK source; the hard-gated dev/alpha
+        // KEK stands in for hub-api's key broker here (read by `Config::from_cli`).
+        std::env::set_var("WADDLES_ENV", "local");
+        std::env::set_var("INGEST_DEV_KEK", "k".repeat(48));
     }
 
     let http_port = free_port();

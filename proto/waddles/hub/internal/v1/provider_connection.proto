@@ -1,0 +1,97 @@
+// ProviderConnectionService: internal gRPC contract replacing hub-api's
+// machine-JWT REST routes `GET /api/v1/internal/provider-connections` and
+// `POST /api/v1/internal/communities/{c}/provider-connections/{n}/resolve`.
+// Consumed by core/connection_resolver (svc-ingest / svc-action). The caller
+// authenticates with a short-lived EdDSA machine JWT in `authorization`
+// metadata; the token's tenant must be the operator-plane `system` tenant.
+syntax = "proto3";
+
+package waddles.hub.internal.v1;
+
+option go_package = "github.com/penguintechinc/waddles/gen/go/waddles/hub/internal/v1;hubinternalv1";
+
+service ProviderConnectionService {
+  // One page of usable bindings for a provider across all tenants. Carries
+  // no credential. Required scope: "connections:list" (unbound token).
+  rpc ListBindings(ListBindingsRequest) returns (ListBindingsResponse);
+
+  // Endpoint + decrypted credential for ONE binding of ONE community. The
+  // token must be community-bound: its `community` claim (and `conn` claim,
+  // when present) must equal the request's ids. Required scope:
+  // "connections:resolve" (OAuth kinds) or "connections:resolve:static"
+  // (additionally static-secret kinds).
+  rpc ResolveConnection(ResolveConnectionRequest) returns (ResolveConnectionResponse);
+}
+
+message ListBindingsRequest {
+  string provider = 1;
+  // Empty means "no capability filter".
+  string capability = 2;
+  // Cursor: last grant id already seen (0 = first page).
+  int64 after = 3;
+  // 1..MAX_PAGE_SIZE; the server rejects anything outside its bounds.
+  uint32 limit = 4;
+}
+
+message ListBindingsResponse {
+  repeated ConnectionBinding items = 1;
+  // Cursor for the next page; absent on the last page.
+  optional int64 next_after = 2;
+}
+
+// One (community, connection) pair the data plane should run. No token.
+message ConnectionBinding {
+  int64 grant_id = 1;
+  int64 connection_id = 2;
+  int64 community_id = 3;
+  // Server-derived from the community's own tenant, always >= 1.
+  int64 tenant_id = 4;
+  string provider = 5;
+  string resource_type = 6;
+  string resource_id = 7;
+  repeated string capabilities = 8;
+  // RFC 3339; absent when the grant does not expire.
+  optional string expires_at = 9;
+  optional string updated_at = 10;
+  map<string, string> metadata = 11;
+  // ConnectionKind int code (1 oauth, 2 http, 3 lambda, 4 gcp function).
+  int32 kind = 12;
+  // Credential-rotation counter (>= 1); a counter, never secret material.
+  int64 secret_version = 13;
+}
+
+message ResolveConnectionRequest {
+  int64 community_id = 1;
+  int64 connection_id = 2;
+}
+
+message ResolveConnectionResponse {
+  int64 community_id = 1;
+  int64 connection_id = 2;
+  string provider = 3;
+  // ConnectionKind int code.
+  int32 kind = 4;
+  // Set iff kind == 1 (OAuth).
+  optional string access_token = 5;
+  // RFC 3339; absent when the credential is not time-limited.
+  optional string expires_at = 6;
+  ResolveEndpoint endpoint = 7;
+  // Set iff kind != 1 (static secret).
+  optional ResolveSecret secret = 8;
+  map<string, string> metadata = 9;
+}
+
+// Non-secret target facts of a static connection; all unset for OAuth rows.
+message ResolveEndpoint {
+  optional string url = 1;
+  optional string region = 2;
+  optional string function = 3;
+  optional string project = 4;
+}
+
+// A static connection's structured credential: SecretScheme int code plus the
+// scheme's camelCase fields (null fields are simply omitted).
+message ResolveSecret {
+  int32 scheme = 1;
+  map<string, string> fields = 2;
+}

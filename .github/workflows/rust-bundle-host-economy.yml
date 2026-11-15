@@ -9,6 +9,7 @@ on:
       - 'core/bundle_capability_gate/**'
       - 'scripts/db/bundle_economy_store.sql'
       - 'scripts/db/bundle_economy_idempotency.sql'
+      - 'scripts/db/bundle_economy_elevated.sql'
       - '.github/workflows/rust-bundle-host-economy.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
@@ -53,6 +54,7 @@ jobs:
             core/bundle_capability_gate/**
             scripts/db/bundle_economy_store.sql
             scripts/db/bundle_economy_idempotency.sql
+            scripts/db/bundle_economy_elevated.sql
 
   lint-test:
     needs: changes

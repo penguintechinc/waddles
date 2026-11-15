@@ -46,6 +46,14 @@ initial super-admin is created **only** if both `INITIAL_ADMIN_EMAIL` and
 if they're unset, no admin account exists until one is created via the
 signup flow or `scripts/seed-admin.sh --email ... --password ...`.
 
+**The initial admin is a platform account, not a person.** It is marked
+`hub_users.is_bootstrap` and exists as the operator's break-glass identity. Do not tie it to a
+real person's e-mail or identity, and do not use it day to day: create **named global admins**
+for each operator (`POST /api/v1/superadmin/users` with `type: global_admin`). The platform
+account cannot be deleted, deactivated, demoted from `system` admin or erased (typed 403
+`PLATFORM_ACCOUNT_PROTECTED`, audited); the Users page shows it with a "Platform account" badge.
+See `docs/GLOBAL_IDENTITY.md` and `docs/PRIVACY.md`.
+
 Local dev (`docker-compose.yml` / `scripts/rebuild-cluster.sh`) sets a
 dev-only default via these env vars -- override them in `.env` to change
 the local login. **Production/beta must set them explicitly; there is no

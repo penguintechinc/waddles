@@ -62,21 +62,29 @@
 //! Per spec S4.1, this service has **no database** -- no `sea-orm`
 //! dependency, unlike `svc_process`/`svc_action`.
 
+pub mod active_context;
+pub mod canary;
+pub mod commands_reconcile;
 pub mod config;
 pub mod connector;
 pub mod connector_runtime;
 pub mod crypto;
 pub mod discord_rest;
+pub mod display_names;
+pub mod egress;
 pub mod error;
 pub mod http;
 pub mod identity_crypto;
 pub mod ingest;
+pub mod interaction_store;
+pub mod interaction_tap;
 pub mod license;
 pub mod normalize;
 pub mod outbound;
 pub mod outbound_boot;
 pub mod outbound_creds;
 pub mod outbound_creds_discord;
+pub mod outbound_creds_kick;
 pub mod outbound_creds_youtube;
 pub mod outbound_ops;
 pub mod outbound_pin;
@@ -85,6 +93,7 @@ pub mod platform_users;
 pub mod publish;
 pub mod scope_resolver;
 pub mod telemetry;
+pub mod tenant_discord;
 pub mod twitch_sessions;
 
 use std::net::SocketAddr;
@@ -315,6 +324,11 @@ where
     crypto::ensure_installed();
 
     let (_telemetry_guard, prom_registry) = telemetry::init(SERVICE_NAME);
+    // Command-latency kill switch (`waddles.disable-command-latency-telemetry`): seeded from the ENV
+    // baseline here, kept live by the refresher once the license client exists below. The
+    // instruments are created now that the global meter provider is installed.
+    command_latency::switch::init_from_env();
+    let _ = command_latency::metrics::metrics();
 
     tracing::info!(
         http_port = config.cli.http_port,
@@ -322,6 +336,8 @@ where
         "starting {SERVICE_NAME}"
     );
 
+    // The env Discord application serves only this tenant (tenant_discord).
+    tenant_discord::set_default_tenant_id(config.cli.default_tenant_id);
     let ingest_metrics = Arc::new(telemetry::register_ingest_metrics(&prom_registry));
     let mut state = http::AppState::new(config.clone(), prom_registry);
     let receiver_readiness = Arc::clone(&state.receiver_readiness);
@@ -336,6 +352,7 @@ where
     // A contradictory Twitch config (dynamic flag ON + a static identity, or
     // bad timing) fails loudly even when the data plane below is OFF.
     config::validate_twitch_mode(&config)?;
+    config::validate_default_tenant(&config)?;
     // Host selector (spec 2026-11-05 s5): env baselines only, never the flag
     // client. Validated BEFORE any receiver starts; fatal and loud.
     let env_lookup = |k: &str| std::env::var(k).ok();
@@ -361,11 +378,26 @@ where
     // With every connector OFF nothing is built, bound or spawned.
     let mut connector_ready: Option<Arc<dyn connector_runtime::RuntimeReady>> = None;
     let license_client = license::build_license_client();
+    license::set_shared_license_client(license_client.clone());
+    {
+        let client = license_client.clone();
+        command_latency::switch::spawn_refresher(move || {
+            let client = client.clone();
+            async move { canary::kill_switch_wanted(client.as_ref()).await }
+        });
+    }
+    // Egress detokenizer: installed BEFORE any outbound drain starts. The drain is the only
+    // platform egress; it substitutes `{user:<token>}` right before each send.
+    egress::install(egress::Egress::from_cli(
+        &config.cli,
+        license_client.clone(),
+        std::env::var("DATABASE_URL").ok(),
+    ));
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
         // Schema-v3 producer: resolver is installed BEFORE any receiver can
         // publish. A flag that is ON but misconfigured fails the process
         // loudly -- never a silent downgrade to the v2/static path.
-        try_install_scope_resolver(&config, ingest_metrics.clone())?;
+        try_install_scope_resolver(&config, ingest_metrics.clone()).await?;
         // Twitch IRC (primary e2e path), Discord Gateway (secondary), the
         // Twitch outbound relay drain, and the Twitch EventSub webhook
         // receiver each independently no-op with a logged reason when
@@ -377,7 +409,23 @@ where
         // `ConfiguredDekProvider` is cheaply `Clone` (see its doc comment),
         // so each independently-spawned receiver task gets its own handle
         // onto the same underlying TTL cache / HTTP client.
-        let dek_provider = build_dek_provider(&config, reqwest::Client::new());
+        let dek_provider = build_dek_provider(&config)?;
+        start_bundle_schedules(
+            &config,
+            &state.metrics,
+            ingest_metrics.clone(),
+            dek_provider.clone(),
+        )
+        .await?;
+
+        // Command-latency synthetic canary (flag `waddles.command-latency-canary`, default OFF):
+        // the machinery is built lazily on the first enabled tick.
+        canary::spawn(
+            config.clone(),
+            ingest_metrics.clone(),
+            dek_provider.clone(),
+            license_client.clone(),
+        );
 
         // Connector service bundle runtime (spec 2026-11-05 PR-E): only when an
         // `CONNECTOR_<P>_ENABLED` baseline is ON. It owns the single executor
@@ -459,8 +507,7 @@ struct RealLegacy<'a> {
     config: &'a config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
     readiness: Arc<ReceiverReadiness>,
-    dek_provider:
-        identity_crypto::ConfiguredDekProvider<identity_crypto::UnimplementedMachineJwtProvider>,
+    dek_provider: identity_crypto::ConfiguredDekProvider,
     state: &'a mut http::AppState,
 }
 
@@ -546,7 +593,7 @@ async fn start_outbound(
 /// missing machine-JWT bootstrap config, or a plaintext
 /// `http://` hub-api outside alpha is an `Err` -- fail loud, never silently
 /// fall back.
-fn try_install_scope_resolver(
+async fn try_install_scope_resolver(
     config: &config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
 ) -> anyhow::Result<()> {
@@ -564,14 +611,27 @@ fn try_install_scope_resolver(
             scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG
         );
     }
-    scope_resolver::check_transport(&cli.hub_api_url, &cli.environment)
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let jwt = Arc::new(service_auth::MachineJwtClient::new(
-        cli.service_jwt_token_endpoint.clone(),
-        cli.service_jwt_sa_token_path.clone(),
-        scope_resolver::RESOLVE_SCOPE_JWT_SCOPE,
-    ));
-    let source = scope_resolver::HubScopeSource::new(&cli.hub_api_url, jwt)?;
+    let hub_grpc_endpoint = std::env::var("HUB_API_GRPC_ENDPOINT")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} is ON but HUB_API_GRPC_ENDPOINT is unset: no hub-api gRPC endpoint for the resolver",
+                scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG
+            )
+        })?;
+    let hub_grpc_ca = std::env::var("HUB_API_GRPC_CA_FILE")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
+    let source = scope_resolver::HubScopeSource::connect(
+        &hub_grpc_endpoint,
+        &cli.service_jwt_token_endpoint,
+        &cli.service_jwt_sa_token_path,
+        hub_grpc_ca.as_deref(),
+    )
+    .await?;
     let resolver = Arc::new(scope_resolver::ScopeResolver::new(
         source,
         scope_resolver::ResolverConfig::default(),
@@ -587,6 +647,112 @@ fn try_install_scope_resolver(
     Ok(())
 }
 
+/// Env baseline gating the APP/SERVICE bundle reconcile scheduler (default OFF until validated).
+const BUNDLE_SCHEDULES_ENV: &str = "BUNDLE_SCHEDULES_ENABLED";
+
+/// Starts the APP/SERVICE bundle reconcile scheduler
+/// ([`connector::bundle_schedule`]) when `BUNDLE_SCHEDULES_ENABLED=true`. OFF is a logged no-op;
+/// ON with any missing prerequisite (machine-JWT bootstrap, binding keyring, spine, Valkey) is an
+/// `Err` that fails the process -- never a silent downgrade to "no schedules".
+async fn start_bundle_schedules(
+    config: &config::Config,
+    registry: &prometheus::Registry,
+    metrics: Arc<telemetry::IngestMetrics>,
+    dek_provider: identity_crypto::ConfiguredDekProvider,
+) -> anyhow::Result<()> {
+    use connector::bundle_schedule::{
+        run_manager, HubScheduleSource, ScheduleRunner, SpineReconcileSink, ValkeyScheduleLease,
+    };
+    if std::env::var(BUNDLE_SCHEDULES_ENV).as_deref() != Ok("true") {
+        tracing::info!(
+            env = BUNDLE_SCHEDULES_ENV,
+            "flag is OFF; bundle reconcile schedules not started"
+        );
+        return Ok(());
+    }
+    let cli = &config.cli;
+    if cli.service_jwt_token_endpoint.is_empty() {
+        anyhow::bail!("{BUNDLE_SCHEDULES_ENV} is ON but SERVICE_JWT_TOKEN_ENDPOINT is unset");
+    }
+    let hub_grpc_endpoint = std::env::var("HUB_API_GRPC_ENDPOINT")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("{BUNDLE_SCHEDULES_ENV} is ON but HUB_API_GRPC_ENDPOINT is unset")
+        })?;
+    let hub_grpc_ca = std::env::var("HUB_API_GRPC_CA_FILE")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
+    let keyring = resolve_binding_keyring(config, "bundle schedules").ok_or_else(|| {
+        anyhow::anyhow!(
+            "bundle schedules need a valid ENVELOPE_BINDING_KEYS + ENVELOPE_BINDING_ACTIVE_KID"
+        )
+    })?;
+    let spine_cfg = penguin_spine::SpineConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("spine config unavailable for bundle schedules: {e}"))?;
+    let redis_client = outbound::build_redis_client(&spine_cfg).map_err(|e| {
+        anyhow::anyhow!(
+            "valkey client build failed for bundle schedules ({:?})",
+            e.kind()
+        )
+    })?;
+    let spine_metrics: Arc<dyn penguin_spine::SpineMetrics> = metrics.clone();
+    let appender = connect_spine_with_retry(
+        spine_cfg,
+        Arc::clone(&spine_metrics),
+        metrics.as_ref(),
+        "bundle_schedules",
+        &ReceiverFlag::default(),
+        Duration::from_secs(cli.spine_connect_backoff_max_secs),
+        Instant::now() + Duration::from_secs(cli.spine_connect_grace_secs),
+    )
+    .await
+    .ok_or_else(|| {
+        anyhow::anyhow!("bundle schedules: spine did not connect within the grace period")
+    })?;
+    let lease_conn = redis_client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|e| anyhow::anyhow!("bundle schedules: valkey connect failed ({:?})", e.kind()))?;
+    let source = HubScheduleSource::connect(
+        &hub_grpc_endpoint,
+        &cli.service_jwt_token_endpoint,
+        &cli.service_jwt_sa_token_path,
+        hub_grpc_ca.as_deref(),
+    )
+    .await?;
+    if let Err(e) = connector::reconcile_hook::register_metrics(registry) {
+        tracing::warn!(error = %e, "reconcile metrics already registered; reusing");
+    }
+    let sink = SpineReconcileSink {
+        appender: Arc::new(appender),
+        metrics: spine_metrics,
+        keyring: Arc::new(keyring),
+        active_kid: cli.binding_active_kid.clone(),
+        dek: Arc::new(dek_provider),
+        identity_metrics: metrics.identity_encryption_total.clone(),
+    };
+    let runner = Arc::new(ScheduleRunner::new(
+        ValkeyScheduleLease::new(lease_conn),
+        sink,
+    ));
+    tokio::spawn(run_manager(
+        runner,
+        source,
+        Duration::from_secs(60),
+        async {
+            let _ = shutdown_receiver().await;
+        },
+    ));
+    tracing::info!(
+        env = BUNDLE_SCHEDULES_ENV,
+        "bundle reconcile schedules started"
+    );
+    Ok(())
+}
+
 /// Picks the Twitch inbound path from configuration
 /// ([`config::validate_twitch_mode`]) and starts it: per-community sessions
 /// (flag ON), the single-tenant static dev receiver (flag OFF + complete
@@ -596,9 +762,7 @@ fn start_twitch_inbound(
     config: &config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
     readiness: Arc<ReceiverReadiness>,
-    dek_provider: identity_crypto::ConfiguredDekProvider<
-        identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek_provider: identity_crypto::ConfiguredDekProvider,
 ) -> anyhow::Result<()> {
     let mode = config::validate_twitch_mode(config)?;
     let dek_dynamic = dek_provider.clone();
@@ -660,9 +824,7 @@ fn try_start_twitch_irc(
     config: &config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
     readiness: Arc<ReceiverReadiness>,
-    dek_provider: identity_crypto::ConfiguredDekProvider<
-        identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek_provider: identity_crypto::ConfiguredDekProvider,
 ) {
     if !config.twitch_irc_enabled() {
         tracing::info!(
@@ -760,9 +922,7 @@ fn try_start_discord(
     config: &config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
     readiness: Arc<ReceiverReadiness>,
-    dek_provider: identity_crypto::ConfiguredDekProvider<
-        identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek_provider: identity_crypto::ConfiguredDekProvider,
 ) {
     if !config.discord_enabled() {
         tracing::info!("DISCORD_BOT_TOKEN not set; discord gateway receiver not started");
@@ -923,12 +1083,7 @@ fn try_start_twitch_outbound_percommunity(config: &config::Config) -> anyhow::Re
     let spine_cfg = penguin_spine::SpineConfig::from_env()
         .map_err(|e| anyhow::anyhow!("spine config unavailable for twitch outbound: {e}"))?;
     let resolver = connection_resolver::ConnectionResolver::new(
-        connection_resolver::ResolverConfig::new(
-            cli.hub_api_url.clone(),
-            cli.environment.clone(),
-            cli.service_jwt_token_endpoint.clone(),
-            cli.service_jwt_sa_token_path.clone(),
-        ),
+        cli.resolver_config()?,
         std::sync::Arc::new(twitch_sessions::boot::ResolverTelemetry),
     )
     .map_err(|e| anyhow::anyhow!("connection resolver unavailable: {e}"))?;
@@ -1021,9 +1176,7 @@ fn try_start_discord_outbound(config: &config::Config) {
 async fn try_build_eventsub_state(
     config: &config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
-    dek_provider: identity_crypto::ConfiguredDekProvider<
-        identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek_provider: identity_crypto::ConfiguredDekProvider,
 ) -> Option<Arc<http::eventsub::EventSubState>> {
     let keyring = resolve_binding_keyring(config, "twitch eventsub")?;
 
@@ -1086,64 +1239,79 @@ async fn try_build_eventsub_state(
 /// shared across every receiver via `try_start_*` (see call sites below).
 ///
 /// Production posture (`config.ingest_dev_kek` unset): [`identity_crypto::
-/// HubApiDekProvider`], authenticated via [`identity_crypto::
-/// UnimplementedMachineJwtProvider`] until `core/service_auth`'s real ES256
-/// machine-JWT minter lands (PR #438) -- every call fails closed with
-/// [`identity_crypto::DekUnavailableError`] until then, the documented gap
-/// this task calls out (not a silent stub). hub-api's own broker endpoint
-/// (`POST /api/v1/internal/keys/tenant-dek`, `feature/tenant-dek-broker`)
-/// is a second, independent documented gap -- also unmerged as of this
-/// writing.
+/// ConfiguredDekProvider::hub`] over a [`hub_client::HubClient`] holding the
+/// `key:stream-dek:read` scope. The machine JWT is minted/cached/refreshed by
+/// `service_auth::MachineJwtClient` from the pod's projected ServiceAccount token, the DEK
+/// is fetched over hub-api's internal gRPC `KeyService` (sealed to a per-call ephemeral
+/// X25519 key), and every failure fails closed. The connection is lazy: the process starts
+/// (and reports readiness) before hub-api is reachable, and events are held -- never written
+/// plaintext -- until it is.
 ///
 /// Dev/alpha fallback (`config.ingest_dev_kek` set): [`identity_crypto::
 /// LocalDevDekProvider`], hard-gated to [`config::Config::
-/// deployment_environment`] `alpha`/`local` regardless of whether the dev
-/// KEK is configured -- refuses construction otherwise (see that type's
-/// doc comment). A misconfigured beta/gamma/prod deployment with
-/// `INGEST_DEV_KEK` accidentally set therefore still falls through to
-/// `HubApiDekProvider` (logged loudly), never to a silently-accepted dev
-/// KEK outside alpha/local.
+/// deployment_environment`] `alpha`/`local` regardless of whether the dev KEK is configured
+/// -- refused otherwise (logged loudly), in which case the broker is used, never a silently
+/// accepted dev KEK outside alpha/local.
 ///
-/// Both are wrapped in [`identity_crypto::TtlCachedDekProvider`] (default
-/// 10-minute TTL) so a steady-state ingest loop does not resolve a DEK on
-/// every event.
+/// # Errors
+/// The broker path needs `HUB_API_GRPC_ENDPOINT` (https), `SERVICE_JWT_TOKEN_ENDPOINT` and a
+/// well-formed `SPIFFE_ID` (its service segment is the seal-context name);
+/// missing/plaintext values are fatal at boot -- a pod that could only ever hold events must
+/// not start looking healthy.
 fn build_dek_provider(
     config: &config::Config,
-    http: reqwest::Client,
-) -> identity_crypto::ConfiguredDekProvider<identity_crypto::UnimplementedMachineJwtProvider> {
-    use identity_crypto::{
-        ConfiguredDekProvider, HubApiDekProvider, LocalDevDekProvider, TtlCachedDekProvider,
-        UnimplementedMachineJwtProvider, DEFAULT_DEK_CACHE_TTL,
-    };
+) -> anyhow::Result<identity_crypto::ConfiguredDekProvider> {
+    use identity_crypto::{ConfiguredDekProvider, LocalDevDekProvider, STREAM_DEK_SCOPE};
 
-    if let Some(kek) = config.ingest_dev_kek.as_ref() {
+    if config.ingest_dev_kek.is_some() {
         match LocalDevDekProvider::new(config.deployment_environment(), "INGEST_DEV_KEK") {
-            Ok(provider) => {
-                let _ = kek; // presence already checked by LocalDevDekProvider::new via std::env::var
-                return ConfiguredDekProvider::LocalDev(TtlCachedDekProvider::new(
-                    provider,
-                    DEFAULT_DEK_CACHE_TTL,
-                ));
-            }
+            Ok(provider) => return Ok(ConfiguredDekProvider::local_dev(provider)),
             Err(err) => {
                 tracing::error!(
                     error = %err,
                     "INGEST_DEV_KEK is set but LocalDevDekProvider was refused; \
-                     falling back to HubApiDekProvider (never a silent dev-key fallback \
+                     using the hub-api key broker (never a silent dev-key fallback \
                      outside alpha/local)"
                 );
             }
         }
     }
-    ConfiguredDekProvider::HubApi(TtlCachedDekProvider::new(
-        HubApiDekProvider::new(
-            http,
-            config.cli.hub_api_url.clone(),
-            UnimplementedMachineJwtProvider,
-            SERVICE_NAME,
-        ),
-        DEFAULT_DEK_CACHE_TTL,
-    ))
+    let cli = &config.cli;
+    let endpoint = cli.hub_api_grpc_endpoint.trim();
+    if endpoint.is_empty() || cli.service_jwt_token_endpoint.trim().is_empty() {
+        anyhow::bail!(
+            "identity-field encryption needs HUB_API_GRPC_ENDPOINT and \
+             SERVICE_JWT_TOKEN_ENDPOINT to fetch tenant DEKs from hub-api's key broker; \
+             refusing to start a data plane that could only hold every event"
+        );
+    }
+    if !endpoint.to_ascii_lowercase().starts_with("https://") {
+        anyhow::bail!(
+            "HUB_API_GRPC_ENDPOINT must be https:// (tenant DEK delivery is never plaintext)"
+        );
+    }
+    let ca =
+        (!cli.hub_api_grpc_ca_file.trim().is_empty()).then_some(cli.hub_api_grpc_ca_file.as_str());
+    let client = hub_client::HubClient::connect_lazy(
+        endpoint,
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        STREAM_DEK_SCOPE,
+        ca,
+    )
+    .map_err(|e| anyhow::anyhow!("key broker client unavailable: {e}"))?;
+    tracing::info!(
+        endpoint = %endpoint,
+        scope = STREAM_DEK_SCOPE,
+        "identity-field DEKs are fetched from hub-api's KeyService"
+    );
+    ConfiguredDekProvider::hub_for_spiffe_id(Arc::new(client), &cli.spiffe_id).map_err(|e| {
+        anyhow::anyhow!(
+            "{e}: SPIFFE_ID must be this pod's spiffe://penguintech.io/<env>/<service> id \
+             (the stream-DEK seal context uses its service segment; a mismatch with hub-api \
+             would fail every unseal)"
+        )
+    })
 }
 
 /// Shared keyring-resolution step for [`try_start_twitch_irc`]/
@@ -1289,6 +1457,53 @@ mod tests {
     // `cargo test` threads don't race on the same variable.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Serialized, self-restoring edit of process environment variables.
+    ///
+    /// Holds [`ENV_LOCK`] and applies the edits (`None` removes a variable); on drop it puts
+    /// every touched variable back to the value it had -- INCLUDING the CI-provided
+    /// `VALKEY_URL`/`TEST_DATABASE_URL` that the real-Valkey tests in other modules read without
+    /// this lock. Removing them permanently (as these tests used to) made those tests fail
+    /// whenever the scheduler ran an env test first.
+    struct EnvScope {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvScope {
+        fn new(edits: &[(&'static str, Option<&str>)]) -> Self {
+            let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let mut saved = Vec::with_capacity(edits.len());
+            for (key, value) in edits {
+                saved.push((*key, std::env::var_os(key)));
+                // SAFETY: serialized by ENV_LOCK (held in `_guard`).
+                unsafe {
+                    match value {
+                        Some(v) => std::env::set_var(key, v),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+            Self {
+                saved,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for EnvScope {
+        fn drop(&mut self) {
+            for (key, previous) in self.saved.drain(..).rev() {
+                // SAFETY: still serialized by ENV_LOCK (`_guard` drops after this body).
+                unsafe {
+                    match previous {
+                        Some(v) => std::env::set_var(key, v),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn healthcheck_port_defaults_when_unset() {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -1360,6 +1575,38 @@ mod tests {
             ingest_dev_kek: None,
             waddles_env: "production".to_string(),
         }
+    }
+
+    /// A production-posture config whose broker prerequisites are satisfied except `SPIFFE_ID`.
+    fn broker_config(spiffe_id: &str) -> config::Config {
+        let mut config = base_config();
+        config.cli.hub_api_grpc_endpoint = "https://hub-api:50204".to_string();
+        config.cli.service_jwt_token_endpoint = "https://hub-api:50204".to_string();
+        config.cli.hub_api_grpc_ca_file = String::new();
+        config.cli.spiffe_id = spiffe_id.to_string();
+        config
+    }
+
+    #[tokio::test]
+    async fn dek_provider_boot_fails_loud_without_a_valid_spiffe_id() {
+        for bad in [
+            "",
+            "svc-ingest",
+            "spiffe://penguintech.io/svc-ingest",
+            "spiffe://evil.example/alpha/svc-ingest",
+        ] {
+            let err = build_dek_provider(&broker_config(bad))
+                .err()
+                .unwrap_or_else(|| panic!("booted with SPIFFE_ID {bad:?}"));
+            assert!(err.to_string().contains("SPIFFE_ID"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dek_provider_boots_with_a_valid_spiffe_id() {
+        assert!(
+            build_dek_provider(&broker_config("spiffe://penguintech.io/alpha/svc-gateway")).is_ok()
+        );
     }
 
     fn test_readiness() -> Arc<ReceiverReadiness> {
@@ -1469,18 +1716,20 @@ mod tests {
     /// tests that never actually resolve a DEK (every `try_start_*`
     /// no-op-before-spawn test below returns before the spawned task would
     /// call `get_dek`).
-    fn test_dek_provider(
-    ) -> identity_crypto::ConfiguredDekProvider<identity_crypto::UnimplementedMachineJwtProvider>
-    {
-        identity_crypto::ConfiguredDekProvider::HubApi(identity_crypto::TtlCachedDekProvider::new(
-            identity_crypto::HubApiDekProvider::new(
-                reqwest::Client::new(),
-                "http://hub-api:8204",
-                identity_crypto::UnimplementedMachineJwtProvider,
-                SERVICE_NAME,
-            ),
-            identity_crypto::DEFAULT_DEK_CACHE_TTL,
-        ))
+    fn test_dek_provider() -> identity_crypto::ConfiguredDekProvider {
+        let client = hub_client::HubClient::connect_lazy(
+            "https://hub-api:50204",
+            "https://hub-api:50204",
+            "/nonexistent/sa-token",
+            identity_crypto::STREAM_DEK_SCOPE,
+            None,
+        )
+        .expect("lazy client never dials");
+        identity_crypto::ConfiguredDekProvider::hub_for_spiffe_id(
+            Arc::new(client),
+            "spiffe://penguintech.io/alpha/svc-ingest",
+        )
+        .expect("well-formed test SPIFFE id")
     }
 
     #[tokio::test]
@@ -1562,12 +1811,7 @@ mod tests {
 
     #[tokio::test]
     async fn try_start_twitch_irc_noop_when_spine_config_unavailable() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialized by ENV_LOCK above.
-        unsafe {
-            std::env::remove_var("VALKEY_URL");
-            std::env::remove_var("REDIS_URL");
-        }
+        let _env = EnvScope::new(&[("VALKEY_URL", None), ("REDIS_URL", None)]);
         let mut config = base_config();
         config.cli.twitch_irc_nick = "waddlebot".to_string();
         config.cli.twitch_irc_channel = "somechannel".to_string();
@@ -1586,12 +1830,7 @@ mod tests {
 
     #[tokio::test]
     async fn try_start_twitch_outbound_noop_when_spine_config_unavailable() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialized by ENV_LOCK above.
-        unsafe {
-            std::env::remove_var("VALKEY_URL");
-            std::env::remove_var("REDIS_URL");
-        }
+        let _env = EnvScope::new(&[("VALKEY_URL", None), ("REDIS_URL", None)]);
         let mut config = base_config();
         config.cli.twitch_irc_nick = "waddlebot".to_string();
         config.twitch_irc_oauth_token = Some(crate::config::Secret::new("test-token"));
@@ -1617,12 +1856,10 @@ mod tests {
         // relative to the `license::tests` in the same `--lib` binary.
         crypto::ensure_installed();
         {
-            let _guard = ENV_LOCK.lock().unwrap();
-            // SAFETY: serialized by ENV_LOCK above.
-            unsafe {
-                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
-                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
-            }
+            let _env = EnvScope::new(&[
+                ("VALKEY_URL", Some("rediss://127.0.0.1:1/")),
+                ("VALKEY_PASSWORD", Some("test-valkey-pass")),
+            ]);
             let mut config = base_config();
             config.cli.twitch_irc_nick = "waddlebot".to_string();
             config.cli.twitch_irc_channel = "somechannel".to_string();
@@ -1637,10 +1874,6 @@ mod tests {
                 test_readiness(),
                 test_dek_provider(),
             );
-            unsafe {
-                std::env::remove_var("VALKEY_URL");
-                std::env::remove_var("VALKEY_PASSWORD");
-            }
         }
         // Real (not paused) sleep: lets the spawned tasks actually run on
         // this same current-thread test runtime and reach their
@@ -1652,12 +1885,10 @@ mod tests {
     async fn try_start_discord_spawns_when_everything_is_valid() {
         crypto::ensure_installed();
         {
-            let _guard = ENV_LOCK.lock().unwrap();
-            // SAFETY: serialized by ENV_LOCK above.
-            unsafe {
-                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
-                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
-            }
+            let _env = EnvScope::new(&[
+                ("VALKEY_URL", Some("rediss://127.0.0.1:1/")),
+                ("VALKEY_PASSWORD", Some("test-valkey-pass")),
+            ]);
             let mut config = base_config();
             config.discord_bot_token = Some(crate::config::Secret::new("test-token"));
             config.cli.binding_active_kid = "k1".to_string();
@@ -1670,10 +1901,6 @@ mod tests {
                 test_readiness(),
                 test_dek_provider(),
             );
-            unsafe {
-                std::env::remove_var("VALKEY_URL");
-                std::env::remove_var("VALKEY_PASSWORD");
-            }
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
@@ -1687,19 +1914,13 @@ mod tests {
     async fn try_start_discord_outbound_spawns_when_everything_is_valid() {
         crypto::ensure_installed();
         {
-            let _guard = ENV_LOCK.lock().unwrap();
-            // SAFETY: serialized by ENV_LOCK above.
-            unsafe {
-                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
-                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
-            }
+            let _env = EnvScope::new(&[
+                ("VALKEY_URL", Some("rediss://127.0.0.1:1/")),
+                ("VALKEY_PASSWORD", Some("test-valkey-pass")),
+            ]);
             let mut config = base_config();
             config.discord_bot_token = Some(crate::config::Secret::new("test-token"));
             try_start_discord_outbound(&config);
-            unsafe {
-                std::env::remove_var("VALKEY_URL");
-                std::env::remove_var("VALKEY_PASSWORD");
-            }
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
@@ -1708,20 +1929,14 @@ mod tests {
     async fn try_start_twitch_outbound_spawns_when_everything_is_valid() {
         crypto::ensure_installed();
         {
-            let _guard = ENV_LOCK.lock().unwrap();
-            // SAFETY: serialized by ENV_LOCK above.
-            unsafe {
-                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
-                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
-            }
+            let _env = EnvScope::new(&[
+                ("VALKEY_URL", Some("rediss://127.0.0.1:1/")),
+                ("VALKEY_PASSWORD", Some("test-valkey-pass")),
+            ]);
             let mut config = base_config();
             config.cli.twitch_irc_nick = "waddlebot".to_string();
             config.twitch_irc_oauth_token = Some(crate::config::Secret::new("test-token"));
             try_start_twitch_outbound(&config);
-            unsafe {
-                std::env::remove_var("VALKEY_URL");
-                std::env::remove_var("VALKEY_PASSWORD");
-            }
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }

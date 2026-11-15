@@ -793,3 +793,87 @@ fn admin_adjust_requires_its_own_grant_and_is_rate_limited_not_amount_metered() 
         Denied::RateLimited
     );
 }
+
+// ---- Elevated app-caller families (transfer_from / app_mint)
+
+/// Amount-less two-party target: elevated permissions are rate limited at the
+/// gate; the durable store enforces their amount caps.
+fn pair(victim: Uuid, to: Uuid) -> ResourceRef {
+    ResourceRef::EconomyScoped(EconomyTarget {
+        target_user: Some(victim),
+        counterparty: Some(to),
+        amount: None,
+        payout: None,
+    })
+}
+
+#[test]
+fn elevated_families_are_dangerous_economy_scoped_and_round_trip() {
+    for (family, id) in [
+        (
+            PermissionFamily::EconomyTransferFrom,
+            "economy.transfer_from",
+        ),
+        (PermissionFamily::EconomyAppMint, "economy.app_mint"),
+    ] {
+        assert!(PermissionFamily::ALL.contains(&family), "{id}");
+        assert!(family.is_economy_scoped(), "{id}");
+        assert_eq!(family.catalog_entry().risk, Risk::Dangerous, "{id}");
+        let parsed = PermissionId::parse(id).expect(id);
+        assert_eq!(parsed.family(), family);
+        assert_eq!(family.economy_amount_bound(&serde_json::json!({})), None);
+    }
+}
+
+#[test]
+fn elevated_permissions_need_their_own_explicit_grant() {
+    let (victim, thief) = (Uuid::new_v4(), Uuid::new_v4());
+    // The ordinary money grants (incl. admin_adjust) never imply an elevated grant.
+    let g = gate(
+        &[
+            ("economy.transfer", serde_json::json!({"max_amount": 50})),
+            ("economy.credit", serde_json::json!({})),
+            ("economy.admin_adjust", serde_json::json!({})),
+        ],
+        &[victim, thief],
+    );
+    for p in [
+        PermissionId::EconomyTransferFrom,
+        PermissionId::EconomyAppMint,
+    ] {
+        assert_eq!(
+            g.authorize(&scope(), p, pair(victim, thief)).unwrap_err(),
+            Denied::NotGranted
+        );
+    }
+    let g = gate(
+        &[(
+            "economy.transfer_from",
+            serde_json::json!({"max_per_op": 5}),
+        )],
+        &[victim, thief],
+    );
+    assert!(g
+        .authorize(
+            &scope(),
+            PermissionId::EconomyTransferFrom,
+            pair(victim, thief)
+        )
+        .is_ok());
+    // Holding transfer_from does not grant the mint class.
+    assert_eq!(
+        g.authorize(&scope(), PermissionId::EconomyAppMint, read(Some(victim)))
+            .unwrap_err(),
+        Denied::NotGranted
+    );
+    // Both named users must be live members.
+    assert_eq!(
+        g.authorize(
+            &scope(),
+            PermissionId::EconomyTransferFrom,
+            pair(victim, Uuid::new_v4())
+        )
+        .unwrap_err(),
+        Denied::UserNotInScope
+    );
+}

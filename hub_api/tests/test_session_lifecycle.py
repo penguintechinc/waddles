@@ -35,6 +35,7 @@ from blueprints.v1.user_management import user_management_bp
 from config import HubAPIConfig
 from services import audit_http, session_service
 from services.auth_service import SessionUser, create_session_token
+from services.global_identity import grant_global_admin_sync, revoke_global_admin_sync
 from services.session_cookie import REFRESH_COOKIE_NAME, SESSION_COOKIE_NAME
 from tests.conftest import SECRET_KEY, TENANT_SLUG, make_user_token
 
@@ -109,10 +110,11 @@ def _seed_user(
         password_hash=_hash(password) if password else None,
         is_active=is_active,
         email_verified=True,
-        is_super_admin=is_super_admin,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
+    if is_super_admin:
+        grant_global_admin_sync(auth_db.dal, user_id)
     auth_db.dal.commit()
     return user_id
 
@@ -325,12 +327,12 @@ class TestRefreshRotation:
         plain = (await (await browser.post("/api/v1/auth/refresh")).get_json())["token"]
         assert "users:admin" not in _claims(plain)["scope"]
 
-        auth_db.dal(auth_db.dal.hub_users.id == user_id).update(is_super_admin=True)
+        grant_global_admin_sync(auth_db.dal, user_id)
         auth_db.dal.commit()
         promoted = (await (await browser.post("/api/v1/auth/refresh")).get_json())["token"]
         assert "users:admin" in _claims(promoted)["scope"].split()
 
-        auth_db.dal(auth_db.dal.hub_users.id == user_id).update(is_super_admin=False)
+        revoke_global_admin_sync(auth_db.dal, user_id)
         auth_db.dal.commit()
         demoted = (await (await browser.post("/api/v1/auth/refresh")).get_json())["token"]
         assert "users:admin" not in _claims(demoted)["scope"].split()

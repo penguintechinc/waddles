@@ -45,6 +45,7 @@ from config import HubAPIConfig
 from services import sso_crypto, sso_saml, sso_state
 from services.auth_service import SessionUser, add_user_to_global_community, create_session_token
 from services.errors import ApiError, bad_request, not_found, payment_required, unprocessable
+from services.global_identity import is_global_admin
 from services.sso_http import SsoHttp, check_outbound_url
 from services.sso_oidc import OidcClient, new_nonce, new_pkce_pair, validate_oidc_settings
 from services.sso_settings import GOOGLE_DISCOVERY_URL, GOOGLE_ISSUER, SsoSettings
@@ -1173,7 +1174,7 @@ async def _finish_login(
         email=user_row.email,
         username=user_row.username,
         avatar_url=user_row.avatar_url,
-        is_super_admin=bool(user_row.is_super_admin),
+        is_super_admin=await is_global_admin(ctx.async_dal, ctx.dal, user_id=int(user_row.id)),
         is_vendor=bool(user_row.is_vendor),
         is_analytics_consumer=bool(user_row.is_analytics_consumer),
     )
