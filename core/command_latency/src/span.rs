@@ -146,7 +146,10 @@ mod tests {
         for bad in ["no-equals-member", "ok=1,broken", "UPPER=1", ""] {
             let sc = parse_remote_context(TP, Some(bad))
                 .unwrap_or_else(|| panic!("traceparent must survive tracestate {bad:?}"));
-            assert!(sc.trace_state().get("ok").is_none(), "state dropped for {bad:?}");
+            assert!(
+                sc.trace_state().get("ok").is_none(),
+                "state dropped for {bad:?}"
+            );
             assert!(sc.is_remote());
         }
         assert!(parse_tracestate("a=1,b=2").is_ok());
