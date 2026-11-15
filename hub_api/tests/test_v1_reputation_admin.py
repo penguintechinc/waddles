@@ -142,7 +142,11 @@ def _member(
     _user(dal, n) if dal(dal.hub_users.id == n).select().first() is None else None
     scopes = ["community:manage_members"] if admin else ["community:read"]
     role_id = dal.community_roles.insert(
-        community_id=community_id, name=f"role{n}", base_claims={"scopes": scopes}
+        community_id=community_id,
+        name=f"role{n}",
+        is_system=admin,
+        role_kind=1 if admin else 0,
+        base_claims={"scopes": scopes},
     )
     dal.community_members.insert(
         community_id=community_id,

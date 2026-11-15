@@ -81,6 +81,22 @@ kubectl --context dal2alpha -n gateway-system create secret tls cloudflare-origi
 kubectl --context dal2alpha -n gateway-system get gateway shared   # Programmed=True
 ```
 
+## 4b. Gateway -> hub-webui CA bundle (transit TLS, audit F4)
+`values-dal2alpha.yaml` enables `global.internalTransitTls`: pods get ECDSA P-256 certs from the
+step-3 ClusterIssuer, and the Gateway re-encrypts to hub-webui with a `BackendTLSPolicy` that needs
+the (public) CA cert as a ConfigMap in ns waddlebot. After the first `helm upgrade` (step 5) has
+let cert-manager mint `waddlebot-hub-api-http-tls`, create it once (or set `httproute.backendTls.caPem`);
+until it exists the policy is not Accepted and the Gateway fails closed (503), never plaintext:
+```bash
+kubectl --context dal2alpha -n waddlebot get secret waddlebot-hub-api-http-tls \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > "$(mktemp -d)/ca.crt"   # inspect, then:
+kubectl --context dal2alpha -n waddlebot create configmap waddlebot-internal-ca-bundle \
+  --from-literal=ca.crt="$(kubectl --context dal2alpha -n waddlebot get secret waddlebot-hub-api-http-tls -o jsonpath='{.data.ca\.crt}' | base64 -d)" \
+  --dry-run=client -o yaml | kubectl --context dal2alpha apply -f -
+```
+Needs the Gateway API `BackendTLSPolicy` CRD (`gateway.networking.k8s.io/v1alpha3`); override with
+`httproute.backendTls.apiVersion` if the cluster serves another version.
+
 ## 5. Waddles (helm 3.17.x -- NOT v4, helm#31361 fresh-install bug)
 Prereq secrets in ns waddlebot: `ghcr-pull`, `waddlebot-platform-credentials`.
 ```bash

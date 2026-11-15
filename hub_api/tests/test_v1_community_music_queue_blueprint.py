@@ -70,6 +70,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -77,7 +78,12 @@ import blueprints.v1.community_music_queue as community_music_queue_module
 from blueprints.v1.community_music_queue import MUSIC_PLAYBACK_REDIS_CONFIG_KEY, music_queue_bp
 from config import HubAPIConfig
 from services.music_providers.track import Track
-from tests.conftest import TENANT_SLUG, make_user_token, make_user_token_with_roles
+from tests.conftest import (
+    TENANT_SLUG,
+    make_user_token,
+    make_user_token_with_roles,
+    role_kind_fields,
+)
 
 
 class FakeRedis:
@@ -115,7 +121,7 @@ def _test_config() -> HubAPIConfig:
         db_retry_delay=1,
         secret_key="change-me-in-production",
         jwt_algorithm="HS256",
-        default_tenant_slug="default",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -209,7 +215,10 @@ def _seed_member(
     role_id = None
     if scopes is not None:
         role_id = db.dal.community_roles.insert(
-            community_id=community_id, name=role, base_claims={"scopes": scopes}
+            community_id=community_id,
+            name=role,
+            base_claims={"scopes": scopes},
+            **role_kind_fields(role),
         )
     db.dal.community_members.insert(
         community_id=community_id,

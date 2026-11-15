@@ -52,6 +52,7 @@ images:
       - hub_api/app.py
       - hub_api/config.py
       - hub_api/bootstrap.py
+      - hub_api/healthcheck.py
       - hub_api/telemetry.py
       - hub_api/blueprints/**
       - hub_api/routers/**
@@ -72,6 +73,7 @@ images:
       - admin/hub_module/webui-server/package*.json
       - admin/hub_module/webui-server/server.js
       - admin/hub_module/webui-server/proxy.js
+      - admin/hub_module/webui-server/tls.js
 
   migrations:
     dockerfile: migrations/Dockerfile
