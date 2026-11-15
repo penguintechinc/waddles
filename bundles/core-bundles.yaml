@@ -1495,7 +1495,7 @@ bundles:
     manifest_path: overlay-service.manifest.yaml
     artifact_path: overlay-service.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # Stream alerts overlay presentation bundle (Rust): provides Alert Box, Sub Banner, Follow Toast.
@@ -1508,7 +1508,7 @@ bundles:
     manifest_path: stream-alerts.manifest.yaml
     artifact_path: stream-alerts.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # Galactic avatars overlay presentation bundle (Rust): provides Star Wars-inspired stage strip & duel arena.
@@ -1521,7 +1521,7 @@ bundles:
     manifest_path: galactic-avatars.manifest.yaml
     artifact_path: galactic-avatars.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # bundle-MCP-tools P6b: twitch platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
