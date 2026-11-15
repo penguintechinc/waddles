@@ -1522,15 +1522,13 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
-            _,
-            redis::aio::MultiplexedConnection,
-        >::new(
-            NoopQueue,
-            egress,
-            Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
-            test_gate(),
-        ));
+        let capabilities: Arc<dyn CapabilityHandler> =
+            Arc::new(StageCapabilities::<_, redis::aio::ConnectionManager>::new(
+                NoopQueue,
+                egress,
+                Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+                test_gate(),
+            ));
 
         let executor = tokio::spawn(async move {
             let mut io = executor_io;
@@ -1757,7 +1755,7 @@ mod tests {
             }
         }
         let capabilities: Arc<dyn CapabilityHandler> = Arc::new(
-            StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
+            StageCapabilities::<_, redis::aio::ConnectionManager>::new(
                 SharedQueue(Arc::clone(&relay_queue)),
                 egress,
                 Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
@@ -1968,15 +1966,13 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
-            _,
-            redis::aio::MultiplexedConnection,
-        >::new(
-            NoopQueue,
-            egress,
-            Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
-            test_gate(),
-        ));
+        let capabilities: Arc<dyn CapabilityHandler> =
+            Arc::new(StageCapabilities::<_, redis::aio::ConnectionManager>::new(
+                NoopQueue,
+                egress,
+                Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+                test_gate(),
+            ));
 
         let executor = tokio::spawn(async move {
             let mut io = executor_io;
@@ -2078,15 +2074,13 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
-            _,
-            redis::aio::MultiplexedConnection,
-        >::new(
-            NoopQueue,
-            egress,
-            Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
-            test_gate(),
-        ));
+        let capabilities: Arc<dyn CapabilityHandler> =
+            Arc::new(StageCapabilities::<_, redis::aio::ConnectionManager>::new(
+                NoopQueue,
+                egress,
+                Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+                test_gate(),
+            ));
 
         let executor = tokio::spawn(async move {
             let mut io = executor_io;

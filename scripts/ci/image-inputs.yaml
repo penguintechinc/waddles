@@ -52,6 +52,7 @@ images:
       - hub_api/app.py
       - hub_api/config.py
       - hub_api/bootstrap.py
+      - hub_api/telemetry.py
       - hub_api/blueprints/**
       - hub_api/routers/**
       - hub_api/openapi/**
@@ -131,6 +132,7 @@ images:
       - core/svc_ingest/Cargo.lock
       - core/svc_ingest/src/**
       - core/bundle_host_http/**
+      - core/command_latency/**
       - core/circuit_breaker/**
       - core/connection_resolver/**
       - core/discord_mentions/**
@@ -163,6 +165,7 @@ images:
       - core/bundle_host_reputation/**
       - core/bundle_host_storage/**
       - core/bundle_tool_call/**
+      - core/command_latency/**
       - core/circuit_breaker/**
       - core/connection_resolver/**
       - core/egress_assertion/**
@@ -187,6 +190,7 @@ images:
       - core/bundle_host_http/**
       - core/bundle_host_kv/**
       - core/bundle_tool_call/**
+      - core/command_latency/**
       - core/circuit_breaker/**
       - core/connection_resolver/**
       - core/discord_mentions/**
