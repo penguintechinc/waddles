@@ -162,6 +162,10 @@ pub struct FakeHost {
     /// `ai.classify`: (label, confidence) or None => ToolErr::TargetUnavailable.
     pub ai_classify: RefCell<Option<(String, f64)>>,
     pub fail_tools: RefCell<Vec<String>>,
+    /// Surface frames published via `overlay.publish-surface` (surface id, payload).
+    pub published: RefCell<Vec<(String, Value)>>,
+    /// When set, every publish is refused with this host code.
+    pub publish_fail: RefCell<Option<String>>,
     pub balance: Cell<i64>,
     /// When > 0, `playlist.get` serves pages of this many tracks.
     pub page_size: Cell<usize>,
@@ -180,6 +184,8 @@ impl FakeHost {
             ai_complete: RefCell::default(),
             ai_classify: RefCell::new(Some(("allowed".into(), 0.95))),
             fail_tools: RefCell::default(),
+            published: RefCell::default(),
+            publish_fail: RefCell::default(),
             balance: Cell::new(100),
             page_size: Cell::new(0),
             music: serde_json::from_str(MUSIC_CONTRACT).expect("music contract parses"),
@@ -293,6 +299,16 @@ impl Host for FakeHost {
     }
     fn now_ms(&self) -> u64 {
         self.now.get()
+    }
+    fn publish_surface(&self, surface_id: &str, payload_json: &str) -> Result<(), String> {
+        if let Some(code) = self.publish_fail.borrow().clone() {
+            return Err(code);
+        }
+        let v: Value = serde_json::from_str(payload_json).expect("payload is JSON");
+        self.published
+            .borrow_mut()
+            .push((surface_id.to_string(), v));
+        Ok(())
     }
     fn invoke(
         &self,

@@ -19,6 +19,13 @@ pub const KEY_CONFIG: &str = "dj.config";
 pub const KEY_STATE: &str = "dj.state";
 pub const KEY_AUDIT: &str = "dj.audit";
 pub const KEY_PUBLIC: &str = "dj.public_state";
+/// Overlay surfaces this bundle OWNS (`<app_id>.<name>`, declared in `owned_surfaces`).
+pub const SURFACE_NOW_PLAYING: &str = "waddles.core.example.dj.now_playing";
+/// Up-next surface (at most [`SURFACE_QUEUE_MAX`] tracks).
+pub const SURFACE_QUEUE: &str = "waddles.core.example.dj.queue";
+/// Contract bounds (`bundles/contracts/surfaces.v1.json`).
+pub const SURFACE_QUEUE_MAX: usize = 25;
+const SURFACE_TEXT_MAX: usize = 200;
 pub const ECONOMY_TARGET: &str = "waddles.core.service.economy";
 
 /// Infrastructure failure (never a user mistake).
@@ -115,7 +122,43 @@ impl<'a> Engine<'a> {
                 .collect(),
             updated_ms: self.host.now_ms(),
         };
-        self.save(KEY_PUBLIC, &public, 0)
+        self.save(KEY_PUBLIC, &public, 0)?;
+        self.publish_overlay(&public);
+        Ok(())
+    }
+
+    /// Publishes the public snapshot to this bundle's own overlay surfaces. State is already
+    /// persisted, so a refusal is logged loudly (surface + code only) and never fails the
+    /// command; the next state change republishes the full snapshot.
+    fn publish_overlay(&self, public: &PublicState) {
+        let queue: Vec<_> = public
+            .queue
+            .iter()
+            .take(SURFACE_QUEUE_MAX)
+            .map(surface_track)
+            .collect();
+        let frames = [
+            (
+                SURFACE_NOW_PLAYING,
+                serde_json::json!({
+                    "now_playing": public.now_playing.as_ref().map(surface_track),
+                    "updated_ms": public.updated_ms,
+                }),
+            ),
+            (
+                SURFACE_QUEUE,
+                serde_json::json!({ "queue": queue, "updated_ms": public.updated_ms }),
+            ),
+        ];
+        for (surface, payload) in frames {
+            if let Err(code) = self.host.publish_surface(surface, &payload.to_string()) {
+                self.host.log(
+                    Level::Error,
+                    "dj surface publish failed",
+                    serde_json::json!({ "surface": surface, "error": code }),
+                );
+            }
+        }
     }
 
     /// Appends one PII-free audit row and a matching log line.
@@ -831,4 +874,32 @@ impl<'a> Engine<'a> {
         }
         None
     }
+}
+
+/// Cuts `s` to `max` chars and drops control characters (the contract refuses them).
+fn clean_text(s: &str, max: usize) -> String {
+    s.chars().filter(|c| !c.is_control()).take(max).collect()
+}
+
+/// `true` for a URL the contract's `https_url` definition accepts.
+fn https_url_ok(u: &str) -> bool {
+    u.len() > 8
+        && u.len() <= 512
+        && u.starts_with("https://")
+        && !u
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\''))
+}
+
+/// One public track as the contract's `public_track`: text only, https-only URL, no requester.
+pub fn surface_track(t: &PublicTrack) -> serde_json::Value {
+    serde_json::json!({
+        "id": t.id,
+        "provider": clean_text(&t.provider, 32),
+        "track_id": clean_text(&t.track_id, 128),
+        "title": clean_text(&t.title, SURFACE_TEXT_MAX),
+        "artist": clean_text(&t.artist, SURFACE_TEXT_MAX),
+        "duration_s": t.duration_s.min(86_400),
+        "url": t.url.as_deref().filter(|u| https_url_ok(u)),
+    })
 }

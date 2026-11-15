@@ -1669,7 +1669,7 @@ bundles:
   # DJ app bundle (Rust, `stage-next-tools`): playlists, !sr song requests, mod queue controls,
   # deterministic song policy + optional AI DJ. Flag waddles.command-dj defaults OFF.
   - app_id: waddles.core.example.dj
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/dj
