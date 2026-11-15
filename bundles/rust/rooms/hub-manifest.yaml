@@ -2,7 +2,7 @@
 schema_version: 2
 app_id: waddles.core.app.rooms
 name: Rooms App Bundle (Rust)
-version: 1.3.0
+version: 1.4.0
 feature: waddles.core.app
 module: core
 provider: builtin
@@ -67,6 +67,10 @@ permissions:
   params:
     write: true
 - id: tool.call:waddles.core.service.webrtc:room.close
+  justification: delegates room/token operations to the webrtc service; the media path stays in svc-streaming
+  params:
+    write: true
+- id: tool.call:waddles.core.service.webrtc:room.update
   justification: delegates room/token operations to the webrtc service; the media path stays in svc-streaming
   params:
     write: true
@@ -169,6 +173,9 @@ requested_tools:
   access: write
   target_app_id: waddles.core.service.webrtc
 - tool: room.close
+  access: write
+  target_app_id: waddles.core.service.webrtc
+- tool: room.update
   access: write
   target_app_id: waddles.core.service.webrtc
 - tool: whip.endpoint

@@ -85,3 +85,7 @@ Room facts: `room.create` now sets `kind` (community, or stage / green_room for 
 so svc-streaming enforces them on join and hub-api can read them from the Room (T2b). Later fact changes
 (close, set_access, set_schedule) still only update the app's kv; pushing them through `UpdateRoom` needs a webrtc
 `room.update` tool (not built).
+
+`room.set_access` and `room.set_schedule` push the full fact set to svc-streaming through the webrtc `room.update`
+tool (staff-only) before saving locally, so a refused push changes nothing. `!room close` still deletes the room
+via `room.close`.

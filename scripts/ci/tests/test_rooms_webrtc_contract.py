@@ -293,10 +293,6 @@ def test_svc_streaming_room_token_matches_policy_numbers_and_has_no_name_claims(
     assert {"exp", "iat", "jti", "room"} <= fields
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="T2 (svc-streaming token.rs) still signs HS256; owner decision is ES256 room tokens",
-)
 def test_room_token_is_signed_es256() -> None:
     assert "Algorithm::ES256" in _rust_before_tests(TOKEN_RS)
 

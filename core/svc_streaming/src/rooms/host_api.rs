@@ -33,7 +33,9 @@ use serde_json::{json, Value};
 use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 
-use super::{ActorRole, HandView, IssueRequest, RoomError, RoomFacts, RoomKind, RoomService, RouteMode};
+use super::{
+    ActorRole, HandView, IssueRequest, RoomError, RoomFacts, RoomKind, RoomService, RouteMode,
+};
 
 /// Errors building/running the listener.
 #[derive(Debug, thiserror::Error)]
@@ -159,6 +161,43 @@ struct CreateReq {
     ends_at: Option<i64>,
     #[serde(default)]
     allow_guests: bool,
+    /// The caller's verified role (the webrtc tool derives it from host-verified scopes).
+    /// Required for any non-default fact, never for a plain open community room.
+    #[serde(default)]
+    actor_role: Option<ActorRole>,
+}
+
+impl CreateReq {
+    fn facts(&self) -> RoomFacts {
+        RoomFacts {
+            kind: self.kind,
+            closed: self.closed,
+            starts_at: self.starts_at,
+            ends_at: self.ends_at,
+            allow_guests: self.allow_guests,
+        }
+    }
+}
+
+/// `room.update`: the full new fact set for a room, set by a verified moderator/admin.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateReq {
+    community_id: String,
+    room_id: Uuid,
+    #[serde(default)]
+    kind: RoomKind,
+    #[serde(default)]
+    closed: bool,
+    #[serde(default)]
+    starts_at: Option<i64>,
+    #[serde(default)]
+    ends_at: Option<i64>,
+    #[serde(default)]
+    allow_guests: bool,
+    /// The verified actor (pseudonym uuid) and role the webrtc tool forwards.
+    actor_id: Uuid,
+    actor_role: ActorRole,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -284,6 +323,12 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
     match op {
         "room.create" => {
             let r: CreateReq = parse(body)?;
+            let facts = r.facts();
+            // Defence in depth: anything but the open-community default needs a verified
+            // moderator/admin role from the caller.
+            if facts != RoomFacts::default() && !r.actor_role.is_some_and(ActorRole::is_moderator) {
+                return Err(RoomError::Forbidden("room facts require a moderator"));
+            }
             let info = svc
                 .create_with_facts(
                     &r.community_id,
@@ -291,16 +336,26 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
                     r.max_publishers,
                     r.route.unwrap_or(RouteMode::Sfu),
                     None,
-                    RoomFacts {
-                        kind: r.kind,
-                        closed: r.closed,
-                        starts_at: r.starts_at,
-                        ends_at: r.ends_at,
-                        allow_guests: r.allow_guests,
-                    },
+                    facts,
                 )
                 .await?;
             Ok(json!(info))
+        }
+        "room.update" => {
+            let r: UpdateReq = parse(body)?;
+            if !r.actor_role.is_moderator() {
+                return Err(RoomError::Forbidden("room facts require a moderator"));
+            }
+            let facts = RoomFacts {
+                kind: r.kind,
+                closed: r.closed,
+                starts_at: r.starts_at,
+                ends_at: r.ends_at,
+                allow_guests: r.allow_guests,
+            };
+            Ok(json!(
+                svc.update_facts(&r.community_id, r.room_id, facts).await?
+            ))
         }
         "room.get" => {
             let r: RoomReq = parse(body)?;

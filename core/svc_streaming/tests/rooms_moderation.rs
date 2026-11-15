@@ -101,7 +101,8 @@ async fn host_room_create_applies_room_facts() {
     let (st, r) = call(
         &h.host,
         "room.create",
-        json!({"community_id": "7", "kind": "stage", "allow_guests": true, "closed": false}),
+        json!({"community_id": "7", "kind": "stage", "allow_guests": true, "closed": false,
+               "actor_role": "moderator"}),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{r}");
@@ -113,14 +114,132 @@ async fn host_room_create_applies_room_facts() {
         json!({"community_id": "7", "kind": "bogus"}),
     )
     .await;
-    assert_ne!(st, StatusCode::OK, "an unknown kind is refused, never coerced: {r}");
+    assert_ne!(
+        st,
+        StatusCode::OK,
+        "an unknown kind is refused, never coerced: {r}"
+    );
     let (st, r) = call(
         &h.host,
         "room.create",
-        json!({"community_id": "7", "starts_at": 20, "ends_at": 10}),
+        json!({"community_id": "7", "starts_at": 20, "ends_at": 10, "actor_role": "admin"}),
     )
     .await;
     assert_ne!(st, StatusCode::OK, "an inverted window is refused: {r}");
+}
+
+/// Defence in depth: any non-default fact needs a verified moderator/admin role on the call.
+#[tokio::test]
+async fn host_room_create_refuses_non_default_facts_without_a_staff_role() {
+    let h = harness(42920, false);
+    for facts in [
+        json!({"kind": "stage"}),
+        json!({"kind": "green_room"}),
+        json!({"allow_guests": true}),
+        json!({"starts_at": 5}),
+        json!({"ends_at": 9}),
+    ] {
+        for role in [None, Some("member"), Some("guest")] {
+            let mut body = json!({"community_id": "7"});
+            body.as_object_mut()
+                .unwrap()
+                .extend(facts.as_object().unwrap().clone());
+            if let Some(r) = role {
+                body["actor_role"] = json!(r);
+            }
+            let (st, r) = call(&h.host, "room.create", body).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{facts} role={role:?}: {r}");
+        }
+    }
+    // Nothing was created by the refused calls; the default room still needs no role.
+    let (st, _) = call(&h.host, "room.create", json!({"community_id": "7"})).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = call(
+        &h.host,
+        "room.create",
+        json!({"community_id": "7", "kind": "community", "allow_guests": false,
+               "actor_role": "member"}),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "default facts stay open to a member-role caller"
+    );
+}
+
+/// `room.update` replaces the facts for a verified moderator/admin only.
+#[tokio::test]
+async fn host_room_update_sets_facts_for_staff_only() {
+    let h = harness(42940, false);
+    let room = new_room(&h).await;
+    let actor = uuid::Uuid::new_v4().to_string();
+    let update = |role: &str, extra: Value| {
+        let mut b = json!({"community_id": "7", "room_id": room, "actor_id": actor,
+                           "actor_role": role});
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        b
+    };
+    for role in ["member", "guest"] {
+        let (st, r) = call(
+            &h.host,
+            "room.update",
+            update(role, json!({"kind": "stage"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{role}: {r}");
+    }
+    // A missing actor or role is refused before anything changes.
+    let (st, _) = call(
+        &h.host,
+        "room.update",
+        json!({"community_id": "7", "room_id": room, "kind": "stage"}),
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK);
+    let (st, r) = call(
+        &h.host,
+        "room.get",
+        json!({"community_id": "7", "room_id": room}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        r["kind"], "community",
+        "refused updates changed nothing: {r}"
+    );
+    // Staff succeed; another community cannot reach the room; bad facts are refused.
+    let (st, r) = call(
+        &h.host,
+        "room.update",
+        update(
+            "moderator",
+            json!({"kind": "stage", "allow_guests": true, "closed": true}),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(
+        (
+            r["kind"].as_str(),
+            r["allow_guests"].as_bool(),
+            r["closed"].as_bool()
+        ),
+        (Some("stage"), Some(true), Some(true))
+    );
+    let mut other = update("admin", json!({}));
+    other["community_id"] = json!("8");
+    let (st, _) = call(&h.host, "room.update", other).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _) = call(
+        &h.host,
+        "room.update",
+        update("admin", json!({"starts_at": 20, "ends_at": 10})),
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK);
 }
 
 async fn endpoint(h: &Harness, op: &str, room: &str, extra: Value) -> (StatusCode, Value) {

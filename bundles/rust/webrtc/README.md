@@ -104,3 +104,8 @@ global `hub_users.uuid` never leaves the platform. No pseudonym in the context =
 
 `room.create` args also accept the room facts `kind` (`community|stage|green_room`; a town hall is hub-api only),
 `closed`, `allow_guests`, `starts_at`, `ends_at`; svc-streaming validates and enforces them on join.
+Any non-default fact (`allow_guests=true`, `kind != community`, a schedule window) additionally needs the
+verified caller to hold `community:moderate` or `community:admin` (checked in the tool, forwarded as `actor_role`,
+and re-checked by the host `room.create`). `room.update {room_id, kind?, closed?, allow_guests?, starts_at?, ends_at?}`
+(`community:moderate`, risk `dangerous`) replaces a room's facts on svc-streaming and ends every live session that
+would no longer be admitted; the rooms app calls it from `room.set_access` / `room.set_schedule`.

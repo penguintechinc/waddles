@@ -19,8 +19,9 @@ use waddle_sdk::tool::{ToolContext, ToolError, ToolRegistry};
 use crate::grants::{GrantRole, HandOp, LEAVE_TOOL, moderation_scope};
 
 /// Every tool name this bundle exposes (also the only labels ever logged).
-pub const TOOL_NAMES: [&str; 29] = [
+pub const TOOL_NAMES: [&str; 30] = [
     "room.create",
+    "room.update",
     "room.get",
     "room.close",
     "token.issue",
@@ -187,7 +188,62 @@ fn room_view(v: &Value) -> Result<Value, ToolError> {
     Ok(r)
 }
 
-fn room_create(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
+/// The verified caller's staff role on the wire (`admin` outranks `moderator`), or `None`
+/// for a plain member. Derived from the HOST-verified scopes, never from an argument.
+fn staff_role(ctx: &ToolContext) -> Option<&'static str> {
+    if ctx.has_scope("community:admin") {
+        Some("admin")
+    } else if ctx.has_scope("community:moderate") {
+        Some("moderator")
+    } else {
+        None
+    }
+}
+
+/// Parses the room-facts arguments shared by `room.create` and `room.update` into `req`
+/// (closed set, bounds-checked). Returns true when any fact is NOT the open-community
+/// default, i.e. needs staff authority to set.
+fn facts_args(o: &Map<String, Value>, req: &mut Map<String, Value>) -> Result<bool, ToolError> {
+    let mut non_default = false;
+    // A town hall is created by hub-api only, never through this tool.
+    match o.get("kind") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(k)) if ["community", "stage", "green_room"].contains(&k.as_str()) => {
+            non_default |= k != "community";
+            req.insert("kind".into(), json!(k));
+        }
+        _ => return Err(bad("kind must be community, stage or green_room")),
+    }
+    for flag in ["closed", "allow_guests"] {
+        match o.get(flag) {
+            None | Some(Value::Null) => {}
+            Some(Value::Bool(b)) => {
+                non_default |= flag == "allow_guests" && *b;
+                req.insert(flag.into(), json!(b));
+            }
+            _ => return Err(ToolError::InvalidArgs(format!("{flag} must be a boolean"))),
+        }
+    }
+    for bound in ["starts_at", "ends_at"] {
+        match o.get(bound) {
+            None | Some(Value::Null) => {}
+            Some(v) => match v.as_i64() {
+                Some(n) if n >= 0 => {
+                    non_default = true;
+                    req.insert(bound.into(), json!(n));
+                }
+                _ => {
+                    return Err(ToolError::InvalidArgs(format!(
+                        "{bound} must be a non-negative unix time"
+                    )));
+                }
+            },
+        }
+    }
+    Ok(non_default)
+}
+
+fn room_create(m: &dyn Media, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
     let o = object(
         &args,
         &[
@@ -233,41 +289,47 @@ fn room_create(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, Too
         }
         _ => return Err(bad("route must be \"sfu\"")),
     }
-    // Room facts svc-streaming enforces on join. A closed set: an unknown kind is refused (a
-    // town hall is created by hub-api only, never through this tool).
-    match o.get("kind") {
-        None | Some(Value::Null) => {}
-        Some(Value::String(k)) if ["community", "stage", "green_room"].contains(&k.as_str()) => {
-            req.insert("kind".into(), json!(k));
-        }
-        _ => return Err(bad("kind must be community, stage or green_room")),
+    // Room facts svc-streaming enforces on join. Any non-default fact (guests, stage / green
+    // room, a schedule window) needs the verified caller to be staff -- defence in depth over
+    // the manifest scope, and the host re-checks the role we forward.
+    let non_default = facts_args(o, &mut req)?;
+    let role = staff_role(ctx);
+    if non_default && role.is_none() {
+        return Err(ToolError::NotGranted);
     }
-    for flag in ["closed", "allow_guests"] {
-        match o.get(flag) {
-            None | Some(Value::Null) => {}
-            Some(Value::Bool(b)) => {
-                req.insert(flag.into(), json!(b));
-            }
-            _ => return Err(ToolError::InvalidArgs(format!("{flag} must be a boolean"))),
-        }
-    }
-    for bound in ["starts_at", "ends_at"] {
-        match o.get(bound) {
-            None | Some(Value::Null) => {}
-            Some(v) => match v.as_i64() {
-                Some(n) if n >= 0 => {
-                    req.insert(bound.into(), json!(n));
-                }
-                _ => {
-                    return Err(ToolError::InvalidArgs(format!(
-                        "{bound} must be a non-negative unix time"
-                    )));
-                }
-            },
-        }
+    if let Some(r) = role {
+        req.insert("actor_role".into(), json!(r));
     }
     room_view(
         &m.call("room.create", &Value::Object(req))
+            .map_err(tool_err)?,
+    )
+}
+
+/// `room.update`: replaces a room's facts on svc-streaming so later rooms-app changes (close,
+/// set_access, set_schedule) take effect on live and future joins. Always staff-only.
+fn room_update(m: &dyn Media, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    reject_actor_args(&args)?;
+    let o = object(
+        &args,
+        &[
+            "room_id",
+            "kind",
+            "closed",
+            "allow_guests",
+            "starts_at",
+            "ends_at",
+        ],
+    )?;
+    let room = uuid_arg(o, "room_id", true)?.ok_or_else(|| bad("room_id required"))?;
+    let actor = verified_actor_scope(ctx, "community:moderate")?;
+    let mut req = Map::new();
+    facts_args(o, &mut req)?;
+    req.insert("room_id".into(), json!(room));
+    req.insert("actor_id".into(), json!(actor.id));
+    req.insert("actor_role".into(), json!(role_wire(actor.role)));
+    room_view(
+        &m.call("room.update", &Value::Object(req))
             .map_err(tool_err)?,
     )
 }
@@ -732,6 +794,7 @@ pub fn build_registry(media: Arc<dyn Media>) -> ToolRegistry {
         r.register(name, move |ctx, args| f(m.as_ref(), ctx, args));
     };
     reg(&mut r, "room.create", Box::new(room_create));
+    reg(&mut r, "room.update", Box::new(room_update));
     reg(&mut r, "room.get", Box::new(room_only("room.get")));
     reg(&mut r, "room.close", Box::new(room_only("room.close")));
     reg(&mut r, "token.issue", Box::new(token_issue));
@@ -886,8 +949,10 @@ mod tests {
         let f = Fake::ok(room_json());
         let facts = json!({"kind": "stage", "closed": false, "allow_guests": true,
                            "starts_at": 10, "ends_at": 20});
-        call(&f, "room.create", facts.clone()).unwrap();
-        assert_eq!(f.calls()[0].1, facts, "facts reach svc-streaming unchanged");
+        call(&f, "room.create", ctx(USER, &ADMIN_SCOPES, facts.clone())).unwrap();
+        let mut sent = facts.clone();
+        sent["actor_role"] = json!("admin");
+        assert_eq!(f.calls()[0].1, sent, "facts + verified role reach the host");
         for bad in [
             json!({"kind": "town_hall"}),
             json!({"kind": "nope"}),
@@ -898,10 +963,100 @@ mod tests {
         ] {
             let g = Fake::ok(room_json());
             assert!(
-                matches!(call(&g, "room.create", bad), Err(ToolError::InvalidArgs(_))),
+                matches!(
+                    call(&g, "room.create", ctx(USER, &ADMIN_SCOPES, bad)),
+                    Err(ToolError::InvalidArgs(_))
+                ),
             );
             assert!(g.calls().is_empty());
         }
+    }
+
+    #[test]
+    fn non_default_room_facts_need_a_verified_staff_actor() {
+        for facts in [
+            json!({"allow_guests": true}),
+            json!({"kind": "stage"}),
+            json!({"kind": "green_room"}),
+            json!({"starts_at": 5}),
+            json!({"ends_at": 9}),
+        ] {
+            // Member scope, or no context at all: refused before any host call.
+            for args in [
+                ctx(USER, &MEMBER_SCOPES, facts.clone()),
+                facts.clone(),
+                ctx(USER, &[], facts.clone()),
+            ] {
+                let f = Fake::ok(room_json());
+                assert!(
+                    matches!(call(&f, "room.create", args), Err(ToolError::NotGranted)),
+                    "{facts}"
+                );
+                assert!(f.calls().is_empty(), "{facts}: no host call for a member");
+            }
+            // Moderator and admin pass, and the host is told which role was verified.
+            for (scopes, role) in [(&MOD_SCOPES[..], "moderator"), (&ADMIN_SCOPES[..], "admin")] {
+                let f = Fake::ok(room_json());
+                call(&f, "room.create", ctx(USER, scopes, facts.clone())).unwrap();
+                assert_eq!(f.calls()[0].1["actor_role"], role);
+            }
+        }
+        // Default facts (and an explicit closed room) stay open to any caller the host lets in.
+        for facts in [json!({}), json!({"kind": "community", "allow_guests": false}), json!({"closed": true})] {
+            let f = Fake::ok(room_json());
+            call(&f, "room.create", ctx(USER, &MEMBER_SCOPES, facts)).unwrap();
+            assert!(f.calls()[0].1.get("actor_role").is_none());
+        }
+    }
+
+    #[test]
+    fn room_update_is_staff_only_and_forwards_the_verified_actor() {
+        let f = Fake::ok(room_json());
+        let facts = json!({"room_id": ROOM, "kind": "stage", "closed": false,
+                           "allow_guests": true, "starts_at": 10, "ends_at": 20});
+        // Members, an absent context and a caller with no pseudonym are all refused.
+        for args in [
+            ctx(USER, &MEMBER_SCOPES, facts.clone()),
+            facts.clone(),
+            json!({"__ctx": {"actor": GLOBAL, "scopes": MOD_SCOPES}, "room_id": ROOM}),
+        ] {
+            assert!(
+                matches!(
+                    call(&f, "room.update", args),
+                    Err(ToolError::NotGranted | ToolError::Forbidden)
+                )
+            );
+        }
+        assert!(f.calls().is_empty(), "nothing reached the host");
+        // A caller cannot name an actor or a community.
+        for extra in [json!({"actor_id": USER}), json!({"actor_role": "admin"}), json!({"community_id": "8"})] {
+            let mut a = facts.clone();
+            a.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            assert!(call(&f, "room.update", ctx(USER, &ADMIN_SCOPES, a)).is_err());
+        }
+        assert!(f.calls().is_empty());
+        // Bad facts / missing room id never reach the host.
+        for bad in [json!({"kind": "town_hall"}), json!({"starts_at": -1}), json!({"allow_guests": "y"}), json!({})] {
+            let mut a = json!({"room_id": ROOM});
+            a.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+            if bad.as_object().unwrap().is_empty() {
+                a = json!({});
+            }
+            assert!(matches!(
+                call(&f, "room.update", ctx(USER, &MOD_SCOPES, a)),
+                Err(ToolError::InvalidArgs(_))
+            ));
+        }
+        assert!(f.calls().is_empty());
+        // Moderator: forwarded with the pseudonym as actor, never the global uuid.
+        let out = call(&f, "room.update", ctx(USER, &MOD_SCOPES, facts.clone())).unwrap();
+        assert_eq!(out["room_id"], ROOM);
+        let (op, sent) = f.calls()[0].clone();
+        assert_eq!(op, "room.update");
+        assert_eq!(sent["actor_id"], USER);
+        assert_eq!(sent["actor_role"], "moderator");
+        assert_eq!(sent["kind"], "stage");
+        assert!(!format!("{sent}").contains(GLOBAL));
     }
 
     #[test]

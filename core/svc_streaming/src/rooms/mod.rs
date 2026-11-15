@@ -3267,7 +3267,11 @@ mod tests {
         live_sub(&s, r.room_id, Uuid::new_v4()).await;
         assert_eq!(counts(&s, r.room_id).await, (1, 1));
         s.revoke_all("7", r.room_id).await.unwrap();
-        assert_eq!(counts(&s, r.room_id).await, (0, 0), "old-epoch sessions end");
+        assert_eq!(
+            counts(&s, r.room_id).await,
+            (0, 0),
+            "old-epoch sessions end"
+        );
         // Another community cannot revoke; the room keeps working on the new epoch.
         assert!(matches!(
             s.revoke_all("8", r.room_id).await,
@@ -3311,7 +3315,11 @@ mod tests {
         s.update_facts("7", r.room_id, facts(RoomKind::Stage))
             .await
             .unwrap();
-        assert_eq!(counts(&s, r.room_id).await, (1, 1), "only the host publishes");
+        assert_eq!(
+            counts(&s, r.room_id).await,
+            (1, 1),
+            "only the host publishes"
+        );
         // Green room: every non-staff session goes, staff stays.
         s.update_facts("7", r.room_id, facts(RoomKind::GreenRoom))
             .await
@@ -3341,7 +3349,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(counts(&s, r3.room_id).await, (0, 0), "closed ends staff too");
+        assert_eq!(
+            counts(&s, r3.room_id).await,
+            (0, 0),
+            "closed ends staff too"
+        );
     }
 
     #[tokio::test]
@@ -3404,7 +3416,11 @@ mod tests {
             .unwrap();
         live_pub(&s, r.room_id, Uuid::new_v4()).await;
         assert_eq!(s.sweep_at(t + 30).await, 0);
-        assert_eq!(s.sweep_at(t + 61).await, 1, "session ends when the window does");
+        assert_eq!(
+            s.sweep_at(t + 61).await,
+            1,
+            "session ends when the window does"
+        );
         assert_eq!(counts(&s, r.room_id).await, (0, 0));
     }
 

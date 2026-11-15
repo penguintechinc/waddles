@@ -2,7 +2,7 @@
 schema_version: 2
 app_id: waddles.core.service.webrtc
 name: WebRTC Service Bundle (Rust)
-version: 1.3.0
+version: 1.4.0
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -31,7 +31,7 @@ permissions: []
 exported_tools:
 - name: room.create
   access: write
-  risk: normal
+  risk: dangerous
   input_schema:
     type: object
     properties:
@@ -87,6 +87,58 @@ exported_tools:
       subscriber_count:
         type: integer
   required_scope: community:admin
+- name: room.update
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      kind:
+        enum:
+        - community
+        - stage
+        - green_room
+      closed:
+        type: boolean
+      allow_guests:
+        type: boolean
+      starts_at:
+        type: integer
+        minimum: 0
+      ends_at:
+        type: integer
+        minimum: 0
+    required:
+    - room_id
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      label:
+        type:
+        - string
+        - 'null'
+      route:
+        enum:
+        - sfu
+      max_publishers:
+        type: integer
+      created_at:
+        type: integer
+      publisher_ids:
+        type: array
+        items:
+          type: string
+          format: uuid
+      subscriber_count:
+        type: integer
+  required_scope: community:moderate
 - name: room.get
   access: read
   risk: normal
