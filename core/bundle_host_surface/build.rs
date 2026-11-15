@@ -3,7 +3,8 @@
 //! same single-source-of-truth approach as `core/hub_client/build.rs`.
 
 fn main() {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo");
+    let manifest_dir =
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo");
     let proto_root = std::path::Path::new(&manifest_dir).join("../../proto");
     let proto_dir = proto_root.join("waddles/presentation/internal/v1");
 

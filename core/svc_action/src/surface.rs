@@ -160,8 +160,10 @@ mod tests {
                 .push((r.community_id, r.surface_id.clone(), bearer));
             if r.payload_json.contains("limit") {
                 let mut s = Status::resource_exhausted("rate limited");
-                s.metadata_mut()
-                    .insert(bundle_host_surface::RETRY_AFTER_MS_KEY, "1500".parse().unwrap());
+                s.metadata_mut().insert(
+                    bundle_host_surface::RETRY_AFTER_MS_KEY,
+                    "1500".parse().unwrap(),
+                );
                 return Err(s);
             }
             Ok(Response::new(PublishResponse { seq: 1 }))
@@ -212,7 +214,9 @@ mod tests {
     #[tokio::test]
     async fn the_flag_off_denies_before_any_delivery() {
         let (w, seen) = wiring(false).await;
-        let e = publish(Some(&w), APP, 7, &args(OWN, "{}")).await.unwrap_err();
+        let e = publish(Some(&w), APP, 7, &args(OWN, "{}"))
+            .await
+            .unwrap_err();
         assert_eq!(e.code, "feature_disabled");
         assert!(seen.0.lock().unwrap().is_empty());
     }
@@ -240,10 +244,15 @@ mod tests {
             "alert",
             "waddles.core.example.music",
         ] {
-            let e = publish(Some(&w), APP, 7, &args(surface, "{}")).await.unwrap_err();
+            let e = publish(Some(&w), APP, 7, &args(surface, "{}"))
+                .await
+                .unwrap_err();
             assert_eq!(e.code, "not_granted", "{surface}");
         }
-        assert!(seen.0.lock().unwrap().is_empty(), "nothing may reach the network");
+        assert!(
+            seen.0.lock().unwrap().is_empty(),
+            "nothing may reach the network"
+        );
     }
 
     #[tokio::test]
@@ -258,7 +267,9 @@ mod tests {
             assert_eq!(e.code, "invalid");
         }
         // Tenant-wide sentinel scope (community 0): no community to publish for.
-        let e = publish(Some(&w), APP, 0, &args(OWN, "{}")).await.unwrap_err();
+        let e = publish(Some(&w), APP, 0, &args(OWN, "{}"))
+            .await
+            .unwrap_err();
         assert_eq!(e.code, "invalid");
         assert!(seen.0.lock().unwrap().is_empty());
     }

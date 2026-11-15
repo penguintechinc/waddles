@@ -193,6 +193,8 @@ tonic = { version = "=0.14.6", default-features = false }
 # compiles `proto/waddles/presentation/internal/v1` with the same protoc/`proto` context as
 # `hub_client` (see Dockerfile.rust).
 bundle-host-surface = { path = "../bundle_host_surface", version = "=0.1.0" }
+# Community-bound machine JWT (`BoundMachineJwtClient`) for the surface delivery host.
+service_auth = { path = "../service_auth", version = "=0.1.0" }
 
 # `src/stage_metrics.rs`: OTel instruments built from the global meter
 # provider `penguin-logging` installs (never a provider of its own). Same

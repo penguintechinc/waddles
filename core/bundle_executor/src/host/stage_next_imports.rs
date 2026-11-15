@@ -458,7 +458,13 @@ mod surface_tests {
 
     #[test]
     fn refusals_are_not_retryable_and_pass_their_code_through() {
-        for code in ["invalid", "not_implemented", "not_granted", "too_large", "denied"] {
+        for code in [
+            "invalid",
+            "not_implemented",
+            "not_granted",
+            "too_large",
+            "denied",
+        ] {
             let e = surface_transport_error(denied(code, "m"));
             assert!(!e.retryable, "{code}");
             assert_eq!(e.code, code);

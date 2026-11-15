@@ -47,7 +47,9 @@ impl SurfaceService for FakeSurfaces {
         };
         match req.surface_id.as_str() {
             "alert" => Ok(Response::new(PublishResponse { seq: 41 })),
-            "waddles.core.example.music.queue" => Err(Status::invalid_argument("bad [/queue:type]")),
+            "waddles.core.example.music.queue" => {
+                Err(Status::invalid_argument("bad [/queue:type]"))
+            }
             "live.channels" => {
                 let mut s = Status::resource_exhausted("rate limited");
                 s.metadata_mut()
@@ -100,9 +102,14 @@ fn all_granted() -> SurfacePolicy {
 #[tokio::test]
 async fn a_publish_carries_the_community_bound_bearer_and_exact_fields() {
     let (host, seen) = start().await;
-    host.publish(&all_granted(), 7, "alert", r#"{"alert_type":"info","message":"m"}"#)
-        .await
-        .unwrap();
+    host.publish(
+        &all_granted(),
+        7,
+        "alert",
+        r#"{"alert_type":"info","message":"m"}"#,
+    )
+    .await
+    .unwrap();
     let s = seen.lock().unwrap().clone();
     assert_eq!(s.bearer.as_deref(), Some("Bearer tok-for-7"));
     assert_eq!(
@@ -132,7 +139,9 @@ async fn every_server_refusal_maps_to_the_stable_guest_codes() {
     }
     // The delay survives the round trip.
     assert_eq!(
-        host.publish(&policy, 1, "live.channels", "{}").await.unwrap_err(),
+        host.publish(&policy, 1, "live.channels", "{}")
+            .await
+            .unwrap_err(),
         SurfaceError::RateLimited {
             retry_after_ms: 2500
         }

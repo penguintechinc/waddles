@@ -88,10 +88,7 @@ impl SurfacePolicy {
     /// app id (`<app_id>.<name>`, the same rule hub-api enforces on `owned_surfaces` at upload),
     /// plus any surface granted by `overlay.surface.<id>` permissions. Ownership is structural --
     /// no bundle can publish into another bundle's namespace.
-    pub fn for_app<'a>(
-        app_id: &str,
-        permissions: impl IntoIterator<Item = &'a str>,
-    ) -> Self {
+    pub fn for_app<'a>(app_id: &str, permissions: impl IntoIterator<Item = &'a str>) -> Self {
         let mut policy = Self::from_permissions(permissions);
         policy.owned_prefix = Some(format!("{app_id}."));
         policy
@@ -385,7 +382,12 @@ mod tests {
 
     #[test]
     fn surface_id_grammar() {
-        for ok in ["alert", "waddles.core.example.music.now_playing", "live.channels", "a1.b2_c"] {
+        for ok in [
+            "alert",
+            "waddles.core.example.music.now_playing",
+            "live.channels",
+            "a1.b2_c",
+        ] {
             assert!(valid_surface_id(ok), "{ok}");
         }
         for bad in [
@@ -440,7 +442,10 @@ mod tests {
     fn publish_args_refuse_unknown_keys_and_wrong_shapes() {
         let ok = PublishArgs::parse(&serde_json::json!({"surface_id": "a", "payload_json": "{}"}))
             .unwrap();
-        assert_eq!((ok.surface_id.as_str(), ok.payload_json.as_str()), ("a", "{}"));
+        assert_eq!(
+            (ok.surface_id.as_str(), ok.payload_json.as_str()),
+            ("a", "{}")
+        );
         for bad in [
             serde_json::json!({"surface_id": "a"}),
             serde_json::json!({"surface_id": "a", "payload_json": "{}", "community_id": 9}),
@@ -570,7 +575,10 @@ mod tests {
             SurfaceInitError::MissingCa
         ));
         assert!(matches!(
-            err("https://presentation.internal:50051", Some("/nonexistent/ca.pem")),
+            err(
+                "https://presentation.internal:50051",
+                Some("/nonexistent/ca.pem")
+            ),
             SurfaceInitError::CaRead { .. }
         ));
         assert!(SurfaceHost::new("http://127.0.0.1:50051", None, t).is_ok());
