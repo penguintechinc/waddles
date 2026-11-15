@@ -823,6 +823,77 @@ class TestChannelPermissionOverrides:
         assert (await final_resp.get_json())["overrides"] == []
 
 
+class TestChannelOverrideEscalation:
+    """Regression: a channel-override editor may not grant/deny scopes they do not hold."""
+
+    async def _setup(self, community_db: Any) -> tuple[int, int, int]:
+        dal, community_id = community_db
+        channel_id = int(dal.hub_channels.insert(community_id=community_id, name="c1"))
+        role_id = int(dal.community_roles.insert(community_id=community_id, name="vip", priority=5))
+        mod_role = dal.community_roles.insert(
+            community_id=community_id,
+            name="chan-mod",
+            is_system=False,
+            role_kind=0,
+            base_claims={"scopes": ["community.channels:manage"]},
+        )
+        dal.community_members.insert(
+            community_id=community_id,
+            user_id="7",
+            role="chan-mod",
+            is_active=True,
+            community_role_id=mod_role,
+        )
+        dal.commit()
+        return community_id, channel_id, role_id
+
+    async def _put(
+        self, client: Any, auth_headers: Any, ids: tuple[int, int, int], override: dict[str, Any]
+    ) -> Any:
+        community_id, channel_id, role_id = ids
+        return await client.put(
+            f"/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
+            headers={**auth_headers(scope="", user_id="7"), "Content-Type": "application/json"},
+            data=json_module.dumps({"overrides": [{"communityRoleId": role_id, **override}]}),
+        )
+
+    async def test_grant_or_deny_scope_not_held_is_403(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        ids = await self._setup(community_db)
+        assert (
+            await self._put(client, auth_headers, ids, {"grantScopes": ["billing:manage"]})
+        ).status_code == 403
+        assert (
+            await self._put(client, auth_headers, ids, {"denyScopes": ["billing:manage"]})
+        ).status_code == 403
+
+    async def test_unknown_scope_foreign_role_and_bad_scope_field_are_400(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        ids = await self._setup(community_db)
+        assert (
+            await self._put(client, auth_headers, ids, {"grantScopes": ["nope:nope"]})
+        ).status_code == 400
+        assert (
+            await self._put(client, auth_headers, ids, {"scope": "everything"})
+        ).status_code == 400
+        community_id, channel_id, _ = ids
+        foreign = await self._put(
+            client, auth_headers, (community_id, channel_id, 99999), {"grantScopes": []}
+        )
+        assert foreign.status_code == 400
+
+    async def test_scope_the_editor_holds_is_allowed(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        ids = await self._setup(community_db)
+        response = await self._put(
+            client, auth_headers, ids, {"grantScopes": ["community.channels:manage"]}
+        )
+        assert response.status_code == 200
+
+
 class TestMemberChannels:
     async def test_list_channels_without_current_user_falls_back(
         self, client: Any, auth_headers: Any, community_db: Any

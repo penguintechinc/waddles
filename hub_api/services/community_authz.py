@@ -82,7 +82,13 @@ from services.current_user import get_current_user_id
 from services.errors import ApiError, forbidden, unauthorized
 from services.global_identity import is_global_admin
 from services.schema import bind_community_authz_tables
-from services.scope_registry import KIND_ADMIN, SCOPE_GLOBAL_ADMIN, all_scopes, effective_scopes
+from services.scope_registry import (
+    KIND_ADMIN,
+    SCOPE_GLOBAL_ADMIN,
+    all_scopes,
+    effective_scopes,
+    guard_grant,
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -595,6 +601,19 @@ async def resolve_editor_scopes_async(
         return all_scopes()
     held = membership.scopes if membership is not None else frozenset()
     return frozenset(held | token_scopes)
+
+
+async def guard_target_member(
+    request: Any, async_dal: Any, dal: Any, *, community_id: int, target_user_id: int
+) -> None:
+    """403 unless the caller holds every scope the target member's role holds.
+
+    Stops a moderator (seeded with member-removal / reputation scopes) acting on an admin: an
+    admin-kind target holds the full registry, so only admin-kind callers, tenant admins and
+    global admins (full registry via `resolve_editor_scopes_async`) pass. Never a role-name check.
+    """
+    editor = await resolve_editor_scopes_async(request, async_dal, dal, community_id=community_id)
+    guard_grant(editor, member_scopes_sync(dal, community_id, target_user_id))
 
 
 def member_scopes_sync(dal: Any, community_id: int, user_id: int) -> frozenset[str]:

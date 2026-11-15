@@ -17,6 +17,7 @@ from typing import Any
 
 from .community_common import ensure_community_tables, sql_bool
 from .community_relay import relay_message
+from .errors import ApiError
 from .scope_registry import (
     KIND_CUSTOM,
     KIND_FIXED,
@@ -742,8 +743,53 @@ def get_channel_permission_overrides(
     ]
 
 
+_OVERRIDE_SCOPES = frozenset({"permanent", "temporary", "both"})
+
+
+def _validated_overrides(
+    dal: Any, community_id: int, overrides: list[dict[str, Any]], editor_scopes: frozenset[str]
+) -> list[dict[str, Any]]:
+    """Validate every override BEFORE any write (all-or-nothing); raises 400/403 `ApiError`.
+
+    Roles must belong to `community_id`, scopes must be registered, `scope` must be one of the
+    stored enum values, and the editor must hold every scope they grant or deny (no escalation).
+    """
+    clean: list[dict[str, Any]] = []
+    for override in overrides:
+        if not isinstance(override, dict):
+            raise ApiError("each override must be an object", 400, "BAD_REQUEST")
+        role_id = override.get("communityRoleId")
+        if not role_id:
+            continue
+        if isinstance(role_id, bool) or not isinstance(role_id, int):
+            raise ApiError("communityRoleId must be an integer", 400, "BAD_REQUEST")
+        if (
+            dal(
+                (dal.community_roles.id == role_id)
+                & (dal.community_roles.community_id == community_id)
+            )
+            .select()
+            .first()
+            is None
+        ):
+            raise ApiError("Role not found in this community", 400, "BAD_REQUEST")
+        grant = normalize_scopes(override.get("grantScopes") or [])
+        deny = normalize_scopes(override.get("denyScopes") or [])
+        guard_grant(editor_scopes, set(grant) | set(deny))
+        scope = override.get("scope", "both")
+        if scope not in _OVERRIDE_SCOPES:
+            raise ApiError("scope must be one of permanent, temporary, both", 400, "BAD_REQUEST")
+        clean.append({"role_id": role_id, "grant": grant, "deny": deny, "scope": scope})
+    return clean
+
+
 def update_channel_permission_overrides(
-    dal: Any, community_id: int, channel_id: int, overrides: list[dict[str, Any]]
+    dal: Any,
+    community_id: int,
+    channel_id: int,
+    overrides: list[dict[str, Any]],
+    *,
+    editor_scopes: frozenset[str],
 ) -> bool:
     """Replace all overrides for one channel; invalidates every member's claims cache."""
     ensure_community_tables(dal)
@@ -755,17 +801,15 @@ def update_channel_permission_overrides(
     ):
         return False
 
+    clean = _validated_overrides(dal, community_id, overrides, editor_scopes)
     dal(dal.hub_channel_permission_overrides.hub_channel_id == channel_id).delete()
-    for override in overrides:
-        role_id = override.get("communityRoleId")
-        if not role_id:
-            continue
+    for item in clean:
         dal.hub_channel_permission_overrides.insert(
             hub_channel_id=channel_id,
-            community_role_id=role_id,
-            grant_scopes=override.get("grantScopes") or [],
-            deny_scopes=override.get("denyScopes") or [],
-            scope=override.get("scope", "both"),
+            community_role_id=item["role_id"],
+            grant_scopes=item["grant"],
+            deny_scopes=item["deny"],
+            scope=item["scope"],
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
