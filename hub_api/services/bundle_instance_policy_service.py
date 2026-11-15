@@ -41,8 +41,9 @@ from penguin_dal import AsyncDB
 from sqlalchemy import select
 
 from services import bundle_audit
-from services.bundle_permission_catalog import permission_family
+from services.bundle_permission_catalog import is_known_policy_key, permission_family
 from services.bundle_permission_service import _publish_invalidation, _write_grant_version_row
+from services.errors import ApiError
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,13 @@ async def set_instance_policy(
     invalidation is published only after commit (same posture as
     `bundle_permission_service.deactivate_permission()`).
     """
+    if not is_known_policy_key(permission_key):
+        # fail loud: an unknown/renamed key would be stored as a policy that matches nothing
+        raise ApiError(
+            f"unknown permission key {permission_key!r}: not a catalog id or family",
+            400,
+            "unknown_permission_key",
+        )
     policies = install_dal.metadata.tables["instance_permission_policies"]
     grants = install_dal.metadata.tables["community_permission_grants"]
     versions = install_dal.metadata.tables["app_permission_grant_versions"]

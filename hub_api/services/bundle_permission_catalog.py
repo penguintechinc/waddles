@@ -28,8 +28,17 @@ import os
 import re
 from typing import Literal
 
-from services.bundle_storage_access import is_storage_access_id, parse_storage_access_id
-from services.bundle_table_access import is_table_access_id, parse_table_access_id
+from services.bundle_storage_access import (
+    STORAGE_OPS,
+    is_storage_access_id,
+    parse_storage_access_id,
+)
+from services.bundle_table_access import (
+    TABLE_ACCESS_OPS,
+    TABLE_ACCESS_PREFIX,
+    is_table_access_id,
+    parse_table_access_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -424,6 +433,34 @@ def is_valid_egress_host(host: str, *, allow_wildcard: bool = True) -> bool:
     if not allow_wildcard and "*" in host:
         return False
     return bool(_HOST_RE.match(host))
+
+
+#: Every key `permission_family()` can return for a parameterized id -- the instance-policy
+#: key space together with `STATIC_PERMISSIONS`.
+PARAMETERIZED_FAMILIES: frozenset[str] = frozenset(
+    {
+        "net.http.fqdn",
+        "net.http.public-ip",
+        "net.http.private-ip",
+        "chat.send",
+        "chat.delete",
+        "dm.send",
+        "moderation",
+        "tool.call",
+        *PLATFORM_OP_FAMILIES,
+        *(f"storage.{op}" for op in STORAGE_OPS),
+        *(f"{TABLE_ACCESS_PREFIX}{op}" for op in TABLE_ACCESS_OPS),
+    }
+)
+
+
+def is_known_policy_key(key: str) -> bool:
+    """`True` iff `key` is a catalog id or a catalog family -- a valid instance-policy key.
+
+    A typo'd or renamed key (e.g. the retired `storage.objects`) would otherwise be stored as
+    a policy that silently never matches anything.
+    """
+    return key in STATIC_PERMISSIONS or key in PARAMETERIZED_FAMILIES
 
 
 def is_known_permission(permission_id: str) -> bool:
