@@ -906,6 +906,23 @@ async fn handle_discord_entry<C: DrainControl, X: ActionExecutor, G: ReplayGuard
     if matches!(claim, Err(SenderError::Rejected { .. })) {
         return;
     }
+    // Command-latency canary egress sink: a stamp-verified, replay-claimed `chat.send` that is
+    // EXACTLY the canary's (numeric tenant + numeric community + sentinel channel) is acknowledged
+    // without any platform call -- the synthetic command's "outbound" lands here, never in Discord.
+    // The match is exact on all three, so no real community's send can be swallowed.
+    if claim.is_ok() && crate::canary::sink_matches(&entry) {
+        tracing::info!(
+            platform = "discord",
+            op,
+            "canary sink: acknowledged without a platform call"
+        );
+        if let Some(op_id) = &entry.op_id {
+            if let Err(err) = ctl.post_ack(op_id, &ack_payload(&Ok(None))).await {
+                tracing::error!(platform = "discord", op, error = %err, "canary sink: failed to post the op result; the canary will time out");
+            }
+        }
+        return;
+    }
     // The stamp gate above ran first; the executor (when configured) then
     // re-checks the pin, verifies the connector's template and sends through
     // the guarded client only. A refused/failed op is acked and dropped
@@ -3339,7 +3356,8 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         // Tenant 7 is the default tenant here, so the env-token sender serves it.
-        crate::tenant_discord::set_default_tenant_id(7);
+        let _default =
+            crate::tenant_discord::test_default_tenant::DefaultTenantGuard::hold(7).await;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/channels/1/messages"))
@@ -3673,6 +3691,13 @@ GRANT SELECT (tenant_id, pseudonym, handle) ON ephemeral_pseudonyms TO {role};
         async fn drain_one(egress: &Egress, text: &str, tenant: i64) -> String {
             use wiremock::matchers::{method, path};
             use wiremock::{Mock, MockServer, ResponseTemplate};
+            // The env-token sender serves ONLY the default tenant (fail-closed since #1289), and
+            // this drain has no per-tenant executor: make the op's tenant the default for this
+            // run. What is under test is the detokenizer's tenant scoping, not that gate (which
+            // `tenant_discord`/the drain's own tests cover); the guard keeps parallel tests from
+            // racing the process-wide default id.
+            let _default =
+                crate::tenant_discord::test_default_tenant::DefaultTenantGuard::hold(tenant).await;
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/channels/1/messages"))

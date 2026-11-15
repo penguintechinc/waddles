@@ -537,79 +537,99 @@ kubectl delete namespace waddlebot
 No workload connects as the database owner/superuser. Every Deployment/Job/CronJob gets its own
 least-privilege Postgres role through `{{ include "waddlebot.dbEnv" (dict "root" . "role" "<role>") }}`;
 role names/grants live in `config/postgres/service-roles.yaml` and are mirrored in
-`infrastructure.postgresql.serviceRoles.roles`. Passwords are generated in alpha/local and **required**
-(`serviceRoles.existingSecret`, or `serviceRoles.passwords` from an out-of-git file) in beta/gamma/
-production. The owner credential is a separate Secret (`<release>-db-admin`) read only by Postgres and
+`infrastructure.postgresql.serviceRoles.roles`. Passwords are generated at runtime on first run in **every tier** (see
+"Secrets: generated on first run"); `serviceRoles.existingSecret` / `serviceRoles.passwords` remain as overrides. The owner credential is a separate Secret (`<release>-db-admin`) read only by Postgres and
 the db-migrate hook. See [`docs/DATABASE_CREDENTIALS.md`](../../../docs/DATABASE_CREDENTIALS.md) for rotation,
 the burned-credential list, and the upgrade path.
 
-## Self-provisioned platform keys (feature/helm-auto-provision-keys)
+## Secrets: generated on first run
 
-Deploys must never require a human to run a script before `helm install`/`helm upgrade`
-succeeds. Four platform key Secrets are self-provisioned by this chart:
+Every secret the platform generates and consumes itself is created **at runtime, create-if-absent, in
+every tier** (alpha, beta, gamma, production, local) by two pre-install/pre-upgrade hook Jobs. A fresh
+`helm install` needs no manual secret in any tier; only external credentials (below) are supplied by the owner.
 
-| Secret | Values key | Consumer | Mechanism |
-|---|---|---|---|
-| `minio-kms` | `autoProvisionedKeys.minioKms` | MinIO static-KMS (PR #439) | `templates/auto-provisioned-secrets.yaml` -- pure Helm template |
-| `waddlebot-tenant-kek` | `autoProvisionedKeys.tenantKek` | hub-api tenant DEK broker (PR #442) | `templates/auto-provisioned-secrets.yaml` -- pure Helm template |
-| `<fullname>-bundle-signing` | `autoProvisionedKeys.bundleSigning` | hub-api bundle signing (PR #431) | `templates/auto-provisioned-keys-job.yaml` -- pre-install/pre-upgrade hook Job (openssl) |
-| `service-jwt-signing-key` | `autoProvisionedKeys.serviceJwt` | hub-api machine JWTs (PR #438) | `templates/auto-provisioned-keys-job.yaml` -- pre-install/pre-upgrade hook Job (openssl) |
+* `templates/provision-secrets.yaml` + `files/provision-secrets.sh` -- every symmetric secret, password and HMAC ring.
+* `templates/auto-provisioned-keys-job.yaml` -- Ed25519 bundle-signing and ECDSA P-256 service-JWT key pairs (+ public-key ConfigMaps).
 
-**Policy, every Secret:**
-1. **Keep** -- if the Secret already exists, it is left completely untouched (never
-   regenerated/rotated by this chart). It is also annotated `helm.sh/resource-policy:
-   keep` when this chart creates it, so it survives `helm uninstall`.
-2. **Generate** -- on a miss, auto-generated ONLY when `global.deploymentTier` is
-   `alpha` or `local`.
-3. **Fail** -- on a miss anywhere else (beta/gamma/production), the release
-   render-fails with an explicit message, UNLESS `autoProvisionedKeys.<key>.
-   externalSecret: true` is set (an ExternalSecret/SealedSecret/other out-of-band
-   controller owns that Secret name) or an operator pre-creates it directly.
+**Why not Helm `lookup`:** `lookup` is empty under `helm template | kubectl apply` / ArgoCD, so a template-time
+generator would regenerate *every* value (all DB passwords, the root KEK) on each sync. The chart now contains **no**
+`lookup`-based generation; Helm never owns these Secrets' data. (TLS/CA certificate Secrets -- `transit-tls`, `host-api-tls`,
+`hub-api-grpc-tls`, `valkey-tls`, connector runtime -- still use template-time `lookup`; they are a separate follow-up.)
 
-The two symmetric keys (`minioKms`, `tenantKek`) use `lookup` + Helm's own
-cryptographically-secure `randBytes`/`sha256sum` template functions -- no extra
-tooling needed. The two asymmetric keys (`bundleSigning`: Ed25519, `serviceJwt`: ECDSA P-256 / ES256) need an
-`openssl`-equipped hook Job instead: Sprig/Helm has no function to derive an Ed25519
-public key from a private key, which both public-key-flow requirements below need.
+**Policy (enforced in the script, proven by `tests/test_provision_secrets_script.py`):**
+1. Existing real value => untouched. Never overwritten, never rotated by an upgrade. A different explicit values override is ignored with a warning (no values logged); to re-seed a key, delete that key from the Secret.
+2. A key is *unset* only if absent, empty or `REPLACE_ME*`, and only for the keys listed below (the chart-owned keys); other keys in the same Secret are never touched. `waddlebot-platform-credentials` is owner-supplied and never touched.
+3. Unset key: explicit value from values (`global.*`, `infrastructure.*.password`, ...) > validated import from a *named* legacy Secret (Postgres owner password from `waddlebot-secrets`, so an existing PVC keeps working; placeholder/default-looking values are refused, never imported) > fresh CSPRNG value.
+4. Concurrency-safe: a missing Secret is written with `kubectl create` (AlreadyExists => adopt the winner), an existing one with a merge patch carrying `resourceVersion` (Conflict => re-read). Two runs never leave two values.
+5. Opt-outs kept: `autoProvisionedKeys.<key>.externalSecret`, `sso.encryptionKey.externalSecret`, `postgresql.admin.existingSecret`, `serviceRoles.existingSecret`, `*.existingSecret` => logged, never touched.
+6. Created Secrets carry `helm.sh/resource-policy: keep` and ArgoCD `Prune=false` / `IgnoreExtraneous`. Existing ones get those annotations on the first run (so Helm does not delete the no-longer-rendered object on the first upgrade).
+7. No value ever reaches argv, stdout/stderr or a ConfigMap: values move through bash variables, a memory-backed `emptyDir` and stdin/`--patch-file`; only Secret and key *names* are logged. No `set -x`.
+8. Entropy: OpenSSL `rand` (DRBG seeded from the OS CSPRNG, `/dev/urandom`). Passwords/keys: 32 bytes (256 bit) base64url (43 chars, never a leading `-`); legacy JWT/module/service keys 48 bytes; KEKs/HMAC keys 32 bytes hex (64 chars; rings `kid:<64 hex>`); S3 access key ids 16 alphanumerics; bootstrap admin password 24 alphanumerics (~143 bit).
+9. Root-of-trust marker: `waddlebot-tenant-kek` is stamped with annotation `waddles.penguintech.io/root-marker = v1.<kek_id>.<hmac>` where `kek_id` = first 8 bytes of SHA-256(KEK) as hex (identical to hub-api `envelope.crypto.kek_id`) and `hmac` = hex HMAC-SHA256(key = the 32 raw KEK bytes, message = `waddles-root-check`). A present-but-different marker makes the hook (and so the release) **fail** -- a replaced root is never accepted silently. hub-api stores the matching value in its DB marker.
+10. Hook RBAC (`<fullname>-provision-secrets`, weight -10, deleted after the pre-* phase succeeds): `get`,`patch` only on the named Secrets below; `create` on Secrets without a name restriction -- **residual risk:** Kubernetes ignores `resourceNames` on `create`, so for the seconds the hook lives it could create a Secret of any name. No list/watch/update/delete, no ConfigMaps, token automounted on the Job pod only. Image pinned by digest (`autoProvisionedKeys.hookImage`).
 
-**Public keys flow to consumers automatically, private keys never do:** the hook Job
-derives each Ed25519 public key from its Secret and publishes it to a plain
-ConfigMap (`<fullname>-bundle-signing-public`, `<fullname>-service-jwt-public` by
-default) containing ONLY public key material -- safe for any pod to mount via
-`envFrom`/`configMapKeyRef`. The private key Secret itself is read only by this hook
-Job (to derive the public key) and by hub-api (the sole signer/issuer); no other
-Deployment's RBAC or volume mounts reference it. See `templates/
-auto-provisioned-keys-job-rbac.yaml` for the least-privilege Role backing this.
+### Generated secrets (name -> keys)
+
+| Secret | Keys (generated if unset) | Consumers |
+|---|---|---|
+| `<fullname>-db-admin` | `POSTGRES_PASSWORD` | Postgres only (skipped if `postgresql.admin.existingSecret`) |
+| `<fullname>-db-credentials` | `PW_<ROLE>` per service role, `PW_WADDLES_PLATFORM_TABLE` (if enabled) | each pod's own key |
+| `waddlebot-secrets` | `DB_READER_PASSWORD`, `DB_REPUTATION_PASSWORD`, `REDIS_PASSWORD`, `REDIS_ADMIN_PASSWORD`, `REDIS_{ROUTER,HUB,WORKFLOW,AI,ANALYTICS,SECURITY,LOYALTY,SPOTIFY,YTMUSIC,TWITCH,DISCORD,SLACK}_PASSWORD`, `VALKEY_DURABLE_PASSWORD`, S3 identities `{HUB_API,DATAPLANE,BUCKET_INIT,STREAMING,BUNDLE_STORAGE}_S3_{ACCESS_KEY_ID,SECRET_ACCESS_KEY}`, `JWT_SECRET` (+`SECRET_KEY`, `JWT_SECRET_KEY` derived), `MODULE_SECRET_KEY`, `SERVICE_API_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, `ENVELOPE_BINDING_KEYS` | envFrom (~40 workloads) |
+| same | derived every run (not generated): `REDIS_URL`, `VALKEY_URL`, `VALKEY_URL_TLS`, `VALKEY_DURABLE_URL[_TLS[_AUTH]]`, chart config keys (`AWS_REGION`, `OPENWHISK_*`, ...) | |
+| `<fullname>-valkey-durable-admin` | `VALKEY_DURABLE_ADMIN_PASSWORD` | durable Valkey only |
+| `<fullname>-valkey-kv` | `VALKEY_KV_PASSWORD` (+ derived URLs) | bundle-kv Valkey, svc-action/process |
+| `<fullname>-hub-admin-bootstrap` | `INITIAL_ADMIN_PASSWORD` | hub-admin-seed |
+| `seaweedfs-sse-kek` | `WEED_S3_SSE_KEK` | SeaweedFS SSE-S3 |
+| `waddlebot-tenant-kek` | `TENANT_KEK_HEX` (root KEK, root marker) | hub-api |
+| `waddlebot-ots-encryption-key` | `ONE_TIME_SECRET_ENCRYPTION_KEY` | hub-api |
+| `waddlebot-sso-encryption-key` | `SSO_ENCRYPTION_KEY` (if `sso.enabled`) | hub-api |
+| `<fullname>-bundle-admin-request`, `-outbound-pin`, `-event-sync-request` | `BUNDLE_ADMIN_REQUEST_KEYS`, `OUTBOUND_PIN_KEYS`, `EVENT_SYNC_REQUEST_KEYS` (HMAC rings) | hub-api / svc-* |
+| `posthog-secrets` | `SECRET_KEY`, `POSTGRES_PASSWORD`, `CLICKHOUSE_PASSWORD` (if in-cluster PostHog without `existingSecret`) | PostHog |
+| `<fullname>-bundle-signing` | `BUNDLE_SIGNING_PRIVATE_KEY` (Ed25519) + public ConfigMap | hub-api / executor |
+| `service-jwt-signing-key` | `SERVICE_JWT_PRIVATE_KEY_<kid>` (ES256) + public ConfigMap | hub-api |
+| `<fullname>-db-migrate-secret` | derived (`DATABASE_URL`, role passwords JSON, ...) re-applied every run | db-migrate |
+
+Placeholder handling: keys above holding `REPLACE_ME*` or an empty string are treated as unset and replaced; nothing else is.
+
+**Owner-supplied (never generated):** Discord / Twitch / YouTube app credentials and the Discord bot token (Secret `waddlebot-platform-credentials`, see `docs/PLATFORM_CREDENTIALS.md`); per-tenant own-app credentials (tenant settings / `platform_connections`); Google OAuth and SAML SSO provider credentials (`sso.google.existingSecret`, IdP metadata); PostHog API key; license server key; Odoo and OpenWhisk credentials; registry pull credentials (`imagePullSecrets`); Cloudflare / DigitalOcean / CI credentials; TLS certificates for beta/gamma/production (`global.*Tls`, cert-manager or ExternalSecret).
+
+**Seam for the platform secret store:** these class-A K8s Secrets stay generated here. hub-api escrows a sealed copy + keyed fingerprint into the `platform_secrets` table / S3 escrow at bootstrap and alerts on drift -- it never writes these Secrets (its ServiceAccount has no Secret write).
+
+**Existing alpha clusters:** the Secrets already hold real values, so the first upgrade is a no-op for values: the hook logs `unchanged`/`patched (annotations only)` per Secret. Verify with `kubectl logs job/<fullname>-provision-secrets` (a failed Job is kept; a successful one is deleted -- check `helm get hooks` or run with `--debug`).
 
 **Validating (no live cluster required):**
 ```bash
-helm lint k8s/helm/waddlebot
-helm template waddlebot k8s/helm/waddlebot -f k8s/helm/waddlebot/values-alpha.yaml --kube-version 1.30.0   # renders, keys generated
-helm template waddlebot k8s/helm/waddlebot -f k8s/helm/waddlebot/values-local.yaml --kube-version 1.30.0   # renders, keys generated
-helm template waddlebot k8s/helm/waddlebot -f k8s/helm/waddlebot/values-beta.yaml  --kube-version 1.30.0   # FAILS closed (no external secret / pre-existing Secret)
+helm lint k8s/helm/waddlebot -f k8s/helm/waddlebot/values-production.yaml
+helm template waddlebot k8s/helm/waddlebot -f k8s/helm/waddlebot/values-production.yaml --kube-version 1.30.0   # renders in every tier, no manual secrets
+helm template ... | python3 scripts/ci/check-helm-hook-dependency-ordering.py
+python3 -m pytest k8s/helm/waddlebot/tests/test_provision_secrets_script.py k8s/helm/waddlebot/tests/test_provision_secrets_render.py
 ```
-`lookup` always returns empty in `helm template`/`--dry-run` (no live API server to
-query), so every `helm template` run takes the "not found" branch -- this validates
-that generation renders correctly and that the fail-guard fires, but it does NOT by
-itself prove keep-on-second-run behavior against a real release (two `helm template`
-runs will in fact mint two *different* random secret values each time, since both
-independently take the "generate" branch -- that's expected, not a bug). Real
-keep/idempotency is exercised by `lookup` against the live cluster during an actual
-`helm install`/`helm upgrade`, i.e. it is proven at deploy time, not template time.
+
+## Self-provisioned platform keys (feature/helm-auto-provision-keys)
+
+Key-pair Secrets (`<fullname>-bundle-signing`: Ed25519, `service-jwt-signing-key`: ECDSA P-256 / ES256) are generated by
+`templates/auto-provisioned-keys-job.yaml`, an `openssl`-equipped pre-install/pre-upgrade hook Job (Sprig/Helm has no
+function to derive an Ed25519 public key). Same create-if-absent policy as above, in every tier (the former alpha/local-only
+gate is removed); `externalSecret: true` opts out. See "Secrets: generated on first run" for the symmetric secrets.
+
+**Public keys flow to consumers automatically, private keys never do:** the hook Job
+derives each public key from its Secret and publishes it to a plain
+ConfigMap (`<fullname>-bundle-signing-public`, `<fullname>-service-jwt-public` by
+default) containing ONLY public key material -- safe for any pod to mount via
+`envFrom`/`configMapKeyRef`. The private key Secret itself is read only by this hook
+Job (to derive the public key) and by hub-api (the sole signer/issuer). See `templates/
+auto-provisioned-keys-job-rbac.yaml` for the least-privilege Role backing this.
 
 ### Enterprise SSO key (`sso.*`, `templates/sso.yaml`)
 
 hub-api's enterprise SSO (SAML 2.0 / OIDC / Google; see `docs/SSO.md`) needs one more symmetric
 key, `SSO_ENCRYPTION_KEY` (64 lowercase hex chars) in Secret `waddlebot-sso-encryption-key`. It follows the
-same keep/generate mechanism as `tenantKek`/`oneTimeSecret` above -- `lookup` + `randBytes`, generated
-in `alpha`/`local` only, `helm.sh/resource-policy: keep`, never rotated by the chart -- with one
-deliberate difference: **a miss in beta/gamma/production does NOT fail the release.** SSO is
-entitlement-gated, so a deployment that never enables it must still install. hub-api consumes the key
+same runtime create-if-absent mechanism as `tenantKek`/`oneTimeSecret` above (generated in every tier by the
+provision-secrets hook, `helm.sh/resource-policy: keep`, never rotated) when `sso.enabled`. hub-api consumes the key
 through an `optional: true` `secretKeyRef` (one `include "waddlebot.sso.hubApiEnv"` in
 `templates/hub-api.yaml`; the env block lives in `templates/_sso.tpl`), and SSO fails loudly at request
-time (HTTP 503 `SSO_UNAVAILABLE`) until the Secret exists. Enable SSO outside alpha/local by
-pre-creating the Secret, or by pointing an ExternalSecret at it and setting
-`sso.encryptionKey.externalSecret=true`. Other values: `sso.allowedPrivateHosts` (operator allowlist for
+time (HTTP 503 `SSO_UNAVAILABLE`) if the Secret is missing. To manage the key yourself, point an
+ExternalSecret at it and set `sso.encryptionKey.externalSecret=true`. Other values: `sso.allowedPrivateHosts` (operator allowlist for
 on-prem IdPs behind the SSRF guard), `sso.stateTtlSeconds`, `sso.clockSkewSeconds`, and
 `sso.google.existingSecret` (optional shared Google OAuth client -- never inline the values).
 Tests: `tests/test_sso_render.py`.
@@ -923,8 +943,8 @@ instantiating any component and fail closed with no configured key.
 every environment** -- `templates/auto-provisioned-keys-job.yaml`'s pre-install/
 pre-upgrade hook keeps the `<release>-bundle-signing` Secret and
 `<release>-bundle-signing-public` ConfigMap in sync on every `helm install`/
-`helm upgrade` (generating the Secret itself on a miss in alpha/local; requiring
-a pre-created Secret or `externalSecret: true` elsewhere), and
+`helm upgrade` (generating the Secret itself on a miss in every tier; `externalSecret: true`
+opts out), and
 `svc-bundles-executor` now source `BUNDLE_SIGNING_PUBLIC_KEYS`
 from that ConfigMap by default -- see "Self-provisioned platform keys" above.
 `make generate-bundle-signing-key` and
@@ -1060,3 +1080,15 @@ instead of running unverified) and `EXECUTOR_PRECOMPILED_PREFIX` (default `preco
 object prefix inside the bundle bucket. The ConfigMap is published by the key-provisioning hook;
 on alpha/local the keypair is generated, on beta/gamma/production the private-key Secret must
 be pre-created or delegated (`autoProvisionedKeys.precompileSigning.externalSecret: true`).
+## Helm matrix gate (`make test-helm-matrix`)
+
+One command runs what CI and review need for this chart: for every helm major present (v3 and v4,
+the chart must work with both) and every environment (alpha, dal2alpha, beta, gamma, production,
+local, ci) it runs `helm lint`, `helm template` and `kubeconform -strict`, then the render
+scripts in `scripts/ci/` (hook dependency ordering, placeholder credentials, manifest invariants,
+seeder Valkey TLS), `check_helm_hook_phases.py`, `check_wait_for_hub_api.py`, the executor render
+test and the chart tests. It prints counts, and zero items examined (no helm, no documents, no
+hooks, no passing tests) is a failure. `make test-helm-matrix-quick` skips the chart tests.
+Point it at specific binaries with `HELM3=` / `HELM4=`; keep renders and logs with
+`HELM_MATRIX_OUT=dir`. Beta/gamma/production/ci render with `--set global.deploymentTier=alpha`,
+as CI does, because those tiers need real secrets.

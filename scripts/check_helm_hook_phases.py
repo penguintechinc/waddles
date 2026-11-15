@@ -55,7 +55,10 @@ def _render() -> list[dict]:
 
 
 def _needs_db(doc: dict) -> bool:
-    text = json.dumps(doc)
+    # Only what the Job's POD consumes counts. Metadata is excluded on purpose: the provision-secrets
+    # hook's `waddles.penguintech.io/provisions-secrets` annotation NAMES db-migrate-secret because it
+    # CREATES it (it never connects to the DB), which a whole-document scan misreads as a dependency.
+    text = json.dumps(((doc.get("spec") or {}).get("template")) or doc)
     return any(marker in text for marker in ("DATABASE_URL", "POSTGRES_PASSWORD", "db-migrate-secret"))
 
 

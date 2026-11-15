@@ -236,6 +236,9 @@ async-trait = "=0.1.89"
 # declares the identical dependency so the breaker logic is written and
 # tested exactly once. See `core/circuit_breaker/Cargo.toml`.
 circuit-breaker = { path = "../circuit_breaker", version = "=0.1.0" }
+# Command-latency SLA telemetry (owner SLA 2026-11-14): first-door stamp in the tracestate, per-hop and
+# end-to-end histograms, bounded label registries, kill switch `waddles.disable-command-latency-telemetry`.
+command-latency = { path = "../command_latency", version = "=0.1.0" }
 # `futures_util::StreamExt`/`join_all`: `grant_gate`'s pub/sub invalidation
 # subscriber (`PubSubStream::into_on_message()`) AND
 # `apply_active_set`'s concurrent per-(session,bundle) Load/Unload dispatch

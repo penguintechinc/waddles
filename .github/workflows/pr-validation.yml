@@ -971,6 +971,13 @@ jobs:
       - name: Check Dockerfile.rust path-dependency coverage
         run: python3 scripts/ci/check-dockerfile-rust-path-deps.py
 
+      # Standing rule: every dependency is hash-pinned. Any `pip install` in any Dockerfile must
+      # be `--require-hashes`, or a local-path `--no-deps --no-build-isolation` install after a
+      # hash-locked one in the same build stage (the old unhashed flask_core install is the
+      # failing fixture in scripts/ci/tests/test_check_dockerfile_pip_hashes.py).
+      - name: Check every Dockerfile pip install is hash-locked
+        run: python3 scripts/ci/check-dockerfile-pip-hashes.py
+
   alembic-single-head:
     name: Alembic single-head invariant (static, no DB)
     needs: changes

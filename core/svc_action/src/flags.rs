@@ -557,6 +557,20 @@ fn shared_flags_license_client() -> Option<Arc<penguin_licensing::LicenseClient>
     CLIENT.get_or_init(crate::build_license_client).clone()
 }
 
+/// The command-latency kill-switch resolver (`waddles.disable-command-latency-telemetry`): `true`
+/// means telemetry is DISABLED. Opt-out convention: an unseen flag leaves the mechanism ON. Under the
+/// license bypass domain `flag_enabled` reads ON for every flag, which for an opt-OUT flag would
+/// switch the mechanism off, so the bypass answer is the ENV baseline only.
+pub async fn command_latency_kill_switch_wanted() -> bool {
+    let env = command_latency::switch::env_baseline_disabled();
+    match shared_flags_license_client() {
+        Some(c) if !c.bypass_active() => {
+            env || c.flag_enabled(command_latency::switch::FLAG_KEY).await
+        }
+        _ => env,
+    }
+}
+
 /// `crate::telemetry::register_flags_metrics`'s counter, wired in here --
 /// see `core/svc_process::license::FLAGS_EVAL_TOTAL`'s identical doc for
 /// the cardinality/labeling rationale.

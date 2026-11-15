@@ -214,6 +214,7 @@ spec:
             drop:
             - ALL
         env:
+        {{- include "waddlebot.otel.env" (dict "root" $ "service" "svc-bundles-executor") | nindent 8 }}
         # Comma-separated list: one dial loop per stage (core/bundle_executor/src/config.rs
         # stage_targets). Every stage shares the HOST_API_* mTLS material + identity below.
         - name: STAGE_HOST_API_ADDR

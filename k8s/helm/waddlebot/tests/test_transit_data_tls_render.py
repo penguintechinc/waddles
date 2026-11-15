@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from provision_harness import with_provisioned  # type: ignore[import-not-found]
 
 _CHART = Path(__file__).resolve().parent.parent
 _ENVS = (
@@ -186,7 +187,8 @@ def test_every_db_client_is_verify_full_with_mounted_ca(values):
 
 @pytest.mark.parametrize("values", _ENVS)
 def test_no_plaintext_postgres_dsn_or_host_anywhere(values):
-    docs = _docs(values)
+    # db-migrate-secret is DERIVED at runtime by the provision-secrets hook; run the real hook.
+    docs = with_provisioned(_docs(values))
     cfg = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "waddlebot-config")
     assert cfg["data"]["DB_HOST"].endswith(".svc.cluster.local")
     assert cfg["data"]["DATABASE_HOST"].endswith(".svc.cluster.local")
@@ -217,7 +219,8 @@ def test_cache_valkey_has_no_plaintext_listener_or_port(values):
 
 @pytest.mark.parametrize("values", _ENVS)
 def test_every_cache_url_is_rediss_with_ca_pinned(values):
-    docs = _docs(values)
+    # the composed URLs are written at runtime by the provision-secrets hook; run the real hook.
+    docs = with_provisioned(_docs(values))
     sec = _secrets_doc(docs)
     urls = {k: v for k, v in sec["stringData"].items() if k.startswith(("REDIS_URL", "VALKEY_URL", "VALKEY_DURABLE_URL", "VALKEY_KV_URL"))}
     assert {"REDIS_URL", "VALKEY_URL"} <= set(urls)
