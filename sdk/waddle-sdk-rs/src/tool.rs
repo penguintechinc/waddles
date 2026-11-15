@@ -127,6 +127,11 @@ pub struct ToolContext {
     /// The host-derived scopes of that actor (from their community role).
     /// Empty when `actor` is `None`.
     pub actor_scopes: Vec<String>,
+    /// The host-derived PER-COMMUNITY call-participant pseudonym of the actor
+    /// (never the global user uuid): the only identity a media/call service may
+    /// send downstream. `None` when the host could not derive it; callers then
+    /// fail closed. Present only together with `actor`.
+    pub participant: Option<String>,
 }
 
 impl ToolContext {
@@ -200,10 +205,16 @@ impl ToolRegistry {
                             .collect::<Result<Vec<_>, _>>()?,
                         Some(_) => return Err(bad_ctx()),
                     };
-                    // Scopes without an actor are meaningless: drop them.
+                    let participant = match c.get("participant") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(p)) => Some(p.clone()),
+                        Some(_) => return Err(bad_ctx()),
+                    };
+                    // Scopes/participant without an actor are meaningless: drop them.
                     if actor.is_some() {
                         ctx.actor = actor;
                         ctx.actor_scopes = scopes;
+                        ctx.participant = participant;
                     }
                 }
                 Some(_) => return Err(bad_ctx()),

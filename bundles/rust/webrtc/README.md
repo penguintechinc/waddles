@@ -16,6 +16,69 @@ calls the `webrtc` host capability (`wit/waddle-bundle/webrtc.wit`).
 | `whep.endpoint {room_id, participant_id?, source?, ttl_secs?}` | write, dangerous | playback URL + subscribe-only token (optionally pinned to one publisher) |
 | `track.route {room_id, mode}` | write | `sfu` (local fan-out); `relay` fails loud (unsupported) |
 | `recording.start/stop {room_id}` | write | fails loud: no room recording path yet |
+| `room.list`, `room.participants {room_id}` | read | live rooms / participants (UUIDs + media flags only) |
+| `participant.self {}` | read (member) | the caller's host-derived PER-COMMUNITY call-participant id `{participant}` (same uuid5 hub-api's REST layer uses); fails closed when the host could not derive it |
+| `room.leave {room_id}` | write, `community:member` | removes only the verified caller from the room (no participant argument) |
+| `room.kick|mute|unmute {room_id, participant_id}` | write, `community:moderate` | moderate another participant; kick closes sessions and blocks rejoin |
+| `room.mute_all|lock|unlock {room_id}` | write, `community:moderate` | `mute_all` never mutes the verified caller (the server excludes `actor_id`) |
+| `room.hand.raise {room_id, api_version?}` | write, `community:member` | the verified caller raises their OWN hand (idempotent) |
+| `room.hand.lower {room_id, api_version?}` | write, `community:member` | the verified caller lowers their OWN hand |
+| `room.hand.list {room_id, api_version?}` | read, `community:member` | the caller's own entry (+ `position`) and the queue `count` -- never other participants |
+| `room.hand.lower_other {room_id, participant_id, api_version?}` | write, `community:moderate` | lower another participant's hand |
+| `room.hand.list_all {room_id, api_version?}` | read, `community:moderate` | the whole ordered queue |
+| `room.hand.ack {room_id, participant_id, api_version?}` | write, `community:moderate` | acknowledge one raised hand |
+| `room.hand.reset {room_id, api_version?}` | write, `community:moderate` | clear the whole queue; returns `cleared` |
+
+## Verified actor (all actor-bound tools)
+
+`room.leave|kick|mute|unmute|mute_all|lock|unlock` and every `room.hand.*` tool take the actor from
+the HOST-VERIFIED tool context (`ToolContext.actor`, role derived from its host-derived scopes);
+`actor_id` / `actor_role` arguments are refused. The manifest `required_scope` (member for
+`room.leave` and the own-hand tools, moderate for everything else) is verified by the host before
+dispatch and re-checked in the tool. Every host op carries `actor_id` and the scope-derived
+`actor_role` (for `room.leave`, `participant_id` is the actor too) so svc-streaming can bind them to
+the authenticated call and re-check them itself.
+
+## Raised hands
+
+The queue is AUTHORITATIVE in svc-streaming's `RoomService` (gRPC `RaiseHand`/`LowerHand`/
+`ListHands`/`AcknowledgeHand`/`ResetHands`); neither this bundle nor the rooms app keeps a copy.
+The server clears a participant's hand when they leave, are kicked or the room is deleted.
+
+**Receiver-gated authorization.** A hand tool NEVER takes the actor or a role from its arguments:
+`actor_id` / `actor_role` are refused outright. The actor is the HOST-VERIFIED tool context
+(`ToolContext.actor`, a community user UUID) and the role is derived from its host-derived scopes.
+What the caller may do is decided by WHICH tool it calls: the manifest `required_scope`
+(`community:member` for the own-hand tools, `community:moderate` for `lower_other`, `list_all`,
+`ack`, `reset`) is verified by the host before dispatch, and the tool re-checks the scope on the
+verified context. Each tool also validates its args (lowercase UUIDs, `api_version` absent or
+`"v1"`, unknown fields rejected) and forwards to a host op (`POST /host/v1/webrtc/room.hand.*`,
+always stating `api_version: "v1"`) carrying `actor_id` (the verified actor) and `actor_role`
+(derived from the verified scopes) on EVERY op, so svc-streaming can bind the actor to the
+authenticated call and re-check it against its own room state instead of trusting this bundle.
+`lower_other` / `list_all` use the host op of their own-hand sibling; the host MUST decide by the
+forwarded actor, never by the tool name: a non-staff `actor_role` may lower only its own hand and
+`room.hand.list` must return only the actor's own entry for it.
+
+| Host op | Request | Response |
+|---|---|---|
+| `room.hand.raise` | `{api_version, room_id, participant_id (= actor_id), actor_id, actor_role}` | `{room_id, hand:{participant_id, raised_at, acknowledged_at?, acknowledged_by?}}` |
+| `room.hand.lower` | `{api_version, room_id, participant_id, actor_id, actor_role}` | `{room_id, participant_id, lowered}` (`false` = no hand, not an error) |
+| `room.hand.list` | `{api_version, room_id, actor_id, actor_role}` | `{room_id, hands:[hand...]}` oldest first |
+| `room.hand.ack` | `{api_version, room_id, participant_id, actor_id, actor_role}` | `{room_id, hand}`; `not_found` when no such hand |
+| `room.hand.reset` | `{api_version, room_id, actor_id, actor_role}` | `{room_id, cleared}` |
+
+## Access and token policy (one source of truth)
+
+`contract/grants.json` is the machine-readable policy; `src/grants.rs` is its single Rust
+implementation (`grants_for(kind, role, ctx)`), compiled into BOTH this bundle and the rooms app
+(`#[path]` include, so changing it re-digests both: bump both versions). Closed, out-of-window
+and locked rooms refuse non-staff; a green room is staff-only; guests (opt-in per room) only
+subscribe; a stage lets only staff publish. Join tokens are short (`join_ttl_secs` 60, never above
+`join_ttl_max_secs` 900), ES256, and identify the participant by UUID (`sub`) only -- never a
+display name. The unit tests of both crates and `scripts/ci/tests/test_rooms_webrtc_contract.py`
+replay the file; the CI test also checks svc-streaming's token and hub-api's REST join against it
+(known disagreements are strict xfails owned by the hub-api / svc-streaming branches).
 
 Safety: args validated first (lowercase UUIDs, bounded ints, unknown fields rejected); the
 community is never an argument (the stage supplies it); results are rebuilt from a field
@@ -29,3 +92,15 @@ Host side: `core/svc_streaming/src/rooms/` -- `host_api.rs` (mTLS `POST /host/v1
 
 Build: `cargo component build --release --target wasm32-wasip2 --locked`; tests: `cargo test`
 (bindings are generated by the build).
+
+## Participant identity (per-community pseudonym)
+
+Every id this bundle sends to svc-streaming (`actor_id`, `participant_id`) is the HOST-derived
+`__ctx.participant` = `uuid5(6f3c1c1e-5b8e-4a67-9d3b-2f0c8f3f6a11, "<tenant slug>:<community id>:<hub user id>")`
+(platform-only members: their per-tenant `user_uuid`). It equals hub-api's
+`call_participants.identity_uuid`, so chat `!room kick` and REST kick target the same participant, and the
+global `hub_users.uuid` never leaves the platform. No pseudonym in the context => `forbidden` (never a fallback to
+`actor`). Shared vectors: `docs/contracts/call_participant_id_vectors.json` (Rust host + Python tests).
+
+`room.create` args also accept the room facts `kind` (`community|stage|green_room`; a town hall is hub-api only),
+`closed`, `allow_guests`, `starts_at`, `ends_at`; svc-streaming validates and enforces them on join.

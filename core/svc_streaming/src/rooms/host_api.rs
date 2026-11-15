@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 
-use super::{ActorRole, HandView, IssueRequest, RoomError, RoomService, RouteMode};
+use super::{ActorRole, HandView, IssueRequest, RoomError, RoomFacts, RoomKind, RoomService, RouteMode};
 
 /// Errors building/running the listener.
 #[derive(Debug, thiserror::Error)]
@@ -148,6 +148,17 @@ struct CreateReq {
     label: Option<String>,
     max_publishers: Option<usize>,
     route: Option<RouteMode>,
+    /// Room facts (default: an open community room). Validated by `RoomFacts::validate`.
+    #[serde(default)]
+    kind: RoomKind,
+    #[serde(default)]
+    closed: bool,
+    #[serde(default)]
+    starts_at: Option<i64>,
+    #[serde(default)]
+    ends_at: Option<i64>,
+    #[serde(default)]
+    allow_guests: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -274,11 +285,19 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
         "room.create" => {
             let r: CreateReq = parse(body)?;
             let info = svc
-                .create(
+                .create_with_facts(
                     &r.community_id,
                     r.label,
                     r.max_publishers,
                     r.route.unwrap_or(RouteMode::Sfu),
+                    None,
+                    RoomFacts {
+                        kind: r.kind,
+                        closed: r.closed,
+                        starts_at: r.starts_at,
+                        ends_at: r.ends_at,
+                        allow_guests: r.allow_guests,
+                    },
                 )
                 .await?;
             Ok(json!(info))

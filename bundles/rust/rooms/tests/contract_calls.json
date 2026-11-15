@@ -1,60 +1,81 @@
 {
   "admin.verify": {},
+  "participant.self": {},
   "room.create": {
-    "label": "Game Night"
+    "label": "Game Night",
+    "kind": "community",
+    "closed": false,
+    "allow_guests": false
   },
   "room.close": {
     "room_id": "00000000-0000-0000-0000-000000000001"
   },
   "whip.endpoint": {
     "room_id": "00000000-0000-0000-0000-000000000001",
-    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "ttl_secs": 60
   },
   "whep.endpoint": {
     "room_id": "00000000-0000-0000-0000-000000000001",
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "ttl_secs": 60
+  },
+  "room.hand.raise": {
+    "api_version": "v1",
+    "room_id": "00000000-0000-0000-0000-000000000001"
+  },
+  "room.hand.lower": {
+    "api_version": "v1",
+    "room_id": "00000000-0000-0000-0000-000000000001"
+  },
+  "room.hand.lower_other": {
+    "api_version": "v1",
+    "room_id": "00000000-0000-0000-0000-000000000001",
     "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+  },
+  "room.hand.list": {
+    "api_version": "v1",
+    "room_id": "00000000-0000-0000-0000-000000000001"
+  },
+  "room.hand.list_all": {
+    "api_version": "v1",
+    "room_id": "00000000-0000-0000-0000-000000000001"
+  },
+  "room.hand.ack": {
+    "api_version": "v1",
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+  },
+  "room.hand.reset": {
+    "api_version": "v1",
+    "room_id": "00000000-0000-0000-0000-000000000001"
   },
   "room.list": {},
   "room.participants": {
     "room_id": "00000000-0000-0000-0000-000000000001"
   },
   "room.leave": {
-    "room_id": "00000000-0000-0000-0000-000000000001",
-    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    "actor_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    "actor_role": "member"
+    "room_id": "00000000-0000-0000-0000-000000000001"
   },
   "room.kick": {
     "room_id": "00000000-0000-0000-0000-000000000001",
-    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-    "actor_role": "admin"
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
   },
   "room.mute": {
     "room_id": "00000000-0000-0000-0000-000000000001",
-    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-    "actor_role": "admin"
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
   },
   "room.unmute": {
     "room_id": "00000000-0000-0000-0000-000000000001",
-    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-    "actor_role": "admin"
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
   },
   "room.mute_all": {
-    "room_id": "00000000-0000-0000-0000-000000000001",
-    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-    "actor_role": "admin"
+    "room_id": "00000000-0000-0000-0000-000000000001"
   },
   "room.lock": {
-    "room_id": "00000000-0000-0000-0000-000000000001",
-    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-    "actor_role": "admin"
+    "room_id": "00000000-0000-0000-0000-000000000001"
   },
   "room.unlock": {
-    "room_id": "00000000-0000-0000-0000-000000000001",
-    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-    "actor_role": "admin"
+    "room_id": "00000000-0000-0000-0000-000000000001"
   }
 }

@@ -2,7 +2,7 @@
 schema_version: 2
 app_id: waddles.core.service.webrtc
 name: WebRTC Service Bundle (Rust)
-version: 1.1.0
+version: 1.3.0
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -45,6 +45,21 @@ exported_tools:
       route:
         enum:
         - sfu
+      kind:
+        enum:
+        - community
+        - stage
+        - green_room
+      closed:
+        type: boolean
+      allow_guests:
+        type: boolean
+      starts_at:
+        type: integer
+        minimum: 0
+      ends_at:
+        type: integer
+        minimum: 0
     required: []
     additionalProperties: false
   output_schema:
@@ -366,6 +381,21 @@ exported_tools:
       verified:
         type: boolean
   required_scope: community:admin
+- name: participant.self
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      participant:
+        type: string
+        format: uuid
+  required_scope: community:member
 - name: recording.stop
   access: write
   risk: normal
@@ -470,23 +500,8 @@ exported_tools:
       room_id:
         type: string
         format: uuid
-      participant_id:
-        type: string
-        format: uuid
-      actor_id:
-        type: string
-        format: uuid
-      actor_role:
-        enum:
-        - guest
-        - member
-        - moderator
-        - admin
     required:
     - room_id
-    - participant_id
-    - actor_id
-    - actor_role
     additionalProperties: false
   output_schema:
     type: object
@@ -499,6 +514,7 @@ exported_tools:
         format: uuid
       sessions_closed:
         type: integer
+  required_scope: community:member
 - name: room.kick
   access: write
   risk: dangerous
@@ -511,20 +527,9 @@ exported_tools:
       participant_id:
         type: string
         format: uuid
-      actor_id:
-        type: string
-        format: uuid
-      actor_role:
-        enum:
-        - guest
-        - member
-        - moderator
-        - admin
     required:
     - room_id
     - participant_id
-    - actor_id
-    - actor_role
     additionalProperties: false
   output_schema:
     type: object
@@ -537,6 +542,7 @@ exported_tools:
         format: uuid
       sessions_closed:
         type: integer
+  required_scope: community:moderate
 - name: room.mute
   access: write
   risk: normal
@@ -549,20 +555,9 @@ exported_tools:
       participant_id:
         type: string
         format: uuid
-      actor_id:
-        type: string
-        format: uuid
-      actor_role:
-        enum:
-        - guest
-        - member
-        - moderator
-        - admin
     required:
     - room_id
     - participant_id
-    - actor_id
-    - actor_role
     additionalProperties: false
   output_schema:
     type: object
@@ -575,6 +570,7 @@ exported_tools:
         format: uuid
       muted:
         type: boolean
+  required_scope: community:moderate
 - name: room.unmute
   access: write
   risk: normal
@@ -587,20 +583,9 @@ exported_tools:
       participant_id:
         type: string
         format: uuid
-      actor_id:
-        type: string
-        format: uuid
-      actor_role:
-        enum:
-        - guest
-        - member
-        - moderator
-        - admin
     required:
     - room_id
     - participant_id
-    - actor_id
-    - actor_role
     additionalProperties: false
   output_schema:
     type: object
@@ -613,6 +598,7 @@ exported_tools:
         format: uuid
       muted:
         type: boolean
+  required_scope: community:moderate
 - name: room.mute_all
   access: write
   risk: normal
@@ -622,19 +608,8 @@ exported_tools:
       room_id:
         type: string
         format: uuid
-      actor_id:
-        type: string
-        format: uuid
-      actor_role:
-        enum:
-        - guest
-        - member
-        - moderator
-        - admin
     required:
     - room_id
-    - actor_id
-    - actor_role
     additionalProperties: false
   output_schema:
     type: object
@@ -644,6 +619,7 @@ exported_tools:
         format: uuid
       muted:
         type: integer
+  required_scope: community:moderate
 - name: room.lock
   access: write
   risk: normal
@@ -653,19 +629,8 @@ exported_tools:
       room_id:
         type: string
         format: uuid
-      actor_id:
-        type: string
-        format: uuid
-      actor_role:
-        enum:
-        - guest
-        - member
-        - moderator
-        - admin
     required:
     - room_id
-    - actor_id
-    - actor_role
     additionalProperties: false
   output_schema:
     type: object
@@ -675,6 +640,7 @@ exported_tools:
         format: uuid
       locked:
         type: boolean
+  required_scope: community:moderate
 - name: room.unlock
   access: write
   risk: normal
@@ -684,19 +650,8 @@ exported_tools:
       room_id:
         type: string
         format: uuid
-      actor_id:
-        type: string
-        format: uuid
-      actor_role:
-        enum:
-        - guest
-        - member
-        - moderator
-        - admin
     required:
     - room_id
-    - actor_id
-    - actor_role
     additionalProperties: false
   output_schema:
     type: object
@@ -706,6 +661,245 @@ exported_tools:
         format: uuid
       locked:
         type: boolean
+  required_scope: community:moderate
+- name: room.hand.raise
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      api_version:
+        enum:
+        - v1
+      room_id:
+        type: string
+        format: uuid
+    required:
+    - room_id
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      hand:
+        type: object
+        properties:
+          participant_id:
+            type: string
+            format: uuid
+          raised_at:
+            type: integer
+          acknowledged_at:
+            type: integer
+          acknowledged_by:
+            type: string
+            format: uuid
+  required_scope: community:member
+- name: room.hand.lower
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      api_version:
+        enum:
+        - v1
+      room_id:
+        type: string
+        format: uuid
+    required:
+    - room_id
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      participant_id:
+        type: string
+        format: uuid
+      lowered:
+        type: boolean
+  required_scope: community:member
+- name: room.hand.lower_other
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      api_version:
+        enum:
+        - v1
+      room_id:
+        type: string
+        format: uuid
+      participant_id:
+        type: string
+        format: uuid
+    required:
+    - room_id
+    - participant_id
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      participant_id:
+        type: string
+        format: uuid
+      lowered:
+        type: boolean
+  required_scope: community:moderate
+- name: room.hand.list
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      api_version:
+        enum:
+        - v1
+      room_id:
+        type: string
+        format: uuid
+    required:
+    - room_id
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      count:
+        type: integer
+      hands:
+        type: array
+        items:
+          type: object
+          properties:
+          participant_id:
+            type: string
+            format: uuid
+          raised_at:
+            type: integer
+          acknowledged_at:
+            type: integer
+          acknowledged_by:
+            type: string
+            format: uuid
+            position:
+              type: integer
+  required_scope: community:member
+- name: room.hand.list_all
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      api_version:
+        enum:
+        - v1
+      room_id:
+        type: string
+        format: uuid
+    required:
+    - room_id
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      count:
+        type: integer
+      hands:
+        type: array
+        items:
+          type: object
+          properties:
+          participant_id:
+            type: string
+            format: uuid
+          raised_at:
+            type: integer
+          acknowledged_at:
+            type: integer
+          acknowledged_by:
+            type: string
+            format: uuid
+            position:
+              type: integer
+  required_scope: community:moderate
+- name: room.hand.ack
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      api_version:
+        enum:
+        - v1
+      room_id:
+        type: string
+        format: uuid
+      participant_id:
+        type: string
+        format: uuid
+    required:
+    - room_id
+    - participant_id
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      hand:
+        type: object
+        properties:
+          participant_id:
+            type: string
+            format: uuid
+          raised_at:
+            type: integer
+          acknowledged_at:
+            type: integer
+          acknowledged_by:
+            type: string
+            format: uuid
+  required_scope: community:moderate
+- name: room.hand.reset
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      api_version:
+        enum:
+        - v1
+      room_id:
+        type: string
+        format: uuid
+    required:
+    - room_id
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      cleared:
+        type: integer
+  required_scope: community:moderate
 config_schema: {}
 compatible_with: []
 incompatible_with: []
