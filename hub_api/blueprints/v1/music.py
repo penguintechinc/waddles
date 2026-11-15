@@ -24,6 +24,7 @@ publishes.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -42,6 +43,8 @@ from services.music_service import MusicProviderDTO, MusicSettingsDTO, RadioStat
 from services.pagination import parse_limit
 from services.schema import bind_streaming_tables
 from services.scope_registry import SCOPE_MUSIC_STATION
+
+logger = logging.getLogger(__name__)
 
 music_bp = Blueprint("v1_music", __name__, url_prefix="/api/v1/admin")
 
@@ -198,6 +201,7 @@ async def get_music_settings(
             raise payment_required("The Music Station is not enabled for this plan")
         settings = await svc.get_music_settings(async_dal, dal, community_id=community_id)
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return MusicSettingsResponse(success=True, settings=settings)
 
@@ -233,6 +237,7 @@ async def update_music_settings(data: UpdateMusicSettingsRequest, community_id: 
             async_dal, dal, community_id=community_id, fields=fields
         )
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return jsonify_dto(MusicSettingsResponse(success=True, settings=settings))
 
@@ -256,6 +261,7 @@ async def get_providers(
         )
         providers = await svc.get_providers(async_dal, dal, community_id=community_id)
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return MusicProvidersResponse(success=True, providers=providers)
 
@@ -286,6 +292,7 @@ async def start_oauth(
             redirect_uri=data.redirectUri,
         )
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return StartOAuthResponse(success=True, authUrl=auth_url, stateToken=state_token)
 
@@ -309,6 +316,7 @@ async def disconnect_provider(
         )
         await svc.disconnect_provider(async_dal, dal, community_id=community_id, provider=provider)
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return MessageResponse(success=True, message=f"{provider} provider disconnected")
 
@@ -336,8 +344,10 @@ async def get_radio_stations(
             async_dal, dal, community_id=community_id, page=page, limit=limit
         )
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
-    except ValueError:
+    except ValueError as exc:
+        logger.debug("rejected non-integer page/limit in music: %s", exc)
         return _err(bad_request("page/limit must be integers"))
     pages = (total + limit - 1) // limit if limit else 0
     return RadioStationsResponse(
@@ -377,6 +387,7 @@ async def add_radio_station(data: AddRadioStationRequest, community_id: int) -> 
             created_by=created_by,
         )
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return jsonify_dto(RadioStationResponse(success=True, station=station), 201)
 
@@ -402,6 +413,7 @@ async def remove_radio_station(
             async_dal, dal, community_id=community_id, station_id=station_id
         )
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return MessageResponse(success=True, message="Radio station removed")
 

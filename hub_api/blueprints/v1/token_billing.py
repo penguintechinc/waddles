@@ -24,6 +24,7 @@ tokens on a premium feature is a normal member action, not an admin one.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -37,6 +38,8 @@ from services import token_billing_service as svc
 from services.community_authz import authorize_community
 from services.errors import ApiError, bad_request
 from services.scope_registry import SCOPE_TOKEN_BILLING
+
+logger = logging.getLogger(__name__)
 
 token_products_bp = Blueprint(
     "v1_marketplace_token_products", __name__, url_prefix="/api/v1/marketplace/token-products"
@@ -312,6 +315,7 @@ async def credit_tokens(
             ref=data.ref,
         )
     except ApiError as exc:
+        logger.debug("handled %s in token_billing: %s", type(exc).__name__, exc)
         return _err(exc)
     if not result.ok:
         return _blocked_response(result)
@@ -405,6 +409,7 @@ async def get_transactions(
             offset=offset,
         )
     except ApiError as exc:
+        logger.debug("handled %s in token_billing: %s", type(exc).__name__, exc)
         return _err(exc)
     return TokenTransactionsResponse(
         success=True,

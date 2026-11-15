@@ -41,6 +41,7 @@ own docstring, not repeated here.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass
 from typing import Any, cast
 
@@ -53,6 +54,8 @@ from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request
 from services.schema import bind_github_sync_tables
 from services.scope_registry import SCOPE_GITHUB_MANAGE
+
+logger = logging.getLogger(__name__)
 
 github_sync_webhook_bp = Blueprint(
     "v1_github_sync_webhook", __name__, url_prefix="/api/v1/github-sync"
@@ -82,6 +85,7 @@ async def _guard(raw_community_id: str) -> int | tuple[dict[str, object], int]:
             async_dal, dal, request, community_id=community_id, scope=SCOPE_GITHUB_MANAGE
         )
     except ApiError as exc:
+        logger.debug("handled %s in github_sync: %s", type(exc).__name__, exc)
         return _err(exc)
     return community_id
 

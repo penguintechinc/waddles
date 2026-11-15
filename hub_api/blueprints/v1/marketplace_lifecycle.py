@@ -688,6 +688,7 @@ async def deactivate_bundle(
         )
         await svc.deactivate_bundle(async_dal, dal, community_id=community_id, app_id=app_id)
     except ApiError as exc:
+        logger.debug("handled %s in marketplace_lifecycle: %s", type(exc).__name__, exc)
         return _err(exc)
     return MessageResponse(success=True, message=f"Bundle {app_id} deactivated")
 

@@ -256,6 +256,7 @@ async def get_policy(community_id: int) -> PolicyResponse | tuple[dict[str, obje
             async_dal, dal, tenant_id=tenant_id, community_id=community_id
         )
     except ApiError as exc:
+        logger.debug("handled %s in community_music_queue: %s", type(exc).__name__, exc)
         return _err(exc)
     return PolicyResponse(success=True, policy=policy)
 
@@ -285,6 +286,7 @@ async def set_policy(data: SetPolicyRequest, community_id: int) -> Any:
             updated_by=actor_id,
         )
     except ApiError as exc:
+        logger.debug("handled %s in community_music_queue: %s", type(exc).__name__, exc)
         return _err(exc)
     return jsonify_dto(PolicyResponse(success=True, policy=policy))
 
@@ -410,6 +412,7 @@ async def kick_song(community_id: int, queue_id: int) -> Any:
             reason=reason,
         )
     except ApiError as exc:
+        logger.debug("handled %s in community_music_queue: %s", type(exc).__name__, exc)
         return _err(exc)
     return jsonify_dto(MessageResponse(success=True, message=f"Queue item {queue_id} removed"))
 
@@ -437,6 +440,7 @@ async def kick_playlist(community_id: int, playlist_id: str) -> Any:
             reason=reason,
         )
     except ApiError as exc:
+        logger.debug("handled %s in community_music_queue: %s", type(exc).__name__, exc)
         return _err(exc)
     return jsonify_dto(
         MessageResponse(success=True, message=f"Removed {removed} item(s) from playlist")
@@ -464,6 +468,7 @@ async def reorder_queue(data: ReorderQueueRequest, community_id: int) -> Any:
             async_dal, dal, community_id=community_id, ordered_queue_ids=data.orderedQueueIds
         )
     except ApiError as exc:
+        logger.debug("handled %s in community_music_queue: %s", type(exc).__name__, exc)
         return _err(exc)
     now_playing, _ = await svc.list_queue(async_dal, dal, community_id=community_id)
     return jsonify_dto(QueueListResponse(success=True, nowPlaying=now_playing, upcoming=upcoming))
@@ -482,6 +487,7 @@ async def advance_queue(community_id: int) -> Any:
             async_dal, dal, _redis_client(), community_id=community_id
         )
     except ApiError as exc:
+        logger.debug("handled %s in community_music_queue: %s", type(exc).__name__, exc)
         return _err(exc)
     return jsonify_dto(AdvanceResponse(success=True, previous=previous, next=next_item))
 

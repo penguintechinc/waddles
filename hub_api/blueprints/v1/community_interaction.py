@@ -15,6 +15,7 @@ auto-discovery -- no edit to `routers/v1.py` needed.
 from __future__ import annotations
 
 import functools
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -60,6 +61,8 @@ from services.scope_registry import (
     describe_scopes,
 )
 
+logger = logging.getLogger(__name__)
+
 interaction_admin_bp = Blueprint(
     "v1_community_interaction_admin", __name__, url_prefix="/api/v1/admin"
 )
@@ -102,6 +105,7 @@ def require_community_scope(scope: str) -> Callable[[Any], Any]:
                     request, current_app.config["dal"], community_id=community_id
                 )
             except ApiError as exc:
+                logger.debug("handled %s in community_interaction: %s", type(exc).__name__, exc)
                 return _guard_error(exc)
             if scope not in held:
                 return {"success": False, "error": f"Missing required scope: {scope}"}, 403
@@ -250,6 +254,7 @@ async def admin_create_role(community_id: int) -> tuple[dict[str, object], int]:
             current_app.config["dal"], community_id, payload, editor_scopes=editor
         )
     except ApiError as exc:
+        logger.debug("handled %s in community_interaction: %s", type(exc).__name__, exc)
         return _guard_error(exc)
     if err:
         status = 409 if "already exists" in err else 400
@@ -270,6 +275,7 @@ async def admin_update_role(community_id: int, role_id: int) -> tuple[dict[str, 
             current_app.config["dal"], community_id, role_id, payload, editor_scopes=editor
         )
     except ApiError as exc:
+        logger.debug("handled %s in community_interaction: %s", type(exc).__name__, exc)
         return _guard_error(exc)
     if err == "__not_found__":
         return {"success": False, "error": "Role not found"}, 404
@@ -293,6 +299,7 @@ async def admin_delete_role(community_id: int, role_id: int) -> tuple[dict[str, 
             current_app.config["dal"], community_id, role_id, editor_scopes=editor
         )
     except ApiError as exc:
+        logger.debug("handled %s in community_interaction: %s", type(exc).__name__, exc)
         return _guard_error(exc)
     if err == "__not_found__":
         return {"success": False, "error": "Role not found"}, 404

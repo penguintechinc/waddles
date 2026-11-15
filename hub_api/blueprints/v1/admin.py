@@ -77,6 +77,7 @@ def require_member_scope(scope: str) -> Callable[[Any], Any]:
             try:
                 await _require_member_scope(kwargs["community_id"], scope)
             except ApiError as exc:
+                logger.debug("handled %s in admin: %s", type(exc).__name__, exc)
                 return _err(exc)
             return await fn(**kwargs)
 

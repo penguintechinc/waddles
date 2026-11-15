@@ -277,6 +277,7 @@ async def deactivate(
             deactivated_by=get_current_user_id(request),
         )
     except ApiError as exc:
+        logger.debug("handled %s in bundle_activation: %s", type(exc).__name__, exc)
         return _err(exc)
     return MessageResponse(success=True, message=f"{app_id} deactivated")
 
