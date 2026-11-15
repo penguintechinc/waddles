@@ -344,3 +344,41 @@ def test_malformed_kid_never_reaches_the_cache(bad_kid: str, clock: _Clock) -> N
     with pytest.raises(jk.UnknownKidError):
         ring.verify_key(bad_kid)
     assert _Spy.lookups == 0 and loader.calls == 0
+
+
+def test_flood_of_bogus_kids_cannot_starve_a_real_rotation(clock: _Clock) -> None:
+    """Spam first, rotate second: the new kid verifies via the NOTIFY refresh (no miss needed)."""
+    old, old_priv = _entry(1, STATE_ACTIVE)
+    new, new_priv = _entry(2, STATE_ACTIVE)
+    loader = _CountingLoader([old])
+    cache = PlatformSecretCache(loader=loader, clock=clock)
+    cache.seed([old])
+    jk.set_jwt_keyring(PlatformVaultJwtKeyring(cache))
+    for i in range(
+        300
+    ):  # flood: limiter blocks all but one reload, blocked kids are NOT remembered
+        assert verify_jwt_token(_forged_kid_token(f"k{i:016x}")) is None
+    assert loader.calls <= 1
+    # Rotation happens; the new kid is presented while the limiter is still closed.
+    loader.entries = [old, new]
+    token = _mint_with(new_priv, new.kid)
+    # (a) the rotation NOTIFY refresh adopts it immediately, no miss needed
+    cache.refresh()
+    assert verify_jwt_token(token) is not None
+
+
+def test_rotation_adopted_after_one_interval_without_notify(clock: _Clock) -> None:
+    old, _ = _entry(1, STATE_ACTIVE)
+    new, new_priv = _entry(2, STATE_ACTIVE)
+    loader = _CountingLoader([old])
+    cache = PlatformSecretCache(loader=loader, clock=clock)
+    cache.seed([old])
+    jk.set_jwt_keyring(PlatformVaultJwtKeyring(cache))
+    for i in range(300):
+        assert verify_jwt_token(_forged_kid_token(f"k{i:016x}")) is None
+    loader.entries = [old, new]
+    token = _mint_with(new_priv, new.kid)
+    assert verify_jwt_token(token) is None  # limiter still closed; kid NOT negative-cached
+    assert new.kid not in {k[2] for k in cache._negative}  # noqa: SLF001
+    clock.now = clock.now + timedelta(seconds=31)
+    assert verify_jwt_token(token) is not None  # one interval later the miss reload adopts it
