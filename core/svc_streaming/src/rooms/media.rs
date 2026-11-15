@@ -29,7 +29,7 @@ use webrtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit}
 use webrtc::runtime::Runtime;
 
 use super::token::RoomClaims;
-use super::{RoomError, RoomService, SessionGrant};
+use super::{RoomError, RoomService, SessionActivity, SessionGrant};
 use crate::egress::whep::{h264_codec, opus_codec, viewer_track};
 use crate::error::ApiError;
 use crate::rtc::fanout::{MediaFanouts, TrackFanout};
@@ -106,6 +106,8 @@ struct PublishHandler {
     gather: Arc<Notify>,
     metrics: RtcMetrics,
     runtime: Arc<dyn Runtime>,
+    /// Ingress RTP counter the room sweeper watches for the publisher idle timeout.
+    packets: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[async_trait]
@@ -127,11 +129,13 @@ impl PeerConnectionEventHandler for PublishHandler {
         let kind = track.kind().await;
         let fanouts = self.fanouts.clone();
         let metrics = self.metrics.clone();
+        let packets = self.packets.clone();
         self.runtime.spawn(Box::pin(async move {
             while let Some(ev) = track.poll().await {
                 let TrackRemoteEvent::OnRtpPacket(p) = ev else {
                     continue;
                 };
+                packets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 metrics
                     .rtp_packets_total
                     .with_label_values(&["ingress"])
@@ -266,12 +270,14 @@ async fn publish(
     let gather = Arc::new(Notify::new());
     let runtime = svc.factory.runtime();
     let reap = ReapSlot::default();
+    let packets = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let handler = Arc::new(PublishHandler {
         reap: reap.clone(),
         fanouts: fanouts.clone(),
         gather: gather.clone(),
         metrics: svc.metrics.clone(),
         runtime,
+        packets: packets.clone(),
     });
     let pc = svc
         .factory
@@ -317,6 +323,9 @@ async fn publish(
             SessionGrant {
                 expires_at: claims.exp,
                 jti,
+            },
+            SessionActivity {
+                packets: Some(packets),
             },
         )
         .await
@@ -493,8 +502,9 @@ async fn end_session(
     Path((room_id, session)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
+    // The token gated admission only: its holder may end their session after it expired.
     let claims = svc
-        .authorize(bearer(&headers)?, room_id)
+        .authorize_established(bearer(&headers)?, room_id)
         .await
         .map_err(api_error)?;
     let participant = claims_participant(&claims)?;

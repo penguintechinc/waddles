@@ -185,8 +185,38 @@ impl CliConfig {
                 reason: "port 0 is not a valid bind port".to_string(),
             });
         }
+        validate_cors_origins(&self.cors_allowed_origins)?;
         Ok(())
     }
+}
+
+/// Validates the media CORS allowlist: every entry must be a bare `http(s)://host[:port]`
+/// origin (no wildcard, no path/query, no trailing slash). Fail loud, never skip an entry.
+pub fn validate_cors_origins(origins: &[String]) -> Result<(), ConfigError> {
+    for raw in origins {
+        let o = raw.trim();
+        if o.is_empty() {
+            continue;
+        }
+        let rest = o
+            .strip_prefix("https://")
+            .or_else(|| o.strip_prefix("http://"));
+        let ok = rest.is_some_and(|r| {
+            !r.is_empty()
+                && !r.contains(['/', '?', '#', '*', '@', ' '])
+                && r.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c))
+        });
+        if !ok {
+            return Err(ConfigError::InvalidValue {
+                field: "cors_allowed_origins",
+                reason: format!(
+                    "{o:?} is not an exact http(s)://host[:port] origin (wildcards are not allowed)"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Parses `"<start>-<end>"` into an inclusive `(u16, u16)` range, validating
@@ -396,5 +426,39 @@ mod tests {
         assert!(!rendered.contains("super-secret-db-pass"));
         assert!(!rendered.contains("super-secret-api-key"));
         clear_secret_env();
+    }
+
+    #[test]
+    fn cors_origins_must_be_exact_origins_never_wildcards() {
+        let ok = |v: &[&str]| {
+            validate_cors_origins(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        assert!(ok(&[]).is_ok());
+        assert!(ok(&["", "  "]).is_ok(), "blank entries are ignored");
+        assert!(ok(&["https://app.waddles.gg", "http://localhost:5173"]).is_ok());
+        for bad in [
+            "*",
+            "https://*.waddles.gg",
+            "app.waddles.gg",
+            "https://app.waddles.gg/",
+            "https://app.waddles.gg/path",
+            "ftp://app.waddles.gg",
+            "https://",
+            "https://a b",
+            "https://user@host",
+        ] {
+            assert!(ok(&[bad]).is_err(), "{bad:?} must be refused");
+        }
+        // One bad entry among good ones still fails the whole list (never silently skipped).
+        assert!(ok(&["https://app.waddles.gg", "*"]).is_err());
+    }
+
+    #[test]
+    fn cli_validate_rejects_a_wildcard_cors_origin() {
+        let mut cli = CliConfig::parse_from(["svc-streaming"]);
+        cli.cors_allowed_origins = vec!["*".into()];
+        assert!(cli.validate().is_err());
+        cli.cors_allowed_origins = vec!["https://app.waddles.gg".into()];
+        assert!(cli.validate().is_ok());
     }
 }

@@ -41,8 +41,8 @@ use super::grpc_auth::{
 };
 use super::host_api::{build_server_config, serve_router, HostApiError, HostApiTls};
 use super::{
-    ActorRole, HandInfo, HandList, HandView, IssueRequest, ParticipantInfo, RoomError, RoomInfo,
-    RoomService, RouteMode,
+    ActorRole, HandInfo, HandList, HandView, IssueRequest, ParticipantInfo, RoomError, RoomFacts,
+    RoomInfo, RoomKind as DomainKind, RoomService, RouteMode,
 };
 
 /// Generated protobuf/tonic types for `waddles.streaming.internal.v1`.
@@ -91,6 +91,7 @@ versioned!(
     ListHandsRequest,
     CreateRoomRequest,
     DeleteRoomRequest,
+    UpdateRoomRequest,
     JoinRoomRequest,
     LeaveRoomRequest,
     RaiseHandRequest,
@@ -118,12 +119,13 @@ fn check_api_version(v: &str) -> Result<(), Status> {
 
 /// Every RPC name in `RoomsService`, kept in lockstep with the proto by the
 /// contract test (`tests/rooms_grpc.rs`) and used as the metric `rpc` label.
-pub const RPC_NAMES: [&str; 18] = [
+pub const RPC_NAMES: [&str; 19] = [
     "ListRooms",
     "GetRoom",
     "ListParticipants",
     "CreateRoom",
     "DeleteRoom",
+    "UpdateRoom",
     "JoinRoom",
     "LeaveRoom",
     "KickParticipant",
@@ -292,8 +294,49 @@ fn role(v: i32) -> ActorRole {
     }
 }
 
+/// Wire kind -> domain kind; unspecified is COMMUNITY, an unknown value is refused.
+fn kind_of(v: i32) -> Result<DomainKind, RoomError> {
+    match RoomKind::try_from(v) {
+        Ok(RoomKind::Unspecified | RoomKind::Community) => Ok(DomainKind::Community),
+        Ok(RoomKind::TownHall) => Ok(DomainKind::TownHall),
+        Ok(RoomKind::Stage) => Ok(DomainKind::Stage),
+        Ok(RoomKind::GreenRoom) => Ok(DomainKind::GreenRoom),
+        Err(_) => Err(RoomError::Invalid("unknown room kind".into())),
+    }
+}
+
+fn kind_pb(k: DomainKind) -> RoomKind {
+    match k {
+        DomainKind::Community => RoomKind::Community,
+        DomainKind::TownHall => RoomKind::TownHall,
+        DomainKind::Stage => RoomKind::Stage,
+        DomainKind::GreenRoom => RoomKind::GreenRoom,
+    }
+}
+
+fn facts_of(
+    kind: i32,
+    closed: bool,
+    starts_at: Option<i64>,
+    ends_at: Option<i64>,
+    allow_guests: bool,
+) -> Result<RoomFacts, RoomError> {
+    Ok(RoomFacts {
+        kind: kind_of(kind)?,
+        closed,
+        starts_at,
+        ends_at,
+        allow_guests,
+    })
+}
+
 fn room_pb(r: RoomInfo) -> Room {
     Room {
+        kind: kind_pb(r.facts.kind) as i32,
+        closed: r.facts.closed,
+        starts_at: r.facts.starts_at,
+        ends_at: r.facts.ends_at,
+        allow_guests: r.facts.allow_guests,
         room_id: r.room_id.to_string(),
         community_id: r.community_id,
         label: r.label,
@@ -377,17 +420,33 @@ impl RoomsService for RoomsGrpc {
         req: Request<CreateRoomRequest>,
     ) -> Result<Response<CreateRoomResponse>, Status> {
         self.run("CreateRoom", SCOPE_WRITE, req, |s, r| async move {
+            let facts = facts_of(r.kind, r.closed, r.starts_at, r.ends_at, r.allow_guests)?;
             let info = s
-                .create_with(
+                .create_with_facts(
                     &r.community_id,
                     r.label,
                     r.max_publishers.map(|n| n as usize),
                     RouteMode::Sfu,
                     r.empty_timeout_secs,
+                    facts,
                 )
                 .await?;
             Ok(CreateRoomResponse {
                 room: Some(room_pb(info)),
+            })
+        })
+        .await
+    }
+
+    async fn update_room(
+        &self,
+        req: Request<UpdateRoomRequest>,
+    ) -> Result<Response<UpdateRoomResponse>, Status> {
+        self.run("UpdateRoom", SCOPE_WRITE, req, |s, r| async move {
+            let id = uuid("room_id", &r.room_id)?;
+            let facts = facts_of(r.kind, r.closed, r.starts_at, r.ends_at, r.allow_guests)?;
+            Ok(UpdateRoomResponse {
+                room: Some(room_pb(s.update_facts(&r.community_id, id, facts).await?)),
             })
         })
         .await
@@ -440,6 +499,7 @@ impl RoomsService for RoomsGrpc {
                             // Staff only ever comes from VERIFIED authority: the moderate-scoped
                             // service JWT. No request field can claim it.
                             staff: c.scope == SCOPE_MODERATE,
+                            guest: r.guest,
                         },
                     )
                     .await?;

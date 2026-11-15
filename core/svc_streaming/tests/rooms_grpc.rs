@@ -115,6 +115,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
                 label: Some("standup".into()),
                 max_publishers: Some(4),
                 empty_timeout_secs: None,
+                ..Default::default()
             },
             &write,
         ))
@@ -179,6 +180,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
                 publish: true,
                 subscribe: true,
                 ttl_secs: None,
+                ..Default::default()
             },
             &write,
         ))
@@ -214,6 +216,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
         publish: false,
         subscribe: true,
         ttl_secs: None,
+        ..Default::default()
     };
     let e = h
         .client

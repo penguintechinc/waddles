@@ -15,11 +15,24 @@ class RoomRole(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     ROOM_ROLE_MODERATOR: _ClassVar[RoomRole]
     ROOM_ROLE_ADMIN: _ClassVar[RoomRole]
 
+class RoomKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    ROOM_KIND_UNSPECIFIED: _ClassVar[RoomKind]
+    ROOM_KIND_COMMUNITY: _ClassVar[RoomKind]
+    ROOM_KIND_TOWN_HALL: _ClassVar[RoomKind]
+    ROOM_KIND_STAGE: _ClassVar[RoomKind]
+    ROOM_KIND_GREEN_ROOM: _ClassVar[RoomKind]
+
 ROOM_ROLE_UNSPECIFIED: RoomRole
 ROOM_ROLE_GUEST: RoomRole
 ROOM_ROLE_MEMBER: RoomRole
 ROOM_ROLE_MODERATOR: RoomRole
 ROOM_ROLE_ADMIN: RoomRole
+ROOM_KIND_UNSPECIFIED: RoomKind
+ROOM_KIND_COMMUNITY: RoomKind
+ROOM_KIND_TOWN_HALL: RoomKind
+ROOM_KIND_STAGE: RoomKind
+ROOM_KIND_GREEN_ROOM: RoomKind
 
 class Room(_message.Message):
     __slots__ = (
@@ -32,6 +45,13 @@ class Room(_message.Message):
         "subscriber_count",
         "locked",
         "empty_timeout_secs",
+        "participant_count",
+        "hand_count",
+        "kind",
+        "closed",
+        "starts_at",
+        "ends_at",
+        "allow_guests",
     )
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
@@ -42,6 +62,13 @@ class Room(_message.Message):
     SUBSCRIBER_COUNT_FIELD_NUMBER: _ClassVar[int]
     LOCKED_FIELD_NUMBER: _ClassVar[int]
     EMPTY_TIMEOUT_SECS_FIELD_NUMBER: _ClassVar[int]
+    PARTICIPANT_COUNT_FIELD_NUMBER: _ClassVar[int]
+    HAND_COUNT_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    CLOSED_FIELD_NUMBER: _ClassVar[int]
+    STARTS_AT_FIELD_NUMBER: _ClassVar[int]
+    ENDS_AT_FIELD_NUMBER: _ClassVar[int]
+    ALLOW_GUESTS_FIELD_NUMBER: _ClassVar[int]
     room_id: str
     community_id: str
     label: str
@@ -51,6 +78,13 @@ class Room(_message.Message):
     subscriber_count: int
     locked: bool
     empty_timeout_secs: int
+    participant_count: int
+    hand_count: int
+    kind: RoomKind
+    closed: bool
+    starts_at: int
+    ends_at: int
+    allow_guests: bool
     def __init__(
         self,
         room_id: _Optional[str] = ...,
@@ -62,6 +96,13 @@ class Room(_message.Message):
         subscriber_count: _Optional[int] = ...,
         locked: _Optional[bool] = ...,
         empty_timeout_secs: _Optional[int] = ...,
+        participant_count: _Optional[int] = ...,
+        hand_count: _Optional[int] = ...,
+        kind: _Optional[_Union[RoomKind, str]] = ...,
+        closed: _Optional[bool] = ...,
+        starts_at: _Optional[int] = ...,
+        ends_at: _Optional[int] = ...,
+        allow_guests: _Optional[bool] = ...,
     ) -> None: ...
 
 class Participant(_message.Message):
@@ -171,17 +212,38 @@ class ListParticipantsResponse(_message.Message):
     ) -> None: ...
 
 class CreateRoomRequest(_message.Message):
-    __slots__ = ("api_version", "community_id", "label", "max_publishers", "empty_timeout_secs")
+    __slots__ = (
+        "api_version",
+        "community_id",
+        "label",
+        "max_publishers",
+        "empty_timeout_secs",
+        "kind",
+        "closed",
+        "starts_at",
+        "ends_at",
+        "allow_guests",
+    )
     API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
     LABEL_FIELD_NUMBER: _ClassVar[int]
     MAX_PUBLISHERS_FIELD_NUMBER: _ClassVar[int]
     EMPTY_TIMEOUT_SECS_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    CLOSED_FIELD_NUMBER: _ClassVar[int]
+    STARTS_AT_FIELD_NUMBER: _ClassVar[int]
+    ENDS_AT_FIELD_NUMBER: _ClassVar[int]
+    ALLOW_GUESTS_FIELD_NUMBER: _ClassVar[int]
     api_version: str
     community_id: str
     label: str
     max_publishers: int
     empty_timeout_secs: int
+    kind: RoomKind
+    closed: bool
+    starts_at: int
+    ends_at: int
+    allow_guests: bool
     def __init__(
         self,
         api_version: _Optional[str] = ...,
@@ -189,9 +251,59 @@ class CreateRoomRequest(_message.Message):
         label: _Optional[str] = ...,
         max_publishers: _Optional[int] = ...,
         empty_timeout_secs: _Optional[int] = ...,
+        kind: _Optional[_Union[RoomKind, str]] = ...,
+        closed: _Optional[bool] = ...,
+        starts_at: _Optional[int] = ...,
+        ends_at: _Optional[int] = ...,
+        allow_guests: _Optional[bool] = ...,
     ) -> None: ...
 
 class CreateRoomResponse(_message.Message):
+    __slots__ = ("room",)
+    ROOM_FIELD_NUMBER: _ClassVar[int]
+    room: Room
+    def __init__(self, room: _Optional[_Union[Room, _Mapping]] = ...) -> None: ...
+
+class UpdateRoomRequest(_message.Message):
+    __slots__ = (
+        "api_version",
+        "community_id",
+        "room_id",
+        "kind",
+        "closed",
+        "starts_at",
+        "ends_at",
+        "allow_guests",
+    )
+    API_VERSION_FIELD_NUMBER: _ClassVar[int]
+    COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
+    ROOM_ID_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    CLOSED_FIELD_NUMBER: _ClassVar[int]
+    STARTS_AT_FIELD_NUMBER: _ClassVar[int]
+    ENDS_AT_FIELD_NUMBER: _ClassVar[int]
+    ALLOW_GUESTS_FIELD_NUMBER: _ClassVar[int]
+    api_version: str
+    community_id: str
+    room_id: str
+    kind: RoomKind
+    closed: bool
+    starts_at: int
+    ends_at: int
+    allow_guests: bool
+    def __init__(
+        self,
+        api_version: _Optional[str] = ...,
+        community_id: _Optional[str] = ...,
+        room_id: _Optional[str] = ...,
+        kind: _Optional[_Union[RoomKind, str]] = ...,
+        closed: _Optional[bool] = ...,
+        starts_at: _Optional[int] = ...,
+        ends_at: _Optional[int] = ...,
+        allow_guests: _Optional[bool] = ...,
+    ) -> None: ...
+
+class UpdateRoomResponse(_message.Message):
     __slots__ = ("room",)
     ROOM_FIELD_NUMBER: _ClassVar[int]
     room: Room
@@ -227,6 +339,7 @@ class JoinRoomRequest(_message.Message):
         "publish",
         "subscribe",
         "ttl_secs",
+        "guest",
     )
     API_VERSION_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
@@ -235,6 +348,7 @@ class JoinRoomRequest(_message.Message):
     PUBLISH_FIELD_NUMBER: _ClassVar[int]
     SUBSCRIBE_FIELD_NUMBER: _ClassVar[int]
     TTL_SECS_FIELD_NUMBER: _ClassVar[int]
+    GUEST_FIELD_NUMBER: _ClassVar[int]
     api_version: str
     community_id: str
     room_id: str
@@ -242,6 +356,7 @@ class JoinRoomRequest(_message.Message):
     publish: bool
     subscribe: bool
     ttl_secs: int
+    guest: bool
     def __init__(
         self,
         api_version: _Optional[str] = ...,
@@ -251,6 +366,7 @@ class JoinRoomRequest(_message.Message):
         publish: _Optional[bool] = ...,
         subscribe: _Optional[bool] = ...,
         ttl_secs: _Optional[int] = ...,
+        guest: _Optional[bool] = ...,
     ) -> None: ...
 
 class JoinRoomResponse(_message.Message):

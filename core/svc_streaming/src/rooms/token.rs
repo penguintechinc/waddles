@@ -252,12 +252,23 @@ impl TokenKeys {
     /// Verifies signature, `exp`, `iss`, `aud`; algorithm pinned to ES256 and the header `kid`
     /// must be this key's (so `none`, HS256 and foreign-key tokens never verify).
     pub fn verify(&self, token: &str) -> Result<RoomClaims, TokenError> {
+        self.verify_inner(token, true)
+    }
+
+    /// [`Self::verify`] without the `exp` check: for ending an already-established session,
+    /// where the token only ever gated admission. Everything else is still enforced.
+    pub fn verify_allow_expired(&self, token: &str) -> Result<RoomClaims, TokenError> {
+        self.verify_inner(token, false)
+    }
+
+    fn verify_inner(&self, token: &str, check_exp: bool) -> Result<RoomClaims, TokenError> {
         let header = decode_header(token).map_err(|_| TokenError::Invalid)?;
         if header.alg != Algorithm::ES256 || header.kid.as_deref() != Some(self.kid.as_str()) {
             return Err(TokenError::Invalid);
         }
         let mut v = Validation::new(Algorithm::ES256);
         v.leeway = 0;
+        v.validate_exp = check_exp;
         v.set_issuer(&[ROOM_TOKEN_ISSUER]);
         v.set_audience(&[ROOM_TOKEN_AUDIENCE]);
         v.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);

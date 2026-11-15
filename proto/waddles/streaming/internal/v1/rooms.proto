@@ -28,6 +28,9 @@ service RoomsService {
   // Scope "streaming.rooms:write" (member-level actions).
   rpc CreateRoom(CreateRoomRequest) returns (CreateRoomResponse);
   rpc DeleteRoom(DeleteRoomRequest) returns (DeleteRoomResponse);
+  // Scope "streaming.rooms:write". Replaces the room's facts (kind, closed, schedule window,
+  // allow_guests) wholesale; the facts are authoritative here and enforced on JoinRoom.
+  rpc UpdateRoom(UpdateRoomRequest) returns (UpdateRoomResponse);
   // Scope "streaming.rooms:write". A call carrying the "streaming.rooms:moderate" service
   // JWT instead additionally registers the participant as room STAFF in the server-side
   // member table (the only way staff is established; no request field can claim it).
@@ -67,6 +70,20 @@ enum RoomRole {
   ROOM_ROLE_ADMIN = 4;
 }
 
+// What a room is for. Set by the caller (hub-api, service JWT with write scope) at
+// CreateRoom/UpdateRoom and enforced server-side on JoinRoom. Closed set: an unknown value is
+// refused as INVALID_ARGUMENT, never coerced.
+enum RoomKind {
+  // On CreateRoom/UpdateRoom unspecified means COMMUNITY.
+  ROOM_KIND_UNSPECIFIED = 0;
+  ROOM_KIND_COMMUNITY = 1;
+  ROOM_KIND_TOWN_HALL = 2;
+  // Non-staff participants are subscribe-only.
+  ROOM_KIND_STAGE = 3;
+  // Staff only.
+  ROOM_KIND_GREEN_ROOM = 4;
+}
+
 message Room {
   string room_id = 1;
   string community_id = 2;
@@ -81,6 +98,16 @@ message Room {
   uint32 empty_timeout_secs = 9;
   uint32 participant_count = 10;
   uint32 hand_count = 11;
+  // Room facts (set by the caller, enforced on JoinRoom). Additive within v1.
+  RoomKind kind = 12;
+  // A closed room refuses every JoinRoom (staff included) and new media sessions.
+  bool closed = 13;
+  // Scheduled window, unix seconds. Unset = unbounded on that side; outside the window
+  // JoinRoom refuses non-staff.
+  optional int64 starts_at = 14;
+  optional int64 ends_at = 15;
+  // Guests (JoinRoom guest=true) are admitted subscribe-only when true, refused when false.
+  bool allow_guests = 16;
 }
 
 message Participant {
@@ -144,9 +171,33 @@ message CreateRoomRequest {
   // Empty-room expiry in seconds. Unset = server default (300, the Go-era
   // EmptyTimeout); 0 = never expire; the server clamps to its configured maximum.
   optional uint32 empty_timeout_secs = 5;
+  // Room facts (see Room). Unspecified kind = COMMUNITY; allow_guests defaults to false.
+  RoomKind kind = 6;
+  bool closed = 7;
+  optional int64 starts_at = 8;
+  optional int64 ends_at = 9;
+  bool allow_guests = 10;
 }
 
 message CreateRoomResponse {
+  Room room = 1;
+}
+
+message UpdateRoomRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  // The full new fact set (replace, not merge). Closing a room also ends the media sessions
+  // of its non-staff participants.
+  RoomKind kind = 4;
+  bool closed = 5;
+  optional int64 starts_at = 6;
+  optional int64 ends_at = 7;
+  bool allow_guests = 8;
+}
+
+message UpdateRoomResponse {
   Room room = 1;
 }
 
@@ -171,6 +222,9 @@ message JoinRoomRequest {
   bool publish = 5;
   bool subscribe = 6;
   optional int64 ttl_secs = 7;
+  // The joiner is an unauthenticated guest (hub-api states it; it can only restrict): admitted
+  // subscribe-only when the room allows guests, refused otherwise.
+  bool guest = 8;
 }
 
 message JoinRoomResponse {

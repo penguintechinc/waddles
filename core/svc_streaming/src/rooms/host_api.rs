@@ -306,6 +306,7 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
                         ttl_secs: r.ttl_secs,
                         // Staff is never claimable through a token op (see `room.staff.register`).
                         staff: false,
+                        guest: false,
                     },
                 )
                 .await?;
@@ -360,6 +361,7 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
                         ttl_secs: r.ttl_secs,
                         // Staff is never claimable through a token op (see `room.staff.register`).
                         staff: false,
+                        guest: false,
                     },
                 )
                 .await?;

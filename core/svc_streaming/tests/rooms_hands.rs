@@ -48,6 +48,7 @@ async fn join(h: &mut Harness, t: &Tokens, community: &str, room: &str, who: &st
                 publish: false,
                 subscribe: true,
                 ttl_secs: None,
+                ..Default::default()
             },
             token,
         ))
@@ -782,6 +783,7 @@ async fn cross_community_hand_access_is_not_found() {
                 publish: false,
                 subscribe: true,
                 ttl_secs: None,
+                ..Default::default()
             },
             &t.moderate
         )),
@@ -885,6 +887,7 @@ async fn hands_and_membership_are_cleared_on_leave_kick_and_room_delete() {
                 publish: false,
                 subscribe: true,
                 ttl_secs: None,
+                ..Default::default()
             },
             &t.write
         )),

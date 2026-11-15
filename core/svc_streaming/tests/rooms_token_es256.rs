@@ -43,6 +43,7 @@ async fn join(
                 publish: false,
                 subscribe: true,
                 ttl_secs: ttl,
+                ..Default::default()
             },
             &write,
         ))

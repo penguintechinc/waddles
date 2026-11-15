@@ -166,6 +166,10 @@ impl AppState {
             .with_idle_policy(
                 crate::rooms::IdlePolicy::from_env()
                     .expect("ROOMS_EMPTY_TIMEOUT_DEFAULT_SECS / ROOMS_EMPTY_TIMEOUT_MAX_SECS, when set, must be valid"),
+            )
+            .with_session_idle_secs(
+                crate::rooms::session_idle_secs_from_lookup(|k| std::env::var(k).ok())
+                    .expect("ROOMS_SESSION_IDLE_SECS, when set, must be a non-negative integer"),
             ),
         );
         let engine: SharedEngine = Arc::new(crate::pipeline::StubSupervisor);
@@ -308,26 +312,22 @@ pub fn moderation_flag_from_env() -> bool {
         .unwrap_or(false)
 }
 
-fn media_cors_layer(origins: &[String]) -> CorsLayer {
+/// CORS for the media signaling routes (WHIP/WHEP/session DELETE): an exact-origin allowlist
+/// from config. No wildcard ever (a `*` entry is dropped here and refused at config
+/// validation); an empty list emits no CORS headers at all. `Content-Type` is allowed so the
+/// `application/sdp` offer passes preflight, `Authorization` for the bearer token, and
+/// `Location` is exposed so a browser can read the session URL.
+pub fn media_cors_layer(origins: &[String]) -> CorsLayer {
     let base = CorsLayer::new()
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PATCH,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
+        .allow_methods([Method::POST, Method::PATCH, Method::DELETE, Method::OPTIONS])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
         .expose_headers([header::LOCATION]);
 
-    if origins.iter().any(|o| o == "*") {
-        return base.allow_origin(AllowOrigin::any());
-    }
     let parsed: Vec<HeaderValue> = origins
         .iter()
         .filter_map(|o| {
             let trimmed = o.trim();
-            if trimmed.is_empty() {
+            if trimmed.is_empty() || trimmed.contains('*') {
                 None
             } else {
                 HeaderValue::from_str(trimmed).ok()
@@ -394,5 +394,127 @@ mod tests {
             .unwrap_or_default()
             .to_string();
         assert!(allow_methods.contains("POST") && allow_methods.contains("DELETE"));
+    }
+
+    /// A router shaped like the media routes (POST create, DELETE session) behind the layer.
+    fn cors_app(origins: &[&str]) -> Router {
+        let o: Vec<String> = origins.iter().map(|s| s.to_string()).collect();
+        Router::new()
+            .route(
+                "/rtc/rooms/{room}/whip",
+                axum::routing::post(|| async { StatusCode::CREATED }),
+            )
+            .route(
+                "/rtc/rooms/{room}/sessions/{s}",
+                axum::routing::delete(|| async { StatusCode::NO_CONTENT }),
+            )
+            .layer(media_cors_layer(&o))
+    }
+
+    async fn preflight(
+        app: Router,
+        uri: &str,
+        origin: &str,
+        method: &str,
+    ) -> axum::response::Response {
+        app.oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri(uri)
+                .header(header::ORIGIN, origin)
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, method)
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "authorization,content-type",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn hv(res: &axum::response::Response, h: header::HeaderName) -> Option<String> {
+        res.headers()
+            .get(h)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    }
+
+    #[tokio::test]
+    async fn preflight_from_a_disallowed_origin_gets_no_allow_origin() {
+        let app = cors_app(&["https://app.waddles.gg"]);
+        for uri in ["/rtc/rooms/r1/whip", "/rtc/rooms/r1/sessions/s1"] {
+            let res = preflight(app.clone(), uri, "https://evil.example", "POST").await;
+            assert_eq!(hv(&res, header::ACCESS_CONTROL_ALLOW_ORIGIN), None, "{uri}");
+        }
+        // Exact match only: a different scheme/port/subdomain of an allowed host is refused.
+        for o in [
+            "http://app.waddles.gg",
+            "https://app.waddles.gg:8443",
+            "https://x.app.waddles.gg",
+        ] {
+            let res = preflight(app.clone(), "/rtc/rooms/r1/whip", o, "POST").await;
+            assert_eq!(hv(&res, header::ACCESS_CONTROL_ALLOW_ORIGIN), None, "{o}");
+        }
+    }
+
+    #[tokio::test]
+    async fn allowed_origin_preflight_for_whip_and_session_delete_allows_sdp_headers() {
+        let app = cors_app(&["https://app.waddles.gg"]);
+        for (uri, method) in [
+            ("/rtc/rooms/r1/whip", "POST"),
+            ("/rtc/rooms/r1/sessions/s1", "DELETE"),
+        ] {
+            let res = preflight(app.clone(), uri, "https://app.waddles.gg", method).await;
+            assert_eq!(
+                hv(&res, header::ACCESS_CONTROL_ALLOW_ORIGIN).as_deref(),
+                Some("https://app.waddles.gg")
+            );
+            let headers = hv(&res, header::ACCESS_CONTROL_ALLOW_HEADERS)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            assert!(headers.contains("authorization") && headers.contains("content-type"));
+            assert!(hv(&res, header::ACCESS_CONTROL_ALLOW_METHODS)
+                .unwrap_or_default()
+                .contains(method));
+        }
+        // The real response carries Expose-Headers: Location for the allowed origin only.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/rtc/rooms/r1/whip")
+                    .header(header::ORIGIN, "https://app.waddles.gg")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            hv(&res, header::ACCESS_CONTROL_EXPOSE_HEADERS)
+                .unwrap_or_default()
+                .to_ascii_lowercase(),
+            "location"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_allowlist_and_wildcard_entries_emit_no_cors() {
+        for origins in [
+            &[][..],
+            &[""][..],
+            &["*"][..],
+            &["https://*.waddles.gg"][..],
+        ] {
+            let app = cors_app(origins);
+            let res = preflight(app, "/rtc/rooms/r1/whip", "https://app.waddles.gg", "POST").await;
+            assert_eq!(
+                hv(&res, header::ACCESS_CONTROL_ALLOW_ORIGIN),
+                None,
+                "{origins:?}"
+            );
+        }
     }
 }

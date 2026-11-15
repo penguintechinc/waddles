@@ -99,6 +99,7 @@ async fn empty_room_is_reaped_at_its_timeout_with_hands_locks_and_an_info_log() 
                 publish: false,
                 subscribe: true,
                 ttl_secs: None,
+                ..Default::default()
             },
             &write,
         ))
@@ -203,6 +204,7 @@ async fn a_room_with_a_live_session_never_expires_and_reports_joined_at() {
                 publish: true,
                 subscribe: false,
                 ttl_secs: Some(600),
+                ..Default::default()
             },
             &write,
         ))

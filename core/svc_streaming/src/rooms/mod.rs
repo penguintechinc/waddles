@@ -22,7 +22,7 @@ pub mod media;
 pub mod token;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,6 +66,26 @@ pub const MAX_HANDS_PER_ROOM: usize = 256;
 
 /// Most joined participants (token holders) one room's member table may hold.
 pub const MAX_MEMBERS_PER_ROOM: usize = 1_000;
+
+/// Default publisher-session idle timeout (seconds without ingress RTP).
+pub const DEFAULT_SESSION_IDLE_SECS: u32 = 300;
+
+/// Env var for the publisher-session idle timeout in seconds (`0` disables).
+pub const ENV_SESSION_IDLE_SECS: &str = "ROOMS_SESSION_IDLE_SECS";
+
+/// Reads [`ENV_SESSION_IDLE_SECS`] through `get`: unset/blank -> [`DEFAULT_SESSION_IDLE_SECS`],
+/// a present-but-invalid value is an error (never silently ignored).
+pub fn session_idle_secs_from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<u32, String> {
+    match get(ENV_SESSION_IDLE_SECS)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        None => Ok(DEFAULT_SESSION_IDLE_SECS),
+        Some(v) => v.parse::<u32>().map_err(|_| {
+            format!("{ENV_SESSION_IDLE_SECS} must be a non-negative integer, got {v:?}")
+        }),
+    }
+}
 
 /// Default empty-room expiry (seconds): the Go-era LiveKit `EmptyTimeout`.
 pub const DEFAULT_EMPTY_TIMEOUT_SECS: u32 = 300;
@@ -235,6 +255,88 @@ pub enum RouteMode {
     Relay,
 }
 
+/// What a room is for. Set by the caller (hub-api, service JWT with write scope) and enforced
+/// server-side on join; a closed set, so an unknown wire value is refused, never coerced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomKind {
+    /// An ordinary community call room.
+    #[default]
+    Community,
+    /// The community's town hall.
+    TownHall,
+    /// Non-staff participants are subscribe-only.
+    Stage,
+    /// Staff only.
+    GreenRoom,
+}
+
+/// Facts about a room that gate who may join and with which grants. Authoritative in
+/// svc-streaming (set at create/update by a write-scoped service caller) and enforced on join.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RoomFacts {
+    pub kind: RoomKind,
+    /// A closed room admits nobody (staff included) and refuses new media sessions.
+    pub closed: bool,
+    /// Scheduled window start (unix seconds); `None` = no lower bound.
+    pub starts_at: Option<i64>,
+    /// Scheduled window end (unix seconds); `None` = no upper bound.
+    pub ends_at: Option<i64>,
+    /// Guests are admitted (subscribe-only) when true, refused when false.
+    pub allow_guests: bool,
+}
+
+impl RoomFacts {
+    /// Rejects a malformed window (negative bound, or `starts_at >= ends_at`).
+    pub fn validate(&self) -> Result<(), RoomError> {
+        if self.starts_at.is_some_and(|t| t < 0) || self.ends_at.is_some_and(|t| t < 0) {
+            return Err(RoomError::Invalid("schedule bounds must be >= 0".into()));
+        }
+        if let (Some(a), Some(b)) = (self.starts_at, self.ends_at) {
+            if a >= b {
+                return Err(RoomError::Invalid(
+                    "starts_at must be before ends_at".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// True when `at` (unix seconds) lies inside the scheduled window.
+    pub fn in_window(&self, at: i64) -> bool {
+        self.starts_at.is_none_or(|s| at >= s) && self.ends_at.is_none_or(|e| at < e)
+    }
+
+    /// The join rules, shared by token issuance and media-session registration. `staff` must
+    /// come from VERIFIED authority (moderate-scope service JWT / server-side member table),
+    /// never from a request field.
+    fn admit(&self, at: i64, staff: bool, guest: bool, publish: bool) -> Result<(), RoomError> {
+        if self.closed {
+            return Err(RoomError::Forbidden("room is closed"));
+        }
+        if !staff && !self.in_window(at) {
+            return Err(RoomError::Forbidden("room is outside its scheduled window"));
+        }
+        if !staff && self.kind == RoomKind::GreenRoom {
+            return Err(RoomError::Forbidden("green room is for staff only"));
+        }
+        if guest {
+            if !self.allow_guests {
+                return Err(RoomError::Forbidden("guests are not allowed in this room"));
+            }
+            if publish {
+                return Err(RoomError::Forbidden("guests are subscribe-only"));
+            }
+        }
+        if !staff && self.kind == RoomKind::Stage && publish {
+            return Err(RoomError::Forbidden(
+                "stage is subscribe-only for non-staff",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Errors from room operations; mapped onto HTTP by [`host_api`]/[`media`].
 #[derive(Debug, thiserror::Error)]
 pub enum RoomError {
@@ -337,6 +439,12 @@ struct PublisherEntry {
     expires_at: i64,
     /// Token id the session was opened with (revocation tears the session down).
     jti: Uuid,
+    /// Ingress RTP packet counter shared with the track reader; the sweeper compares it
+    /// between passes to detect a silently-vanished publisher (idle timeout).
+    packets: Option<Arc<AtomicU64>>,
+    /// Counter value at the last sweep that saw it change, and when that was.
+    seen_packets: u64,
+    seen_at: i64,
 }
 
 struct SubscriberEntry {
@@ -375,6 +483,8 @@ struct Room {
     empty_timeout_secs: u32,
     /// When the room last became (observed) empty; `None` while it has sessions.
     empty_since: Option<i64>,
+    /// Caller-set facts (kind/closed/schedule/guests) enforced on join.
+    facts: RoomFacts,
 }
 
 impl Room {
@@ -415,15 +525,27 @@ pub struct RoomInfo {
     pub participant_count: usize,
     #[serde(default)]
     pub hand_count: usize,
+    /// Caller-set room facts (kind/closed/schedule/guests).
+    #[serde(default, flatten)]
+    pub facts: RoomFacts,
 }
 
 /// The credential a live session was opened with: bounds its lifetime and lets
 /// token revocation find and close it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SessionGrant {
+    /// The admission token's expiry. Recorded for audit only: the token gates ADMISSION, an
+    /// established session never ends because it passed (see `DEFAULT_SESSION_LEASE_SECS`).
     #[allow(dead_code)]
     pub expires_at: i64,
     pub jti: Uuid,
+}
+
+/// Liveness signals a session registers with, kept out of `Copy` [`SessionGrant`].
+#[derive(Clone, Default)]
+pub(crate) struct SessionActivity {
+    /// Ingress RTP packet counter (publishers only).
+    pub packets: Option<Arc<AtomicU64>>,
 }
 
 /// Parameters for [`RoomService::issue_token`].
@@ -439,6 +561,9 @@ pub struct IssueRequest {
     /// `streaming.rooms:moderate` service JWT); every other issuance path leaves it `false`.
     /// Sticky: a later non-staff issuance never demotes (leave/kick/expiry does).
     pub staff: bool,
+    /// The joiner is an unauthenticated guest (the caller states it; it only restricts):
+    /// admitted subscribe-only when the room allows guests, refused otherwise.
+    pub guest: bool,
 }
 
 /// A participant who joined a room (was issued a token for it): the server-side ACL the
@@ -499,6 +624,9 @@ pub struct RoomService {
     moderation_enabled: bool,
     /// Idle-room expiry defaults and bound.
     idle: IdlePolicy,
+    /// Seconds a publisher session may carry no ingress RTP before it is reaped as a
+    /// silently-vanished peer; `0` disables.
+    session_idle_secs: u32,
 }
 
 fn now() -> i64 {
@@ -539,7 +667,15 @@ impl RoomService {
             public_base_url,
             moderation_enabled: false,
             idle: IdlePolicy::default(),
+            session_idle_secs: DEFAULT_SESSION_IDLE_SECS,
         }
+    }
+
+    /// Sets the publisher-session idle timeout (`0` disables). Established sessions end on
+    /// leave/kick/room close/peer loss/this idle timeout -- never on join-token expiry.
+    pub fn with_session_idle_secs(mut self, secs: u32) -> Self {
+        self.session_idle_secs = secs;
+        self
     }
 
     /// Sets the idle-room expiry policy (defaults to [`IdlePolicy::default`]).
@@ -629,6 +765,7 @@ impl RoomService {
             empty_timeout_secs: r.empty_timeout_secs,
             participant_count: r.members.len(),
             hand_count: r.hands.len(),
+            facts: r.facts,
         }
     }
 
@@ -655,6 +792,29 @@ impl RoomService {
         route: RouteMode,
         empty_timeout_secs: Option<u32>,
     ) -> Result<RoomInfo, RoomError> {
+        self.create_with_facts(
+            community_id,
+            label,
+            max_publishers,
+            route,
+            empty_timeout_secs,
+            RoomFacts::default(),
+        )
+        .await
+    }
+
+    /// [`Self::create_with`] plus the caller-set [`RoomFacts`] (validated before anything is
+    /// stored).
+    pub async fn create_with_facts(
+        &self,
+        community_id: &str,
+        label: Option<String>,
+        max_publishers: Option<usize>,
+        route: RouteMode,
+        empty_timeout_secs: Option<u32>,
+        facts: RoomFacts,
+    ) -> Result<RoomInfo, RoomError> {
+        facts.validate()?;
         if community_id.is_empty() || !community_id.bytes().all(|b| b.is_ascii_digit()) {
             return Err(RoomError::Invalid("community_id must be numeric".into()));
         }
@@ -702,6 +862,7 @@ impl RoomService {
             members: HashMap::new(),
             empty_timeout_secs: self.idle.resolve(empty_timeout_secs),
             empty_since: Some(created_at),
+            facts,
         };
         let info = Self::info(id, &room);
         rooms.insert(id, room);
@@ -716,6 +877,39 @@ impl RoomService {
             Some(r) if r.community_id == community_id => Ok(Self::info(room_id, r)),
             _ => Err(RoomError::NotFound),
         }
+    }
+
+    /// Replaces a room's [`RoomFacts`] (validated; community-scoped). Closing a room also ends
+    /// the media sessions of its non-staff participants (staff keep theirs).
+    pub async fn update_facts(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        facts: RoomFacts,
+    ) -> Result<RoomInfo, RoomError> {
+        facts.validate()?;
+        let (info, staff) = {
+            let mut rooms = self.rooms.write().await;
+            match rooms.get_mut(&room_id) {
+                Some(r) if r.community_id == community_id => {
+                    r.facts = facts;
+                    let staff: HashSet<Uuid> = r
+                        .members
+                        .iter()
+                        .filter(|(_, m)| m.staff)
+                        .map(|(p, _)| *p)
+                        .collect();
+                    (Self::info(room_id, r), staff)
+                }
+                _ => return Err(RoomError::NotFound),
+            }
+        };
+        if facts.closed {
+            self.close_matching(room_id, |p, _| !staff.contains(&p))
+                .await;
+        }
+        tracing::info!(%room_id, community_id, kind = ?facts.kind, closed = facts.closed, "rooms: facts updated");
+        Ok(info)
     }
 
     /// Closes a room: drops every peer connection and forgets it.
@@ -771,6 +965,8 @@ impl RoomService {
             let mut rooms = self.rooms.write().await;
             match rooms.get_mut(&room_id) {
                 Some(r) if r.community_id == community_id => {
+                    // `req.staff` is only ever set from a VERIFIED moderate-scope service JWT.
+                    r.facts.admit(now(), req.staff, req.guest, req.publish)?;
                     if r.locked && !req.staff {
                         return Err(RoomError::Forbidden("room is locked"));
                     }
@@ -972,8 +1168,33 @@ impl RoomService {
     /// Verifies a presented token against the live room: signature/expiry,
     /// scope, revocation, room epoch, room id, community and room existence.
     pub async fn authorize(&self, token: &str, room_id: Uuid) -> Result<RoomClaims, RoomError> {
+        self.authorize_inner(token, room_id, false).await
+    }
+
+    /// Like [`Self::authorize`] but ignores `exp`: the token gates ADMISSION only, so the
+    /// holder of an established session may still end it after the token expired. Signature,
+    /// issuer/audience, scope, room, revocation, room epoch and kick state are all enforced.
+    pub async fn authorize_established(
+        &self,
+        token: &str,
+        room_id: Uuid,
+    ) -> Result<RoomClaims, RoomError> {
+        self.authorize_inner(token, room_id, true).await
+    }
+
+    async fn authorize_inner(
+        &self,
+        token: &str,
+        room_id: Uuid,
+        allow_expired: bool,
+    ) -> Result<RoomClaims, RoomError> {
         let keys = self.keys()?;
-        let claims = keys.verify(token).map_err(|e| match e {
+        let verified = if allow_expired {
+            keys.verify_allow_expired(token)
+        } else {
+            keys.verify(token)
+        };
+        let claims = verified.map_err(|e| match e {
             TokenError::NotConfigured => RoomError::Unconfigured("room token secret"),
             _ => RoomError::Unauthorized,
         })?;
@@ -1006,11 +1227,12 @@ impl RoomService {
         pc: Arc<dyn PeerConnection>,
         ended: Arc<AtomicBool>,
         grant: SessionGrant,
+        activity: SessionActivity,
     ) -> Result<Uuid, RoomError> {
         let (session, stale) = {
             let mut rooms = self.rooms.write().await;
             let room = rooms.get_mut(&room_id).ok_or(RoomError::NotFound)?;
-            Self::join_allowed(room, participant)?;
+            Self::join_allowed(room, participant, true)?;
             if room.muted.contains(&participant) {
                 fanouts.set_muted(true);
             }
@@ -1031,6 +1253,12 @@ impl RoomService {
                     ended,
                     expires_at: now().saturating_add(DEFAULT_SESSION_LEASE_SECS),
                     jti: grant.jti,
+                    seen_packets: activity
+                        .packets
+                        .as_ref()
+                        .map_or(0, |c| c.load(Ordering::Relaxed)),
+                    packets: activity.packets,
+                    seen_at: now(),
                 },
             );
             (session, stale)
@@ -1066,7 +1294,7 @@ impl RoomService {
                 .map(|r| r.subscribers.len())
                 .sum();
             let room = rooms.get_mut(&room_id).ok_or(RoomError::NotFound)?;
-            Self::join_allowed(room, participant)?;
+            Self::join_allowed(room, participant, false)?;
             let old: Vec<Uuid> = room
                 .subscribers
                 .iter()
@@ -1120,21 +1348,33 @@ impl RoomService {
         self.sweep_at(now()).await
     }
 
-    /// [`Self::sweep`] as of `at` (unix seconds): also reaps sessions whose token
-    /// has expired -- webrtc-rs gives no reliable end-of-peer signal after a
-    /// silent client disappearance, so the credential lifetime bounds the session.
+    /// [`Self::sweep`] as of `at` (unix seconds): reaps ended peers, sessions past the
+    /// backstop lease, and publishers idle (no ingress RTP) for `session_idle_secs`.
+    /// webrtc-rs gives no reliable end-of-peer signal after a silent client disappearance.
+    /// The join token's expiry is deliberately NOT a criterion: it gates admission only.
     pub async fn sweep_at(&self, at: i64) -> usize {
         let mut dead: Vec<(Uuid, Uuid)> = Vec::new();
         {
-            let rooms = self.rooms.read().await;
-            for (rid, room) in rooms.iter() {
+            let idle = i64::from(self.session_idle_secs);
+            let mut rooms = self.rooms.write().await;
+            for (rid, room) in rooms.iter_mut() {
                 for (sid, s) in &room.subscribers {
                     if s.ended.load(Ordering::SeqCst) || s.expires_at <= at {
                         dead.push((*rid, *sid));
                     }
                 }
-                for p in room.publishers.values() {
-                    if p.ended.load(Ordering::SeqCst) || p.expires_at <= at {
+                for p in room.publishers.values_mut() {
+                    let mut idle_out = false;
+                    if let Some(c) = &p.packets {
+                        let n = c.load(Ordering::Relaxed);
+                        if n != p.seen_packets {
+                            p.seen_packets = n;
+                            p.seen_at = at;
+                        } else {
+                            idle_out = idle > 0 && at.saturating_sub(p.seen_at) >= idle;
+                        }
+                    }
+                    if p.ended.load(Ordering::SeqCst) || p.expires_at <= at || idle_out {
                         dead.push((*rid, p.session));
                     }
                 }
@@ -1377,8 +1617,12 @@ impl RoomService {
     }
 
     /// Refuses a join into a locked room or by a kicked participant.
-    fn join_allowed(room: &Room, participant: Uuid) -> Result<(), RoomError> {
-        if room.locked && !room.members.get(&participant).is_some_and(|m| m.staff) {
+    fn join_allowed(room: &Room, participant: Uuid, publish: bool) -> Result<(), RoomError> {
+        // Staff = recorded in the server-side member table (set only from a verified
+        // moderate-scope join), so a token alone never carries the bypass.
+        let staff = room.members.get(&participant).is_some_and(|m| m.staff);
+        room.facts.admit(now(), staff, false, publish)?;
+        if room.locked && !staff {
             return Err(RoomError::Forbidden("room is locked"));
         }
         if room.kicked.contains(&participant) {
@@ -1987,6 +2231,7 @@ mod tests {
             source: None,
             ttl_secs: Some(60),
             staff: false,
+            guest: false,
         }
     }
 
@@ -2192,6 +2437,7 @@ mod tests {
                 source: None,
                 ttl_secs: Some(60),
                 staff,
+                guest: false,
             },
         )
         .await
@@ -2538,5 +2784,292 @@ mod tests {
     async fn readiness_requires_the_token_secret() {
         assert!(svc(Some(SECRET)).readiness().is_ok());
         assert!(svc(None).readiness().is_err());
+    }
+
+    fn facts(kind: RoomKind) -> RoomFacts {
+        RoomFacts {
+            kind,
+            ..RoomFacts::default()
+        }
+    }
+
+    #[test]
+    fn session_idle_env_parses_strictly() {
+        let get = |v: Option<&'static str>| move |_: &str| v.map(str::to_string);
+        assert_eq!(session_idle_secs_from_lookup(get(None)), Ok(300));
+        assert_eq!(session_idle_secs_from_lookup(get(Some(" "))), Ok(300));
+        assert_eq!(session_idle_secs_from_lookup(get(Some("0"))), Ok(0));
+        assert_eq!(session_idle_secs_from_lookup(get(Some("45"))), Ok(45));
+        assert!(session_idle_secs_from_lookup(get(Some("-1"))).is_err());
+        assert!(session_idle_secs_from_lookup(get(Some("abc"))).is_err());
+    }
+
+    #[test]
+    fn facts_validate_window_and_membership() {
+        assert!(RoomFacts::default().validate().is_ok());
+        let bad = |a, b| {
+            RoomFacts {
+                starts_at: a,
+                ends_at: b,
+                ..RoomFacts::default()
+            }
+            .validate()
+        };
+        assert!(bad(Some(10), Some(10)).is_err());
+        assert!(bad(Some(11), Some(10)).is_err());
+        assert!(bad(Some(-1), None).is_err());
+        assert!(bad(None, Some(-1)).is_err());
+        assert!(bad(Some(10), Some(11)).is_ok());
+        assert!(bad(Some(10), None).is_ok());
+        let w = RoomFacts {
+            starts_at: Some(100),
+            ends_at: Some(200),
+            ..RoomFacts::default()
+        };
+        assert!(!w.in_window(99) && w.in_window(100) && w.in_window(199) && !w.in_window(200));
+        assert!(RoomFacts::default().in_window(i64::MAX));
+    }
+
+    #[test]
+    fn admit_truth_table() {
+        let f = |kind, closed, guests| RoomFacts {
+            kind,
+            closed,
+            allow_guests: guests,
+            ..RoomFacts::default()
+        };
+        // (facts, staff, guest, publish) -> allowed
+        let cases = [
+            (
+                f(RoomKind::Community, false, false),
+                false,
+                false,
+                true,
+                true,
+            ),
+            (
+                f(RoomKind::TownHall, false, false),
+                false,
+                false,
+                true,
+                true,
+            ),
+            (f(RoomKind::Stage, false, false), false, false, true, false),
+            (f(RoomKind::Stage, false, false), false, false, false, true),
+            (f(RoomKind::Stage, false, false), true, false, true, true),
+            (
+                f(RoomKind::GreenRoom, false, false),
+                false,
+                false,
+                false,
+                false,
+            ),
+            (
+                f(RoomKind::GreenRoom, false, false),
+                true,
+                false,
+                true,
+                true,
+            ),
+            (
+                f(RoomKind::Community, true, false),
+                true,
+                false,
+                false,
+                false,
+            ),
+            (
+                f(RoomKind::Community, false, false),
+                false,
+                true,
+                false,
+                false,
+            ),
+            (
+                f(RoomKind::Community, false, true),
+                false,
+                true,
+                false,
+                true,
+            ),
+            (
+                f(RoomKind::Community, false, true),
+                false,
+                true,
+                true,
+                false,
+            ),
+        ];
+        for (facts, staff, guest, publish, ok) in cases {
+            let r = facts.admit(1_000, staff, guest, publish);
+            assert_eq!(
+                r.is_ok(),
+                ok,
+                "{facts:?} staff={staff} guest={guest} pub={publish}"
+            );
+        }
+        let windowed = RoomFacts {
+            starts_at: Some(2_000),
+            ..RoomFacts::default()
+        };
+        assert!(windowed.admit(1_000, false, false, false).is_err());
+        assert!(windowed.admit(1_000, true, false, false).is_ok());
+        assert!(windowed.admit(2_000, false, false, false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn update_facts_replaces_scopes_and_validates() {
+        let s = moderated();
+        let r = new_room(&s, "7").await;
+        assert_eq!(r.facts, RoomFacts::default());
+        let new = RoomFacts {
+            kind: RoomKind::Stage,
+            allow_guests: true,
+            ..RoomFacts::default()
+        };
+        let u = s.update_facts("7", r.room_id, new).await.unwrap();
+        assert_eq!(u.facts, new);
+        assert_eq!(s.get("7", r.room_id).await.unwrap().facts, new);
+        assert!(matches!(
+            s.update_facts("8", r.room_id, new).await,
+            Err(RoomError::NotFound)
+        ));
+        assert!(matches!(
+            s.update_facts("7", Uuid::new_v4(), new).await,
+            Err(RoomError::NotFound)
+        ));
+        let bad = RoomFacts {
+            starts_at: Some(5),
+            ends_at: Some(5),
+            ..RoomFacts::default()
+        };
+        assert!(matches!(
+            s.update_facts("7", r.room_id, bad).await,
+            Err(RoomError::Invalid(_))
+        ));
+        assert!(matches!(
+            s.create_with_facts("7", None, None, RouteMode::Sfu, None, bad)
+                .await,
+            Err(RoomError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn issue_token_enforces_facts_and_lock_bypass_needs_verified_staff() {
+        let s = moderated();
+        let r = s
+            .create_with_facts(
+                "7",
+                None,
+                None,
+                RouteMode::Sfu,
+                None,
+                facts(RoomKind::Stage),
+            )
+            .await
+            .unwrap();
+        // Stage: non-staff publish refused, subscribe ok, staff publish ok.
+        assert!(matches!(
+            s.issue_token("7", r.room_id, issue(true, true)).await,
+            Err(RoomError::Forbidden(_))
+        ));
+        s.issue_token("7", r.room_id, issue(false, true))
+            .await
+            .unwrap();
+        let staff = IssueRequest {
+            staff: true,
+            ..issue(true, true)
+        };
+        s.issue_token("7", r.room_id, staff).await.unwrap();
+        // Lock: a non-staff join is refused even when the participant is staff in the ACL.
+        let who = Uuid::new_v4();
+        join(&s, "7", r.room_id, who, true).await;
+        s.set_locked("7", r.room_id, true, ActorRole::Admin)
+            .await
+            .unwrap();
+        let again = IssueRequest {
+            participant: who,
+            ..issue(false, true)
+        };
+        assert!(matches!(
+            s.issue_token("7", r.room_id, again).await,
+            Err(RoomError::Forbidden("room is locked"))
+        ));
+    }
+
+    #[tokio::test]
+    async fn closing_via_facts_ends_non_staff_sessions_only_and_media_join_is_gated() {
+        let s = moderated();
+        let r = new_room(&s, "7").await;
+        let (staff, member) = (Uuid::new_v4(), Uuid::new_v4());
+        join(&s, "7", r.room_id, staff, true).await;
+        join(&s, "7", r.room_id, member, false).await;
+        // A closed / green-room / out-of-window room refuses a media session for non-staff
+        // (the server-side member table decides staff, not the token).
+        s.update_facts(
+            "7",
+            r.room_id,
+            RoomFacts {
+                closed: true,
+                ..RoomFacts::default()
+            },
+        )
+        .await
+        .unwrap();
+        let rooms = s.rooms.read().await;
+        let room = rooms.get(&r.room_id).unwrap();
+        assert!(RoomService::join_allowed(room, member, false).is_err());
+        assert!(
+            RoomService::join_allowed(room, staff, false).is_err(),
+            "closed refuses staff too"
+        );
+        drop(rooms);
+        s.update_facts("7", r.room_id, facts(RoomKind::GreenRoom))
+            .await
+            .unwrap();
+        let rooms = s.rooms.read().await;
+        let room = rooms.get(&r.room_id).unwrap();
+        assert!(RoomService::join_allowed(room, member, false).is_err());
+        assert!(RoomService::join_allowed(room, staff, true).is_ok());
+        assert!(RoomService::join_allowed(room, Uuid::new_v4(), false).is_err());
+        drop(rooms);
+        s.update_facts("7", r.room_id, facts(RoomKind::Stage))
+            .await
+            .unwrap();
+        let rooms = s.rooms.read().await;
+        let room = rooms.get(&r.room_id).unwrap();
+        assert!(RoomService::join_allowed(room, member, true).is_err());
+        assert!(RoomService::join_allowed(room, member, false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn established_authorization_ignores_exp_but_not_revocation_or_kick() {
+        let s = moderated();
+        let r = new_room(&s, "7").await;
+        let who = Uuid::new_v4();
+        let t = s
+            .issue_token(
+                "7",
+                r.room_id,
+                IssueRequest {
+                    participant: who,
+                    ..issue(false, true)
+                },
+            )
+            .await
+            .unwrap();
+        assert!(s.authorize(&t.token, r.room_id).await.is_ok());
+        assert!(s.authorize_established(&t.token, r.room_id).await.is_ok());
+        // Wrong room / garbage never pass either variant.
+        assert!(s
+            .authorize_established(&t.token, Uuid::new_v4())
+            .await
+            .is_err());
+        assert!(s.authorize_established("junk", r.room_id).await.is_err());
+        // Kicked participants lose even the end-session path.
+        s.kick("7", r.room_id, who, Uuid::new_v4(), ActorRole::Admin)
+            .await
+            .unwrap();
+        assert!(s.authorize_established(&t.token, r.room_id).await.is_err());
     }
 }
