@@ -159,6 +159,23 @@ def test_identities_absent_when_feature_disabled(
     assert "egress:connect" in identities["svc-action"]["allowed_scopes"]
 
 
+def test_no_identity_lists_a_scope_twice(
+    enabled: list[dict[str, Any]], disabled: list[dict[str, Any]]
+) -> None:
+    """Every rendered identity allow-list is duplicate-free in both flag states.
+
+    Regression: ``key:stream-dek:read`` was listed twice for svc-ingest and svc-process in
+    values.yaml (merge artifact), so the "only the stream-DEK scope" grant rendered as a
+    two-element list.
+    """
+    for docs in (enabled, disabled):
+        identities = _identities(docs)
+        assert identities, "zero identities rendered -- cannot be a pass"
+        for name, entry in identities.items():
+            scopes = entry["allowed_scopes"]
+            assert len(scopes) == len(set(scopes)), (name, scopes)
+
+
 def test_each_flag_gates_only_its_own_grant() -> None:
     only_action = _identities(
         _render("pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false")
