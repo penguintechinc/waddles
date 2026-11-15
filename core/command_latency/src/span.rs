@@ -23,16 +23,32 @@ pub fn parse_remote_context(traceparent: &str, tracestate: Option<&str>) -> Opti
         return None;
     }
     let flags = TraceFlags::new(u8::from_str_radix(flags, 16).ok()?);
-    let state = tracestate
-        .and_then(|ts| {
-            TraceState::from_key_value(ts.split(',').filter_map(|m| {
-                let (k, v) = m.trim().split_once('=')?;
-                Some((k.to_string(), v.to_string()))
-            }))
-            .ok()
-        })
-        .unwrap_or_default();
+    let state = match tracestate.map(parse_tracestate) {
+        None => TraceState::NONE,
+        Some(Ok(state)) => state,
+        Some(Err(err)) => {
+            // W3C Trace Context: an invalid tracestate is discarded, the traceparent stays valid.
+            // Not silent: logged (the header content is deliberately not).
+            tracing::debug!(error = %err, "dropping invalid tracestate; keeping traceparent");
+            TraceState::NONE
+        }
+    };
     Some(SpanContext::new(trace_id, span_id, flags, true, state))
+}
+
+/// Parses a `tracestate` header into a [`TraceState`]; malformed list members are an error rather
+/// than being skipped.
+fn parse_tracestate(ts: &str) -> Result<TraceState, String> {
+    let members = ts
+        .split(',')
+        .map(|m| {
+            m.trim()
+                .split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .ok_or_else(|| "tracestate member without '='".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    TraceState::from_key_value(members).map_err(|e| e.to_string())
 }
 
 /// Parents `span` on the envelope's trace context. Returns `true` when a remote parent was set.
@@ -123,6 +139,21 @@ mod tests {
         // No subscriber/tracer: parenting must not panic, whatever it returns.
         let _ = set_remote_parent(&span, TP, None);
         record_error(&span, "unit", "no tracer, still fine");
+    }
+
+    #[test]
+    fn invalid_tracestate_is_dropped_but_traceparent_survives() {
+        for bad in ["no-equals-member", "ok=1,broken", "UPPER=1", ""] {
+            let sc = parse_remote_context(TP, Some(bad))
+                .unwrap_or_else(|| panic!("traceparent must survive tracestate {bad:?}"));
+            assert!(
+                sc.trace_state().get("ok").is_none(),
+                "state dropped for {bad:?}"
+            );
+            assert!(sc.is_remote());
+        }
+        assert!(parse_tracestate("a=1,b=2").is_ok());
+        assert!(parse_tracestate("a=1,b").is_err());
     }
 
     #[test]
