@@ -388,6 +388,7 @@ impl StorageHost {
         validate_request_id(&s.request_id)?;
         let mut tags = tags;
         let size = body.len() as u64;
+        let mut plain_counter: Option<u64> = None;
         let body = match &self.sealing {
             Some(sealing) if sealing.writes_sealed().await => {
                 tags.push(system_tag(TAG_SEALED, 1));
@@ -402,10 +403,11 @@ impl StorageHost {
                 );
                 // Authenticate the plaintext under the tenant key so it stays readable while a
                 // bucket-write attacker's plaintext replacement is refused.
-                let mac = sealing
-                    .plain_mac(s.tenant, s.community, &r.owner, key, &body)
+                let (tag, counter) = sealing
+                    .plain_tag(s.tenant, s.community, &r.owner, key, &r.full_key, &body)
                     .await?;
-                tags.push(system_tag(TAG_PLAIN_MAC, mac));
+                tags.push(system_tag(TAG_PLAIN_MAC, tag));
+                plain_counter = Some(counter);
                 body
             }
             None => body,
@@ -424,6 +426,9 @@ impl StorageHost {
         self.backend
             .put(&r.full_key, body, content_type, &tags)
             .await?;
+        if let (Some(sealing), Some(counter)) = (&self.sealing, plain_counter) {
+            sealing.commit_plain(&r.full_key, counter).await?;
+        }
         metrics::bytes("in", size);
         metrics::op_duration("put", t0.elapsed());
         Ok(ObjectInfo {

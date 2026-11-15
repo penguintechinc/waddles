@@ -4,15 +4,15 @@
 //! kill-switch. Real `StorageHost` + real AES-GCM envelope over `MemoryBackend`; only the
 //! DEK provider (per-tenant keys, switchable to "broker down") is a test double.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bundle_host_crypto::{Dek, DekProvider, DekUnavailableError, TenantCrypto, MAGIC};
 use bundle_host_storage::key::object_key;
 use bundle_host_storage::seal::BoxFuture;
 use bundle_host_storage::{
-    AuditEvent, AuditSink, GrantSet, MemoryBackend, ObjectBackend, ObjectSealing, SealGate,
-    StorageError, StorageHost, StorageScope,
+    AuditEvent, AuditSink, GrantSet, MemoryBackend, MemoryPlainLedger, ObjectBackend,
+    ObjectSealing, SealGate, StorageError, StorageHost, StorageScope,
 };
 use bytes::Bytes;
 use zeroize::Zeroizing;
@@ -22,11 +22,13 @@ const PLAIN: &[u8] = b"top secret clip metadata";
 
 struct Keys {
     up: Arc<AtomicBool>,
+    active: Arc<AtomicU32>,
 }
 
 impl DekProvider for Keys {
     async fn get_dek(&self, tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
-        self.get_dek_version(tenant_id, 1).await.map(|d| (d, 1))
+        let v = self.active.load(Ordering::SeqCst);
+        self.get_dek_version(tenant_id, v).await.map(|d| (d, v))
     }
 
     async fn get_dek_version(
@@ -34,7 +36,10 @@ impl DekProvider for Keys {
         tenant_id: &str,
         version: u32,
     ) -> Result<Dek, DekUnavailableError> {
-        if !self.up.load(Ordering::SeqCst) || version != 1 {
+        if !self.up.load(Ordering::SeqCst)
+            || version == 0
+            || version > self.active.load(Ordering::SeqCst)
+        {
             return Err(DekUnavailableError {
                 tenant_id: tenant_id.to_string(),
                 dek_version: Some(version),
@@ -44,7 +49,8 @@ impl DekProvider for Keys {
         // A distinct DEK per tenant id.
         let byte = tenant_id
             .bytes()
-            .fold(11u8, |a, b| a.wrapping_mul(31).wrapping_add(b));
+            .fold(11u8, |a, b| a.wrapping_mul(31).wrapping_add(b))
+            .wrapping_add((version as u8).wrapping_mul(53));
         Ok(Zeroizing::new([byte; 32]))
     }
 }
@@ -72,15 +78,19 @@ struct Rig {
     backend: Arc<MemoryBackend>,
     broker_up: Arc<AtomicBool>,
     seal_on: Arc<AtomicBool>,
+    active: Arc<AtomicU32>,
 }
 
 fn rig(legacy_cutoff: Option<u64>) -> Rig {
     let backend = Arc::new(MemoryBackend::new());
     let broker_up = Arc::new(AtomicBool::new(true));
     let seal_on = Arc::new(AtomicBool::new(true));
+    let active = Arc::new(AtomicU32::new(1));
     let sealing = ObjectSealing::new(TenantCrypto::new(Keys {
         up: broker_up.clone(),
+        active: active.clone(),
     }))
+    .with_plain_ledger(Arc::new(MemoryPlainLedger::default()))
     .with_gate(Arc::new(Gate(seal_on.clone())));
     let sealing = match legacy_cutoff {
         Some(cutoff) => sealing.with_legacy_plaintext_until(cutoff),
@@ -92,6 +102,7 @@ fn rig(legacy_cutoff: Option<u64>) -> Rig {
         backend,
         broker_up,
         seal_on,
+        active,
     }
 }
 
@@ -430,4 +441,152 @@ async fn sealed_objects_have_no_presigned_url_and_unsealed_host_refuses_them() {
         bare.get(&s, None, "x").await.unwrap_err(),
         StorageError::Backend(m) if m.contains("sealing is not configured")
     ));
+}
+
+fn plain_tag_of(o: &bundle_host_storage::StoredObject) -> String {
+    o.meta
+        .tags
+        .iter()
+        .find(|t| t.starts_with("waddles-plain="))
+        .cloned()
+        .expect("plain tag")
+}
+
+fn with_tag(o: &bundle_host_storage::StoredObject, tag: String) -> Vec<String> {
+    o.meta
+        .tags
+        .iter()
+        .filter(|t| !t.starts_with("waddles-plain="))
+        .cloned()
+        .chain([tag])
+        .collect()
+}
+
+#[tokio::test]
+async fn rotation_keeps_recent_plain_tags_verifiable_and_rewrite_moves_to_the_new_version() {
+    let r = rig(None);
+    let s = scope(1, 7);
+    r.seal_on.store(false, Ordering::SeqCst);
+    put(&r, &s, "p").await;
+    assert!(plain_tag_of(&raw(&r, &s, "p").await).starts_with("waddles-plain=v1:1:"));
+    // One rotation: still inside the window.
+    r.active.store(2, Ordering::SeqCst);
+    assert_eq!(
+        &r.host
+            .get(&s, None, "p")
+            .await
+            .expect("v1 tag after rotation")
+            .1[..],
+        PLAIN
+    );
+    // A rewrite re-tags under v2 with the next counter.
+    put(&r, &s, "p").await;
+    assert!(plain_tag_of(&raw(&r, &s, "p").await).starts_with("waddles-plain=v2:2:"));
+    // Two rotations past the tag's version: outside the window, refused until rewritten.
+    r.active.store(4, Ordering::SeqCst);
+    assert!(r.host.get(&s, None, "p").await.is_err());
+}
+
+#[tokio::test]
+async fn replayed_older_plain_body_and_tag_is_refused() {
+    let r = rig(None);
+    let s = scope(1, 7);
+    r.seal_on.store(false, Ordering::SeqCst);
+    r.host
+        .put(
+            &s,
+            None,
+            "k",
+            Bytes::from_static(b"old value"),
+            "text/plain",
+            &[],
+        )
+        .await
+        .expect("put old");
+    let old = raw(&r, &s, "k").await;
+    r.host
+        .put(
+            &s,
+            None,
+            "k",
+            Bytes::from_static(b"new value"),
+            "text/plain",
+            &[],
+        )
+        .await
+        .expect("put new");
+    assert_eq!(
+        &r.host.get(&s, None, "k").await.expect("current").1[..],
+        b"new value"
+    );
+    // Attacker restores the earlier (valid-at-the-time) body + tags wholesale.
+    r.backend
+        .put(
+            &object_key(APP, 1, 7, "k"),
+            old.body,
+            "text/plain",
+            &old.meta.tags,
+        )
+        .await
+        .expect("rollback");
+    assert!(r.host.get(&s, None, "k").await.is_err(), "rollback refused");
+}
+
+#[tokio::test]
+async fn plain_tag_version_mismatch_is_refused() {
+    let r = rig(None);
+    let s = scope(1, 7);
+    r.seal_on.store(false, Ordering::SeqCst);
+    put(&r, &s, "v").await;
+    r.active.store(2, Ordering::SeqCst);
+    let o = raw(&r, &s, "v").await;
+    // Claim the MAC (made under v1) was made under v2.
+    let forged = plain_tag_of(&o).replacen("=v1:", "=v2:", 1);
+    r.backend
+        .put(
+            &object_key(APP, 1, 7, "v"),
+            o.body.clone(),
+            "text/plain",
+            &with_tag(&o, forged),
+        )
+        .await
+        .expect("forge");
+    assert!(r.host.get(&s, None, "v").await.is_err());
+    // Version beyond the active one is refused outright.
+    let beyond = plain_tag_of(&o).replacen("=v1:", "=v9:", 1);
+    r.backend
+        .put(
+            &object_key(APP, 1, 7, "v"),
+            o.body.clone(),
+            "text/plain",
+            &with_tag(&o, beyond),
+        )
+        .await
+        .expect("forge");
+    assert!(r.host.get(&s, None, "v").await.is_err());
+}
+
+#[tokio::test]
+async fn plaintext_writes_without_a_ledger_are_refused() {
+    let backend = Arc::new(MemoryBackend::new());
+    let up = Arc::new(AtomicBool::new(true));
+    let host = StorageHost::with_rate_limit(backend, Arc::new(Sink::default()), 1000).with_sealing(
+        ObjectSealing::new(TenantCrypto::new(Keys {
+            up,
+            active: Arc::new(AtomicU32::new(1)),
+        }))
+        .with_gate(Arc::new(Gate(Arc::new(AtomicBool::new(false))))),
+    );
+    let err = host
+        .put(
+            &scope(1, 7),
+            None,
+            "x",
+            Bytes::from_static(PLAIN),
+            "text/plain",
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StorageError::Backend(m) if m.contains("rollback ledger")));
 }

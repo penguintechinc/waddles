@@ -36,6 +36,7 @@ use bytes::Bytes;
 
 use crate::backend::ObjectMeta;
 use crate::error::StorageError;
+use crate::key::object_key;
 use crate::tags::{system_tag, TAG_PLAIN_MAC, TAG_SEALED};
 
 /// Metric/log surface label for [`TenantCrypto`].
@@ -61,6 +62,58 @@ impl SealGate for AlwaysSeal {
     }
 }
 
+/// Host-side record of the newest authenticated-plaintext write counter per object key, so a
+/// stale (body, tag) pair replayed from the bucket is rejected as a rollback. Metadata alone
+/// cannot prevent that: an attacker who can write the bucket can restore a whole old object.
+/// Production wiring backs it with the durable store (Valkey/DB); `MemoryPlainLedger` is for
+/// tests and single-process dev.
+pub trait PlainLedger: Send + Sync {
+    /// Newest committed counter for `object_key` (0 = none).
+    fn latest<'a>(&'a self, object_key: &'a str) -> BoxFuture<'a, Result<u64, StorageError>>;
+    /// Records `counter` as committed (monotonic: never lowers the stored value).
+    fn commit<'a>(
+        &'a self,
+        object_key: &'a str,
+        counter: u64,
+    ) -> BoxFuture<'a, Result<(), StorageError>>;
+}
+
+/// In-process [`PlainLedger`].
+#[derive(Default)]
+pub struct MemoryPlainLedger(std::sync::Mutex<std::collections::HashMap<String, u64>>);
+
+impl PlainLedger for MemoryPlainLedger {
+    fn latest<'a>(&'a self, object_key: &'a str) -> BoxFuture<'a, Result<u64, StorageError>> {
+        Box::pin(async move {
+            let m = self
+                .0
+                .lock()
+                .map_err(|_| StorageError::Backend("ledger poisoned".into()))?;
+            Ok(m.get(object_key).copied().unwrap_or(0))
+        })
+    }
+
+    fn commit<'a>(
+        &'a self,
+        object_key: &'a str,
+        counter: u64,
+    ) -> BoxFuture<'a, Result<(), StorageError>> {
+        Box::pin(async move {
+            let mut m = self
+                .0
+                .lock()
+                .map_err(|_| StorageError::Backend("ledger poisoned".into()))?;
+            let slot = m.entry(object_key.to_string()).or_insert(0);
+            *slot = (*slot).max(counter);
+            Ok(())
+        })
+    }
+}
+
+/// How many DEK versions back an authenticated-plaintext tag stays verifiable (the rotation
+/// window); older tags are refused until the object is rewritten.
+pub const PLAIN_MAC_VERSION_WINDOW: u32 = 1;
+
 /// Sealing configuration of a [`crate::StorageHost`].
 #[derive(Clone)]
 pub struct ObjectSealing {
@@ -69,6 +122,7 @@ pub struct ObjectSealing {
     /// Unix-seconds cutoff for serving legacy (pre-encryption, unauthenticated) plaintext;
     /// `None` (default) = never.
     legacy_plaintext_until: Option<u64>,
+    ledger: Option<Arc<dyn PlainLedger>>,
 }
 
 impl ObjectSealing {
@@ -79,6 +133,7 @@ impl ObjectSealing {
             crypto,
             gate: Arc::new(AlwaysSeal),
             legacy_plaintext_until: None,
+            ledger: None,
         }
     }
 
@@ -95,6 +150,14 @@ impl ObjectSealing {
     #[must_use]
     pub fn with_legacy_plaintext_until(mut self, cutoff_unix: u64) -> Self {
         self.legacy_plaintext_until = Some(cutoff_unix);
+        self
+    }
+
+    /// Installs the rollback ledger. Required for kill-switch plaintext writes: without one
+    /// they are refused (fail closed) because they could not be rollback-protected.
+    #[must_use]
+    pub fn with_plain_ledger(mut self, ledger: Arc<dyn PlainLedger>) -> Self {
+        self.ledger = Some(ledger);
         self
     }
 
@@ -119,22 +182,107 @@ impl ObjectSealing {
             .map_err(map_err)
     }
 
-    /// HMAC tag value authenticating a plaintext body written while the kill-switch was on.
-    pub(crate) async fn plain_mac(
+    /// Authenticates a plaintext body written while the kill-switch was on. Returns the tag
+    /// value `v<dek_version>:<counter>:<hex hmac>` and the counter to commit after the put.
+    /// The MAC binds scope, key, DEK version, a per-key monotonic counter and the body.
+    pub(crate) async fn plain_tag(
         &self,
         tenant: u64,
         community: u64,
         owner: &str,
         key: &str,
+        full_key: &str,
         body: &[u8],
-    ) -> Result<String, StorageError> {
+    ) -> Result<(String, u64), StorageError> {
+        let ledger = self.ledger.as_ref().ok_or_else(|| {
+            StorageError::Backend(
+                "plaintext writes need a rollback ledger; none configured (refusing)".into(),
+            )
+        })?;
+        let counter = ledger.latest(full_key).await?.saturating_add(1);
         let (t, c) = (tenant.to_string(), community.to_string());
-        let mac = self
+        let ctr = counter.to_string();
+        let (version, mac) = self
             .crypto
-            .blind_index(SURFACE, &t, &[&t, &c, owner, "object-plain", key], body)
+            .blind_index_versioned(
+                SURFACE,
+                &t,
+                None,
+                &[&t, &c, owner, "object-plain", key, &ctr],
+                body,
+            )
             .await
             .map_err(map_err)?;
-        Ok(mac.iter().map(|b| format!("{b:02x}")).collect())
+        Ok((format!("v{version}:{counter}:{}", hex(&mac)), counter))
+    }
+
+    /// Records a committed plaintext write counter (after the backend put succeeded).
+    pub(crate) async fn commit_plain(
+        &self,
+        full_key: &str,
+        counter: u64,
+    ) -> Result<(), StorageError> {
+        match &self.ledger {
+            Some(l) => l.commit(full_key, counter).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Verifies an authenticated-plaintext tag: version inside the rotation window, MAC valid
+    /// under that retained version, counter not older than the ledger's newest (rollback).
+    async fn verify_plain(
+        &self,
+        (tenant, community): (u64, u64),
+        owner: &str,
+        key: &str,
+        full_key: &str,
+        claimed: &str,
+        body: &[u8],
+    ) -> Result<(), StorageError> {
+        let bad = || StorageError::Backend("object integrity check failed".into());
+        let mut parts = claimed.splitn(3, ':');
+        let version: u32 = parts
+            .next()
+            .and_then(|v| v.strip_prefix('v'))
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(bad)?;
+        let counter: u64 = parts.next().and_then(|v| v.parse().ok()).ok_or_else(bad)?;
+        let hex_mac = parts.next().ok_or_else(bad)?;
+        let ledger = self.ledger.as_ref().ok_or_else(bad)?;
+        let (t, c) = (tenant.to_string(), community.to_string());
+        let active = self.crypto.active_dek_version(&t).await.map_err(map_err)?;
+        if version == 0 || version > active || active - version > PLAIN_MAC_VERSION_WINDOW {
+            return Err(bad());
+        }
+        let ctr = counter.to_string();
+        let (_, mac) = self
+            .crypto
+            .blind_index_versioned(
+                SURFACE,
+                &t,
+                Some(version),
+                &[&t, &c, owner, "object-plain", key, &ctr],
+                body,
+            )
+            .await
+            .map_err(map_err)?;
+        if !ct_eq(hex_mac.as_bytes(), hex(&mac).as_bytes()) {
+            return Err(bad());
+        }
+        let latest = ledger.latest(full_key).await?;
+        if counter < latest {
+            tracing::error!(
+                tenant,
+                community,
+                "stale plaintext object replayed; refusing"
+            );
+            return Err(bad());
+        }
+        if counter > latest {
+            // A write whose ledger commit was lost to a crash: adopt it.
+            ledger.commit(full_key, counter).await?;
+        }
+        Ok(())
     }
 
     /// Opens (or, for authenticated/legacy plaintext, validates) a stored object body.
@@ -153,16 +301,25 @@ impl ObjectSealing {
             let mac_prefix = format!("{TAG_PLAIN_MAC}=");
             let plain_mac = meta.tags.iter().find_map(|t| t.strip_prefix(&mac_prefix));
             if let Some(claimed) = plain_mac {
-                let expected = self
-                    .plain_mac(tenant, community, owner, key, &stored)
-                    .await?;
-                if !tagged_sealed && ct_eq(claimed.as_bytes(), expected.as_bytes()) {
+                if !tagged_sealed
+                    && self
+                        .verify_plain(
+                            (tenant, community),
+                            owner,
+                            key,
+                            &object_key(owner, tenant, community, key),
+                            claimed,
+                            &stored,
+                        )
+                        .await
+                        .is_ok()
+                {
                     return Ok(stored);
                 }
                 tracing::error!(
                     tenant,
                     community,
-                    "plaintext object failed its MAC; refusing"
+                    "plaintext object failed its MAC/version/rollback check; refusing"
                 );
                 return Err(integrity());
             }
@@ -198,6 +355,10 @@ impl ObjectSealing {
             .map(Bytes::from)
             .map_err(map_err)
     }
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// Constant-time equality of two byte strings.
