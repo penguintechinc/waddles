@@ -40,7 +40,11 @@ from services.bundle_access_grants import is_access_grant_id, summarize_access_g
 from services.bundle_access_grants import kinds as access_grant_kinds
 from services.bundle_approval_service import _reparse_trusted
 from services.bundle_manifest_v2 import BundleManifestV2, PermissionDeclaration
-from services.bundle_permission_catalog import CORE_NAMESPACE_PREFIX, is_dangerous
+from services.bundle_permission_catalog import (
+    CORE_NAMESPACE_PREFIX,
+    is_dangerous,
+    is_known_permission,
+)
 from services.errors import ApiError, forbidden, not_found
 
 logger = logging.getLogger(__name__)
@@ -572,6 +576,13 @@ async def grant_community_permissions(
     app) grant version and publishes the push-invalidation event (Sec4).
     Returns the new `grant_version`.
     """
+    not_in_catalog = sorted(p for p in granted_permission_ids if not is_known_permission(p))
+    if not_in_catalog:
+        raise ApiError(
+            f"cannot grant permissions that are not catalog ids: {not_in_catalog}",
+            422,
+            "unknown_permission",
+        )
     approved = await get_approved_permission_ids(install_dal, app_id=app_id, version=version)
     restricted = await get_tenant_restricted_ids(install_dal, tenant_id=tenant_id, app_id=app_id)
     allowed = approved - restricted
