@@ -18,6 +18,7 @@ vi.mock('@penguintechinc/react-libs', () => ({
     />
   ),
 }));
+vi.mock('../../lib/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
 vi.mock('../../components/GlobalBanner', () => ({ default: () => null }));
 vi.mock('../../components/VendorRequestFooter', () => ({ default: () => null }));
 

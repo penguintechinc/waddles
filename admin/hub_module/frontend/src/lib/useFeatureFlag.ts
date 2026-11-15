@@ -63,3 +63,17 @@ export function useFeatureFlag(key: FlagKey): boolean {
 
   return data?.[key] ?? false;
 }
+
+/**
+ * Like `useFeatureFlag` but also reports whether the flag map is still loading, so a page can
+ * show a loading state instead of flashing "not found" for a flag that is about to resolve ON.
+ */
+export function useFeatureFlagStatus(key: FlagKey): { enabled: boolean; isLoading: boolean } {
+  const { data, isPending } = useQuery({
+    queryKey: FLAGS_QUERY_KEY,
+    queryFn: fetchResolvedFlags,
+    staleTime: FLAGS_STALE_TIME_MS,
+  });
+
+  return { enabled: data?.[key] ?? false, isLoading: isPending };
+}

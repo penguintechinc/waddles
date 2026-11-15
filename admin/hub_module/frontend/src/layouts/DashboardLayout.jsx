@@ -16,6 +16,7 @@ import {
   LinkIcon,
   TrophyIcon,
   InboxStackIcon,
+  MusicalNoteIcon,
   ServerStackIcon,
   TicketIcon,
   CubeIcon,
@@ -28,6 +29,7 @@ import UserDropdown from '../components/UserDropdown';
 import { MAIN_CONTENT_ID, RouteAnnouncer, RouteOutlet, SkipLink } from '../components/ui';
 import { WADDLES_SIDEBAR_COLORS } from '../theme/sidebarTheme';
 import { useSidebarNav } from './useSidebarNav';
+import { useFeatureFlag } from '../lib/useFeatureFlag';
 
 function DashboardLayout() {
   const { user, isSuperAdmin, isVendor, isAnalyticsConsumer, isCommunityAdmin } = useAuth();
@@ -35,6 +37,8 @@ function DashboardLayout() {
   const { id: communityId } = useParams();
   const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
+  // Music page is feature-flagged (defaults OFF); only advertise it when the page will render.
+  const musicEnabled = useFeatureFlag('waddles.music.queue-page');
 
   const activeGroupKey = useMemo(() => {
     if (location.pathname.startsWith('/superadmin') || location.pathname.startsWith('/admin/platform')) {
@@ -82,6 +86,9 @@ function DashboardLayout() {
           { name: 'Chat & Forums', href: `/community/${communityId}/interact`, icon: ChatBubbleLeftRightIcon },
           { name: 'Leaderboard', href: `/dashboard/community/${communityId}/leaderboard`, icon: TrophyIcon },
           { name: 'Inventory', href: `/community/${communityId}/inventory`, icon: InboxStackIcon },
+          ...(musicEnabled
+            ? [{ name: 'Music', href: `/community/${communityId}/music`, icon: MusicalNoteIcon }]
+            : []),
           { name: 'Game Servers', href: `/community/${communityId}/game-servers`, icon: ServerStackIcon },
           { name: 'Support', href: `/community/${communityId}/support/submit`, icon: TicketIcon },
         ],
@@ -141,7 +148,7 @@ function DashboardLayout() {
     }
 
     return cats;
-  }, [communityId, activeGroupKey, isSuperAdmin, isVendor, isAnalyticsConsumer, isCommunityAdmin]);
+  }, [communityId, activeGroupKey, isSuperAdmin, isVendor, isAnalyticsConsumer, isCommunityAdmin, musicEnabled]);
 
   const footer = useMemo(
     () => [

@@ -63,6 +63,7 @@ const AdminDomains = lazy(() => import('./pages/admin/AdminDomains'));
 const AdminServers = lazy(() => import('./pages/admin/AdminServers'));
 const AdminConnectedPlatforms = lazy(() => import('./pages/admin/AdminConnectedPlatforms'));
 const LiveActivity = lazy(() => import('./pages/community/LiveActivity'));
+const MusicQueue = lazy(() => import('./pages/community/MusicQueue'));
 const AdminMirrorGroups = lazy(() => import('./pages/admin/AdminMirrorGroups'));
 const AdminLeaderboardConfig = lazy(() => import('./pages/admin/AdminLeaderboardConfig'));
 const AdminCommunityProfile = lazy(() => import('./pages/admin/AdminCommunityProfile'));
@@ -287,6 +288,7 @@ function App() {
         {/* Inventory (Quartermaster) routes (authenticated) */}
         <Route path="/community/:communityId/inventory" element={<InventoryBrowse />} />
         <Route path="/community/:communityId/inventory/my-items" element={<InventoryMyItems />} />
+        <Route path="/community/:communityId/music" element={<MusicQueue />} />
         <Route path="/community/:communityId/game-servers" element={<GameServers />} />
         <Route path="/community/:communityId/interact" element={<CommunityInteraction />} />
         <Route path="/community/:communityId/interact/:channelId" element={<CommunityInteraction />} />
