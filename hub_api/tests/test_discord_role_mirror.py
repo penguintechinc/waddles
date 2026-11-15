@@ -621,23 +621,56 @@ class TestAllowlistAndCrossCommunity:
         assert mirror.list_mappings(dal, cid) == []
         assert len(mirror.list_mappings(dal, cid2)) == 1
 
-    async def test_reconcile_fails_closed_on_cyclic_mappings(self, guild_pairing_db: Any) -> None:
-        """Pre-existing cyclic rows are never reconciled (counted failed, nothing granted)."""
+    async def test_reconcile_revokes_grants_of_cyclic_mappings(self, guild_pairing_db: Any) -> None:
+        """Pre-existing cyclic rows are never reconciled; their ledger grants are revoked."""
         dal, cid, _t, _g = guild_pairing_db
         _pair(dal, cid, G_A, G_B)
         t = dal.discord_role_mirror_mappings
+        ids = []
         for sg, sr, tg, tr in ((G_A, R_SRC, G_B, R_DST), (G_B, R_DST, G_A, R_SRC)):
-            t.insert(
-                community_id=cid,
-                source_guild_id=sg,
-                source_role_id=sr,
-                target_guild_id=tg,
-                target_role_id=tr,
+            ids.append(
+                t.insert(
+                    community_id=cid,
+                    source_guild_id=sg,
+                    source_role_id=sr,
+                    target_guild_id=tg,
+                    target_role_id=tr,
+                )
             )
+        dal.discord_role_mirror_grants.insert(
+            mapping_id=ids[0], platform="discord", platform_user_id="u1"
+        )
         dal.commit()
-        summary = await _run(dal, _FakeGuilds({}))
+        fake = _FakeGuilds({G_A: {"u1": {R_SRC}}, G_B: {"u1": {R_DST}}})
+        summary = await _run(dal, fake)
         assert summary.mappings_examined == 2
         assert summary.mappings_failed == 2
+        assert fake.adds == []
+        assert fake.removes == [(G_B, "u1", R_DST)]
+        assert dal(dal.discord_role_mirror_grants.mapping_id > 0).count() == 0
+
+    async def test_three_guild_cycle_is_refused_and_lock_is_global(
+        self, guild_pairing_db: Any
+    ) -> None:
+        """A cycle through a third guild (G1->G2, G2->G3 exist; G3->G1 refused), one lock key."""
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B, G_C)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        cid2 = await self._foreign_community(dal, G_B, G_C)
+        await _map(dal, cid2, G_B, R_DST, G_C, R_SRC)
+        cid3 = await self._foreign_community_n(dal, "third-corp", G_C, G_A)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid3, G_C, R_SRC, G_A, R_SRC)
+        assert exc.value.status_code == 409
+        assert mirror.list_mappings(dal, cid3) == []
+        assert mirror._GRAPH_LOCK_KEY == "role_mirror:graph"
+
+    async def _foreign_community_n(self, dal: Any, slug: str, *guilds: str) -> int:
+        t = dal.tenants.insert(slug=slug, is_active=True, is_global=False)
+        cid = dal.communities.insert(name=f"{slug}-community", tenant_id=t)
+        dal.commit()
+        _pair(dal, cid, *guilds)
+        return int(cid)
 
     async def test_cross_tenant_binding_vs_mirror_is_generic(self, guild_pairing_db: Any) -> None:
         dal, cid, _t, _g = guild_pairing_db
