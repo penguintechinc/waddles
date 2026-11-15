@@ -170,6 +170,10 @@ where
     // would bind to the no-op default provider and silently record nothing.
     // Every later `stage_metrics::stage_metrics()` call returns this same set.
     let _ = stage_metrics::stage_metrics();
+    // Command-latency kill switch: ENV baseline now, live PostHog value via the refresher.
+    command_latency::switch::init_from_env();
+    let _ = command_latency::metrics::metrics();
+    command_latency::switch::spawn_refresher(flags::command_latency_kill_switch_wanted);
     // Route `bundle-capability-gate`'s `metrics`-facade audit counters
     // (grants and denials) into the same OTel pipeline; without a recorder
     // the facade drops them.
@@ -1392,6 +1396,8 @@ fn try_start_changelog_consumer(
         }
     };
     let rust_data_plane = flag_or_closed(&license, flags::RUST_DATA_PLANE_FLAG);
+    // Executor slot sharding kill switch (unseen = sharding ON).
+    let sharding_flag = flags::executor_sharding_flag(&license);
     let dispatch_retry_policy = dispatch::RetryPolicy {
         max_retries: config.cli.action_max_retries,
         base_backoff_ms: config.cli.action_base_backoff_ms,
@@ -1524,6 +1530,7 @@ fn try_start_changelog_consumer(
             full_reconcile_interval,
             call_timeout_ms,
             flag,
+            sharding_flag,
             connections,
             dispatch_spawner,
             excluded_metric,
@@ -2593,6 +2600,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )

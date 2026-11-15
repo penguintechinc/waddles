@@ -146,6 +146,7 @@ async fn tool_calls(
             runtime: "runc".into(),
             verified: false,
         },
+        executor_id: None,
     };
     let exec = tokio::spawn(run_connection(
         executor_io,

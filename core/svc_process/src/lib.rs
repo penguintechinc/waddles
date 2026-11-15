@@ -207,6 +207,31 @@ fn build_ai_wiring(
     }
 }
 
+/// Resolves the deployment environment name the dev-DEK gate is checked against.
+///
+/// An unset `WADDLES_ENV` must never satisfy the dev gate, so it resolves to `production`
+/// (which `LocalDevDekProvider` refuses) -- and the fallback is logged, not silent. A value that
+/// is set but not valid unicode is likewise treated as `production` and logged as an error.
+fn dev_gate_environment(raw: Result<String, std::env::VarError>) -> String {
+    match raw {
+        Ok(name) => name,
+        Err(std::env::VarError::NotPresent) => {
+            tracing::warn!(
+                "WADDLES_ENV is unset; treating the environment as production for the \
+                 INGEST_DEV_KEK gate (the dev key provider will be refused)"
+            );
+            "production".to_string()
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            tracing::error!(
+                "WADDLES_ENV is not valid unicode; treating the environment as production \
+                 for the INGEST_DEV_KEK gate (the dev key provider will be refused)"
+            );
+            "production".to_string()
+        }
+    }
+}
+
 /// Builds this stage's tenant stream-DEK source (`crate::identity_crypto`): the counterpart of
 /// svc-ingest's encrypt side, shared by every consumer through `Config::identity_dek`.
 ///
@@ -231,8 +256,7 @@ fn build_dek_provider(
     use hub_client::dek::{ConfiguredDekProvider, LocalDevDekProvider, STREAM_DEK_SCOPE};
 
     if std::env::var_os("INGEST_DEV_KEK").is_some() {
-        // Unset `WADDLES_ENV` must never satisfy the dev gate: default to production.
-        let env_name = std::env::var("WADDLES_ENV").unwrap_or_else(|_| "production".to_string());
+        let env_name = dev_gate_environment(std::env::var("WADDLES_ENV"));
         match LocalDevDekProvider::new(&env_name, "INGEST_DEV_KEK") {
             Ok(provider) => return Ok(ConfiguredDekProvider::local_dev(provider)),
             Err(err) => tracing::error!(
@@ -474,6 +498,10 @@ where
     // would bind to the no-op default provider and silently record nothing.
     // Every later `stage_metrics::stage_metrics()` call returns this same set.
     let _ = stage_metrics::stage_metrics();
+    // Command-latency kill switch: ENV baseline now, live PostHog value via the refresher.
+    command_latency::switch::init_from_env();
+    let _ = command_latency::metrics::metrics();
+    command_latency::switch::spawn_refresher(license::command_latency_kill_switch_wanted);
     // Route `bundle-capability-gate`'s `metrics`-facade audit counters
     // (grants and denials) into the same OTel pipeline; without a recorder
     // the facade drops them.
@@ -2353,12 +2381,19 @@ fn try_start_changelog_consumer(
                 None => None,
             };
 
+        // Executor slot sharding kill switch (unseen = sharding ON). No
+        // license client means "flag unseen", i.e. sharding ON, never off.
+        let sharding_gate: Arc<dyn license::FeatureGate> = match &bundle_db_license_client {
+            Some(client) => Arc::new(license::ExecutorShardingGate::new(Arc::clone(client))),
+            None => Arc::new(license::StaticGate(true)),
+        };
         changelog_consumer::run(
             db,
             poll_interval,
             full_reconcile_interval,
             call_timeout_ms,
             gate,
+            sharding_gate,
             connections,
             spawner,
             excluded_metric,
@@ -2622,6 +2657,28 @@ async fn spawn_v2_registry_refresh(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dev_gate_environment_defaults_to_production_never_a_dev_env() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        assert_eq!(dev_gate_environment(Ok("alpha".to_string())), "alpha");
+        for unusable in [
+            Err(std::env::VarError::NotPresent),
+            Err(std::env::VarError::NotUnicode(OsString::from_vec(vec![
+                0xff,
+            ]))),
+        ] {
+            let name = dev_gate_environment(unusable);
+            assert_eq!(name, "production");
+            // The fallback must be refused by the dev-key gate itself, end to end.
+            assert!(matches!(
+                hub_client::dek::LocalDevDekProvider::from_kek(&name, [7u8; 32]),
+                Err(hub_client::dek::LocalDevDekProviderError::EnvironmentNotAllowed(_))
+            ));
+        }
+    }
+
     /// Wiring: bundle-kv goes to `VALKEY_KV_URL` (dedicated), the spine config
     /// stays on the durable `VALKEY_URL`; unset kv URL => None (no fallback).
     #[test]
@@ -3693,5 +3750,201 @@ mod tests {
         unsafe { std::env::remove_var("MODULE_PORT") };
 
         assert!(result.is_ok(), "run_healthcheck must succeed: {result:?}");
+    }
+
+    /// `BUNDLE_REPUTATION_PASSWORD` unset leaves the reputation capability unwired.
+    #[tokio::test]
+    async fn try_build_reputation_wiring_is_none_when_password_unset() {
+        let cfg = bundle_host_reputation::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_bundle_reputation".to_string(),
+        };
+        let wiring = try_build_reputation_wiring(
+            &cfg,
+            None,
+            &test_license_client(),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(wiring.is_none());
+    }
+
+    /// A configured reputation password with an unreachable DB degrades to `None`, never panics.
+    #[tokio::test]
+    async fn try_build_reputation_wiring_is_none_when_connection_fails() {
+        let cfg = bundle_host_reputation::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_bundle_reputation".to_string(),
+        };
+        let password = crate::config::Secret::new("irrelevant");
+        let wiring = try_build_reputation_wiring(
+            &cfg,
+            Some(&password),
+            &test_license_client(),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(wiring.is_none());
+    }
+
+    /// `BUNDLE_ECONOMY_PASSWORD` unset leaves the economy capability unwired.
+    #[tokio::test]
+    async fn try_build_economy_wiring_is_none_when_password_unset() {
+        let cfg = bundle_host_economy::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_economy_runtime".to_string(),
+        };
+        let wiring = try_build_economy_wiring(
+            &cfg,
+            None,
+            &test_license_client(),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(wiring.is_none());
+    }
+
+    /// A configured economy password with an unreachable DB degrades to `None`.
+    #[tokio::test]
+    async fn try_build_economy_wiring_is_none_when_connection_fails() {
+        let cfg = bundle_host_economy::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_economy_runtime".to_string(),
+        };
+        let password = crate::config::Secret::new("irrelevant");
+        let wiring = try_build_economy_wiring(
+            &cfg,
+            Some(&password),
+            &test_license_client(),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(wiring.is_none());
+    }
+
+    /// `BUNDLE_PLATFORM_TABLE_PASSWORD` unset leaves platform-table unwired.
+    #[tokio::test]
+    async fn try_build_platform_table_wiring_is_none_when_password_unset() {
+        let cfg = bundle_host_platform_table::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_platform_table".to_string(),
+        };
+        let wiring = try_build_platform_table_wiring(&cfg, None, &test_license_client()).await;
+        assert!(wiring.is_none());
+    }
+
+    /// A configured platform-table password with an unreachable DB degrades to `None`.
+    #[tokio::test]
+    async fn try_build_platform_table_wiring_is_none_when_connection_fails() {
+        let cfg = bundle_host_platform_table::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_platform_table".to_string(),
+        };
+        let password = crate::config::Secret::new("irrelevant");
+        let wiring =
+            try_build_platform_table_wiring(&cfg, Some(&password), &test_license_client()).await;
+        assert!(wiring.is_none());
+    }
+
+    /// An unset `SERVICE_JWT_TOKEN_ENDPOINT` leaves gameserver-net unwired.
+    #[tokio::test]
+    async fn try_build_gameserver_net_wiring_is_none_without_token_endpoint() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert!(cli.service_jwt_token_endpoint.is_empty());
+        assert!(try_build_gameserver_net_wiring(&cli, &test_license_client()).is_none());
+    }
+
+    /// With a token endpoint configured the gameserver-net wiring builds with its flag OFF.
+    #[tokio::test]
+    async fn try_build_gameserver_net_wiring_builds_with_flag_off_by_default() {
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--service-jwt-token-endpoint",
+            "https://hub.example.invalid/token",
+        ]);
+        if let Some(w) = try_build_gameserver_net_wiring(&cli, &test_license_client()) {
+            assert!(
+                !w.flag.enabled().await,
+                "the gameserver-net capability flag must default OFF"
+            );
+        }
+    }
+
+    /// The production supervisor spawns a real consumer per binding that survives an
+    /// unreachable Valkey (retrying with backoff) and stops promptly on `stop_all`.
+    #[tokio::test]
+    async fn spine_consumer_supervisor_survives_unreachable_valkey_and_stops_on_request() {
+        {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
+                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
+            }
+        }
+        let config = test_config(CliConfig::parse_from(["svc-process"]));
+        let deps = build_source_supervisor_deps(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            Arc::new(license::test_support::FixedGate(true)),
+            sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+            bundle_active_set::ActiveVersionSnapshot::new(),
+            test_egress_guard(),
+            Arc::new(active_digests::ActiveDigests::new()),
+            Arc::new(license::test_support::FixedGate(true)),
+            None,
+            Arc::new(()),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+        )
+        .await
+        .expect("valid config builds the supervisor deps");
+        // SAFETY: serialized by ENV_LOCK above.
+        unsafe {
+            std::env::remove_var("VALKEY_URL");
+            std::env::remove_var("VALKEY_PASSWORD");
+        }
+        let spawner = source_supervisor::SpineConsumerSupervisor {
+            deps: Arc::new(deps),
+        };
+        let metrics = test_source_supervisor_metrics();
+        let binding = source_supervisor::ResolvedBinding {
+            tenant_id: 1,
+            community_id: 2,
+            tenant_slug: "acme".to_string(),
+            community_name: Some("main".to_string()),
+            app_id: "waddles.core.service.test".to_string(),
+            platform: "twitch".to_string(),
+            source_id: "chan".to_string(),
+        };
+        let mut running = source_supervisor::RunningConsumers::new();
+        source_supervisor::reconcile(&mut running, &[binding], &spawner, &metrics).await;
+        assert_eq!(running.len(), 1);
+        assert_eq!(metrics.active_consumers.get(), 1);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            source_supervisor::stop_all(&mut running, &metrics),
+        )
+        .await
+        .expect("stop_all must return once shutdown is signalled");
+        assert!(running.is_empty());
+        assert_eq!(metrics.active_consumers.get(), 0);
     }
 }

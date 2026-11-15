@@ -52,6 +52,11 @@ _MIGRATION = (
     / "versions"
     / "0107_bundle_config_db_reads.py"
 )
+_MIGRATION_0108 = (
+    Path(__file__).resolve().parent.parent
+    / "versions"
+    / "0108_revoke_cfg_communities.py"
+)
 _RUST_SOURCE = REPO_ROOT / "core" / "bundle_config_db" / "src" / "lib.rs"
 _PRIOR = "0106_backfill_kv_capability"
 _ROLES = ("waddles_svc_process", "waddles_svc_action")
@@ -68,6 +73,24 @@ def _load() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _effective_grants() -> dict[str, dict[str, tuple[str, ...]]]:
+    """0107's GRANTS minus what 0108 revokes again (the state at head)."""
+    spec = importlib.util.spec_from_file_location("migration_0108", _MIGRATION_0108)
+    assert spec is not None and spec.loader is not None
+    m0108 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m0108)
+    out: dict[str, dict[str, tuple[str, ...]]] = {}
+    for role, tables in _load().GRANTS.items():
+        kept: dict[str, tuple[str, ...]] = {}
+        for table, cols in tables.items():
+            gone = set(m0108.REVOKED.get(role, {}).get(table, ()))
+            left = tuple(c for c in cols if c not in gone)
+            if left:
+                kept[table] = left
+        out[role] = kept
+    return out
 
 
 def _config_sql() -> str:
@@ -119,6 +142,8 @@ _FORBIDDEN_READS = (
     ("artifact_digest", "app_versions"),
     ("staging_source_key", "app_version_uploads"),
     ("name", "communities"),
+    ("id", "communities"),  # 0108: svc-process has no communities access at all
+    ("tenant_id", "communities"),
 )
 
 
@@ -220,8 +245,11 @@ def test_metadata_single_head_off_0106() -> None:
     assert len(m.revision) <= 32
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
-    heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == [m.revision], f"alembic heads: {heads}"
+    script = ScriptDirectory.from_config(cfg)
+    heads = script.get_heads()
+    assert len(heads) == 1, f"alembic heads: {heads}"
+    ancestors = {r.revision for r in script.walk_revisions("base", "heads")}
+    assert m.revision in ancestors, "0107 must be on the single chain"
 
 
 def test_catalog_matches_the_migration_grants() -> None:
@@ -229,17 +257,19 @@ def test_catalog_matches_the_migration_grants() -> None:
     re-asserts the catalog, so any difference would strip or add privileges after every upgrade)."""
     catalog = load_service_roles_module().load_catalog()
     by_name = {r.name: r for r in catalog.roles}
-    grants = _load().GRANTS
+    grants = _effective_grants()
     examined = 0
     for role, tables in grants.items():
         declared = {
             t: tuple(by_name[role].columns[t]["SELECT"]) for t in by_name[role].columns
         }
-        assert declared == dict(tables), f"{role}: catalog columns != migration GRANTS"
+        assert declared == dict(tables), f"{role}: catalog columns != 0107+0108 grants"
         examined += len(tables)
-    assert examined == 9, "denominator: 5 tables for svc-process + 4 for svc-action"
-    # svc-action's tenant gate is the pre-existing table-level communities grant.
+    assert examined == 8, "denominator: 4 tables for svc-process + 4 for svc-action"
+    # svc-action keeps its pre-existing table-level communities grant; svc-process has none.
     assert "communities" in by_name["waddles_svc_action"].tables
+    assert "communities" not in by_name["waddles_svc_process"].columns
+    assert "communities" not in by_name["waddles_svc_process"].tables
 
 
 @requires_docker
@@ -259,7 +289,11 @@ def test_role_runs_the_reader_statement_and_nothing_else(
             APP,
         ),  # community activation (v2 manifest, default 120), never saved
         (801, 0, APP),  # tenant-wide scope
-        (801, 8020, APP),  # community of ANOTHER tenant: absent
+        (
+            801,
+            8020,
+            APP,
+        ),  # ANOTHER tenant's community id: tenant 801's own defaults only
         (801, 8010, "waddles.core.app.inactive"),  # not active: absent
     ]
     rows = {
@@ -270,7 +304,8 @@ def test_role_runs_the_reader_statement_and_nothing_else(
         (801, 8010, APP): (2, {"default_duration_minutes": 30, "x": True}),
         (801, 8011, APP): (0, {"default_duration_minutes": 120}),
         (801, 0, APP): (0, {"default_duration_minutes": 60}),
-    }, "denominator: 3 of 5 scopes resolve"
+        (801, 8020, APP): (0, {"default_duration_minutes": 60}),
+    }, "denominator: 4 of 5 scopes resolve (the inactive app is absent)"
     forbidden = [
         (
             "INSERT INTO bundle_community_config (tenant_id, community_id, app_id, version, "
@@ -284,7 +319,7 @@ def test_role_runs_the_reader_statement_and_nothing_else(
         f"SELECT {c} FROM {t}"
         for c, t in _FORBIDDEN_READS
         # svc-action holds table-level `communities: SELECT` (catalog), so `name` is readable
-        # there by design; svc-process only has the column-scoped (id, tenant_id).
+        # there by design; svc-process has no communities access (0108).
         if not (role == "waddles_svc_action" and t == "communities")
     ]
     for stmt in forbidden:
@@ -299,7 +334,7 @@ def test_downgrade_revokes_exactly_then_upgrade_regrants(
 ) -> None:
     """upgrade -> downgrade -> upgrade on the real chain: no column ACL left behind."""
     owner = _owner(real_chain)
-    grants = _load().GRANTS
+    grants = _effective_grants()
     checked = 0
     for role, tables in grants.items():
         assert _column_acl_entries(owner, role) > 0
@@ -307,14 +342,12 @@ def test_downgrade_revokes_exactly_then_upgrade_regrants(
             for col in cols:
                 assert _col_priv(owner, role, table, col), f"{role} lacks {table}.{col}"
                 checked += 1
-    assert checked == 28, "denominator: 15 svc-process + 13 svc-action columns"
+    assert checked == 26, "denominator: 13 svc-process + 13 svc-action columns"
 
     alembic_cli("downgrade", _PRIOR, dsn=real_chain.dsn)
     for role, tables in grants.items():
         for table, cols in tables.items():
             for col in cols:
-                if table == "communities":
-                    continue  # a designed group role may also grant it; the ACL check below is exact
                 assert not _col_priv(owner, role, table, col), (
                     f"{role} kept {table}.{col}"
                 )

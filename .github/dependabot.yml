@@ -18,6 +18,7 @@ updates:
   - /core/bundle_tool_call
   - /core/bundle_host_reputation
   - /core/circuit_breaker
+  - /core/command_latency
   - /core/connection_resolver
   - /core/connector_e2e
   - /core/discord_mentions

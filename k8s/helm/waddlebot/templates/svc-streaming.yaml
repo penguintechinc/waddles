@@ -105,7 +105,7 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-streaming
-        image: "{{ .Values.streaming.image.repository }}:{{ printf "%s-%s" (.Values.streaming.image.tag | default .Values.global.imageTag | toString) $variant }}"
+        image: "{{ .Values.streaming.image.repository }}:{{ printf "%s-%s" (include "waddlebot.resolveImageTag" (dict "root" . "image" "svc-streaming" "explicit" .Values.streaming.image.tag)) $variant }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         {{- include "waddlebot.preStop" $ | nindent 8 }}
         # Pinned to the Rust image's own `appuser` (uid 10001), not the chart-wide
@@ -151,6 +151,7 @@ spec:
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
         env:
+        {{- include "waddlebot.otel.env" (dict "root" $ "service" "svc-streaming") | nindent 8 }}
         # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_streaming;
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
