@@ -74,14 +74,37 @@ class TestScopeAndTenant:
         _, community_id = community_db
         response = await client.get(
             f"/api/v1/admin/{community_id}/interaction/channels",
-            headers=auth_headers(scope="community.interaction:write"),
+            headers=auth_headers(scope="community.interaction:read", user_id="1"),
         )
         assert response.status_code == 403
+
+    async def test_broad_jwt_scopes_do_not_grant_channel_or_forum_admin(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        """Dedicated community scopes are required; the old broad JWT scopes no longer admit."""
+        _, community_id = community_db
+        headers = auth_headers(
+            scope="community.interaction:read community.interaction:write "
+            "community.interaction:manage_channels community:admin",
+            user_id="1",
+        )
+        for method, path in (
+            ("GET", "interaction/channels"),
+            ("POST", "interaction/channels"),
+            ("DELETE", "interaction/channels/1"),
+            ("DELETE", "interaction/forum/replies/1"),
+            ("PUT", "interaction/channels/1/permissions"),
+            ("GET", "interaction/roles"),
+        ):
+            response = await client.open(
+                f"/api/v1/admin/{community_id}/{path}", method=method, headers=headers
+            )
+            assert response.status_code == 403, (method, path)
 
     async def test_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         response = await client.get(
             "/api/v1/admin/9999/interaction/channels",
-            headers=auth_headers(scope="community.interaction:read"),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         assert response.status_code == 404
 
@@ -94,7 +117,7 @@ class TestChannelCrudAndAutoProvision:
         response = await _post_json(
             client,
             f"/api/v1/admin/{community_id}/interaction/channels",
-            auth_headers(scope="community.interaction:write", user_id="1"),
+            auth_headers(scope="users:admin", user_id="1"),
             {"name": "general-chat", "channel_type": "chat"},
         )
         assert response.status_code == 201
@@ -116,7 +139,7 @@ class TestChannelCrudAndAutoProvision:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(scope="users:admin", user_id="1")
         await _post_json(
             client,
             f"/api/v1/admin/{community_id}/interaction/channels",
@@ -126,7 +149,7 @@ class TestChannelCrudAndAutoProvision:
 
         response = await client.get(
             f"/api/v1/admin/{community_id}/interaction/channels",
-            headers=auth_headers(scope="community.interaction:read"),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -137,7 +160,7 @@ class TestChannelCrudAndAutoProvision:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         _, community_id = community_db
-        headers = auth_headers(scope="community.interaction:write", user_id="1")
+        headers = auth_headers(scope="users:admin", user_id="1")
         await _post_json(
             client, f"/api/v1/admin/{community_id}/interaction/channels", headers, {"name": "dupe"}
         )
@@ -152,7 +175,9 @@ class TestForumFlow:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
 
         channel_resp = await _post_json(
             client,
@@ -193,7 +218,9 @@ class TestForumFlow:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         dal, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         channel_resp = await _post_json(
             client,
             f"/api/v1/admin/{community_id}/interaction/channels",
@@ -388,7 +415,7 @@ class TestChannelUpdateDelete:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(scope="users:admin", user_id="1")
         channel_resp = await _post_json(
             client,
             f"/api/v1/admin/{community_id}/interaction/channels",
@@ -416,7 +443,7 @@ class TestChannelUpdateDelete:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(scope="users:admin", user_id="1")
         channel_resp = await _post_json(
             client,
             f"/api/v1/admin/{community_id}/interaction/channels",
@@ -441,7 +468,9 @@ class TestForumModerationAndReplies:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         channel_resp = await _post_json(
             client,
             f"/api/v1/admin/{community_id}/interaction/channels",
@@ -479,7 +508,9 @@ class TestForumModerationAndReplies:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         channel_resp = await _post_json(
             client,
             f"/api/v1/admin/{community_id}/interaction/channels",
@@ -506,7 +537,9 @@ class TestForumModerationAndReplies:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         channel_resp = await _post_json(
             client,
             f"/api/v1/admin/{community_id}/interaction/channels",
@@ -539,7 +572,9 @@ class TestForumModerationAndReplies:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         channel_resp = await _post_json(
             client,
             f"/api/v1/admin/{community_id}/interaction/channels",
@@ -560,7 +595,9 @@ class TestForumModerationAndReplies:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         channel_resp = await _post_json(
             client,
             f"/api/v1/admin/{community_id}/interaction/channels",
@@ -588,7 +625,9 @@ class TestForumModerationAndReplies:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         response = await _post_json(
             client,
             f"/api/v1/community/{community_id}/interact/forum/posts/9999/replies",
@@ -601,7 +640,9 @@ class TestForumModerationAndReplies:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         channel_resp = await _post_json(
             client,
             f"/api/v1/admin/{community_id}/interaction/channels",
@@ -642,7 +683,7 @@ class TestRolesAdditional:
 
         response = await client.get(
             f"/api/v1/admin/{community_id}/interaction/roles",
-            headers=auth_headers(scope="community.interaction:read"),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -691,7 +732,7 @@ class TestChannelPermissionOverrides:
         _, community_id = community_db
         response = await client.get(
             f"/api/v1/admin/{community_id}/interaction/channels/9999/permissions",
-            headers=auth_headers(scope="community.interaction:read"),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         assert response.status_code == 404
 
@@ -699,7 +740,7 @@ class TestChannelPermissionOverrides:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         _, community_id = community_db
-        manage_headers = auth_headers(scope="community.interaction:manage_channels")
+        manage_headers = auth_headers(scope="users:admin", user_id="1")
 
         bad_shape_resp = await client.put(
             f"/api/v1/admin/{community_id}/interaction/channels/1/permissions",
@@ -719,7 +760,7 @@ class TestChannelPermissionOverrides:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         dal, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(scope="users:admin", user_id="1")
         channel_resp = await _post_json(
             client,
             f"/api/v1/admin/{community_id}/interaction/channels",
@@ -732,7 +773,7 @@ class TestChannelPermissionOverrides:
 
         empty_resp = await client.get(
             f"/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
-            headers=auth_headers(scope="community.interaction:read"),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         assert empty_resp.status_code == 200
         assert (await empty_resp.get_json())["overrides"] == []
@@ -740,7 +781,7 @@ class TestChannelPermissionOverrides:
         update_resp = await client.put(
             f"/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
             headers={
-                **auth_headers(scope="community.interaction:manage_channels"),
+                **auth_headers(scope="users:admin", user_id="1"),
                 "Content-Type": "application/json",
             },
             data=json_module.dumps(
@@ -759,7 +800,7 @@ class TestChannelPermissionOverrides:
 
         after_resp = await client.get(
             f"/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
-            headers=auth_headers(scope="community.interaction:read"),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         after_body = await after_resp.get_json()
         assert len(after_body["overrides"]) == 1
@@ -769,7 +810,7 @@ class TestChannelPermissionOverrides:
         skip_resp = await client.put(
             f"/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
             headers={
-                **auth_headers(scope="community.interaction:manage_channels"),
+                **auth_headers(scope="users:admin", user_id="1"),
                 "Content-Type": "application/json",
             },
             data=json_module.dumps({"overrides": [{"grantScopes": []}]}),
@@ -777,7 +818,7 @@ class TestChannelPermissionOverrides:
         assert skip_resp.status_code == 200
         final_resp = await client.get(
             f"/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
-            headers=auth_headers(scope="community.interaction:read"),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         assert (await final_resp.get_json())["overrides"] == []
 
@@ -820,7 +861,10 @@ class TestMemberChannels:
         response = await _post_json(
             client,
             f"/api/v1/community/{community_id}/interact/channels",
-            auth_headers(scope="community.interaction:write", user_id="1"),
+            auth_headers(
+                scope="community.interaction:write community.interaction:read users:admin",
+                user_id="1",
+            ),
             {"name": "self-created"},
         )
         assert response.status_code == 403
@@ -847,7 +891,10 @@ class TestMemberChannels:
         response = await _post_json(
             client,
             f"/api/v1/community/{community_id}/interact/channels",
-            auth_headers(scope="community.interaction:write", user_id="1"),
+            auth_headers(
+                scope="community.interaction:write community.interaction:read users:admin",
+                user_id="1",
+            ),
             {"name": "self-created-2"},
         )
         assert response.status_code == 201
@@ -870,7 +917,10 @@ class TestMemberChannels:
         response = await _post_json(
             client,
             f"/api/v1/community/{community_id}/interact/channels",
-            auth_headers(scope="community.interaction:write", user_id="1"),
+            auth_headers(
+                scope="community.interaction:write community.interaction:read users:admin",
+                user_id="1",
+            ),
             {"name": "self-created-3"},
         )
         assert response.status_code == 201

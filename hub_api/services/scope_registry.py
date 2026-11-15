@@ -56,6 +56,15 @@ SCOPE_MEMBERS_REMOVE: Final[str] = "members:remove"
 SCOPE_REPUTATION_MANAGE: Final[str] = "members:reputation.manage"
 SCOPE_BUNDLE_ADMIN_MODERATE: Final[str] = "bundles.admin:moderate"
 SCOPE_BUNDLE_ADMIN_ADMIN: Final[str] = "bundles.admin:admin"
+SCOPE_SETTINGS_MANAGE: Final[str] = "community.settings:manage"
+SCOPE_MODULES_MANAGE: Final[str] = "community.modules:manage"
+SCOPE_TEMP_PASSWORD: Final[str] = "members:temp_password.reset"  # noqa: S105  # nosec B105
+SCOPE_PLATFORMS_MANAGE: Final[str] = "community.platforms:manage"
+SCOPE_COMMANDS_MANAGE: Final[str] = "community.commands:manage"
+SCOPE_CHANNELS_MANAGE: Final[str] = "community.channels:manage"
+SCOPE_FORUMS_MANAGE: Final[str] = "community.forums:manage"
+SCOPE_MEMBERS_VIEW: Final[str] = "community.members:view"
+SCOPE_ROLES_VIEW: Final[str] = "community.roles:view"
 #: Global-admin literal on a JWT; the only token claim that bypasses community checks.
 SCOPE_GLOBAL_ADMIN: Final[str] = "users:admin"
 
@@ -126,6 +135,15 @@ register_scopes(
         SCOPE_REPUTATION_MANAGE: "Adjust and administer reputation",
         SCOPE_BUNDLE_ADMIN_MODERATE: "Use moderation-level bundle admin tools",
         SCOPE_BUNDLE_ADMIN_ADMIN: "Use admin-level bundle admin tools",
+        SCOPE_SETTINGS_MANAGE: "Edit community settings",
+        SCOPE_MODULES_MANAGE: "Configure community modules",
+        SCOPE_TEMP_PASSWORD: "Generate member temporary passwords",
+        SCOPE_PLATFORMS_MANAGE: "View and manage connected platforms",
+        SCOPE_COMMANDS_MANAGE: "View and manage community commands",
+        SCOPE_CHANNELS_MANAGE: "Administer hub channels and overrides",
+        SCOPE_FORUMS_MANAGE: "Moderate forum posts and replies",
+        SCOPE_MEMBERS_VIEW: "List community members (admin view)",
+        SCOPE_ROLES_VIEW: "List roles and the scope registry",
     }
 )
 
@@ -145,6 +163,10 @@ MODERATOR_SEED_SCOPES: Final[tuple[str, ...]] = (
     SCOPE_REPUTATION_MANAGE,
     SCOPE_MEMBERS_REMOVE,
     SCOPE_BUNDLE_ADMIN_MODERATE,
+    SCOPE_CHANNELS_MANAGE,
+    SCOPE_FORUMS_MANAGE,
+    SCOPE_MEMBERS_VIEW,
+    SCOPE_ROLES_VIEW,
 )
 
 

@@ -94,6 +94,15 @@ predefined moderator role (moderation-level actions moderators could already per
 | Music queue admin | `music:queue.manage` | M |
 | Bundle admin tools, moderation level | `bundles.admin:moderate` | M |
 | Bundle admin tools, admin level | `bundles.admin:admin` | no |
+| Community settings | `community.settings:manage` | no |
+| Member list (admin view) | `community.members:view` | M |
+| Module configuration | `community.modules:manage` | no |
+| Temporary passwords | `members:temp_password.reset` | no |
+| Connected platforms | `community.platforms:manage` | no |
+| Community commands | `community.commands:manage` | no |
+| Hub channels and overrides | `community.channels:manage` | M |
+| Forum moderation | `community.forums:manage` | M |
+| Role/scope listing | `community.roles:view` | M |
 | Profile edit | `community.profile:manage` | no |
 | Marketplace billing | `billing:manage` | no |
 | Token billing admin | `token.billing:manage` | no |
@@ -109,7 +118,5 @@ predefined moderator role (moderation-level actions moderators could already per
 Migration `0117` merges the moderator list into every moderator-kind row and a trigger does the same
 for future communities; `scope_registry.MODERATOR_SEED_SCOPES` mirrors it (a test asserts equality).
 
-Not yet converted: the remaining `admin.py` routes gated by the JWT `community:admin` scope
-(settings, modules, temp-password, connected-platforms, commands) and `community_interaction`
-channel/forum admin (JWT `community.interaction:*` scopes) -- both are token-scope gates, tracked
-as follow-up.
+No JWT-scope admin gates remain: `admin.py` and the interaction admin routes resolve every scope
+from the caller's community role (plus global/tenant-admin bypass); an AST test enforces it.

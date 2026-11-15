@@ -415,7 +415,7 @@ class TestScopeEndpointAndSync:
         _, community_id = community_db
         response = await client.get(
             f"/api/v1/admin/{community_id}/interaction/scopes",
-            headers=auth_headers(scope="community.interaction:read", user_id="1"),
+            headers=auth_headers(scope="community.roles:view", user_id="1"),
         )
         assert response.status_code == 200
         assert "roles:manage" in (await response.get_json())["scopes"]
@@ -489,6 +489,11 @@ ADMIN_LEVEL_SCOPES = (
     "bundles.admin:admin",
     "community:admin",
     "community.profile:manage",
+    "community.settings:manage",
+    "community.modules:manage",
+    "members:temp_password.reset",
+    "community.platforms:manage",
+    "community.commands:manage",
 )
 
 
@@ -540,3 +545,48 @@ class TestEveryAdminGateHasDedicatedScope:
                         missing.append(f"{path.name}:{node.lineno}")
         assert gates >= 30, gates
         assert not missing, missing
+
+
+class TestNoTokenScopeAdminGates:
+    """AST sweep: admin.py and the interaction admin blueprint gate on community scopes only."""
+
+    def test_admin_blueprint_has_no_jwt_scope_gates(self) -> None:
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "blueprints/v1"
+        tree = ast.parse((root / "admin.py").read_text(encoding="utf-8"))
+        calls = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "require_scope"
+        ]
+        gated = [
+            f.name
+            for f in ast.walk(tree)
+            if isinstance(f, ast.AsyncFunctionDef)
+            and any(
+                isinstance(d, ast.Call) and getattr(d.func, "id", "") == "require_member_scope"
+                for d in f.decorator_list
+            )
+        ]
+        assert not calls, [c.lineno for c in calls]
+        assert len(gated) >= 11, gated
+
+    def test_interaction_admin_routes_use_community_scopes(self) -> None:
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "blueprints/v1"
+        tree = ast.parse((root / "community_interaction.py").read_text(encoding="utf-8"))
+        admin_funcs = 0
+        offenders: list[str] = []
+        for f in ast.walk(tree):
+            if not isinstance(f, ast.AsyncFunctionDef):
+                continue
+            decos = [ast.unparse(d) for d in f.decorator_list]
+            if not any("interaction_admin_bp" in d for d in decos):
+                continue
+            admin_funcs += 1
+            if any(d.startswith("require_scope(") for d in decos):
+                offenders.append(f.name)
+        assert admin_funcs >= 13, admin_funcs
+        assert not offenders, offenders

@@ -40,6 +40,10 @@ MODERATOR_SEED_SCOPES = (
     "members:reputation.manage",
     "members:remove",
     "bundles.admin:moderate",
+    "community.channels:manage",
+    "community.forums:manage",
+    "community.members:view",
+    "community.roles:view",
 )
 _SEED_ARRAY = "ARRAY[" + ", ".join("'%s'" % scope for scope in MODERATOR_SEED_SCOPES) + "]"
 

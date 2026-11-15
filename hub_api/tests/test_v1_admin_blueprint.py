@@ -580,3 +580,78 @@ class TestConnectedPlatformsAndCommands:
         assert "success" not in body  # byte-faithful to Node: no success wrapper
         assert body["commands"][0]["command"] == "!help"
         assert body["commands"][0]["is_enabled"] is True
+
+
+class TestAdminDedicatedScopes:
+    """Each remaining admin route needs its own community scope, never the broad JWT scope."""
+
+    ROUTES = (
+        ("GET", "settings", "community.settings:manage"),
+        ("GET", "members", "community.members:view"),
+        ("GET", "modules", "community.modules:manage"),
+        ("GET", "connected-platforms", "community.platforms:manage"),
+        ("GET", "commands", "community.commands:manage"),
+    )
+
+    @staticmethod
+    def _member_with(admin_db: Any, community_id: int, user_id: int, scopes: list[str]) -> None:
+        dal = admin_db.dal
+        role_id = dal.community_roles.insert(
+            community_id=community_id,
+            name=f"custom{user_id}",
+            is_system=False,
+            role_kind=0,
+            base_claims={"scopes": scopes},
+        )
+        dal.commit()
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=user_id,
+            role="custom",
+            community_role_id=role_id,
+        )
+
+    @pytest.mark.parametrize(("method", "path", "scope"), ROUTES)
+    async def test_broad_scopes_and_jwt_admin_scope_are_refused(
+        self, client: Any, admin_db: Any, method: str, path: str, scope: str
+    ) -> None:
+        community_id = _seed_community(admin_db)
+        self._member_with(
+            admin_db, community_id, 9, ["community:manage_members", "community:manage_channels"]
+        )
+        response = await client.open(
+            f"/api/v1/admin/{community_id}/{path}",
+            method=method,
+            headers=_headers(user_id=9, scope="community:admin"),
+        )
+        assert response.status_code == 403
+
+    @pytest.mark.parametrize(("method", "path", "scope"), ROUTES)
+    async def test_exact_scope_admits_and_only_that_route(
+        self, client: Any, admin_db: Any, method: str, path: str, scope: str
+    ) -> None:
+        community_id = _seed_community(admin_db)
+        self._member_with(admin_db, community_id, 10, [scope])
+        headers = _headers(user_id=10, scope="")
+        allowed = await client.open(
+            f"/api/v1/admin/{community_id}/{path}", method=method, headers=headers
+        )
+        assert allowed.status_code != 403
+        for other_method, other_path, other_scope in self.ROUTES:
+            if other_scope == scope:
+                continue
+            denied = await client.open(
+                f"/api/v1/admin/{community_id}/{other_path}", method=other_method, headers=headers
+            )
+            assert denied.status_code == 403, other_path
+
+    async def test_temp_password_needs_its_own_scope(self, client: Any, admin_db: Any) -> None:
+        community_id = _seed_community(admin_db)
+        self._member_with(admin_db, community_id, 11, ["community.members:view", "members:remove"])
+        response = await client.post(
+            f"/api/v1/admin/{community_id}/temp-password",
+            headers=_headers(user_id=11, scope=""),
+            json={"userId": 42},
+        )
+        assert response.status_code == 403
