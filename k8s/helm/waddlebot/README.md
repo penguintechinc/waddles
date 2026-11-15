@@ -1080,6 +1080,33 @@ instead of running unverified) and `EXECUTOR_PRECOMPILED_PREFIX` (default `preco
 object prefix inside the bundle bucket. The ConfigMap is published by the key-provisioning hook;
 on alpha/local the keypair is generated, on beta/gamma/production the private-key Secret must
 be pre-created or delegated (`autoProvisionedKeys.precompileSigning.externalSecret: true`).
+## Kata isolation for the bundle executor (`bundleExecutor.runtimeClass`, default OFF)
+
+The `svc-bundles-executor` StatefulSet pools run untrusted WASM bundles and can optionally run
+inside Kata Containers micro-VMs. Every other data-plane pod stays on standard containers with
+enforced Tetragon exec allowlists (unchanged). **No values file enables Kata** (a test pins it).
+
+```yaml
+bundleExecutor:
+  runtimeClass: { enabled: true, name: kata }
+  nodeSelector: { katacontainers.io/kata-runtime: "true" }   # KVM-capable nodes
+```
+
+- Renders `runtimeClassName` on every executor pool only when enabled; enabled with an empty
+  `name` fails the render (never a silent fallback to runc; a missing RuntimeClass leaves the pod Pending).
+- `nodeSelector` / `affinity` apply to the executor only, and only when enabled (default empty).
+- `runtimeClass.resources` + `runtimeClass.memoryBudgetMb` replace the per-pool executor
+  resources and LRU budget when enabled; the budget is checked against the override's memory
+  LIMIT, so size both together per cluster. The RuntimeClass `overhead` (guest kernel + agent) is
+  added to the pod request by Kubernetes automatically; size resources for the workload only.
+- Tetragon: inside a Kata guest the host's Tetragon cannot see the executor's `execve` calls, so
+  a Kata executor **omits** its `TracingPolicyNamespaced` (the micro-VM boundary is the control)
+  and **keeps** its `CiliumNetworkPolicy`. Policies on all other data-plane pods are untouched.
+- Extension seam: the Kata switch is global to the executor. Per-pool Kata (for example only the
+  scripted pools) needs the executor Tetragon policy selected per pool label first; both are
+  localised to `waddlebot.executorEffective` and the `workloadPolicies` call in
+  `templates/svc-bundles-executor.yaml`.
+- Prerequisite: the `RuntimeClass` and KVM nodes are cluster-admin managed (not by this chart).
 ## Helm matrix gate (`make test-helm-matrix`)
 
 One command runs what CI and review need for this chart: for every helm major present (v3 and v4,

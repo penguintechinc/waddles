@@ -87,17 +87,23 @@ guess.
 */}}
 {{- $bsepCmName := .Values.autoProvisionedKeys.bundleSigning.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" (include "waddlebot.fullname" .)) }}
 {{- $be := .Values.pipeline.rustDataPlane.bundleExecutor }}
+{{- /* Kata (bundleExecutor.runtimeClass.enabled, default false): host Tetragon cannot see inside the guest VM, so a Kata executor omits the TracingPolicy (the micro-VM is its control); the CiliumNetworkPolicy is kept either way. */}}
+{{- $kataAny := (($.Values.bundleExecutor).runtimeClass | default dict).enabled | default false }}
 {{- $psCmName := ((.Values.autoProvisionedKeys).precompileSigning | default dict).publicKeyConfigMapName | default (printf "%s-executor-precompile-signing-public" (include "waddlebot.fullname" .)) }}
 {{- range $pool := (include "waddlebot.executorPools" . | fromJsonArray) }}
 {{- with $ }}
 {{- $name := printf "%s-svc-bundles-executor%s" (include "waddlebot.fullname" .) $pool.suffix }}
 {{- $scaled := ne (($pool.autoscaling).mode | default "none") "none" }}
-{{- $limitMi := int (include "waddlebot.memToMi" (($pool.resources).limits).memory) }}
-{{- if or (le (int $pool.memoryBudgetMb) 0) (ge (int $pool.memoryBudgetMb) $limitMi) }}
-{{- fail (printf "svc-bundles-executor pool %s: memoryBudgetMb (%v) must be >0 and below the memory limit (%vMi) -- the budget is the LRU ceiling for compiled modules; the rest is headroom for instances + compile transients" $pool.name $pool.memoryBudgetMb $limitMi) }}
+{{- /* Effective sizing: the pool's own, or the Kata override when bundleExecutor.runtimeClass.enabled (executorEffective). The budget is checked against the LIMIT of the EFFECTIVE resources. */}}
+{{- $eff := include "waddlebot.executorEffective" (dict "root" $ "pool" $pool) | fromJson }}
+{{- $res := $eff.resources }}
+{{- $budgetMb := int $eff.memoryBudgetMb }}
+{{- $limitMi := int (include "waddlebot.memToMi" ($res.limits).memory) }}
+{{- if or (le $budgetMb 0) (ge $budgetMb $limitMi) }}
+{{- fail (printf "svc-bundles-executor pool %s: memoryBudgetMb (%v) must be >0 and below the memory limit (%vMi) -- the budget is the LRU ceiling for compiled modules; the rest is headroom for instances + compile transients" $pool.name $budgetMb $limitMi) }}
 {{- end }}
 {{- /* Sizing policy: requests are the bare minimum, limits the headroom -- a request above its limit is rejected by the API server only at apply time, so fail it here. */}}
-{{- $requestMi := int (include "waddlebot.memToMi" (($pool.resources).requests).memory) }}
+{{- $requestMi := int (include "waddlebot.memToMi" ($res.requests).memory) }}
 {{- if gt $requestMi $limitMi }}
 {{- fail (printf "svc-bundles-executor pool %s: memory request (%vMi) exceeds the memory limit (%vMi)" $pool.name $requestMi $limitMi) }}
 {{- end }}
@@ -170,6 +176,7 @@ spec:
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       automountServiceAccountToken: false
+      {{- include "waddlebot.executorKataPodSpec" . | nindent 6 }}
       {{- if $be.spreadAcrossNodes }}
       # Low requests (sizing policy) no longer make the scheduler reserve each pod's working set,
       # so spread a pool across nodes explicitly: both slot owners must not die with one node.
@@ -244,7 +251,7 @@ spec:
           value: {{ join "," $pool.languages | quote }}
         # LRU ceiling for resident compiled modules (MiB); render fails unless below the limit.
         - name: EXECUTOR_MEMORY_BUDGET_MB
-          value: {{ $pool.memoryBudgetMb | quote }}
+          value: {{ $budgetMb | quote }}
         # Object-storage prefix of signed AOT artifacts (precompiled/<engine_fp>/<digest>.cwasm)
         # written by the precompile Jobs (part D); read here via the read-only data-plane identity.
         - name: EXECUTOR_PRECOMPILED_PREFIX
@@ -388,7 +395,7 @@ spec:
           timeoutSeconds: 5
           failureThreshold: 3
         resources:
-          {{- toYaml $pool.resources | nindent 10 }}
+          {{- toYaml $res | nindent 10 }}
         volumeMounts:
         - name: tmp
           mountPath: /tmp
@@ -434,6 +441,7 @@ spec:
       {{- end }}
 {{- end }}
 {{- end }}
-# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
-{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-bundles-executor" "ports" (list ) "runtime" "rust" "binaries" (list "/app/bundle-executor") "cnp" false) }}
+# R5 posture: ingress scoped to declared ports, default-deny egress (own CiliumNetworkPolicy, always
+# rendered), enforced Tetragon exec allowlist -- OMITTED when Kata is enabled ($kataAny, see top).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-bundles-executor" "ports" (list ) "runtime" "rust" "binaries" (list "/app/bundle-executor") "cnp" false "tetragon" (not $kataAny)) }}
 {{- end }}

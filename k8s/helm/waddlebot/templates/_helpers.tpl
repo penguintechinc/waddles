@@ -1117,6 +1117,31 @@ true
 {{- end -}}
 
 {{/*
+Kata Containers isolation for the bundle executors (bundleExecutor.runtimeClass).
+Renders pod-spec lines (runtimeClassName, nodeSelector, affinity) for the svc-bundles-executor
+Deployment ONLY -- never included by any other data-plane workload. Empty output when
+disabled. Fails the render if enabled with an empty name (no silent fallback to runc).
+Call: include "waddlebot.executorKataPodSpec" .
+*/}}
+{{- define "waddlebot.executorKataPodSpec" -}}
+{{- $rc := .Values.bundleExecutor.runtimeClass | default dict -}}
+{{- if $rc.enabled -}}
+{{- if not $rc.name -}}
+{{- fail "bundleExecutor.runtimeClass.enabled=true requires a non-empty bundleExecutor.runtimeClass.name (the RuntimeClass, e.g. \"kata\", must exist in the cluster)" -}}
+{{- end -}}
+runtimeClassName: {{ $rc.name | quote }}
+{{- with .Values.bundleExecutor.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.bundleExecutor.affinity }}
+affinity:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Bundle storage v2 (docs/bundle-storage-v2.md): BUNDLE_DB_* env for svc-process-rust / svc-action-rust.
 Off by default (bundleStorageV2.db.enabled=false -> renders nothing, db capability stays
 not_implemented). Enabled -> the password is read by secretKeyRef from an operator-managed
@@ -1139,6 +1164,25 @@ chart's own Postgres service. Usage: include "waddlebot.bundleDbEnv" .
     secretKeyRef:
       name: {{ required "bundleStorageV2.db.existingSecret is required when bundleStorageV2.db.enabled=true" $v.existingSecret }}
       key: {{ $v.passwordKey | default "BUNDLE_DB_PASSWORD" }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Effective executor sizing for ONE pool, as JSON {"resources": {...}, "memoryBudgetMb": N}.
+Default: the pool's own resources + memoryBudgetMb. When Kata is enabled
+(bundleExecutor.runtimeClass.enabled) and bundleExecutor.runtimeClass.resources is set, those
+requests/limits REPLACE the pool's (they size the workload inside the guest VM; the RuntimeClass
+`overhead` is added by Kubernetes on top automatically) and the LRU budget becomes
+bundleExecutor.runtimeClass.memoryBudgetMb (0/unset fails the budget < limit render check).
+The caller validates budget < memory LIMIT on the EFFECTIVE values.
+Call: include "waddlebot.executorEffective" (dict "root" $ "pool" $pool) | fromJson
+*/}}
+{{- define "waddlebot.executorEffective" -}}
+{{- $rc := .root.Values.bundleExecutor.runtimeClass | default dict -}}
+{{- if and $rc.enabled $rc.resources -}}
+{{- dict "resources" $rc.resources "memoryBudgetMb" (int ($rc.memoryBudgetMb | default 0)) | toJson -}}
+{{- else -}}
+{{- dict "resources" .pool.resources "memoryBudgetMb" (int .pool.memoryBudgetMb) | toJson -}}
 {{- end -}}
 {{- end -}}
 

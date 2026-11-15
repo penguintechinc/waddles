@@ -497,6 +497,13 @@ bundleExecutor:
   image:
     repository: "ghcr.io/penguintechinc/waddles/svc-bundles-executor"
     tag: ""
+  # Kata isolation stays OFF until the admin Kata PR (RuntimeClass + node labels) is applied
+  # on dal2alpha. To enable afterwards:
+  # runtimeClass:
+  #   enabled: true
+  #   name: "kata"
+  # nodeSelector:
+  #   katacontainers.io/kata-runtime: "true"
 
 # svc-bundles-executor: the old CPU/memory HPA (targets <unknown>, no metrics API here) is
 # removed; the executor is a StatefulSet with its own PDB (maxUnavailable 1) and optional
