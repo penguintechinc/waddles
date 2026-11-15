@@ -6552,3 +6552,7 @@ mod ai_tests;
 #[cfg(test)]
 #[path = "capabilities_platform_table_tests.rs"]
 mod platform_table_tests;
+
+#[cfg(test)]
+#[path = "capabilities_object_storage_tests.rs"]
+mod object_storage_tests;

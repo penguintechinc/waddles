@@ -42,6 +42,7 @@ pub mod ai;
 pub mod builtins;
 pub mod bundle_admin;
 pub mod bundle_loader;
+pub mod bundle_storage;
 pub mod capabilities;
 pub mod changelog_consumer;
 pub mod config;
@@ -493,6 +494,8 @@ where
     host_api::ensure_crypto_provider_installed();
 
     let (_telemetry_guard, prom_registry) = telemetry::init(SERVICE_NAME);
+    // Fail LOUD on a partial BUNDLE_STORAGE_* config; log + gauge the disabled state.
+    bundle_storage::validate_startup()?;
     // Build the stage's OTel instruments NOW, strictly after `telemetry::init`
     // installed the global meter provider: an instrument created earlier
     // would bind to the no-op default provider and silently record nothing.
@@ -1610,6 +1613,8 @@ fn try_start_process_loop(
             &bundle_db_license_client,
         )
         .await;
+        let object_storage_wiring =
+            bundle_storage::try_build_wiring(&cli, &bundle_db_license_client).await;
         let gameserver_net_wiring =
             try_build_gameserver_net_wiring(&cli, &bundle_db_license_client);
         let economy_wiring = try_build_economy_wiring(
@@ -1768,6 +1773,7 @@ fn try_start_process_loop(
                 reputation_wiring: reputation_wiring.clone(),
                 economy_wiring: economy_wiring.clone(),
                 platform_table_wiring: platform_table_wiring.clone(),
+                object_storage_wiring: object_storage_wiring.clone(),
                 gameserver_net_wiring: gameserver_net_wiring.clone(),
                 // The legacy single-bundle path runs at the `(0, 0)` fail-closed
                 // scope (no resolved tenant/community), where every
@@ -2289,6 +2295,10 @@ fn try_start_changelog_consumer(
                         }
                         None => None,
                     };
+                    deps.object_storage_wiring = match &bundle_db_license_client {
+                        Some(client) => bundle_storage::try_build_wiring(&config.cli, client).await,
+                        None => None,
+                    };
                     deps.gameserver_net_wiring = bundle_db_license_client
                         .as_ref()
                         .and_then(|client| try_build_gameserver_net_wiring(&config.cli, client));
@@ -2557,6 +2567,7 @@ async fn build_source_supervisor_deps(
         reputation_wiring: None,
         economy_wiring: None,
         platform_table_wiring: None,
+        object_storage_wiring: None,
         gameserver_net_wiring: None,
         identity_wiring: None,
         ai_wiring: None,
