@@ -36,6 +36,7 @@ from quart_schema import validate_request, validate_response
 from services import token_billing_service as svc
 from services.community_authz import authorize_community
 from services.errors import ApiError, bad_request
+from services.scope_registry import SCOPE_TOKEN_BILLING
 
 token_products_bp = Blueprint(
     "v1_marketplace_token_products", __name__, url_prefix="/api/v1/marketplace/token-products"
@@ -293,7 +294,14 @@ async def credit_tokens(
     """Grant tokens to a community -- community-admin action (manual grant or purchase credit)."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_TOKEN_BILLING,
+        )
         result = await svc.credit_tokens(
             async_dal,
             dal,
@@ -365,7 +373,14 @@ async def get_transactions(
         # caller gets the same 403 regardless of whether their query
         # string happens to be malformed, never a 400 that would confirm
         # "you reached the validation logic" ahead of the authz check.
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_TOKEN_BILLING,
+        )
 
         try:
             limit = int(request.args.get("limit", "50"))

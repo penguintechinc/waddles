@@ -74,12 +74,42 @@ Retained on purpose: `tenant_admins.role` -> scope bundle expansion at token iss
 role-to-scopes step itself), and `target.role == "community-owner"` in `admin_service` (member change/removal)
 protects the community's owner row, a data invariant on the *target*, not authorization of the caller.
 
-## Still on the broad community-admin gate (no dedicated scope yet)
+## Per-action scope map
 
-Routes using `authorize_community(admin=True)` / default `require_community_admin` (any of
-`community:manage_members` or `community:manage_channels`): music station and music queue admin,
-streaming/stream config, token billing admin, marketplace lifecycle admin, bundle permissions and
-activation (community tier), provider connections, member admin (`admin_service`: roles, reputation,
-removal). Bundle admin gateway maps manifest-declared `community:moderate|admin` onto those two
-scopes by design. Convert each by passing `scope=` (the helper already accepts it) and registering
-the scope.
+Every privileged community action has its own registered scope (an AST test fails if any blueprint
+admin gate omits `scope=`). The admin kind holds all of them (computed). `M` = seeded on the
+predefined moderator role (moderation-level actions moderators could already perform).
+
+| Action | Scope | Moderator |
+|---|---|---|
+| Role create/edit/delete | `roles:manage` | no |
+| Assign member roles | `members:roles.manage` | no |
+| Remove members | `members:remove` | M |
+| Reputation adjust/config/soft-bans | `members:reputation.manage` | M |
+| Join requests | `community.members:manage` | M |
+| Logo/banner | `community.branding:manage` | M |
+| Overlay admin | `overlay:manage` | M |
+| Calls admin | `calls:manage` | M |
+| Music station admin | `music:station.manage` | M |
+| Music queue admin | `music:queue.manage` | M |
+| Bundle admin tools, moderation level | `bundles.admin:moderate` | M |
+| Bundle admin tools, admin level | `bundles.admin:admin` | no |
+| Profile edit | `community.profile:manage` | no |
+| Marketplace billing | `billing:manage` | no |
+| Token billing admin | `token.billing:manage` | no |
+| Marketplace lifecycle | `marketplace.lifecycle:manage` | no |
+| Bundle permissions / activation | `bundles.permissions:manage`, `bundles.activation:manage` | no |
+| Provider connections | `provider.connections:manage` | no |
+| Stream config and keys | `stream:config.manage` | no |
+| GitHub sync | `github:manage` | no |
+| Workflow | `workflow:manage` | no |
+| Media BYOK / AI routing | `media.byok:manage`, `ai.routing:manage` | no |
+| Community admin (default for `community_access.require_community_admin`) | `community:admin` | no |
+
+Migration `0117` merges the moderator list into every moderator-kind row and a trigger does the same
+for future communities; `scope_registry.MODERATOR_SEED_SCOPES` mirrors it (a test asserts equality).
+
+Not yet converted: the remaining `admin.py` routes gated by the JWT `community:admin` scope
+(settings, modules, temp-password, connected-platforms, commands) and `community_interaction`
+channel/forum admin (JWT `community.interaction:*` scopes) -- both are token-scope gates, tracked
+as follow-up.

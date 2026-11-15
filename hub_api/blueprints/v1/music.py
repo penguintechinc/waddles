@@ -41,6 +41,7 @@ from services.errors import ApiError, bad_request, payment_required
 from services.music_service import MusicProviderDTO, MusicSettingsDTO, RadioStationDTO
 from services.pagination import parse_limit
 from services.schema import bind_streaming_tables
+from services.scope_registry import SCOPE_MUSIC_STATION
 
 music_bp = Blueprint("v1_music", __name__, url_prefix="/api/v1/admin")
 
@@ -183,7 +184,14 @@ async def get_music_settings(
     """Get music settings for a community."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         ctx = get_tenant_context(request)
         assert ctx is not None  # nosec B101 -- tenant_middleware guarantees this
         if not await feature_enabled(FEATURE_STREAMING_MUSIC_STATION, tenant=ctx.tenant_slug):
@@ -204,7 +212,14 @@ async def update_music_settings(data: UpdateMusicSettingsRequest, community_id: 
     """Update music settings for a community."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         fields = {
             "defaultProvider": data.defaultProvider,
             "autoplayEnabled": data.autoplayEnabled,
@@ -231,7 +246,14 @@ async def get_providers(
     """List configured music providers for a community."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         providers = await svc.get_providers(async_dal, dal, community_id=community_id)
     except ApiError as exc:
         return _err(exc)
@@ -248,7 +270,14 @@ async def start_oauth(
     """Start OAuth flow for a music provider."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         auth_url, state_token = await svc.start_oauth(
             async_dal,
             dal,
@@ -270,7 +299,14 @@ async def disconnect_provider(
     """Disconnect a music provider."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         await svc.disconnect_provider(async_dal, dal, community_id=community_id, provider=provider)
     except ApiError as exc:
         return _err(exc)
@@ -286,7 +322,14 @@ async def get_radio_stations(
     """Get radio stations for a community."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         page = int(request.args.get("page", "1"))
         limit = parse_limit(request.args.get("limit"), default=25)
         stations, page, limit, total = await svc.get_radio_stations(
@@ -313,7 +356,14 @@ async def add_radio_station(data: AddRadioStationRequest, community_id: int) -> 
     """Add a radio station to a community."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         created_by = get_optional_current_user_id(request)
         station = await svc.add_radio_station(
             async_dal,
@@ -340,7 +390,14 @@ async def remove_radio_station(
     """Remove a radio station from a community."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         await svc.remove_radio_station(
             async_dal, dal, community_id=community_id, station_id=station_id
         )

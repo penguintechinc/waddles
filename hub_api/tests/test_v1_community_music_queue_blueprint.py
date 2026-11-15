@@ -77,7 +77,12 @@ import blueprints.v1.community_music_queue as community_music_queue_module
 from blueprints.v1.community_music_queue import MUSIC_PLAYBACK_REDIS_CONFIG_KEY, music_queue_bp
 from config import HubAPIConfig
 from services.music_providers.track import Track
-from tests.conftest import TENANT_SLUG, make_user_token, make_user_token_with_roles
+from tests.conftest import (
+    TENANT_SLUG,
+    make_user_token,
+    make_user_token_with_roles,
+    role_kind_fields,
+)
 
 
 class FakeRedis:
@@ -209,7 +214,10 @@ def _seed_member(
     role_id = None
     if scopes is not None:
         role_id = db.dal.community_roles.insert(
-            community_id=community_id, name=role, base_claims={"scopes": scopes}
+            community_id=community_id,
+            name=role,
+            base_claims={"scopes": scopes},
+            **role_kind_fields(role),
         )
     db.dal.community_members.insert(
         community_id=community_id,

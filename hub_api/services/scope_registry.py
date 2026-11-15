@@ -43,6 +43,19 @@ SCOPE_BYOK_MANAGE: Final[str] = "media.byok:manage"
 SCOPE_AI_ROUTING_MANAGE: Final[str] = "ai.routing:manage"
 SCOPE_OVERLAY_MANAGE: Final[str] = "overlay:manage"
 SCOPE_CALLS_MANAGE: Final[str] = "calls:manage"
+SCOPE_MUSIC_STATION: Final[str] = "music:station.manage"
+SCOPE_MUSIC_QUEUE: Final[str] = "music:queue.manage"
+SCOPE_STREAM_CONFIG: Final[str] = "stream:config.manage"
+SCOPE_TOKEN_BILLING: Final[str] = "token.billing:manage"  # noqa: S105  # nosec B105
+SCOPE_MARKETPLACE_LIFECYCLE: Final[str] = "marketplace.lifecycle:manage"
+SCOPE_BUNDLE_PERMISSIONS: Final[str] = "bundles.permissions:manage"
+SCOPE_BUNDLE_ACTIVATION: Final[str] = "bundles.activation:manage"
+SCOPE_PROVIDER_CONNECTIONS: Final[str] = "provider.connections:manage"
+SCOPE_MEMBERS_ROLES: Final[str] = "members:roles.manage"
+SCOPE_MEMBERS_REMOVE: Final[str] = "members:remove"
+SCOPE_REPUTATION_MANAGE: Final[str] = "members:reputation.manage"
+SCOPE_BUNDLE_ADMIN_MODERATE: Final[str] = "bundles.admin:moderate"
+SCOPE_BUNDLE_ADMIN_ADMIN: Final[str] = "bundles.admin:admin"
 #: Global-admin literal on a JWT; the only token claim that bypasses community checks.
 SCOPE_GLOBAL_ADMIN: Final[str] = "users:admin"
 
@@ -100,7 +113,38 @@ register_scopes(
         SCOPE_AI_ROUTING_MANAGE: "Manage AI routing and BYOK keys",
         SCOPE_OVERLAY_MANAGE: "Manage stream overlays",
         SCOPE_CALLS_MANAGE: "Administer voice call rooms",
+        SCOPE_MUSIC_STATION: "Administer the community music station",
+        SCOPE_MUSIC_QUEUE: "Administer the community music queue",
+        SCOPE_STREAM_CONFIG: "Manage streaming configuration and keys",
+        SCOPE_TOKEN_BILLING: "Administer community token billing",
+        SCOPE_MARKETPLACE_LIFECYCLE: "Administer marketplace installs",
+        SCOPE_BUNDLE_PERMISSIONS: "Manage bundle permission grants",
+        SCOPE_BUNDLE_ACTIVATION: "Activate and deactivate bundles",
+        SCOPE_PROVIDER_CONNECTIONS: "Manage provider connections",
+        SCOPE_MEMBERS_ROLES: "Assign member roles",
+        SCOPE_MEMBERS_REMOVE: "Remove community members",
+        SCOPE_REPUTATION_MANAGE: "Adjust and administer reputation",
+        SCOPE_BUNDLE_ADMIN_MODERATE: "Use moderation-level bundle admin tools",
+        SCOPE_BUNDLE_ADMIN_ADMIN: "Use admin-level bundle admin tools",
     }
+)
+
+
+#: Scopes the predefined moderator role is seeded with beyond its original channel/chat scopes:
+#: exactly the moderation-level privileged actions moderators could already perform. Admin-level
+#: money/infra/secret actions (billing, BYOK, AI routing, GitHub, workflow, roles, token billing,
+#: marketplace lifecycle, bundle permissions/activation, provider connections, stream config,
+#: role assignment, `bundles.admin:admin`) are deliberately NOT here. Mirrors migration 0117.
+MODERATOR_SEED_SCOPES: Final[tuple[str, ...]] = (
+    SCOPE_MEMBERS_MANAGE,
+    SCOPE_OVERLAY_MANAGE,
+    SCOPE_CALLS_MANAGE,
+    SCOPE_BRANDING_MANAGE,
+    SCOPE_MUSIC_STATION,
+    SCOPE_MUSIC_QUEUE,
+    SCOPE_REPUTATION_MANAGE,
+    SCOPE_MEMBERS_REMOVE,
+    SCOPE_BUNDLE_ADMIN_MODERATE,
 )
 
 

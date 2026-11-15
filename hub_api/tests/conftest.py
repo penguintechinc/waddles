@@ -111,6 +111,7 @@ from services.schema import (
     bind_tenant_tables,
     bind_token_billing_tables,
 )
+from services.scope_registry import MODERATOR_SEED_SCOPES
 
 # Env-gated real-Ollama fixtures (skip unless WADDLE_TEST_OLLAMA_URL is set) -- shared support
 # in <repo>/tests/support; see docs/testing/ollama-realpath.md. Additive re-export only.
@@ -455,7 +456,13 @@ def seed_community(
     return community_id
 
 
-_ROLE_KINDS = {"community-admin": 1, "community-owner": 1, "moderator": 2}
+_ROLE_KINDS = {"community-admin": 1, "community-owner": 1, "admin": 1, "moderator": 2}
+
+
+def role_kind_fields(name: str) -> dict[str, Any]:
+    """`is_system`/`role_kind` for a seeded role NAME, as the 0117 insert trigger sets them."""
+    kind = _ROLE_KINDS.get(name, 0)
+    return {"is_system": kind != 0, "role_kind": kind}
 
 
 def _seed_kind_role(dal: Any, community_id: int, name: str) -> int | None:
@@ -475,7 +482,11 @@ def _seed_kind_role(dal: Any, community_id: int, name: str) -> int | None:
     )
     if existing is not None:
         return int(existing.id)
-    scopes = ["community:manage_channels", "channels:moderate"] if kind == 2 else []
+    scopes = (
+        ["community:manage_channels", "channels:moderate", *MODERATOR_SEED_SCOPES]
+        if kind == 2
+        else []
+    )
     return int(
         dal.community_roles.insert(
             community_id=community_id,
@@ -497,6 +508,28 @@ def seed_membership(
         community_id=community_id,
         user_id=str(user_id),
         role=role,
+        is_active=True,
+        community_role_id=role_id,
+    )
+    dal.commit()
+
+
+def seed_scoped_member(
+    overlay_db: Any, *, community_id: int, user_id: int, scopes: list[str], name: str = "custom"
+) -> None:
+    """Active member holding a CUSTOM role with exactly `scopes` (no predefined kind, no extras)."""
+    dal = overlay_db.dal
+    role_id = dal.community_roles.insert(
+        community_id=community_id,
+        name=f"{name}{user_id}",
+        is_system=False,
+        role_kind=0,
+        base_claims={"scopes": scopes},
+    )
+    dal.community_members.insert(
+        community_id=community_id,
+        user_id=str(user_id),
+        role=name,
         is_active=True,
         community_role_id=role_id,
     )
@@ -741,6 +774,8 @@ def lifecycle_db(tmp_path: Any) -> Any:
     role_id = dal.community_roles.insert(
         community_id=community_id,
         name="admin",
+        is_system=True,
+        role_kind=1,
         base_claims={"scopes": ["community:manage_members"]},
     )
     dal.community_members.insert(

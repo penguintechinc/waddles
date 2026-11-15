@@ -470,3 +470,73 @@ class TestNoRoleNameAuthorization:
             scanned += 1
             assert needle not in path.read_text(encoding="utf-8"), f"{needle} in {path}"
         assert scanned > 50
+
+
+ADMIN_LEVEL_SCOPES = (
+    "billing:manage",
+    "media.byok:manage",
+    "ai.routing:manage",
+    "github:manage",
+    "workflow:manage",
+    "roles:manage",
+    "token.billing:manage",
+    "marketplace.lifecycle:manage",
+    "bundles.permissions:manage",
+    "bundles.activation:manage",
+    "provider.connections:manage",
+    "stream:config.manage",
+    "members:roles.manage",
+    "bundles.admin:admin",
+    "community:admin",
+    "community.profile:manage",
+)
+
+
+class TestModeratorSeed:
+    def test_seed_is_registered_and_moderation_level_only(self) -> None:
+        assert set(reg.MODERATOR_SEED_SCOPES) <= reg.all_scopes()
+        assert not set(reg.MODERATOR_SEED_SCOPES) & set(ADMIN_LEVEL_SCOPES)
+
+    def test_admin_level_scopes_are_registered(self) -> None:
+        assert set(ADMIN_LEVEL_SCOPES) <= reg.all_scopes()
+
+    def test_migration_seed_matches_registry(self) -> None:
+        import importlib.util
+
+        path = Path(__file__).resolve().parents[2] / "alembic/versions/0117_community_role_kind.py"
+        spec = importlib.util.spec_from_file_location("m0117", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert tuple(module.MODERATOR_SEED_SCOPES) == tuple(reg.MODERATOR_SEED_SCOPES)
+
+
+class TestEveryAdminGateHasDedicatedScope:
+    """AST sweep: no blueprint admin gate may fall back to the broad manage_* OR-set."""
+
+    def test_admin_gates_pass_scope(self) -> None:
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "blueprints"
+        gates = 0
+        missing: list[str] = []
+        for path in root.rglob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+                kw = {k.arg: k.value for k in node.keywords if k.arg}
+                admin_true = (
+                    "admin" in kw
+                    and isinstance(kw["admin"], ast.Constant)
+                    and kw["admin"].value is True
+                )
+                if (name == "authorize_community" and admin_true) or (
+                    name == "require_community_admin"
+                ):
+                    gates += 1
+                    if "scope" not in kw:
+                        missing.append(f"{path.name}:{node.lineno}")
+        assert gates >= 30, gates
+        assert not missing, missing

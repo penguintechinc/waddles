@@ -46,7 +46,7 @@ def client(app: Quart) -> Any:
 
 
 def _headers(
-    *, user_id: int = 1, scope: str = "community:admin", tenant: str = TENANT_SLUG
+    *, user_id: int = 1, scope: str = "community:admin users:admin", tenant: str = TENANT_SLUG
 ) -> dict[str, str]:
     token = make_user_token(user_id=user_id, scope=scope, tenant=tenant)
     return {"Authorization": f"Bearer {token}"}
@@ -322,6 +322,60 @@ class TestMembers:
             json={"role": "community-admin"},
         )
         assert by_admin.status_code == 200
+
+    async def test_member_admin_actions_need_their_own_scopes(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        """A moderator-seeded member can remove members but cannot assign roles (own scope each)."""
+        from services.scope_registry import MODERATOR_SEED_SCOPES
+
+        community_id = _seed_community(admin_db)
+        mod_role = self._seed_role(
+            admin_db,
+            community_id,
+            "moderator",
+            2,
+            ["community:manage_channels", *MODERATOR_SEED_SCOPES],
+        )
+        self._seed_role(admin_db, community_id, "vip", 0, ["community:read"])
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=7,
+            role="moderator",
+            community_role_id=mod_role,
+        )
+        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        headers = _headers(user_id=7, scope="community:admin")
+        denied = await client.put(
+            f"/api/v1/admin/{community_id}/members/42/role", headers=headers, json={"role": "vip"}
+        )
+        assert denied.status_code == 403
+        removed = await client.delete(
+            f"/api/v1/admin/{community_id}/members/42", headers=headers, json={"reason": "spam"}
+        )
+        assert removed.status_code == 200
+
+    async def test_custom_role_without_remove_scope_cannot_remove_or_adjust(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        community_id = _seed_community(admin_db)
+        role = self._seed_role(admin_db, community_id, "custom", 0, ["community:manage_members"])
+        _seed_member(
+            admin_db, community_id=community_id, user_id=9, role="custom", community_role_id=role
+        )
+        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        headers = _headers(user_id=9, scope="community:admin")
+        removed = await client.delete(
+            f"/api/v1/admin/{community_id}/members/42", headers=headers, json={}
+        )
+        assert removed.status_code == 403
+        adjusted = await client.put(
+            f"/api/v1/admin/{community_id}/members/42/reputation",
+            headers=headers,
+            json={"amount": 5},
+        )
+        assert adjusted.status_code == 403
 
     async def test_update_member_role_not_found_is_404(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)

@@ -455,6 +455,7 @@ async def require_community_admin_scoped(
     user_id: int,
     tenant_id: int,
     scopes_claim: frozenset[str],
+    scope: str | None = None,
 ) -> CommunityMembership:
     """Port of `requireCommunityAdmin` -- raise 403 unless bypass or an admin/moderator scope."""
     membership = await resolve_community_membership_scoped(
@@ -465,7 +466,11 @@ async def require_community_admin_scoped(
         tenant_id=tenant_id,
         scopes_claim=scopes_claim,
     )
-    if membership is None or not (membership.bypass or membership.is_admin):
+    # A dedicated per-action `scope` replaces the broad multi-purpose admin OR-set.
+    held = membership is not None and (
+        membership.bypass or ((scope in membership.scopes) if scope else membership.is_admin)
+    )
+    if not held:
         raise forbidden("Community admin access required")
     return membership
 
@@ -497,7 +502,13 @@ def _decode_caller(request: Any) -> tuple[int, frozenset[str]]:
 
 
 async def authorize_community(
-    request: Any, async_dal: Any, dal: Any, *, community_id: int, admin: bool
+    request: Any,
+    async_dal: Any,
+    dal: Any,
+    *,
+    community_id: int,
+    admin: bool,
+    scope: str | None = None,
 ) -> CommunityMembership:
     """One-call authz gate for a `:communityId`-scoped route (M7 `_scoped` variant).
 
@@ -511,8 +522,17 @@ async def authorize_community(
     if ctx is None:
         raise forbidden("Tenant context not resolved")
     user_id, scopes = _decode_caller(request)
-    check = require_community_admin_scoped if admin else require_community_member_scoped
-    return await check(
+    if admin:
+        return await require_community_admin_scoped(
+            async_dal,
+            dal,
+            community_id=community_id,
+            user_id=user_id,
+            tenant_id=ctx.tenant_id,
+            scopes_claim=scopes,
+            scope=scope,
+        )
+    return await require_community_member_scoped(
         async_dal,
         dal,
         community_id=community_id,
@@ -549,6 +569,32 @@ def resolve_editor_scopes(request: Any, dal: Any, *, community_id: int) -> froze
         if is_tenant_admin:
             return all_scopes()
     return frozenset(member_scopes_sync(dal, community_id, user_id) | token_scopes)
+
+
+async def resolve_editor_scopes_async(
+    request: Any, async_dal: Any, dal: Any, *, community_id: int
+) -> frozenset[str]:
+    """Async twin of :func:`resolve_editor_scopes` for handlers that already hold the async DAL.
+
+    Goes through `resolve_community_membership_scoped` (tenant ownership check first, then the
+    global/tenant-admin bypass, then the member's role scopes), unioned with the token scopes.
+    """
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        raise forbidden("Tenant context not resolved")
+    user_id, token_scopes = _decode_caller(request)
+    membership = await resolve_community_membership_scoped(
+        async_dal,
+        dal,
+        community_id=community_id,
+        user_id=user_id,
+        tenant_id=ctx.tenant_id,
+        scopes_claim=token_scopes,
+    )
+    if membership is not None and membership.bypass:
+        return all_scopes()
+    held = membership.scopes if membership is not None else frozenset()
+    return frozenset(held | token_scopes)
 
 
 def member_scopes_sync(dal: Any, community_id: int, user_id: int) -> frozenset[str]:

@@ -43,7 +43,7 @@ from services import community_authz
 from services import community_reputation_service as reputation_svc
 from services.errors import bad_request, forbidden, not_found
 from services.schema import bind_admin_tables
-from services.scope_registry import KIND_ADMIN, effective_scopes
+from services.scope_registry import KIND_ADMIN, SCOPE_REPUTATION_MANAGE, effective_scopes
 
 SALT_ROUNDS = 12  # matches adminController.js's own SALT_ROUNDS
 
@@ -353,7 +353,7 @@ async def authorize_reputation_admin(
     _ensure_tables(dal)
     await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
     await community_authz.require_community_admin(
-        async_dal, dal, request, community_id=community_id
+        async_dal, dal, request, community_id=community_id, scope=SCOPE_REPUTATION_MANAGE
     )
 
 

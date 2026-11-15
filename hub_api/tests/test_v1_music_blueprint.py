@@ -31,7 +31,12 @@ from quart_schema import QuartSchema
 import blueprints.v1.music as music_module
 from blueprints.v1.music import music_bp
 from config import HubAPIConfig
-from tests.conftest import TENANT_SLUG, make_user_token, make_user_token_with_roles
+from tests.conftest import (
+    TENANT_SLUG,
+    make_user_token,
+    make_user_token_with_roles,
+    role_kind_fields,
+)
 
 
 def _test_config() -> HubAPIConfig:
@@ -104,7 +109,10 @@ def _seed_member(
     role_id = None
     if scopes is not None:
         role_id = db.dal.community_roles.insert(
-            community_id=community_id, name=role, base_claims={"scopes": scopes}
+            community_id=community_id,
+            name=role,
+            base_claims={"scopes": scopes},
+            **role_kind_fields(role),
         )
     db.dal.community_members.insert(
         community_id=community_id,
@@ -158,19 +166,36 @@ class TestCommunityAdminGate:
         assert response.status_code == 403
 
     async def test_moderator_scope_is_sufficient(self, client: Any, streaming_db: Any) -> None:
-        """`community:manage_channels` (the seeded `moderator` role bundle) satisfies the gate."""
+        """The moderator-kind role (seeded with `music:station.manage`) satisfies the gate."""
         community_id = _seed_community(streaming_db)
         _seed_member(
             streaming_db,
             community_id=community_id,
             user_id=1,
             role="moderator",
-            scopes=["community:manage_channels"],
+            scopes=["community:manage_channels", "music:station.manage"],
         )
         _seed_settings(streaming_db, community_id=community_id)
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
         response = await client.get(f"/api/v1/admin/{community_id}/music/settings", headers=headers)
         assert response.status_code == 200
+
+    async def test_broad_manage_channels_scope_is_not_music_station(
+        self, client: Any, streaming_db: Any
+    ) -> None:
+        """`community:manage_channels` alone no longer satisfies the dedicated music gate."""
+        community_id = _seed_community(streaming_db)
+        _seed_member(
+            streaming_db,
+            community_id=community_id,
+            user_id=1,
+            role="moderator",
+            scopes=["community:manage_channels", "community:manage_members"],
+        )
+        _seed_settings(streaming_db, community_id=community_id)
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
+        response = await client.get(f"/api/v1/admin/{community_id}/music/settings", headers=headers)
+        assert response.status_code == 403
 
     async def test_super_admin_role_claim_bypasses(self, client: Any, streaming_db: Any) -> None:
         community_id = _seed_community(streaming_db)

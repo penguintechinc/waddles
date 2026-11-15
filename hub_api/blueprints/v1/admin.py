@@ -37,10 +37,16 @@ from quart_schema import document_response, validate_request, validate_response
 
 from services import admin_service as svc
 from services import community_reputation_service as reputation_svc
+from services.community_authz import resolve_editor_scopes_async
 from services.current_user import get_optional_current_user_id
 from services.dto_response import jsonify_dto
-from services.errors import ApiError
+from services.errors import ApiError, forbidden
 from services.pagination import parse_limit
+from services.scope_registry import (
+    SCOPE_MEMBERS_REMOVE,
+    SCOPE_MEMBERS_ROLES,
+    SCOPE_REPUTATION_MANAGE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -471,6 +477,14 @@ async def get_members(community_id: int) -> MembersResponse | tuple[dict[str, ob
     )
 
 
+async def _require_member_scope(community_id: int, scope: str) -> None:
+    """403 unless the caller holds the dedicated per-action community `scope`."""
+    async_dal, dal = _dal()
+    held = await resolve_editor_scopes_async(request, async_dal, dal, community_id=community_id)
+    if scope not in held:
+        raise forbidden(f"Missing required scope: {scope}")
+
+
 @admin_bp.route("/<int:community_id>/members/<int:user_id>/role", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community:admin")  # type: ignore[misc]
@@ -485,6 +499,7 @@ async def update_member_role(
     assert ctx is not None
     caller_id = get_optional_current_user_id(request)
     try:
+        await _require_member_scope(community_id, SCOPE_MEMBERS_ROLES)
         await svc.update_member_role(
             async_dal,
             dal,
@@ -513,6 +528,7 @@ async def adjust_reputation(
     ctx = get_tenant_context(request)
     assert ctx is not None
     try:
+        await _require_member_scope(community_id, SCOPE_REPUTATION_MANAGE)
         new_score, change = await svc.adjust_reputation(
             async_dal,
             dal,
@@ -753,6 +769,7 @@ async def remove_member(
     assert ctx is not None
     caller_id = get_optional_current_user_id(request)
     try:
+        await _require_member_scope(community_id, SCOPE_MEMBERS_REMOVE)
         await svc.remove_member(
             async_dal,
             dal,

@@ -11,6 +11,8 @@ and role management never branch on a name:
 
 The backfill keys on the seeded system-role names ONCE, here, in data; a BEFORE INSERT trigger does
 the same for every future `seed_community_system_roles()` call, so new communities need no code.
+It also merges the moderation-level dedicated scopes into every moderator role (see
+`MODERATOR_SEED_SCOPES`) so converting broad gates to per-action scopes loses nothing for moderators.
 `community-owner` shares the admin kind (full scope set). Revision id <= 32 chars; `down_revision`
 is re-pointed to the release alembic head at merge (single-head CI gate).
 """
@@ -24,6 +26,22 @@ revision = "0117_community_role_kind"
 down_revision = "0109_platform_vault"
 branch_labels = None
 depends_on = None
+
+#: Dedicated moderation-level scopes the moderator role keeps (what moderators could already do).
+#: Admin-level money/infra/secret scopes are deliberately absent. Mirrors
+#: `hub_api/services/scope_registry.MODERATOR_SEED_SCOPES` (a test asserts they match).
+MODERATOR_SEED_SCOPES = (
+    "community.members:manage",
+    "overlay:manage",
+    "calls:manage",
+    "community.branding:manage",
+    "music:station.manage",
+    "music:queue.manage",
+    "members:reputation.manage",
+    "members:remove",
+    "bundles.admin:moderate",
+)
+_SEED_ARRAY = "ARRAY[" + ", ".join("'%s'" % scope for scope in MODERATOR_SEED_SCOPES) + "]"
 
 _KIND_CASE = (
     "CASE name WHEN 'community-admin' THEN 1 WHEN 'community-owner' THEN 1 "
@@ -45,12 +63,44 @@ def upgrade() -> None:
     )
     conn.execute(
         sa.text(
+            f"""
+            CREATE OR REPLACE FUNCTION community_roles_with_moderator_seed(claims jsonb)
+            RETURNS jsonb AS $$
+              SELECT COALESCE(claims, '{{}}'::jsonb) || jsonb_build_object('scopes', (
+                SELECT COALESCE(jsonb_agg(DISTINCT s ORDER BY s), '[]'::jsonb) FROM (
+                  SELECT jsonb_array_elements_text(
+                           COALESCE(claims->'scopes', '[]'::jsonb)) AS s
+                  UNION SELECT unnest({_SEED_ARRAY})
+                ) merged
+              ))
+            $$ LANGUAGE sql IMMUTABLE
+            """
+        )
+    )
+    conn.execute(
+        sa.text(
+            "UPDATE community_roles SET base_claims = "
+            "community_roles_with_moderator_seed(base_claims::jsonb) WHERE role_kind = 2"
+        )
+    )
+    # Member scope caches may hold the old moderator list; drop them so they re-resolve.
+    conn.execute(
+        sa.text(
+            "UPDATE community_members SET claims_cache = NULL WHERE community_role_id IN "
+            "(SELECT id FROM community_roles WHERE role_kind = 2)"
+        )
+    )
+    conn.execute(
+        sa.text(
             """
             CREATE OR REPLACE FUNCTION community_roles_set_kind() RETURNS trigger AS $$
             BEGIN
               IF NEW.is_system AND COALESCE(NEW.role_kind, 0) = 0 THEN
                 NEW.role_kind := CASE NEW.name WHEN 'community-admin' THEN 1
                   WHEN 'community-owner' THEN 1 WHEN 'moderator' THEN 2 ELSE 3 END;
+                IF NEW.role_kind = 2 THEN
+                  NEW.base_claims := community_roles_with_moderator_seed(NEW.base_claims::jsonb);
+                END IF;
               END IF;
               RETURN NEW;
             END;
@@ -78,6 +128,7 @@ def downgrade() -> None:
     conn = op.get_bind()
     conn.execute(sa.text("DROP TRIGGER IF EXISTS trg_community_roles_kind ON community_roles"))
     conn.execute(sa.text("DROP FUNCTION IF EXISTS community_roles_set_kind()"))
+    conn.execute(sa.text("DROP FUNCTION IF EXISTS community_roles_with_moderator_seed(jsonb)"))
     conn.execute(
         sa.text("ALTER TABLE community_roles DROP CONSTRAINT IF EXISTS ck_community_roles_kind")
     )

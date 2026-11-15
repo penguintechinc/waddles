@@ -61,6 +61,7 @@ from services.provider_connections.service import (
     ConnectionView,
 )
 from services.provider_connections.telemetry import log_failure
+from services.scope_registry import SCOPE_PROVIDER_CONNECTIONS
 from services.youtube_install import make_app_credentials
 
 logger = logging.getLogger(__name__)
@@ -480,6 +481,7 @@ async def _admin_guard(community_id: int) -> tuple[int, int | None]:
         current_app.config["dal"],
         community_id=community_id,
         admin=True,
+        scope=SCOPE_PROVIDER_CONNECTIONS,
     )
     if not await feature_enabled(FEATURE_PROVIDER_CONNECTIONS, tenant=ctx.tenant_slug):
         raise payment_required("Provider connections are not enabled for this plan")

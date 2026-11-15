@@ -42,6 +42,7 @@ from services.dto_response import jsonify_dto
 from services.errors import ApiError, bad_request, not_found
 from services.music_status_service import check_spotify_health, check_youtube_health
 from services.rate_limiting import RATE_LIMITER_CONFIG_KEY
+from services.scope_registry import SCOPE_MUSIC_QUEUE
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +248,9 @@ async def get_policy(community_id: int) -> PolicyResponse | tuple[dict[str, obje
     """Get the community's Music Station policy (community admin only)."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request, async_dal, dal, community_id=community_id, admin=True, scope=SCOPE_MUSIC_QUEUE
+        )
         tenant_id = _tenant_id()
         policy = await svc.get_policy(
             async_dal, dal, tenant_id=tenant_id, community_id=community_id
@@ -267,7 +270,9 @@ async def set_policy(data: SetPolicyRequest, community_id: int) -> Any:
     """Set the community's Music Station policy (community admin only)."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request, async_dal, dal, community_id=community_id, admin=True, scope=SCOPE_MUSIC_QUEUE
+        )
         actor_id = get_optional_current_user_id(request)
         policy = await svc.set_policy(
             async_dal,
@@ -389,7 +394,9 @@ async def kick_song(community_id: int, queue_id: int) -> Any:
     """Kick a single song off the queue (community admin only) -- audited."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request, async_dal, dal, community_id=community_id, admin=True, scope=SCOPE_MUSIC_QUEUE
+        )
         actor_id = get_current_user_id(request)
         reason = request.args.get("reason")
         await svc.kick_song(
@@ -415,7 +422,9 @@ async def kick_playlist(community_id: int, playlist_id: str) -> Any:
     """Kick an entire playlist off the queue (community admin only) -- audited once."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request, async_dal, dal, community_id=community_id, admin=True, scope=SCOPE_MUSIC_QUEUE
+        )
         actor_id = get_current_user_id(request)
         reason = request.args.get("reason")
         removed = await svc.kick_playlist(
@@ -446,7 +455,9 @@ async def reorder_queue(data: ReorderQueueRequest, community_id: int) -> Any:
     """Reorder the community's upcoming queue (community admin only)."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request, async_dal, dal, community_id=community_id, admin=True, scope=SCOPE_MUSIC_QUEUE
+        )
         if not data.orderedQueueIds:
             raise bad_request("orderedQueueIds must not be empty")
         upcoming = await svc.reorder_queue(
@@ -464,7 +475,9 @@ async def advance_queue(community_id: int) -> Any:
     """Advance the queue: mark now-playing played, promote the next queued track (admin only)."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request, async_dal, dal, community_id=community_id, admin=True, scope=SCOPE_MUSIC_QUEUE
+        )
         previous, next_item = await svc.advance_queue(
             async_dal, dal, _redis_client(), community_id=community_id
         )
