@@ -218,7 +218,7 @@ def test_wait_for_hub_api_probes_https_with_ca(dal2: list[dict[str, Any]]) -> No
 
 
 def test_certificates_are_ecdsa_p256_fqdn_only(dal2: list[dict[str, Any]]) -> None:
-    """Four server certs: ECDSA 256, internal-CA ClusterIssuer, SAN = service FQDN only."""
+    """Three server certs: ECDSA 256, internal-CA ClusterIssuer, SAN = service FQDN only."""
     certs = {
         d["metadata"]["name"]: d["spec"]
         for d in dal2
@@ -227,7 +227,6 @@ def test_certificates_are_ecdsa_p256_fqdn_only(dal2: list[dict[str, Any]]) -> No
     assert set(certs) == {
         "waddlebot-hub-api-http-tls",
         "waddlebot-hub-webui-http-tls",
-        "waddlebot-core-data-http-tls",
         "waddlebot-svc-streaming-http-tls",
     }
     for name, spec in certs.items():
@@ -244,27 +243,15 @@ def test_certificates_are_ecdsa_p256_fqdn_only(dal2: list[dict[str, Any]]) -> No
         assert "ipAddresses" not in spec
 
 
-def test_core_data_and_streaming_over_tls(dal2: list[dict[str, Any]]) -> None:
-    """F6: hub-api dials core-data (HTTPS) and svc-streaming (TLS port); both servers terminate TLS."""
+def test_streaming_over_tls(dal2: list[dict[str, Any]]) -> None:
+    """F6: hub-api dials svc-streaming (TLS port); the server terminates TLS (core-data was removed from the chart)."""
     hub = _by_component(dal2, "Deployment", "hub-api")["spec"]["template"]["spec"][
         "containers"
     ][0]
     env = _env(hub)
     assert (
-        env["ANALYTICS_CORE_API_URL"]["value"]
-        == f"https://waddlebot-core-data{_FQDN_SUFFIX}:8040"
-    )
-    assert (
         env["STREAMING_RTC_URL"]["value"]
         == f"https://waddlebot-svc-streaming{_FQDN_SUFFIX}:8448"
-    )
-
-    cd = _by_component(dal2, "Deployment", "core-data")["spec"]["template"]["spec"][
-        "containers"
-    ][0]
-    assert (
-        "--certfile" in cd["command"]
-        and cd["readinessProbe"]["httpGet"]["scheme"] == "HTTPS"
     )
 
     st = _by_component(dal2, "Deployment", "svc-streaming")["spec"]["template"]["spec"]

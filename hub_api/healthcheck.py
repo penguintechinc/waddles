@@ -19,7 +19,8 @@ def main() -> int:
     url = f"{'https' if tls else 'http'}://localhost:8204/healthz"
     try:
         resp = httpx.get(url, verify=not tls, timeout=3.0)  # noqa: S501 - loopback self-probe
-    except httpx.HTTPError:
+    except httpx.HTTPError as exc:
+        sys.stderr.write(f"healthcheck: probe of {url} failed: {type(exc).__name__}: {exc}\n")
         return 1
     return 0 if resp.status_code == 200 else 1
 

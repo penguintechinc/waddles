@@ -15,7 +15,7 @@
 {{- $targets := list }}
 {{- if .Values.pipeline.hubApi.enabled }}{{- $targets = append $targets (dict "component" "hub-api" "svc" "hub-api-v3") }}{{- end }}
 {{- if .Values.pipeline.hubWebui.enabled }}{{- $targets = append $targets (dict "component" "hub-webui" "svc" "hub-webui-v3") }}{{- end }}
-{{- if .Values.modules.coreData.enabled }}{{- $targets = append $targets (dict "component" "core-data" "svc" "core-data") }}{{- end }}
+{{- if (.Values.modules.coreData | default dict).enabled }}{{- $targets = append $targets (dict "component" "core-data" "svc" "core-data") }}{{- end }}
 {{- if .Values.pipeline.svcStreaming.enabled }}{{- $targets = append $targets (dict "component" "svc-streaming" "svc" "svc-streaming") }}{{- end }}
 {{- range $t := $targets }}
 ---
