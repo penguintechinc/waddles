@@ -121,7 +121,7 @@ fn relay(provider: &str, text: &str) -> HostCallBody {
 }
 
 /// Every payload currently on `key`, via a plain `LRANGE` on the real server.
-async fn lrange(conn: &mut redis::aio::MultiplexedConnection, key: &str) -> Vec<String> {
+async fn lrange(conn: &mut redis::aio::ConnectionManager, key: &str) -> Vec<String> {
     redis::cmd("LRANGE")
         .arg(key)
         .arg(0)
@@ -137,7 +137,7 @@ async fn relay_queues_the_token_unchanged_and_never_a_name_on_real_valkey() {
         .expect("VALKEY_URL must be set: this test needs a REAL Valkey (no silent skip)");
     let client = redis::Client::open(url).expect("valid VALKEY_URL");
     let mut conn = client
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .expect("connect to real Valkey");
     let _: () = redis::cmd("DEL")
@@ -156,7 +156,7 @@ async fn relay_queues_the_token_unchanged_and_never_a_name_on_real_valkey() {
         .await
         .expect("advertise a ready drain");
 
-    let caps: StageCapabilities<redis::aio::MultiplexedConnection> = StageCapabilities::new(
+    let caps: StageCapabilities<redis::aio::ConnectionManager> = StageCapabilities::new(
         conn.clone(),
         egress(),
         Arc::new(Mutex::new(UsageBatcher::new())),

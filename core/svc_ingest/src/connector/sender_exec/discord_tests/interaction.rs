@@ -29,11 +29,11 @@ impl DesiredLookup for FixedDesired {
     }
 }
 
-async fn valkey() -> redis::aio::MultiplexedConnection {
+async fn valkey() -> redis::aio::ConnectionManager {
     let url = std::env::var("VALKEY_URL").expect("VALKEY_URL (a local valkey) is required");
     redis::Client::open(url)
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap()
 }

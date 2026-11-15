@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, jsonify, request
@@ -568,7 +569,7 @@ async def internal_enqueue_song_request() -> Any:
         # straight from the tenant row it was just derived from, "default"
         # fallback only for the practically-unreachable dangling-FK case.
         tenant_row = dal(dal.tenants.id == tenant_id).select(dal.tenants.slug).first()
-        tenant_slug = tenant_row.slug if tenant_row is not None else "default"
+        tenant_slug = tenant_row.slug if tenant_row is not None else DEFAULT_TENANT_SLUG
         enforce_youtube_labels = await feature_enabled(
             FEATURE_MUSIC_YOUTUBE_LABELS, tenant=tenant_slug, community=community_id, default=True
         )

@@ -106,6 +106,8 @@ def main() -> int:
 
         got = changed(base, render(t2, dict.fromkeys(IMAGES, t1), wd))
         print(f"2. global={t2}, all images pinned to {t1}: changed={len(got)}")
+        for n in got:
+            print(f"   {n}")
         failures += bool(got)
 
         pins = dict.fromkeys(IMAGES, t1) | {"svc-ingest": t2, "hub-api": t2}
