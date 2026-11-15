@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 import yaml
+from provision_harness import materialize, spec_of, with_provisioned  # type: ignore[import-not-found]
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _ALPHA = _CHART_DIR / "values-alpha.yaml"
@@ -40,7 +41,9 @@ def _render(extra_set: list[str] | None = None) -> list[dict[str, Any]]:
     assert res.returncode == 0, res.stderr
     docs = [d for d in yaml.safe_load_all(res.stdout) if d]
     assert docs, "helm template produced zero documents -- cannot be a pass"
-    return docs
+    # The bootstrap Secret is created at RUNTIME by the provision-secrets hook (every tier);
+    # run the real hook against the rendered spec so assertions see what a cluster gets.
+    return with_provisioned(docs)
 
 
 def _by_name(docs: list[dict[str, Any]], kind: str, suffix: str) -> dict[str, Any]:
@@ -96,17 +99,20 @@ def test_explicit_password_wins_over_generation() -> None:
     assert _secret_value(d) == "ExplicitAdminPw123456789x"
 
 
-def test_generate_if_absent_structure() -> None:
-    helpers = (_CHART_DIR / "templates" / "_helpers.tpl").read_text()
-    secrets = (_CHART_DIR / "templates" / "secrets.yaml").read_text()
-    # lookup-KEEP of non-empty existing value precedes generation in the shared helper
-    assert helpers.index(
-        'secretKeyNonEmpty" (dict "existing" $existing'
-    ) < helpers.index("randAlphaNum (int $length)")
-    assert (
-        '"key" "INITIAL_ADMIN_PASSWORD"' in secrets
-        and '"alwaysGenerate" true' in secrets
+def test_generate_if_absent_structure(docs: list[dict[str, Any]]) -> None:
+    """Create-if-absent: generated on a miss in EVERY tier, an existing real value is never rotated."""
+    spec = spec_of(docs)
+    assert "secret|waddlebot-hub-admin-bootstrap|" in spec
+    assert "key|INITIAL_ADMIN_PASSWORD|gen|alnum:24|min=12" in spec
+    kept = materialize(docs, {"waddlebot-hub-admin-bootstrap": {"INITIAL_ADMIN_PASSWORD": "ExistingAdminPw0123456789"}})
+    assert kept["waddlebot-hub-admin-bootstrap"]["data"]["INITIAL_ADMIN_PASSWORD"] == "ExistingAdminPw0123456789"
+    beta = subprocess.run(  # noqa: S603 -- fixed argv, test-only
+        ["helm", "template", "waddlebot", str(_CHART_DIR), "--kube-version", "1.30.0", "--values", str(_CHART_DIR / "values-beta.yaml")],
+        capture_output=True, text=True, check=False,
     )
+    assert beta.returncode == 0, beta.stderr
+    beta_docs = [d for d in yaml.safe_load_all(beta.stdout) if d]
+    assert "key|INITIAL_ADMIN_PASSWORD|gen|alnum:24" in spec_of(beta_docs)
 
 
 def test_seed_job_hook_annotations_image_envfrom(docs: list[dict[str, Any]]) -> None:

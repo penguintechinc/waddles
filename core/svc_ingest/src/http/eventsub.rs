@@ -54,9 +54,7 @@ pub struct EventSubState {
     pub scope: Scope,
     /// Identity-field (`actor`) DEK provider -- `crate::identity_crypto`,
     /// forwarded to `handle_webhook` unchanged.
-    pub dek_provider: crate::identity_crypto::ConfiguredDekProvider<
-        crate::identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    pub dek_provider: crate::identity_crypto::ConfiguredDekProvider,
 }
 
 /// Body-size cap enforced at the HTTP layer via

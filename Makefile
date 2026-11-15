@@ -1,15 +1,16 @@
-.PHONY: backfill-bundle-author seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: backfill-bundle-author role-sync-remediate seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit check-docs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
         build-superpenguin-roll-bundle test-superpenguin-roll-e2e test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
+        check-no-stubs check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
         test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
-        test-data-plane-parity test-connector-parity gen-connector-parity-expected test-hub-api
+        test-data-plane-parity test-connector-parity gen-connector-parity-expected \
+        test-hub-api test-helm-matrix test-helm-matrix-quick
 
 dev:
 	$(error dev: docker-compose is deprecated -- deploy to Kubernetes via scripts/deploy-alpha.sh)
@@ -29,7 +30,7 @@ backfill-bundle-author:
 	@python3 scripts/backfill_bundle_author.py
 
 openapi-hubapi:
-	@python3 scripts/export-hubapi-openapi.py
+	@PYTHONPATH="$(CURDIR)/libs/flask_core:$(CURDIR)/libs:$(CURDIR)/hub_api" python3 scripts/export-hubapi-openapi.py
 	@spectral lint openapi/v1.yaml --fail-severity=error
 
 # Fails when the committed openapi/v1.yaml differs from a fresh regeneration
@@ -56,6 +57,15 @@ check-helm-hook-phases:
 check-wait-for-hub-api:
 	@python3 scripts/check_wait_for_hub_api.py
 
+# Helm matrix: every environment x helm v3 + v4 -- lint, template, kubeconform, the CI render
+# scripts, the chart tests. Zero items examined fails. `-quick` skips the chart tests (~5 min per
+# helm major). See k8s/helm/waddlebot/README.md "Helm matrix gate".
+test-helm-matrix:
+	@bash scripts/ci/helm_matrix.sh
+
+test-helm-matrix-quick:
+	@bash scripts/ci/helm_matrix.sh --quick
+
 # USER DECISION (2026-10-01, fix/chart-fresh-install-hooks): db-migrate now runs
 # post-install -- helm upgrade --install in alpha-deploy.sh must never pass
 # --wait/--atomic, or a fresh install deadlocks (Deployments wait on hub-api,
@@ -77,6 +87,13 @@ test-helm-pending-recover:
 # `semgrep` on PATH (pinned in CI; see scripts/ci/semgrep-silent-fallback.yml).
 check-no-stubs:
 	@bash scripts/ci/check-no-stubs.sh
+
+# PII boundary: only svc-ingest's outbound drain/sender_exec and svc-presentation may reference the
+# egress detokenizer. Prints files examined; fails on a violation or zero files examined. Its
+# negative test (fixture tree with a violation must fail) runs first.
+check-pii-egress:
+	@bash scripts/ci/tests/test_check_pii_egress_boundary.sh
+	@bash scripts/ci/check-pii-egress-boundary.sh
 
 # Bundle hygiene gates (.github/workflows/bundle-hygiene.yml): raw user input in
 # bundle log calls, legacy bare-string `permissions:` in hub-manifest.yaml, broad
@@ -127,6 +144,17 @@ test:
 test-scripts:
 	@bash scripts/tests/test_release_merge.sh
 	@bash scripts/tests/test_release_auto_merge.sh
+	@python3 -m pytest -q -p no:cacheprovider scripts/ops
+
+# Read-only command-latency SLA report (p99 < 1 s, first door -> outbound confirmed): p50/p95/p99
+# per command and per hop from the data-plane histograms. Zero samples = FAIL.
+#   make command-latency-report METRICS_URLS="http://127.0.0.1:19090/metrics http://127.0.0.1:19091/metrics"
+#   make command-latency-report METRICS_FILES="/tmp/action-metrics.txt"
+# (port-forward the svc-action/svc-process :9090 first; this target only performs HTTP GETs)
+.PHONY: command-latency-report
+command-latency-report:
+	@test -n "$(strip $(METRICS_URLS)$(METRICS_FILES))" || { echo 'usage: make command-latency-report METRICS_URLS="http://127.0.0.1:19090/metrics ..." [METRICS_FILES="a.txt ..."]' >&2; exit 2; }
+	@python3 -I scripts/ops/command_latency_report.py $(foreach u,$(METRICS_URLS),--url $(u)) $(foreach f,$(METRICS_FILES),--file $(f))
 
 # Verify + merge a PR into release/*: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]
 release-merge:
@@ -300,6 +328,12 @@ test-csharp-bundle-compile:
 # env, run from hub_api so `cli.*` resolves). Exits 1 on tampering, 2 if zero records were
 # examined (a check over nothing is not a pass; add ALLOW_EMPTY=1 for deployments with no
 # Enterprise tenant), 3 if it could not run. Pin heads with EXPECT="tenant:1=42:<hash>".
+# role-sync privilege hardening (migration 0104): members promoted by a purged privileged inbound
+# binding. Default queues them for admin review (role_sync_remediation_queue); APPLY=1 demotes
+# them to BASELINE (default member). Needs DATABASE_URL; run from a hub-api pod/shell.
+role-sync-remediate:
+	@cd hub_api && python3 -m cli.role_sync_remediate $(if $(APPLY),--apply) $(if $(BASELINE),--baseline-role $(BASELINE))
+
 verify-audit-chain:
 # NOTE: Rust port complete in core/waddles_ops_cli (`waddles-ops verify-audit-chain`); Python kept until the port is CI-validated. Do not rewire until then.
 	@cd hub_api && python3 -m cli.verify_audit_chain $(if $(ALLOW_EMPTY),--allow-empty) \
@@ -347,7 +381,7 @@ verify-audit-export:
 		$(if $(HEAD_SEQ),--expect-head-seq $(HEAD_SEQ)) $(if $(HEAD_HASH),--expect-head-hash $(HEAD_HASH))
 
 # Proves bundles/Dockerfile.core-bundles's two example-bundle artifacts (ping.wasm from the
-# rust-bundle-builder stage, pyping.wasm from the python-bundle-builder stage) are both
+# bundle-ping stage, pyping.wasm from the python-bundle-builder stage) are both
 # byte-reproducible -- two independent --no-cache builds of the full image must produce
 # identical sha256 for each. See scripts/verify-core-bundles-reproducible.sh for why.
 verify-core-bundles-reproducible:
@@ -413,6 +447,43 @@ test-seaweedfs-sse-kms:
 # rejects any other KUBE_CONTEXT before build/push/helm run). Usage: make alpha-deploy [ARGS="--skip-build"]
 alpha-deploy:
 	@bash scripts/alpha-deploy.sh $(ARGS)
+
+# --- Changed-only alpha image builds (deploy-dal2alpha) ---------------------------------------
+# scripts/ci/image-inputs.yaml is the reviewable input map; changed_images.py maps a diff to the
+# images that need a rebuild. Usage: make changed-images BASE=<sha> [HEAD=HEAD] [FORCE_ALL=true]
+.PHONY: changed-images changed-images-audit test-ci-image-plan check-alpha-image-pins check-dockerfile-cache-mounts check-dockerfile-pip-hashes test-alpha-registry-e2e prune-alpha-images
+changed-images:
+	@test -n "$(BASE)" || { echo "usage: make changed-images BASE=<sha> [HEAD=HEAD] [FORCE_ALL=true]" >&2; exit 2; }
+	@python3 scripts/ci/changed_images.py --base "$(BASE)" --head "$(or $(HEAD),HEAD)" --format names $(if $(filter true,$(FORCE_ALL)),--force-all)
+
+# Fails if any tracked file is neither an image input nor an explicit ignore (map rot guard).
+changed-images-audit:
+	@python3 scripts/ci/changed_images.py --audit
+
+# Cache-mounted installs must be hash/lock verified (build-cache poisoning guard).
+check-dockerfile-cache-mounts:
+	@python3 scripts/ci/check-dockerfile-cache-mounts.py
+
+# Every Dockerfile pip install must be --require-hashes (or --no-deps/--no-build-isolation on a local path after one).
+check-dockerfile-pip-hashes:
+	@python3 scripts/ci/check-dockerfile-pip-hashes.py
+
+test-ci-image-plan:
+	@python3 -m pytest scripts/ci/tests/test_cache_trust_boundary.py scripts/ci/tests/test_check_dockerfile_pip_hashes.py scripts/ci/tests/test_changed_images.py scripts/ci/tests/test_image_inputs.py scripts/ci/tests/test_alpha_plan.py scripts/ci/tests/test_prune_alpha_images.py -q -p no:cacheprovider
+
+# Helm render proof: pinned images keep their pod template (no restart). Needs helm v3 on PATH.
+check-alpha-image-pins:
+	@python3 scripts/ci/check-alpha-image-pins.py
+
+# Real throwaway registry: plan + digest-verified retag. Needs docker+buildx. [BASE=<sha>]
+test-alpha-registry-e2e:
+	@bash scripts/ci/tests/alpha_registry_e2e.sh $(BASE)
+
+# ghcr alpha tag / stale buildcache pruning. DRY RUN unless ARGS contains --apply (which also
+# needs --deployed <plan.json|values.json>). Never scheduled; enabling a schedule needs owner approval.
+# Usage: GH_TOKEN=... make prune-alpha-images [ARGS="--keep 10 --deployed plan.json"]
+prune-alpha-images:
+	@python3 scripts/ci/prune_alpha_images.py $(ARGS)
 
 # resolve-433 -- alpha-deploy.sh's registry-backed build cache
 # (localhost:32000/waddlebot/buildcache/*) shares disk with the MicroK8s

@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey
 from quart import Quart
 from quart_schema import QuartSchema
@@ -839,7 +839,7 @@ class TestSchemaConstraints:
 @pytest.fixture
 def issuer() -> ServiceJwtIssuer:
     """Real issuer: host (reconcile+secret), other service (neither), non-system tenant."""
-    private = Ed25519PrivateKey.generate()
+    private = ec.generate_private_key(ec.SECP256R1())
     key = SigningKey(kid="k1", private_key=private, public_key=private.public_key())
 
     def ident(sid: str, scopes: set[str], tenant: str = "system") -> ServiceIdentity:

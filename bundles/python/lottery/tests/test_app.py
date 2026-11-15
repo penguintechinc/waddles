@@ -1241,7 +1241,10 @@ def test_economy_permission_is_declared_with_bounds() -> None:
     assert "economy.transfer" not in perms, "least privilege: no transfer is ever issued"
     assert {"storage.kv", "economy.read", "identity.resolve"} <= set(perms)
     assert all(len(p["justification"]) <= 280 for p in manifest["permissions"])
-    assert manifest["version"] == "1.0.0" and "notice" not in manifest
+    # The version moves on every bump; the manifest must agree with pyproject, not a literal.
+    pyproject = (Path(app.__file__).parents[1] / "pyproject.toml").read_text()
+    pinned = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
+    assert pinned and manifest["version"] == pinned.group(1) and "notice" not in manifest
     assert MAX_BUY * TICKET_PRICE <= 500, "one purchase must fit inside the declared max_bet"
 
 

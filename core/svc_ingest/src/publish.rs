@@ -212,6 +212,22 @@ fn mint_trace() -> Trace {
     }
 }
 
+/// The envelope trace: minted FROM the live `ingest.publish` span's OTel ids when a tracer backs
+/// it (so every downstream stage span joins one distributed trace rooted here, and the sampler's
+/// decision travels in the flags), else a fresh locally minted W3C trace as before.
+fn mint_trace_for(span: &tracing::Span) -> Trace {
+    if command_latency::switch::is_disabled() {
+        return mint_trace();
+    }
+    match command_latency::span::span_ids(span) {
+        Some((trace_id, span_id, sampled)) => Trace {
+            traceparent: command_latency::span::format_traceparent(&trace_id, &span_id, sampled),
+            tracestate: None,
+        },
+        None => mint_trace(),
+    }
+}
+
 /// Publishes one normalized event onto its ingest source's stream, exactly
 /// once, minting every D30 identity field -- the sole `StageEnvelope`
 /// construction site in this crate.
@@ -451,9 +467,6 @@ pub async fn publish_event_scoped<A: EventAppender, M: SpineMetrics + ?Sized, D:
     .await
 }
 
-/// The shared stamping/encryption/append body. `resolved: Some` publishes a
-/// schema-v3 envelope under the resolved scope; `None` the v2 static-`scope` one.
-#[allow(clippy::too_many_arguments)]
 /// `true` for event types reserved to the platform's own internal emitters
 /// (`reputation.*`, `internal.*`): ingest, which only carries external /
 /// connector input, must never publish one -- a system-originated event type
@@ -463,7 +476,64 @@ pub fn is_reserved_event_type(event_type: &str) -> bool {
     event_type.starts_with("reputation.") || event_type.starts_with("internal.")
 }
 
+/// The shared stamping/encryption/append body. `resolved: Some` publishes a
+/// schema-v3 envelope under the resolved scope; `None` the v2 static-`scope` one.
+// Justified: private shared core of the two public publish entry points; every argument is a
+// distinct injected dependency, and bundling them would only re-split at both call sites.
+#[allow(clippy::too_many_arguments)]
 async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProvider>(
+    resolved: Option<ResolvedScope>,
+    appender: &A,
+    metrics: &M,
+    keyring: &KeyRing,
+    active_kid: &str,
+    scope: &Scope,
+    source_id: &str,
+    workstream_id: &str,
+    session_id: Option<&str>,
+    event: PlatformEvent,
+    dek_provider: &D,
+    identity_metrics: &prometheus::IntCounterVec,
+) -> Result<String, PublishError> {
+    use tracing::Instrument as _;
+    // Command-latency: the `ingest.publish` span covers the whole funnel (identity encryption,
+    // binding, XADD) and parents the downstream stage spans through the envelope's trace context.
+    // Attributes are bounded and non-PII: numeric ids and the platform slug only.
+    let span = tracing::info_span!(
+        "ingest.publish",
+        platform = %event.platform,
+        tenant_id = resolved.as_ref().map(|r| r.tenant_id),
+        community_id = resolved.as_ref().map(|r| r.community_id),
+        door = tracing::field::Empty,
+        "otel.kind" = "producer",
+    );
+    let outcome = publish_resolved_inner(
+        resolved,
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        scope,
+        source_id,
+        workstream_id,
+        session_id,
+        event,
+        dek_provider,
+        identity_metrics,
+        &span,
+    )
+    .instrument(span.clone())
+    .await;
+    if let Err(err) = &outcome {
+        command_latency::span::record_error(&span, "PublishError", &err.to_string());
+    }
+    outcome
+}
+
+/// The un-instrumented body of [`publish_resolved`]; `span` is the live `ingest.publish` span, read
+/// only to mint the envelope's trace from its OTel ids when a tracer backs it.
+#[allow(clippy::too_many_arguments)]
+async fn publish_resolved_inner<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProvider>(
     resolved: Option<ResolvedScope>,
     appender: &A,
     metrics: &M,
@@ -476,7 +546,9 @@ async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProv
     mut event: PlatformEvent,
     dek_provider: &D,
     identity_metrics: &prometheus::IntCounterVec,
+    span: &tracing::Span,
 ) -> Result<String, PublishError> {
+    let entered_ms = command_latency::stamp::now_ms();
     if is_reserved_event_type(&event.event_type) {
         return Err(PublishError::ReservedEventType);
     }
@@ -491,7 +563,22 @@ async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProv
     let stream = scope.source_stream(&event.platform, source_id);
     let platform = event.platform.clone();
 
-    let trace = mint_trace();
+    let mut trace = mint_trace_for(span);
+    // The first-door stamp: the receiver's instant when it set one, else this funnel's own entry
+    // time marked `publish` (a lower bound, never a silent zero). Metadata only; never read for
+    // authorization anywhere downstream.
+    let latency_on = !command_latency::switch::is_disabled();
+    let (t0_ms, door) = command_latency::first_door::current()
+        .unwrap_or((entered_ms, command_latency::Door::Publish));
+    if latency_on {
+        let stamps = command_latency::Stamps {
+            t0_ms: Some(t0_ms),
+            door: Some(door),
+            ..command_latency::Stamps::default()
+        };
+        trace.tracestate = Some(stamps.merge_into_tracestate(trace.tracestate.as_deref()));
+        span.record("door", door.label());
+    }
     let trace_id = trace_id_from_traceparent(&trace.traceparent)
         .expect("mint_trace always produces a valid W3C traceparent")
         .to_string();
@@ -519,14 +606,24 @@ async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProv
             )
         });
     if event.actor.is_some() || has_identity_payload_field {
-        match dek_provider.get_dek(&scope.tenant).await {
+        // The DEK is requested by NUMERIC tenant id, never the slug (a slug is a mutable display
+        // alias). The legacy string-scope path (resolver off) has no numeric id: `0` is never a
+        // valid tenant, so the hub broker refuses it client-side and the event is held -- only
+        // the dev/alpha local provider (which keys on whatever id it is given) serves it.
+        let dek_tenant_id: i64 = resolved.as_ref().map_or(0, |r| r.tenant_id);
+        // The AAD binds the numeric id too (immutable across a slug rename); the legacy path
+        // has nothing but the slug to bind.
+        let aad_tenant: String = resolved
+            .as_ref()
+            .map_or_else(|| scope.tenant.clone(), |r| r.tenant_id.to_string());
+        match dek_provider.get_dek(dek_tenant_id).await {
             Ok((dek, dek_version)) => {
                 let encrypt_field = |value: &str, field: &str| -> String {
                     let envelope = identity_crypto::encrypt_identity_value(
                         value,
                         &dek,
                         dek_version,
-                        &scope.tenant,
+                        &aad_tenant,
                         &stream,
                         field,
                         &event_id,
@@ -636,6 +733,26 @@ async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProv
 
     let entry_id = appender.append(&stream, &env).await?;
     metrics.stream_event_written(&platform, source_id);
+    if latency_on {
+        // First door -> XADD acknowledged: receive, permissions lookup, identity encryption,
+        // binding, append. An implausible t0 only skips this sample.
+        let done_ms = command_latency::stamp::now_ms();
+        match command_latency::stamp::elapsed_ms(t0_ms, done_ms) {
+            Ok(ms) => {
+                command_latency::metrics::metrics().record_hop(
+                    command_latency::Hop::IngestPublish,
+                    std::time::Duration::from_millis(ms),
+                );
+                tracing::debug!(
+                    hop = command_latency::Hop::IngestPublish.label(),
+                    elapsed_ms = ms,
+                    door = door.label(),
+                    "ingest publish hop"
+                );
+            }
+            Err(why) => command_latency::metrics::metrics().record_marker_invalid(why.label()),
+        }
+    }
     Ok(entry_id)
 }
 
@@ -714,7 +831,7 @@ mod tests {
     impl DekProvider for FakeDekProvider {
         async fn get_dek(
             &self,
-            _tenant_id: &str,
+            _tenant_id: i64,
         ) -> Result<(crate::identity_crypto::Dek, u32), DekUnavailableError> {
             Ok((zeroize::Zeroizing::new([9u8; 32]), 3))
         }
@@ -730,10 +847,10 @@ mod tests {
     impl DekProvider for FailingDekProvider {
         async fn get_dek(
             &self,
-            tenant_id: &str,
+            tenant_id: i64,
         ) -> Result<(crate::identity_crypto::Dek, u32), DekUnavailableError> {
             Err(DekUnavailableError {
-                tenant_id: tenant_id.to_string(),
+                tenant_id,
                 dek_version: None,
                 reason: "no broker configured in this test".to_string(),
             })
