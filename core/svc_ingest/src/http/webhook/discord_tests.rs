@@ -108,7 +108,7 @@ async fn store() -> crate::interaction_store::InteractionStore {
     crate::interaction_store::InteractionStore::new(
         redis::Client::open(url)
             .expect("valkey url")
-            .get_multiplexed_async_connection()
+            .get_connection_manager()
             .await
             .expect("valkey"),
     )

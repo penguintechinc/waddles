@@ -599,7 +599,7 @@ fn parse_event_ack(raw: &str) -> EventSyncOutcome {
 /// Posts `outcome` for `request_id` (`RPUSH` + `EXPIRE`, atomic) on `conn` --
 /// a connection that is NOT the one blocked in `BRPOP`.
 async fn post_result(
-    conn: &mut redis::aio::MultiplexedConnection,
+    conn: &mut redis::aio::ConnectionManager,
     request_id: &str,
     outcome: &EventSyncOutcome,
 ) -> Result<(), redis::RedisError> {
@@ -624,8 +624,8 @@ async fn post_result(
 /// failed result post is logged loudly (hub-api then times out, fail closed).
 pub async fn run_event_sync_consumer<Q, K, S>(
     caps: std::sync::Arc<StageCapabilities<Q, K>>,
-    mut pop_conn: redis::aio::MultiplexedConnection,
-    mut post_conn: redis::aio::MultiplexedConnection,
+    mut pop_conn: redis::aio::ConnectionManager,
+    mut post_conn: redis::aio::ConnectionManager,
     shutdown: S,
 ) where
     Q: RelayQueue + 'static,
