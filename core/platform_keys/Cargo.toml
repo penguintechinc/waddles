@@ -1,0 +1,37 @@
+[package]
+name = "platform-keys"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Data-plane verifying-key cache over the platform_vault.public_keys replica view (design T5 of the platform secret store): seed at startup, lazy-load on an unknown kid with a negative cache, periodic poll, last-known on database outage, verify_until enforcement, readiness gating, and the db|configmap key-source switch that never silently falls back. Public key material only -- no sealed value ever reaches this crate."
+
+[lib]
+name = "platform_keys"
+path = "src/lib.rs"
+
+# Exact-version pins only (rules/critical-rules.md Dependency Pinning). The core (cache, state
+# machine, key-source switch) deliberately has NO database dependency so a credential-less binary
+# (core/bundle_executor, whose tests/dependency_policy.rs bans sqlx/sea-orm) can embed it; the
+# Postgres loader is the default-on `postgres` feature (svc_* crates take it); the executor opts
+# out with `default-features = false`.
+[dependencies]
+async-trait = "=0.1.92"
+thiserror = "=2.0.20"
+tokio = { version = "=1.53.3", features = ["rt", "macros", "sync", "time"] }
+tracing = "=0.1.44"
+opentelemetry = { version = "=0.32.0", default-features = false, features = ["metrics", "trace"] }
+sea-orm = { version = "=2.0.2", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls"], optional = true }
+
+[features]
+default = ["postgres"]
+postgres = ["dep:sea-orm"]
+
+[dev-dependencies]
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["metrics", "trace", "testing"] }
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

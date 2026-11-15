@@ -359,6 +359,15 @@ pub enum DrainOutcome {
 }
 
 impl<S: ComponentSource> Executor<S> {
+    /// Switches artifact-signature verification to the database-backed key cache
+    /// (`BUNDLE_SIGNING_KEY_SOURCE=db`, design T5). The static ConfigMap set is dropped, not
+    /// kept as a fallback: an unknown kid or an unreadable store fails the `load` closed.
+    #[must_use]
+    pub fn with_key_cache(mut self, cache: Arc<platform_keys::KeyCache>, key_type: i16) -> Self {
+        self.signing_keys = PlatformPublicKeys::from_cache(cache, key_type);
+        self
+    }
+
     pub fn new(cfg: &CliConfig, source: S) -> Result<Self, ExecutorError> {
         let engine = crate::engine::build_engine(cfg)?;
         let linker = Arc::new(crate::engine::build_linker(&engine)?);
@@ -818,18 +827,19 @@ impl<S: ComponentSource> Executor<S> {
                 // own doc. Lives inside the single-flight closure so a
                 // concurrent `load` for the same digest never bypasses
                 // verification via the shared `OnceCell`.
-                let verified = verified.and_then(|()| {
-                    if self.signing_keys.is_empty() {
-                        return Ok(());
+                let verified = match verified {
+                    Ok(()) if !self.signing_keys.is_empty() => {
+                        crate::signing::verify_artifact_signature_async(
+                            &sidecar_bytes,
+                            &self.signing_keys,
+                            &body.app_id,
+                            &body.version,
+                            &body.digest,
+                        )
+                        .await
                     }
-                    crate::signing::verify_artifact_signature(
-                        &sidecar_bytes,
-                        &self.signing_keys,
-                        &body.app_id,
-                        &body.version,
-                        &body.digest,
-                    )
-                });
+                    other => other,
+                };
                 self.metrics.record_load_phase(
                     &app_id,
                     "verify",
