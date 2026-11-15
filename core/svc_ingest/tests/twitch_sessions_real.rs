@@ -354,10 +354,10 @@ impl Env {
         let url = std::env::var("VALKEY_URL")
             .expect("VALKEY_URL must be set: these tests need a REAL Valkey (no silent skip)");
         let client = redis::Client::open(url).expect("valkey client");
-        let cfg =
-            redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(2)));
+        let cfg = redis::aio::ConnectionManagerConfig::new()
+            .set_response_timeout(Some(Duration::from_secs(2)));
         let conn = client
-            .get_multiplexed_async_connection_with_config(&cfg)
+            .get_connection_manager_with_config(cfg)
             .await
             .expect("real valkey must be reachable");
         let lease = Arc::new(ValkeyLease::with_replica_id(conn, replica.to_string()));
