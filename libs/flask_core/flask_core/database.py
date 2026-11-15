@@ -266,7 +266,7 @@ class AsyncDAL:
 
     async def count_async(self, query):
         """
-        Async count operation using read replica if available.
+        Async count operation on the DAL the query is bound to (primary unless built from the replica).
 
         Ends its own transaction (commit on success, rollback on failure)
         against whichever DAL actually ran the count -- see `select_async`'s
@@ -280,7 +280,11 @@ class AsyncDAL:
             Count of records matching query
         """
         loop = asyncio.get_event_loop()
-        dal = self.read_dal if self.read_dal else self.dal
+        # Run on the DAL the query's tables were built from (same rule as `select_async`),
+        # never an implicit swap to the read replica: a count that silently hopped to the
+        # replica would break read-after-write and auth paths. Callers opt in to the replica
+        # by building the query from the replica DAL (hub-api `services/db_routing.py`).
+        dal = query.db if getattr(query, "db", None) is not None else self.dal
 
         def _count():
             try:

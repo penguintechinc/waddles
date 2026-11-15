@@ -45,10 +45,11 @@ from dataclasses import asdict, dataclass
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
-from quart import Blueprint, Response, current_app, jsonify, request
+from quart import Blueprint, Response, jsonify, request
 
 from services import live_status_service as svc
 from services.community_common import is_valid_service_key
+from services.db_routing import get_read_dals, reads_from_replica
 from services.errors import ApiError, bad_request, not_found
 from services.schema import bind_streaming_tables
 
@@ -61,10 +62,12 @@ live_status_internal_bp = Blueprint(
 
 
 def _dal() -> tuple[Any, Any]:
-    """Return `(async_dal, dal)` from app config, ensuring this group's tables are bound."""
-    async_dal, dal = current_app.config["async_dal"], current_app.config["dal"]
-    bind_streaming_tables(dal)
-    return async_dal, dal
+    """Return `(async_dal, read_dal)` with this group's tables bound on the serving DAL.
+
+    Both routes are pure GET reads polled by overlays; replica lag (sub-second typical) only
+    delays a live/offline flip by that much, so they are replica-eligible.
+    """
+    return get_read_dals(binders=(bind_streaming_tables,))
 
 
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
@@ -118,6 +121,7 @@ def _envelope(data: LiveStatusResponseDTO) -> Response:
 
 
 @live_status_public_bp.route("/communities/<int:community_id>/live", methods=["GET"])
+@reads_from_replica("live_status.get_public_live_status")
 async def get_public_live_status(community_id: int) -> Any:
     """Unauthenticated, rate-limited read of one community's current live status.
 
@@ -151,6 +155,7 @@ async def get_public_live_status(community_id: int) -> Any:
 
 
 @live_status_internal_bp.route("/live", methods=["GET"])
+@reads_from_replica("live_status.get_internal_live_status")
 async def get_internal_live_status() -> Any:
     """`GET /api/v1/internal/live?community_id=` -- `X-Service-Key` only, no public/active gate."""
     if not is_valid_service_key(request):

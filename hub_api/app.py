@@ -54,6 +54,7 @@ from services.bundle_active_set_watermark_job import BundleActiveSetWatermarkJob
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
 from services.community_common import api_error
+from services.db_routing import mark_replica
 from services.envelope.runtime import build_envelope_runtime
 from services.identity_resolution_service import run_uuid_availability_monitor
 from services.object_storage_kms import get_object_storage_sse
@@ -242,6 +243,10 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     # recurring InFailedSqlTransaction). Registered before the DAL exists is
     # fine -- the teardown hook reads current_app.config lazily.
     install_db_resilience(app)
+    # Same teardown net for the read-replica connection (config key "read_dal", set at startup
+    # only when DATABASE_READ_REPLICA_URL is configured; a no-op while it is None). Without it a
+    # replica read would leave its pooled connection idle-in-transaction on the hot standby.
+    install_db_resilience(app, dal_key="read_dal")
 
     # security.md A04 hardening -- global before_request hook covering
     # every route registered below, not a per-blueprint decorator (see
@@ -364,6 +369,18 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # the wrapper for any future async-offloaded query helpers.
         dal = async_dal.dal
         _bind_reference_tables(dal)
+        if async_dal.read_dal is not None:
+            # Replica-eligible reads build queries from the replica's own table objects, so it
+            # needs the same startup table bindings (schema is owned by migrations: migrate=False).
+            mark_replica(async_dal.read_dal)
+            app.config["read_dal"] = async_dal.read_dal
+            _bind_reference_tables(async_dal.read_dal)
+            logger.info("hub-api read replica configured; replica-eligible reads will use it")
+        else:
+            logger.info(
+                "hub-api read replica NOT configured (DATABASE_READ_REPLICA_URL unset); "
+                "replica-eligible reads fall back to the primary"
+            )
         app.config["async_dal"] = async_dal
         app.config["dal"] = dal
         # penguin-dal (R52): a SEPARATE AsyncDB/pool against the same

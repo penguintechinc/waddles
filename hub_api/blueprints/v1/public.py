@@ -36,6 +36,7 @@ from quart_schema import validate_response
 from config import HubAPIConfig
 from services import landing_stats_cache
 from services import public_service as svc
+from services.db_routing import get_read_dals, reads_from_replica, record_primary_read
 from services.errors import ApiError
 from services.pagination import parse_limit
 
@@ -48,7 +49,17 @@ signup_settings_alias_bp = Blueprint("v1_signup_settings_alias", __name__, url_p
 
 
 def _dal() -> tuple[Any, Any]:
-    """Return `(async_dal, dal)` from app config."""
+    """Return `(async_dal, read_dal)` -- every route using this is an anonymous GET read.
+
+    Public pages tolerate replica lag (seconds). The signup-settings reads are NOT routed here
+    (they gate registration; see `docs/hub-api-db-routing.md`) and use `_primary_dals()`.
+    """
+    return get_read_dals()
+
+
+def _primary_dals() -> tuple[Any, Any]:
+    """Return `(async_dal, dal)` on the primary -- for the registration-gating reads."""
+    record_primary_read("public.signup_settings")
     return current_app.config["async_dal"], current_app.config["dal"]
 
 
@@ -68,7 +79,7 @@ def _iso(value: Any) -> str | None:
     return value.isoformat() if value else None
 
 
-async def _default_tenant_or_500() -> Any:
+async def _default_tenant_or_500(async_dal: Any, dal: Any) -> Any:
     """`public_service.resolve_default_tenant()`, converted to a 500 `ApiError` on failure.
 
     A missing/inactive default tenant is a deployment-configuration
@@ -76,7 +87,6 @@ async def _default_tenant_or_500() -> Any:
     500 via `ApiError`, never silently swallowed into an empty result
     that would look like "no communities exist".
     """
-    async_dal, dal = _dal()
     try:
         return await svc.resolve_default_tenant(async_dal, dal, _cfg())
     except LookupError as exc:
@@ -324,13 +334,14 @@ async def get_stats() -> StatsResponse | tuple[StatsWarmingResponse, int]:
 
 @public_bp.route("/communities/spotlighted", methods=["GET"])
 @validate_response(SpotlightedCommunitiesResponse)
+@reads_from_replica("public.get_spotlighted_communities")
 async def get_spotlighted_communities() -> (
     SpotlightedCommunitiesResponse | tuple[dict[str, object], int]
 ):
     """Get spotlighted communities."""
     async_dal, dal = _dal()
     try:
-        ctx = await _default_tenant_or_500()
+        ctx = await _default_tenant_or_500(async_dal, dal)
     except ApiError as exc:
         return _err(exc)
     rows = await svc.get_spotlighted_communities(async_dal, dal, ctx)
@@ -354,11 +365,12 @@ async def get_spotlighted_communities() -> (
 
 @public_bp.route("/communities", methods=["GET"])
 @validate_response(ListCommunitiesResponse)
+@reads_from_replica("public.list_communities")
 async def list_communities() -> ListCommunitiesResponse | tuple[dict[str, object], int]:
     """List communities."""
     async_dal, dal = _dal()
     try:
-        ctx = await _default_tenant_or_500()
+        ctx = await _default_tenant_or_500(async_dal, dal)
     except ApiError as exc:
         return _err(exc)
     page = int(request.args.get("page", "1"))
@@ -389,11 +401,12 @@ async def list_communities() -> ListCommunitiesResponse | tuple[dict[str, object
 
 @public_bp.route("/communities/<int:community_id>", methods=["GET"])
 @validate_response(GetCommunityResponse)
+@reads_from_replica("public.get_community")
 async def get_community(community_id: int) -> GetCommunityResponse | tuple[dict[str, object], int]:
     """Get community."""
     async_dal, dal = _dal()
     try:
-        ctx = await _default_tenant_or_500()
+        ctx = await _default_tenant_or_500(async_dal, dal)
         row = await svc.get_community(async_dal, dal, ctx, community_id=community_id)
     except ApiError as exc:
         return _err(exc)
@@ -416,6 +429,7 @@ async def get_community(community_id: int) -> GetCommunityResponse | tuple[dict[
 
 @public_bp.route("/live", methods=["GET"])
 @validate_response(LiveStreamsResponse)
+@reads_from_replica("public.get_live_streams")
 async def get_live_streams() -> LiveStreamsResponse:
     """Get live streams."""
     async_dal, dal = _dal()
@@ -441,6 +455,7 @@ async def get_live_streams() -> LiveStreamsResponse:
 
 @public_bp.route("/live/<entity_id>", methods=["GET"])
 @validate_response(StreamDetailsResponse)
+@reads_from_replica("public.get_stream_details")
 async def get_stream_details(
     entity_id: str,
 ) -> StreamDetailsResponse | tuple[dict[str, object], int]:
@@ -476,7 +491,7 @@ async def _build_signup_settings_response() -> SignupSettingsResponse:
     typing widens it to `Any`), which `--strict`'s `no-any-return`
     correctly flags.
     """
-    async_dal, dal = _dal()
+    async_dal, dal = _primary_dals()
     signup_enabled, allowed_domains = await svc.get_signup_settings(async_dal, dal)
     return SignupSettingsResponse(
         success=True,
@@ -502,6 +517,7 @@ async def get_signup_settings_alias() -> SignupSettingsResponse:
 
 @public_bp.route("/banner", methods=["GET"])
 @validate_response(BannerResponse)
+@reads_from_replica("public.get_banner")
 async def get_banner() -> BannerResponse:
     """Get banner."""
     async_dal, dal = _dal()
