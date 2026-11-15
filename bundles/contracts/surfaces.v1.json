@@ -125,6 +125,51 @@
         "required": ["alert_type", "message"],
         "additionalProperties": false
       }
+    },
+    "waddles.core.app.stream-alerts.alerts": {
+      "doc": "Stream alert (follow/sub/cheer/raid/donation) published by the stream-alerts app. An EVENT: never replayed. Text only; no user names (counts and tiers only).",
+      "replay": false,
+      "max_payload_bytes": 1024,
+      "rate_limit_per_minute": 60,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "alert_type": { "type": "string", "enum": ["follow", "sub", "raid", "cheer", "donation"] },
+          "title": { "type": "string", "maxLength": 100 },
+          "message": { "type": "string", "maxLength": 300 },
+          "amount": { "type": "integer", "minimum": 0 },
+          "duration_ms": { "type": "integer", "minimum": 1000, "maximum": 30000 }
+        },
+        "required": ["alert_type", "title", "message", "duration_ms"],
+        "additionalProperties": false
+      }
+    },
+    "waddles.core.app.galactic-avatars.stage_strip": {
+      "doc": "Galactic avatars stage strip: anonymous faction avatars for recently active chatters (no names, no user references), at most 50. Last state replayed to late joiners.",
+      "replay": true,
+      "max_payload_bytes": 4096,
+      "rate_limit_per_minute": 60,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "avatars": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "properties": {
+                "faction": { "type": "string", "enum": ["jedi", "sith", "mandalorian", "droid"] },
+                "level": { "type": "integer", "minimum": 0, "maximum": 1000 }
+              },
+              "required": ["faction", "level"],
+              "additionalProperties": false
+            }
+          },
+          "updated_ms": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["avatars", "updated_ms"],
+        "additionalProperties": false
+      }
     }
   }
 }

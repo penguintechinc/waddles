@@ -166,6 +166,20 @@ COPY bundles/rust/kick /repo/bundles/rust/kick
 WORKDIR /repo/bundles/rust/kick
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# --- stream-alerts
+# stream-alerts app (stage-next-tools world): same pinned builder.
+FROM rust-bundle-base AS bundle-stream-alerts
+COPY bundles/rust/stream-alerts /repo/bundles/rust/stream-alerts
+WORKDIR /repo/bundles/rust/stream-alerts
+RUN cargo component build --release --target wasm32-wasip2 --locked
+
+# --- galactic-avatars
+# galactic-avatars app (stage-next-tools world): same pinned builder.
+FROM rust-bundle-base AS bundle-galactic-avatars
+COPY bundles/rust/galactic-avatars /repo/bundles/rust/galactic-avatars
+WORKDIR /repo/bundles/rust/galactic-avatars
+RUN cargo component build --release --target wasm32-wasip2 --locked
+
 # --- live-now
 # live-now app (stage-next-tools world): same pinned builder.
 FROM rust-bundle-base AS bundle-live-now
@@ -459,6 +473,8 @@ COPY bundles/rust/discord/hub-manifest.yaml /core-bundles/discord-connector.mani
 COPY bundles/rust/youtube/hub-manifest.yaml /core-bundles/youtube.manifest.yaml
 COPY bundles/rust/kick/hub-manifest.yaml /core-bundles/kick.manifest.yaml
 COPY bundles/rust/live-now/hub-manifest.yaml /core-bundles/live-now.manifest.yaml
+COPY bundles/rust/stream-alerts/hub-manifest.yaml /core-bundles/stream-alerts.manifest.yaml
+COPY bundles/rust/galactic-avatars/hub-manifest.yaml /core-bundles/galactic-avatars.manifest.yaml
 COPY bundles/rust/spectrum/hub-manifest.yaml /core-bundles/spectrum.manifest.yaml
 COPY bundles/rust/wix/hub-manifest.yaml /core-bundles/wix-connector.manifest.yaml
 COPY bundles/rust/webrtc/hub-manifest.yaml /core-bundles/webrtc.manifest.yaml
@@ -484,6 +500,8 @@ COPY --from=bundle-discord /repo/bundles/rust/discord/target/wasm32-wasip2/relea
 COPY --from=bundle-youtube /repo/bundles/rust/youtube/target/wasm32-wasip2/release/waddle_bundle_youtube_service.wasm /core-bundles/youtube.wasm
 COPY --from=bundle-kick /repo/bundles/rust/kick/target/wasm32-wasip2/release/waddle_bundle_kick_service.wasm /core-bundles/kick.wasm
 COPY --from=bundle-live-now /repo/bundles/rust/live-now/target/wasm32-wasip2/release/waddle_bundle_live_now.wasm /core-bundles/live-now.wasm
+COPY --from=bundle-stream-alerts /repo/bundles/rust/stream-alerts/target/wasm32-wasip2/release/waddle_bundle_stream_alerts.wasm /core-bundles/stream-alerts.wasm
+COPY --from=bundle-galactic-avatars /repo/bundles/rust/galactic-avatars/target/wasm32-wasip2/release/waddle_bundle_galactic_avatars.wasm /core-bundles/galactic-avatars.wasm
 COPY --from=bundle-spectrum /repo/bundles/rust/spectrum/target/wasm32-wasip2/release/waddle_bundle_spectrum_service.wasm /core-bundles/spectrum.wasm
 COPY --from=bundle-wix /repo/bundles/rust/wix/target/wasm32-wasip2/release/waddle_bundle_wix_service.wasm /core-bundles/wix-connector.wasm
 COPY --from=bundle-webrtc /repo/bundles/rust/webrtc/target/wasm32-wasip2/release/waddle_bundle_webrtc_service.wasm /core-bundles/webrtc.wasm

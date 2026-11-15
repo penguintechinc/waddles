@@ -84,6 +84,8 @@ class _FakeHost:
         self.kv_calls: list[tuple[Any, ...]] = []
         self.relay_calls: list[tuple[str, str]] = []
         self.log_calls: list[tuple[str, str, str]] = []
+        self.surface_calls: list[tuple[str, dict[str, Any]]] = []
+        self.surface_raises: Exception | None = None
         self.now_ms = 1_700_000_000_000
 
     def advance(self, seconds: float) -> None:
@@ -132,9 +134,7 @@ def _install(
         return new_value
 
     flags_mod = types.SimpleNamespace(enabled=lambda key, default_value: flag_enabled)
-    kv_mod = types.SimpleNamespace(
-        get=kv_get, set=kv_set, delete=kv_delete, increment=kv_increment
-    )
+    kv_mod = types.SimpleNamespace(get=kv_get, set=kv_set, delete=kv_delete, increment=kv_increment)
     relay_mod = types.SimpleNamespace(
         push=lambda provider, msg: host.relay_calls.append((provider, msg))
     )
@@ -147,9 +147,21 @@ def _install(
         now_rfc3339=lambda: "2026-10-05T00:00:00.000Z",
         monotonic_nanos=lambda: 0,
     )
+
+    def publish_surface(surface_id: str, payload_json: str) -> None:
+        if host.surface_raises is not None:
+            raise host.surface_raises
+        host.surface_calls.append((surface_id, json.loads(payload_json)))
+
+    overlay_mod = types.SimpleNamespace(publish_surface=publish_surface)
     fake_wit_world = types.ModuleType("wit_world")
     fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
-        flags=flags_mod, kv=kv_mod, relay=relay_mod, log=log_mod, clock=clock_mod
+        flags=flags_mod,
+        kv=kv_mod,
+        relay=relay_mod,
+        log=log_mod,
+        clock=clock_mod,
+        overlay=overlay_mod,
     )
     monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
 
@@ -476,9 +488,7 @@ def test_show_limit_constant_is_sane() -> None:
 
 def test_owner_can_remove_own_request(fake_host: _FakeHost) -> None:
     _run(dispatch(_sample_envelope("twitch", "add", arg="my song"), {}, http_client=None))
-    result = _run(
-        dispatch(_sample_envelope("twitch", "remove", arg="1"), {}, http_client=None)
-    )
+    result = _run(dispatch(_sample_envelope("twitch", "remove", arg="1"), {}, http_client=None))
     assert result.detail == "remove"
     assert "removed request #1" in _reply_text(fake_host)
     assert json.loads(fake_host.store[_scoped(_QUEUE_KEY)].decode()) == []
@@ -500,9 +510,7 @@ def test_mod_can_remove_someone_elses_request(fake_host: _FakeHost) -> None:
     _run(dispatch(_sample_envelope("twitch", "add", arg="my song"), {}, http_client=None))
     result = _run(
         dispatch(
-            _sample_envelope(
-                "twitch", "remove", arg="1", actor="viewer-2", is_mod=True
-            ),
+            _sample_envelope("twitch", "remove", arg="1", actor="viewer-2", is_mod=True),
             {},
             http_client=None,
         )
@@ -572,9 +580,7 @@ def test_mod_can_advance_queue(fake_host: _FakeHost) -> None:
 def test_broadcaster_can_advance_last_entry_to_empty(fake_host: _FakeHost) -> None:
     _run(dispatch(_sample_envelope("twitch", "add", arg="only song"), {}, http_client=None))
     result = _run(
-        dispatch(
-            _sample_envelope("twitch", "advance", is_broadcaster=True), {}, http_client=None
-        )
+        dispatch(_sample_envelope("twitch", "advance", is_broadcaster=True), {}, http_client=None)
     )
     assert result.detail == "advance"
     assert "queue is now empty" in _reply_text(fake_host)
@@ -604,9 +610,7 @@ def test_config_set_denied_without_mod_signal(fake_host: _FakeHost) -> None:
 def test_mod_can_set_max_per_user(fake_host: _FakeHost) -> None:
     result = _run(
         dispatch(
-            _sample_envelope(
-                "twitch", "config_set", arg="max-per-user 5", is_broadcaster=True
-            ),
+            _sample_envelope("twitch", "config_set", arg="max-per-user 5", is_broadcaster=True),
             {},
             http_client=None,
         )
@@ -620,9 +624,7 @@ def test_mod_can_set_max_per_user(fake_host: _FakeHost) -> None:
 def test_set_max_per_user_out_of_bounds(value: str, fake_host: _FakeHost) -> None:
     result = _run(
         dispatch(
-            _sample_envelope(
-                "twitch", "config_set", arg=f"max-per-user {value}", is_mod=True
-            ),
+            _sample_envelope("twitch", "config_set", arg=f"max-per-user {value}", is_mod=True),
             {},
             http_client=None,
         )
@@ -1285,3 +1287,54 @@ def test_every_kv_key_the_bundle_touches_satisfies_the_host_charset(fake_host: _
         assert ":" not in key
     for constant in (_QUEUE_KEY, _SEQ_KEY, _MAX_PER_USER_CONFIG_KEY):
         validate_key(constant)
+
+
+# -- overlay surfaces (publish-surface) ---------------------------------------
+
+
+def _add(host: _FakeHost, text: str, actor: str = "viewer-1") -> None:
+    _run(dispatch(_sample_envelope("twitch", "add", actor=actor, arg=text), {}, http_client=None))
+
+
+def test_queue_changes_publish_now_playing_and_queue_on_own_surfaces(fake_host: _FakeHost) -> None:
+    _add(fake_host, "first song")
+    _add(fake_host, "second song", actor="viewer-2")
+    surfaces = {sid for sid, _ in fake_host.surface_calls}
+    assert surfaces == {
+        "waddles.core.example.music.now_playing",
+        "waddles.core.example.music.queue",
+    }
+    # Every surface id sits under this bundle's own app id (the host's ownership rule).
+    assert all(s.startswith("waddles.core.example.music.") for s in surfaces)
+    last = dict(fake_host.surface_calls[-2:])
+    assert last["waddles.core.example.music.now_playing"]["now_playing"]["title"] == "first song"
+    queue = last["waddles.core.example.music.queue"]["queue"]
+    assert [t["title"] for t in queue] == ["second song"]
+
+
+def test_published_tracks_carry_no_requester_and_strip_control_chars(fake_host: _FakeHost) -> None:
+    _add(fake_host, "bad\x07title", actor="secret-viewer")
+    blob = json.dumps(fake_host.surface_calls)
+    assert "secret-viewer" not in blob
+    assert _expected_pseudonym("secret-viewer") not in blob
+    assert "requester" not in blob
+    now = dict(fake_host.surface_calls[-2:])["waddles.core.example.music.now_playing"]
+    assert now["now_playing"]["title"] == "badtitle"
+
+
+def test_empty_queue_publishes_null_now_playing(fake_host: _FakeHost) -> None:
+    _add(fake_host, "only song")
+    _run(dispatch(_sample_envelope("twitch", "advance", is_mod=True), {}, http_client=None))
+    last = dict(fake_host.surface_calls[-2:])
+    assert last["waddles.core.example.music.now_playing"]["now_playing"] is None
+    assert last["waddles.core.example.music.queue"]["queue"] == []
+
+
+def test_publish_failure_is_logged_loudly_and_does_not_fail_the_command(
+    fake_host: _FakeHost,
+) -> None:
+    fake_host.surface_raises = RuntimeError("boom")
+    _add(fake_host, "a song")
+    assert any("music.surface_publish_failed" in c[1] for c in fake_host.log_calls)
+    # The queue itself was still persisted.
+    assert _scoped(_QUEUE_KEY) in fake_host.store

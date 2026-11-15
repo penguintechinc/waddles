@@ -26,10 +26,12 @@
   <div class="card" id="live"><h2>Live now</h2><div id="live-body" class="muted">Nobody is live</div></div>
   <div class="card" id="clip"><h2>New clip</h2><div id="clip-body"></div></div>
   <div class="card" id="alert" style="display:none"><h2>Alert</h2><div id="alert-body"></div></div>
+  <div class="card" id="sa" style="display:none"><h2>Stream alert</h2><div id="sa-body"></div></div>
+  <div class="card" id="strip"><h2>Stage</h2><div id="strip-body" class="muted">Nobody here yet</div></div>
 </div>
 <script>
 /* Structured frames only: every server string goes into the DOM via textContent, never innerHTML. */
-var KNOWN = ['waddles.core.example.music.now_playing', 'waddles.core.example.music.queue', 'live.channels', 'clip.alert', 'alert'];
+var KNOWN = ['waddles.core.example.music.now_playing', 'waddles.core.example.music.queue', 'live.channels', 'clip.alert', 'alert', 'waddles.core.app.stream-alerts.alerts', 'waddles.core.app.galactic-avatars.stage_strip'];
 function el(tag, cls, text) {
   var node = document.createElement(tag);
   if (cls) { node.className = cls; }
@@ -105,9 +107,29 @@ function renderAlert(p) {
   if (alertTimer) { clearTimeout(alertTimer); }
   alertTimer = setTimeout(function () { card.style.display = 'none'; }, 8000);
 }
+var saTimer = null;
+function renderStreamAlert(p) {
+  var card = document.getElementById('sa'); var body = document.getElementById('sa-body'); clear(body);
+  body.appendChild(el('div', 'title', p.title));
+  body.appendChild(el('div', 'sub', p.message));
+  card.style.display = 'block';
+  if (saTimer) { clearTimeout(saTimer); }
+  saTimer = setTimeout(function () { card.style.display = 'none'; }, p.duration_ms);
+}
+var ICONS = { jedi: 'J', sith: 'S', mandalorian: 'M', droid: 'D' };
+function renderStrip(p) {
+  var body = document.getElementById('strip-body'); clear(body);
+  if (!p.avatars.length) { body.className = 'muted'; body.textContent = 'Nobody here yet'; return; }
+  body.className = '';
+  p.avatars.forEach(function (a) {
+    body.appendChild(el('span', 'row', (ICONS[a.faction] || '?') + a.level));
+  });
+}
 var RENDER = {
   'waddles.core.example.music.now_playing': renderNow, 'waddles.core.example.music.queue': renderQueue, 'live.channels': renderLive,
-  'clip.alert': renderClip, 'alert': renderAlert
+  'clip.alert': renderClip, 'alert': renderAlert,
+  'waddles.core.app.stream-alerts.alerts': renderStreamAlert,
+  'waddles.core.app.galactic-avatars.stage_strip': renderStrip
 };
 function onFrame(frame) {
   if (!frame || typeof frame.surface !== 'string' || !frame.payload) { return; }

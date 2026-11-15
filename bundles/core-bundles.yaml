@@ -218,8 +218,9 @@ bundles:
       - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.music
-    version: "1.0.8"
+    version: "1.0.9"
     language: python
+    wit_world: stage-next
     source_dir: python/music
     manifest_path: music.manifest.yaml
     artifact_path: music.wasm
@@ -1756,6 +1757,30 @@ bundles:
     source_dir: rust/live-now
     manifest_path: live-now.manifest.yaml
     artifact_path: live-now.wasm
+    activation_targets:
+      - tenant_slug: default
+        community_id: null
+
+  # Stream alerts APP bundle (Rust, world stage-next-tools): follow/sub/cheer/raid/donation alerts published to its own namespaced overlay surface.
+  - app_id: waddles.core.app.stream-alerts
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-next-tools
+    source_dir: rust/stream-alerts
+    manifest_path: stream-alerts.manifest.yaml
+    artifact_path: stream-alerts.wasm
+    activation_targets:
+      - tenant_slug: default
+        community_id: null
+
+  # Galactic avatars APP bundle (Rust, world stage-next-tools): anonymous faction avatars on the overlay stage strip, published to its own namespaced surface.
+  - app_id: waddles.core.app.galactic-avatars
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-next-tools
+    source_dir: rust/galactic-avatars
+    manifest_path: galactic-avatars.manifest.yaml
+    artifact_path: galactic-avatars.wasm
     activation_targets:
       - tenant_slug: default
         community_id: null
