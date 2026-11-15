@@ -126,7 +126,14 @@ fn widget_surface(widget: &WidgetDescriptorDto) -> Result<String, ToolError> {
 /// `style`/`class` attributes, only `https` URLs. Never trust bundle markup.
 fn sanitize_html(raw: &str) -> String {
     let mut b = ammonia::Builder::default();
+    // Text-formatting tags only: no `a`/`img`/media, so bundle markup carries no URLs at all;
+    // relative URLs (`//host`, `/path`, `../x`) are denied as well, as defence in depth.
+    b.tags(std::collections::HashSet::from([
+        "b", "i", "u", "em", "strong", "small", "span", "div", "p", "br", "ul", "ol", "li", "h1",
+        "h2", "h3", "h4", "h5", "h6",
+    ]));
     b.url_schemes(std::collections::HashSet::from(["https"]));
+    b.url_relative(ammonia::UrlRelative::Deny);
     b.clean(raw).to_string()
 }
 

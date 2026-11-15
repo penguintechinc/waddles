@@ -544,3 +544,32 @@ fn presets_render_escaped_and_need_admin_and_registration() {
     let frames = sink.frames.lock().unwrap();
     assert!(!frames[1].1.contains("<img"));
 }
+
+/// Relative URLs and link/media tags must not survive sanitizing (scheme allowlist bypass).
+#[test]
+fn sanitizer_strips_relative_urls_and_link_media_tags() {
+    let (_kv, sink, reg) = fresh();
+    call_as(&reg, "register_widget", widget("dj.a"), Some(ADMIN_A), true).unwrap();
+    let mut args = push_args("dj.a");
+    args["html"] = json!(
+        "<a href=\"//evil.host/x\">1</a><a href=\"/path\">2</a><a href=\"../x\">3</a>\
+         <img src=\"//evil.host/a.png\"><img src=\"/a.png\"><img src=\"../a.png\">\
+         <iframe src=\"https://e.com\"></iframe><b>ok</b>"
+    );
+    call_as(&reg, "push_widget", args, Some(ADMIN_A), true).unwrap();
+    let frames = sink.frames.lock().unwrap();
+    let frame = &frames[0].1;
+    for bad in [
+        "evil.host",
+        "href",
+        "src",
+        "<a",
+        "<img",
+        "iframe",
+        "/path",
+        "../x",
+    ] {
+        assert!(!frame.contains(bad), "{bad} survived: {frame}");
+    }
+    assert!(frame.contains("ok"));
+}
