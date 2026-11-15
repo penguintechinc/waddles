@@ -172,9 +172,18 @@ Provide these four values (the only owner inputs):
    make seed-latency-canary HUB_API_URL=http://127.0.0.1:18080 CANARY_GUILD_ID=<guild snowflake>
    ```
    It creates (or finds) the `latency-canary` community bound to the guild, activates `waddles.core.example.ping`,
-   deactivates any reputation/economy/loyalty/raffle/giveaway/dungeon bundle (app bundles are activation-only, so
-   "none active" is "disabled"), then re-lists the activations and fails if ping is missing, a denied bundle is
-   active, or zero activations were examined. It prints `latencyCanary.communityId: <n>`.
+   and **switches accrual off for the community**: reputation and economy are SERVICE bundles activated
+   tenant-wide, so a per-community deactivation cannot stop them. The supported per-community off switch is the
+   bundle community config `accrual_enabled: false` (hub-api bundle-admin gateway `PUT
+   /api/v1/apps/community/<id>/bundles/<app_id>/config`), read from `get-context().config_json` by the
+   `waddles.core.app.reputation-accrual` app (event-driven reputation accrual, `process` stage) and by the
+   `waddles.core.service.reputation` (`adjust`, `apply_moderation`) and `waddles.core.service.economy`
+   (`adjust_balance` credits, `pay_pot`, `exchange`) service bundles, which refuse minting with `forbidden` in an
+   opted-out community. Real communities are unchanged: ONLY an explicit `false` disables, absent/`{}`/unparseable
+   keeps accrual ON. The seeder sets it on all three, reads each back, and fails if one is not confirmed `false`,
+   if a bundle predates the switch (needs reputation-accrual >= 1.0.1, reputation >= 1.1.2, economy >= 1.0.2
+   deployed first), or if zero accrual bundles were examined. Any minting game/loyalty APP bundle activated for the
+   community is deactivated too (service bundles are never touched). It prints `latencyCanary.communityId: <n>`.
 3. Edit `k8s/helm/waddlebot/values-dal2alpha.yaml` -> `latencyCanary`: set `communityId`, `guildId`, `channelId`,
    then `enabled: true`. (`enabled: true` with any placeholder left makes `helm upgrade` fail loud.)
 4. Deploy (`make dal2alpha-deploy`). Verify: `waddles_canary_e2e_seconds` has samples, a `!ping` reply appears in the
@@ -183,7 +192,7 @@ Provide these four values (the only owner inputs):
 
 Owner decisions of 2026-11-15 applied: canary approved; dedicated testing guild instead of a sentinel guild; `!ping`
 (Rust) driven; ephemeral pseudonym for the synthetic author accepted (the identity pipeline mints it from the
-non-user author id = the guild id); reputation/economy disabled in the canary community (seeder enforces).
+non-user author id = the guild id); reputation/economy accrual disabled in the canary community (`accrual_enabled: false`, seeder enforces).
 
 ## First door on the HTTP / ingress path (read-only findings, nothing applied)
 

@@ -3,8 +3,14 @@ r"""Idempotent alpha-only seeder for the command-latency canary community (testi
 
 Creates (or finds) the dedicated canary community through the hub-api CONTROL PLANE -- the same
 superadmin/activation REST routes the web UI uses, never direct SQL -- binds it to the dedicated
-testing Discord guild, activates the Rust `!ping` bundle, and makes sure no reputation / economy
-style bundle is active there. Prints the numeric community id the owner puts in
+testing Discord guild, activates the Rust `!ping` bundle, and switches ALL accrual off for that
+community. Reputation and economy are SERVICE bundles (activated tenant-wide, so a per-community
+deactivation cannot stop them): the supported per-community off switch is the bundle community
+config `accrual_enabled: false` (bundle-admin gateway ``PUT /api/v1/apps/community/<id>/bundles/
+<app_id>/config``), honoured by the reputation-accrual app and the reputation and economy service
+bundles (versions >= 1.0.1 / 1.1.2 / 1.0.2). The seeder sets it on all three and verifies it by reading
+the saved config back. Game/loyalty APP bundles that mint are additionally deactivated here if the
+community has them activated. Prints the numeric community id the owner puts in
 ``latencyCanary.communityId``.
 
     kubectl --context dal2alpha -n waddlebot port-forward svc/waddlebot-hub-api-v3 18080:8080 &
@@ -17,8 +23,8 @@ Safety: refuses any hub-api URL that is not loopback or an explicit ``alpha`` ho
 Re-running is a no-op (everything is looked up first). ``--dry-run`` performs GETs only.
 
 Exit status: 0 = community ready and verified; 1 = a step failed or verification found a denied
-bundle still active; 2 = refused (bad arguments / non-alpha target / token missing). Zero
-activations examined after seeding is a failure, never a pass.
+bundle still active or `accrual_enabled` could not be confirmed false; 2 = refused (bad arguments / non-alpha target / token missing).
+Zero activations or zero accrual configs examined after seeding is a failure, never a pass.
 """
 
 from __future__ import annotations
@@ -40,15 +46,27 @@ EXIT_REFUSED = 2
 
 PING_APP_ID = "waddles.core.example.ping"
 COMMUNITY_NAME = "latency-canary"
-# Substrings of app ids that must NOT be active in the canary community (reputation / economy).
+# Reputation / economy accrual: the reputation-accrual APP plus the two SERVICE bundles. Their
+# per-community off switch is the bundle community config key `accrual_enabled`.
+ACCRUAL_BUNDLES = (
+    "waddles.core.app.reputation-accrual",
+    "waddles.core.service.reputation",
+    "waddles.core.service.economy",
+)
+ACCRUAL_KEY = "accrual_enabled"
+# Substrings of APP bundle ids that mint/accrue and must NOT be active in the canary community.
+# Service bundles (`.service.`) are never touched here: they are tenant-wide and are switched off
+# through ACCRUAL_BUNDLES' community config instead.
 DENY_PATTERNS = (
     "reputation",
-    "economy",
     "waddlebuck",
     "loyalty",
     "raffle",
     "giveaway",
     "dungeon",
+    "lottery",
+    "jackpot",
+    "blackjack",
 )
 TOKEN_ENV = "WADDLES_ADMIN_TOKEN"
 
@@ -68,6 +86,8 @@ class Result:
     ping_activated: bool
     deactivated: tuple[str, ...]
     examined: int
+    accrual_off: tuple[str, ...] = ()
+    accrual_changed: tuple[str, ...] = ()
 
 
 def check_target(url: str) -> None:
@@ -167,6 +187,85 @@ def active_app_ids(http: Http, community_id: int) -> list[str]:
     return [str(b["appId"]) for b in bundles if isinstance(b, dict) and "appId" in b]
 
 
+def is_denied_app(app_id: str, deny: Sequence[str]) -> bool:
+    """Whether an activated APP bundle should be deactivated (service bundles never are)."""
+    low = app_id.lower()
+    return ".service." not in low and any(p in low for p in deny)
+
+
+def _bundle_config_path(community_id: int, app_id: str) -> str:
+    return f"/api/v1/apps/community/{community_id}/bundles/{app_id}/config"
+
+
+def read_accrual_config(
+    http: Http, community_id: int, app_id: str
+) -> tuple[int, dict[str, object]] | None:
+    """The saved (version, config) of one accrual bundle, or None when it is not active here.
+
+    A bundle without a `community_config_schema` (an old, pre-switch version) is a hard failure:
+    the off switch cannot exist until the new bundle versions are deployed.
+    """
+    status, body = http("GET", _bundle_config_path(community_id, app_id), None)
+    text = json.dumps(body)
+    if status == 404 and "bundle_not_active" in text:
+        return None
+    if status == 404 and "bundle_has_no_config" in text:
+        raise RuntimeError(
+            f"{app_id} declares no community_config_schema: deploy the bundle versions that add "
+            f"`{ACCRUAL_KEY}` (reputation-accrual >= 1.0.1, reputation >= 1.1.2, economy >= 1.0.2) first"
+        )
+    _ok(status, f"read config of {app_id}")
+    version = body.get("version")
+    config = body.get("config")
+    if not isinstance(version, int) or not isinstance(config, dict):
+        raise RuntimeError(f"read config of {app_id}: unexpected response shape")  # noqa: TRY004
+    return version, config
+
+
+def disable_accrual(
+    http: Http, community_id: int, *, dry_run: bool
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Sets `accrual_enabled: false` on every accrual bundle active here, then reads each back.
+
+    Returns (confirmed off, changed by this run). A bundle that is not active for the community
+    accrues nothing and is skipped; zero bundles examined is a failure.
+    """
+    off: list[str] = []
+    changed: list[str] = []
+    examined = 0
+    for app_id in ACCRUAL_BUNDLES:
+        cur = read_accrual_config(http, community_id, app_id)
+        if cur is None:
+            continue
+        examined += 1
+        version, config = cur
+        if config.get(ACCRUAL_KEY) is not False:
+            if dry_run:
+                raise RuntimeError(
+                    f"dry-run: {app_id} accrual is not disabled (would set {ACCRUAL_KEY}=false)"
+                )
+            status, _ = http(
+                "PUT",
+                _bundle_config_path(community_id, app_id),
+                {"config": {**config, ACCRUAL_KEY: False}, "expectedVersion": version},
+            )
+            _ok(status, f"disable accrual on {app_id}")
+            changed.append(app_id)
+            after = read_accrual_config(http, community_id, app_id)
+            config = after[1] if after else {}
+        if config.get(ACCRUAL_KEY) is not False:
+            raise RuntimeError(
+                f"verification: {app_id} {ACCRUAL_KEY} is not false after seeding"
+            )
+        off.append(app_id)
+    if examined == 0:
+        raise RuntimeError(
+            "verification examined 0 accrual bundles -- zero examined is a failure "
+            "(none of the reputation/economy bundles is active for this community's tenant)"
+        )
+    return tuple(off), tuple(changed)
+
+
 def seed(
     http: Http, guild_id: str, *, dry_run: bool, deny: Sequence[str] = DENY_PATTERNS
 ) -> Result:
@@ -201,7 +300,7 @@ def seed(
         ping_activated = True
     deactivated: list[str] = []
     for app_id in active_app_ids(http, cid):
-        if any(p in app_id.lower() for p in deny):
+        if is_denied_app(app_id, deny):
             if dry_run:
                 raise RuntimeError(f"dry-run: {app_id} is active (would deactivate it)")
             status, _ = http(
@@ -216,10 +315,13 @@ def seed(
         )
     if PING_APP_ID not in final:
         raise RuntimeError(f"verification: {PING_APP_ID} is not active after seeding")
-    still = [a for a in final if any(p in a.lower() for p in deny)]
+    still = [a for a in final if is_denied_app(a, deny)]
     if still:
         raise RuntimeError(f"verification: denied bundles still active: {still}")
-    return Result(cid, created, ping_activated, tuple(deactivated), len(final))
+    off, changed = disable_accrual(http, cid, dry_run=dry_run)
+    return Result(
+        cid, created, ping_activated, tuple(deactivated), len(final), off, changed
+    )
 
 
 def main(
@@ -266,7 +368,8 @@ def main(
         return EXIT_FAIL
     print(
         f"OK community_id={res.community_id} created={res.created} ping_activated={res.ping_activated} "
-        f"deactivated={list(res.deactivated)} activations_examined={res.examined}"
+        f"deactivated={list(res.deactivated)} activations_examined={res.examined} "
+        f"accrual_off={len(res.accrual_off)}/{len(ACCRUAL_BUNDLES)} accrual_changed={list(res.accrual_changed)}"
     )
     print(f"latencyCanary.communityId: {res.community_id}")
     return EXIT_OK

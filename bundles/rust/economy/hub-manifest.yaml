@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.service.economy
 name: Economy Service Bundle (Rust)
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -223,3 +223,11 @@ exported_tools:
   input_schema: *id003
   output_schema: *id004
   required_scope: community:admin
+community_config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    accrual_enabled:
+      type: boolean
+      default: true
+      description: "Set false to stop ALL accrual in this community (reputation / economy credits). Only an explicit false disables; absent keeps the default behaviour."

@@ -10,7 +10,7 @@ mod component {
 
     use super::bindings::exports::waddle::bundle::tool_provider::Guest;
     use super::bindings::waddle::bundle::tool::ToolError as WitError;
-    use super::bindings::waddle::bundle::{economy, kv, log};
+    use super::bindings::waddle::bundle::{context_v2, economy, kv, log};
     use super::logic::{self, ConfigStore, EconomyHost};
     use waddle_sdk::tool::{ToolError, ToolRegistry};
 
@@ -93,6 +93,10 @@ mod component {
         /// Raw kv read; the error never carries host detail.
         fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
             kv::get(key).map_err(|_| "kv unavailable".to_string())
+        }
+        /// The live per-community config JSON from the stage context.
+        fn community_config_json(&self) -> String {
+            context_v2::get_context().config_json
         }
     }
 

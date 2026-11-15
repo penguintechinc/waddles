@@ -17,3 +17,10 @@ Tools: `get_score`, `get_many`, `rep`, `leaderboard` (community only), `adjust {
 
 Build: `cargo component build --release --target wasm32-wasip2 --locked`
 (the core-bundle image does this in `bundles/Dockerfile.core-bundles`).
+
+## Per-community opt-out (`accrual_enabled`)
+
+Community config accepts `accrual_enabled` (boolean, default `true`). An explicit `false` makes `adjust` and
+`apply_moderation` fail `forbidden` for that community (reads, overrides and policy tools are unaffected). Only an
+explicit `false` disables; absent / `{}` / unparseable keeps accrual ON. Added in 1.1.2 (see
+`docs/observability/command-latency.md`).

@@ -23,6 +23,8 @@ struct Fake {
     metrics: RefCell<Vec<(String, String)>>,
     /// Tokens the host-verified mention bindings resolve (token -> uuid).
     mentions: RefCell<HashMap<String, String>>,
+    /// The live community config JSON (`None` = the trait default `{}`).
+    community_config: RefCell<Option<String>>,
 }
 
 impl Fake {
@@ -57,6 +59,12 @@ impl Fake {
 }
 
 impl Host for Fake {
+    fn community_config_json(&self) -> String {
+        self.community_config
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| "{}".to_string())
+    }
     fn kv_get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         Ok(self.kv.borrow().get(key).cloned())
     }
@@ -525,4 +533,44 @@ fn reasons_match_service_charset() {
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._:-".contains(&b))
         );
     }
+}
+
+#[test]
+fn community_opt_out_stops_accrual_with_no_calls() {
+    let h = Fake::on();
+    *h.community_config.borrow_mut() = Some(r#"{"accrual_enabled":false}"#.to_string());
+    for et in ["channel.follow", "chat.message", "moderation.ban"] {
+        assert_eq!(
+            run_ev(&h, et, r#"{"text":"hi"}"#).outcome,
+            "community_disabled",
+            "{et}"
+        );
+    }
+    assert_eq!(
+        h.n_calls(),
+        0,
+        "a disabled community must make no tool call"
+    );
+}
+
+#[test]
+fn only_an_explicit_false_disables_accrual() {
+    for cfg in [
+        "{}",
+        "",
+        "not json",
+        r#"{"accrual_enabled":true}"#,
+        r#"{"accrual_enabled":"false"}"#,
+        r#"{"accrual_enabled":0}"#,
+        r#"{"other":false}"#,
+    ] {
+        assert!(accrual_enabled(cfg), "{cfg:?} must keep accrual ON");
+    }
+    assert!(!accrual_enabled(r#"{"accrual_enabled":false}"#));
+    let h = Fake::on();
+    *h.community_config.borrow_mut() = Some(r#"{"accrual_enabled":true}"#.to_string());
+    assert_ne!(
+        run_ev(&h, "channel.follow", "{}").outcome,
+        "community_disabled"
+    );
 }
