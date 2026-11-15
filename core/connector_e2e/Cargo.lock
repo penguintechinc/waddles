@@ -641,6 +641,7 @@ version = "0.1.0"
 dependencies = [
  "hub_client",
  "serde",
+ "serde_json",
  "service_auth",
  "thiserror 2.0.20",
  "tokio",
@@ -665,6 +666,7 @@ dependencies = [
  "prometheus",
  "redis",
  "serde_json",
+ "service_auth",
  "sha2 0.10.9",
  "svc-ingest",
  "tokio",
@@ -2508,8 +2510,8 @@ dependencies = [
 
 [[package]]
 name = "penguin-bundle-host"
-version = "0.5.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=53e95619f1b3e49e1150b78a125981fcc5905d8a#53e95619f1b3e49e1150b78a125981fcc5905d8a"
+version = "0.6.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=96a5065f1d379ea0cfc7c7716c6eab628138330a#96a5065f1d379ea0cfc7c7716c6eab628138330a"
 dependencies = [
  "regex",
  "serde",
@@ -3593,6 +3595,7 @@ dependencies = [
  "hyper-util",
  "jsonwebtoken",
  "opentelemetry",
+ "opentelemetry_sdk",
  "prost",
  "rustls",
  "rustls-pki-types",

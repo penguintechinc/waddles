@@ -403,6 +403,7 @@ mod tests {
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             }),
         );
         write_frame(&mut tls, &hello)
@@ -471,6 +472,7 @@ mod tests {
                 runtime: "runc".to_string(),
                 verified: false,
             },
+            executor_id: None,
         });
         write_frame(&mut tls, &Frame::new(1, hello)).await.unwrap();
         assert!(matches!(

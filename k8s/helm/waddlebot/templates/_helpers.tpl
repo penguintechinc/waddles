@@ -147,31 +147,6 @@ Args (dict): root (the root "."), role.
 {{- end -}}
 {{- end }}
 
-{{/*
-Resolve + validate one role's password (secrets.yaml calls this exactly once per role).
-Args (dict): ctx (root "."), role. Precedence: explicit infrastructure.postgresql.
-serviceRoles.passwords.<role> > existing key in the credentials Secret (KEEP) > generate
-(alpha/local only) > fail closed -- the shared waddlebot.autoSecretValue policy. The value
-must be URL-safe ([A-Za-z0-9._~-], it is embedded in DATABASE_URL) and >= 16 chars, and
-must not look like a placeholder / repo default: the same rules scripts/db/
-service_roles.py enforces at migration time, so a bad value fails here, at render.
-*/}}
-{{- define "waddlebot.db.rolePassword" -}}
-{{- $ctx := .ctx -}}
-{{- $role := .role -}}
-{{- $key := include "waddlebot.db.passwordKey" $role -}}
-{{- $explicit := index ($ctx.Values.infrastructure.postgresql.serviceRoles.passwords | default dict) $role | default "" | toString -}}
-{{- $explicit = ternary "" $explicit (hasPrefix "REPLACE_ME" $explicit) -}}
-{{- $value := include "waddlebot.autoSecretValue" (dict "ctx" $ctx "key" $key "explicit" $explicit "length" 32 "secret" (include "waddlebot.db.credentialsSecretName" $ctx)) -}}
-{{- if not (regexMatch "^[A-Za-z0-9._~-]{16,}$" $value) -}}
-{{- fail (printf "PostgreSQL password for role %q must be >=16 chars of [A-Za-z0-9._~-] (it is embedded in DATABASE_URL)" $role) -}}
-{{- end -}}
-{{- if regexMatch "(?i)(changeme|change_me|replace_me|example|password|dev_)" $value -}}
-{{- fail (printf "PostgreSQL password for role %q looks like a placeholder / repo default -- refusing" $role) -}}
-{{- end -}}
-{{- $value -}}
-{{- end }}
-
 {{/* Connection target pieces (the in-chart Postgres Service). */}}
 {{- define "waddlebot.postgres.host" -}}
 {{- /* FQDN (feature/transit-tls-core F8): always in the server cert's SANs and inside the internal CA's nameConstraints suffix, so sslmode=verify-full holds. */ -}}
@@ -990,58 +965,10 @@ regenerated, closing the gap where #541 added the drift *detection*
 {{- end }}
 
 {{/*
-fix/helm-alpha-self-provisioning -- lookup-then-generate-or-require for a single key
-inside the monolithic waddlebot-secrets Secret (templates/secrets.yaml). Mirrors
-templates/auto-provisioned-secrets.yaml's KEEP-vs-GENERATE policy but at per-key
-granularity, since waddlebot-secrets also carries user-supplied pass-through values
-(OAuth tokens, AWS/GCP creds, etc.) that must always reflect current .Values and are
-therefore never routed through this helper.
-
-Args (dict): ctx (the root "."), key (Secret data key name, e.g. "JWT_SECRET"),
-explicit (the value already resolved from .Values, "" if unset/placeholder), length
-(random byte-string length, default 32), optional secret (the Secret to look the key up
-in; default "waddlebot-secrets"), optional legacySecret/legacyKey (a SECOND Secret/key
-read ONLY as a one-way migration source when `secret` has no value yet -- how
-POSTGRES_PASSWORD moves out of waddlebot-secrets into waddlebot-db-admin on `helm upgrade`
-without minting a new password that the Postgres PVC's initdb-time password would reject).
-
-Precedence: explicit non-placeholder value from .Values wins outright (operator/
-ExternalSecret already deliberately set it) > existing Secret key (KEEP, never
-rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
+Per-key lookup-then-generate (waddlebot.autoSecretValue) was REMOVED: template-time `lookup` is empty under
+`helm template | kubectl apply` / ArgoCD and would regenerate every secret. Generation is now runtime,
+create-if-absent, in every tier -- templates/provision-secrets.yaml + files/provision-secrets.sh.
 */}}
-{{- define "waddlebot.autoSecretValue" -}}
-{{- $ctx := .ctx -}}
-{{- $key := .key -}}
-{{- $explicit := .explicit | default "" -}}
-{{- $length := .length | default 32 -}}
-{{- $hex := .hex | default false -}}
-{{- $secretName := .secret | default "waddlebot-secrets" -}}
-{{- if ne $explicit "" -}}
-{{- $explicit -}}
-{{- else -}}
-{{- $tier := $ctx.Values.global.deploymentTier -}}
-{{- $canGenerate := or (eq $tier "alpha") (eq $tier "local") (.alwaysGenerate | default false) -}}
-{{- $existing := lookup "v1" "Secret" $ctx.Values.namespace $secretName -}}
-{{- $legacy := dict -}}
-{{- if .legacySecret -}}
-{{- $legacy = lookup "v1" "Secret" $ctx.Values.namespace .legacySecret | default dict -}}
-{{- end -}}
-{{- $legacyKey := .legacyKey | default $key -}}
-{{- if (include "waddlebot.secretKeyNonEmpty" (dict "existing" $existing "key" $key)) -}}
-{{- index $existing.data $key | b64dec -}}
-{{- else if (include "waddlebot.secretKeyNonEmpty" (dict "existing" $legacy "key" $legacyKey)) -}}
-{{- index $legacy.data $legacyKey | b64dec -}}
-{{- else if $canGenerate -}}
-{{- if $hex -}}
-{{- sha256sum (randBytes 32) -}}
-{{- else -}}
-{{- randAlphaNum (int $length) -}}
-{{- end -}}
-{{- else -}}
-{{- fail (printf "%s: key %q has no value and global.deploymentTier=%q is outside alpha/local -- auto-generation is alpha/local only. Set the corresponding value explicitly (or pre-populate this Secret via ExternalSecret/SealedSecret) before deploying." $secretName $key $tier) -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
 
 {{/* Server-role volume: full cert+key+CA bundle, mounted by templates/infrastructure/redis.yaml. */}}
 {{- define "waddlebot.valkeyTlsServerVolume" -}}
@@ -1190,6 +1117,31 @@ true
 {{- end -}}
 
 {{/*
+Kata Containers isolation for the bundle executors (bundleExecutor.runtimeClass).
+Renders pod-spec lines (runtimeClassName, nodeSelector, affinity) for the svc-bundles-executor
+Deployment ONLY -- never included by any other data-plane workload. Empty output when
+disabled. Fails the render if enabled with an empty name (no silent fallback to runc).
+Call: include "waddlebot.executorKataPodSpec" .
+*/}}
+{{- define "waddlebot.executorKataPodSpec" -}}
+{{- $rc := .Values.bundleExecutor.runtimeClass | default dict -}}
+{{- if $rc.enabled -}}
+{{- if not $rc.name -}}
+{{- fail "bundleExecutor.runtimeClass.enabled=true requires a non-empty bundleExecutor.runtimeClass.name (the RuntimeClass, e.g. \"kata\", must exist in the cluster)" -}}
+{{- end -}}
+runtimeClassName: {{ $rc.name | quote }}
+{{- with .Values.bundleExecutor.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.bundleExecutor.affinity }}
+affinity:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Bundle storage v2 (docs/bundle-storage-v2.md): BUNDLE_DB_* env for svc-process-rust / svc-action-rust.
 Off by default (bundleStorageV2.db.enabled=false -> renders nothing, db capability stays
 not_implemented). Enabled -> the password is read by secretKeyRef from an operator-managed
@@ -1216,6 +1168,25 @@ chart's own Postgres service. Usage: include "waddlebot.bundleDbEnv" .
 {{- end -}}
 
 {{/*
+Effective executor sizing for ONE pool, as JSON {"resources": {...}, "memoryBudgetMb": N}.
+Default: the pool's own resources + memoryBudgetMb. When Kata is enabled
+(bundleExecutor.runtimeClass.enabled) and bundleExecutor.runtimeClass.resources is set, those
+requests/limits REPLACE the pool's (they size the workload inside the guest VM; the RuntimeClass
+`overhead` is added by Kubernetes on top automatically) and the LRU budget becomes
+bundleExecutor.runtimeClass.memoryBudgetMb (0/unset fails the budget < limit render check).
+The caller validates budget < memory LIMIT on the EFFECTIVE values.
+Call: include "waddlebot.executorEffective" (dict "root" $ "pool" $pool) | fromJson
+*/}}
+{{- define "waddlebot.executorEffective" -}}
+{{- $rc := .root.Values.bundleExecutor.runtimeClass | default dict -}}
+{{- if and $rc.enabled $rc.resources -}}
+{{- dict "resources" $rc.resources "memoryBudgetMb" (int ($rc.memoryBudgetMb | default 0)) | toJson -}}
+{{- else -}}
+{{- dict "resources" .pool.resources "memoryBudgetMb" (int .pool.memoryBudgetMb) | toJson -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Bundle storage v2: BUNDLE_MIGRATOR_* env for hub-api only (DDL provisioning at install/upgrade/uninstall).
 Off by default; password only ever from an operator-managed existingSecret (required when enabled).
 */}}
@@ -1236,17 +1207,17 @@ Off by default; password only ever from an operator-managed existingSecret (requ
 
 {{/*
 svc-bundles-executor stage dial list -- the comma-separated `host:port` value of
-STAGE_HOST_API_ADDR: one entry per `pipeline.rustDataPlane.bundleExecutor.stages` item
+STAGE_HOST_API_ADDR: one entry per stage of ONE executor pool (waddlebot.executorPools)
 (`<fullname>-<target>:<port>`), in order. The executor runs one independent dial loop per
 entry (core/bundle_executor/src/config.rs). Fails the render on an empty list -- an executor
-that dials no stage would serve nothing.
+that dials no stage would serve nothing. Call with (dict "root" $ "stages" $pool.stages).
 */}}
 {{- define "waddlebot.bundleExecutorStageAddrs" -}}
-{{- $stages := .Values.pipeline.rustDataPlane.bundleExecutor.stages | default list -}}
+{{- $stages := .stages | default list -}}
 {{- if not $stages -}}
 {{- fail "pipeline.rustDataPlane.bundleExecutor.stages must list at least one stage ({target, port}) for svc-bundles-executor to dial" -}}
 {{- end -}}
-{{- $fullname := include "waddlebot.fullname" . -}}
+{{- $fullname := include "waddlebot.fullname" .root -}}
 {{- $addrs := list -}}
 {{- range $stage := $stages -}}
 {{- $addrs = append $addrs (printf "%s-%s:%v" $fullname $stage.target $stage.port) -}}

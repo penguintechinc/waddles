@@ -1,0 +1,5 @@
+# Build-time tools of the python-bundles-builder stage of bundles/Dockerfile.core-bundles
+# (componentize-py + the PyYAML that build_python_bundles.py reads core-bundles.yaml with).
+# Install: pip install --require-hashes -r bundles/python-builder/requirements.txt
+componentize-py==0.25.1
+pyyaml==6.0.3

@@ -668,6 +668,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-config-db"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hub_client",
+ "opentelemetry",
+ "redis",
+ "sea-orm",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "bundle-executor"
 version = "0.1.0"
 dependencies = [
@@ -3152,8 +3166,8 @@ dependencies = [
 
 [[package]]
 name = "penguin-bundle-host"
-version = "0.5.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=53e95619f1b3e49e1150b78a125981fcc5905d8a#53e95619f1b3e49e1150b78a125981fcc5905d8a"
+version = "0.6.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=96a5065f1d379ea0cfc7c7716c6eab628138330a#96a5065f1d379ea0cfc7c7716c6eab628138330a"
 dependencies = [
  "regex",
  "serde",
@@ -4744,6 +4758,7 @@ dependencies = [
  "base64 0.22.1",
  "bundle-active-set",
  "bundle-capability-gate",
+ "bundle-config-db",
  "bundle-host-credentials",
  "bundle-host-db",
  "bundle-host-economy",
