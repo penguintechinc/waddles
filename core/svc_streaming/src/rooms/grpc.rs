@@ -9,22 +9,41 @@
 //! -> moderator/admin), the `rooms.moderation` flag, and the room/moderation
 //! metrics and spans behave identically on both surfaces. This layer adds only
 //! per-RPC telemetry (`rooms_grpc_requests_total`, `rooms_grpc_request_seconds`, a
-//! `rooms.grpc` span) and the error mapping to gRPC status codes.
+//! `rooms.grpc` span carrying `rpc`/`op`, the numeric `community_id`/`tenant_id` and the
+//! `outcome`, never a name or free text) and the error mapping to gRPC status codes.
+//!
+//! The listener also serves the standard `grpc.health.v1` service (`tonic-health`) for
+//! in-mesh checks: SERVING only when [`RoomService::readiness`] is `Ok`, and it demands the
+//! same `streaming.rooms:read` service JWT as the data RPCs (no inter-service call is
+//! unauthenticated). kubelet's native gRPC probe cannot present a client certificate, so it
+//! cannot reach this listener; the chart keeps its HTTP `/health` + `/readyz` probes on the
+//! HTTP port (an owner-approved exception to the native-gRPC-probe convention).
+//!
+//! Tenancy: `community_id` comes from the request (hub-api derives it from the end user's
+//! verified JWT and is the only mTLS peer allowed to call). When the service JWT is itself
+//! community-bound (`community` claim, see `flask_core.service_jwt`), a request naming any
+//! other community is refused as `NOT_FOUND` before any room is touched.
 
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use tonic::metadata::MetadataMap;
+use tonic::service::interceptor::InterceptedService;
 use tonic::{Request, Response, Status};
+use tonic_health::ServingStatus;
 use tracing::Instrument;
 use uuid::Uuid;
 
 use super::grpc_auth::{
-    ServiceJwtVerifier, SCOPE_MODERATE, SCOPE_READ, SCOPE_WRITE,
+    ServiceClaims, ServiceJwtVerifier, SCOPE_MODERATE, SCOPE_READ, SCOPE_WRITE,
 };
 use super::host_api::{build_server_config, serve_router, HostApiError, HostApiTls};
-use super::{ActorRole, IssueRequest, ParticipantInfo, RoomError, RoomInfo, RoomService, RouteMode};
+use super::{
+    ActorRole, HandInfo, HandList, HandView, IssueRequest, ParticipantInfo, RoomError, RoomInfo,
+    RoomService, RouteMode,
+};
 
 /// Generated protobuf/tonic types for `waddles.streaming.internal.v1`.
 pub mod pb {
@@ -38,11 +57,18 @@ use pb::*;
 /// `UNIMPLEMENTED` before any request field is acted on (rule `backend.md` API Versioning).
 pub const API_VERSION: &str = "v1";
 
+/// Name the `grpc.health.v1` service reports `RoomsService` readiness under (the overall
+/// server, name `""`, is reported alongside it).
+pub const HEALTH_SERVICE_NAME: &str = "waddles.streaming.internal.v1.RoomsService";
+
 /// Implemented by every `RoomsService` request message so [`RoomsGrpc::run`] can enforce
-/// [`API_VERSION`] uniformly instead of each handler remembering to.
+/// [`API_VERSION`] and the community binding uniformly instead of each handler
+/// remembering to.
 trait Versioned {
     /// The request's `api_version` field.
     fn api_version(&self) -> &str;
+    /// The request's `community_id` field.
+    fn community_id(&self) -> &str;
 }
 
 macro_rules! versioned {
@@ -50,6 +76,9 @@ macro_rules! versioned {
         $(impl Versioned for $t {
             fn api_version(&self) -> &str {
                 &self.api_version
+            }
+            fn community_id(&self) -> &str {
+                &self.community_id
             }
         })+
     };
@@ -73,6 +102,7 @@ versioned!(
     LockRoomRequest,
     UnlockRoomRequest,
     AcknowledgeHandRequest,
+    ResetHandsRequest,
 );
 
 /// Refuses any `api_version` other than [`API_VERSION`] with `UNIMPLEMENTED`.
@@ -80,13 +110,15 @@ fn check_api_version(v: &str) -> Result<(), Status> {
     if v == API_VERSION {
         Ok(())
     } else {
-        Err(Status::unimplemented(format!("api_version {v} not supported")))
+        Err(Status::unimplemented(format!(
+            "api_version {v} not supported"
+        )))
     }
 }
 
 /// Every RPC name in `RoomsService`, kept in lockstep with the proto by the
 /// contract test (`tests/rooms_grpc.rs`) and used as the metric `rpc` label.
-pub const RPC_NAMES: [&str; 17] = [
+pub const RPC_NAMES: [&str; 18] = [
     "ListRooms",
     "GetRoom",
     "ListParticipants",
@@ -104,7 +136,36 @@ pub const RPC_NAMES: [&str; 17] = [
     "RaiseHand",
     "LowerHand",
     "AcknowledgeHand",
+    "ResetHands",
 ];
+
+/// Verifies the `authorization: Bearer ...` machine JWT in `md` for `scope`. Failures never
+/// say which check failed: a bad scope/subject is `PERMISSION_DENIED`, anything else
+/// `UNAUTHENTICATED`.
+fn bearer_claims(
+    auth: &ServiceJwtVerifier,
+    md: &MetadataMap,
+    scopes: &[&str],
+) -> Result<ServiceClaims, Status> {
+    let token = md
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| Status::unauthenticated("missing bearer token"))?;
+    auth.verify_any(token, scopes).map_err(|r| {
+        if r.reason == crate::http::auth::hardening::REASON_SCOPE_DENIED {
+            Status::permission_denied("scope not permitted")
+        } else {
+            Status::unauthenticated("invalid token")
+        }
+    })
+}
+
+/// True for a plain decimal id (digits only, bounded): the only shape allowed into a span
+/// attribute, so request text can never be recorded as telemetry.
+fn is_numeric_id(v: &str) -> bool {
+    !v.is_empty() && v.len() <= 20 && v.bytes().all(|b| b.is_ascii_digit())
+}
 
 /// The `RoomsService` implementation: JWT-gated, delegating to [`RoomService`].
 pub struct RoomsGrpc {
@@ -118,27 +179,13 @@ impl RoomsGrpc {
         Self { rooms, auth }
     }
 
-    /// Verifies the caller's machine JWT for `scope`; failures never say which check failed.
-    fn authenticate<T>(&self, req: &Request<T>, scope: &str) -> Result<(), Status> {
-        let token = req
-            .metadata()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .ok_or_else(|| Status::unauthenticated("missing bearer token"))?;
-        self.auth
-            .verify(token, scope)
-            .map(|_| ())
-            .map_err(|r| {
-                if r.reason == crate::http::auth::hardening::REASON_SCOPE_DENIED {
-                    Status::permission_denied("scope not permitted")
-                } else {
-                    Status::unauthenticated("invalid token")
-                }
-            })
+    /// Verifies the caller's machine JWT for any of `scopes`; failures never say which check
+    /// failed. The returned claims say which scope was presented.
+    fn authenticate<T>(&self, req: &Request<T>, scopes: &[&str]) -> Result<ServiceClaims, Status> {
+        bearer_claims(&self.auth, req.metadata(), scopes)
     }
 
-    /// Runs one RPC: authenticate, execute, then record the per-RPC metric/latency/span.
+    /// Runs one RPC that needs exactly `scope`.
     async fn run<R, T, Fut>(
         &self,
         rpc: &'static str,
@@ -150,12 +197,51 @@ impl RoomsGrpc {
         R: Versioned,
         Fut: Future<Output = Result<T, RoomError>>,
     {
+        self.run_scoped(rpc, &[scope], req, |s, r, _claims| f(s, r))
+            .await
+    }
+
+    /// Runs one RPC: authenticate against any of `scopes`, execute (the closure sees the
+    /// verified claims, so it can branch on WHICH scope was presented), then record the
+    /// per-RPC metric/latency/span.
+    async fn run_scoped<R, T, Fut>(
+        &self,
+        rpc: &'static str,
+        scopes: &[&'static str],
+        req: Request<R>,
+        f: impl FnOnce(Arc<RoomService>, R, ServiceClaims) -> Fut,
+    ) -> Result<Response<T>, Status>
+    where
+        R: Versioned,
+        Fut: Future<Output = Result<T, RoomError>>,
+    {
         let started = Instant::now();
-        let span = tracing::info_span!("rooms.grpc", rpc);
+        let span = tracing::info_span!(
+            "rooms.grpc",
+            rpc,
+            op = rpc,
+            community_id = tracing::field::Empty,
+            tenant_id = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+        );
+        if is_numeric_id(req.get_ref().community_id()) {
+            span.record("community_id", req.get_ref().community_id());
+        }
+        let outcome_span = span.clone();
         let result = async {
-            self.authenticate(&req, scope)?;
+            let claims = self.authenticate(&req, scopes)?;
+            if let Some(t) = claims.tenant.as_deref().filter(|t| is_numeric_id(t)) {
+                tracing::Span::current().record("tenant_id", t);
+            }
             check_api_version(req.get_ref().api_version())?;
-            f(self.rooms.clone(), req.into_inner())
+            if let Some(bound) = claims.community {
+                if req.get_ref().community_id() != bound.to_string() {
+                    // A community-bound credential never reaches another community's rooms;
+                    // indistinguishable from "not found".
+                    return Err(status_of(RoomError::NotFound));
+                }
+            }
+            f(self.rooms.clone(), req.into_inner(), claims)
                 .await
                 .map(Response::new)
                 .map_err(status_of)
@@ -166,6 +252,7 @@ impl RoomsGrpc {
             Ok(_) => "ok".to_string(),
             Err(s) => format!("{:?}", s.code()).to_lowercase(),
         };
+        outcome_span.record("outcome", code.as_str());
         let m = &self.rooms.metrics;
         m.grpc_requests_total.with_label_values(&[rpc, &code]).inc();
         m.grpc_request_seconds
@@ -215,8 +302,18 @@ fn room_pb(r: RoomInfo) -> Room {
         publisher_ids: r.publisher_ids.iter().map(Uuid::to_string).collect(),
         subscriber_count: r.subscriber_count as u32,
         locked: r.locked,
-        // Idle-room expiry is not implemented yet (plan T2), so no room ever expires: 0 = disabled.
-        empty_timeout_secs: 0,
+        empty_timeout_secs: r.empty_timeout_secs,
+        participant_count: r.participant_count as u32,
+        hand_count: r.hand_count as u32,
+    }
+}
+
+fn hand_pb(h: HandInfo) -> RaisedHand {
+    RaisedHand {
+        participant_id: h.participant_id.to_string(),
+        raised_at: h.raised_at,
+        acknowledged_at: h.acknowledged_at,
+        acknowledged_by: h.acknowledged_by.map(|u| u.to_string()),
     }
 }
 
@@ -226,8 +323,7 @@ fn participant_pb(p: ParticipantInfo) -> Participant {
         publisher: p.publisher,
         subscriber: p.subscriber,
         muted: p.muted,
-        // The room ledger does not record join times yet (plan T2); unset, never a made-up 0.
-        joined_at: None,
+        joined_at: p.joined_at,
     }
 }
 
@@ -281,17 +377,13 @@ impl RoomsService for RoomsGrpc {
         req: Request<CreateRoomRequest>,
     ) -> Result<Response<CreateRoomResponse>, Status> {
         self.run("CreateRoom", SCOPE_WRITE, req, |s, r| async move {
-            if r.empty_timeout_secs.is_some_and(|n| n != 0) {
-                return Err(RoomError::Unsupported(
-                    "empty_timeout_secs: empty-room expiry is not implemented yet".into(),
-                ));
-            }
             let info = s
-                .create(
+                .create_with(
                     &r.community_id,
                     r.label,
                     r.max_publishers.map(|n| n as usize),
                     RouteMode::Sfu,
+                    r.empty_timeout_secs,
                 )
                 .await?;
             Ok(CreateRoomResponse {
@@ -318,33 +410,51 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<JoinRoomRequest>,
     ) -> Result<Response<JoinRoomResponse>, Status> {
-        self.run("JoinRoom", SCOPE_WRITE, req, |s, r| async move {
-            let room_id = uuid("room_id", &r.room_id)?;
-            let participant = uuid("participant_id", &r.participant_id)?;
-            let t = s
-                .issue_token(
-                    &r.community_id,
-                    room_id,
-                    IssueRequest {
-                        participant,
-                        publish: r.publish,
-                        subscribe: r.subscribe,
-                        source: None,
-                        ttl_secs: r.ttl_secs,
-                    },
-                )
-                .await?;
-            let base = s.public_base_url().trim_end_matches('/').to_string();
-            Ok(JoinRoomResponse {
-                token: t.token,
-                token_id: t.token_id.to_string(),
-                participant_id: participant.to_string(),
-                expires_at: t.expires_at,
-                whip_url: format!("{base}/rtc/rooms/{room_id}/whip"),
-                whep_url: format!("{base}/rtc/rooms/{room_id}/whep"),
-                api_version: API_VERSION.to_string(),
-            })
-        })
+        self.run_scoped(
+            "JoinRoom",
+            &[SCOPE_WRITE, SCOPE_MODERATE],
+            req,
+            |s, r, c| async move {
+                let room_id = uuid("room_id", &r.room_id)?;
+                let participant = uuid("participant_id", &r.participant_id)?;
+                if r.ttl_secs
+                    .is_some_and(|t| t > super::token::JOIN_TTL_MAX_SECS)
+                {
+                    return Err(RoomError::Invalid(format!(
+                        "ttl_secs of a join token must be {}..={} (unset = {})",
+                        super::token::MIN_TTL_SECS,
+                        super::token::JOIN_TTL_MAX_SECS,
+                        super::token::DEFAULT_TTL_SECS
+                    )));
+                }
+                let t = s
+                    .issue_token(
+                        &r.community_id,
+                        room_id,
+                        IssueRequest {
+                            participant,
+                            publish: r.publish,
+                            subscribe: r.subscribe,
+                            source: None,
+                            ttl_secs: r.ttl_secs,
+                            // Staff only ever comes from VERIFIED authority: the moderate-scoped
+                            // service JWT. No request field can claim it.
+                            staff: c.scope == SCOPE_MODERATE,
+                        },
+                    )
+                    .await?;
+                let base = s.public_base_url().trim_end_matches('/').to_string();
+                Ok(JoinRoomResponse {
+                    token: t.token,
+                    token_id: t.token_id.to_string(),
+                    participant_id: participant.to_string(),
+                    expires_at: t.expires_at,
+                    whip_url: format!("{base}/rtc/rooms/{room_id}/whip"),
+                    whep_url: format!("{base}/rtc/rooms/{room_id}/whep"),
+                    api_version: API_VERSION.to_string(),
+                })
+            },
+        )
         .await
     }
 
@@ -357,7 +467,13 @@ impl RoomsService for RoomsGrpc {
             let participant = uuid("participant_id", &r.participant_id)?;
             let actor = uuid("actor_id", &r.actor_id)?;
             let n = s
-                .leave(&r.community_id, room_id, participant, actor, role(r.actor_role))
+                .leave(
+                    &r.community_id,
+                    room_id,
+                    participant,
+                    actor,
+                    role(r.actor_role),
+                )
                 .await?;
             Ok(LeaveRoomResponse {
                 room_id: room_id.to_string(),
@@ -377,7 +493,13 @@ impl RoomsService for RoomsGrpc {
             let participant = uuid("participant_id", &r.participant_id)?;
             let actor = uuid("actor_id", &r.actor_id)?;
             let n = s
-                .kick(&r.community_id, room_id, participant, actor, role(r.actor_role))
+                .kick(
+                    &r.community_id,
+                    room_id,
+                    participant,
+                    actor,
+                    role(r.actor_role),
+                )
                 .await?;
             Ok(KickParticipantResponse {
                 room_id: room_id.to_string(),
@@ -396,8 +518,14 @@ impl RoomsService for RoomsGrpc {
             let room_id = uuid("room_id", &r.room_id)?;
             let participant = uuid("participant_id", &r.participant_id)?;
             uuid("actor_id", &r.actor_id)?;
-            s.set_muted(&r.community_id, room_id, participant, true, role(r.actor_role))
-                .await?;
+            s.set_muted(
+                &r.community_id,
+                room_id,
+                participant,
+                true,
+                role(r.actor_role),
+            )
+            .await?;
             Ok(MuteParticipantResponse {
                 room_id: room_id.to_string(),
                 participant_id: participant.to_string(),
@@ -411,18 +539,29 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<UnmuteParticipantRequest>,
     ) -> Result<Response<UnmuteParticipantResponse>, Status> {
-        self.run("UnmuteParticipant", SCOPE_MODERATE, req, |s, r| async move {
-            let room_id = uuid("room_id", &r.room_id)?;
-            let participant = uuid("participant_id", &r.participant_id)?;
-            uuid("actor_id", &r.actor_id)?;
-            s.set_muted(&r.community_id, room_id, participant, false, role(r.actor_role))
+        self.run(
+            "UnmuteParticipant",
+            SCOPE_MODERATE,
+            req,
+            |s, r| async move {
+                let room_id = uuid("room_id", &r.room_id)?;
+                let participant = uuid("participant_id", &r.participant_id)?;
+                uuid("actor_id", &r.actor_id)?;
+                s.set_muted(
+                    &r.community_id,
+                    room_id,
+                    participant,
+                    false,
+                    role(r.actor_role),
+                )
                 .await?;
-            Ok(UnmuteParticipantResponse {
-                room_id: room_id.to_string(),
-                participant_id: participant.to_string(),
-                muted: false,
-            })
-        })
+                Ok(UnmuteParticipantResponse {
+                    room_id: room_id.to_string(),
+                    participant_id: participant.to_string(),
+                    muted: false,
+                })
+            },
+        )
         .await
     }
 
@@ -482,9 +621,33 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<ListHandsRequest>,
     ) -> Result<Response<ListHandsResponse>, Status> {
-        self.run("ListHands", SCOPE_READ, req, |_s, _r| async move {
-            Err::<ListHandsResponse, _>(hands_unimplemented("ListHands"))
-        })
+        self.run_scoped(
+            "ListHands",
+            &[SCOPE_READ, SCOPE_MODERATE],
+            req,
+            |s, r, c| async move {
+                let id = uuid("room_id", &r.room_id)?;
+                let actor = uuid("actor_id", &r.actor_id)?;
+                // The whole queue is reachable only with the moderate scope (and a staff actor);
+                // the read scope sees the actor's own entry, queue length and position.
+                let view = if c.scope == SCOPE_MODERATE {
+                    HandView::All
+                } else {
+                    HandView::Own
+                };
+                let HandList {
+                    hands,
+                    count,
+                    position,
+                } = s.list_hands(&r.community_id, id, actor, view).await?;
+                Ok(ListHandsResponse {
+                    room_id: id.to_string(),
+                    hands: hands.into_iter().map(hand_pb).collect(),
+                    count: count as u32,
+                    position: position.map(|p| p as u32),
+                })
+            },
+        )
         .await
     }
 
@@ -492,8 +655,16 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<RaiseHandRequest>,
     ) -> Result<Response<RaiseHandResponse>, Status> {
-        self.run("RaiseHand", SCOPE_WRITE, req, |_s, _r| async move {
-            Err::<RaiseHandResponse, _>(hands_unimplemented("RaiseHand"))
+        self.run("RaiseHand", SCOPE_WRITE, req, |s, r| async move {
+            let room_id = uuid("room_id", &r.room_id)?;
+            let participant = uuid("participant_id", &r.participant_id)?;
+            let actor = uuid("actor_id", &r.actor_id)?;
+            let hand = s
+                .raise_hand(&r.community_id, room_id, participant, actor)
+                .await?;
+            Ok(RaiseHandResponse {
+                hand: Some(hand_pb(hand)),
+            })
         })
         .await
     }
@@ -502,9 +673,31 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<LowerHandRequest>,
     ) -> Result<Response<LowerHandResponse>, Status> {
-        self.run("LowerHand", SCOPE_WRITE, req, |_s, _r| async move {
-            Err::<LowerHandResponse, _>(hands_unimplemented("LowerHand"))
-        })
+        self.run_scoped(
+            "LowerHand",
+            &[SCOPE_WRITE, SCOPE_MODERATE],
+            req,
+            |s, r, c| async move {
+                let room_id = uuid("room_id", &r.room_id)?;
+                let participant = uuid("participant_id", &r.participant_id)?;
+                let actor = uuid("actor_id", &r.actor_id)?;
+                // Lowering someone else's hand needs the VERIFIED moderate scope on top of the
+                // staff ACL the service checks; `actor_role` is never read.
+                if actor != participant && c.scope != SCOPE_MODERATE {
+                    return Err(RoomError::Forbidden(
+                        "lowering another participant's hand needs the moderate scope",
+                    ));
+                }
+                let lowered = s
+                    .lower_hand(&r.community_id, room_id, participant, actor)
+                    .await?;
+                Ok(LowerHandResponse {
+                    room_id: room_id.to_string(),
+                    participant_id: participant.to_string(),
+                    lowered,
+                })
+            },
+        )
         .await
     }
 
@@ -512,24 +705,61 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<AcknowledgeHandRequest>,
     ) -> Result<Response<AcknowledgeHandResponse>, Status> {
-        self.run("AcknowledgeHand", SCOPE_MODERATE, req, |_s, _r| async move {
-            Err::<AcknowledgeHandResponse, _>(hands_unimplemented("AcknowledgeHand"))
+        self.run("AcknowledgeHand", SCOPE_MODERATE, req, |s, r| async move {
+            let room_id = uuid("room_id", &r.room_id)?;
+            let participant = uuid("participant_id", &r.participant_id)?;
+            let actor = uuid("actor_id", &r.actor_id)?;
+            let hand = s
+                .acknowledge_hand(&r.community_id, room_id, participant, actor)
+                .await?;
+            Ok(AcknowledgeHandResponse {
+                hand: Some(hand_pb(hand)),
+            })
+        })
+        .await
+    }
+
+    async fn reset_hands(
+        &self,
+        req: Request<ResetHandsRequest>,
+    ) -> Result<Response<ResetHandsResponse>, Status> {
+        self.run("ResetHands", SCOPE_MODERATE, req, |s, r| async move {
+            let room_id = uuid("room_id", &r.room_id)?;
+            let actor = uuid("actor_id", &r.actor_id)?;
+            let cleared = s.reset_hands(&r.community_id, room_id, actor).await?;
+            Ok(ResetHandsResponse {
+                room_id: room_id.to_string(),
+                cleared: cleared as u32,
+            })
         })
         .await
     }
 }
 
-/// Loud refusal for the raised-hand RPCs: the contract exists (proto T1) but the server-side
-/// queue is not built yet (plan T2); callers must never see a silent empty list or no-op.
-fn hands_unimplemented(rpc: &str) -> RoomError {
-    RoomError::Unsupported(format!(
-        "{rpc}: raised-hand queue is not implemented in svc-streaming yet"
-    ))
-}
-
-/// The axum router carrying the tonic service (a single `RoomsService` route set).
-pub fn router(rooms: Arc<RoomService>, auth: Arc<ServiceJwtVerifier>) -> axum::Router {
+/// The axum router carrying the tonic services: `RoomsService` plus `grpc.health.v1`.
+///
+/// Health reports SERVING (for the overall server `""` and for [`HEALTH_SERVICE_NAME`]) only
+/// when [`RoomService::readiness`] is `Ok`, else NOT_SERVING with the reason logged; checks
+/// need the same `streaming.rooms:read` service JWT as the data RPCs.
+pub async fn router(rooms: Arc<RoomService>, auth: Arc<ServiceJwtVerifier>) -> axum::Router {
+    let (reporter, health) = tonic_health::server::health_reporter();
+    let status = match rooms.readiness() {
+        Ok(()) => ServingStatus::Serving,
+        Err(reason) => {
+            tracing::warn!(reason, "rooms gRPC health: NOT_SERVING");
+            ServingStatus::NotServing
+        }
+    };
+    reporter.set_service_status("", status).await;
+    reporter
+        .set_service_status(HEALTH_SERVICE_NAME, status)
+        .await;
+    let health_auth = Arc::clone(&auth);
+    let health = InterceptedService::new(health, move |req: Request<()>| {
+        bearer_claims(&health_auth, req.metadata(), &[SCOPE_READ]).map(|_| req)
+    });
     tonic::service::Routes::new(RoomsServiceServer::new(RoomsGrpc::new(rooms, auth)))
+        .add_service(health)
         .into_axum_router()
 }
 
@@ -548,7 +778,13 @@ pub async fn serve(
     rooms: Arc<RoomService>,
     auth: Arc<ServiceJwtVerifier>,
 ) -> Result<(), HostApiError> {
-    serve_router(listener, server_config, router(rooms, auth), "rooms grpc").await
+    serve_router(
+        listener,
+        server_config,
+        router(rooms, auth).await,
+        "rooms grpc",
+    )
+    .await
 }
 
 /// mTLS file locations for the gRPC listener: `ROOMS_GRPC_SERVER_CERT_FILE`,
@@ -583,7 +819,10 @@ pub async fn spawn_from_env(
     bind: std::net::IpAddr,
     rooms: Arc<RoomService>,
 ) -> Result<(), HostApiError> {
-    let Some(port) = std::env::var("ROOMS_GRPC_PORT").ok().filter(|v| !v.is_empty()) else {
+    let Some(port) = std::env::var("ROOMS_GRPC_PORT")
+        .ok()
+        .filter(|v| !v.is_empty())
+    else {
         tracing::warn!("rooms gRPC disabled: ROOMS_GRPC_PORT is not set");
         return Ok(());
     };

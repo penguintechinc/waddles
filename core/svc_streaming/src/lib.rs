@@ -193,6 +193,13 @@ where
     tokio::spawn(srt_listener.run(ingest_tx));
 
     // --- WebRTC rooms host-API (mTLS; off + logged when HOST_API_* unset).
+    // The same 5 s reaper also expires rooms left empty past their `empty_timeout_secs`.
+    let idle = state.rooms.idle_policy();
+    tracing::info!(
+        default_empty_timeout_secs = idle.default_secs,
+        max_empty_timeout_secs = idle.max_secs,
+        "rooms: idle-room expiry policy"
+    );
     state.rooms.spawn_sweeper(Duration::from_secs(5));
     state.whep_state.spawn_sweeper(Duration::from_secs(5));
     rooms::host_api::spawn_from_env(config.cli.bind_addr, state.rooms.clone())

@@ -12,10 +12,16 @@
 # scheduler-side gates (hostPath, GPU limit, runtimeClass) are what can keep a pod from starting.
 #
 # Unlike the old placeholder (control-only, no media ports declared), this pod now listens
-# directly on RTMP (1935/tcp), SRT (9000/udp), and a WebRTC UDP media range
-# (40000-40100/udp) in addition to the HTTP control/health port, gRPC (reserved, still
-# REST-primary), and a Prometheus metrics port. Gated solely on
+# directly on RTMP (1935/tcp), SRT (9000/udp), ONE multiplexed WebRTC UDP media port (plus an
+# optional ICE-TCP fallback port), the HTTP control/health/WHIP/WHEP port, the RoomsService gRPC
+# port (50208, mTLS + per-call ES256 service JWT), and a Prometheus metrics port. Gated solely on
 # `pipeline.svcStreaming.enabled`, same single-condition gate as before.
+#
+# RTC exposure (docs/RTC_MEDIA_EXPOSURE.md): the SFU's media port is published ONLY by the
+# dedicated `<release>-svc-streaming-rtc-media` Service below (alpha/local: NodePort, owner-approved
+# exemption; beta/gamma/production: LoadBalancer scoped to that one port). No hostPort, no
+# hostNetwork, no externalIPs, no port range. Ingress is carved out of the generic per-workload
+# CNP into two dedicated CNPs: gRPC <- hub-api pods only; media <- the configured entities only.
 #
 # db-migrate initContainer included (same helper every other pipeline-stage/standalone
 # service in this chart uses) — svc-streaming reads its own DB tables via SeaORM;
@@ -25,6 +31,8 @@
 # (runAsUser 1000) — the Rust image's Dockerfile creates a dedicated non-root `appuser` at
 # uid 10001, so this container pins that uid explicitly instead.
 {{- if .Values.pipeline.svcStreaming.enabled }}
+{{- /* RTC media exposure: validated settings (fails the render on any bad port/type combination). */}}
+{{- $rtc := include "waddlebot.svcStreaming.rtcMedia" . | fromJson }}
 {{- /* Image variant (streaming.gpuVariant) selects the image tag suffix and per-variant pod wiring. */}}
 {{- $variant := .Values.streaming.gpuVariant | default "cpu" | toString }}
 {{- if not (has $variant (list "cpu" "amd" "nvidia")) }}
@@ -97,7 +105,7 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-streaming
-        image: "{{ .Values.streaming.image.repository }}:{{ printf "%s-%s" (.Values.streaming.image.tag | default .Values.global.imageTag | toString) $variant }}"
+        image: "{{ .Values.streaming.image.repository }}:{{ printf "%s-%s" (include "waddlebot.resolveImageTag" (dict "root" . "image" "svc-streaming" "explicit" .Values.streaming.image.tag)) $variant }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         {{- include "waddlebot.preStop" $ | nindent 8 }}
         # Pinned to the Rust image's own `appuser` (uid 10001), not the chart-wide
@@ -126,24 +134,24 @@ spec:
         - name: srt
           containerPort: {{ .Values.pipeline.svcStreaming.srtPort }}
           protocol: UDP
-        # WebRTC media range is 101 ports (40000-40100/udp) -- too many to enumerate as
-        # individual containerPort entries and no range-loop precedent exists elsewhere in
-        # this chart's port declarations, so only the range's two boundary ports are
-        # declared here for documentation/introspection. WEBRTC_UDP_RANGE (env, below) is
-        # what the app actually binds against; no Service/NodePort exposes this range in any
-        # environment today (alpha's direct media exposure is RTMP/SRT/HTTP only).
-        - name: webrtc-lo
-          containerPort: {{ .Values.pipeline.svcStreaming.webrtcRangeStart }}
+        # RTC SFU media: ONE multiplexed UDP port (the WebRTC UDP mux) + an optional ICE-TCP
+        # fallback port. Declared exactly -- no range, no extra containerPort. Published (never via
+        # hostPort) by the dedicated -svc-streaming-rtc-media Service below.
+        - name: webrtc-media
+          containerPort: {{ $rtc.udpPort | int }}
           protocol: UDP
-        - name: webrtc-hi
-          containerPort: {{ .Values.pipeline.svcStreaming.webrtcRangeEnd }}
-          protocol: UDP
+        {{- if $rtc.iceTcpEnabled }}
+        - name: webrtc-ice-tcp
+          containerPort: {{ $rtc.iceTcpPort | int }}
+          protocol: TCP
+        {{- end }}
         envFrom:
         - configMapRef:
             name: {{ include "waddlebot.fullname" . }}-config
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
         env:
+        {{- include "waddlebot.otel.env" (dict "root" $ "service" "svc-streaming") | nindent 8 }}
         # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_streaming;
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
@@ -192,8 +200,25 @@ spec:
           value: {{ .Values.pipeline.svcStreaming.rtmpPort | quote }}
         - name: SRT_PORT
           value: {{ .Values.pipeline.svcStreaming.srtPort | quote }}
+        # Single mux port expressed as a one-port range (core/svc_streaming config.rs
+        # parse_udp_range accepts start==end).
         - name: WEBRTC_UDP_RANGE
-          value: {{ printf "%v-%v" .Values.pipeline.svcStreaming.webrtcRangeStart .Values.pipeline.svcStreaming.webrtcRangeEnd | quote }}
+          value: {{ printf "%d-%d" ($rtc.udpPort | int) ($rtc.udpPort | int) | quote }}
+        {{- if $rtc.iceTcpEnabled }}
+        # Optional ICE-TCP fallback listener (one TCP port).
+        - name: WEBRTC_ICE_TCP_PORT
+          value: {{ $rtc.iceTcpPort | int | quote }}
+        {{- end }}
+        {{- $roomToken := .Values.pipeline.svcStreaming.rooms.roomToken }}
+        {{- if $roomToken.existingSecret }}
+        # Room-token signing key from a pre-created Secret (never a values literal). SEAM: the
+        # platform_secrets store supersedes this reference and the key becomes ES256 (docs/RTC_MEDIA_EXPOSURE.md).
+        - name: WEBRTC_ROOM_TOKEN_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ $roomToken.existingSecret | quote }}
+              key: {{ $roomToken.key | quote }}
+        {{- end }}
         - name: STREAM_DATA_DIR
           value: {{ .Values.pipeline.svcStreaming.streamDataDir | quote }}
         - name: FFMPEG_PATH
@@ -237,7 +262,20 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: STREAMING_S3_SECRET_ACCESS_KEY
-        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
+        # EXCEPTION (approved): HTTP probes on the plaintext port 8208, not native `grpc.health.v1`
+        # probes. The RoomsService listener (50208) requires a client certificate (mTLS) and the
+        # kubelet's gRPC probe cannot present one, so a gRPC probe could never succeed. Owner
+        # decision 2026-11-14; peers still health-check over mTLS via tonic-health.
+        # Startup budget is per-service (pipeline.svcStreaming.startupProbe, 300s) for the cold
+        # first boot: DB wait + GPU trial-encode gate + rooms/WASM bundle first compile.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: {{ .Values.pipeline.svcStreaming.startupProbe.periodSeconds }}
+          timeoutSeconds: 5
+          failureThreshold: {{ .Values.pipeline.svcStreaming.startupProbe.failureThreshold }}
+        # EXCEPTION (approved): HTTP liveness -- see the startupProbe note above.
         livenessProbe:
           httpGet:
             path: /health
@@ -246,6 +284,7 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
+        # EXCEPTION (approved): HTTP readiness -- see the startupProbe note above.
         readinessProbe:
           httpGet:
             path: /readyz
@@ -361,6 +400,128 @@ spec:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-streaming
 {{- end }}
+{{- if $rtc.serviceEnabled }}
+---
+# RTC media Service: publishes ONLY the SFU media port (UDP mux) and, when enabled, the ICE-TCP
+# port -- never RTMP/SRT/HTTP/gRPC. alpha/local = NodePort (owner-approved exemption from the
+# no-external-ports rule; fixed nodePort == the bound port, owner forwards the router to it);
+# beta/gamma/production = LoadBalancer (provider/MetalLB UDP LB, `loadBalancerSourceRanges` and
+# annotations hooks). The chart refuses NodePort outside alpha/local and a published port that
+# differs from the bound port (waddlebot.svcStreaming.rtcMedia). Mixed UDP+TCP needs a provider
+# with mixed-protocol LB support when iceTcp is on. No hostPort/hostNetwork/externalIPs.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-streaming-rtc-media
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-streaming
+  {{- with .Values.pipeline.svcStreaming.webrtc.media.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $rtc.serviceType }}
+  externalTrafficPolicy: {{ .Values.pipeline.svcStreaming.webrtc.media.service.externalTrafficPolicy }}
+  {{- if eq $rtc.serviceType "LoadBalancer" }}
+  {{- with .Values.pipeline.svcStreaming.webrtc.media.service.loadBalancerClass }}
+  loadBalancerClass: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.pipeline.svcStreaming.webrtc.media.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  ports:
+  - name: rtc-media
+    port: {{ $rtc.udpPort | int }}
+    targetPort: webrtc-media
+    protocol: UDP
+    {{- if eq $rtc.serviceType "NodePort" }}
+    nodePort: {{ $rtc.nodePortUdp | int }}
+    {{- end }}
+  {{- if $rtc.iceTcpEnabled }}
+  - name: rtc-ice-tcp
+    port: {{ $rtc.iceTcpPort | int }}
+    targetPort: webrtc-ice-tcp
+    protocol: TCP
+    {{- if eq $rtc.serviceType "NodePort" }}
+    nodePort: {{ $rtc.nodePortTcp | int }}
+    {{- end }}
+  {{- end }}
+  selector:
+    {{- include "waddlebot.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-streaming
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+---
+# RoomsService gRPC (50208): ingress from hub-api pods ONLY (not the whole namespace, not the
+# ingress controller / Gateway). Cilium unions allow rules, so this port is deliberately excluded
+# from the generic per-workload CNP below (excludePorts) -- same pattern as hub-api-grpc. The
+# app-layer boundary (mTLS client cert + ES256 service JWT pinned to hub-api's SPIFFE id) is the
+# second layer. hub-api's egress to this port is already covered by its own-namespace egress rule.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-streaming-grpc
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-streaming
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-streaming
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: {{ .Values.namespace }}
+            app.kubernetes.io/component: hub-api
+      toPorts:
+        - ports:
+            - port: {{ .Values.pipeline.svcStreaming.grpcPort | quote }}
+              protocol: TCP
+---
+# RTC media: external clients (browsers/OBS) open ICE/RTP flows to the SFU's single UDP mux port
+# (and the optional ICE-TCP port) and nothing else. `world` is every non-cluster source; alpha
+# NodePort (externalTrafficPolicy Cluster) adds host + remote-node because the node SNATs the
+# flow. Egress is the generic `world` profile (STUN, if ever used, is already permitted).
+# Excluded from the generic per-workload CNP (excludePorts) so these ports are admitted ONLY here.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-streaming-media
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-streaming
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-streaming
+  ingress:
+    - fromEntities:
+        {{- toYaml .Values.pipeline.svcStreaming.webrtc.media.networkPolicy.fromEntities | nindent 8 }}
+      toPorts:
+        - ports:
+            - port: {{ $rtc.udpPort | int | quote }}
+              protocol: UDP
+            {{- if $rtc.iceTcpEnabled }}
+            - port: {{ $rtc.iceTcpPort | int | quote }}
+              protocol: TCP
+            {{- end }}
+{{- end }}
 # R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
-{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-streaming" "ports" (list $.Values.pipeline.svcStreaming.port $.Values.pipeline.svcStreaming.metricsPort $.Values.pipeline.svcStreaming.grpcPort $.Values.pipeline.svcStreaming.rtmpPort (printf "%v/UDP" $.Values.pipeline.svcStreaming.srtPort) (printf "%v-%v/UDP" $.Values.pipeline.svcStreaming.webrtcRangeStart $.Values.pipeline.svcStreaming.webrtcRangeEnd)) "runtime" "rust" "binaries" (list "/app/svc-streaming" "/usr/bin/ffmpeg" "/usr/bin/ffprobe") "egress" "world") }}
+# gRPC + media ports are carved out (excludePorts) and admitted only by the dedicated CNPs above.
+{{- $mediaSpec := printf "%d/UDP" ($rtc.udpPort | int) }}
+{{- $iceSpec := printf "%d" ($rtc.iceTcpPort | int) }}
+{{- $polPorts := list $.Values.pipeline.svcStreaming.port $.Values.pipeline.svcStreaming.metricsPort $.Values.pipeline.svcStreaming.grpcPort $.Values.pipeline.svcStreaming.rtmpPort (printf "%v/UDP" $.Values.pipeline.svcStreaming.srtPort) $mediaSpec }}
+{{- $exclude := list $.Values.pipeline.svcStreaming.grpcPort $mediaSpec }}
+{{- if $rtc.iceTcpEnabled }}
+{{- $polPorts = append $polPorts $iceSpec }}
+{{- $exclude = append $exclude $iceSpec }}
+{{- end }}
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-streaming" "ports" $polPorts "excludePorts" $exclude "runtime" "rust" "binaries" (list "/app/svc-streaming" "/usr/bin/ffmpeg" "/usr/bin/ffprobe") "egress" "world") }}
 {{- end }}

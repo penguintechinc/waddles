@@ -12,6 +12,7 @@ on:
       - 'core/bundle_capability_gate/**'
       - 'core/bundle_tool_call/**'
       - 'core/circuit_breaker/**'
+      - 'core/command_latency/**'
       - 'core/bundle_host_reputation/**'
       - 'core/bundle_host_economy/**'
       - 'core/bundle_host_media/**'
@@ -69,6 +70,7 @@ jobs:
             core/bundle_capability_gate/**
             core/bundle_tool_call/**
             core/circuit_breaker/**
+            core/command_latency/**
             core/bundle_host_reputation/**
             core/bundle_host_economy/**
             core/bundle_host_media/**

@@ -33,8 +33,13 @@ def test_upgrade_adds_each_column_idempotently(monkeypatch: Any) -> None:
     rec = _Recorder()
     monkeypatch.setattr(_mig, "op", rec)
     _mig.upgrade()
-    assert len(rec.sql) == len(_COLS)  # zero statements would prove nothing
-    for col, sql in zip(_COLS, rec.sql, strict=True):
+    # table (IF NOT EXISTS, legacy 004 DDL) + its index + one ALTER per toggle column;
+    # zero statements would prove nothing
+    assert len(rec.sql) == 2 + len(_COLS)
+    create, index, *alters = rec.sql
+    assert "CREATE TABLE IF NOT EXISTS community_leaderboard_config" in create
+    assert "CREATE INDEX IF NOT EXISTS idx_community_leaderboard_config_community" in index
+    for col, sql in zip(_COLS, alters, strict=True):
         assert "ADD COLUMN IF NOT EXISTS " + col in sql
         assert "DEFAULT TRUE" in sql
         assert "community_leaderboard_config" in sql

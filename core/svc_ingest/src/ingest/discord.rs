@@ -79,6 +79,10 @@ fn build_http_client(
 /// Fresh-hit window for a cached permission set: within it no Discord call
 /// is made. A role grant/revoke takes effect within at most this long.
 pub const PERMISSIONS_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Age at which a fresh cached value is refreshed ahead of its TTL (80%).
+pub const PERMISSIONS_REFRESH_AHEAD_AFTER: Duration = Duration::from_secs(48);
+/// Max concurrent background permission refreshes.
+pub const PERMISSIONS_MAX_REFRESH_CONCURRENCY: usize = 8;
 /// Hard cap on how old a cached value may be and still be served stale when
 /// Discord is failing. Past it the resolver fails closed -- bounds how long
 /// a demoted mod could keep privilege during an outage.
@@ -98,7 +102,10 @@ const BREAKER_KEY: &str = "discord-rest";
 
 /// Counters for the resolver's cache/breaker (PII-free: outcome labels only,
 /// never a guild/user id). `outcome` is one of `hit`, `miss`, `stale_served` (non-privileged stale), `stale_elevated_denied`,
-/// `fail_closed`, `breaker_short_circuit`, `breaker_opened`, `breaker_closed`.
+/// `fail_closed`, `breaker_short_circuit`, `breaker_opened`, `breaker_closed`,
+/// plus the refresh-ahead / single-flight outcomes `refresh_ahead_started`,
+/// `refresh_ahead_ok`, `refresh_ahead_failed`, `refresh_ahead_skipped`,
+/// `refresh_ahead_hit` and `singleflight_joined`.
 /// No-op default so tests and unwired callers need no impl.
 pub trait PermissionsMetrics: Send + Sync {
     /// Records one resolver outcome.
@@ -128,6 +135,12 @@ pub struct PermissionsCacheConfig {
     pub stale_max: Duration,
     /// Max entries.
     pub max_entries: usize,
+    /// Age at which a still-fresh entry is refreshed in the background
+    /// (refresh-ahead) so a hot author never waits on Discord REST when the
+    /// TTL lapses. A value `>= ttl` disables refresh-ahead.
+    pub refresh_ahead_after: Duration,
+    /// Max background refreshes in flight at once (bounds REST pressure).
+    pub max_refresh_concurrency: usize,
 }
 
 impl Default for PermissionsCacheConfig {
@@ -136,6 +149,8 @@ impl Default for PermissionsCacheConfig {
             ttl: PERMISSIONS_CACHE_TTL,
             stale_max: PERMISSIONS_STALE_MAX,
             max_entries: PERMISSIONS_CACHE_MAX_ENTRIES,
+            refresh_ahead_after: PERMISSIONS_REFRESH_AHEAD_AFTER,
+            max_refresh_concurrency: PERMISSIONS_MAX_REFRESH_CONCURRENCY,
         }
     }
 }
@@ -143,7 +158,17 @@ impl Default for PermissionsCacheConfig {
 struct CacheEntry {
     perms: DiscordPermissions,
     fetched_at: Instant,
+    /// Set when a refresh-ahead wrote this entry; the first fresh hit on it
+    /// counts one `refresh_ahead_hit` and clears the flag.
+    refreshed_ahead: bool,
 }
+
+/// `(guild_id, author_id)` cache / single-flight key.
+type PermKey = (String, String);
+
+/// One in-flight lookup that concurrent callers for the same key share
+/// (single-flight): exactly one performs the Discord REST calls.
+type FlightCell = Arc<tokio::sync::OnceCell<DiscordPermissions>>;
 
 /// Whether a failed lookup says "Discord is unhealthy" (timeout, connect
 /// error, 5xx, 429) as opposed to a definitive answer about this member
@@ -173,10 +198,20 @@ fn is_transient(err: &anyhow::Error) -> bool {
 /// NO usable cached value does it fail closed to non-privileged. No request
 /// is made at all for a DM (no `guild_id`) -- see [`run_loop`]'s call site.
 pub struct RestPermissionsResolver {
+    core: Arc<ResolverCore>,
+}
+
+/// The resolver's shared state, behind an `Arc` so a refresh-ahead task can
+/// own a handle that outlives the `resolve` call that spawned it.
+struct ResolverCore {
     client: reqwest::Client,
     bot_token: String,
     api_base: String,
-    cache: Mutex<HashMap<(String, String), CacheEntry>>,
+    cache: Mutex<HashMap<PermKey, CacheEntry>>,
+    /// Single-flight table: one entry per key with a lookup in progress.
+    inflight: Mutex<HashMap<PermKey, FlightCell>>,
+    /// Bounds concurrent refresh-ahead tasks.
+    refresh_slots: Arc<tokio::sync::Semaphore>,
     cache_cfg: PermissionsCacheConfig,
     breaker: circuit_breaker::CircuitBreaker,
     metrics: Arc<dyn PermissionsMetrics>,
@@ -215,32 +250,62 @@ impl RestPermissionsResolver {
         metrics: Arc<dyn PermissionsMetrics>,
     ) -> Self {
         Self {
-            client,
-            bot_token,
-            api_base,
-            cache: Mutex::new(HashMap::new()),
-            cache_cfg,
-            breaker: circuit_breaker::CircuitBreaker::with_config(
-                Arc::new(BreakerMetricsAdapter(metrics.clone())),
-                breaker.0,
-                breaker.1,
-                breaker.2,
-            ),
-            metrics,
+            core: Arc::new(ResolverCore {
+                client,
+                bot_token,
+                api_base,
+                cache: Mutex::new(HashMap::new()),
+                inflight: Mutex::new(HashMap::new()),
+                refresh_slots: Arc::new(tokio::sync::Semaphore::new(
+                    cache_cfg.max_refresh_concurrency,
+                )),
+                cache_cfg,
+                breaker: circuit_breaker::CircuitBreaker::with_config(
+                    Arc::new(BreakerMetricsAdapter(metrics.clone())),
+                    breaker.0,
+                    breaker.1,
+                    breaker.2,
+                ),
+                metrics,
+            }),
         }
     }
 
+    /// Number of cached entries (test/diagnostic visibility).
+    #[must_use]
+    pub fn cache_len(&self) -> usize {
+        self.core.cache_len()
+    }
+
+    #[cfg(test)]
+    async fn fetch(&self, guild_id: &str, author_id: &str) -> anyhow::Result<DiscordPermissions> {
+        self.core.fetch(guild_id, author_id).await
+    }
+}
+
+impl ResolverCore {
     /// Returns the cached value and its age, if any. A poisoned cache lock
     /// is treated as a miss -- the cache must never break the request path.
     fn cache_get(&self, guild_id: &str, author_id: &str) -> Option<(DiscordPermissions, Duration)> {
-        let cache = self.cache.lock().ok()?;
-        let e = cache.get(&(guild_id.to_string(), author_id.to_string()))?;
-        Some((e.perms, e.fetched_at.elapsed()))
+        let mut cache = self.cache.lock().ok()?;
+        let e = cache.get_mut(&(guild_id.to_string(), author_id.to_string()))?;
+        let age = e.fetched_at.elapsed();
+        if e.refreshed_ahead && age < self.cache_cfg.ttl {
+            e.refreshed_ahead = false;
+            self.metrics.permissions_outcome("refresh_ahead_hit");
+        }
+        Some((e.perms, age))
     }
 
     /// Inserts a value, keeping the map within `max_entries`: first drops
     /// entries past the stale cap, then the single oldest if still full.
-    fn cache_put(&self, guild_id: &str, author_id: &str, perms: DiscordPermissions) {
+    fn cache_put(
+        &self,
+        guild_id: &str,
+        author_id: &str,
+        perms: DiscordPermissions,
+        refreshed_ahead: bool,
+    ) {
         let Ok(mut cache) = self.cache.lock() else {
             return;
         };
@@ -263,6 +328,7 @@ impl RestPermissionsResolver {
             CacheEntry {
                 perms,
                 fetched_at: Instant::now(),
+                refreshed_ahead,
             },
         );
     }
@@ -389,22 +455,124 @@ impl RestPermissionsResolver {
 
 impl PermissionsResolver for RestPermissionsResolver {
     async fn resolve(&self, guild_id: &str, author_id: &str) -> DiscordPermissions {
-        let cached = self.cache_get(guild_id, author_id);
+        let core = &self.core;
+        let cached = core.cache_get(guild_id, author_id);
         if let Some((perms, age)) = cached {
-            if age < self.cache_cfg.ttl {
-                self.metrics.permissions_outcome("hit");
+            if age < core.cache_cfg.ttl {
+                core.metrics.permissions_outcome("hit");
+                if age >= core.cache_cfg.refresh_ahead_after {
+                    core.spawn_refresh_ahead(guild_id, author_id);
+                }
                 return perms;
             }
         }
+        core.resolve_blocking(guild_id, author_id, cached).await
+    }
+}
+
+impl ResolverCore {
+    /// Cold / expired path: single-flight per key. The first caller for a key
+    /// runs the Discord lookup; concurrent callers for the same key await its
+    /// result instead of each issuing their own REST calls.
+    async fn resolve_blocking(
+        &self,
+        guild_id: &str,
+        author_id: &str,
+        cached: Option<(DiscordPermissions, Duration)>,
+    ) -> DiscordPermissions {
+        let key = (guild_id.to_string(), author_id.to_string());
+        let (cell, leader) = self.flight_cell(&key);
+        if !leader {
+            self.metrics.permissions_outcome("singleflight_joined");
+        }
+        let perms = *cell
+            .get_or_init(|| self.lookup(guild_id, author_id, cached, false))
+            .await;
+        self.flight_done(&key, &cell);
+        perms
+    }
+
+    /// Returns the shared in-flight cell for `key` and whether the caller
+    /// created it (the leader).
+    fn flight_cell(&self, key: &PermKey) -> (FlightCell, bool) {
+        let Ok(mut map) = self.inflight.lock() else {
+            // A poisoned table must not break the request path: run unshared.
+            return (Arc::new(tokio::sync::OnceCell::new()), true);
+        };
+        if let Some(cell) = map.get(key) {
+            return (cell.clone(), false);
+        }
+        let cell: FlightCell = Arc::new(tokio::sync::OnceCell::new());
+        map.insert(key.clone(), cell.clone());
+        (cell, true)
+    }
+
+    /// Clears a finished lookup so the next miss starts a fresh one. Every
+    /// caller that observed the result calls it (idempotent, and only removes
+    /// `cell` itself), so a cancelled leader can never strand a stale cell.
+    fn flight_done(&self, key: &PermKey, cell: &FlightCell) {
+        if let Ok(mut map) = self.inflight.lock() {
+            if map.get(key).is_some_and(|c| Arc::ptr_eq(c, cell)) {
+                map.remove(key);
+            }
+        }
+    }
+
+    /// Starts one bounded background refresh for a still-fresh entry unless
+    /// a lookup for the key is already running or every slot is busy. Never
+    /// blocks the caller; the caller was already answered from cache.
+    fn spawn_refresh_ahead(self: &Arc<Self>, guild_id: &str, author_id: &str) {
+        let key = (guild_id.to_string(), author_id.to_string());
+        let Ok(permit) = self.refresh_slots.clone().try_acquire_owned() else {
+            self.metrics.permissions_outcome("refresh_ahead_skipped");
+            return;
+        };
+        let (cell, leader) = self.flight_cell(&key);
+        if !leader {
+            self.metrics.permissions_outcome("refresh_ahead_skipped");
+            return;
+        }
+        self.metrics.permissions_outcome("refresh_ahead_started");
+        let core = self.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let cached = core.cache_get_quiet(&key.0, &key.1);
+            let perms = *cell
+                .get_or_init(|| core.lookup(&key.0, &key.1, cached, true))
+                .await;
+            core.flight_done(&key, &cell);
+            tracing::debug!(
+                platform = "discord",
+                guild_id = %key.0,
+                elevated = perms.is_mod || perms.is_broadcaster,
+                "discord permissions refreshed ahead of ttl"
+            );
+        });
+    }
+
+    /// The miss path shared by blocking and refresh-ahead lookups: breaker
+    /// gate, REST fetch, cache write, and the degraded/fail-closed answers.
+    async fn lookup(
+        &self,
+        guild_id: &str,
+        author_id: &str,
+        cached: Option<(DiscordPermissions, Duration)>,
+        refresh_ahead: bool,
+    ) -> DiscordPermissions {
         if !self.breaker.allow(BREAKER_KEY) {
             self.metrics.permissions_outcome("breaker_short_circuit");
             return self.stale_or_closed(guild_id, cached, "breaker_open");
         }
-        self.metrics.permissions_outcome("miss");
+        if !refresh_ahead {
+            self.metrics.permissions_outcome("miss");
+        }
         match self.fetch(guild_id, author_id).await {
             Ok(perms) => {
                 self.breaker.record_success(BREAKER_KEY);
-                self.cache_put(guild_id, author_id, perms);
+                self.cache_put(guild_id, author_id, perms, refresh_ahead);
+                if refresh_ahead {
+                    self.metrics.permissions_outcome("refresh_ahead_ok");
+                }
                 perms
             }
             Err(err) => {
@@ -417,11 +585,20 @@ impl PermissionsResolver for RestPermissionsResolver {
                     platform = "discord",
                     guild_id,
                     timed_out,
+                    refresh_ahead,
                     error = %err,
                     "failed to resolve discord permissions"
                 );
+                if refresh_ahead {
+                    self.metrics.permissions_outcome("refresh_ahead_failed");
+                }
                 if is_transient(&err) {
                     self.breaker.record_failure(BREAKER_KEY);
+                    if refresh_ahead {
+                        // The caller was already served the (still fresh)
+                        // cached value; leave it to expire normally.
+                        return cached.map_or_else(DiscordPermissions::default, |(p, _)| p);
+                    }
                     self.stale_or_closed(guild_id, cached, "upstream_failure")
                 } else {
                     // Definitive per-member answer (e.g. 404: left the
@@ -432,6 +609,17 @@ impl PermissionsResolver for RestPermissionsResolver {
                 }
             }
         }
+    }
+
+    /// Cache read that neither counts a refresh-ahead hit nor clears its flag.
+    fn cache_get_quiet(
+        &self,
+        guild_id: &str,
+        author_id: &str,
+    ) -> Option<(DiscordPermissions, Duration)> {
+        let cache = self.cache.lock().ok()?;
+        let e = cache.get(&(guild_id.to_string(), author_id.to_string()))?;
+        Some((e.perms, e.fetched_at.elapsed()))
     }
 }
 
@@ -627,6 +815,9 @@ async fn run_loop<C, A, M, P, Dk>(
                 }
                 recv = channel.next_chat_message() => match recv {
                     Ok(Some(msg)) => {
+                        // Command-latency first door: the gateway frame has just been received and
+                        // decoded. Taken before the permissions lookup so that leg is measured too.
+                        let first_door_ms = command_latency::stamp::now_ms();
                         if !stable {
                             stable = true;
                             backoff.reset();
@@ -664,18 +855,28 @@ async fn run_loop<C, A, M, P, Dk>(
                         {
                             continue;
                         }
-                        if let Err(err) = publish_event(
-                            appender,
-                            metrics,
-                            keyring,
-                            active_kid,
-                            scope,
-                            &sid,
-                            &workstream_id,
-                            None,
-                            event,
-                            dek_provider,
-                            identity_metrics,
+                        let receive_span = tracing::info_span!(
+                            "ingest.receive",
+                            platform = "discord",
+                            pre_publish_ms = command_latency::stamp::now_ms().saturating_sub(first_door_ms),
+                            "otel.kind" = "consumer",
+                        );
+                        if let Err(err) = command_latency::first_door::with_first_door(
+                            first_door_ms,
+                            command_latency::Door::Gateway,
+                            tracing::Instrument::instrument(publish_event(
+                                appender,
+                                metrics,
+                                keyring,
+                                active_kid,
+                                scope,
+                                &sid,
+                                &workstream_id,
+                                None,
+                                event,
+                                dek_provider,
+                                identity_metrics,
+                            ), receive_span),
                         )
                         .await
                         {
@@ -2236,6 +2437,7 @@ mod tests {
                     ttl: Duration::from_millis(ttl_ms),
                     stale_max: Duration::from_secs(3600),
                     max_entries,
+                    ..PermissionsCacheConfig::default()
                 },
                 (
                     threshold,

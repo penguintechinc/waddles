@@ -253,9 +253,23 @@ pipeline:
       rtmpPort: 31935
       srtPort: 30900
       httpPort: 31208
-    resources:
-      requests: { cpu: "200m", memory: "256Mi" }
-      limits: { cpu: "2000m", memory: "1Gi" }
+    # Resources follow the base owner policy (requests 250m/512Mi, limits 4 CPU/4Gi).
+    #
+    # RTC media: NodePort (owner-approved alpha exemption from the no-external-ports rule). The
+    # fixed nodePort MUST equal webrtc.udpPort -- the SFU advertises the port it binds in its ICE
+    # candidates, so the router UDP port-forward is WAN 31400/udp -> <node IP>:31400/udp (owner
+    # action; docs/RTC_MEDIA_EXPOSURE.md). externalTrafficPolicy Cluster so any node answers
+    # (the node SNATs, hence host + remote-node in the CNP entities). Chart refuses NodePort
+    # outside global.deploymentTier alpha|local.
+    webrtc:
+      udpPort: 31400
+      media:
+        service:
+          type: NodePort
+          nodePort: { udp: 31400, tcp: 0 }
+          externalTrafficPolicy: Cluster
+        networkPolicy:
+          fromEntities: ["world", "host", "remote-node"]
 
   # feature/e2e-helm-rust-dataplane -- Rust data-plane stack. Formalizing the alpha e2e
   # cutover state here (svc-action executor wiring) -- this was previously
@@ -400,12 +414,13 @@ pipeline:
     # larger of the two former Deployments (each replica holds a bundle registry per stage and
     # compiles the active set via Cranelift: the OOM finding that sized these still applies).
     bundleExecutor:
-      replicas: 1
+      replicas: 2
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
+      memoryBudgetMb: 1536
       resources:
         requests: { cpu: "500m", memory: "1Gi" }
-        limits: { cpu: "2000m", memory: "2560Mi" }
+        limits: { cpu: "4000m", memory: "2560Mi" }
 
 presentation:
   # Rust svc-presentation (overlay + image surface). Overlay view/SSE port reachable on-host at
@@ -439,18 +454,10 @@ bundleExecutor:
     repository: "localhost:32000/waddlebot/svc-bundles-executor"
     tag: ""
 
-# svc-bundles-executor scales horizontally: every replica dials every stage + the connector
-# link and each listener round-robins work across the replicas (see values.yaml
-# pipeline.rustDataPlane.bundleExecutor). HPA on CPU + memory; the PDB (minAvailable 1) renders
-# automatically once the effective replica floor is >1.
+# svc-bundles-executor is a StatefulSet with its own PDB + optional KEDA/HPA-external
+# autoscaling (pipeline.rustDataPlane.bundleExecutor.autoscaling) -- not in this registry.
 autoscaling:
-  services:
-    bundleExecutor:
-      enabled: true
-      minReplicas: 1
-      maxReplicas: 3
-      targetCPUUtilizationPercentage: 70
-      targetMemoryUtilizationPercentage: 80
+  services: {}
 
 ingress:
   enabled: false

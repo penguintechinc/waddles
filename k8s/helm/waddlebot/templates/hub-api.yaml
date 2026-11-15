@@ -49,7 +49,7 @@ spec:
         # API, see critical-rules.md Data Plane) now exists; no longer the shared
         # pipeline.pythonBaseImage skeleton placeholder. Bare module name "hub-api" is the
         # alpha-local repo under global.imageRegistry -- see scripts/deploy-alpha.sh.
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" (.Values.hubApi.imageTag | default .Values.global.imageTag)) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.hubApi.imageTag) }}"
         # Values-driven (.Values.global.imagePullPolicy, default IfNotPresent). Every deploy
         # now carries a unique per-deploy global.imageTag (alpha SHA8, beta beta-<epoch>), so
         # the old hardcoded Always (a workaround for a stale same-tag `alpha` push) is
@@ -109,6 +109,7 @@ spec:
         # kms.enabled -- the platform-managed baseline needs none of it.
         {{- with (include "waddlebot.kms.hubApiEnvFrom" .) }}{{ . | nindent 8 }}{{- end }}
         env:
+        {{- include "waddlebot.otel.env" (dict "root" $ "service" "hub-api") | nindent 8 }}
         {{- if .Values.hubApi.trustForwardedHost }}
         {{- range .Values.httproute.rules }}
         {{- if contains "hub-api" (.service | toString) }}{{ fail "hubApi.trustForwardedHost=true but an HTTPRoute rule targets hub-api directly; only hub-webui may front it" }}{{ end }}
@@ -180,6 +181,12 @@ spec:
           value: /etc/waddlebot/host-api-tls/tls.crt
         - name: STREAMING_RTC_GRPC_CLIENT_KEY_FILE
           value: /etc/waddlebot/host-api-tls/tls.key
+        # TLS server name verified against the svc-streaming cert SANs (waddlebot.hostApiTlsDesiredDnsNames);
+        # defaults to the Service name from the target, so it always matches a SAN.
+        - name: STREAMING_RTC_GRPC_SERVER_NAME
+          value: {{ .Values.pipeline.hubApi.streamingRtc.serverName | default (printf "%s-svc-streaming" (include "waddlebot.fullname" .)) | quote }}
+        - name: STREAMING_RTC_TIMEOUT_SECONDS
+          value: {{ .Values.pipeline.hubApi.streamingRtc.timeoutSeconds | default 10 | quote }}
         {{- end }}
         - name: SERVICE_JWT_AUDIENCE
           value: {{ .Values.serviceJwt.audience | quote }}
