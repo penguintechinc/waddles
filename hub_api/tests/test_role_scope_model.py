@@ -373,7 +373,19 @@ class TestNoDeletingStrongerRole:
 
 class TestDedicatedScopes:
     def test_per_action_scopes_registered_and_admin_only(self) -> None:
-        for scope in (reg.SCOPE_GITHUB_MANAGE, reg.SCOPE_COMMUNITY_ADMIN, reg.SCOPE_PROFILE_MANAGE):
+        for scope in (
+            reg.SCOPE_GITHUB_MANAGE,
+            reg.SCOPE_COMMUNITY_ADMIN,
+            reg.SCOPE_PROFILE_MANAGE,
+            reg.SCOPE_BRANDING_MANAGE,
+            reg.SCOPE_BILLING_MANAGE,
+            reg.SCOPE_MEMBERS_MANAGE,
+            reg.SCOPE_WORKFLOW_MANAGE,
+            reg.SCOPE_BYOK_MANAGE,
+            reg.SCOPE_AI_ROUTING_MANAGE,
+            reg.SCOPE_OVERLAY_MANAGE,
+            reg.SCOPE_CALLS_MANAGE,
+        ):
             assert scope in reg.all_scopes()
             assert scope in reg.effective_scopes(reg.KIND_ADMIN, [])
             assert scope not in reg.effective_scopes(reg.KIND_MODERATOR, MODERATOR_SCOPES)

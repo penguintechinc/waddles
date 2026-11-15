@@ -35,6 +35,14 @@ SCOPE_ROLES_MANAGE: Final[str] = "roles:manage"
 SCOPE_GITHUB_MANAGE: Final[str] = "github:manage"
 SCOPE_COMMUNITY_ADMIN: Final[str] = "community:admin"
 SCOPE_PROFILE_MANAGE: Final[str] = "community.profile:manage"
+SCOPE_BRANDING_MANAGE: Final[str] = "community.branding:manage"
+SCOPE_BILLING_MANAGE: Final[str] = "billing:manage"
+SCOPE_MEMBERS_MANAGE: Final[str] = "community.members:manage"
+SCOPE_WORKFLOW_MANAGE: Final[str] = "workflow:manage"
+SCOPE_BYOK_MANAGE: Final[str] = "media.byok:manage"
+SCOPE_AI_ROUTING_MANAGE: Final[str] = "ai.routing:manage"
+SCOPE_OVERLAY_MANAGE: Final[str] = "overlay:manage"
+SCOPE_CALLS_MANAGE: Final[str] = "calls:manage"
 #: Global-admin literal on a JWT; the only token claim that bypasses community checks.
 SCOPE_GLOBAL_ADMIN: Final[str] = "users:admin"
 
@@ -84,6 +92,14 @@ register_scopes(
         SCOPE_GITHUB_MANAGE: "Manage the community GitHub sync connections",
         SCOPE_COMMUNITY_ADMIN: "Administer the community (overlays, calls admin)",
         SCOPE_PROFILE_MANAGE: "Edit the community profile",
+        SCOPE_BRANDING_MANAGE: "Upload and delete the community logo and banner",
+        SCOPE_BILLING_MANAGE: "Manage marketplace billing and subscriptions",
+        SCOPE_MEMBERS_MANAGE: "Review and decide member join requests",
+        SCOPE_WORKFLOW_MANAGE: "Manage community workflows",
+        SCOPE_BYOK_MANAGE: "Manage media bring-your-own-key credentials",
+        SCOPE_AI_ROUTING_MANAGE: "Manage AI routing and BYOK keys",
+        SCOPE_OVERLAY_MANAGE: "Manage stream overlays",
+        SCOPE_CALLS_MANAGE: "Administer voice call rooms",
     }
 )
 

@@ -295,19 +295,14 @@ class TestCommunityLogo:
     async def test_delete_no_logo_set_by_moderator_succeeds(
         self, client: Any, auth_db: Any
     ) -> None:
-        """Moderator (`community:manage_channels` only) CAN manage logo/banner.
-
-        Looser than the text-profile-field gate (matches Node's
-        route-level-only `requireCommunityAdmin` check for logo/banner, no
-        extra controller check).
-        """
+        """A moderator-kind role granted `community.branding:manage` CAN manage logo/banner."""
         community_id = _seed_community(auth_db)
         mod_id = _seed_user(auth_db, email="mod2@example.com", username="mod2")
         mod_role = _seed_role(
             auth_db,
             community_id=community_id,
             name="moderator",
-            scopes=["community:manage_channels"],
+            scopes=["community.branding:manage"],
         )
         _seed_member(auth_db, community_id=community_id, user_id=mod_id, role_id=mod_role)
 
@@ -317,6 +312,30 @@ class TestCommunityLogo:
         assert response.status_code == 200
         body = await response.get_json()
         assert body["success"] is True
+
+    @pytest.mark.parametrize(
+        "method,path",
+        [("DELETE", "logo"), ("DELETE", "banner")],
+    )
+    async def test_broad_moderator_scopes_cannot_manage_branding(
+        self, client: Any, auth_db: Any, method: str, path: str
+    ) -> None:
+        """`community:manage_channels`/`manage_members` are not `community.branding:manage`."""
+        community_id = _seed_community(auth_db)
+        mod_id = _seed_user(auth_db, email="mod9@example.com", username="mod9")
+        mod_role = _seed_role(
+            auth_db,
+            community_id=community_id,
+            name="moderator",
+            scopes=["community:manage_channels", "community:manage_members"],
+        )
+        _seed_member(auth_db, community_id=community_id, user_id=mod_id, role_id=mod_role)
+        response = await client.open(
+            f"/api/v1/admin/{community_id}/{path}",
+            method=method,
+            headers=_auth_header(user_id=mod_id),
+        )
+        assert response.status_code == 403
 
     async def test_upload_no_file_is_400(self, client: Any, auth_db: Any) -> None:
         community_id = _seed_community(auth_db)

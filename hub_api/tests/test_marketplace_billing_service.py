@@ -38,7 +38,7 @@ class TestIsCommunityAdmin:
         dal.commit()
         assert svc.is_community_admin(dal, community_id, user_id) is False
 
-    def test_moderator_role_is_admin(self, seeded: Any) -> None:
+    def test_moderator_granted_billing_manage_is_admin(self, seeded: Any) -> None:
         dal, _tenant_id, community_id = seeded
         user_id = int(dal.hub_users.insert(username="mod", email="mod@x.com"))
         role_id = dal.community_roles.insert(
@@ -46,7 +46,7 @@ class TestIsCommunityAdmin:
             name="moderator",
             is_system=True,
             role_kind=2,
-            base_claims={"scopes": ["community:manage_channels"]},
+            base_claims={"scopes": ["billing:manage"]},
         )
         dal.community_members.insert(
             community_id=community_id,
@@ -57,6 +57,27 @@ class TestIsCommunityAdmin:
         )
         dal.commit()
         assert svc.is_community_admin(dal, community_id, user_id) is True
+
+    def test_broad_moderator_scopes_are_not_billing_admin(self, seeded: Any) -> None:
+        """`community:manage_members`/`manage_channels` do not carry `billing:manage`."""
+        dal, _tenant_id, community_id = seeded
+        user_id = int(dal.hub_users.insert(username="bm", email="bm@x.com"))
+        role_id = dal.community_roles.insert(
+            community_id=community_id,
+            name="moderator",
+            is_system=True,
+            role_kind=2,
+            base_claims={"scopes": ["community:manage_members", "community:manage_channels"]},
+        )
+        dal.community_members.insert(
+            community_id=community_id,
+            user_id=str(user_id),
+            role="moderator",
+            community_role_id=role_id,
+            is_active=True,
+        )
+        dal.commit()
+        assert svc.is_community_admin(dal, community_id, user_id) is False
 
     def test_role_name_alone_grants_nothing(self, seeded: Any) -> None:
         """A `moderator` role NAME with no scope-bearing role row is not admin (scopes only)."""

@@ -66,10 +66,20 @@ no data change and never reaches the moderator or custom roles until an authoriz
 | `_ADMIN_ROLE_NAMES` (`community_profile_service.update_community_profile`) | dedicated `community.profile:manage` scope |
 | `ADMIN_PROMOTION_ROLES` (`admin_service.update_member_role`) | assigner must hold every scope of the assigned role; an undefined role is refused (400), never assigned |
 
-Per-action scopes (`github:manage`, `community:admin`, `community.profile:manage`, `roles:manage`) are
+Per-action scopes (`github:manage`, `community:admin`, `community.profile:manage`, `community.branding:manage`, `billing:manage`, `community.members:manage`, `workflow:manage`, `media.byok:manage`, `ai.routing:manage`, `overlay:manage`, `calls:manage`, `roles:manage`) are
 registered, so the admin kind holds them automatically and the moderator kind does not unless an
 authorized admin grants them.
 
 Retained on purpose: `tenant_admins.role` -> scope bundle expansion at token issuance (that is the
 role-to-scopes step itself), and `target.role == "community-owner"` in `admin_service` (member change/removal)
 protects the community's owner row, a data invariant on the *target*, not authorization of the caller.
+
+## Still on the broad community-admin gate (no dedicated scope yet)
+
+Routes using `authorize_community(admin=True)` / default `require_community_admin` (any of
+`community:manage_members` or `community:manage_channels`): music station and music queue admin,
+streaming/stream config, token billing admin, marketplace lifecycle admin, bundle permissions and
+activation (community tier), provider connections, member admin (`admin_service`: roles, reputation,
+removal). Bundle admin gateway maps manifest-declared `community:moderate|admin` onto those two
+scopes by design. Convert each by passing `scope=` (the helper already accepts it) and registering
+the scope.

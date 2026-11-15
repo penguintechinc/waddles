@@ -25,10 +25,7 @@ from typing import Any
 from services import ban_suppression
 from services.community_authz import require_community_scope
 from services.errors import bad_request, conflict, forbidden, not_found
-
-#: OR-check, mirrors `requireCommunityAdmin`'s own
-#: `scopes.includes('community:manage_members') || scopes.includes('community:manage_channels')`.
-_ADMIN_SCOPES = ("community:manage_members", "community:manage_channels")
+from services.scope_registry import SCOPE_MEMBERS_MANAGE
 
 
 @dataclass(slots=True, frozen=True)
@@ -164,9 +161,13 @@ async def list_requests(
     page: int,
     limit: int,
 ) -> tuple[list[JoinRequestListItem], int]:
-    """List join requests for a community (admin, `community:manage_members|_channels`)."""
+    """List join requests for a community (needs `community.members:manage`)."""
     await require_community_scope(
-        async_dal, dal, community_id=community_id, user_id=admin_user_id, any_of=_ADMIN_SCOPES
+        async_dal,
+        dal,
+        community_id=community_id,
+        user_id=admin_user_id,
+        any_of=(SCOPE_MEMBERS_MANAGE,),
     )
 
     page = max(1, page)
@@ -212,9 +213,13 @@ async def list_requests(
 async def approve_request(
     async_dal: Any, dal: Any, *, community_id: int, request_id: int, reviewer_id: int
 ) -> None:
-    """Approve a pending join request (admin, `community:manage_members|_channels`)."""
+    """Approve a pending join request (needs `community.members:manage`)."""
     await require_community_scope(
-        async_dal, dal, community_id=community_id, user_id=reviewer_id, any_of=_ADMIN_SCOPES
+        async_dal,
+        dal,
+        community_id=community_id,
+        user_id=reviewer_id,
+        any_of=(SCOPE_MEMBERS_MANAGE,),
     )
 
     rows = await async_dal.select_async(
@@ -272,9 +277,13 @@ async def approve_request(
 async def reject_request(
     async_dal: Any, dal: Any, *, community_id: int, request_id: int, reviewer_id: int
 ) -> None:
-    """Reject a pending join request (admin, `community:manage_members|_channels`)."""
+    """Reject a pending join request (needs `community.members:manage`)."""
     await require_community_scope(
-        async_dal, dal, community_id=community_id, user_id=reviewer_id, any_of=_ADMIN_SCOPES
+        async_dal,
+        dal,
+        community_id=community_id,
+        user_id=reviewer_id,
+        any_of=(SCOPE_MEMBERS_MANAGE,),
     )
 
     updated = await async_dal.update_async(

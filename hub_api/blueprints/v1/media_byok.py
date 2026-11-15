@@ -28,6 +28,7 @@ from services import media_byok_service as media
 from services.community_access import require_community_admin
 from services.current_user import get_current_user_id
 from services.errors import ApiError
+from services.scope_registry import SCOPE_BYOK_MANAGE
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,13 @@ async def _require_admin(community_id: int) -> tuple[int, int]:
     async_dal, dal = _dal()
     user_id = get_current_user_id(request)
     await require_community_admin(
-        async_dal, dal, request, ctx, community_id=community_id, user_id=user_id
+        async_dal,
+        dal,
+        request,
+        ctx,
+        community_id=community_id,
+        user_id=user_id,
+        scope=SCOPE_BYOK_MANAGE,
     )
     return int(ctx.tenant_id), user_id
 

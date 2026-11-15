@@ -86,8 +86,9 @@ async def require_community_admin(
     *,
     community_id: int,
     user_id: int,
+    scope: str = SCOPE_COMMUNITY_ADMIN,
 ) -> None:
-    """Raise 403 unless `user_id` holds `community:admin` in `community_id` (inside `ctx`'s tenant).
+    """Raise 403 unless `user_id` holds `scope` (default `community:admin`) in `community_id`.
 
     Port of Node's `requireCommunityAdmin` -- gates every overlay route
     and every admin-facing calls route (`blueprints/v1/overlay.py`,
@@ -115,7 +116,7 @@ async def require_community_admin(
     caller_role = await get_caller_community_role(
         async_dal, dal, community_id=community_id, user_id=user_id
     )
-    if caller_role is None or SCOPE_COMMUNITY_ADMIN not in caller_role.scopes:
+    if caller_role is None or scope not in caller_role.scopes:
         raise forbidden("Community admin access required")
 
 

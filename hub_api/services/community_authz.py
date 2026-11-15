@@ -191,7 +191,7 @@ _ADMIN_SCOPES = frozenset({"community:manage_members", "community:manage_channel
 
 
 async def require_community_admin(
-    async_dal: Any, dal: Any, request: Request, *, community_id: int
+    async_dal: Any, dal: Any, request: Request, *, community_id: int, scope: str | None = None
 ) -> None:
     """Raise :class:`ApiError` (401/403) unless the caller admins `community_id`.
 
@@ -241,7 +241,13 @@ async def require_community_admin(
     role = await get_caller_community_role(
         async_dal, dal, community_id=community_id, user_id=user_id
     )
-    if role is None or not (role.scopes & _ADMIN_SCOPES):
+    # A dedicated per-action `scope` replaces the broad multi-purpose OR-set.
+    allowed = (
+        (scope in role.scopes)
+        if (role is not None and scope)
+        else bool(role is not None and role.scopes & _ADMIN_SCOPES)
+    )
+    if not allowed:
         raise forbidden("Community admin access required")
 
 

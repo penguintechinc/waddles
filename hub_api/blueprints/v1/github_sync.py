@@ -52,6 +52,7 @@ from services.community_authz import require_community_admin, require_valid_comm
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request
 from services.schema import bind_github_sync_tables
+from services.scope_registry import SCOPE_GITHUB_MANAGE
 
 github_sync_webhook_bp = Blueprint(
     "v1_github_sync_webhook", __name__, url_prefix="/api/v1/github-sync"
@@ -77,7 +78,9 @@ async def _guard(raw_community_id: str) -> int | tuple[dict[str, object], int]:
     try:
         community_id = require_valid_community_id(raw_community_id)
         async_dal, dal = _dal()
-        await require_community_admin(async_dal, dal, request, community_id=community_id)
+        await require_community_admin(
+            async_dal, dal, request, community_id=community_id, scope=SCOPE_GITHUB_MANAGE
+        )
     except ApiError as exc:
         return _err(exc)
     return community_id

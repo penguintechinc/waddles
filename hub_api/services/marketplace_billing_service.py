@@ -40,9 +40,7 @@ from typing import Any
 from services.community_authz import member_scopes_sync
 from services.errors import bad_request, conflict, forbidden, not_found
 from services.global_identity import is_global_admin_sync
-
-#: Scopes Node's `requireCommunityAdmin` treats as admin-equivalent (any one suffices).
-_COMMUNITY_ADMIN_SCOPES = frozenset({"community:manage_members", "community:manage_channels"})
+from services.scope_registry import SCOPE_BILLING_MANAGE
 
 _VALID_DISCOUNT_TYPES = ("percentage", "fixed_amount", "free")
 
@@ -58,7 +56,7 @@ def is_community_admin(dal: Any, community_id: int, user_id: int) -> bool:
     if is_global_admin_sync(dal, user_id):
         return True
 
-    return bool(member_scopes_sync(dal, community_id, user_id) & _COMMUNITY_ADMIN_SCOPES)
+    return SCOPE_BILLING_MANAGE in member_scopes_sync(dal, community_id, user_id)
 
 
 # ---------------------------------------------------------------------------
