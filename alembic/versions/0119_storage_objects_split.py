@@ -27,11 +27,10 @@ and is NOT recomputed here; a hub-api/data-plane restart (or any grant change) r
 No shipped bundle manifest declared `storage.objects`, so no manifest rewrite is needed.
 
 Revision ID: 0119_storage_objects_split
-Revises: 0108_bundle_precompile_requests, 0109_platform_vault
+Revises: 0110_merge_precompile_vault
 Create Date: 2026-11-15
 
-The `down_revision` tuple merges the two heads that exist on `release/v3.0.X` today;
-re-point it to the release head at merge time (ALEMBIC ORDER rule, `.PLAN`).
+`down_revision` is the release head at merge time (ALEMBIC ORDER rule, `.PLAN`).
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ from __future__ import annotations
 from alembic import op
 
 revision = "0119_storage_objects_split"
-down_revision = ("0108_bundle_precompile_requests", "0109_platform_vault")
+down_revision = "0110_merge_precompile_vault"
 branch_labels = None
 depends_on = None
 
