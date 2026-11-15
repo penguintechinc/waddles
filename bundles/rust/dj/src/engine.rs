@@ -83,6 +83,8 @@ const MAX_ADD_ATTEMPTS: u32 = 8;
 #[derive(Default)]
 struct Live {
     keys: Vec<String>,
+    /// [`policy::live_key`]s of the last [`HISTORY_WINDOW`] played songs (also in `keys`).
+    recent: Vec<String>,
     titles: Vec<String>,
     safe: bool,
     attempts: u32,
@@ -96,6 +98,9 @@ struct Stats {
     artists: Vec<String>,
     songs: Vec<(String, String)>,
 }
+
+/// How many recently played songs the DJ refuses to replay (`history.list` limit).
+const HISTORY_WINDOW: u32 = 25;
 
 impl Stats {
     /// Sort key: position among the top artists, unknown artists last.
@@ -411,6 +416,22 @@ impl<'a> Engine<'a> {
                 live.titles.push(i.title.clone());
             }
         }
+        // No-replay: anything in the last HISTORY_WINDOW played songs counts as already
+        // present (title + artist, case-insensitive). No grant or an outage means no filter.
+        match requests::history_list(self.host, HISTORY_WINDOW) {
+            Ok(items) => {
+                for h in items {
+                    let k = policy::live_key(&h.title, &h.artist);
+                    live.keys.push(k.clone());
+                    live.recent.push(k);
+                }
+            }
+            Err(_) => self.host.log(
+                Level::Debug,
+                "dj history unavailable; no replay filter",
+                json!({"unavailable": 1}),
+            ),
+        }
         let stats = self.load_stats();
         let mut st = self.state()?;
         let mut lines: Vec<String> = Vec::new();
@@ -635,6 +656,9 @@ impl<'a> Engine<'a> {
         for (title, artist) in hints {
             if lines.len() as u32 >= goal {
                 break;
+            }
+            if live.recent.contains(&policy::live_key(&title, &artist)) {
+                continue;
             }
             let query = format!("{title} {artist}");
             let Some(track) = self.resolve_hint(cfg, &query, &title) else {

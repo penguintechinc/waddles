@@ -239,7 +239,7 @@ mod tests {
     async fn a_bundle_cannot_publish_into_another_bundles_namespace() {
         let (w, seen) = wiring(true).await;
         for surface in [
-            "waddles.core.example.dj.now_playing",
+            "waddles.core.example.otherapp.now_playing",
             "waddles.core.example.musicbox.queue",
             "alert",
             "waddles.core.example.music",

@@ -11,6 +11,8 @@ use waddle_sdk::tool::{ToolContext, ToolError, ToolRegistry};
 
 /// Scope for read-only queue tools.
 pub const SCOPE_READ: &str = "music:requests.read";
+/// Scope for the played-history read tool (`history.list`).
+pub const SCOPE_HISTORY_READ: &str = "music:history.read";
 /// Scope for viewer write tools.
 pub const SCOPE_WRITE: &str = "music:requests.write";
 /// Scope for moderator queue management (also gates `kind: dj` adds).
@@ -1367,7 +1369,10 @@ pub fn build_registry(svc: Arc<Service>) -> ToolRegistry {
         s.advance(true)
     });
     tool!("requests.import", |s, c, a| s.import(c, a));
-    tool!("history.list", |s, _c, a| s.history(a));
+    tool!("history.list", |s, c, a| {
+        need_scope(c, SCOPE_HISTORY_READ)?;
+        s.history(a)
+    });
     tool!("config.get", |s, _c, a| {
         fields(&a, &[])?;
         s.config_json()

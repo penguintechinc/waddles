@@ -592,6 +592,7 @@ TOOL_REQUIRED_SCOPES = frozenset(
         # waddles.core.service.music-requests (see `docs/music-requests-service.md`);
         # mirrors the music entries in `core/bundle_tool_call::scopes_for_role`.
         "music:requests.read",
+        "music:history.read",
         "music:requests.write",
         "music:requests.manage",
         "music:dj.manage",

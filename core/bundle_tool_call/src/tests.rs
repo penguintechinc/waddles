@@ -749,7 +749,12 @@ fn role_scope_map_is_cumulative_and_fails_closed() {
 
 #[test]
 fn music_scopes_follow_the_role_bundles() {
-    let viewer = ["music:requests.read", "music:requests.write", "music:stats.read"];
+    let viewer = [
+        "music:requests.read",
+        "music:history.read",
+        "music:requests.write",
+        "music:stats.read",
+    ];
     let staff = ["music:requests.manage", "music:dj.manage", "music:settings.write"];
     for role in ["member", "vip", "moderator", "community-admin", "community-owner", "owner"] {
         for s in viewer {

@@ -430,7 +430,7 @@ mod tests {
         assert!(p.allows("alert"), "explicit grants still apply");
         // Another bundle's namespace, a prefix sibling, the bare prefix and the empty name.
         assert!(!p.allows("waddles.core.example.musicbox.queue"));
-        assert!(!p.allows("waddles.core.example.dj.now_playing"));
+        assert!(!p.allows("waddles.core.example.otherapp.now_playing"));
         assert!(!p.allows("waddles.core.example.music"));
         assert!(!p.allows("waddles.core.example.music."));
         assert!(!p.allows("live.channels"));

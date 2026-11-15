@@ -106,7 +106,7 @@ impl ActorContext {
 /// | `member` | member + music read/write/stats |
 ///
 /// Music scopes (`waddles.core.service.music-requests`): `music:requests.read`,
-/// `music:requests.write` and `music:stats.read` for every member; moderator and above also get
+/// `music:history.read`, `music:requests.write` and `music:stats.read` for every member; moderator and above also get
 /// `music:requests.manage`, `music:dj.manage` and `music:settings.write`.
 pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
     match role {
@@ -119,6 +119,7 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
             "community:admin",
             "community:owner",
             "music:requests.read",
+            "music:history.read",
             "music:requests.write",
             "music:stats.read",
             "music:requests.manage",
@@ -131,6 +132,7 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
             "community:moderate",
             "community:admin",
             "music:requests.read",
+            "music:history.read",
             "music:requests.write",
             "music:stats.read",
             "music:requests.manage",
@@ -141,6 +143,7 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
             "community:member",
             "community:moderate",
             "music:requests.read",
+            "music:history.read",
             "music:requests.write",
             "music:stats.read",
             "music:requests.manage",
@@ -151,12 +154,14 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
             "community:member",
             "community:vip",
             "music:requests.read",
+            "music:history.read",
             "music:requests.write",
             "music:stats.read",
         ],
         "member" => &[
             "community:member",
             "music:requests.read",
+            "music:history.read",
             "music:requests.write",
             "music:stats.read",
         ],
