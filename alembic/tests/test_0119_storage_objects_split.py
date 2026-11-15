@@ -25,7 +25,7 @@ requires_docker = pytest.mark.skipif(
 
 _ROOT = Path(__file__).resolve().parents[2]
 _MIGRATION_PATH = _ROOT / "alembic" / "versions" / "0119_storage_objects_split.py"
-_PREV = "0110_merge_precompile_vault"  # the revision 0119 chains off (release head at merge)
+_PREV = "0117_community_role_kind"  # the revision 0119 chains off (release head at merge)
 _OLD = "storage.objects"
 _READ = "storage.objects.read"
 _WRITE = "storage.objects.write"
