@@ -1,15 +1,21 @@
 # hub-api direct dependencies.
 #
-# libs/flask_core is installed separately in the Dockerfile's builder
-# stage (`pip install /app/libs/flask_core`, its own requirements.in is
-# the source of truth for its transitive deps -- flask-security-too,
-# authlib, sqlalchemy, alembic, posthog, penguin-licensing, redis,
-# opentelemetry-*, etc.) -- listed here only what hub-api's own app code
-# (app.py, config.py, blueprints/, routers/, openapi/) imports directly.
+# libs/flask_core is installed in the Dockerfile's builder stage AFTER the
+# `--require-hashes` install of this file's lock, with
+# `pip install --no-deps --no-build-isolation /app/libs/flask_core`, so NOTHING flask_core
+# needs may be resolved from the network unhashed: every runtime dependency in
+# libs/flask_core/requirements.in is listed below ("flask_core runtime dependencies"),
+# and scripts/ci/check-dockerfile-cache-mounts.py fails any pip install without
+# --require-hashes (or --no-deps after a hash-locked install). Keep that block in sync with
+# libs/flask_core/requirements.in (dev tools there -- pytest/black/flake8/mypy -- are NOT
+# runtime deps and stay out of the image).
 quart>=0.23.0,<0.24.0
 hypercorn>=0.18.0,<0.19.0
 quart-schema>=0.25.0,<0.26.0
-pydal>=20240906.1,<20260601
+# <20250101: libs/flask_core declares pydal<20250101 and is installed --no-deps, so the lock itself
+# must satisfy it. This is the version the image actually ran before the lock (flask_core's
+# unhashed install downgraded the previously-locked 20260520.0 to this).
+pydal>=20240906.1,<20250101
 # Generic bundle-admin gateway (config + admin-tool args validated against manifest JSON Schemas).
 jsonschema>=4.23.0,<5.0.0
 psycopg2-binary>=2.9.9,<3.0.0
@@ -94,3 +100,29 @@ alembic==1.19.1
 # defusedxml and only signxml touches lxml.
 signxml>=5.1.0,<6.0.0
 defusedxml>=0.7.1,<0.8.0
+
+# flask_core runtime dependencies (mirrors libs/flask_core/requirements.in, same specifiers;
+# entries hub-api already pins above are not repeated). flask_core is installed --no-deps.
+quart-flask-patch>=0.3.0
+flask-sqlalchemy>=3.1.0
+sqlalchemy>=2.0
+authlib>=1.3.0
+bcrypt>=4.1.2
+posthog>=7.44.2
+penguin-licensing>=0.1.0
+hiredis>=2.3.2
+requests>=2.31.0
+urllib3>=2.6.3
+pydantic>=2.5.0
+bleach>=6.0.0
+python-dateutil>=2.8.2
+python-dotenv>=1.0.0
+psutil>=5.9.0
+opentelemetry-api==1.45.2
+opentelemetry-sdk==1.45.2
+opentelemetry-instrumentation==0.66b2
+opentelemetry-instrumentation-flask==0.66b2
+opentelemetry-instrumentation-requests==0.66b2
+opentelemetry-exporter-otlp-proto-grpc==1.45.2
+protobuf>=5.29.6,<7.0
+prometheus-client>=0.19.0
