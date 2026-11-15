@@ -71,7 +71,7 @@ Revision ids are <= 32 chars. `down_revision` is 0107: the `0108_revoke_cfg_comm
 on an unmerged branch; whichever lands second must re-point its `down_revision` to keep one head.
 
 Revision ID: 0109_platform_vault
-Revises: 0107_bundle_config_db_reads
+Revises: 0108_revoke_cfg_communities
 Create Date: 2026-11-14
 """
 
@@ -82,7 +82,7 @@ import os
 from alembic import op
 
 revision = "0109_platform_vault"
-down_revision = "0107_bundle_config_db_reads"
+down_revision = "0108_revoke_cfg_communities"
 branch_labels = None
 depends_on = None
 
