@@ -595,6 +595,9 @@ async def internal_enqueue_song_request() -> Any:
             enforce_youtube_labels=enforce_youtube_labels,
         )
     except ApiError as exc:
+        logger.warning(
+            "internal_enqueue_song_request rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     except Exception as exc:  # noqa: BLE001 - last-resort 500 must still be JSON, never an empty body
         logger.exception(
