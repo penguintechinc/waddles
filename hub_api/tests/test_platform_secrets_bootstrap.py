@@ -30,7 +30,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from services.envelope.platform_kek import PlatformKekAdapter
 from services.platform_secrets import bootstrap as vault_bootstrap
-from services.platform_secrets import registry, telemetry
+from services.platform_secrets import importer, refresher, registry, telemetry
 from services.platform_secrets.bootstrap import (
     PlatformVaultRefusedError,
     bootstrap_platform_secrets,
@@ -46,7 +46,7 @@ from services.platform_secrets.cache import (
 )
 from services.platform_secrets.event_chain import append_event, verify_chain
 from services.platform_secrets.importer import import_candidate
-from services.platform_secrets.refresher import CacheRefresher
+from services.platform_secrets.refresher import CacheRefresher, PgNotifyWaiter
 from services.platform_secrets.registry import REGISTRY, SecretType
 from services.platform_secrets.repository import (
     EventRow,
@@ -59,6 +59,7 @@ from services.provider_connections.vault import (
     PLATFORM_ALG_ES256,
     PLATFORM_ALG_PASSWORD,
     PLATFORM_ALG_RANDOM_256,
+    PlatformSecretInputError,
     generate_platform_key_material,
     platform_key_material_from_private,
 )
@@ -328,6 +329,37 @@ def test_importer_drops_a_placeholder_kid_instead_of_trusting_it() -> None:
     )
     assert decision.usable and decision.material is not None
     assert decision.material.kid is not None and decision.material.kid.startswith("k")
+
+
+def test_importer_logs_rejection_of_unparsable_key_material_without_the_value(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A key the builder refuses is `rejected_invalid` AND logged (name + type), never silent."""
+
+    def _refuse(*_a: Any, **_k: Any) -> Any:
+        raise PlatformSecretInputError("secret-detail-must-not-leak")
+
+    monkeypatch.setattr(importer, "platform_key_material_from_private", _refuse)
+    with caplog.at_level(logging.WARNING, logger=importer.logger.name):
+        decision = import_candidate(REGISTRY[SecretType.BUNDLE_SIGNING], _env(_b64(GOOD_SEED)))
+    assert decision.outcome == "rejected_invalid" and not decision.usable
+    text = caplog.text
+    assert "BUNDLE_SIGNING_PRIVATE_KEY" in text and "PlatformSecretInputError" in text
+    assert "secret-detail-must-not-leak" not in text and _b64(GOOD_SEED) not in text
+
+
+def test_notify_waiter_close_failure_is_logged_not_swallowed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Closing a dead LISTEN connection is best effort but leaves a DEBUG trace (type only)."""
+    waiter = PgNotifyWaiter("postgresql://unused")
+    conn = MagicMock()
+    conn.close.side_effect = RuntimeError("dsn-secret-detail")
+    waiter._conn = conn  # noqa: SLF001 -- inject a dead connection
+    with caplog.at_level(logging.DEBUG, logger=refresher.logger.name):
+        waiter.close()
+    assert waiter._conn is None  # noqa: SLF001
+    assert "RuntimeError" in caplog.text and "dsn-secret-detail" not in caplog.text
 
 
 def test_importer_never_imports_a_type_without_a_source() -> None:

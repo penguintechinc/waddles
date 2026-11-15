@@ -301,7 +301,7 @@ pub trait WebhookDedup: Send + Sync {
 /// compare-and-delete script. (A dedicated type rather than
 /// `RedisReplayGuard`, which cannot release a key.)
 pub struct RedisWebhookDedup {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
     ttl_ms: usize,
 }
 
@@ -310,7 +310,7 @@ const DEDUP_PREFIX: &str = "waddles:webhook:dedup:";
 impl RedisWebhookDedup {
     /// Builds the dedup over a connected Valkey connection.
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection, ttl: Duration) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager, ttl: Duration) -> Self {
         Self {
             conn,
             ttl_ms: usize::try_from(ttl.as_millis()).unwrap_or(usize::MAX),

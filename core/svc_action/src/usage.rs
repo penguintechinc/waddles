@@ -104,12 +104,12 @@ pub trait UsageSink: Send + Sync {
 /// and DLQ streams respectively).
 #[derive(Debug)]
 pub struct RedisUsageSink {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
     maxlen: u64,
 }
 
 impl RedisUsageSink {
-    pub fn new(conn: redis::aio::MultiplexedConnection, maxlen: u64) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager, maxlen: u64) -> Self {
         Self { conn, maxlen }
     }
 }
@@ -140,7 +140,7 @@ impl UsageSink for RedisUsageSink {
 /// `XADD waddles:usage` is not envelope-typed (module doc).
 pub async fn connect(
     cfg: &penguin_spine::SpineConfig,
-) -> Result<redis::aio::MultiplexedConnection, UsageError> {
+) -> Result<redis::aio::ConnectionManager, UsageError> {
     let info: redis::ConnectionInfo = cfg.valkey_url.as_str().into_connection_info()?;
     let mut settings = info.redis_settings().clone();
     if let Some(username) = &cfg.valkey_username {
@@ -164,7 +164,7 @@ pub async fn connect(
     } else {
         redis::Client::open(info)?
     };
-    Ok(client.get_multiplexed_async_connection().await?)
+    Ok(client.get_connection_manager().await?)
 }
 
 /// Convenience wrapper around [`connect`] that also builds the
