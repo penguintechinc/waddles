@@ -285,6 +285,15 @@ pub enum PermissionFamily {
     /// grant, and a bundle holding it is expected to expose it only to admin
     /// callers.
     ReputationCommunityAdmin,
+    /// `reputation.history.read` -- a user's reputation ledger page (core
+    /// bundles only: the host refuses any non-`waddles.core.` app).
+    ReputationHistoryRead,
+    /// `reputation.tenant.read` -- the user's aggregate across the tenant's
+    /// communities and the tenant auto-ban policy (core bundles only).
+    ReputationTenantRead,
+    /// `reputation.moderation.write` -- moderation-class deltas (larger cap,
+    /// e.g. -200 for a ban) and soft-ban writes (core/approved bundles only).
+    ReputationModerationWrite,
     /// `economy.read` -- balance / max-bet / leaderboard reads (issue #714).
     EconomyRead,
     /// `economy.wager` -- atomic debit-stake/credit-payout (issue #714).
@@ -362,6 +371,11 @@ pub enum PermissionFamily {
     StorageList,
     StorageWrite,
     StorageDelete,
+    /// `gameserver.net` -- host-mediated TCP/UDP to admin-registered game-server
+    /// connections (RCON, query). `Dangerous`, global-admin approved, first-party
+    /// core only. The guest names a connection by UUID; address and RCON password
+    /// stay host-side.
+    GameserverNet,
 }
 
 /// One row of the catalog table (spec SS1).
@@ -404,6 +418,9 @@ impl PermissionFamily {
         Self::ReputationCommunityWrite,
         Self::ReputationTenantWrite,
         Self::ReputationCommunityAdmin,
+        Self::ReputationHistoryRead,
+        Self::ReputationTenantRead,
+        Self::ReputationModerationWrite,
         Self::EconomyRead,
         Self::EconomyWager,
         Self::EconomyTransfer,
@@ -429,6 +446,7 @@ impl PermissionFamily {
         Self::StorageList,
         Self::StorageWrite,
         Self::StorageDelete,
+        Self::GameserverNet,
     ];
 
     /// The static catalog id prefix -- for a parameterized family
@@ -462,6 +480,9 @@ impl PermissionFamily {
             Self::ReputationCommunityWrite => "reputation.community.write",
             Self::ReputationTenantWrite => "reputation.tenant.write",
             Self::ReputationCommunityAdmin => "reputation.community.admin",
+            Self::ReputationHistoryRead => "reputation.history.read",
+            Self::ReputationTenantRead => "reputation.tenant.read",
+            Self::ReputationModerationWrite => "reputation.moderation.write",
             Self::EconomyRead => "economy.read",
             Self::EconomyWager => "economy.wager",
             Self::EconomyTransfer => "economy.transfer",
@@ -487,6 +508,7 @@ impl PermissionFamily {
             Self::StorageList => "storage.list",
             Self::StorageWrite => "storage.write",
             Self::StorageDelete => "storage.delete",
+            Self::GameserverNet => "gameserver.net",
         }
     }
 
@@ -563,6 +585,9 @@ impl PermissionFamily {
                 | Self::ReputationCommunityWrite
                 | Self::ReputationTenantWrite
                 | Self::ReputationCommunityAdmin
+                | Self::ReputationHistoryRead
+                | Self::ReputationTenantRead
+                | Self::ReputationModerationWrite
                 | Self::UsersProfileRead
         )
     }
@@ -867,6 +892,37 @@ impl PermissionFamily {
                 },
                 notes: "ADMIN-only absolute score override (bundle-MCP-tools P5); rate-limited, ledgered as admin_override, clamped",
             },
+            Self::ReputationHistoryRead => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Reputation,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 20,
+                    window: Duration::from_secs(1),
+                },
+                notes: "ledger history page; core bundles only (host refuses non-waddles.core. apps)",
+            },
+            Self::ReputationTenantRead => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Reputation,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 20,
+                    window: Duration::from_secs(1),
+                },
+                notes: "own tenant aggregate + tenant auto-ban policy; core bundles only; never cross-tenant",
+            },
+            Self::ReputationModerationWrite => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Reputation,
+                default_quota: Quota::ReputationDelta {
+                    per_call_abs_max: 200,
+                    per_user_daily_abs_max: 400,
+                    per_scope_daily_abs_max: 4_000,
+                },
+                notes: "moderation-class deltas + soft-ban writes; core/approved bundles only; separate from the activity cap",
+            },
             Self::EconomyRead => CatalogEntry {
                 family: *self,
                 risk: Risk::Normal,
@@ -993,6 +1049,20 @@ impl PermissionFamily {
                     notes: "cross-prefix object-storage access (2026-11-06 spec); owner app_id encoded in the id; never auto-granted; host additionally tag-filters every op",
                 }
             }
+            Self::GameserverNet => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Db,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 10,
+                    window: Duration::from_secs(1),
+                },
+                notes: "host-mediated game-server network access (rcon/tcp/udp-exchange); \
+                        connection id resolved host-side to an admin-registered, \
+                        tenant+community-scoped connection; SSRF-guarded on the resolved IP; \
+                        RCON password never enters the guest; never auto-granted, first-party \
+                        core only",
+            },
             Self::ToolCall => CatalogEntry {
                 family: *self,
                 risk: Risk::Dangerous,
@@ -1132,6 +1202,9 @@ pub enum PermissionId {
     ReputationCommunityWrite,
     ReputationTenantWrite,
     ReputationCommunityAdmin,
+    ReputationHistoryRead,
+    ReputationTenantRead,
+    ReputationModerationWrite,
     EconomyRead,
     EconomyWager,
     EconomyTransfer,
@@ -1168,6 +1241,8 @@ pub enum PermissionId {
         op: StorageOp,
         owner: String,
     },
+    /// `gameserver.net` (unparameterized).
+    GameserverNet,
 }
 
 /// Platforms compiled into this build's relay/moderation providers (spec
@@ -1222,6 +1297,7 @@ impl PermissionId {
             Self::OverlayMedia => PermissionFamily::OverlayMedia,
             Self::AiGenerate => PermissionFamily::AiGenerate,
             Self::MediaGenerate => PermissionFamily::MediaGenerate,
+            Self::GameserverNet => PermissionFamily::GameserverNet,
             Self::UsersProfileRead => PermissionFamily::UsersProfileRead,
             Self::TelemetryLogs => PermissionFamily::TelemetryLogs,
             Self::TelemetryMetrics => PermissionFamily::TelemetryMetrics,
@@ -1229,6 +1305,9 @@ impl PermissionId {
             Self::ReputationCommunityWrite => PermissionFamily::ReputationCommunityWrite,
             Self::ReputationTenantWrite => PermissionFamily::ReputationTenantWrite,
             Self::ReputationCommunityAdmin => PermissionFamily::ReputationCommunityAdmin,
+            Self::ReputationHistoryRead => PermissionFamily::ReputationHistoryRead,
+            Self::ReputationTenantRead => PermissionFamily::ReputationTenantRead,
+            Self::ReputationModerationWrite => PermissionFamily::ReputationModerationWrite,
             Self::EconomyRead => PermissionFamily::EconomyRead,
             Self::EconomyWager => PermissionFamily::EconomyWager,
             Self::EconomyTransfer => PermissionFamily::EconomyTransfer,
@@ -1555,6 +1634,7 @@ impl PermissionId {
             "overlay.media" => Ok(Self::OverlayMedia),
             "ai.generate" => Ok(Self::AiGenerate),
             "media.generate" => Ok(Self::MediaGenerate),
+            "gameserver.net" => Ok(Self::GameserverNet),
             "users.profile.read" => Ok(Self::UsersProfileRead),
             "telemetry.logs" => Ok(Self::TelemetryLogs),
             "telemetry.metrics" => Ok(Self::TelemetryMetrics),
@@ -1562,6 +1642,9 @@ impl PermissionId {
             "reputation.community.write" => Ok(Self::ReputationCommunityWrite),
             "reputation.tenant.write" => Ok(Self::ReputationTenantWrite),
             "reputation.community.admin" => Ok(Self::ReputationCommunityAdmin),
+            "reputation.history.read" => Ok(Self::ReputationHistoryRead),
+            "reputation.tenant.read" => Ok(Self::ReputationTenantRead),
+            "reputation.moderation.write" => Ok(Self::ReputationModerationWrite),
             "economy.read" => Ok(Self::EconomyRead),
             "economy.wager" => Ok(Self::EconomyWager),
             "economy.transfer" => Ok(Self::EconomyTransfer),
@@ -2093,5 +2176,38 @@ mod tests {
         assert!(PermissionFamily::ToolCall.is_parameterized());
         assert!(PermissionFamily::ALL.contains(&PermissionFamily::ToolCall));
         assert_eq!(PermissionFamily::ToolCall.id_prefix(), "tool.call");
+    }
+
+    #[test]
+    fn reputation_history_tenant_and_moderation_perms_are_dangerous_scoped_and_round_trip() {
+        for (name, fam) in [
+            (
+                "reputation.history.read",
+                PermissionFamily::ReputationHistoryRead,
+            ),
+            (
+                "reputation.tenant.read",
+                PermissionFamily::ReputationTenantRead,
+            ),
+            (
+                "reputation.moderation.write",
+                PermissionFamily::ReputationModerationWrite,
+            ),
+        ] {
+            let id = PermissionId::parse(name).unwrap();
+            assert_eq!(id.canonical_id(), name);
+            assert_eq!(id.family(), fam);
+            assert!(fam.is_reputation_scoped(), "{name}");
+            assert_eq!(fam.catalog_entry().risk, Risk::Dangerous, "{name}");
+        }
+        match PermissionFamily::ReputationModerationWrite
+            .catalog_entry()
+            .default_quota
+        {
+            Quota::ReputationDelta {
+                per_call_abs_max, ..
+            } => assert_eq!(per_call_abs_max, 200),
+            other => panic!("unexpected quota {other:?}"),
+        }
     }
 }

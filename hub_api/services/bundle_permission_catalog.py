@@ -135,6 +135,12 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     #: (`core/bundle_capability_gate`'s `reputation.community.admin`).
     #: `dangerous` -- an admin must explicitly approve the grant.
     "reputation.community.admin": "dangerous",
+    #: Core-only reputation families mirrored from `core/bundle_capability_gate`
+    #: (the host refuses non-`waddles.core.` apps): own/admin ledger page, the
+    #: tenant aggregate + auto-ban policy, and MODERATION-class deltas (cap 200).
+    "reputation.history.read": "normal",
+    "reputation.tenant.read": "normal",
+    "reputation.moderation.write": "dangerous",
     #: Shared community currency (issue #714), `core/bundle_capability_gate`'s
     #: `economy.*` families. `read` = balance/leaderboard; `wager` = atomic
     #: stake-debit/payout-credit (+ `max-bet`); `transfer` = member-to-member.
@@ -183,6 +189,12 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     "platform.context": "normal",
     "platform.clock": "normal",
     "platform.log": "normal",
+    #: Host-mediated game-server network access (`gameserver-net` WIT
+    #: interface: rcon-open / tcp-open / udp-exchange). `dangerous`, global-admin
+    #: approved, first-party-core only. The guest names an admin-registered
+    #: connection by UUID; the host resolves address + RCON password, runs the
+    #: SSRF guard on the resolved IP, and never returns either to the guest.
+    "gameserver.net": "dangerous",
 }
 
 #: Compiled-in relay providers `chat.send:<platform>`/`moderation.<platform>`

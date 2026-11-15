@@ -668,6 +668,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-config-db"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hub_client",
+ "opentelemetry",
+ "redis",
+ "sea-orm",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "bundle-executor"
 version = "0.1.0"
 dependencies = [
@@ -736,6 +750,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-host-gameserver-net"
+version = "0.1.0"
+dependencies = [
+ "bundle-host-http",
+ "connection_resolver",
+ "opentelemetry",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "bundle-host-http"
 version = "0.1.0"
 dependencies = [
@@ -773,6 +801,7 @@ dependencies = [
  "bundle-host-http",
  "bytes",
  "http",
+ "hub_client",
  "object_store",
  "opentelemetry",
  "redis",
@@ -781,6 +810,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tonic",
  "tracing",
  "uuid",
  "zeroize",
@@ -1026,12 +1056,12 @@ dependencies = [
 name = "connection_resolver"
 version = "0.1.0"
 dependencies = [
- "reqwest 0.12.28",
+ "hub_client",
  "serde",
- "serde_json",
  "service_auth",
  "thiserror 2.0.20",
  "tokio",
+ "tonic",
  "tracing",
  "zeroize",
 ]
@@ -2136,9 +2166,14 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 name = "hub_client"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "async-trait",
+ "hkdf 0.12.4",
+ "opentelemetry",
  "prost",
+ "redis",
  "service_auth",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
  "tokio",
  "tonic",
@@ -2146,6 +2181,8 @@ dependencies = [
  "tonic-prost-build",
  "tower",
  "tracing",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -3129,8 +3166,8 @@ dependencies = [
 
 [[package]]
 name = "penguin-bundle-host"
-version = "0.5.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=53e95619f1b3e49e1150b78a125981fcc5905d8a#53e95619f1b3e49e1150b78a125981fcc5905d8a"
+version = "0.6.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=96a5065f1d379ea0cfc7c7716c6eab628138330a#96a5065f1d379ea0cfc7c7716c6eab628138330a"
 dependencies = [
  "regex",
  "serde",
@@ -3787,7 +3824,6 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
- "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -4322,7 +4358,6 @@ dependencies = [
  "jsonwebtoken",
  "opentelemetry",
  "prost",
- "reqwest 0.12.28",
  "rustls",
  "rustls-pki-types",
  "serde",
@@ -4723,9 +4758,11 @@ dependencies = [
  "base64 0.22.1",
  "bundle-active-set",
  "bundle-capability-gate",
+ "bundle-config-db",
  "bundle-host-credentials",
  "bundle-host-db",
  "bundle-host-economy",
+ "bundle-host-gameserver-net",
  "bundle-host-http",
  "bundle-host-kv",
  "bundle-host-media",
@@ -4736,9 +4773,12 @@ dependencies = [
  "chrono",
  "circuit-breaker",
  "clap",
+ "connection_resolver",
  "futures-util",
  "governor",
+ "hex",
  "hkdf 0.12.4",
+ "hmac 0.12.1",
  "hub_client",
  "hyper",
  "metrics",
@@ -4767,7 +4807,6 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "uuid",
- "x25519-dalek",
  "zeroize",
 ]
 
@@ -5140,6 +5179,7 @@ dependencies = [
  "bundle-host-http",
  "bundle-host-kv",
  "bundle-host-reputation",
+ "bundle-tool-call",
  "clap",
  "opentelemetry",
  "opentelemetry_sdk",

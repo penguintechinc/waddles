@@ -44,18 +44,33 @@ Node's logged-out browsing contract.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
+import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from flask_core.auth import DEFAULT_TENANT_SLUG, verify_jwt_token
-from flask_core.bundle_author import AuthorError, canonical_author
+from flask_core.bundle_author import author_view
 from flask_core.secrets import require_secret_key
 
-from services.errors import ApiError, bad_request, conflict, not_found
+from services.errors import bad_request
 from services.marketplace_author import AuthorDTO, to_author_dto
 
 _MAX_LIMIT = 100
+
+logger = logging.getLogger(__name__)
+
+#: Filter value selecting rows with no derivable vendor (legacy/plain-name authors). Contains an
+#: underscore, which a GitHub org name can never contain, so it cannot collide with a real vendor.
+UNAFFILIATED_VENDOR = "_unaffiliated"
+_VENDOR_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?|_unaffiliated)$")
+_REPO_RE = re.compile(r"^[a-z0-9-]{1,100}/[a-z0-9._-]{1,150}$")
+
+
+#: app_ids already reported as vendorless in this process -- one ERROR per distinct bundle, not
+#: one per request.
+_VENDORLESS_LOGGED: set[str] = set()
 
 
 def _iso(value: Any) -> str | None:
@@ -120,7 +135,11 @@ class CatalogEntry:
     """One `marketplace_catalog` row -- camelCase DTO matching `formatCatalogEntry()`."""
 
     source: str
-    sourceId: int
+    sourceId: int | None
+    sourceRef: str | None
+    vendorKey: str | None
+    vendorName: str | None
+    sourceRepo: str | None
     name: str | None
     displayName: str | None
     description: str | None
@@ -160,6 +179,33 @@ class CatalogListResponse:
     success: bool
     modules: list[CatalogEntry]
     pagination: CatalogPagination
+
+
+@dataclass(slots=True, frozen=True)
+class VendorRepoEntry:
+    """One source repo (`org/repo`) inside a vendor marketplace + its entry count."""
+
+    repo: str | None
+    count: int
+
+
+@dataclass(slots=True, frozen=True)
+class VendorEntry:
+    """One vendor marketplace (a GitHub org) with its per-repo breakdown."""
+
+    key: str
+    name: str
+    count: int
+    repos: list[VendorRepoEntry]
+
+
+@dataclass(slots=True, frozen=True)
+class VendorsResponse:
+    """Response DTO for `GET /api/v1/marketplace/vendors`; counts sum to `total`."""
+
+    success: bool
+    vendors: list[VendorEntry]
+    total: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -227,6 +273,56 @@ def _install_status_maps(
     return installed_core, installed_marketplace
 
 
+def _vendor_of(row: Any) -> tuple[str | None, str | None]:
+    """`(vendor_key, display_name)` for a catalog row; `(None, None)` when no vendor derives.
+
+    `vendor_key` is derived in the view (alembic 0091). A vendorless `bundle` row is listed
+    as unaffiliated (never a 500, never hidden) and reported once per app_id at ERROR. The
+    display name keeps the GitHub handle's original casing from `author` when it matches the
+    key, else falls back to the key.
+    """
+    key = row.vendor_key
+    if not key:
+        if row.source == "bundle" and row.source_ref not in _VENDORLESS_LOGGED:
+            _VENDORLESS_LOGGED.add(row.source_ref)
+            logger.error(
+                "marketplace bundle has no derivable vendor; listing as _unaffiliated",
+                extra={"app_id": row.source_ref, "has_source_url": bool(row.source_url)},
+            )
+        return None, None
+    view = author_view(row.author)
+    handle = view["github_handle"] if view else None
+    name = handle if handle and handle.lower() == key else key
+    return key, name
+
+
+def vendor_repo_error(vendor: str | None, repo: str | None) -> str | None:
+    """Validation message for malformed `vendor`/`repo` filters, else `None` (caller sends 400)."""
+    if vendor and not _VENDOR_RE.match(vendor.lower()):
+        return "vendor must be a GitHub org key or '_unaffiliated'"
+    if repo and not _REPO_RE.match(repo.lower()):
+        return "repo must look like 'org/repo'"
+    return None
+
+
+def _vendor_repo_filters(query: Any, catalog: Any, vendor: str | None, repo: str | None) -> Any:
+    """AND the `vendor` / `repo` filters onto `query`; malformed values raise 400 (no fallback)."""
+    if vendor:
+        vendor = vendor.lower()
+        if not _VENDOR_RE.match(vendor):
+            raise bad_request("vendor must be a GitHub org key or '_unaffiliated'")
+        if vendor == UNAFFILIATED_VENDOR:
+            query &= catalog.vendor_key == None  # noqa: E711
+        else:
+            query &= catalog.vendor_key == vendor
+    if repo:
+        repo = repo.lower()
+        if not _REPO_RE.match(repo):
+            raise bad_request("repo must look like 'org/repo'")
+        query &= catalog.source_repo == repo
+    return query
+
+
 def _to_catalog_entry(
     row: Any, installed_core: dict[int, bool], installed_marketplace: dict[int, bool]
 ) -> CatalogEntry:
@@ -239,9 +335,14 @@ def _to_catalog_entry(
         is_installed = row.source_id in installed_marketplace
         is_enabled = installed_marketplace.get(row.source_id)
 
+    vendor_key, vendor_name = _vendor_of(row)
     return CatalogEntry(
         source=row.source,
         sourceId=row.source_id,
+        sourceRef=row.source_ref,
+        vendorKey=vendor_key,
+        vendorName=vendor_name,
+        sourceRepo=row.source_repo,
         name=row.name,
         displayName=row.display_name,
         description=row.description,
@@ -276,6 +377,8 @@ def get_catalog(
     pricing_type: str | None,
     source: str | None,
     community_id: int | None,
+    vendor: str | None = None,
+    repo: str | None = None,
 ) -> CatalogListResponse:
     """Paginated, filtered, tenant-scoped catalog browse -- port of `getCatalog()`."""
     page, limit = _clamp_pagination(page, limit)
@@ -295,11 +398,12 @@ def get_catalog(
         query &= catalog.pricing_type == pricing_type
     if source:
         query &= catalog.source == source
+    query = _vendor_repo_filters(query, catalog, vendor, repo)
 
     total = dal(query).count()
     offset = (page - 1) * limit
     rows = dal(query).select(
-        orderby=(~catalog.is_core, ~catalog.install_count, ~catalog.created_at),
+        orderby=(~catalog.is_core, ~catalog.install_count, ~catalog.created_at, catalog.name),
         limitby=(offset, offset + limit),
     )
 
@@ -338,6 +442,61 @@ def get_catalog_entry(
     return _to_catalog_entry(row, installed_core, installed_marketplace)
 
 
+def get_catalog_bundle_entry(
+    dal: Any, request: Any, app_id: str, community_id: int | None
+) -> CatalogEntry | None:
+    """Single `bundle` catalog entry by `app_id` (`source_ref`), tenant-scoped."""
+    catalog = dal.marketplace_catalog
+    query = _tenant_scope_query(dal, visible_tenant_ids(dal, request))
+    query &= (catalog.source == "bundle") & (catalog.source_ref == app_id)
+    row = dal(query).select(limitby=(0, 1)).first()
+    if row is None:
+        return None
+    return _to_catalog_entry(row, {}, {})
+
+
+def get_vendors(dal: Any, request: Any) -> VendorsResponse:
+    """Vendor marketplaces (GitHub orgs) with per-repo entry counts, tenant-scoped.
+
+    Same visibility scope as `get_catalog`, so the vendor counts always sum to the unfiltered
+    catalog total. Rows with no derivable vendor are reported once, as `_unaffiliated`.
+    """
+    catalog = dal.marketplace_catalog
+    query = _tenant_scope_query(dal, visible_tenant_ids(dal, request))
+    rows = dal(query).select(
+        catalog.vendor_key,
+        catalog.source_repo,
+        catalog.source.count().with_alias("n"),
+        catalog.author.min().with_alias("sample_author"),
+        groupby=catalog.vendor_key | catalog.source_repo,
+    )
+    by_vendor: dict[str, dict[str, Any]] = {}
+    total = 0
+    for r in rows:
+        key = r.marketplace_catalog.vendor_key or UNAFFILIATED_VENDOR
+        repo = r.marketplace_catalog.source_repo
+        count = int(r._extra["n"])
+        total += count
+        bucket = by_vendor.setdefault(key, {"name": None, "count": 0, "repos": []})
+        bucket["count"] += count
+        bucket["repos"].append(VendorRepoEntry(repo=repo, count=count))
+        if bucket["name"] is None and key != UNAFFILIATED_VENDOR:
+            view = author_view(r._extra["sample_author"])
+            handle = view["github_handle"] if view else None
+            bucket["name"] = handle if handle and handle.lower() == key else key
+    vendors = [
+        VendorEntry(
+            key=key,
+            name=b["name"] or "Unaffiliated",
+            count=b["count"],
+            repos=sorted(b["repos"], key=lambda e: (-e.count, e.repo or "")),
+        )
+        for key, b in by_vendor.items()
+    ]
+    vendors.sort(key=lambda v: (v.key == UNAFFILIATED_VENDOR, -v.count, v.key))
+    return VendorsResponse(success=True, vendors=vendors, total=total)
+
+
 def get_categories(dal: Any) -> list[CategoryEntry]:
     """Distinct categories + counts, whole-catalog, unfiltered by tenant -- port of `getCategories`.
 
@@ -348,8 +507,9 @@ def get_categories(dal: Any) -> list[CategoryEntry]:
     """
     catalog = dal.marketplace_catalog
     # `marketplace_catalog` has no `id` field (composite `primarykey=`, see
-    # `bind_marketplace_module_tables`'s own docstring) -- `source_id`
-    # (never NULL) stands in as the COUNT() target. Sorted in Python
+    # `bind_marketplace_module_tables`'s own docstring) -- `source`
+    # (never NULL -- `source_id` is NULL for bundle rows) stands in as the COUNT() target.
+    # Sorted in Python
     # rather than via a pydal aggregate `orderby=` (the category list is
     # a handful of rows, and ordering by an aliased aggregate expression
     # is a fragile enough pydal corner to avoid rather than lean on).
@@ -363,7 +523,7 @@ def get_categories(dal: Any) -> list[CategoryEntry]:
     # table `left=` join case).
     rows = dal(catalog.category != None).select(  # noqa: E711
         catalog.category,
-        catalog.source_id.count().with_alias("module_count"),
+        catalog.source.count().with_alias("module_count"),
         groupby=catalog.category,
     )
     entries = [
@@ -385,494 +545,3 @@ def get_featured(dal: Any, request: Any, community_id: int | None) -> list[Catal
         dal, community_id, core_ids, marketplace_ids
     )
     return [_to_catalog_entry(r, installed_core, installed_marketplace) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# Module registry DTOs + CRUD -- port of moduleController.js (hub_modules)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(slots=True, frozen=True)
-class ModuleEntry:
-    """One `hub_modules` row, camelCase to match `moduleService.js`'s `formatModule`."""
-
-    id: int
-    name: str
-    displayName: str
-    description: str | None
-    version: str | None
-    author: AuthorDTO | None
-    category: str | None
-    iconUrl: str | None
-    isCore: bool
-    isFeatured: bool
-    avgRating: str
-    reviewCount: int
-    installCount: int
-    createdAt: str | None
-    updatedAt: str | None
-
-
-@dataclass(slots=True, frozen=True)
-class ModuleReview:
-    """One `hub_module_reviews` row, camelCase to match `formatReview`."""
-
-    id: int
-    rating: int
-    reviewText: str | None
-    author: str
-    authorAvatar: str | None
-    createdAt: str | None
-
-
-@dataclass(slots=True, frozen=True)
-class ModuleListPagination:
-    """Page metadata for `GET /api/v1/modules`."""
-
-    page: int
-    limit: int
-    total: int
-    totalPages: int
-
-
-@dataclass(slots=True, frozen=True)
-class ModuleListResponse:
-    """Response DTO for `GET /api/v1/modules`."""
-
-    success: bool
-    modules: list[ModuleEntry]
-    pagination: ModuleListPagination
-
-
-@dataclass(slots=True, frozen=True)
-class ModuleDetail:
-    """`getModuleById()`'s response shape -- `ModuleEntry` fields + `configSchema` + `reviews`."""
-
-    id: int
-    name: str
-    displayName: str
-    description: str | None
-    version: str | None
-    author: AuthorDTO | None
-    category: str | None
-    iconUrl: str | None
-    isCore: bool
-    isFeatured: bool
-    avgRating: str
-    reviewCount: int
-    installCount: int
-    createdAt: str | None
-    updatedAt: str | None
-    configSchema: dict[str, Any]
-    reviews: list[ModuleReview] = field(default_factory=list)
-
-
-@dataclass(slots=True, frozen=True)
-class ModuleDetailResponse:
-    """Response DTO for `GET /api/v1/modules/<id>`."""
-
-    success: bool
-    module: ModuleDetail
-
-
-@dataclass(slots=True, frozen=True)
-class ModuleCreated:
-    """`createModule()`'s response payload."""
-
-    id: int
-    createdAt: str | None
-
-
-@dataclass(slots=True, frozen=True)
-class ModuleCreateResponse:
-    """Response DTO for `POST /api/v1/modules`."""
-
-    success: bool
-    message: str
-    module: ModuleCreated
-
-
-@dataclass(slots=True, frozen=True)
-class SimpleMessageResponse:
-    """Shared `{success, message}` response for update/delete."""
-
-    success: bool
-    message: str
-
-
-@dataclass(slots=True, frozen=True)
-class ModuleSubscription:
-    """One community's installation of a module -- camelCase DTO, matches Node's response shape."""
-
-    id: int
-    communityId: int
-    communityName: str | None
-    communityDisplayName: str | None
-    communityLogo: str | None
-    isEnabled: bool
-    config: dict[str, Any]
-    installedAt: str | None
-    updatedAt: str | None
-
-
-@dataclass(slots=True, frozen=True)
-class ModuleSubscriptionsResponse:
-    """Response DTO for `GET /api/v1/modules/<id>/subscriptions`."""
-
-    success: bool
-    subscriptions: list[ModuleSubscription]
-    total: int
-
-
-def _to_module_entry(
-    row: Any, avg_rating: float, review_count: int, install_count: int
-) -> ModuleEntry:
-    return ModuleEntry(
-        id=row.id,
-        name=row.name,
-        displayName=row.display_name or row.name,
-        description=row.description,
-        version=row.version,
-        author=to_author_dto(row.author),
-        category=row.category,
-        iconUrl=row.icon_url,
-        isCore=bool(row.is_core),
-        isFeatured=bool(row.is_featured),
-        avgRating=f"{avg_rating:.1f}",
-        reviewCount=review_count,
-        installCount=install_count,
-        createdAt=_iso(row.created_at),
-        updatedAt=_iso(row.updated_at),
-    )
-
-
-def _module_stats(dal: Any, module_id: int) -> tuple[float, int, int]:
-    """`(avg_rating, review_count, install_count)` for one module -- `get_module`'s detail page."""
-    review_rows = dal(dal.hub_module_reviews.module_id == module_id).select(
-        dal.hub_module_reviews.rating
-    )
-    review_count = len(review_rows)
-    avg_rating = (sum(r.rating for r in review_rows) / review_count) if review_count else 0.0
-    install_count = dal(dal.hub_module_installations.module_id == module_id).count()
-    return avg_rating, review_count, install_count
-
-
-def _module_stats_batch(dal: Any, module_ids: list[int]) -> dict[int, tuple[float, int, int]]:
-    """`{module_id: (avg_rating, review_count, install_count)}` for a whole page at once.
-
-    `list_modules()`'s batched equivalent of `_module_stats()` -- 2 fixed
-    queries per PAGE (grouped by `module_id`) instead of 2 per ROW, still
-    entirely through the pydal query builder (`hub_api/PORTING.md`
-    Gotcha #1 -- no raw SQL), no `LEFT JOIN`/Row-shape ambiguity
-    (Gotcha #6) to reason about.
-    """
-    if not module_ids:
-        return {}
-    review_rows = dal(dal.hub_module_reviews.module_id.belongs(module_ids)).select(
-        dal.hub_module_reviews.module_id, dal.hub_module_reviews.rating
-    )
-    install_rows = dal(dal.hub_module_installations.module_id.belongs(module_ids)).select(
-        dal.hub_module_installations.module_id,
-        dal.hub_module_installations.id.count().with_alias("install_count"),
-        groupby=dal.hub_module_installations.module_id,
-    )
-    ratings: dict[int, list[int]] = {}
-    for r in review_rows:
-        ratings.setdefault(r.module_id, []).append(r.rating)
-    # Field + aggregate on the same table nests under the tablename (see
-    # `get_categories()`'s own comment on this same pydal Row shape).
-    installs = {
-        r.hub_module_installations.module_id: int(r._extra["install_count"]) for r in install_rows
-    }
-
-    stats: dict[int, tuple[float, int, int]] = {}
-    for module_id in module_ids:
-        rs = ratings.get(module_id, [])
-        avg = (sum(rs) / len(rs)) if rs else 0.0
-        stats[module_id] = (avg, len(rs), installs.get(module_id, 0))
-    return stats
-
-
-def list_modules(
-    dal: Any, *, page: int, limit: int, search: str, category: str | None, featured: bool | None
-) -> ModuleListResponse:
-    """Paginated, published-only module browse -- port of `getModules()`."""
-    page, limit = _clamp_pagination(page, limit)
-    modules = dal.hub_modules
-
-    query = modules.is_published == True  # noqa: E712
-    if search:
-        pattern = f"%{search}%"
-        query &= (
-            modules.name.like(pattern, case_sensitive=False)
-            | modules.display_name.like(pattern, case_sensitive=False)
-            | modules.description.like(pattern, case_sensitive=False)
-        )
-    if category:
-        query &= modules.category == category
-    if featured is not None:
-        query &= modules.is_featured == featured
-
-    total = dal(query).count()
-    offset = (page - 1) * limit
-    rows = dal(query).select(
-        orderby=(~modules.is_featured, ~modules.is_core, ~modules.created_at),
-        limitby=(offset, offset + limit),
-    )
-    stats = _module_stats_batch(dal, [row.id for row in rows])
-    entries = []
-    for row in rows:
-        avg_rating, review_count, install_count = stats.get(row.id, (0.0, 0, 0))
-        entries.append(_to_module_entry(row, avg_rating, review_count, install_count))
-
-    return ModuleListResponse(
-        success=True,
-        modules=entries,
-        pagination=ModuleListPagination(
-            page=page, limit=limit, total=total, totalPages=-(-total // limit) if limit else 0
-        ),
-    )
-
-
-def get_module(dal: Any, module_id: int) -> ModuleDetail:
-    """Full module detail + reviews, published only -- port of `getModuleById`. Raises 404."""
-    modules = dal.hub_modules
-    row = dal((modules.id == module_id) & (modules.is_published == True)).select().first()  # noqa: E712
-    if row is None:
-        raise not_found("Module not found")
-
-    avg_rating, review_count, install_count = _module_stats(dal, module_id)
-    review_rows = dal(dal.hub_module_reviews.module_id == module_id).select(
-        orderby=~dal.hub_module_reviews.created_at, limitby=(0, 10)
-    )
-    reviews = [
-        ModuleReview(
-            id=r.id,
-            rating=r.rating,
-            reviewText=r.review_text,
-            author="Anonymous",
-            authorAvatar=None,
-            createdAt=_iso(r.created_at),
-        )
-        for r in review_rows
-    ]
-
-    return ModuleDetail(
-        id=row.id,
-        name=row.name,
-        displayName=row.display_name or row.name,
-        description=row.description,
-        version=row.version,
-        author=to_author_dto(row.author),
-        category=row.category,
-        iconUrl=row.icon_url,
-        isCore=bool(row.is_core),
-        isFeatured=bool(row.is_featured),
-        avgRating=f"{avg_rating:.1f}",
-        reviewCount=review_count,
-        installCount=install_count,
-        createdAt=_iso(row.created_at),
-        updatedAt=_iso(row.updated_at),
-        configSchema=row.config_schema or {},
-        reviews=reviews,
-    )
-
-
-def _validate_text(
-    payload: dict[str, Any], key: str, *, min_len: int, max_len: int, required: bool
-) -> str | None:
-    """Port of Node's `validators.text` -- returns the trimmed value, or raises a 400 `ApiError`."""
-    raw = payload.get(key)
-    if raw is None or raw == "":
-        if required:
-            raise bad_request(f"{key} is required")
-        return None
-    if not isinstance(raw, str):
-        raise bad_request(f"{key} must be a string")
-    value = raw.strip()
-    if not (min_len <= len(value) <= max_len):
-        raise bad_request(f"{key} must be between {min_len} and {max_len} characters")
-    return value
-
-
-def _validate_url_field(payload: dict[str, Any], key: str) -> str | None:
-    """Node's `validators.url` -- optional; a present-but-malformed URL is a 400."""
-    raw = payload.get(key)
-    if raw is None or raw == "":
-        return None
-    if not isinstance(raw, str) or not raw.startswith(("http://", "https://")):
-        raise bad_request(f"{key} must be a valid URL")
-    return raw.strip()
-
-
-def _validate_author(payload: dict[str, Any]) -> str | None:
-    """Validate an optional `author` payload value; returns its canonical storage form.
-
-    Accepts a GitHub profile (`github:<h>`, `@<h>`, `https://github.com/<h>`) or a simple name;
-    anything else is a 400 carrying the stable `author_*` reason code.
-    """
-    raw = payload.get("author")
-    if raw is None:
-        return None
-    try:
-        return canonical_author(raw)
-    except AuthorError as exc:
-        raise bad_request(f"author invalid ({exc.code}): {exc}") from exc
-
-
-def create_module(dal: Any, payload: dict[str, Any], user_id: int) -> ModuleCreated:
-    """Validate + insert a new `hub_modules` row -- port of `createModule()`. Raises `ApiError`."""
-    name = _validate_text(payload, "name", min_len=3, max_len=100, required=True)
-    display_name = _validate_text(payload, "displayName", min_len=3, max_len=255, required=False)
-    description = _validate_text(payload, "description", min_len=0, max_len=5000, required=False)
-    version = _validate_text(payload, "version", min_len=1, max_len=50, required=True)
-    author = _validate_author(payload)
-    category = _validate_text(payload, "category", min_len=1, max_len=100, required=False)
-    icon_url = _validate_url_field(payload, "iconUrl")
-    is_core = bool(payload.get("isCore", False))
-    is_featured = bool(payload.get("isFeatured", False))
-    config_schema = payload.get("configSchema") or {}
-    if not isinstance(config_schema, dict):
-        raise bad_request("configSchema must be an object")
-
-    if dal(dal.hub_modules.name == name).select(limitby=(0, 1)).first() is not None:
-        raise conflict(f"A module named {name!r} already exists")
-
-    now = datetime.utcnow()
-    new_id = dal.hub_modules.insert(
-        name=name,
-        display_name=display_name,
-        description=description,
-        version=version,
-        author=author,
-        category=category,
-        icon_url=icon_url,
-        config_schema=config_schema,
-        is_core=is_core,
-        is_featured=is_featured,
-        is_published=False,
-        created_at=now,
-        updated_at=now,
-    )
-    dal.commit()
-    return ModuleCreated(id=new_id, createdAt=_iso(now))
-
-
-_UPDATABLE_FIELDS = (
-    "displayName",
-    "description",
-    "version",
-    "author",
-    "category",
-    "iconUrl",
-    "isFeatured",
-    "isPublished",
-)
-
-
-def update_module(dal: Any, module_id: int, payload: dict[str, Any], user_id: int) -> None:
-    """Partial update; only fields present in `payload` change -- port of `updateModule`."""
-    modules = dal.hub_modules
-    if dal(modules.id == module_id).select(limitby=(0, 1)).first() is None:
-        raise not_found("Module not found")
-
-    fields: dict[str, Any] = {}
-    if "displayName" in payload:
-        fields["display_name"] = _validate_text(
-            payload, "displayName", min_len=3, max_len=255, required=False
-        )
-    if "description" in payload:
-        fields["description"] = _validate_text(
-            payload, "description", min_len=0, max_len=5000, required=False
-        )
-    if "version" in payload:
-        fields["version"] = _validate_text(
-            payload, "version", min_len=1, max_len=50, required=False
-        )
-    if "author" in payload:
-        fields["author"] = _validate_author(payload)
-    if "category" in payload:
-        fields["category"] = _validate_text(
-            payload, "category", min_len=1, max_len=100, required=False
-        )
-    if "iconUrl" in payload:
-        fields["icon_url"] = _validate_url_field(payload, "iconUrl")
-    if "isFeatured" in payload:
-        fields["is_featured"] = bool(payload["isFeatured"])
-    if "isPublished" in payload:
-        fields["is_published"] = bool(payload["isPublished"])
-
-    if not fields:
-        raise bad_request("No fields to update")
-
-    fields["updated_at"] = datetime.utcnow()
-    dal(modules.id == module_id).update(**fields)
-    dal.commit()
-
-
-def delete_module(dal: Any, module_id: int, user_id: int) -> None:
-    """Delete a non-core module -- port of `deleteModule()`. Raises `ApiError`."""
-    modules = dal.hub_modules
-    row = dal((modules.id == module_id) & (modules.is_core == False)).select().first()  # noqa: E712
-    if row is None:
-        raise not_found("Module not found or cannot delete core module")
-    dal(modules.id == module_id).delete()
-    dal.commit()
-
-
-def list_module_subscriptions(dal: Any, module_id: int) -> list[ModuleSubscription]:
-    """Every community's installation of `module_id` -- port of `getModuleSubscriptions()`."""
-    rows = dal(dal.hub_module_installations.module_id == module_id).select(
-        orderby=~dal.hub_module_installations.installed_at
-    )
-    subscriptions = []
-    for row in rows:
-        community = dal(dal.communities.id == row.community_id).select().first()
-        subscriptions.append(
-            ModuleSubscription(
-                id=row.id,
-                communityId=row.community_id,
-                communityName=community.name if community else None,
-                communityDisplayName=community.display_name if community else None,
-                communityLogo=community.logo_url if community else None,
-                isEnabled=bool(row.is_enabled),
-                config=row.config or {},
-                installedAt=_iso(row.installed_at),
-                updatedAt=_iso(row.updated_at),
-            )
-        )
-    return subscriptions
-
-
-__all__ = [
-    "ApiError",
-    "CatalogEntry",
-    "CatalogEntryResponse",
-    "CatalogListResponse",
-    "CatalogPagination",
-    "CategoriesResponse",
-    "CategoryEntry",
-    "FeaturedResponse",
-    "ModuleCreateResponse",
-    "ModuleCreated",
-    "ModuleDetail",
-    "ModuleDetailResponse",
-    "ModuleEntry",
-    "ModuleListPagination",
-    "ModuleListResponse",
-    "ModuleReview",
-    "ModuleSubscription",
-    "ModuleSubscriptionsResponse",
-    "SimpleMessageResponse",
-    "create_module",
-    "delete_module",
-    "get_catalog",
-    "get_catalog_entry",
-    "get_categories",
-    "get_featured",
-    "get_module",
-    "list_module_subscriptions",
-    "list_modules",
-    "update_module",
-    "visible_tenant_ids",
-]

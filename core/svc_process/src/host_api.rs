@@ -265,6 +265,11 @@ pub struct Connection {
     /// Answers a `host-call` whose `call_id` has no live entry in
     /// `invoke_scopes` -- `DenyAllCapabilities` in production.
     fallback_capabilities: Arc<dyn CapabilityHandler>,
+    /// The stable executor identity (StatefulSet pod name) the peer sent in
+    /// its `hello` (`HelloBody.executor_id`) -- unset for an executor that
+    /// predates the field, which forces broadcast placement
+    /// (`bundle_active_set::sharding`). Set once, at handshake.
+    executor_id: std::sync::OnceLock<String>,
 }
 
 /// Drop guard for one in-flight [`Connection::invoke`]: removes its per-invoke
@@ -318,7 +323,20 @@ impl Connection {
             metrics: std::sync::OnceLock::new(),
             invoke_scopes: Mutex::new(HashMap::new()),
             fallback_capabilities,
+            executor_id: std::sync::OnceLock::new(),
         })
+    }
+
+    /// The executor id this peer reported in its handshake, if any.
+    pub fn executor_id(&self) -> Option<&str> {
+        self.executor_id.get().map(String::as_str)
+    }
+
+    /// Records the handshake's executor id (first call wins; empty ignored).
+    pub fn set_executor_id(&self, id: &str) {
+        if !id.is_empty() {
+            let _ = self.executor_id.set(id.to_string());
+        }
     }
 
     /// Wires the Prometheus handles in (production only -- called by
@@ -639,6 +657,18 @@ where
             message: "executor sandbox posture mismatch".to_string(),
         });
     }
+    match hello
+        .executor_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => connection.set_executor_id(id),
+        None => warn!(
+            "host-api hello carried no executor_id (executor predates the field); \
+             bundle placement falls back to broadcast while this session is live"
+        ),
+    }
     debug!(?hello, "host-api hello accepted");
     connection
         .send(Frame::new(hello_frame.id, Message::HelloOk(hello_ok)))
@@ -930,6 +960,11 @@ pub struct ConnectionRegistry {
     dead_lettered_no_executor_total: std::sync::OnceLock<prometheus::IntCounter>,
     /// Round-robin turn counter behind [`Self::pick_dispatch`].
     dispatch_rotation: AtomicU64,
+    /// Raw state of the `waddles.disable-executor-sharding` kill switch,
+    /// refreshed every changelog-consumer tick. Stored inverted so the
+    /// derived `Default` (false) is the contract default: unseen = sharding
+    /// ON.
+    sharding_disabled: std::sync::atomic::AtomicBool,
 }
 
 impl ConnectionRegistry {
@@ -1054,6 +1089,60 @@ impl ConnectionRegistry {
         let turn = self.dispatch_rotation.fetch_add(1, Ordering::Relaxed);
         let index = usize::try_from(turn % count).ok()?;
         live.into_iter().nth(index).map(|(_, conn)| conn)
+    }
+
+    /// Records the current executor-sharding decision (already negated kill
+    /// switch: `true` = shard). Written by the changelog consumer each tick.
+    pub fn set_sharding_enabled(&self, enabled: bool) {
+        self.sharding_disabled.store(!enabled, Ordering::Relaxed);
+    }
+
+    /// Whether executor sharding is on (default `true`).
+    pub fn sharding_enabled(&self) -> bool {
+        !self.sharding_disabled.load(Ordering::Relaxed)
+    }
+
+    /// Executor id of every live session that reported one -- sessions of
+    /// old executors (no id) are absent, which the router treats as
+    /// "broadcast" (`bundle_active_set::SessionRouter`).
+    pub fn live_executor_ids(&self) -> HashMap<u64, String> {
+        self.prune_and_snapshot()
+            .into_iter()
+            .filter_map(|(id, conn)| conn.executor_id().map(|e| (id, e.to_string())))
+            .collect()
+    }
+
+    /// The session to send one `app_id` work item to: round-robin across the
+    /// sessions of the app's OWNER executors when sharding is on and every
+    /// live executor reported an id; otherwise exactly [`Self::pick_dispatch`]
+    /// (legacy round-robin over every live session). The caller's per-
+    /// connection `ensure_loaded` still loads on demand if the pick does not
+    /// hold the digest yet.
+    pub fn pick_dispatch_for_app(&self, app_id: &str) -> Option<Arc<Connection>> {
+        let mut live = self.prune_and_snapshot();
+        live.sort_by_key(|(id, _)| *id);
+        let ids: Vec<u64> = live.iter().map(|(id, _)| *id).collect();
+        let executor_of: HashMap<u64, String> = live
+            .iter()
+            .filter_map(|(id, c)| c.executor_id().map(|e| (*id, e.to_string())))
+            .collect();
+        let router = bundle_active_set::SessionRouter::new(
+            &ids,
+            &executor_of,
+            self.sharding_enabled(),
+            bundle_active_set::DEFAULT_REPLICAS,
+        );
+        if router.mode() != bundle_active_set::RoutingMode::Sharded {
+            return self.pick_dispatch();
+        }
+        let targets = router.target_sessions(app_id);
+        self.track_zero_since(!live.is_empty());
+        let count = u64::try_from(targets.len()).ok().filter(|c| *c > 0)?;
+        let turn = self.dispatch_rotation.fetch_add(1, Ordering::Relaxed);
+        let pick = *targets.get(usize::try_from(turn % count).ok()?)?;
+        live.into_iter()
+            .find(|(id, _)| *id == pick)
+            .map(|(_, conn)| conn)
     }
 
     /// How long this registry has held zero live executor sessions --
@@ -1281,6 +1370,7 @@ mod tests {
                 runtime: sandbox_runtime.to_string(),
                 verified: sandbox_runtime == "gvisor",
             },
+            executor_id: None,
         }
     }
 
@@ -1907,6 +1997,70 @@ mod tests {
             Arc::ptr_eq(&second, &conn_b),
             "selection must be stable across repeated calls while both remain live"
         );
+    }
+
+    /// Executor sharding (T6): dispatch for an app round-robins across its
+    /// two owner executors only; kill switch ON or an executor without an id
+    /// falls back to every live session.
+    #[tokio::test]
+    async fn pick_dispatch_for_app_routes_to_owner_executors_or_broadcasts() {
+        let registry = ConnectionRegistry::new();
+        let mut conns = Vec::new();
+        for i in 0..4 {
+            let (tx_x, rx_x) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+            let conn = Connection::new(tx_x, Arc::new(DenyAllCapabilities));
+            conn.set_executor_id(&format!("exec-{i}"));
+            let id = registry.register(Arc::clone(&conn));
+            conns.push((id, conn, rx_x));
+        }
+        assert_eq!(registry.live_executor_ids().len(), 4);
+        let router = bundle_active_set::SessionRouter::new(
+            &registry.live_session_ids(),
+            &registry.live_executor_ids(),
+            true,
+            bundle_active_set::DEFAULT_REPLICAS,
+        );
+        let owners = router.target_sessions("waddles.a");
+        assert_eq!(owners.len(), 2);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..8 {
+            let picked = registry.pick_dispatch_for_app("waddles.a").expect("owner");
+            let (id, _, _) = conns
+                .iter()
+                .find(|(_, c, _)| Arc::ptr_eq(c, &picked))
+                .unwrap();
+            assert!(owners.contains(id), "picked non-owner session {id}");
+            seen.insert(*id);
+        }
+        assert_eq!(seen.len(), 2, "both owner replicas share the work");
+
+        // Kill switch ON -> legacy round-robin over all live sessions.
+        registry.set_sharding_enabled(false);
+        assert!(!registry.sharding_enabled());
+        let all: std::collections::BTreeSet<u64> = (0..8)
+            .map(|_| {
+                let p = registry.pick_dispatch_for_app("waddles.a").unwrap();
+                conns.iter().find(|(_, c, _)| Arc::ptr_eq(c, &p)).unwrap().0
+            })
+            .collect();
+        assert_eq!(all.len(), 4);
+        registry.set_sharding_enabled(true);
+
+        // An executor without an id -> broadcast fallback.
+        let (tx_x, _rx_x) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let old = Connection::new(tx_x, Arc::new(DenyAllCapabilities));
+        let old_id = registry.register(Arc::clone(&old));
+        let picks: std::collections::BTreeSet<u64> = (0..10)
+            .map(|_| {
+                let p = registry.pick_dispatch_for_app("waddles.a").unwrap();
+                if Arc::ptr_eq(&p, &old) {
+                    old_id
+                } else {
+                    conns.iter().find(|(_, c, _)| Arc::ptr_eq(c, &p)).unwrap().0
+                }
+            })
+            .collect();
+        assert_eq!(picks.len(), 5, "broadcast fallback reaches every session");
     }
 
     /// Multi-replica dispatch: with three executor replicas connected,

@@ -10,6 +10,7 @@ Guide, API reference, security model, data-plane contract and the "adding a prov
 |---|---|
 | `adapter.py` | `AdapterSpec` (declarative provider description) + `ProviderAdapter` protocol + metadata/credential validation + `AdapterRegistry`. No Waddles-specific imports. |
 | `twitch.py` | The first adapter: bot account token -> channel resolution -> refresh via the platform Twitch app. |
+| `kick.py` | Bot account's Kick OAuth token -> channel; fetches `chatroom_id` / `broadcaster_user_id` / `self_user_id` at connect time; rotating refresh via the platform Kick app; capped at ONE connection per community (`max_connections_per_community`, DB trigger from migration 0082). Guide: [`docs/integrations/kick.md`](../../../docs/integrations/kick.md). |
 | `youtube.py` | Channel owner's Google OAuth token -> channel -> `live_chat_id` binding (typed or discovered) -> refresh via the tenant's own Google app. Install flow: `services/youtube_install.py`. |
 | `kinds.py` | `ConnectionKind` / `SecretScheme` int enums -- the cross-task code contract (mirrors migration 0064's CHECK and the Rust enum). |
 | `static_secret.py` | `external_http` / `aws_lambda` / `gcp_function` adapters + `validate_endpoint_url` / `validate_secret_document`; credential check is structural only (no outbound call at write time). |

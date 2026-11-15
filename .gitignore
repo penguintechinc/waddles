@@ -128,8 +128,6 @@ core/bundle_executor/tests/fixtures/tool-caller-fixture-src/src/bindings.rs
 # tests/conftest.py at test-collection time (both from the same
 # proto/workflow.proto source), so a checked-in copy would just be a stale
 # build artifact waiting to drift.
-core/workflow_core_module/proto/workflow_pb2.py
-core/workflow_core_module/proto/workflow_pb2_grpc.py
 
 # Jupyter Notebook
 .ipynb_checkpoints

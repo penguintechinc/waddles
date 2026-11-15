@@ -1,0 +1,301 @@
+[
+  {
+    "access": "read",
+    "name": "classify_close_code",
+    "risk": "normal"
+  },
+  {
+    "access": "read",
+    "name": "classify_frame",
+    "risk": "normal"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "role.add",
+      "origin": "guild_scope",
+      "platform": "discord",
+      "required": [
+        "role_key",
+        "user"
+      ],
+      "text": "role_key",
+      "user": "user",
+      "userWire": "placeholder"
+    },
+    "name": "discord.member.roles.add",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "role.remove",
+      "origin": "guild_scope",
+      "platform": "discord",
+      "required": [
+        "role_key",
+        "user"
+      ],
+      "text": "role_key",
+      "user": "user",
+      "userWire": "placeholder"
+    },
+    "name": "discord.member.roles.remove",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "role.set",
+      "origin": "guild_scope",
+      "platform": "discord",
+      "required": [
+        "role_keys",
+        "user"
+      ],
+      "textList": "role_keys",
+      "user": "user",
+      "userWire": "placeholder"
+    },
+    "name": "discord.member.roles.set",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "messageId": "message_id",
+      "op": "chat.delete",
+      "origin": "channel",
+      "platform": "discord",
+      "required": [
+        "message_id"
+      ]
+    },
+    "name": "discord.message.delete",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "messageId": "message_id",
+      "op": "message.edit",
+      "origin": "channel",
+      "platform": "discord",
+      "required": [
+        "content",
+        "message_id"
+      ],
+      "text": "content"
+    },
+    "name": "discord.message.edit",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "message.embed",
+      "origin": "channel",
+      "platform": "discord",
+      "required": [
+        "embeds"
+      ],
+      "returns": [
+        "id"
+      ],
+      "textObject": {
+        "content": "content",
+        "embeds": "embeds"
+      }
+    },
+    "name": "discord.message.embed",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "messageId": "message_id",
+      "op": "reaction.add",
+      "origin": "channel",
+      "platform": "discord",
+      "required": [
+        "emoji",
+        "message_id"
+      ],
+      "text": "emoji"
+    },
+    "name": "discord.message.react",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "mod.ban",
+      "origin": "guild_scope",
+      "platform": "discord",
+      "required": [
+        "user"
+      ],
+      "textObject": {
+        "delete_message_seconds": "delete_message_seconds"
+      },
+      "user": "user",
+      "userWire": "placeholder"
+    },
+    "name": "discord.moderation.ban",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "mod.kick",
+      "origin": "guild_scope",
+      "platform": "discord",
+      "required": [
+        "user"
+      ],
+      "user": "user",
+      "userWire": "placeholder"
+    },
+    "name": "discord.moderation.kick",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "mod.timeout",
+      "origin": "guild_scope",
+      "platform": "discord",
+      "required": [
+        "duration_seconds",
+        "user"
+      ],
+      "textObject": {
+        "duration_seconds": "duration_seconds"
+      },
+      "user": "user",
+      "userWire": "placeholder"
+    },
+    "name": "discord.moderation.timeout",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "mod.unban",
+      "origin": "guild_scope",
+      "platform": "discord",
+      "required": [
+        "user"
+      ],
+      "user": "user",
+      "userWire": "placeholder"
+    },
+    "name": "discord.moderation.unban",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "mod.timeout",
+      "origin": "guild_scope",
+      "platform": "discord",
+      "required": [
+        "clear",
+        "user"
+      ],
+      "textObject": {
+        "clear": "clear"
+      },
+      "user": "user",
+      "userWire": "placeholder"
+    },
+    "name": "discord.moderation.untimeout",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "read",
+    "hostOp": {
+      "op": "role.list",
+      "origin": "guild_scope",
+      "platform": "discord",
+      "returns": [
+        "roles"
+      ]
+    },
+    "name": "discord.roles.list",
+    "risk": "normal"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "event.cancel",
+      "origin": "none",
+      "platform": "discord"
+    },
+    "name": "discord.scheduled_event.cancel",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "event.create",
+      "origin": "none",
+      "platform": "discord",
+      "returns": [
+        "id"
+      ]
+    },
+    "name": "discord.scheduled_event.create",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "event.delete",
+      "origin": "none",
+      "platform": "discord"
+    },
+    "name": "discord.scheduled_event.delete",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "event.update",
+      "origin": "none",
+      "platform": "discord",
+      "returns": [
+        "id"
+      ]
+    },
+    "name": "discord.scheduled_event.update",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "webhook.create",
+      "origin": "channel",
+      "platform": "discord",
+      "required": [
+        "name"
+      ],
+      "returns": [
+        "id"
+      ],
+      "text": "name"
+    },
+    "name": "discord.webhook.create",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  }
+]

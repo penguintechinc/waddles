@@ -281,6 +281,16 @@ pub struct InvocationIdentity {
     /// The actor's community role, cached after the first successful
     /// [`MemberDirectory::role_for`] (successes only). Never held across an `.await`.
     actor_role: Mutex<Option<String>>,
+    /// A host-verified actor handed in by a signed hub-api bundle-admin request (never an
+    /// event): resolves without a directory lookup. `None` for every event-driven invocation.
+    preverified: Option<bundle_tool_call::ActorContext>,
+    /// HOST-derived: this invocation was started by a platform/system event
+    /// (a follow, a subscription, a moderation outcome, ...) rather than a
+    /// human typing a chat command. Set only by the spine from the verified
+    /// envelope's event type, never from guest input; moderation-class
+    /// reputation ops from a system-originated invocation need no human actor
+    /// scope (the automatic floor evaluation), every other caller does.
+    system_originated: bool,
 }
 
 impl fmt::Debug for InvocationIdentity {
@@ -292,6 +302,39 @@ impl fmt::Debug for InvocationIdentity {
             .field("has_event_id", &self.event_id.is_some())
             .finish()
     }
+}
+
+/// First-party (core) bundle app ids.
+pub(crate) fn is_first_party(app_id: &str) -> bool {
+    app_id.starts_with("waddles.core.")
+}
+
+/// The ALLOWLIST of event types that are genuinely system-originated (no human
+/// typed a command): platform engagement notifications and platform moderation
+/// outcomes. Internal event types (e.g. `reputation.floor_check`) are
+/// deliberately NOT here: nothing in-cluster emits them yet, svc-ingest drops
+/// any reserved `reputation.*`/`internal.*` type, and an internal emitter must
+/// bring its own host-only provenance marker before it can be system-origin.
+/// Everything else --
+/// `message`, `chat.*`, `interaction.command`, any unknown or connector-supplied
+/// type -- is human-originated, so the actor-scope check applies (fail-closed).
+/// Matched EXACTLY against the MAC-verified envelope's event type.
+pub fn is_system_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "channel.follow"
+            | "channel.followed"
+            | "channel.subscribe"
+            | "channel.cheer"
+            | "channel.raid"
+            | "channel.ban"
+            | "channel.unban"
+            | "channel.moderate"
+            | "moderation.ban"
+            | "moderation.timeout"
+    ) || event_type
+        .strip_prefix("channel.subscription.")
+        .is_some_and(|rest| matches!(rest, "gift" | "gifts" | "new" | "renewal"))
 }
 
 /// `true` iff `s` is a usable platform account id / token: non-empty, bounded,
@@ -344,6 +387,8 @@ impl InvocationIdentity {
             event_id: None,
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
+            preverified: None,
+            system_originated: false,
         }
     }
 
@@ -398,6 +443,25 @@ impl InvocationIdentity {
             event_id: None,
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
+            preverified: None,
+            system_originated: false,
+        }
+    }
+
+    /// An invocation with no inbound event, acting for an actor the host already verified (the
+    /// hub-api gateway's signed `actor_scope`, MAC-checked by `crate::bundle_admin`). Scope
+    /// checks resolve to `actor` without a directory lookup; nothing here is guest input.
+    pub fn for_verified_admin(actor: bundle_tool_call::ActorContext) -> Self {
+        Self {
+            platform: "hub".to_string(),
+            actor_platform_user_id: None,
+            mentions: HashMap::new(),
+            resolved: Mutex::new(HashMap::new()),
+            event_id: None,
+            mutation_seq: Mutex::new(HashMap::new()),
+            actor_role: Mutex::new(None),
+            preverified: Some(actor),
+            system_originated: false,
         }
     }
 
@@ -409,6 +473,18 @@ impl InvocationIdentity {
         self
     }
 
+    /// Marks this invocation as started by a platform/system event (host-derived
+    /// from the verified envelope's event type; see the field docs).
+    pub fn with_system_originated(mut self, system: bool) -> Self {
+        self.system_originated = system;
+        self
+    }
+
+    /// `true` when the invocation was started by a system event, not a human command.
+    pub(crate) fn is_system_originated(&self) -> bool {
+        self.system_originated
+    }
+
     /// The host-verified retry identity exposed in bundle context. Never sourced
     /// from guest arguments; an unanchored invocation has no retry identity.
     pub(crate) fn event_id(&self) -> Option<&str> {
@@ -418,7 +494,12 @@ impl InvocationIdentity {
     /// Forks verified actor/mention facts with a fresh mutation sequence for one
     /// nested tool call. The host supplies a domain-separated retry namespace
     /// for writes; reads receive `None` and cannot mutate economy/reputation.
-    pub(super) fn for_tool_call(&self, mutation_event_id: Option<String>) -> Self {
+    pub(super) fn for_tool_call(
+        &self,
+        mutation_event_id: Option<String>,
+        caller_app_id: &str,
+        target_app_id: &str,
+    ) -> Self {
         Self {
             platform: self.platform.clone(),
             actor_platform_user_id: self.actor_platform_user_id.clone(),
@@ -427,6 +508,12 @@ impl InvocationIdentity {
             event_id: mutation_event_id,
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
+            preverified: self.preverified.clone(),
+            // Never inherited across an untrusted hop (confused deputy): only a
+            // first-party core caller handing off to a first-party core target keeps it.
+            system_originated: self.system_originated
+                && is_first_party(caller_app_id)
+                && is_first_party(target_app_id),
         }
     }
 
@@ -604,6 +691,9 @@ pub async fn resolve_actor_scopes(
     inv: &InvocationIdentity,
     scope: IdentityScope,
 ) -> Result<bundle_tool_call::ActorContext, IdentityError> {
+    if let Some(actor) = &inv.preverified {
+        return Ok(actor.clone());
+    }
     let user = resolve_actor(wiring, inv, scope).await?;
     let role = match inv.cached_role() {
         Some(role) => role,
@@ -1556,5 +1646,78 @@ mod tests {
         let ctx = resolve_actor_scopes(&w, &odd, SCOPE).await.unwrap();
         assert!(ctx.scopes.is_empty());
         assert!(!ctx.has_scope("community:member"));
+    }
+}
+
+#[cfg(test)]
+mod system_event_tests {
+    use super::*;
+
+    #[test]
+    fn only_allowlisted_platform_events_are_system_originated() {
+        for yes in [
+            "channel.follow",
+            "channel.followed",
+            "channel.subscribe",
+            "channel.subscription.gift",
+            "channel.subscription.renewal",
+            "channel.cheer",
+            "channel.raid",
+            "moderation.ban",
+            "moderation.timeout",
+        ] {
+            assert!(is_system_event_type(yes), "{yes}");
+        }
+        // Human-typed, malformed or unknown: fail CLOSED. An ingested envelope
+        // claiming an internal type is treated as human-originated.
+        for no in [
+            "reputation.floor_check",
+            "reputation.x",
+            "internal.x",
+            "message",
+            "chat.message",
+            "interaction.command",
+            "chat.command",
+            "command",
+            "",
+            "Channel.Follow",
+            "channel.follow ",
+            "channel.subscription.",
+            "channel.subscription.unknown",
+            "channel.subscription.gift.extra",
+            "anything.else",
+            "moderation.",
+        ] {
+            assert!(!is_system_event_type(no), "{no:?}");
+        }
+    }
+
+    #[test]
+    fn the_flag_survives_only_core_to_core_hops() {
+        let base = InvocationIdentity::new("twitch", Some("1".into()), vec![])
+            .with_event_id("e")
+            .with_system_originated(true);
+        let core = "waddles.core.app.reputation-accrual";
+        let svc = "waddles.core.service.reputation";
+        assert!(base
+            .for_tool_call(Some("k".into()), core, svc)
+            .is_system_originated());
+        // A third-party caller or target strips it (confused deputy).
+        assert!(!base
+            .for_tool_call(Some("k".into()), "acme.logic", svc)
+            .is_system_originated());
+        assert!(!base
+            .for_tool_call(Some("k".into()), core, "acme.service")
+            .is_system_originated());
+        // And it can never be re-acquired further down the chain.
+        let hop1 = base.for_tool_call(Some("k".into()), "acme.logic", svc);
+        assert!(!hop1
+            .for_tool_call(Some("k".into()), svc, svc)
+            .is_system_originated());
+        // A human-originated invocation stays human across core hops.
+        let human = InvocationIdentity::new("twitch", Some("1".into()), vec![]);
+        assert!(!human
+            .for_tool_call(Some("k".into()), core, svc)
+            .is_system_originated());
     }
 }

@@ -410,19 +410,36 @@ mod embed_webhook_tests {
     #[test]
     fn message_embed_posts_to_the_pinned_channel_and_returns_the_message_snowflake() {
         let url = "https://discord.com/api/v10/channels/{target.channel_id}/messages";
-        let good = tpl("POST", url, Some(serde_json::json!({"content": "x", "embeds": [{"title": "t"}]})));
+        let good = tpl(
+            "POST",
+            url,
+            Some(serde_json::json!({"content": "x", "embeds": [{"title": "t"}]})),
+        );
         assert_eq!(check("message.embed", &good), Ok(()));
-        let k = PlatformPolicy::discord().kind("message.embed").unwrap().clone();
+        let k = PlatformPolicy::discord()
+            .kind("message.embed")
+            .unwrap()
+            .clone();
         assert!(k.requires_pin);
         assert_eq!(k.result, ResultMode::CreatedSnowflake);
-        let bad_key = tpl("POST", url, Some(serde_json::json!({"content": "x", "attachments": []})));
-        assert_eq!(check("message.embed", &bad_key), Err(TemplateError::BodyKeyNotAllowed));
+        let bad_key = tpl(
+            "POST",
+            url,
+            Some(serde_json::json!({"content": "x", "attachments": []})),
+        );
+        assert_eq!(
+            check("message.embed", &bad_key),
+            Err(TemplateError::BodyKeyNotAllowed)
+        );
         let lit = tpl(
             "POST",
             "https://discord.com/api/v10/channels/42/messages",
             Some(serde_json::json!({"content": "x"})),
         );
-        assert_eq!(check("message.embed", &lit), Err(TemplateError::PathMismatch));
+        assert_eq!(
+            check("message.embed", &lit),
+            Err(TemplateError::PathMismatch)
+        );
     }
 
     #[test]
@@ -430,18 +447,31 @@ mod embed_webhook_tests {
         let url = "https://discord.com/api/v10/channels/{target.channel_id}/webhooks";
         let good = tpl("POST", url, Some(serde_json::json!({"name": "bridge"})));
         assert_eq!(check("webhook.create", &good), Ok(()));
-        let k = PlatformPolicy::discord().kind("webhook.create").unwrap().clone();
+        let k = PlatformPolicy::discord()
+            .kind("webhook.create")
+            .unwrap()
+            .clone();
         assert!(k.requires_pin);
         // The reply carries the webhook token: Body mode keeps it host-side (the producer
         // drops every key the manifest did not allowlist).
         assert_eq!(k.result, ResultMode::Body);
-        let extra = tpl("POST", url, Some(serde_json::json!({"name": "b", "avatar": "x"})));
-        assert_eq!(check("webhook.create", &extra), Err(TemplateError::BodyKeyNotAllowed));
+        let extra = tpl(
+            "POST",
+            url,
+            Some(serde_json::json!({"name": "b", "avatar": "x"})),
+        );
+        assert_eq!(
+            check("webhook.create", &extra),
+            Err(TemplateError::BodyKeyNotAllowed)
+        );
         let lit = tpl(
             "POST",
             "https://discord.com/api/v10/channels/42/webhooks",
             Some(serde_json::json!({"name": "b"})),
         );
-        assert_eq!(check("webhook.create", &lit), Err(TemplateError::PathMismatch));
+        assert_eq!(
+            check("webhook.create", &lit),
+            Err(TemplateError::PathMismatch)
+        );
     }
 }

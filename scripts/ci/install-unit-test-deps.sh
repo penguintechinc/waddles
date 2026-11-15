@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # Installs every Python dependency `make test-unit` / tests/k8s/alpha/05-unit-tests.sh
-# needs to collect and run the full unit suite (legacy tests/unit +
-# identity_core_module, workflow_core_module, community_module, hub_api,
-# libs/* (flask_core + SCCEMBS module libraries), and every core/svc_*
-# stage-runner container).
+# needs to collect and run the unit suite (hub_api + libs/flask_core +
+# libs/waddle_transports).
 #
 # Each subproject ships its own requirements.txt with its own pins -- most
 # are hash-pinned (--require-hashes) and some legitimately disagree on
@@ -34,13 +32,12 @@ PIP=("$PYTHON_BIN" -m pip install --disable-pip-version-check)
 # not TYPE_CHECKING-guarded) as of the R52 App Bundle DB access work, but
 # flask_core's own requirements.in/setup.py never declared it. Any module
 # whose `app.py`/`config.py` does `from flask_core import (...)` --
-# identity_core_module and community_module both, at minimum -- transitively
+# hub_api included -- transitively
 # hits `flask_core/__init__.py`'s `from .bundle_runtime import (...)` and
 # fails to even collect with `ModuleNotFoundError: No module named
 # 'penguin_dal'` unless this is installed first. Pinned to the same
 # `penguin-dal==0.4.0` every other consumer in this repo already uses
-# (hub_api/requirements.in, core/svc_action/requirements.in,
-# core/svc_process/requirements.in) so nothing here introduces a second,
+# (hub_api/requirements.in) so nothing here introduces a second,
 # divergent pin.
 echo "[install-unit-test-deps] penguin-dal (libs/flask_core's undeclared runtime import)"
 "${PIP[@]}" "penguin-dal==0.4.0"
@@ -51,75 +48,24 @@ echo "[install-unit-test-deps] penguin-dal (libs/flask_core's undeclared runtime
 # --no-deps on the editable install: every dependency was already installed
 # hash-verified from the two requirements.txt files above it, so nothing
 # unhashed is resolved from the index.
-echo "[install-unit-test-deps] core/identity_core_module (hash-pinned deps)"
-"${PIP[@]}" --require-hashes -r core/identity_core_module/requirements.txt
 echo "[install-unit-test-deps] libs/flask_core (hash-pinned deps)"
 "${PIP[@]}" --require-hashes -r libs/flask_core/requirements.txt
 echo "[install-unit-test-deps] editable libs/flask_core"
 "${PIP[@]}" --no-deps -e libs/flask_core
 
-# core/workflow_core_module's requirements.txt is hash-pinned
-# (--generate-hashes, like libs/waddle_transports below) -- installed
-# without --require-hashes since there's no accompanying unhashed/editable
-# spec in this call to conflict with pip's auto-enabled hash-checking mode.
-# It also needs grpc_tools.protoc at test-collection time (tests/conftest.py
-# generates workflow_pb2*.py from proto/workflow.proto on the fly, mirroring
-# the Dockerfile's build-time codegen step) -- grpcio-tools is already
-# declared in this requirements.txt for exactly that reason.
-echo "[install-unit-test-deps] core/workflow_core_module"
-"${PIP[@]}" -r core/workflow_core_module/requirements.txt
-
-echo "[install-unit-test-deps] core/community_module"
-"${PIP[@]}" -r core/community_module/requirements.txt
-
-# libs/waddle_transports is the first libs/* module carrying its own
-# runtime dependencies beyond flask_core (websockets/aiosmtplib/httpx[http2]
-# for the socket/email/http transports) -- most other libs/* modules (see
-# the run_suite loop in tests/k8s/alpha/05-unit-tests.sh) have no
-# requirements.txt of their own and are satisfied by flask_core alone. Unlike
-# flask_core's combined line above, this requirements.txt IS hash-pinned
-# (--generate-hashes) -- pip auto-enables hash-checking the moment any
-# requirement in a call carries a hash, and then rejects every other spec
-# in that same call lacking one (the unhashed local `-e` path), so the
-# hash-pinned install and the editable package install must be two
-# separate `pip install` calls, not combined like flask_core's.
+# libs/waddle_transports carries its own hash-pinned runtime deps; pip rejects an editable
+# requirement in a hash-checked call, so the deps and the editable package are two calls.
 echo "[install-unit-test-deps] libs/waddle_transports (hash-pinned deps)"
 "${PIP[@]}" --require-hashes -r libs/waddle_transports/requirements.txt
 echo "[install-unit-test-deps] editable libs/waddle_transports"
 "${PIP[@]}" -e libs/waddle_transports
 
-# libs/moderation_module (content-moderation classifier, see
-# docs/plans/2026-09-08-content-moderation-design.md) is consumed directly
-# by core/svc_process's services/moderation_gate.py -- same local-package
-# shape as libs/waddle_transports above (own hash-pinned requirements.txt,
-# installed editable so `import moderation_module` resolves). The Dockerfile
-# already installs it this way for the runtime image; this was the missing
-# piece for the *test* environment -- without it, core/svc_process's own
-# suite fails to collect with ModuleNotFoundError.
-echo "[install-unit-test-deps] libs/moderation_module (hash-pinned deps)"
-"${PIP[@]}" --require-hashes -r libs/moderation_module/requirements.txt
-echo "[install-unit-test-deps] editable libs/moderation_module"
-"${PIP[@]}" -e libs/moderation_module
-
-for pkg in hub_api core/svc_action core/svc_ingest core/svc_presentation core/svc_process core/svc_streaming; do
-    req="${pkg}/requirements.txt"
-    if [ ! -f "$req" ]; then
-        echo "[install-unit-test-deps] ERROR: $req not found" >&2
-        exit 1
-    fi
-    echo "[install-unit-test-deps] ${pkg}"
-    "${PIP[@]}" --require-hashes -r "$req"
-done
-
-# tests/unit's own test-only deps (hash-pinned): defusedxml, imported by the
-# XXE regression tests (tests/unit/test_caldav_xxe.py,
-# tests/unit/test_youtube_webhook_xxe.py) and by the production code they
-# exercise (libs/calendar_sync Apple provider, youtube_live_module webhook
-# handler). No subproject above declares it, so without this step the legacy
-# tests/unit suite fails to collect with ModuleNotFoundError: defusedxml.
-# Installed last: defusedxml has no dependencies, so it cannot disturb any
-# earlier subproject's pins.
-echo "[install-unit-test-deps] tests/unit (hash-pinned: defusedxml for XXE regression tests)"
-"${PIP[@]}" --require-hashes -r tests/unit/requirements.txt
+req="hub_api/requirements.txt"
+if [ ! -f "$req" ]; then
+    echo "[install-unit-test-deps] ERROR: $req not found" >&2
+    exit 1
+fi
+echo "[install-unit-test-deps] hub_api"
+"${PIP[@]}" --require-hashes -r "$req"
 
 echo "[install-unit-test-deps] done"

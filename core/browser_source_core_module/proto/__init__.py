@@ -1,1 +1,0 @@
-# gRPC proto module

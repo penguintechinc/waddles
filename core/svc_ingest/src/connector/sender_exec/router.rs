@@ -1,8 +1,8 @@
 //! The per-platform [`SlotSource`] router.
 //!
 //! [`super::SenderExecutor`] takes exactly ONE [`SlotSource`]; production has
-//! three platform-specific ones (`TwitchSlots`, `DiscordSlots`,
-//! `YoutubeSlots`), each of which resolves only its own platform's handles
+//! four platform-specific ones (`TwitchSlots`, `DiscordSlots`,
+//! `YoutubeSlots`, `KickSlots`), each of which resolves only its own platform's handles
 //! and refuses any other. [`PlatformSlotRouter`] is the dispatcher: the
 //! platform string the executor hands in selects exactly one source, and an
 //! unknown platform is a typed [`SlotError::Refused`] -- never a default
@@ -21,26 +21,29 @@ pub const UNKNOWN_PLATFORM: &str = "slot_platform_unknown";
 /// Dispatches [`SlotRequest`]s by `req.platform` to the platform's own source.
 /// `app.*` handles are answered ONLY by the app-credential source `A`
 /// ([`NoAppCredentials`] by default: every app-scoped kind is refused).
-pub struct PlatformSlotRouter<T, D, Y, A = NoAppCredentials> {
+pub struct PlatformSlotRouter<T, D, Y, K, A = NoAppCredentials> {
     twitch: T,
     discord: D,
     youtube: Y,
+    kick: K,
     app: A,
 }
 
-impl<T, D, Y> PlatformSlotRouter<T, D, Y, NoAppCredentials>
+impl<T, D, Y, K> PlatformSlotRouter<T, D, Y, K, NoAppCredentials>
 where
     T: SlotSource,
     D: SlotSource,
     Y: SlotSource,
+    K: SlotSource,
 {
-    /// A router over the three production platform sources.
+    /// A router over the four production platform sources.
     #[must_use]
-    pub fn new(twitch: T, discord: D, youtube: Y) -> Self {
+    pub fn new(twitch: T, discord: D, youtube: Y, kick: K) -> Self {
         Self {
             twitch,
             discord,
             youtube,
+            kick,
             app: NoAppCredentials,
         }
     }
@@ -50,21 +53,23 @@ where
     pub fn with_app_credentials<A: AppCredentialSource>(
         self,
         app: A,
-    ) -> PlatformSlotRouter<T, D, Y, A> {
+    ) -> PlatformSlotRouter<T, D, Y, K, A> {
         PlatformSlotRouter {
             twitch: self.twitch,
             discord: self.discord,
             youtube: self.youtube,
+            kick: self.kick,
             app,
         }
     }
 }
 
-impl<T, D, Y, A> SlotSource for PlatformSlotRouter<T, D, Y, A>
+impl<T, D, Y, K, A> SlotSource for PlatformSlotRouter<T, D, Y, K, A>
 where
     T: SlotSource,
     D: SlotSource,
     Y: SlotSource,
+    K: SlotSource,
     A: AppCredentialSource,
 {
     async fn resolve(
@@ -94,12 +99,13 @@ where
             "twitch" => self.twitch.resolve(req).await,
             "discord" => self.discord.resolve(req).await,
             "youtube" => self.youtube.resolve(req).await,
+            "kick" => self.kick.resolve(req).await,
             _ => Err(SlotError::Refused(UNKNOWN_PLATFORM)),
         }
     }
 
-    /// Delegates to the platform's own source; an unknown platform (Kick included, which has
-    /// no slot source yet) never supports app credentials.
+    /// Delegates to the platform's own source; an unknown platform never supports app
+    /// credentials.
     fn supports_app_credentials(&self, platform: &str) -> bool {
         // The app source is the sole authority for app-scoped credentials; a
         // platform's USER source opting in is not enough (it would be handed
@@ -133,10 +139,11 @@ mod tests {
         }
     }
 
-    type Counters = [Arc<AtomicUsize>; 3];
+    type Counters = [Arc<AtomicUsize>; 4];
 
-    fn router() -> (PlatformSlotRouter<Tagged, Tagged, Tagged>, Counters) {
+    fn router() -> (PlatformSlotRouter<Tagged, Tagged, Tagged, Tagged>, Counters) {
         let counters: Counters = [
+            Arc::new(AtomicUsize::new(0)),
             Arc::new(AtomicUsize::new(0)),
             Arc::new(AtomicUsize::new(0)),
             Arc::new(AtomicUsize::new(0)),
@@ -146,7 +153,12 @@ mod tests {
             calls: Arc::clone(&counters[i]),
         };
         (
-            PlatformSlotRouter::new(mk("twitch", 0), mk("discord", 1), mk("youtube", 2)),
+            PlatformSlotRouter::new(
+                mk("twitch", 0),
+                mk("discord", 1),
+                mk("youtube", 2),
+                mk("kick", 3),
+            ),
             counters,
         )
     }
@@ -163,7 +175,10 @@ mod tests {
 
     #[tokio::test]
     async fn each_platform_reaches_only_its_own_source() {
-        for (i, p) in ["twitch", "discord", "youtube"].into_iter().enumerate() {
+        for (i, p) in ["twitch", "discord", "youtube", "kick"]
+            .into_iter()
+            .enumerate()
+        {
             let (r, counters) = router();
             let out = r.resolve(&req(p)).await.unwrap();
             assert_eq!(out["who"].expose(), p);
@@ -269,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_platform_is_refused_and_no_source_is_consulted() {
-        for p in ["slack", "", "Twitch", "twitch ", "kick"] {
+        for p in ["slack", "", "Twitch", "twitch ", "Kick"] {
             let (r, counters) = router();
             let err = r.resolve(&req(p)).await.unwrap_err();
             assert_eq!(err, SlotError::Refused(UNKNOWN_PLATFORM), "{p:?}");

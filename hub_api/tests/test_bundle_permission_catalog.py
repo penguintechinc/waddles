@@ -45,6 +45,14 @@ def test_connector_pii_read_is_dangerous() -> None:
     assert resolve_risk("connector.pii.read:x") is None
 
 
+def test_gameserver_net_is_dangerous() -> None:
+    """Host-mediated game-server network access is `dangerous`, mirrors the Rust catalog."""
+    assert resolve_risk("gameserver.net") == "dangerous"
+    assert is_dangerous("gameserver.net")
+    assert is_known_permission("gameserver.net")
+    assert resolve_risk("gameserver.net:x") is None
+
+
 def test_streaming_lifecycle_subscribe_is_normal() -> None:
     """Read-only subscribe to svc-streaming-rust's lifecycle hooks (issue #456) is `normal`."""
     assert resolve_risk("streaming.lifecycle.subscribe") == "normal"

@@ -215,6 +215,7 @@ async fn world_scoped(
                         runtime: "runc".to_string(),
                         verified: false,
                     },
+                    executor_id: None,
                 }),
             ),
         )
@@ -919,8 +920,23 @@ mod discord_role_tool_invoke {
         };
         vec![
             row(APP, APP_VERSION, manifest(false, &[], req)),
-            row(DISCORD, 44, manifest(true, &[(TOOL_ROLES_ADD, true)], &[])),
+            row(DISCORD, 44, discord_service_manifest()),
         ]
+    }
+
+    /// The Discord service bundle's role-add tool exactly as its REAL manifest declares it.
+    fn discord_service_manifest() -> ToolManifestInfo {
+        let exported: Vec<ExportedToolInfo> =
+            crate::capabilities::host_tools::host_tools_tests::manifest_tools("discord")
+                .into_iter()
+                .filter(|t| t.name == TOOL_ROLES_ADD)
+                .collect();
+        assert_eq!(exported.len(), 1, "the manifest declares {TOOL_ROLES_ADD}");
+        ToolManifestInfo {
+            is_tool_service: true,
+            exported,
+            requested: vec![],
+        }
     }
 
     fn handler(requested: bool, granted: bool) -> StageCapabilities<FakeRelayQueue> {

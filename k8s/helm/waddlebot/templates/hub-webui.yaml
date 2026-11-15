@@ -48,7 +48,7 @@ spec:
         # already builds under CI as module "hub-webui" (containers.yml); no longer the
         # shared pipeline.nodeBaseImage skeleton placeholder. Bare module name "hub-webui"
         # is the alpha-local repo under global.imageRegistry -- see scripts/deploy-alpha.sh.
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-webui" "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-webui") }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
@@ -66,6 +66,9 @@ spec:
         # default (see server.js). Same pattern as svc-ingest/svc-action/etc.
         - name: HUB_API_URL
           value: {{ include "waddlebot.hubApiBaseUrl" . | quote }}
+        # Allowlist for the X-Forwarded-Host the proxy sets (license bypass-domain check).
+        - name: PUBLIC_HOSTNAMES
+          value: {{ join "," .Values.webui.publicHostnames | quote }}
         # F3 -- internal CA (secretKeyRef) + plaintext refusal for every internal HTTP client in this pod.
         {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
         {{- if include "waddlebot.transitTlsEnabled" . }}

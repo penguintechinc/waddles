@@ -1,0 +1,66 @@
+// DataplaneScopeService: internal gRPC contract replacing the former REST hop
+// `GET /api/v1/internal/dataplane/resolve-scope` (+ `/batch`); intra-cluster traffic is gRPC only.
+//
+// svc-ingest has no database; it asks hub-api which community a platform source (a Discord guild
+// id, a Twitch channel login, or -- for the reserved pseudo-platform `community` -- a numeric
+// community id) belongs to, so the data plane keys on NUMERIC tenant/community ids. The answer
+// carries ids and display names only; no secret exists to leak. A NOT_FOUND means "not linked":
+// the caller fails closed (drops the event), it never guesses a scope.
+//
+// Auth: hub-api-issued EdDSA machine JWT in the `authorization` metadata key with scope
+// "dataplane:resolve-scope" (deliberately NOT "connections:resolve", least privilege) from the
+// operator-plane `system` tenant, granted in the chart to svc-ingest's SPIFFE identity alone.
+syntax = "proto3";
+
+package waddles.hub.internal.v1;
+
+option go_package = "github.com/penguintechinc/waddles/gen/go/waddles/hub/internal/v1;hubinternalv1";
+
+service DataplaneScopeService {
+  // Resolves one source to its numeric scope.
+  // Required scope: "dataplane:resolve-scope".
+  // Errors: INVALID_ARGUMENT (malformed platform/source), NOT_FOUND (unlinked),
+  // FAILED_PRECONDITION (source claimed by more than one community/tenant).
+  rpc ResolveScope(ResolveScopeRequest) returns (ResolveScopeResponse);
+
+  // Resolves 1..100 sources; every item carries its own status, order preserved.
+  // Required scope: "dataplane:resolve-scope". INVALID_ARGUMENT outside 1..100 items.
+  rpc ResolveScopeBatch(ResolveScopeBatchRequest) returns (ResolveScopeBatchResponse);
+}
+
+message ResolveScopeRequest {
+  string platform = 1;
+  string source_id = 2;
+}
+
+// The numeric keys plus display-only names. Only the ids are ever a key.
+message ResolveScopeResponse {
+  int64 tenant_id = 1;
+  int64 community_id = 2;
+  string tenant_slug = 3;
+  string community_name = 4;
+}
+
+message ResolveScopeBatchRequest {
+  repeated ResolveScopeRequest items = 1;
+}
+
+enum ScopeStatus {
+  SCOPE_STATUS_UNSPECIFIED = 0;
+  SCOPE_STATUS_RESOLVED = 1;
+  SCOPE_STATUS_NOT_FOUND = 2;
+  SCOPE_STATUS_AMBIGUOUS = 3;
+  SCOPE_STATUS_INVALID = 4;
+}
+
+message ScopeResult {
+  string platform = 1;
+  string source_id = 2;
+  ScopeStatus status = 3;
+  // Set only when status is SCOPE_STATUS_RESOLVED.
+  ResolveScopeResponse scope = 4;
+}
+
+message ResolveScopeBatchResponse {
+  repeated ScopeResult results = 1;
+}

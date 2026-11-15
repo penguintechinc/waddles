@@ -1,4 +1,4 @@
-# AI Teammates (`waddles.core.example.ai_teammates`)
+# AI Teammates (`waddles.core.example.ai-teammates`)
 
 Rust APP bundle on the `stage-next-tools` world. Three teammates, each **off by default** and
 enabled/configured **per community**. All model access is through the AI service tools

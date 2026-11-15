@@ -6,6 +6,10 @@
 -- under `scripts/db/` because that directory is already copied into the
 -- migrations image (`migrations/Dockerfile`).
 --
+-- NOTE: the unified `reputation_apply()` write path, the policy/tenant-aggregate tables and
+-- their grants (incl. hub_api) live in `bundle_reputation_unify.sql` (alembic 0097): they depend
+-- on columns added by 0072, which do not exist yet when this file runs at 0050.
+--
 -- Prerequisites (created by earlier migrations / the test harness BEFORE this
 -- file runs): `tenants`, `communities(id, tenant_id)`, `community_members`
 -- (incl. `is_active`, `left_at`, `removed_at`), `bundle_reputation_adjustments`
@@ -52,6 +56,8 @@ CREATE INDEX IF NOT EXISTS idx_bundle_reputation_adjustments_user_window
     ON bundle_reputation_adjustments (tenant_id, community_id, target_user_uuid, occurred_at)
     WHERE scope = 'community';
 
+-- NOTE: the DML grants below are the 0050 baseline only; `bundle_reputation_unify.sql` (0097)
+-- REVOKEs every write from the bundle role (writes go through SECURITY DEFINER functions).
 -- 4. Least-privilege role grants (role itself is provisioned by the
 -- migration / test harness; skipped if absent so this file never depends on
 -- ordering). DML only on the two reputation tables, column-scoped SELECT on

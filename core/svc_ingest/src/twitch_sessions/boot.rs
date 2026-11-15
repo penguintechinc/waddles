@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use connection_resolver::{
-    ConnectionKind, ConnectionResolver, ResolverConfig, ResolverMetrics as ConnResolverMetrics,
+    ConnectionKind, ConnectionResolver, ResolverMetrics as ConnResolverMetrics,
 };
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -116,9 +116,7 @@ pub fn try_start_twitch_sessions(
     config: &Config,
     metrics: Arc<telemetry::IngestMetrics>,
     readiness: Arc<ReceiverReadiness>,
-    dek_provider: crate::identity_crypto::ConfiguredDekProvider<
-        crate::identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek_provider: crate::identity_crypto::ConfiguredDekProvider,
 ) -> anyhow::Result<()> {
     let cli = &config.cli;
     validate_dynamic_prereqs(cli, publish::scope_resolver_installed())?;
@@ -137,16 +135,8 @@ pub fn try_start_twitch_sessions(
         )
     })?;
     let resolver = Arc::new(
-        ConnectionResolver::new(
-            ResolverConfig::new(
-                cli.hub_api_url.clone(),
-                cli.environment.clone(),
-                cli.service_jwt_token_endpoint.clone(),
-                cli.service_jwt_sa_token_path.clone(),
-            ),
-            Arc::new(ResolverTelemetry),
-        )
-        .map_err(|e| anyhow::anyhow!("connection resolver unavailable: {e}"))?,
+        ConnectionResolver::new(cli.resolver_config()?, Arc::new(ResolverTelemetry))
+            .map_err(|e| anyhow::anyhow!("connection resolver unavailable: {e}"))?,
     );
 
     let active_kid = cli.binding_active_kid.clone();

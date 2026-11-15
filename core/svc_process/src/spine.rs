@@ -194,6 +194,10 @@ pub async fn ensure_loaded(
     let metrics = stage_metrics::stage_metrics();
     let result = if outcome.is_ok() { "ok" } else { "error" };
     metrics.record_bundle_load(app_id, "load", result, started.elapsed());
+    if outcome.is_ok() {
+        // Seed the live-config cache for this scope (lazy-load still covers a failed seed).
+        hub_client::bundle_config::seed_scope_in_background(tenant_id, community_id, app_id);
+    }
     if let Ok(loaded) = &outcome {
         // The executor's own account of the load (`precompile_ms`, covering
         // fetch + verify + compile on its side) -- the stage cannot see
@@ -428,6 +432,9 @@ fn record_executor_call(
             Message::Error(e) => {
                 if let Some(limit) = stage_metrics::sandbox_limit_for(e.code, e.detail.as_deref()) {
                     metrics.record_sandbox_trip(app_id, limit);
+                }
+                if e.detail.as_deref() == Some("pool_exhausted") {
+                    metrics.record_pool_exhausted(app_id);
                 }
                 "executor_error"
             }
@@ -875,6 +882,12 @@ pub struct ProcessDeps<S: SpineOps> {
     ///
     /// [`pii_gate`]: ProcessDeps::pii_gate
     pub pii_minter: Option<Arc<dyn crate::pii_tokenize::IdentityMinter>>,
+    /// The process-wide single-flight memo that makes ONE ingest message
+    /// tokenize (one hub-api mint) once per process rather than once per
+    /// consuming app -- see `crate::tokenize_memo`. ONE instance is shared by
+    /// every consumer (`SupervisorDeps::tokenize_memo`); a per-consumer memo
+    /// would defeat it.
+    pub tokenize_memo: Arc<crate::tokenize_memo::TokenizeMemo>,
     /// The `db` host capability's production wiring
     /// (`crate::capabilities::StageCapabilities::with_db`), built once at
     /// startup (`crate::lib::try_build_db_wiring`) and cloned -- cheap,
@@ -920,6 +933,10 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `BUNDLE_PLATFORM_TABLE_PASSWORD` is unset or the connection failed
     /// (every `platform_table.*` call then denies `not_implemented`).
     pub platform_table_wiring: Option<crate::capabilities::PlatformTableWiring>,
+    /// The `gameserver-net` host capability's production wiring (`crate::lib::
+    /// try_build_gameserver_net_wiring`). `None` when the connection-resolver endpoints are
+    /// unconfigured (every `gameserver_net.*` call then denies `not_implemented`).
+    pub gameserver_net_wiring: Option<crate::capabilities::GameServerNetWiring>,
     /// The `identity` host capability's production wiring
     /// (`crate::lib::try_build_identity_wiring`), cloned into every per-invoke
     /// `StageCapabilities` like [`ProcessDeps::economy_wiring`] -- paired there
@@ -940,6 +957,86 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `StageCapabilities`. `None` when its config/dependencies are not
     /// provisioned (every `media.*` call then denies `not_implemented`).
     pub media_wiring: Option<crate::media::MediaWiring>,
+    /// The tenant stream-DEK source (hub-api `KeyService` in production, the hard-gated
+    /// dev/alpha KEK otherwise) [`handle_delivered`] decrypts inbound identity fields with.
+    /// `None` is a deployment error, not an opt-out: an event that carries identity fields
+    /// is then dead-lettered (`IDENTITY_DECRYPT_FAILED`/`dek_unconfigured`), never forwarded
+    /// still-encrypted and never dropped -- `crate::run_with_shutdown` refuses to start
+    /// without one, so this can only be observed in a misassembled pod.
+    pub dek_provider: Option<hub_client::dek::ConfiguredDekProvider>,
+}
+
+/// Decrypts the delivered event's identity fields into a fresh, in-memory-only copy.
+///
+/// svc-ingest envelope-encrypts every identity-bearing field before the event ever touches the
+/// stream (outside the PII boundary); this is the single place the plaintext comes back, after
+/// hop verification and before tokenization/dispatch. The plaintext lives only in the returned
+/// value: the delivered envelope (`d`) stays ciphertext, which is what gets dead-lettered or
+/// replayed. `Err` is the ready-to-write dead-letter payload -- the caller must dead-letter it
+/// (visible, replayable), never ack-and-drop and never continue with the encrypted copy.
+async fn decrypt_inbound_event<S: SpineOps>(
+    d: &Delivered,
+    deps: &ProcessDeps<S>,
+) -> Result<PlatformEvent, DlqError> {
+    let mut event = d.env.event.clone();
+    let has_identity = event.actor.is_some()
+        || crate::identity_crypto::PAYLOAD_IDENTITY_FIELDS
+            .iter()
+            .any(|f| matches!(event.payload.get(*f), Some(serde_json::Value::String(_))));
+    if !has_identity {
+        return Ok(event);
+    }
+    // The numeric id keys the DEK; the AAD binds that same id (v3) or the slug (legacy v2).
+    let tenant_id = d.env.tenant_id.unwrap_or(0);
+    let aad_tenant = d
+        .env
+        .tenant_id
+        .map_or_else(|| d.env.tenant.clone(), |id| id.to_string());
+    let fail = |reason: &'static str, detail: &str| {
+        stage_metrics::stage_metrics().identity_decrypt_failure(reason);
+        // Numeric tenant id + event id only: no slug, stream, username or message text.
+        tracing::error!(
+            app_id = %d.env.app_id,
+            tenant_id,
+            event_id = %d.env.event_id,
+            reason,
+            detail,
+            "identity-field decrypt failed; dead-lettering (fail-closed, never forwarding \
+             ciphertext as plaintext and never dropping the event)"
+        );
+        DlqError {
+            kind: DlqErrorKind::BundleError,
+            code: "IDENTITY_DECRYPT_FAILED".to_string(),
+            message: reason.to_string(),
+            detail: None,
+            artifact_digest: deps.digest_source.current(),
+            consumer_id: deps.consumer_id.clone(),
+        }
+    };
+    let Some(provider) = deps.dek_provider.as_ref() else {
+        return Err(fail("dek_unconfigured", "no tenant DEK source configured"));
+    };
+    match crate::identity_crypto::decrypt_identity_fields(
+        &mut event,
+        provider,
+        tenant_id,
+        &aad_tenant,
+        &d.stream,
+        &d.env.event_id,
+    )
+    .await
+    {
+        Ok(()) => Ok(event),
+        Err(err) => {
+            // `DekUnavailableError`'s reason carries no key/token material; every other
+            // variant's text is withheld (it can echo envelope bytes).
+            let detail = match &err {
+                crate::identity_crypto::IdentityCryptoError::DekUnavailable(e) => e.reason.clone(),
+                _ => String::new(),
+            };
+            Err(fail(err.reason_label(), &detail))
+        }
+    }
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -988,18 +1085,161 @@ fn verified_numeric_scope(
     Ok(Some((t, c)))
 }
 
+/// Builds one invocation's capability set from the stage's process-wide wirings. Shared by the
+/// event path ([`handle_delivered_inner`]) and the hub-api bundle-admin path
+/// (`crate::bundle_admin`), so both authorize through exactly the same gate and wiring.
+/// `invocation` carries the host-derived identity facts (from the raw event, or a verified admin
+/// actor); it is attached only when identity wiring exists.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_stage_capabilities<S: SpineOps>(
+    deps: &ProcessDeps<S>,
+    tenant: String,
+    community: Option<String>,
+    app_version: i64,
+    verified_scope: Option<(i32, i32)>,
+    trace: Option<TraceContext>,
+    invocation: Option<Arc<crate::identity::InvocationIdentity>>,
+) -> StageCapabilities<redis::aio::MultiplexedConnection> {
+    let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+        tenant,
+        community,
+        deps.app_id.clone(),
+        deps.tenant_id,
+        deps.community_id,
+        app_version,
+        Arc::clone(&deps.egress),
+        Arc::clone(&deps.gate),
+    );
+    let caps = caps.with_verified_scope(verified_scope);
+    // `tool.invoke`: a top-level invocation's chain is just this app, and
+    // every nested call is bounded by this invoke's own executor budget.
+    let caps = caps.with_tool(crate::capabilities::ToolContext {
+        connections: Arc::clone(&deps.connections),
+        snapshot: deps.app_version_snapshot.clone(),
+        chain: vec![deps.app_id.clone()],
+        deadline: Some(std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms)),
+        trace: trace.clone(),
+        read_only: false,
+    });
+    let caps = match &deps.kv_conn {
+        Some(conn) => caps.with_kv(conn.clone(), Arc::clone(&deps.kv_capabilities)),
+        None => caps,
+    };
+    let caps = match &deps.db_wiring {
+        Some(db) => caps.with_db(db.clone()),
+        None => caps,
+    };
+    let caps = match &deps.reputation_wiring {
+        Some(rep) => caps.with_reputation(rep.clone()),
+        None => caps,
+    };
+    let caps = match &deps.economy_wiring {
+        Some(eco) => caps.with_economy(eco.clone()),
+        None => caps,
+    };
+    let caps = match &deps.platform_table_wiring {
+        Some(pt) => caps.with_platform_table(pt.clone()),
+        None => caps,
+    };
+    let caps = match &deps.gameserver_net_wiring {
+        Some(gs) => caps.with_gameserver_net(gs.clone()),
+        None => caps,
+    };
+    // `ai`: every model call is clamped to what remains of THIS invoke's
+    // executor deadline, so the deadline is fixed here, at construction.
+    let caps = match &deps.ai_wiring {
+        Some(ai) => caps.with_ai(
+            ai.clone(),
+            std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms),
+        ),
+        None => caps,
+    };
+    let caps = match &deps.media_wiring {
+        Some(media) => caps.with_media(
+            media.clone(),
+            std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms),
+        ),
+        None => caps,
+    };
+    // Live per-community config for `get-context().config_json` (None when hub-api is not
+    // configured): served only for the verified envelope scope.
+    let caps = caps.with_bundle_config(hub_client::bundle_config::global());
+    // `identity`: the invocation's host-derived identity facts (see the callers).
+    match (&deps.identity_wiring, invocation) {
+        (Some(identity), Some(invocation)) => caps.with_identity(identity.clone(), invocation),
+        _ => caps,
+    }
+}
+
+/// Records `queue_wait_seconds` for one delivered entry: how long it sat in
+/// the stream (its id's millisecond timestamp) before this stage picked it
+/// up -- the KEDA scale signal. A malformed id is logged, never fatal.
+fn record_queue_wait(app_id: &str, entry_id: &str) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    match bundle_active_set::stream_entry_age(entry_id, now_ms) {
+        Some(wait) => stage_metrics::stage_metrics().record_queue_wait(app_id, wait),
+        None => tracing::debug!(
+            app_id,
+            entry_id,
+            "stream entry id has no millisecond prefix; queue wait not recorded"
+        ),
+    }
+}
+
 async fn handle_delivered<S: SpineOps>(
     d: &Delivered,
     deps: &ProcessDeps<S>,
 ) -> Result<(), SpineError> {
+    use tracing::Instrument as _;
     let started = std::time::Instant::now();
-    let outcome = handle_delivered_inner(d, deps).await;
+    record_queue_wait(&deps.app_id, &d.entry_id);
+    // Command-latency: the consume instant, the publish -> consume queue-wait hop (XADD time from
+    // the entry id), and the `process.consume` span parented on the envelope's W3C trace context.
+    let consumed_ms = command_latency::stamp::now_ms();
+    let queue_wait_ms = command_latency::stage::record_queue_wait(
+        command_latency::Hop::QueueWait,
+        &d.entry_id,
+        consumed_ms,
+    );
+    let span = tracing::info_span!(
+        "process.consume",
+        app_id = %deps.app_id,
+        tenant_id = d.env.tenant_id,
+        community_id = d.env.community_id,
+        deliveries = d.deliveries,
+        queue_wait_ms = queue_wait_ms,
+        result = tracing::field::Empty,
+        "otel.kind" = "consumer",
+    );
+    if let Some(trace) = &d.env.trace {
+        command_latency::span::set_remote_parent(
+            &span,
+            &trace.traceparent,
+            trace.tracestate.as_deref(),
+        );
+    }
+    let outcome = handle_delivered_inner(d, deps, consumed_ms)
+        .instrument(span.clone())
+        .await;
     let result = match &outcome {
         Ok(result) => result.as_str(),
         // The ack/DLQ/append write itself failed: the entry stays pending
         // for redelivery, so it is neither delivered nor dead-lettered.
         Err(_) => "spine_error",
     };
+    span.record("result", result);
+    match &outcome {
+        Ok(StageResult::DeadLettered) => command_latency::span::record_error(
+            &span,
+            "DeadLettered",
+            "entry dead-lettered by the process stage",
+        ),
+        Err(err) => command_latency::span::record_error(&span, "SpineError", &err.to_string()),
+        Ok(_) => {}
+    }
     stage_metrics::stage_metrics().record_stage(&deps.app_id, result, started.elapsed());
     outcome.map(|_| ())
 }
@@ -1012,7 +1252,9 @@ async fn handle_delivered<S: SpineOps>(
 async fn handle_delivered_inner<S: SpineOps>(
     d: &Delivered,
     deps: &ProcessDeps<S>,
+    consumed_ms: u64,
 ) -> Result<StageResult, SpineError> {
+    use tracing::Instrument as _;
     // Spec §5.11: hop verification runs before any other processing.
     // Verified against THIS entry's own `d.stream` (not a single fixed
     // key, unlike `svc_action::dispatch`'s action-stream reader) --
@@ -1078,6 +1320,24 @@ async fn handle_delivered_inner<S: SpineOps>(
             .map(|()| StageResult::DeadLettered);
     }
 
+    // svc-ingest encrypted every identity field on the way in (the stream sits outside the PII
+    // boundary): decrypt them here -- after hop verification, strictly before tokenization and
+    // dispatch -- into an in-memory-only copy. A failure dead-letters the still-encrypted
+    // original; it is never dropped and never forwarded.
+    let raw_event = match decrypt_inbound_event(d, deps)
+        .instrument(tracing::info_span!("process.decrypt"))
+        .await
+    {
+        Ok(event) => event,
+        Err(err) => {
+            return deps
+                .spine
+                .dead_letter(d, &err)
+                .await
+                .map(|()| StageResult::DeadLettered);
+        }
+    };
+
     // PII boundary hard invariant (`rules/critical-rules.md` PII
     // Tokenization): a bundle's `transform` must never see a raw platform
     // username/login/display-name/mention -- run strictly after hop
@@ -1094,12 +1354,15 @@ async fn handle_delivered_inner<S: SpineOps>(
     ) = if deps.pii_gate.enabled().await {
         match &deps.pii_minter {
             Some(minter) => {
-                match crate::pii_tokenize::tokenize_event_with_mentions(
-                    &d.env.event,
-                    &d.env.tenant,
-                    minter.as_ref(),
-                )
-                .await
+                // Once per message per process (`crate::tokenize_memo`): every
+                // per-app consumer of this entry shares one tokenization / one
+                // hub-api mint; failures are shared with in-flight waiters and
+                // never cached, so the fail-closed arm below is unchanged.
+                match deps
+                    .tokenize_memo
+                    .tokenize_delivered(d, &raw_event, &d.env.tenant, minter.as_ref())
+                    .instrument(tracing::info_span!("process.tokenize"))
+                    .await
                 {
                     Ok(tokenized) => (tokenized.event, Some(tokenized.mentions)),
                     Err(reason) => {
@@ -1151,7 +1414,7 @@ async fn handle_delivered_inner<S: SpineOps>(
     } else {
         // Kill-switch ON: documented, explicit opt-out -- legacy
         // pre-tokenization behavior (raw PII reaches the bundle).
-        (d.env.event.clone(), None)
+        (raw_event.clone(), None)
     };
 
     // Resolve the digest to load/invoke with BEFORE ever checking for an
@@ -1211,7 +1474,11 @@ async fn handle_delivered_inner<S: SpineOps>(
             0
         });
 
-    let Some(connection) = deps.connections.pick_dispatch() else {
+    // Executor sharding (T6): route to one of this app's owner executors
+    // (legacy round-robin when sharding is off or an executor has no id);
+    // a non-owner pick is still served via the on-demand `ensure_loaded`
+    // below.
+    let Some(connection) = deps.connections.pick_dispatch_for_app(&deps.app_id) else {
         // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
         // 2026-10-02 incident: svc-process/svc-action were rolled and each
         // bundle-executor stayed bound to its old, terminated pod; the new
@@ -1337,86 +1604,34 @@ async fn handle_delivered_inner<S: SpineOps>(
         traceparent: t.traceparent.clone(),
         tracestate: t.tracestate.clone(),
     });
-    let capabilities: Arc<dyn CapabilityHandler> = {
-        let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
-            d.env.tenant.clone(),
-            d.env.community.clone(),
-            deps.app_id.clone(),
-            deps.tenant_id,
-            deps.community_id,
-            app_version,
-            Arc::clone(&deps.egress),
-            Arc::clone(&deps.gate),
+    // The invocation's host-derived identity facts come from the RAW event (never the tokenized
+    // copy a bundle sees) plus the mention bindings the tokenization pass produced.
+    let invocation = deps.identity_wiring.as_ref().map(|_| {
+        let inv = match mention_bindings {
+            Some(bindings) => crate::identity::InvocationIdentity::from_event(&raw_event, bindings),
+            None => crate::identity::InvocationIdentity::for_untokenized_event(&raw_event),
+        }
+        // The hop-verified envelope id: identical across redeliveries of this event, the anchor
+        // of the economy's idempotency keys.
+        .with_event_id(d.env.event_id.clone())
+        // System-originated ONLY for an allowlisted platform event type (fail-closed: `message`,
+        // `interaction.command`, `chat.*` and every unknown type are human-originated) AND only
+        // when this stage serves a first-party core bundle.
+        .with_system_originated(
+            crate::identity::is_system_event_type(&d.env.event.event_type)
+                && crate::identity::is_first_party(&deps.app_id),
         );
-        let caps = caps.with_verified_scope(verified_scope);
-        // `tool.invoke`: a top-level invocation's chain is just this app, and
-        // every nested call is bounded by this invoke's own executor budget.
-        let caps = caps.with_tool(crate::capabilities::ToolContext {
-            connections: Arc::clone(&deps.connections),
-            snapshot: deps.app_version_snapshot.clone(),
-            chain: vec![deps.app_id.clone()],
-            deadline: Some(std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms)),
-            trace: trace.clone(),
-            read_only: false,
-        });
-        let caps = match &deps.kv_conn {
-            Some(conn) => caps.with_kv(conn.clone(), Arc::clone(&deps.kv_capabilities)),
-            None => caps,
-        };
-        let caps = match &deps.db_wiring {
-            Some(db) => caps.with_db(db.clone()),
-            None => caps,
-        };
-        let caps = match &deps.reputation_wiring {
-            Some(rep) => caps.with_reputation(rep.clone()),
-            None => caps,
-        };
-        let caps = match &deps.economy_wiring {
-            Some(eco) => caps.with_economy(eco.clone()),
-            None => caps,
-        };
-        let caps = match &deps.platform_table_wiring {
-            Some(pt) => caps.with_platform_table(pt.clone()),
-            None => caps,
-        };
-        // `ai`: every model call is clamped to what remains of THIS invoke's
-        // executor deadline, so the deadline is fixed here, at construction.
-        let caps = match &deps.ai_wiring {
-            Some(ai) => caps.with_ai(
-                ai.clone(),
-                std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms),
-            ),
-            None => caps,
-        };
-        let caps = match &deps.media_wiring {
-            Some(media) => caps.with_media(
-                media.clone(),
-                std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms),
-            ),
-            None => caps,
-        };
-        // `identity`: the invocation's host-derived identity facts come from
-        // the RAW event (never the tokenized copy a bundle sees) plus the
-        // mention bindings the tokenization pass produced.
-        let caps = match &deps.identity_wiring {
-            Some(identity) => {
-                let invocation = match mention_bindings {
-                    Some(bindings) => {
-                        crate::identity::InvocationIdentity::from_event(&d.env.event, bindings)
-                    }
-                    None => {
-                        crate::identity::InvocationIdentity::for_untokenized_event(&d.env.event)
-                    }
-                }
-                // The hop-verified envelope id: identical across redeliveries
-                // of this event, the anchor of the economy's idempotency keys.
-                .with_event_id(d.env.event_id.clone());
-                caps.with_identity(identity.clone(), Arc::new(invocation))
-            }
-            None => caps,
-        };
-        Arc::new(caps)
-    };
+        Arc::new(inv)
+    });
+    let capabilities: Arc<dyn CapabilityHandler> = Arc::new(build_stage_capabilities(
+        deps,
+        d.env.tenant.clone(),
+        d.env.community.clone(),
+        app_version,
+        verified_scope,
+        trace.clone(),
+        invocation,
+    ));
 
     let outcome = invoke_transform(
         &connection,
@@ -1556,6 +1771,25 @@ async fn handle_delivered_inner<S: SpineOps>(
     let scope = Scope::new(d.env.tenant.clone(), d.env.community.clone());
     let dest_stream = scope.action_stream(&dest_app_id);
     let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    // Command-latency: carry the inbound trace onto the action envelope with this stage's stamps
+    // added -- the publish time (entry id), consume/hand-off instants and the REGISTERED command the
+    // message invokes (read in place from the decrypted text; the text itself is never kept). The
+    // trace id (the only part the binding MAC covers) is untouched.
+    let command = raw_event
+        .payload
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|text| command_latency::registry::global().detect(text));
+    let trace_out = d.env.trace.clone().map(|mut t| {
+        t.tracestate = command_latency::stage::process_handoff_tracestate(
+            t.tracestate.as_deref(),
+            &d.entry_id,
+            consumed_ms,
+            command_latency::stamp::now_ms(),
+            command,
+        );
+        t
+    });
     let envelope_out = StageEnvelope {
         // Scope + schema version are copied VERBATIM from the verified
         // inbound envelope (never re-derived): the copied `binding` covers
@@ -1574,7 +1808,7 @@ async fn handle_delivered_inner<S: SpineOps>(
         workstream_id: d.env.workstream_id.clone(),
         event_id: d.env.event_id.clone(),
         session_id: d.env.session_id.clone(),
-        trace: d.env.trace.clone(),
+        trace: trace_out,
         binding: d.env.binding.clone(),
     };
 
@@ -1964,7 +2198,7 @@ mod tests {
         let err = SpineError::Redis(redis::make_extension_error(
             "NOGROUP".to_string(),
             Some(
-                "No such key 'waddles:t:global:c:_tenant:src:twitch:tw-x:events' or consumer \
+                "No such key 'waddles:t:default:c:_tenant:src:twitch:tw-x:events' or consumer \
                  group 'waddles.core.example.ping' in XREADGROUP with GROUP option"
                     .to_string(),
             ),
@@ -2038,7 +2272,7 @@ mod tests {
         )
         .unwrap();
         let community_segment = community.unwrap_or(penguin_spine::TENANT_WIDE_SEGMENT);
-        Delivered {
+        let mut d = Delivered {
             stream: format!(
                 "waddles:t:{tenant}:c:{community_segment}:src:twitch:tw-channelA:events"
             ),
@@ -2075,7 +2309,9 @@ mod tests {
             // for (see `penguin_spine::Delivered`'s own doc comment at the
             // pinned rev).
             group: "waddles.bot.commands.default".to_string(),
-        }
+        };
+        crate::identity_crypto::test_support::encrypt_delivered(&mut d, true);
+        d
     }
 
     fn test_ring() -> KeyRing {
@@ -2121,7 +2357,7 @@ mod tests {
         )
         .unwrap();
         let community_segment = community.unwrap_or(penguin_spine::TENANT_WIDE_SEGMENT);
-        Delivered {
+        let mut d = Delivered {
             stream: format!("waddles:t:{tenant}:c:{community_segment}:src:discord:guild-A:events"),
             entry_id: "1234567890-0".to_string(),
             env: serde_json::from_value(serde_json::json!({
@@ -2149,7 +2385,9 @@ mod tests {
             .unwrap(),
             deliveries: 1,
             group: "waddles.bot.commands.default".to_string(),
-        }
+        };
+        crate::identity_crypto::test_support::encrypt_delivered(&mut d, true);
+        d
     }
 
     #[test]
@@ -2519,6 +2757,7 @@ mod tests {
             // ON behavior.
             pii_gate: Arc::new(crate::license::test_support::FixedGate(false)),
             pii_minter: None,
+            tokenize_memo: Arc::new(crate::tokenize_memo::TokenizeMemo::default()),
             // No live Postgres connection in this module's unit tests --
             // every `db` host-call a fixture invokes sees `not_implemented`,
             // exercised directly by `capabilities`'s own test suite instead.
@@ -2531,9 +2770,11 @@ mod tests {
             reputation_wiring: None,
             economy_wiring: None,
             platform_table_wiring: None,
+            gameserver_net_wiring: None,
             identity_wiring: None,
             ai_wiring: None,
             media_wiring: None,
+            dek_provider: Some(crate::identity_crypto::test_support::dek_provider()),
         };
         (deps, metrics)
     }
@@ -2680,6 +2921,129 @@ mod tests {
         let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
         assert_eq!(dead_lettered.len(), 1);
         assert_eq!(dead_lettered[0].1, DlqErrorKind::BundleError);
+    }
+
+    /// A minter that counts hub-api calls, optionally sleeping (so concurrent
+    /// consumers overlap in flight) and optionally failing.
+    struct CountingMinterFixture {
+        calls: std::sync::atomic::AtomicUsize,
+        delay_ms: u64,
+        fail: bool,
+    }
+
+    impl crate::pii_tokenize::IdentityMinter for CountingMinterFixture {
+        fn mint_many<'a>(
+            &'a self,
+            _tenant_id: &'a str,
+            items: Vec<crate::pii_tokenize::MintItem>,
+        ) -> crate::pii_tokenize::MintResult<'a> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+                if self.fail {
+                    return Err(crate::pii_tokenize::TokenizeError::ResolutionUnavailable(
+                        "simulated hub-api outage".to_string(),
+                    ));
+                }
+                Ok(items
+                    .into_iter()
+                    .map(|i| (i.platform_user_id, "pseud-0001".to_string()))
+                    .collect())
+            })
+        }
+    }
+
+    /// Many per-app consumers handling the SAME entry through the real
+    /// `handle_delivered` share ONE tokenization / ONE hub-api mint, and every
+    /// one of them still reaches `invoke_transform` and acks.
+    #[tokio::test]
+    async fn handle_delivered_many_consumers_of_one_entry_mint_once() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let minter = Arc::new(CountingMinterFixture {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            delay_ms: 100,
+            fail: false,
+        });
+        let memo = Arc::new(crate::tokenize_memo::TokenizeMemo::default());
+        let mut all = Vec::new();
+        for _ in 0..12 {
+            let connections = connected_registry_with_fake_executor(serde_json::json!(null)).await;
+            let mut deps = test_deps(FakeSpineOps::default(), connections);
+            deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(true));
+            deps.pii_minter = Some(minter.clone());
+            deps.tokenize_memo = Arc::clone(&memo);
+            all.push(deps);
+        }
+        let results =
+            futures_util::future::join_all(all.iter().map(|deps| handle_delivered(&d, deps))).await;
+
+        assert_eq!(results.len(), 12, "examined 12 consumers");
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(
+            minter.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one hub-api mint for one message, not one per consuming app"
+        );
+        for deps in &all {
+            assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+            assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+        }
+    }
+
+    /// Fail-closed through the memo: when the single shared mint fails, EVERY
+    /// consumer dead-letters (none forwards raw PII or acks), the failure
+    /// costs one hub-api call rather than one per consumer, and the next
+    /// delivery of the entry retries normally and succeeds.
+    #[tokio::test]
+    async fn handle_delivered_shared_mint_failure_dead_letters_all_then_retries() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let failing = Arc::new(CountingMinterFixture {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            delay_ms: 100,
+            fail: true,
+        });
+        let memo = Arc::new(crate::tokenize_memo::TokenizeMemo::default());
+        let mut all = Vec::new();
+        for _ in 0..12 {
+            let mut deps = test_deps(FakeSpineOps::default(), Arc::new(ConnectionRegistry::new()));
+            deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(true));
+            deps.pii_minter = Some(failing.clone());
+            deps.tokenize_memo = Arc::clone(&memo);
+            all.push(deps);
+        }
+        let results =
+            futures_util::future::join_all(all.iter().map(|deps| handle_delivered(&d, deps))).await;
+
+        assert_eq!(results.len(), 12, "examined 12 consumers");
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(failing.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        for deps in &all {
+            assert!(
+                deps.spine.acked.lock().unwrap().is_empty(),
+                "never acked on failure"
+            );
+            let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+            assert_eq!(dead_lettered.len(), 1);
+            assert_eq!(dead_lettered[0].1, DlqErrorKind::BundleError);
+        }
+
+        // Redelivery after hub-api recovers: not served from a cached failure.
+        let healthy = Arc::new(CountingMinterFixture {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            delay_ms: 0,
+            fail: false,
+        });
+        let connections = connected_registry_with_fake_executor(serde_json::json!(null)).await;
+        let mut deps = test_deps(FakeSpineOps::default(), connections);
+        deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(true));
+        deps.pii_minter = Some(healthy.clone());
+        deps.tokenize_memo = Arc::clone(&memo);
+        handle_delivered(&d, &deps).await.unwrap();
+        assert_eq!(healthy.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
     }
 
     /// Kill-switch regression test: with the opt-out flag ON (tokenization
@@ -2884,6 +3248,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -2960,6 +3325,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3052,6 +3418,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3261,6 +3628,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3552,6 +3920,88 @@ mod tests {
         assert_eq!(source.platform, "discord");
         assert_eq!(source.account_id, "bot-123");
         assert_eq!(source.channel_id.as_deref(), Some("origin-channel"));
+    }
+
+    /// Command-latency propagation through the real `handle_delivered`: the inbound first-door stamp
+    /// survives onto the action envelope with this stage's stamps added (publish time from the entry
+    /// id, consume/hand-off instants, the REGISTERED command read from the text), the trace id the
+    /// binding MAC covers is untouched, and the action hop verification therefore still passes.
+    #[tokio::test]
+    async fn handle_delivered_carries_the_first_door_stamp_and_adds_process_stamps() {
+        use command_latency::stamp::{now_ms, Door, Stamps};
+        assert!(command_latency::registry::global().register("songrequest"));
+        command_latency::switch::set_disabled(false);
+        let ring = test_ring();
+        let mut d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let trace_id = "0af7651916cd43dd8448eb211c80319c";
+        let t0 = now_ms().saturating_sub(120);
+        d.entry_id = format!("{}-0", now_ms().saturating_sub(80));
+        d.env.trace = Some(penguin_spine::Trace {
+            traceparent: format!("00-{trace_id}-b7ad6b7169203331-01"),
+            tracestate: Some(
+                Stamps {
+                    t0_ms: Some(t0),
+                    door: Some(Door::Gateway),
+                    ..Stamps::default()
+                }
+                .merge_into_tracestate(Some("vendor=1")),
+            ),
+        });
+        d.env.binding.mac = penguin_spine::compute_binding_mac(
+            &ring,
+            "k1",
+            "acme",
+            Some("main"),
+            &d.env.workstream_id,
+            &d.env.event_id,
+            Some(trace_id),
+        )
+        .unwrap();
+        let reply = wire_platform_event(&PlatformEvent {
+            platform: "twitch".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("bot".to_string()),
+            payload: serde_json::from_value(serde_json::json!({"text": "pong"})).unwrap(),
+            occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
+            source: None,
+        })
+        .unwrap();
+        let connections = connected_registry_with_fake_executor(reply).await;
+        let deps = test_deps(FakeSpineOps::default(), connections);
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+        let appended = deps.spine.appended.lock().unwrap();
+        assert_eq!(appended.len(), 1);
+        let trace = appended[0].1.trace.as_ref().expect("trace carried");
+        assert!(
+            trace.traceparent.contains(trace_id),
+            "the MAC-covered trace id is untouched"
+        );
+        let ts = trace.tracestate.as_deref().expect("tracestate carried");
+        assert!(ts.ends_with(",vendor=1"), "foreign member preserved: {ts}");
+        let s = Stamps::from_tracestate(Some(ts));
+        assert_eq!(s.t0_ms, Some(t0), "first door survives the hop");
+        assert_eq!(s.door, Some(Door::Gateway));
+        assert_eq!(
+            s.publish_ms,
+            command_latency::stamp::entry_id_ms(&d.entry_id)
+        );
+        let (pc, pd) = (s.consume_ms.unwrap(), s.handoff_ms.unwrap());
+        assert!(
+            pc >= s.publish_ms.unwrap() && pd >= pc,
+            "stamps are ordered"
+        );
+        assert_eq!(
+            s.command.as_deref(),
+            Some("songrequest"),
+            "the registered command, read from the decrypted text"
+        );
+        assert!(
+            !ts.contains("foo"),
+            "no argument or user text ever reaches the tracestate"
+        );
     }
 
     #[tokio::test]
@@ -3883,6 +4333,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -4012,6 +4463,9 @@ mod tests {
         .as_object()
         .cloned()
         .unwrap();
+        // The fixture was encrypted with its original payload; encrypt the swapped one too
+        // (the actor is already ciphertext).
+        crate::identity_crypto::test_support::encrypt_delivered(&mut d, false);
 
         let (alice, bob) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
         let (connections, observed) = connected_registry_with_scripted_identity_bundle().await;
@@ -4128,6 +4582,7 @@ mod tests {
                                 runtime: "runc".to_string(),
                                 verified: false,
                             },
+                            executor_id: None,
                         }),
                     ),
                 )
@@ -4991,6 +5446,439 @@ mod tests {
             let after = started.load(Ordering::Relaxed);
             tokio::time::sleep(Duration::from_millis(60)).await;
             assert_eq!(started.load(Ordering::Relaxed), after);
+        }
+    }
+
+    /// Inbound identity-field decryption in `handle_delivered`, against the REAL
+    /// `hub_client` stack: a real tonic `KeyService` fake implementing the seal contract, a real
+    /// `MachineJwtClient` minting from an in-process `ServiceAuthService`, the real
+    /// `HubDekBroker` + cache. Ciphertext is produced independently with the fake hub's own
+    /// deterministic per-(tenant, version) keys, exactly as svc-ingest would.
+    mod identity_decrypt {
+        use super::*;
+        use crate::identity_crypto::test_support::encrypt_value;
+        use crate::stage_metrics::test_support::shared;
+        use hub_client::dek::testing::{test_key, FakeKeyService, FAKE_TOKEN, REQUIRED_SCOPE};
+        use hub_client::dek::{ConfiguredDekProvider, STREAM_DEK_SCOPE};
+        use service_auth::test_support::{MintReply, MockHub};
+        use service_auth::MachineJwtClient;
+
+        const TENANT_ID: i64 = 7;
+        const COMMUNITY_ID: i32 = 3;
+        const STREAM: &str = "waddles:t:acme:c:main:src:discord:guild-A:events";
+        const EVENT_ID: &str = "00000000-0000-4000-8000-000000000002";
+
+        async fn hub_provider(
+            fake: &FakeKeyService,
+            tag: &str,
+        ) -> (ConfiguredDekProvider, MockHub) {
+            let mint = MockHub::builder()
+                .mint(vec![MintReply::when(
+                    |c| c.scope == REQUIRED_SCOPE,
+                    FAKE_TOKEN,
+                    3600,
+                )])
+                .start()
+                .await;
+            let sa = std::env::temp_dir()
+                .join(format!("svc-process-dek-sa-{tag}-{}", std::process::id()));
+            std::fs::write(&sa, "projected-sa-token").unwrap();
+            let tokens = Arc::new(MachineJwtClient::new(
+                mint.endpoint.clone(),
+                sa.to_string_lossy().to_string(),
+                STREAM_DEK_SCOPE,
+            ));
+            let channel = hub_client::lazy_channel(&fake.serve().await, None).unwrap();
+            let client = hub_client::HubClient::with_channel(channel, tokens);
+            (
+                ConfiguredDekProvider::hub(Arc::new(client), "svc-process"),
+                mint,
+            )
+        }
+
+        /// A schema-v3 entry (numeric scope in the MAC) whose identity fields are encrypted
+        /// under `tenant_key_of` at `key_version`, AAD-bound to `aad_tenant`.
+        fn v3_delivered(
+            ring: &KeyRing,
+            text: &str,
+            key_tenant: i64,
+            key_version: u32,
+            aad_tenant: &str,
+        ) -> Delivered {
+            let key = hub_key(key_tenant, key_version);
+            let mac = penguin_spine::compute_binding_mac_v3(
+                ring,
+                "k1",
+                TENANT_ID,
+                COMMUNITY_ID,
+                "acme",
+                Some("main"),
+                "00000000-0000-0000-0000-000000000001",
+                EVENT_ID,
+                None,
+            )
+            .unwrap();
+            let enc = |value: &str, field: &str| {
+                encrypt_value(
+                    value,
+                    &key,
+                    key_version,
+                    aad_tenant,
+                    STREAM,
+                    field,
+                    EVENT_ID,
+                )
+            };
+            Delivered {
+                stream: STREAM.to_string(),
+                entry_id: "1234567890-0".to_string(),
+                env: serde_json::from_value(serde_json::json!({
+                    "schema_version": 3,
+                    "tenant": "acme",
+                    "community": "main",
+                    "tenant_id": TENANT_ID,
+                    "community_id": COMMUNITY_ID,
+                    "app_id": "waddles.bot.commands.default",
+                    "stage": "process",
+                    "event": {
+                        "platform": "discord",
+                        "event_type": "message",
+                        "actor": enc("some_user", "actor"),
+                        "payload": {"text": enc(text, "text"), "channel_id": "chan-1"},
+                        "occurred_at": "2026-09-22T00:00:00.000Z",
+                        "source": {"platform": "discord", "account_id": "guild-A", "channel_id": "chan-1"}
+                    },
+                    "ts": "2026-09-22T00:00:00.000Z",
+                    "target_app_id": null,
+                    "workstream_id": "00000000-0000-0000-0000-000000000001",
+                    "event_id": EVENT_ID,
+                    "session_id": null,
+                    "trace": null,
+                    "binding": {"kid": "k1", "mac": mac}
+                }))
+                .unwrap(),
+                deliveries: 1,
+                group: "waddles.bot.commands.default".to_string(),
+            }
+        }
+
+        fn hub_key(tenant: i64, version: u32) -> crate::identity_crypto::Dek {
+            zeroize::Zeroizing::new(test_key(tenant, version))
+        }
+
+        /// Executor fake that records the `transform` payload it was invoked with, then replies.
+        async fn registry_capturing_invoke(
+            response: serde_json::Value,
+        ) -> (
+            Arc<ConnectionRegistry>,
+            Arc<Mutex<Option<serde_json::Value>>>,
+        ) {
+            use crate::capabilities::DenyAllCapabilities;
+            use penguin_bundle_host::wire::{
+                read_frame, write_frame, Frame, HelloBody, HelloOkBody, ResultBody, SandboxInfo,
+            };
+            let seen = Arc::new(Mutex::new(None));
+            let seen_task = Arc::clone(&seen);
+            let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+            tokio::spawn(async move {
+                write_frame(
+                    &mut executor_io,
+                    &Frame::new(
+                        1,
+                        Message::Hello(HelloBody {
+                            protocol_version: 1,
+                            executor_version: "0.1.0".to_string(),
+                            wasmtime_version: "test".to_string(),
+                            wasmtime_abi: "test".to_string(),
+                            collector: "drc".to_string(),
+                            sandbox: SandboxInfo {
+                                runtime: "runc".to_string(),
+                                verified: false,
+                            },
+                            executor_id: None,
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+                let hello_ok = read_frame(&mut executor_io).await.unwrap();
+                assert!(matches!(hello_ok.message, Message::HelloOk(_)));
+                let invoke = read_frame(&mut executor_io).await.unwrap();
+                if let Message::Invoke(body) = &invoke.message {
+                    *seen_task.lock().unwrap() = Some(body.payload.clone());
+                }
+                write_frame(
+                    &mut executor_io,
+                    &Frame::new(
+                        invoke.id,
+                        Message::Result(ResultBody {
+                            payload: response,
+                            duration_ms: 1,
+                            fuel_used: 0,
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+            });
+            let (connection, read_loop) = crate::host_api::run_connection(
+                stage_io,
+                HelloOkBody {
+                    stage: "svc-process".to_string(),
+                    protocol_version: 1,
+                    limits: penguin_bundle_host::wire::HelloLimits {
+                        call_timeout_ms: 2000,
+                        memory_mb: 64,
+                        max_concurrent_calls: 32,
+                    },
+                },
+                false,
+                Arc::new(DenyAllCapabilities),
+            )
+            .await
+            .expect("handshake succeeds");
+            tokio::spawn(read_loop);
+            let registry = Arc::new(ConnectionRegistry::new());
+            registry.set_active(connection);
+            (registry, seen)
+        }
+
+        fn pong() -> serde_json::Value {
+            wire_platform_event(&PlatformEvent {
+                platform: "discord".to_string(),
+                event_type: "message".to_string(),
+                actor: Some("bot".to_string()),
+                payload: serde_json::from_value(serde_json::json!({"text": "pong"})).unwrap(),
+                occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
+                source: None,
+            })
+            .unwrap()
+        }
+
+        fn failures(reason: &str) -> f64 {
+            shared().count(
+                "waddles_identity_decrypt_failures_total",
+                &[("reason", reason)],
+            )
+        }
+
+        fn assert_dead_lettered_without_dispatch(deps: &ProcessDeps<FakeSpineOps>) {
+            let dead = deps.spine.dead_lettered.lock().unwrap();
+            assert_eq!(
+                dead.len(),
+                1,
+                "the event must be dead-lettered, never dropped"
+            );
+            assert_eq!(dead[0].1, DlqErrorKind::BundleError);
+            assert!(
+                deps.spine.appended.lock().unwrap().is_empty(),
+                "nothing dispatched"
+            );
+        }
+
+        /// The demo path: a Discord `!ping`, encrypted by ingest with the tenant's DEK, is
+        /// decrypted in process (DEK fetched over gRPC from the key broker, machine JWT, sealed
+        /// to a per-call ephemeral key) and reaches the bundle as plaintext -- while the
+        /// delivered envelope itself stays ciphertext.
+        #[tokio::test]
+        async fn a_ping_flows_from_ciphertext_to_the_bundle_via_the_key_broker() {
+            let ring = test_ring();
+            let d = v3_delivered(&ring, "!ping", TENANT_ID, 1, &TENANT_ID.to_string());
+            let fake = FakeKeyService::for_service("svc-process");
+            let (provider, _mint) = hub_provider(&fake, "ping").await;
+            let (connections, seen) = registry_capturing_invoke(pong()).await;
+            let mut deps = test_deps(FakeSpineOps::default(), connections);
+            deps.dek_provider = Some(provider);
+
+            handle_delivered(&d, &deps).await.unwrap();
+
+            let invoked = seen
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("the bundle was invoked");
+            let payload: serde_json::Value =
+                serde_json::from_str(invoked["payload_json"].as_str().unwrap()).unwrap();
+            assert_eq!(payload["text"], "!ping", "the bundle sees plaintext");
+            assert_eq!(invoked["actor"], "some_user");
+            assert_eq!(fake.call_count(), 1, "one DEK fetch for the whole event");
+            let call = fake.state.lock().unwrap().calls[0].clone();
+            assert_eq!(
+                (call.0, call.1),
+                (TENANT_ID, 1),
+                "numeric tenant id and the exact version named by the envelope header",
+            );
+            assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+            assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+            assert_eq!(
+                deps.spine.appended.lock().unwrap().len(),
+                1,
+                "the reply was enqueued"
+            );
+            // Plaintext lives only in memory: the entry as delivered is still ciphertext.
+            let ct = d.env.event.payload["text"].as_str().unwrap();
+            assert_ne!(ct, "!ping");
+            assert!(ct.contains("\"ct\""));
+        }
+
+        /// Key rotation: an entry written under key version 1 still decrypts after the current
+        /// version became 2 -- the version comes from the envelope header, not "current".
+        #[tokio::test]
+        async fn an_event_written_before_a_rotation_still_decrypts() {
+            let ring = test_ring();
+            let fake = FakeKeyService::for_service("svc-process");
+            fake.state.lock().unwrap().current.insert(TENANT_ID, 2);
+            let (provider, _mint) = hub_provider(&fake, "rotation").await;
+            let old = v3_delivered(&ring, "!ping", TENANT_ID, 1, &TENANT_ID.to_string());
+            let new = v3_delivered(&ring, "!ping", TENANT_ID, 2, &TENANT_ID.to_string());
+            let (connections, seen) = registry_capturing_invoke(pong()).await;
+            let mut deps = test_deps(FakeSpineOps::default(), connections);
+            deps.dek_provider = Some(provider);
+            deps.connections.pick_dispatch().expect("connected");
+
+            handle_delivered(&old, &deps).await.unwrap();
+            assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+            assert!(
+                seen.lock().unwrap().is_some(),
+                "v1 envelope decrypted and dispatched"
+            );
+            let versions: Vec<u32> = fake
+                .state
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .map(|c| c.1)
+                .collect();
+            assert_eq!(versions, vec![1], "the exact header version was requested");
+
+            // A v2 entry decrypts too, from its own cached/pinned key.
+            let (connections, _seen) = registry_capturing_invoke(pong()).await;
+            deps.connections = connections;
+            handle_delivered(&new, &deps).await.unwrap();
+            assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+        }
+
+        /// Tenant isolation: ciphertext made with ANOTHER tenant's DEK, or bound to another
+        /// tenant in the AAD, never decrypts -- it is dead-lettered with reason `aead`.
+        #[tokio::test]
+        async fn another_tenants_key_or_aad_never_decrypts() {
+            let ring = test_ring();
+            let fake = FakeKeyService::for_service("svc-process");
+            let (provider, _mint) = hub_provider(&fake, "isolation").await;
+            for (label, d) in [
+                (
+                    "foreign key",
+                    v3_delivered(&ring, "!ping", TENANT_ID + 1, 1, &TENANT_ID.to_string()),
+                ),
+                (
+                    "foreign aad",
+                    v3_delivered(&ring, "!ping", TENANT_ID, 1, &(TENANT_ID + 1).to_string()),
+                ),
+            ] {
+                let before = failures("aead");
+                let mut deps = test_deps(
+                    FakeSpineOps::default(),
+                    registry_capturing_invoke(pong()).await.0,
+                );
+                deps.dek_provider = Some(provider.clone());
+                handle_delivered(&d, &deps).await.unwrap();
+                assert_dead_lettered_without_dispatch(&deps);
+                assert_eq!(
+                    failures("aead") - before,
+                    1.0,
+                    "{label}: aead failure counted"
+                );
+            }
+        }
+
+        /// Fail closed on a broker outage: dead-lettered (not acked-and-dropped), counted, and
+        /// recovers once the broker is back -- the failure is only negative-cached for one short
+        /// jittered backoff window (<= 312 ms by default), never beyond it.
+        #[tokio::test]
+        async fn a_key_broker_outage_dead_letters_visibly_and_recovers() {
+            let ring = test_ring();
+            let fake = FakeKeyService::for_service("svc-process");
+            fake.state.lock().unwrap().down = true;
+            let (provider, _mint) = hub_provider(&fake, "outage").await;
+            let d = v3_delivered(&ring, "!ping", TENANT_ID, 1, &TENANT_ID.to_string());
+            let before = failures("dek_unavailable");
+            let mut deps = test_deps(
+                FakeSpineOps::default(),
+                registry_capturing_invoke(pong()).await.0,
+            );
+            deps.dek_provider = Some(provider);
+
+            handle_delivered(&d, &deps).await.unwrap();
+
+            assert_dead_lettered_without_dispatch(&deps);
+            assert_eq!(failures("dek_unavailable") - before, 1.0);
+
+            fake.state.lock().unwrap().down = false;
+            // Inside the negative window the failure is replayed (no retry stampede); past its
+            // jittered upper bound (250 ms base * 1.25) the broker is asked again.
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            let mut deps2 = test_deps(
+                FakeSpineOps::default(),
+                registry_capturing_invoke(pong()).await.0,
+            );
+            deps2.dek_provider = deps.dek_provider.clone();
+            handle_delivered(&d, &deps2).await.unwrap();
+            assert!(
+                deps2.spine.dead_lettered.lock().unwrap().is_empty(),
+                "recovered"
+            );
+        }
+
+        /// No DEK source wired: an identity-bearing event is dead-lettered, never forwarded.
+        #[tokio::test]
+        async fn no_dek_source_dead_letters_identity_bearing_events() {
+            let ring = test_ring();
+            let d = v3_delivered(&ring, "!ping", TENANT_ID, 1, &TENANT_ID.to_string());
+            let before = failures("dek_unconfigured");
+            let mut deps = test_deps(
+                FakeSpineOps::default(),
+                registry_capturing_invoke(pong()).await.0,
+            );
+            deps.dek_provider = None;
+            handle_delivered(&d, &deps).await.unwrap();
+            assert_dead_lettered_without_dispatch(&deps);
+            assert_eq!(failures("dek_unconfigured") - before, 1.0);
+        }
+
+        /// An identity field that is NOT an envelope (a plaintext straggler, or a forged event)
+        /// is never passed through as if it were plaintext.
+        #[tokio::test]
+        async fn a_plaintext_identity_field_is_refused_not_forwarded() {
+            let ring = test_ring();
+            let mut d = v3_delivered(&ring, "!ping", TENANT_ID, 1, &TENANT_ID.to_string());
+            d.env.event.actor = Some("some_user".to_string());
+            let fake = FakeKeyService::for_service("svc-process");
+            let (provider, _mint) = hub_provider(&fake, "plain").await;
+            let before = failures("not_an_envelope");
+            let mut deps = test_deps(
+                FakeSpineOps::default(),
+                registry_capturing_invoke(pong()).await.0,
+            );
+            deps.dek_provider = Some(provider);
+            handle_delivered(&d, &deps).await.unwrap();
+            assert_dead_lettered_without_dispatch(&deps);
+            assert_eq!(failures("not_an_envelope") - before, 1.0);
+        }
+
+        /// An event with no identity-bearing field needs no key at all.
+        #[tokio::test]
+        async fn an_event_without_identity_fields_needs_no_dek() {
+            let ring = test_ring();
+            let mut d = v3_delivered(&ring, "!ping", TENANT_ID, 1, &TENANT_ID.to_string());
+            d.env.event.actor = None;
+            d.env.event.payload.remove("text");
+            let (connections, seen) = registry_capturing_invoke(pong()).await;
+            let mut deps = test_deps(FakeSpineOps::default(), connections);
+            deps.dek_provider = None;
+            handle_delivered(&d, &deps).await.unwrap();
+            assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+            assert!(seen.lock().unwrap().is_some());
         }
     }
 }

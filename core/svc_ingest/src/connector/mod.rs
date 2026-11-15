@@ -35,6 +35,7 @@
 //! `ExportKind::Connector*`); its real-path proof against the real executor
 //! lives in `core/connector_e2e`.
 
+pub mod bundle_schedule;
 pub mod driver;
 pub(crate) mod egress_guard;
 pub mod gateway_rules;
@@ -43,6 +44,9 @@ pub mod host_api_listener;
 pub mod host_calls;
 pub mod identify_budget;
 pub mod invoker;
+pub mod kick_keys;
+pub mod kick_subscribe;
+pub mod kick_webhook;
 pub mod lifecycle;
 #[cfg(test)]
 mod lifecycle_tests;

@@ -139,6 +139,12 @@ jobs:
       - name: check-no-stubs
         run: make check-no-stubs
 
+      # PII boundary: only svc-ingest's outbound drain and svc-presentation may reference the
+      # egress detokenizer (svc-action used to detokenize into Valkey queues). Prints files
+      # examined; zero examined or any violation fails, and the negative test runs first.
+      - name: check-pii-egress
+        run: make check-pii-egress
+
   python-unit:
     name: Python unit tests
     needs: changes
@@ -166,26 +172,11 @@ jobs:
           python-version: '3.13'
           cache: pip
           cache-dependency-path: |
-            core/identity_core_module/requirements.txt
-            core/workflow_core_module/requirements.txt
-            core/community_module/requirements.txt
             libs/flask_core/requirements.txt
             hub_api/requirements.txt
-            core/svc_action/requirements.txt
-            core/svc_ingest/requirements.txt
-            core/svc_presentation/requirements.txt
-            core/svc_process/requirements.txt
-            core/svc_streaming/requirements.txt
 
-      # test-unit runs the real suites, not just the legacy 173-test subset:
-      # hub_api, libs/* (flask_core + every SCCEMBS module library), and
-      # every core/svc_* stage-runner container each ship their own
-      # hash-pinned requirements.txt -- none of these are satisfied by
-      # identity_core_module's requirements alone. scripts/ci/install-unit-test-deps.sh
-      # is the single source of truth for the sequential per-package install
-      # order (see that script for why a single combined install call
-      # doesn't work); make test-unit also runs it, so local and CI installs
-      # never drift out of sync.
+      # test-unit installs hub_api + libs/flask_core + libs/waddle_transports via
+      # scripts/ci/install-unit-test-deps.sh (single source of truth; make test-unit also runs it).
       - name: Install test dependencies
         env:
           PYTHON_BIN: python
@@ -317,8 +308,8 @@ jobs:
       # is a follow-up, tracked separately from this migration-chain gate.
       #
       # alembic/env.py imports `flask_core.models.db` (needed for
-      # `target_metadata`), which transitively needs flask-sqlalchemy +
-      # flask-security-too -- neither is in hub_api/requirements.txt (hub_api
+      # `target_metadata`), which transitively needs flask-sqlalchemy --
+      # not in hub_api/requirements.txt (hub_api
       # itself doesn't use flask_core). This is exactly the dependency set
       # migrations/Dockerfile already installs for the same reason; versions
       # pinned to match libs/flask_core/requirements.txt's own pins. First
@@ -334,7 +325,6 @@ jobs:
           pip install --disable-pip-version-check \
             "alembic==1.20.0" \
             "flask-sqlalchemy==3.1.1" \
-            "flask-security-too==5.8.2" \
             "PyYAML>=6.0.2,<7.0.0"
 
       # Legacy `config/postgres/migrations/NNN_*.sql` files reach an EXISTING database only
@@ -672,32 +662,6 @@ jobs:
             alembic/tests/test_chart_credentials_roundtrip.py \
             -v -p no:cacheprovider
 
-  marketplace-refunds:
-    name: Marketplace refund authorization tests
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node == 'true') }}
-    # bare dal2-alpha-ci image has no cc/cmake/libatomic and sudo is blocked (no-new-privileges): C-toolchain / node jobs stay on hosted ubuntu-latest until a custom runner image bakes them in
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: admin/marketplace_module/backend
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
-        with:
-          node-version: '26'
-          cache: npm
-          cache-dependency-path: admin/marketplace_module/backend/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Run refund tests
-        run: npm test
-
   web-builds:
     name: Build ${{ matrix.name }}
     needs: changes
@@ -786,6 +750,12 @@ jobs:
       # exit code 5, never a silent pass -- critical-rules.md Verification Integrity.
       - name: Helm chart template tests (pytest)
         run: python3 -m pytest k8s/helm/waddlebot/tests/ -v
+
+      # changed-only alpha deploys pin each image via global.imageTags; this proves a pinned
+      # (unchanged) image keeps its pod template byte-identical, so it does NOT restart, and
+      # that a rebuilt image changes only its own workloads. Exits non-zero if helm renders 0.
+      - name: Alpha per-image pins restart only changed workloads
+        run: python3 scripts/ci/check-alpha-image-pins.py
 
       # fix/helm-hook-rbac-ordering -- helm.sh/hook-annotated Jobs run BEFORE any
       # regular (non-hook) chart resource. A pre-install/pre-upgrade Job whose
@@ -1000,6 +970,13 @@ jobs:
       # transitive path dep is COPYed before Docker ever runs.
       - name: Check Dockerfile.rust path-dependency coverage
         run: python3 scripts/ci/check-dockerfile-rust-path-deps.py
+
+      # Standing rule: every dependency is hash-pinned. Any `pip install` in any Dockerfile must
+      # be `--require-hashes`, or a local-path `--no-deps --no-build-isolation` install after a
+      # hash-locked one in the same build stage (the old unhashed flask_core install is the
+      # failing fixture in scripts/ci/tests/test_check_dockerfile_pip_hashes.py).
+      - name: Check every Dockerfile pip install is hash-locked
+        run: python3 scripts/ci/check-dockerfile-pip-hashes.py
 
   alembic-single-head:
     name: Alembic single-head invariant (static, no DB)

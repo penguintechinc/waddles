@@ -14,15 +14,13 @@ function AdminHome() {
     async function fetchStats() {
       try {
         // Custom domains have no hub-api route yet: never call them.
-        const [members, modules, sources, domains] = await Promise.all([
+        const [members, sources, domains] = await Promise.all([
           adminApi.getMembers(communityId, { limit: 1 }),
-          adminApi.getModules(communityId),
           adminApi.getBrowserSources(communityId),
           isFeatureServed('custom-domains') ? adminApi.getDomains(communityId) : null,
         ]);
         setStats({
           memberCount: members.data.pagination?.total || 0,
-          moduleCount: modules.data.modules?.length || 0,
           sourceCount: sources?.data.sources?.length || 0,
           domainCount: domains?.data.domains?.length || 0,
         });
@@ -37,7 +35,7 @@ function AdminHome() {
 
   const cards = [
     { to: `/admin/${communityId}/members`, icon: UserGroupIcon, label: 'Members', value: stats?.memberCount, color: 'bg-blue-500' },
-    { to: `/admin/${communityId}/modules`, icon: PuzzlePieceIcon, label: 'Modules', value: stats?.moduleCount, color: 'bg-purple-500' },
+    { to: `/admin/${communityId}/bundles`, icon: PuzzlePieceIcon, label: 'Bundles', value: undefined, color: 'bg-purple-500' },
     { to: `/admin/${communityId}/stream-overlays`, icon: ComputerDesktopIcon, label: 'Browser Sources', value: stats?.sourceCount, color: 'bg-green-500' },
     { to: `/admin/${communityId}/domains`, icon: GlobeAltIcon, label: 'Custom Domains', value: stats?.domainCount, color: 'bg-orange-500', feature: 'custom-domains' },
   ];

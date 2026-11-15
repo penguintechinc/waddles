@@ -35,6 +35,7 @@ from webauthn.helpers.structs import (
 from config import HubAPIConfig
 from services import session_service
 from services.errors import bad_request, not_found, unauthorized
+from services.global_identity import is_global_admin
 
 RP_NAME = os.getenv("PASSKEY_RP_NAME", "Waddles")
 RP_ID = os.getenv("PASSKEY_RP_ID", "localhost")
@@ -145,7 +146,7 @@ async def finish_login(
 
     rows = await async_dal.executesql_async(
         "SELECT pk.id, pk.credential_id, pk.public_key, pk.sign_count, "
-        "u.id, u.email, u.username, u.avatar_url, u.is_super_admin, u.is_vendor, "
+        "u.id, u.email, u.username, u.avatar_url, u.is_vendor, "
         "u.is_analytics_consumer "
         "FROM user_passkeys pk JOIN hub_users u ON u.id = pk.user_id "
         "WHERE pk.credential_id = %s",
@@ -162,7 +163,6 @@ async def finish_login(
         email,
         username,
         avatar_url,
-        is_super_admin,
         is_vendor,
         is_analytics_consumer,
     ) = rows[0]
@@ -200,7 +200,7 @@ async def finish_login(
         email=email,
         username=username,
         avatar_url=avatar_url,
-        is_super_admin=bool(is_super_admin),
+        is_super_admin=await is_global_admin(async_dal, dal, user_id=int(uid)),
         is_vendor=bool(is_vendor),
         is_analytics_consumer=bool(is_analytics_consumer),
     )

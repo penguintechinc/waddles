@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 import pytest
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from flask_core.service_jwt import ServiceJwtIssuer
 
 from tests.provider_connections.conftest import admin_headers
@@ -156,7 +157,7 @@ async def test_first_write_and_same_client_rotation_need_no_confirmation(
 
 async def test_the_global_tenant_can_never_replace(yt_client: Any, yt_db: Any) -> None:
     headers = admin_headers(
-        yt_db, scope="tenant:admin", tenant="global", user_id=yt_db.global_admin_id
+        yt_db, scope="tenant:admin", tenant=DEFAULT_TENANT_SLUG, user_id=yt_db.global_admin_id
     )
     response = await _put(yt_client, headers, {**NEW_APP, "replace": True})
     assert response.status_code == 422

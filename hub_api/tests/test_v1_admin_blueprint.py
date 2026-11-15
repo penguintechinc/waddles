@@ -24,6 +24,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.admin import admin_bp
+from services import community_reputation_service as reputation_svc
 from tests.conftest import TENANT_SLUG, make_user_token
 
 OTHER_TENANT_SLUG = "other-tenant"
@@ -77,6 +78,19 @@ def _seed_community(admin_db: Any, *, tenant_slug: str = TENANT_SLUG, **override
     return community_id
 
 
+def _seed_admin_actor(admin_db: Any, user_id: int = 1) -> None:
+    """The acting admin's `hub_users` row (its UUID is the ledger actor for reputation writes)."""
+    dal = admin_db.dal
+    if not dal(dal.hub_users.id == user_id).select().first():
+        dal.hub_users.insert(
+            id=user_id,
+            email=f"user{user_id}@example.com",
+            username=f"user{user_id}",
+            is_active=True,
+        )
+        dal.commit()
+
+
 def _seed_member(
     admin_db: Any, *, community_id: int, user_id: int, role: str = "member", **overrides: Any
 ) -> int:
@@ -84,6 +98,7 @@ def _seed_member(
     fields = {
         "community_id": community_id,
         "user_id": str(user_id),
+        "user_uuid": f"00000000-0000-4000-8000-{user_id:012d}",
         "role": role,
         "reputation": 600,
         "is_active": True,
@@ -96,6 +111,28 @@ def _seed_member(
     ) if not dal(dal.hub_users.id == user_id).select().first() else None
     dal.commit()
     return member_id
+
+
+@pytest.fixture(autouse=True)
+def _fake_reputation_apply(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Python stand-in for the Postgres-only `reputation_apply()` (route-contract tests only).
+
+    Mirrors its clamp (300-850, start 600). The real function -- row lock, clamp, idempotency,
+    concurrency, tenant isolation -- is exercised against real Postgres in
+    `alembic/tests/test_0097_reputation_unify.py`.
+    """
+    balances: dict[tuple[int, str], int] = {}
+    calls: list[dict[str, Any]] = []
+
+    async def fake(async_dal: Any, **kw: Any) -> reputation_svc.ApplyResult:
+        calls.append(kw)
+        key = (kw["community_id"], kw["user_uuid"])
+        new = max(300, min(850, balances.get(key, 600) + kw["delta"]))
+        balances[key] = new
+        return reputation_svc.ApplyResult(new_score=new, applied=True)
+
+    monkeypatch.setattr(reputation_svc, "apply_reputation", fake)
+    return calls
 
 
 class TestScopeAndTenantEnforcement:
@@ -229,6 +266,7 @@ class TestMembers:
     async def test_adjust_reputation_relative(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         _seed_member(admin_db, community_id=community_id, user_id=42, reputation=600)
+        _seed_admin_actor(admin_db)
         response = await client.put(
             f"/api/v1/admin/{community_id}/members/42/reputation",
             headers=_headers(),
@@ -238,10 +276,21 @@ class TestMembers:
         body = await response.get_json()
         assert body["reputation"]["score"] == 650
         assert body["change"] == 50
+        assert set(body) == {"success", "reputation", "change"}  # exact top-level field set
+        assert set(body["reputation"]) == {
+            "score",
+            "label",
+            "shortLabel",
+            "tierMin",
+            "tierMax",
+            "systemMin",
+            "systemMax",
+        }
 
     async def test_adjust_reputation_set_to(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         _seed_member(admin_db, community_id=community_id, user_id=42, reputation=600)
+        _seed_admin_actor(admin_db)
         response = await client.put(
             f"/api/v1/admin/{community_id}/members/42/reputation",
             headers=_headers(),
@@ -256,6 +305,7 @@ class TestMembers:
     ) -> None:
         community_id = _seed_community(admin_db)
         _seed_member(admin_db, community_id=community_id, user_id=42, reputation=600)
+        _seed_admin_actor(admin_db)
         response = await client.put(
             f"/api/v1/admin/{community_id}/members/42/reputation",
             headers=_headers(),

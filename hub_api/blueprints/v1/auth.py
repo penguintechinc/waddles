@@ -520,9 +520,10 @@ async def login(
             _cfg(),
             email=data.email,
             password=data.password,
-            tenant_slug=data.tenantSlug or "global",
+            tenant_slug=data.tenantSlug or "default",
         )
     except auth_service.RequiresVerificationError:
+        logger.info("login blocked: email verification required")
         return (
             VerificationRequiredResponse(
                 success=False,
@@ -532,6 +533,7 @@ async def login(
             403,
         )
     except ApiError as exc:
+        logger.warning("login rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     issue_session_cookie(result.token)
     return LoginResponse(success=True, token=result.token, user=_login_user_dto(result))

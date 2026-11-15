@@ -161,32 +161,25 @@ describe('CommunityDashboard', () => {
       return { success: true, streams: [STREAM] };
     });
     renderPage();
-    const state = await screen.findByTestId('streams-error');
+    const state = await screen.findByTestId('panel-upgrade');
     expect(within(state).getByText('Live streams are not enabled for this plan')).toBeInTheDocument();
     expect(screen.getByTestId('leaderboard-card-watch-time')).toBeInTheDocument();
-    fireEvent.click(within(state).getByRole('button', { name: 'Try again' }));
-    expect(await screen.findByText('penguinzplays')).toBeInTheDocument();
   });
 
-  it('hides announcements on an expected denial but reports unexpected failures', async () => {
-    const get = serve('member', (url) => {
-      if (url === '/api/v1/admin/7/announcements') throw httpError(403, { error: 'no' });
-      return undefined;
-    });
+  it('does not query announcements for plain members, and reports admin failures visibly', async () => {
+    const get = serve('member');
     const first = renderPage();
     await screen.findByRole('heading', { level: 1 });
-    await waitFor(() => expect(get.mock.calls.some(([url]) => url === '/api/v1/admin/7/announcements')).toBe(true));
     await act(async () => {});
-    expect(screen.queryByText('We could not load announcements')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('announcement')).not.toBeInTheDocument();
+    expect(get.mock.calls.some(([url]) => url === '/api/v1/admin/7/announcements')).toBe(false);
     first.unmount();
 
-    serve('member', (url) => {
+    serve('community-admin', (url) => {
       if (url === '/api/v1/admin/7/announcements') throw httpError(500, { error: 'Announcements exploded' });
       return undefined;
     });
     renderPage();
-    expect(await screen.findByText('We could not load announcements')).toBeInTheDocument();
+    expect(await screen.findByText('We could not load Announcements')).toBeInTheDocument();
     expect(screen.getByText('Announcements exploded')).toBeInTheDocument();
   });
 

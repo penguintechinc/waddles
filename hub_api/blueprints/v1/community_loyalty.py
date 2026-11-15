@@ -76,7 +76,7 @@ def _tenant_slug_for_community(dal: Any, community_id: int) -> str:
 
     No JWT/`TenantContext` on the internal blueprint (see module
     docstring) -- looked up straight from the community's own
-    `tenant_id`, "global" fallback only for the practically-unreachable
+    `tenant_id`, "default" fallback only for the practically-unreachable
     dangling-FK case. Mirrors `community_music_queue.py`'s
     `internal_enqueue_song_request()` exactly.
     """
@@ -86,11 +86,11 @@ def _tenant_slug_for_community(dal: Any, community_id: int) -> str:
         .first()
     )
     if community_row is None:
-        return "global"
+        return "default"
     tenant_row = (
         dal(dal.tenants.id == int(community_row.tenant_id)).select(dal.tenants.slug).first()
     )
-    return tenant_row.slug if tenant_row is not None else "global"
+    return tenant_row.slug if tenant_row is not None else "default"
 
 
 def _parse_int(raw: str | None) -> int | None:

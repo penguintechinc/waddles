@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-lottery"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!lottery` -- periodic ticket lottery (economy-SDK ticket purchases, kv ticket ledger, ticket-weighted draw, claim-based conserved pot payout). Net-new Waddles content; points only, no real-money ties."
 requires-python = ">=3.13"
 dependencies = []

@@ -33,6 +33,11 @@ Other mapping keys: `message_id` (tool arg -> wire `message_id`), `text` (string
 `text`, `text_list` and `text_object` are mutually exclusive. Unknown keys are rejected at
 manifest parse; any tool argument the declaration does not map is refused at call time.
 
+`user_wire: placeholder` keeps the target as `{user:<uuid>}` for a consumer that re-resolves it
+(Discord role ops; YouTube, whose svc_ingest duties hold the raw channel id). A destructive
+moderation op (ban/timeout/kick) on a placeholder wire still resolves the user HOST-side, only to
+run the protected-target check; that raw id is never queued or logged.
+
 ## Pipeline
 
 1. Planner (`bundle_tool_call::authorize_tool_call`): caller `requested_tools`, `tool.call`
@@ -48,6 +53,22 @@ manifest parse; any tool argument the declaration does not map is refused at cal
 5. Signed (`pin_sig`) envelope queued; the tool waits for the consumer's ack (bounded;
    silence = `not_confirmed`, never "done"). Only manifest-`returns` keys of the reply reach
    the caller -- a created webhook's token never does.
+
+## Testing a platform bundle's declarations
+
+Planner tests must run the bundle's REAL declarations, not hand-built copies. The consent summary of
+a platform bundle's `exported_tools` lives at
+`core/svc_action/tests/fixtures/host_tools/<platform>.json`; `scripts/host_tool_summary.py
+<bundle-dir> --write <fixture>` regenerates it through the production manifest parser and
+`hub_api/tests/test_platform_host_tool_fixtures.py` fails when either `bundle.yaml` or
+`hub-manifest.yaml` drifts from it. Rust tests load it with `manifest_tools(<platform>)`
+(`host_tools_tests.rs`) and call tools through `StageCapabilities::handle`
+(`tool.invoke`), e.g. `host_tools_twitch_manifest_tests.rs`, `host_tools_discord_manifest_tests.rs` and
+`host_tools_youtube_manifest_tests.rs`.
+
+A `user_wire: placeholder` user (`{user:<uuid>}`, resolved by the consumer) is accepted only for the typed role ops
+and `mod.*` ops (Discord/Twitch/YouTube moderation); for destructive moderation ops the planner still detokenizes
+the user host-side to run the protected-target check before queueing the placeholder.
 
 ## Stable refusal codes
 

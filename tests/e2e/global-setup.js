@@ -120,7 +120,7 @@ async function seedViaKubectl() {
   const seedSql = [
     `CREATE EXTENSION IF NOT EXISTS pgcrypto;`,
     // Create global tenant (if not exists)
-    `INSERT INTO tenants (slug, display_name, is_global) VALUES ('global', 'Waddles Global', TRUE) ON CONFLICT (slug) DO NOTHING;`,
+    `INSERT INTO tenants (slug, display_name, is_global) VALUES ('default', 'Waddles', TRUE) ON CONFLICT (slug) DO NOTHING;`,
     // Create admin user
     `INSERT INTO hub_users (email, username, password_hash, is_active, is_super_admin, email_verified, created_at, updated_at)`,
     `VALUES (${sqlLiteral(TEST_EMAIL)}, 'admin', crypt(${sqlLiteral(TEST_PASS)}, gen_salt('bf', 12)), true, true, true, NOW(), NOW())`,

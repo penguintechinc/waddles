@@ -18,8 +18,6 @@ use svc_ingest::connector::webhook::SecretError;
 use svc_ingest::connector_runtime::feed::TransportPlan;
 use svc_ingest::connector_runtime::plan::{ConnectorProfile, RuntimeEnv};
 use svc_ingest::connector_runtime::profiles::youtube::YoutubeProfile;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const CHAT: &str = "Cg0KC-abc_123";
 const TOKEN: &str = "ya29.test-token";
@@ -51,7 +49,6 @@ fn dest(url: &str) -> Destination {
 
 #[tokio::test]
 async fn real_transport_secrets_release_only_the_oauth_token_to_the_pinned_host() {
-    let hub = MockServer::start().await;
     // The mint is gRPC: a real in-process `ServiceAuthService` answers only community 7.
     let mint_endpoint = service_auth::test_support::MockHub::builder()
         .mint(vec![service_auth::test_support::MintReply::when(
@@ -61,21 +58,20 @@ async fn real_transport_secrets_release_only_the_oauth_token_to_the_pinned_host(
         )])
         .start_detached()
         .await;
-    Mock::given(method("POST"))
-        .and(path(
-            "/api/v1/internal/communities/7/provider-connections/12/resolve",
+    let running =
+        connection_resolver::test_support::start(&connection_resolver::test_support::json_hub(
+            &serde_json::json!({"items": [], "nextAfter": null}),
+            &serde_json::json!({
+                "communityId": 7, "connectionId": 12, "provider": "youtube",
+                "kind": 1, "accessToken": TOKEN, "expiresAt": null,
+            }),
         ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "communityId": 7, "connectionId": 12, "provider": "youtube",
-            "kind": 1, "accessToken": TOKEN, "expiresAt": null,
-        })))
-        .mount(&hub)
         .await;
     let sa = std::env::temp_dir().join(format!("yt-profile-sa-{}", uuid::Uuid::new_v4()));
     std::fs::write(&sa, "synthetic-service-account").unwrap();
     let resolver = ConnectionResolver::new(
         ResolverConfig::new(
-            hub.uri(),
+            running.endpoint.clone(),
             "alpha",
             mint_endpoint,
             sa.to_string_lossy().to_string(),

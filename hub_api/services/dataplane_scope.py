@@ -119,17 +119,24 @@ async def _resolve_community(async_dal: Any, dal: Any, source_id: str) -> Resolv
     )
 
 
-async def resolve_scope(async_dal: Any, dal: Any, platform: str, source_id: str) -> ResolvedScope:
-    """Resolve one platform source to its numeric ``(tenant_id, community_id)``.
+@dataclass(slots=True, frozen=True)
+class Claimants:
+    """Usable communities claiming one source, first-registered first, all in ONE tenant."""
 
-    Raises :class:`InvalidSourceError`, :class:`ScopeNotFoundError` or
-    :class:`AmbiguousScopeError`; never returns a guess.
-    Inactive communities/tenants and communities with no tenant never resolve; a source claimed
-    across tenants is ambiguous (fail closed).
+    ordered: tuple[int, ...]
+    communities: dict[int, Any]
+    primary_flag: dict[int, bool]
+
+
+async def resolve_claimants(async_dal: Any, dal: Any, plat: str, src: str) -> Claimants:
+    """The single candidate-resolution rule shared by scope resolution and active context.
+
+    ``plat``/``src`` must already be normalized. Fail-closed throughout: a verified claim beats a
+    self-asserted one and is decided on the PRE-filter set (an inactive/orphaned verified owner
+    refuses, never falls through to a legacy claimant); a source whose claimants span more than one
+    tenant (judged before the activity filter) is :class:`AmbiguousScopeError`, never pinned to a
+    side. Raises :class:`ScopeNotFoundError` / :class:`AmbiguousScopeError`.
     """
-    plat, src = normalize(platform, source_id)
-    if plat == COMMUNITY_PLATFORM:
-        return await _resolve_community(async_dal, dal, src)
     bind_admin_tables(dal)  # idempotent lazy bind of community_servers (see schema.py)
 
     # ``verified`` = communities with an APPROVED community_servers link (a reviewed claim);
@@ -143,7 +150,11 @@ async def resolve_scope(async_dal: Any, dal: Any, platform: str, source_id: str)
             (dal.community_servers.platform == plat)
             & (dal.community_servers.platform_server_id == src)
             & (dal.community_servers.status == "approved")
-        )
+        ),
+        dal.community_servers.id,
+        dal.community_servers.community_id,
+        dal.community_servers.is_primary,
+        orderby=dal.community_servers.id,
     )
     for link in links:
         cid = int(link.community_id)
@@ -151,9 +162,11 @@ async def resolve_scope(async_dal: Any, dal: Any, platform: str, source_id: str)
         primary_flag[cid] = primary_flag.get(cid, False) or bool(link.is_primary)
 
     legacy = await async_dal.select_async(
-        dal((dal.communities.platform == plat) & (dal.communities.platform_server_id == src))
+        dal((dal.communities.platform == plat) & (dal.communities.platform_server_id == src)),
+        dal.communities.id,
+        orderby=dal.communities.id,
     )
-    legacy_ids = {int(row.id) for row in legacy}
+    legacy_ids = [int(row.id) for row in legacy]
     for cid in legacy_ids:
         primary_flag.setdefault(cid, False)
         if cid in verified:
@@ -164,42 +177,60 @@ async def resolve_scope(async_dal: Any, dal: Any, platform: str, source_id: str)
     if not primary_flag:
         raise ScopeNotFoundError("no community is linked to this source")
 
-    communities = {}
-    for row in await async_dal.select_async(dal(dal.communities.id.belongs(list(primary_flag)))):
-        if row.tenant_id is not None and _truthy_active(row):
-            communities[int(row.id)] = row
-    candidates = [cid for cid in primary_flag if cid in communities]
-    if not candidates:
-        raise ScopeNotFoundError("no active community is linked to this source")
-
     # A verified claim beats a self-asserted one: legacy-only communities cannot contest (or
-    # hijack) a source another community has had approved. With no verified claim at all, the
-    # legacy-only communities are the only evidence and are held to the contention rules below.
-    # Decided on the PRE-filter ``verified`` set: if the verified owner is inactive/orphaned we must
-    # fail closed, never fall through to a legacy claimant (hijack by deactivating the owner).
-    if verified:
-        survivors = [cid for cid in candidates if cid in verified]
-        if not survivors:
+    # hijack) a source another community has had approved. Decided on the PRE-filter set.
+    pool = [cid for cid in primary_flag if cid in verified] if verified else list(primary_flag)
+    rows = {
+        int(row.id): row
+        for row in await async_dal.select_async(
+            dal(dal.communities.id.belongs(pool)),
+            dal.communities.id,
+            dal.communities.tenant_id,
+            dal.communities.is_active,
+            dal.communities.name,
+        )
+    }
+
+    # A source claimed across tenant boundaries is a misconfiguration (or an attack): refuse on the
+    # PRE-filter claimants, never adjudicate by primary flag or pin to one tenant.
+    tenants = {int(r.tenant_id) for r in rows.values() if r.tenant_id is not None}
+    if len(tenants) > 1:
+        logger.warning(
+            "dataplane_scope.cross_tenant_contention platform=%s candidates=%d", plat, len(pool)
+        )
+        raise AmbiguousScopeError("source is claimed by more than one tenant")
+
+    usable = {cid: r for cid, r in rows.items() if r.tenant_id is not None and _truthy_active(r)}
+    ordered = tuple(cid for cid in pool if cid in usable)
+    if not ordered:
+        if verified:
             logger.warning(
                 "dataplane_scope.verified_claimant_unusable platform=%s verified=%d",
                 plat,
                 len(verified),
             )
             raise ScopeNotFoundError("verified claimant is inactive; refusing legacy fallback")
-        candidates = survivors
+        raise ScopeNotFoundError("no active community is linked to this source")
+    return Claimants(ordered, usable, primary_flag)
 
-    # A source claimed across tenant boundaries is a misconfiguration (or an attack): refuse, never
-    # adjudicate by primary flag -- a tenant must not be able to win by asserting primary.
-    if len({int(communities[cid].tenant_id) for cid in candidates}) > 1:
-        logger.warning(
-            "dataplane_scope.cross_tenant_contention platform=%s candidates=%d",
-            plat,
-            len(candidates),
-        )
-        raise AmbiguousScopeError("source is claimed by more than one tenant")
+
+async def resolve_scope(async_dal: Any, dal: Any, platform: str, source_id: str) -> ResolvedScope:
+    """Resolve one platform source to its numeric ``(tenant_id, community_id)``.
+
+    Raises :class:`InvalidSourceError`, :class:`ScopeNotFoundError` or
+    :class:`AmbiguousScopeError`; never returns a guess.
+    Inactive communities/tenants and communities with no tenant never resolve; a source claimed
+    across tenants is ambiguous (fail closed).
+    """
+    plat, src = normalize(platform, source_id)
+    if plat == COMMUNITY_PLATFORM:
+        return await _resolve_community(async_dal, dal, src)
+    claimants = await resolve_claimants(async_dal, dal, plat, src)
+    communities = claimants.communities
+    candidates = list(claimants.ordered)
 
     if len(candidates) > 1:
-        primaries = [cid for cid in candidates if primary_flag[cid]]
+        primaries = [cid for cid in candidates if claimants.primary_flag[cid]]
         if len(primaries) != 1:
             logger.warning(
                 "dataplane_scope.ambiguous platform=%s candidates=%d", plat, len(candidates)

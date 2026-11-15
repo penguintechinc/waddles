@@ -111,11 +111,30 @@ async def test_happy_path_dto_shape_sorted_everyone_excluded(
     assert body == {
         "success": True,
         "roles": [
-            {"id": "333", "name": "Officer", "color": 65280, "position": 5},
-            {"id": "222", "name": "Member", "color": 255, "position": 1},
+            {
+                "id": "333",
+                "name": "Officer",
+                "color": 65280,
+                "position": 5,
+                "permissions": 0,
+                "managed": False,
+                "privileged": False,
+            },
+            {
+                "id": "222",
+                "name": "Member",
+                "color": 255,
+                "position": 1,
+                "permissions": 0,
+                "managed": False,
+                "privileged": False,
+            },
         ],
     }
-    assert all(set(r) == {"id", "name", "color", "position"} for r in body["roles"])
+    assert all(
+        set(r) == {"id", "name", "color", "position", "permissions", "managed", "privileged"}
+        for r in body["roles"]
+    )
     assert seen[0].url.path.endswith(f"/guilds/{GUILD}/roles")
     assert seen[0].headers["Authorization"] == f"Bot {FAKE_TOKEN}"
 

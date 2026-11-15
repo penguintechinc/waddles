@@ -1,111 +1,139 @@
-//! `HubTierResolver` / `HubCredentialResolver` against a fake hub-api.
+//! `HubTierResolver` / `HubCredentialResolver` against a REAL in-process tonic `MediaService`
+//! on loopback (the generated server trait, a real lazy `Channel`): request shape, bearer
+//! metadata, tier cache + grace, and fail-closed handling of every error status.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
-use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
-use axum::routing::post;
-use axum::{Json, Router};
 use bundle_host_media::auth::StaticBearer;
 use bundle_host_media::credentials::{CredentialError, CredentialResolver, HubCredentialResolver};
 use bundle_host_media::tier::{require_professional, HubTierResolver, TierError, TierResolver};
 use bundle_host_media::{MediaError, Tier};
 use common::scope;
+use hub_client::lazy_channel;
+use hub_client::pb::media_service_server::{MediaService, MediaServiceServer};
+use hub_client::pb::{
+    ByokStatus, GetEffectiveTierRequest, GetEffectiveTierResponse, MediaTier, ResolveByokRequest,
+    ResolveByokResponse,
+};
+use tonic::{Code, Request, Response, Status};
 
+const DEADLINE: Duration = Duration::from_secs(2);
+
+/// Scriptable fake hub: each RPC answers `Err(code)` when set, else the scripted reply.
 #[derive(Default)]
 struct Hub {
-    status: AtomicU16,
-    tier: Mutex<String>,
+    tier: Mutex<i32>,
+    tier_error: Mutex<Option<Code>>,
     tier_calls: AtomicUsize,
-    tier_body: Mutex<serde_json::Value>,
+    tier_request: Mutex<Option<GetEffectiveTierRequest>>,
     auth: Mutex<Vec<String>>,
-    byok_body: Mutex<serde_json::Value>,
-    byok_status: AtomicU16,
-    byok_reply: Mutex<serde_json::Value>,
+    byok_request: Mutex<Option<ResolveByokRequest>>,
+    byok_error: Mutex<Option<Code>>,
+    byok_reply: Mutex<ResolveByokResponse>,
 }
 
-async fn tier(
-    State(h): State<Arc<Hub>>,
-    headers: HeaderMap,
-    Json(b): Json<serde_json::Value>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    h.tier_calls.fetch_add(1, Ordering::SeqCst);
-    h.auth.lock().unwrap().push(
-        headers
-            .get("authorization")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string(),
-    );
-    *h.tier_body.lock().unwrap() = b;
-    let st = h.status.load(Ordering::SeqCst);
-    (
-        StatusCode::from_u16(st).unwrap(),
-        Json(serde_json::json!({"tier": *h.tier.lock().unwrap()})),
-    )
+fn bearer<T>(r: &Request<T>) -> String {
+    r.metadata()
+        .get("authorization")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string()
 }
 
-async fn byok(
-    State(h): State<Arc<Hub>>,
-    headers: HeaderMap,
-    Json(b): Json<serde_json::Value>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    h.auth.lock().unwrap().push(
-        headers
-            .get("authorization")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string(),
-    );
-    *h.byok_body.lock().unwrap() = b;
-    (
-        StatusCode::from_u16(h.byok_status.load(Ordering::SeqCst)).unwrap(),
-        Json(h.byok_reply.lock().unwrap().clone()),
-    )
+struct Svc(Arc<Hub>);
+
+#[tonic::async_trait]
+impl MediaService for Svc {
+    async fn resolve_byok(
+        &self,
+        request: Request<ResolveByokRequest>,
+    ) -> Result<Response<ResolveByokResponse>, Status> {
+        let h = &self.0;
+        h.auth.lock().unwrap().push(bearer(&request));
+        *h.byok_request.lock().unwrap() = Some(request.into_inner());
+        if let Some(code) = *h.byok_error.lock().unwrap() {
+            return Err(Status::new(code, "SECRET-LOOKING-server-text"));
+        }
+        Ok(Response::new(h.byok_reply.lock().unwrap().clone()))
+    }
+
+    async fn get_effective_tier(
+        &self,
+        request: Request<GetEffectiveTierRequest>,
+    ) -> Result<Response<GetEffectiveTierResponse>, Status> {
+        let h = &self.0;
+        h.tier_calls.fetch_add(1, Ordering::SeqCst);
+        h.auth.lock().unwrap().push(bearer(&request));
+        *h.tier_request.lock().unwrap() = Some(request.into_inner());
+        if let Some(code) = *h.tier_error.lock().unwrap() {
+            return Err(Status::new(code, "SECRET-LOOKING-server-text"));
+        }
+        Ok(Response::new(GetEffectiveTierResponse {
+            tier: *h.tier.lock().unwrap(),
+        }))
+    }
 }
 
 async fn hub() -> (Arc<Hub>, String) {
     let h = Arc::new(Hub::default());
-    h.status.store(200, Ordering::SeqCst);
-    let app = Router::new()
-        .route("/api/v1/internal/media/effective-tier", post(tier))
-        .route("/api/v1/internal/media/byok/resolve", post(byok))
-        .with_state(h.clone());
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+    let svc = Svc(h.clone());
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(MediaServiceServer::new(svc))
+            .serve(addr)
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
     (h, format!("http://{addr}"))
 }
 
-fn tier_resolver(base: String, fresh: Duration, grace: Duration) -> HubTierResolver {
+fn tier_resolver(endpoint: &str, fresh: Duration, grace: Duration) -> HubTierResolver {
     HubTierResolver::new(
-        reqwest::Client::new(),
-        base,
+        lazy_channel(endpoint, None).unwrap(),
         Arc::new(StaticBearer("jwt-1".into())),
+        DEADLINE,
         fresh,
         grace,
     )
 }
 
+fn creds(endpoint: &str, token: &str) -> HubCredentialResolver {
+    HubCredentialResolver::new(
+        lazy_channel(endpoint, None).unwrap(),
+        Arc::new(StaticBearer(token.into())),
+        DEADLINE,
+    )
+}
+
+fn set_tier(h: &Hub, tier: MediaTier) {
+    *h.tier.lock().unwrap() = tier as i32;
+}
+
 #[tokio::test]
 async fn hub_tier_request_shape_jwt_and_cache() {
-    let (h, base) = hub().await;
-    let r = tier_resolver(base, Duration::from_secs(60), Duration::from_secs(600));
-    *h.tier.lock().unwrap() = "professional".into();
+    let (h, endpoint) = hub().await;
+    let r = tier_resolver(&endpoint, Duration::from_secs(60), Duration::from_secs(600));
+    set_tier(&h, MediaTier::Professional);
     assert_eq!(
         r.effective_tier(&scope("a")).await.unwrap(),
         Tier::Professional
     );
     assert_eq!(
-        *h.tier_body.lock().unwrap(),
-        serde_json::json!({"tenant_id": 7, "community_id": 42})
+        *h.tier_request.lock().unwrap(),
+        Some(GetEffectiveTierRequest {
+            tenant_id: 7,
+            community_id: 42
+        })
     );
     assert_eq!(h.auth.lock().unwrap()[0], "Bearer jwt-1");
     assert!(require_professional(&r, &scope("a")).await.is_ok());
@@ -116,9 +144,9 @@ async fn hub_tier_request_shape_jwt_and_cache() {
 
 #[tokio::test]
 async fn free_tenant_and_free_community_is_refused() {
-    let (h, base) = hub().await;
-    let r = tier_resolver(base, Duration::from_secs(60), Duration::from_secs(600));
-    *h.tier.lock().unwrap() = "free".into();
+    let (h, endpoint) = hub().await;
+    let r = tier_resolver(&endpoint, Duration::from_secs(60), Duration::from_secs(600));
+    set_tier(&h, MediaTier::Free);
     assert_eq!(
         require_professional(&r, &scope("a")).await.unwrap_err(),
         MediaError::TierRequired("professional".into())
@@ -126,26 +154,29 @@ async fn free_tenant_and_free_community_is_refused() {
 }
 
 #[tokio::test]
-async fn unknown_tier_slug_fails_closed() {
-    let (h, base) = hub().await;
-    let r = tier_resolver(base, Duration::ZERO, Duration::from_secs(600));
-    *h.tier.lock().unwrap() = "platinum".into();
-    assert_eq!(
-        r.effective_tier(&scope("a")).await.unwrap_err(),
-        TierError::Unknown
-    );
-    assert_eq!(
-        require_professional(&r, &scope("a")).await.unwrap_err(),
-        MediaError::TierRequired("license_unknown".into())
-    );
+async fn unspecified_or_unknown_tier_fails_closed() {
+    let (h, endpoint) = hub().await;
+    let r = tier_resolver(&endpoint, Duration::ZERO, Duration::from_secs(600));
+    for raw in [MediaTier::Unspecified as i32, 99] {
+        *h.tier.lock().unwrap() = raw;
+        assert_eq!(
+            r.effective_tier(&scope("a")).await.unwrap_err(),
+            TierError::Unknown,
+            "{raw}"
+        );
+        assert_eq!(
+            require_professional(&r, &scope("a")).await.unwrap_err(),
+            MediaError::TierRequired("license_unknown".into())
+        );
+    }
 }
 
 #[tokio::test]
 async fn hub_down_never_seen_refuses_but_last_known_serves_within_grace() {
-    let (h, base) = hub().await;
+    let (h, endpoint) = hub().await;
     // Never seen + hub error => refuse.
-    h.status.store(503, Ordering::SeqCst);
-    let r = tier_resolver(base.clone(), Duration::ZERO, Duration::from_secs(600));
+    *h.tier_error.lock().unwrap() = Some(Code::Unavailable);
+    let r = tier_resolver(&endpoint, Duration::ZERO, Duration::from_secs(600));
     assert!(matches!(
         r.effective_tier(&scope("a")).await,
         Err(TierError::Unavailable(_))
@@ -155,24 +186,43 @@ async fn hub_down_never_seen_refuses_but_last_known_serves_within_grace() {
         MediaError::TierRequired("license_unknown".into())
     );
     // Seen, then hub down => last-known within grace.
-    h.status.store(200, Ordering::SeqCst);
-    *h.tier.lock().unwrap() = "enterprise".into();
+    *h.tier_error.lock().unwrap() = None;
+    set_tier(&h, MediaTier::Enterprise);
     assert_eq!(
         r.effective_tier(&scope("a")).await.unwrap(),
         Tier::Enterprise
     );
-    h.status.store(500, Ordering::SeqCst);
+    *h.tier_error.lock().unwrap() = Some(Code::Internal);
     assert_eq!(
         r.effective_tier(&scope("a")).await.unwrap(),
         Tier::Enterprise
     );
     // Grace expired => refuse again.
-    let strict = tier_resolver(base, Duration::ZERO, Duration::ZERO);
-    h.status.store(200, Ordering::SeqCst);
+    let strict = tier_resolver(&endpoint, Duration::ZERO, Duration::ZERO);
+    *h.tier_error.lock().unwrap() = None;
     strict.effective_tier(&scope("a")).await.unwrap();
     tokio::time::sleep(Duration::from_millis(5)).await;
-    h.status.store(500, Ordering::SeqCst);
+    *h.tier_error.lock().unwrap() = Some(Code::Internal);
     assert!(strict.effective_tier(&scope("a")).await.is_err());
+}
+
+#[tokio::test]
+async fn tier_refusals_are_unavailable_and_never_echo_server_text() {
+    let (h, endpoint) = hub().await;
+    let r = tier_resolver(&endpoint, Duration::ZERO, Duration::ZERO);
+    for code in [
+        Code::NotFound,
+        Code::PermissionDenied,
+        Code::Unauthenticated,
+        Code::InvalidArgument,
+        Code::ResourceExhausted,
+    ] {
+        *h.tier_error.lock().unwrap() = Some(code);
+        match r.effective_tier(&scope("a")).await {
+            Err(TierError::Unavailable(m)) => assert!(!m.contains("SECRET"), "{m}"),
+            other => panic!("{code:?}: {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -180,59 +230,64 @@ async fn unreachable_hub_is_unavailable() {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     drop(l);
-    let r = tier_resolver(format!("http://{addr}"), Duration::ZERO, Duration::ZERO);
+    let endpoint = format!("http://{addr}");
+    let r = tier_resolver(&endpoint, Duration::ZERO, Duration::ZERO);
     assert!(matches!(
         r.effective_tier(&scope("a")).await,
         Err(TierError::Unavailable(_))
     ));
-    let c = HubCredentialResolver::new(
-        reqwest::Client::new(),
-        format!("http://{addr}"),
-        Arc::new(StaticBearer("j".into())),
-    );
+    let c = creds(&endpoint, "j");
     assert!(matches!(
         c.resolve(&scope("a"), "gemini").await,
         Err(CredentialError::Unavailable(_))
     ));
 }
 
+fn reply(status: ByokStatus, key: Option<&str>) -> ResolveByokResponse {
+    ResolveByokResponse {
+        status: status as i32,
+        tier: MediaTier::Professional as i32,
+        api_key: key.map(str::to_owned),
+    }
+}
+
 #[tokio::test]
 async fn byok_resolver_contract() {
-    let (h, base) = hub().await;
-    let c = HubCredentialResolver::new(
-        reqwest::Client::new(),
-        base,
-        Arc::new(StaticBearer("jwt-2".into())),
-    );
-    h.byok_status.store(200, Ordering::SeqCst);
-    *h.byok_reply.lock().unwrap() =
-        serde_json::json!({"status": "ok", "tier": "professional", "api_key": "AIza-secret"});
+    let (h, endpoint) = hub().await;
+    let c = creds(&endpoint, "jwt-2");
+    *h.byok_reply.lock().unwrap() = reply(ByokStatus::Ok, Some("AIza-secret"));
     let key = c.resolve(&scope("a"), "gemini").await.unwrap();
     assert_eq!(key.expose(), "AIza-secret");
     assert_eq!(format!("{key:?}"), "ApiKey(<redacted>)");
     assert_eq!(
-        *h.byok_body.lock().unwrap(),
-        serde_json::json!({"tenant_id": 7, "community_id": 42, "provider": "gemini"})
+        *h.byok_request.lock().unwrap(),
+        Some(ResolveByokRequest {
+            tenant_id: 7,
+            community_id: 42,
+            provider: "gemini".into()
+        })
     );
     assert_eq!(h.auth.lock().unwrap().last().unwrap(), "Bearer jwt-2");
-    *h.byok_reply.lock().unwrap() =
-        serde_json::json!({"status": "not_configured", "tier": "professional", "api_key": null});
+
+    *h.byok_reply.lock().unwrap() = reply(ByokStatus::NotConfigured, None);
     assert_eq!(
         c.resolve(&scope("a"), "gemini").await.unwrap_err(),
         CredentialError::NotConfigured
     );
-    *h.byok_reply.lock().unwrap() =
-        serde_json::json!({"status": "tier_required", "tier": "free", "api_key": null});
+    *h.byok_reply.lock().unwrap() = reply(ByokStatus::TierRequired, None);
     assert_eq!(
         c.resolve(&scope("a"), "gemini").await.unwrap_err(),
         CredentialError::TierRequired
     );
-    // ok without a key, unknown status, malformed body: fail closed.
+    // ok without a key / with an empty key, unspecified or unknown status: fail closed.
     for bad in [
-        serde_json::json!({"status": "ok", "tier": "professional", "api_key": null}),
-        serde_json::json!({"status": "ok", "tier": "professional", "api_key": ""}),
-        serde_json::json!({"status": "weird", "tier": "x", "api_key": null}),
-        serde_json::json!({"nope": 1}),
+        reply(ByokStatus::Ok, None),
+        reply(ByokStatus::Ok, Some("")),
+        reply(ByokStatus::Unspecified, None),
+        ResolveByokResponse {
+            status: 99,
+            ..Default::default()
+        },
     ] {
         *h.byok_reply.lock().unwrap() = bad;
         assert!(matches!(
@@ -240,16 +295,22 @@ async fn byok_resolver_contract() {
             Err(CredentialError::Unavailable(_))
         ));
     }
-    // Every documented error status is Unavailable, never NotConfigured.
-    for st in [400u16, 401, 403, 404, 429, 500, 503] {
-        h.byok_status.store(st, Ordering::SeqCst);
-        *h.byok_reply.lock().unwrap() = serde_json::json!({"status": "not_configured"});
-        assert!(
-            matches!(
-                c.resolve(&scope("a"), "gemini").await,
-                Err(CredentialError::Unavailable(_))
-            ),
-            "{st}"
-        );
+    // Every documented error status is Unavailable (never NotConfigured) and never echoes
+    // server text.
+    for code in [
+        Code::InvalidArgument,
+        Code::Unauthenticated,
+        Code::PermissionDenied,
+        Code::NotFound,
+        Code::ResourceExhausted,
+        Code::Internal,
+        Code::Unavailable,
+    ] {
+        *h.byok_error.lock().unwrap() = Some(code);
+        *h.byok_reply.lock().unwrap() = reply(ByokStatus::NotConfigured, None);
+        match c.resolve(&scope("a"), "gemini").await {
+            Err(CredentialError::Unavailable(m)) => assert!(!m.contains("SECRET"), "{m}"),
+            other => panic!("{code:?}: {other:?}"),
+        }
     }
 }

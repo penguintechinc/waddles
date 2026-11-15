@@ -1,0 +1,55 @@
+// MediaService: internal gRPC contract replacing hub-api's
+// `POST /api/v1/internal/media/byok/resolve` and
+// `POST /api/v1/internal/media/effective-tier` (machine-JWT, svc-process
+// media stage only). The BYOK RPC is the ONLY place a community's plaintext
+// provider key leaves hub-api; every call is audited hub-side.
+syntax = "proto3";
+
+package waddles.hub.internal.v1;
+
+option go_package = "github.com/penguintechinc/waddles/gen/go/waddles/hub/internal/v1;hubinternalv1";
+
+service MediaService {
+  // Resolves the community's BYOK key. Required scope: "media:byok:resolve".
+  rpc ResolveByok(ResolveByokRequest) returns (ResolveByokResponse);
+
+  // max(tenant tier, community tier). Required scope: "media:tier:resolve".
+  rpc GetEffectiveTier(GetEffectiveTierRequest) returns (GetEffectiveTierResponse);
+}
+
+enum MediaTier {
+  MEDIA_TIER_UNSPECIFIED = 0;
+  MEDIA_TIER_FREE = 1;
+  MEDIA_TIER_PROFESSIONAL = 2;
+  MEDIA_TIER_ENTERPRISE = 3;
+}
+
+enum ByokStatus {
+  BYOK_STATUS_UNSPECIFIED = 0;
+  BYOK_STATUS_OK = 1;
+  BYOK_STATUS_NOT_CONFIGURED = 2;
+  BYOK_STATUS_TIER_REQUIRED = 3;
+}
+
+message ResolveByokRequest {
+  // Numeric ids only (data-plane keys never use slugs).
+  int64 tenant_id = 1;
+  int64 community_id = 2;
+  string provider = 3;
+}
+
+message ResolveByokResponse {
+  ByokStatus status = 1;
+  MediaTier tier = 2;
+  // Set iff status == BYOK_STATUS_OK.
+  optional string api_key = 3;
+}
+
+message GetEffectiveTierRequest {
+  int64 tenant_id = 1;
+  int64 community_id = 2;
+}
+
+message GetEffectiveTierResponse {
+  MediaTier tier = 1;
+}

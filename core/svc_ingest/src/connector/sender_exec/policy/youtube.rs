@@ -3,7 +3,8 @@
 //! `liveChatId` is the host-resolved slot (the community's connection), never bundle input.
 
 use super::{
-    resolver_slot, KindPolicy, PathSeg, PlatformPolicy, Position, ResultMode, SlotShape, SlotSyntax,
+    duty_slot, resolver_slot, KindPolicy, PathSeg, PlatformPolicy, Position, ResultMode, SlotDecl,
+    SlotShape, SlotSyntax,
 };
 
 /// `/youtube/v3/liveChat/<resource>`.
@@ -21,10 +22,12 @@ fn live_chat(resource: &'static str) -> Vec<PathSeg> {
 fn insert_kind(kind: &'static str, resource: &'static str, result: ResultMode) -> KindPolicy {
     KindPolicy {
         query: vec!["part"],
-        slots: vec!["YT_OAUTH_TOKEN", "YT_LIVE_CHAT_ID"],
+        slots: vec!["YT_OAUTH_TOKEN", "YT_LIVE_CHAT_ID", "YT_TARGET_USER"],
         max_body: Some(4096),
         body_keys: vec!["snippet"],
         requires_pin: true,
+        // Quota, target-user detokenization and id-ownership run in `YoutubeDuties`.
+        needs_duty: true,
         result,
         ..KindPolicy::new(kind, "POST", live_chat(resource))
     }
@@ -37,6 +40,8 @@ fn delete_kind(kind: &'static str, resource: &'static str) -> KindPolicy {
         query: vec!["id"],
         slots: vec!["YT_OAUTH_TOKEN"],
         requires_pin: true,
+        // The `id` is proven to belong to the pinned live chat by `YoutubeDuties` before egress.
+        needs_duty: true,
         ..KindPolicy::new(kind, "DELETE", live_chat(resource))
     }
 }
@@ -66,6 +71,14 @@ impl PlatformPolicy {
                         Position::Query("liveChatId"),
                     ],
                 ),
+                // The tokenized target user, detokenized by the duty hook for THIS community.
+                SlotDecl {
+                    positions: vec![
+                        Position::Body("/snippet/bannedUserDetails/channelId"),
+                        Position::Body("/snippet/moderatorDetails/channelId"),
+                    ],
+                    ..duty_slot("YT_TARGET_USER")
+                },
                 resolver_slot(
                     "YT_CHANNEL_ID",
                     "youtube.channel_id",
@@ -85,6 +98,8 @@ impl PlatformPolicy {
                     query: vec!["part"],
                     slots: vec!["YT_OAUTH_TOKEN", "YT_LIVE_CHAT_ID"],
                     max_body: Some(4096),
+                    // Quota is charged by `YoutubeDuties`.
+                    needs_duty: true,
                     ..KindPolicy::new("chat.send", "POST", live_chat("messages"))
                 },
                 // https://developers.google.com/youtube/v3/live/docs/liveChatMessages/delete

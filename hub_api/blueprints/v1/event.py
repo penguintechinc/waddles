@@ -393,6 +393,13 @@ def _make_handler(route: ProxyRoute) -> Callable[..., Any]:
             query=query or None,
             json_body=body,
         )
+        if (
+            not result.ok
+            and result.status_code == 503
+            and isinstance(result.body, dict)
+            and result.body.get("error") == "service_unavailable"
+        ):
+            return result.body, 503
         if not result.ok:
             # See module docstring "Known inherited behavior" -- masked
             # 500 on every downstream failure, matching Node's

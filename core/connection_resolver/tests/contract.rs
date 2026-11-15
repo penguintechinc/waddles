@@ -1,53 +1,29 @@
-//! Contract test: the crate parses hub-api's golden resolve-v2 fixtures through the real
-//! client path (a local fake hub serves each fixture byte-for-byte).
+//! Contract test: the crate decodes hub-api's golden resolve-v2 fixtures through the real
+//! gRPC client path (a real in-process tonic hub serves each fixture as the proto message).
+
+mod common;
 
 use std::sync::Arc;
-use std::time::Duration;
 
+use common::{cfg, reply_from_json, start, token_server, Hub, Rec};
 use connection_resolver::{
     ConnectionKind, ConnectionRef, ConnectionResolver, ConnectionSecret, ResolveError,
-    ResolverConfig, ResolverMetrics,
 };
-use service_auth::test_support::{MintReply, MockHub};
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const OAUTH: &str = include_str!("../../../hub_api/tests/fixtures/resolve_v2_oauth.json");
 const HTTP: &str = include_str!("../../../hub_api/tests/fixtures/resolve_v2_http.json");
 const LAMBDA: &str = include_str!("../../../hub_api/tests/fixtures/resolve_v2_lambda.json");
 const GCP: &str = include_str!("../../../hub_api/tests/fixtures/resolve_v2_gcp.json");
 
-struct NoMetrics;
-impl ResolverMetrics for NoMetrics {
-    fn resolve(&self, _: ConnectionKind, _: &'static str, _: Duration) {}
-    fn list(&self, _: &'static str) {}
-}
-
 async fn resolve_fixture(
     body: &str,
 ) -> Result<connection_resolver::ResolvedConnection, ResolveError> {
-    let server = MockServer::start().await;
-    // The mint is gRPC: a real in-process `ServiceAuthService` hands out the token.
-    let hub = MockHub::builder()
-        .mint(vec![MintReply::token("t", 3600)])
-        .start()
-        .await;
-    Mock::given(method("POST"))
-        .and(path(
-            "/api/v1/internal/communities/7/provider-connections/12/resolve",
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(body.to_string(), "application/json"))
-        .mount(&server)
-        .await;
-    let sa = std::env::temp_dir().join(format!("contract-sa-{}", server.address().port()));
-    std::fs::write(&sa, "sa").unwrap();
-    let cfg = ResolverConfig::new(
-        server.uri(),
-        "alpha",
-        hub.endpoint.clone(),
-        sa.to_string_lossy().to_string(),
-    );
-    let r = ConnectionResolver::new(cfg, Arc::new(NoMetrics)).unwrap();
+    let reply = reply_from_json(&serde_json::from_str(body).unwrap());
+    let hub = Hub::resolving(move |_, _| Ok(reply.clone()));
+    let running = start(&hub).await;
+    let tokens = token_server().await;
+    let r =
+        ConnectionResolver::new(cfg(&running.endpoint, &tokens), Arc::new(Rec::default())).unwrap();
     r.resolve(ConnectionRef {
         community_id: 7,
         connection_id: 12,
@@ -86,7 +62,7 @@ async fn contract_parses_every_golden_fixture() {
         other => panic!("{other:?}"),
     }
 
-    // AWS Lambda (kind 3, scheme 4); null sessionToken -> None.
+    // AWS Lambda (kind 3, scheme 4); absent sessionToken -> None.
     let c = resolve_fixture(LAMBDA).await.unwrap();
     assert_eq!(c.kind, ConnectionKind::AwsLambda);
     assert_eq!(c.endpoint.region.as_deref(), Some("us-east-1"));

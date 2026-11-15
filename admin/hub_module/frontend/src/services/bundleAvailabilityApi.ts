@@ -15,6 +15,8 @@ export interface BundleAvailability {
   tenantId: number;
   available: boolean;
   pinnedVersionId: number | null;
+  /** Pinned version string, else the live installed version (null when unknown). */
+  version?: string | null;
   updatedAt: string | null;
 }
 

@@ -29,6 +29,10 @@ object_store = { version = "=0.14.1", default-features = false, features = ["aws
 http = "=1.5.0"
 opentelemetry = "=0.32.0"
 bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
+# hub-api's internal gRPC surface (MediaService): generated client + the shared machine-JWT
+# metadata helper; tonic for `Status`/`Channel` (same pins as core/hub_client).
+hub_client = { path = "../hub_client", version = "=0.1.0" }
+tonic = "=0.14.6"
 
 [dev-dependencies]
 tokio = { version = "=1.53.3", features = ["full", "test-util"] }

@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-prediction"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!prediction` / `!predict` -- community predictions on a pari-mutuel point pool (economy-SDK stakes, kv pools, claim-based conserved payouts). Net-new Waddles content; points only, no real-money ties."
 requires-python = ">=3.13"
 dependencies = []

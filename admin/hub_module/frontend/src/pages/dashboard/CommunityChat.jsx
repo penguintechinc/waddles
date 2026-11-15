@@ -10,11 +10,12 @@ import api from '../../services/api';
 import ChatChannelList from '../../components/chat/ChatChannelList';
 import ChatWindow from '../../components/chat/ChatWindow';
 import ChatInput from '../../components/chat/ChatInput';
+import RealtimeUnavailableBanner from '../../components/chat/RealtimeUnavailableBanner';
 
 export default function CommunityChat() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { socket, connected } = useSocket();
+  const { socket, connected, degraded } = useSocket();
 
   const [channels, setChannels] = useState([]);
   const [activeChannel, setActiveChannel] = useState('general');
@@ -28,9 +29,14 @@ export default function CommunityChat() {
     loadChannels();
   }, [id]);
 
+  // Degraded (flag off / reconnects exhausted): REST history only, no socket
+  useEffect(() => {
+    if (degraded) loadMessages();
+  }, [degraded, id, activeChannel]);
+
   // Join channel when active channel changes
   useEffect(() => {
-    if (!socket || !connected) return;
+    if (degraded || !socket || !connected) return;
 
     // Join the new channel
     socket.emit('chat:join', {
@@ -131,6 +137,20 @@ export default function CommunityChat() {
 
   // Load message history
   const loadMessages = () => {
+    if (degraded) {
+      // No live socket: read history over REST so the page still works.
+      api
+        .get(`/api/v1/community/${id}/chat/history`, {
+          params: { channelName: activeChannel, limit: 50 },
+        })
+        .then((res) => setMessages(res.data?.messages || []))
+        .catch((err) => {
+          console.error('[CommunityChat] History load failed', { message: err?.message });
+          setError('Failed to load chat history');
+        })
+        .finally(() => setLoading(false));
+      return;
+    }
     if (!socket) return;
 
     setLoading(true);
@@ -184,12 +204,14 @@ export default function CommunityChat() {
               <h1 className="text-2xl font-bold text-white">Community Chat</h1>
               <p className="text-sm text-fg-muted">
                 #{activeChannel}
-                {!connected && <span className="text-red-400 ml-2">(Disconnected)</span>}
+                {!degraded && !connected && <span className="text-red-400 ml-2">(Disconnected)</span>}
               </p>
             </div>
           </div>
         </div>
       </div>
+
+      {degraded && <RealtimeUnavailableBanner />}
 
       {/* Error banner */}
       {error && (
@@ -213,7 +235,7 @@ export default function CommunityChat() {
           <ChatWindow messages={messages} typingUsers={typingUsers} loading={loading} />
 
           {/* Input */}
-          <ChatInput onSendMessage={handleSendMessage} disabled={!connected} />
+          <ChatInput onSendMessage={handleSendMessage} disabled={degraded || !connected} />
         </div>
       </div>
     </div>

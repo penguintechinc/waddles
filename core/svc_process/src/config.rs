@@ -79,8 +79,9 @@ pub struct CliConfig {
     #[arg(long, env = "BIND_ADDR", default_value = "0.0.0.0")]
     pub bind_addr: IpAddr,
 
-    /// hub-api base URL, source of the `GET /api/v1/distribution/bundles
-    /// ?stage=process` activation poll.
+    /// hub-api base URL. The `process` activation poll is NOT REST any more: it is the internal
+    /// gRPC `DistributionService.ListBundles` (`hub_client::HubClient::list_distribution_bundles`,
+    /// scope `distribution:read`).
     /// TODO(M4): the poll loop itself is blocked on M2's compiler/executor
     /// and penguin-spine landing; this field is read by config validation
     /// only today.
@@ -185,8 +186,8 @@ pub struct CliConfig {
     #[arg(long, env = "HOST_API_MAX_CONNECTIONS", default_value_t = 64)]
     pub host_api_max_connections: usize,
 
-    /// Interim, env-driven substitute for the `GET /api/v1/distribution/
-    /// bundles?stage=process` grant list (spec SS4.2/SS6.7) -- **TODO(M4+)**:
+    /// Interim, env-driven substitute for the `DistributionService.ListBundles(stage=PROCESS)`
+    /// grant list (spec SS4.2/SS6.7) -- **TODO(M4+)**:
     /// replace with the real poll once it lands. When set together with
     /// [`Self::process_ingest_source_id`], the drain loop is granted
     /// exactly one ingest-source stream to read; when either is unset, the
@@ -727,6 +728,12 @@ pub struct Config {
     /// unprovisioned deployment must start; the capability then denies
     /// `not_implemented`. Empty is treated as unset.
     pub bundle_platform_table_password: Option<Secret>,
+    /// The tenant stream-DEK source shared by every consumer (`crate::identity_crypto`),
+    /// built ONCE at startup by `crate::run_with_shutdown` (`crate::build_dek_provider`) --
+    /// it needs a live tokio runtime to open its lazy hub-api channel, so it cannot exist at
+    /// config-parse time. Empty until then; a consumer that finds it empty dead-letters every
+    /// event that carries an encrypted identity field (fail closed), never forwards them.
+    pub identity_dek: std::sync::Arc<std::sync::OnceLock<hub_client::dek::ConfiguredDekProvider>>,
 }
 
 impl fmt::Debug for Config {
@@ -835,6 +842,7 @@ impl Config {
             bundle_reputation_password,
             bundle_economy_password,
             bundle_platform_table_password,
+            identity_dek: std::sync::Arc::default(),
         })
     }
 }

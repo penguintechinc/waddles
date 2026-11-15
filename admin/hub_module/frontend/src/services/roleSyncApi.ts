@@ -11,6 +11,20 @@ import { apiClient } from '../lib/apiClient';
 // `communityId`/`pairingId`/`bindingId` are numeric platform identifiers
 // (never PII); `discordGuildId`/`discordRoleId` are Discord snowflakes.
 
+/** Body for `POST .../guild-pairings` -- hub-api validates the guild ID and bot membership. */
+export interface CreateGuildPairingPayload {
+  discord_guild_id: string;
+  sync_enabled: boolean;
+  direction?: GuildPairingDirection;
+}
+
+/** Shared TanStack Query keys for role-sync data, so every writer invalidates the same cache entry. */
+export const roleSyncKeys = {
+  pairings: (communityId: number) => ['role-sync-pairings', communityId] as const,
+  bindings: (communityId: number, pairingId: number) =>
+    ['role-sync-bindings', communityId, pairingId] as const,
+};
+
 /** `guild_tenant_pairings.direction` -- migration 0034's CHECK constraint values. */
 export type GuildPairingDirection = 'discord_to_twitch' | 'twitch_to_discord' | 'bidirectional';
 
@@ -101,12 +115,98 @@ interface RoleSyncBindingResponse {
   binding: RoleSyncBinding;
 }
 
+/** One Discord guild role (`GET .../discord/roles`) -- `id` is a string snowflake. */
+export interface DiscordRole {
+  id: string;
+  name: string;
+  color: number;
+  position: number;
+  permissions: number;
+  managed: boolean;
+  /** Server-computed: carries a privileged permission or is a managed role -- never a mirror target. */
+  privileged: boolean;
+}
+
+/** One cross-guild role mirror mapping (`discord_role_mirror_mappings`) + last sync counters. */
+export interface RoleMirrorMapping {
+  id: number;
+  community_id: number;
+  source_guild_id: string;
+  source_role_id: string;
+  target_guild_id: string;
+  target_role_id: string;
+  last_synced_at: string | null;
+  last_roles_added: number;
+  last_roles_removed: number;
+  last_skipped_not_member: number;
+  last_error: string | null;
+  created_at: string | null;
+}
+
+export interface CreateRoleMirrorPayload {
+  source_guild_id: string;
+  source_role_id: string;
+  target_guild_id: string;
+  target_role_id: string;
+}
+
 export const roleSyncApi = {
+  /** `GET .../discord/roles?guild_id=` -- a paired guild's roles; requires `community.guild_pairing:read`. */
+  listGuildRoles: (communityId: number, guildId: string) =>
+    apiClient
+      .get<{ success: boolean; roles: DiscordRole[] }>(
+        `/api/v1/communities/${communityId}/discord/roles`,
+        { params: { guild_id: guildId } },
+      )
+      .then((res) => res.data.roles),
+
+  /** `GET .../discord/role-mirrors` -- mirror mappings + last sync counters. */
+  listMirrors: (communityId: number) =>
+    apiClient
+      .get<{ success: boolean; mappings: RoleMirrorMapping[] }>(
+        `/api/v1/communities/${communityId}/discord/role-mirrors`,
+      )
+      .then((res) => res.data.mappings),
+
+  /** `POST .../discord/role-mirrors` -- one-way source -> target mapping; requires `...:write`. */
+  createMirror: (communityId: number, payload: CreateRoleMirrorPayload) =>
+    apiClient
+      .post<{ success: boolean; mapping: RoleMirrorMapping }>(
+        `/api/v1/communities/${communityId}/discord/role-mirrors`,
+        payload,
+      )
+      .then((res) => res.data.mapping),
+
+  /** `DELETE .../discord/role-mirrors/<mappingId>`. */
+  deleteMirror: (communityId: number, mappingId: number) =>
+    apiClient.delete<void>(`/api/v1/communities/${communityId}/discord/role-mirrors/${mappingId}`),
+
   /** `GET /api/v1/communities/<communityId>/guild-pairings` -- requires `community.guild_pairing:read`. */
   listPairings: (communityId: number) =>
     apiClient
       .get<GuildPairingListResponse>(`/api/v1/communities/${communityId}/guild-pairings`)
       .then((res) => res.data.pairings),
+
+  /**
+   * `POST /api/v1/communities/<communityId>/guild-pairings` -- pair a Discord
+   * server by ID (hub-api verifies the bot is in it); requires `community.guild_pairing:write`.
+   */
+  createPairing: (communityId: number, payload: CreateGuildPairingPayload) =>
+    apiClient
+      .post<GuildPairingResponse>(`/api/v1/communities/${communityId}/guild-pairings`, payload)
+      .then((res) => res.data.pairing),
+
+  /**
+   * `POST .../discord/server-install/authorize` -- returns the Discord OAuth
+   * install URL the browser must be sent to; the callback pairs the server.
+   */
+  startServerInstall: (communityId: number, payload: { sync_enabled: boolean }) =>
+    apiClient
+      .post<{ success: boolean; authorize_url: string }>(
+        `/api/v1/communities/${communityId}/discord/server-install/authorize`,
+        payload,
+      )
+      .then((res) => res.data.authorize_url),
 
   /** `PATCH .../guild-pairings/<pairingId>` -- requires `community.guild_pairing:write`. */
   updatePairing: (communityId: number, pairingId: number, payload: UpdateGuildPairingPayload) =>
@@ -166,4 +266,21 @@ export function extractErrorMessage(err: unknown, fallback: string): string {
     }
   }
   return fallback;
+}
+
+/**
+ * Pulls the HTTP status and hub-api error `code` off an axios-style error,
+ * so callers can map known failures to friendly text without re-parsing.
+ */
+export function extractErrorInfo(err: unknown): { status: number | null; code: string | null } {
+  if (typeof err === 'object' && err !== null && 'response' in err) {
+    const response = (err as { response?: { status?: unknown; data?: Partial<ApiErrorBody> } })
+      .response;
+    const code = response?.data?.error?.code;
+    return {
+      status: typeof response?.status === 'number' ? response.status : null,
+      code: typeof code === 'string' ? code : null,
+    };
+  }
+  return { status: null, code: null };
 }

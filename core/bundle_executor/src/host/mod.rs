@@ -14,10 +14,12 @@ pub mod stage_next_economy;
 pub mod stage_next_identity;
 pub mod stage_next_imports;
 pub mod stage_next_media;
+pub mod stage_next_metrics;
 pub mod stage_next_object_storage;
 pub mod stage_next_platform_table;
 pub mod stage_next_storage_v2;
 pub mod stage_tools;
+pub mod stage_tools_gameserver_net;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

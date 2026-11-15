@@ -4,7 +4,7 @@ name: Timed Announcements Bundle (Python)
 # 1.0.0: initial kv-only recurring announcements -- !timer add/del/list/enable/disable/reset,
 # fired by chat activity (there is no tick/scheduler event). See src/app.py's module docstring
 # (feature/bundles-queue-timer).
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin

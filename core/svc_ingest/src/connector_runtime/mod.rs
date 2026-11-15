@@ -15,6 +15,7 @@
 
 pub mod boot;
 pub mod feed;
+pub mod interaction_routing;
 pub mod lease;
 pub mod metrics;
 pub mod observed;
@@ -23,10 +24,12 @@ pub mod profiles;
 pub mod ready;
 pub mod scoped;
 pub mod selector;
+pub mod self_echo;
 pub mod supervisor;
 pub mod tenant;
 #[cfg(test)]
 pub(crate) mod testkit;
+pub mod unverified_gate;
 pub mod webhook_boot;
 
 pub use feed::{
