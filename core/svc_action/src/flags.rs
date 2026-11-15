@@ -189,6 +189,42 @@ pub fn db_bundle_config_flag(
     }
 }
 
+/// Opt-out kill switch for executor slot sharding
+/// (`bundle_active_set::sharding`, executor scale-out phase 1): unseen /
+/// OFF / license server unreachable = sharding ON (each app loads only on
+/// its 2 owner executors); ON = legacy broadcast to every executor. Same
+/// key `core/svc_process/src/license.rs` gates on.
+pub const DISABLE_EXECUTOR_SHARDING_FLAG: &str = "waddles.disable-executor-sharding";
+
+/// Production [`FeatureFlag`] for [`DISABLE_EXECUTOR_SHARDING_FLAG`]:
+/// `enabled()` answers "is sharding on?" (negated raw flag); a bypassed
+/// client reads as sharding ON (see [`DisableDbBundleConfigFlag`] for why
+/// bypass must be checked first).
+pub struct ExecutorShardingFlag(Arc<penguin_licensing::LicenseClient>);
+
+impl FeatureFlag for ExecutorShardingFlag {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            if self.0.bypass_active() {
+                return true;
+            }
+            !self.0.flag_enabled(DISABLE_EXECUTOR_SHARDING_FLAG).await
+        })
+    }
+}
+
+/// The sharding [`FeatureFlag`] for `crate::changelog_consumer::run`: the
+/// real kill switch over a license client, or "sharding ON" (= flag unseen)
+/// when no license client is available.
+pub fn executor_sharding_flag(
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+) -> Arc<dyn FeatureFlag> {
+    match license {
+        Some(client) => boxed(ExecutorShardingFlag(Arc::clone(client))),
+        None => boxed(StaticFlag(true)),
+    }
+}
+
 /// Opt-out kill-switch for the multi-tenant, change-log-driven active-set
 /// loader (`crate::changelog_consumer`) -- dataplane scale design rev 4,
 /// §8 step 2: "Multi-tenant watermark polling ...
@@ -238,59 +274,6 @@ pub fn multi_tenant_watermark_flag(
 ) -> Arc<dyn FeatureFlag> {
     match license {
         Some(client) => boxed(DisableMultiTenantWatermarkFlag::new(Arc::clone(client))),
-        None => boxed(StaticFlag(true)),
-    }
-}
-
-/// Opt-out kill-switch for the outbound PII-detokenization pass
-/// (`egress_detokenizer`, wired into `crate::capabilities::
-/// StageCapabilities::handle_relay`/`handle_discord_relay`) -- same
-/// opt-out-kill-switch shape as [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]:
-/// detokenization is a core platform mechanism, not a licensed feature, so
-/// unseen/OFF/license-server-unreachable must leave it ENABLED (the
-/// default -- real display names, not opaque tokens, appear in chat/
-/// overlay output). ON opts back OUT of it: every relay send shows the raw
-/// `{user:<token>}` placeholder it received from the bundle rather than a
-/// resolved name -- never raw PII either way, since nothing upstream of
-/// this pass ever holds raw PII (`core/svc_process`'s inbound tokenization
-/// pass already stripped it) -- a documented, deliberate degraded-UX
-/// tradeoff, never the default.
-pub const DISABLE_PII_DETOKENIZATION_FLAG: &str = "waddles.core.disable-pii-detokenization";
-
-/// Production [`FeatureFlag`] for [`DISABLE_PII_DETOKENIZATION_FLAG`] --
-/// same bypass-aware negation shape as [`DisableDbBundleConfigFlag`] (see
-/// that type's own doc for the full bypass-awareness rationale, identical
-/// here).
-pub struct DisablePiiDetokenizationFlag(Arc<penguin_licensing::LicenseClient>);
-
-impl DisablePiiDetokenizationFlag {
-    pub fn new(client: Arc<penguin_licensing::LicenseClient>) -> Self {
-        Self(client)
-    }
-}
-
-impl FeatureFlag for DisablePiiDetokenizationFlag {
-    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            if self.0.bypass_active() {
-                return true;
-            }
-            !self.0.flag_enabled(DISABLE_PII_DETOKENIZATION_FLAG).await
-        })
-    }
-}
-
-/// Builds the [`FeatureFlag`] `crate::lib::build_hub_client`/
-/// `crate::capabilities::StageCapabilities::with_detokenize`'s call site
-/// gate on: [`DisablePiiDetokenizationFlag`] over a real client, or a fixed
-/// "detokenization enabled" answer when no license client is available at
-/// all -- mirrors [`db_bundle_config_flag`]/[`multi_tenant_watermark_flag`]'s
-/// identical `None`-branch rationale.
-pub fn pii_detokenization_flag(
-    license: &Option<Arc<penguin_licensing::LicenseClient>>,
-) -> Arc<dyn FeatureFlag> {
-    match license {
-        Some(client) => boxed(DisablePiiDetokenizationFlag::new(Arc::clone(client))),
         None => boxed(StaticFlag(true)),
     }
 }
@@ -410,9 +393,8 @@ impl FlagSource for Arc<penguin_licensing::LicenseClient> {
 
 /// `FLAGS_CAPABILITY_ENABLED` -- a plain env off-switch for the whole
 /// `flags` host capability, independent of any individual PostHog flag's
-/// own state, mirroring `crate::config::CliConfig::
-/// pii_detokenization_enabled_override`'s "explicit, loudly-logged
-/// operator escape hatch" shape. Default ON (unset, or any other value,
+/// own state -- an explicit, loudly-logged operator escape hatch.
+/// Default ON (unset, or any other value,
 /// leaves the capability wired); `false`/`0`/`off`/`no` makes every
 /// `flags.enabled` host-call resolve straight to the caller's own
 /// `default_value`, with no license-client lookup at all.
@@ -454,7 +436,7 @@ fn env_flag_var_name(key: &str) -> String {
 /// **LICENSE-flag immunity:** wired *only* into [`resolve_flag_with`]'s
 /// plain FEATURE-flag path -- the [`FeatureFlag`] implementations above
 /// ([`LicenseFlag`], [`DisableDbBundleConfigFlag`],
-/// [`DisableMultiTenantWatermarkFlag`], [`DisablePiiDetokenizationFlag`])
+/// [`DisableMultiTenantWatermarkFlag`])
 /// call `LicenseClient::flag_enabled` directly and never pass through this
 /// function or [`resolve_flag_with`] at all.
 fn env_flag_value(key: &str) -> Option<bool> {
@@ -579,6 +561,20 @@ pub async fn resolve_flag_with<F: FlagSource>(
 fn shared_flags_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
     static CLIENT: OnceLock<Option<Arc<penguin_licensing::LicenseClient>>> = OnceLock::new();
     CLIENT.get_or_init(crate::build_license_client).clone()
+}
+
+/// The command-latency kill-switch resolver (`waddles.disable-command-latency-telemetry`): `true`
+/// means telemetry is DISABLED. Opt-out convention: an unseen flag leaves the mechanism ON. Under the
+/// license bypass domain `flag_enabled` reads ON for every flag, which for an opt-OUT flag would
+/// switch the mechanism off, so the bypass answer is the ENV baseline only.
+pub async fn command_latency_kill_switch_wanted() -> bool {
+    let env = command_latency::switch::env_baseline_disabled();
+    match shared_flags_license_client() {
+        Some(c) if !c.bypass_active() => {
+            env || c.flag_enabled(command_latency::switch::FLAG_KEY).await
+        }
+        _ => env,
+    }
 }
 
 /// `crate::telemetry::register_flags_metrics`'s counter, wired in here --
@@ -963,6 +959,19 @@ mod flags_capability_tests {
 mod tests {
     use super::*;
 
+    /// `waddles.disable-db-bundle-config-reads`: no client and an unseen flag both leave the
+    /// direct database read path ON (opt-out kill switch, issue #1306).
+    #[tokio::test]
+    async fn db_config_reads_gate_defaults_to_the_database_path() {
+        use hub_client::bundle_config::ReadPathGate;
+        assert!(DbConfigReadsGate(None).db_reads_enabled().await);
+        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-db-reads-gate")
+            .expect("default LicenseConfig::new never fails");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        assert!(DbConfigReadsGate(Some(client)).db_reads_enabled().await);
+    }
+
     #[tokio::test]
     async fn static_flag_reports_its_fixed_value() {
         assert!(StaticFlag(true).enabled().await);
@@ -1064,56 +1073,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn disable_pii_detokenization_flag_matches_the_product_flag_key_convention() {
-        assert_eq!(
-            DISABLE_PII_DETOKENIZATION_FLAG,
-            "waddles.core.disable-pii-detokenization"
-        );
-    }
-
-    /// Same hard invariant as the DB-bundle-config kill-switch regression
-    /// test above: a never-seen flag must leave outbound detokenization
-    /// ENABLED -- real display names, not raw tokens, appear by default.
-    #[tokio::test]
-    async fn disable_pii_detokenization_flag_defaults_enabled_when_never_seen() {
-        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-pii-detok-default")
-            .expect("default LicenseConfig::new never fails");
-        let client = penguin_licensing::LicenseClient::new(cfg)
-            .expect("LicenseClient::new with a valid default config never fails");
-        let flag = DisablePiiDetokenizationFlag::new(client);
-        assert!(
-            flag.enabled().await,
-            "an unseen kill-switch flag must leave PII detokenization enabled"
-        );
-    }
-
     #[tokio::test]
     async fn multi_tenant_watermark_flag_defaults_enabled_when_no_license_client_is_available() {
         let flag = multi_tenant_watermark_flag(&None);
         assert!(flag.enabled().await);
-    }
-
-    #[tokio::test]
-    async fn pii_detokenization_flag_defaults_enabled_when_no_license_client_is_available() {
-        let flag = pii_detokenization_flag(&None);
-        assert!(flag.enabled().await);
-    }
-
-    /// `Some(client)` branch: wraps a real client in
-    /// `DisablePiiDetokenizationFlag` rather than the `None` fallback's
-    /// fixed `StaticFlag(true)`.
-    #[tokio::test]
-    async fn pii_detokenization_flag_wraps_a_real_client_when_available() {
-        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-pii-detok-some")
-            .expect("default LicenseConfig::new never fails");
-        let client = penguin_licensing::LicenseClient::new(cfg)
-            .expect("LicenseClient::new with a valid default config never fails");
-        let flag = pii_detokenization_flag(&Some(client));
-        assert!(
-            flag.enabled().await,
-            "an unseen kill-switch flag must leave PII detokenization enabled"
-        );
     }
 
     /// `Some(client)` branch: wraps a real client in
@@ -1173,5 +1136,46 @@ mod tests {
             .expect("LicenseClient::new with a valid default config never fails");
         let flag = LicenseFlag::new(client, RUST_DATA_PLANE_FLAG);
         assert!(!flag.enabled().await);
+    }
+}
+
+/// Adapts the license/flag client to the hub_client cache's kill switch
+/// (`waddles.disable-bundle-community-config`): ON = live community config disabled, unseen/OFF/
+/// license-server-unreachable = enabled. Bypass-aware like [`DisableDbBundleConfigFlag`]: a
+/// bypassed client reads `true` for every key, which must NOT read as "kill switch ON".
+pub struct LiveBundleConfigGate(pub Option<Arc<penguin_licensing::LicenseClient>>);
+
+impl hub_client::bundle_config::LiveConfigGate for LiveBundleConfigGate {
+    fn live_enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            match &self.0 {
+                Some(c) if !c.bypass_active() => {
+                    !c.flag_enabled(hub_client::bundle_config::DISABLE_FLAG)
+                        .await
+                }
+                _ => true,
+            }
+        })
+    }
+}
+
+/// Adapts the license/flag client to the bundle-config read-path kill switch
+/// (`waddles.disable-db-bundle-config-reads`, issue #1306): ON = serve per-community config via
+/// the legacy hub-api gRPC path, unseen/OFF/license-server-unreachable = the direct read-only
+/// database path. Bypass-aware like [`LiveBundleConfigGate`]: a bypassed client reads `true` for
+/// every key, which must NOT read as "kill switch ON".
+pub struct DbConfigReadsGate(pub Option<Arc<penguin_licensing::LicenseClient>>);
+
+impl hub_client::bundle_config::ReadPathGate for DbConfigReadsGate {
+    fn db_reads_enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            match &self.0 {
+                Some(c) if !c.bypass_active() => {
+                    !c.flag_enabled(bundle_config_db::DISABLE_DB_READS_FLAG)
+                        .await
+                }
+                _ => true,
+            }
+        })
     }
 }

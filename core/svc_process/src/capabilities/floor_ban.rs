@@ -427,6 +427,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             ai_deadline: self.ai_deadline,
             media: self.media.clone(),
             media_deadline: self.media_deadline,
+            bundle_config: self.bundle_config.clone(),
             invocation_identity: self.invocation_identity.clone(),
             verified_scope: Some((self.tenant_id, community_id)),
             stage_metrics: std::sync::Arc::clone(&self.stage_metrics),

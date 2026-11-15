@@ -728,6 +728,12 @@ pub struct Config {
     /// unprovisioned deployment must start; the capability then denies
     /// `not_implemented`. Empty is treated as unset.
     pub bundle_platform_table_password: Option<Secret>,
+    /// The tenant stream-DEK source shared by every consumer (`crate::identity_crypto`),
+    /// built ONCE at startup by `crate::run_with_shutdown` (`crate::build_dek_provider`) --
+    /// it needs a live tokio runtime to open its lazy hub-api channel, so it cannot exist at
+    /// config-parse time. Empty until then; a consumer that finds it empty dead-letters every
+    /// event that carries an encrypted identity field (fail closed), never forwards them.
+    pub identity_dek: std::sync::Arc<std::sync::OnceLock<hub_client::dek::ConfiguredDekProvider>>,
 }
 
 impl fmt::Debug for Config {
@@ -836,6 +842,7 @@ impl Config {
             bundle_reputation_password,
             bundle_economy_password,
             bundle_platform_table_password,
+            identity_dek: std::sync::Arc::default(),
         })
     }
 }

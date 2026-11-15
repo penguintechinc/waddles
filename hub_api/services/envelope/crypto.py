@@ -47,6 +47,7 @@ PURPOSE_TENANT_DEK = "tenant-dek"
 PURPOSE_VERIFY = "verify"
 
 _HKDF_SALT = b"waddles-envelope-v1"
+_LINEAGE = re.compile(r"^[a-z][a-z0-9-]{0,29}$")
 _IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _LOCAL_WRAP_VERSION = b"\x01"
 _KEK_ID_LENGTH = 8
@@ -73,14 +74,23 @@ def context_aad(context: Mapping[str, str]) -> bytes:
     return json.dumps(dict(context), sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def derive_data_subkey(dek: bytes, tenant_id: int) -> bytes:
-    """Derive the AES-256-GCM data subkey from a tenant DEK (HKDF-SHA256, per-tenant info)."""
+def derive_data_subkey(dek: bytes, tenant_id: int, *, lineage: str | None = None) -> bytes:
+    """Derive the AES-256-GCM data subkey from a tenant DEK (HKDF-SHA256, per-tenant info).
+
+    `lineage` (``None`` = the original at-rest lineage, byte-identical info for existing
+    ciphertext) domain-separates a non-default key lineage such as ``ingest-stream``, so a
+    wrapped DEK copied between lineages' rows can never yield the other lineage's subkey.
+    """
     if len(dek) != KEY_LENGTH:
         raise EnvelopeInputError("DEK must be exactly 32 bytes")
-    info = f"waddles-envelope-data-v1|tenant:{validate_tenant_id(tenant_id)}".encode()
-    return HKDF(algorithm=hashes.SHA256(), length=KEY_LENGTH, salt=_HKDF_SALT, info=info).derive(
-        dek
-    )
+    info = f"waddles-envelope-data-v1|tenant:{validate_tenant_id(tenant_id)}"
+    if lineage is not None:
+        if not lineage or not _LINEAGE.fullmatch(lineage):
+            raise EnvelopeInputError("lineage label is malformed")
+        info = f"{info}|lineage:{lineage}"
+    return HKDF(
+        algorithm=hashes.SHA256(), length=KEY_LENGTH, salt=_HKDF_SALT, info=info.encode()
+    ).derive(dek)
 
 
 def derive_kek_subkey(kek: bytes, info: bytes) -> bytes:

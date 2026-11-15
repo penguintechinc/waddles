@@ -3,9 +3,12 @@
 //! `CapabilityGate` (grants, declared bounds, quotas, production
 //! `SnapshotMembership` populated from the DB by the REAL
 //! `load_membership`) -> the REAL `PostgresReputationStore` -> a real Postgres
-//! container running the exact shipped DDL
-//! (`scripts/db/bundle_reputation_store.sql`). Nothing in the chain is a test
-//! double. (The executor half -- real wasm calling the import and emitting
+//! container running the exact shipped DDL and the reputation SQL contract
+//! (`scripts/db/bundle_reputation_store.sql`, `..._host_ops.sql`,
+//! `..._unify.sql` -- the same files alembic 0050/0071/0097 execute, never a
+//! hand-written copy of the schema). Nothing in the chain is a test double
+//! except the platform-account directory the `identity` wiring requires (the
+//! reputation calls never consult it). (The executor half -- real wasm calling the import and emitting
 //! this exact wire shape -- is `core/bundle_executor/tests/
 //! stage_next_reputation.rs`.)
 //!
@@ -29,6 +32,9 @@ use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use svc_process::capabilities::{
     CapabilityHandler, HttpEgressCatalog, ReputationWiring, StageCapabilities,
 };
+use svc_process::identity::{
+    BoxFuture, IdentityError, IdentityScope, IdentityWiring, InvocationIdentity, MemberDirectory,
+};
 use svc_process::license::StaticGate;
 use uuid::Uuid;
 #[allow(dead_code)]
@@ -44,6 +50,45 @@ const COMMUNITY: i32 = 10;
 const SHIPPED_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_store.sql");
 /// P5 host-ops DDL (alembic 0071): ledger kind/idempotency columns + score clamp the store now writes.
 const HOST_OPS_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_host_ops.sql");
+/// The reputation SQL contract (alembic 0097): `reputation_apply`, the floor soft-ban wrappers,
+/// the policy tables and the role's contract grants. Owns membership, caps, idempotency and the
+/// score clamp -- the host never re-implements them.
+const CONTRACT_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_unify.sql");
+
+/// An unscored member reads as the policy default (the scale is 300-850, start 600), not 0.
+const SCORE_DEFAULT: i64 = 600;
+
+/// The platform-account directory the `identity` wiring requires. Reputation calls address a
+/// member by UUID and never consult it, so every lookup is refused loudly.
+struct NoDirectory;
+
+impl MemberDirectory for NoDirectory {
+    fn member_by_platform_id<'a>(
+        &'a self,
+        _scope: IdentityScope,
+        _platform: &'a str,
+        _platform_user_id: &'a str,
+    ) -> BoxFuture<'a, Result<Uuid, IdentityError>> {
+        Box::pin(async { Err(IdentityError::NotAMember) })
+    }
+
+    fn role_for<'a>(
+        &'a self,
+        _scope: IdentityScope,
+        _platform: &'a str,
+        _platform_user_id: &'a str,
+    ) -> BoxFuture<'a, Result<String, IdentityError>> {
+        Box::pin(async { Err(IdentityError::NotAMember) })
+    }
+
+    fn confirm_member<'a>(
+        &'a self,
+        _scope: IdentityScope,
+        _user: Uuid,
+    ) -> BoxFuture<'a, Result<Uuid, IdentityError>> {
+        Box::pin(async { Err(IdentityError::NotAMember) })
+    }
+}
 
 struct World {
     _container: DockerContainer,
@@ -106,6 +151,8 @@ async fn world_with_members(extra_members: usize) -> World {
     ))
     .await
     .unwrap();
+    // Prerequisites: minimal shapes of the legacy tables the shipped DDL and the contract SQL
+    // reference (the same shapes `core/bundle_host_reputation`'s integration suite uses).
     exec(
         &su,
         "CREATE TABLE tenants (id SERIAL PRIMARY KEY, slug TEXT);
@@ -113,7 +160,9 @@ async fn world_with_members(extra_members: usize) -> World {
          CREATE TABLE community_members (
              id SERIAL PRIMARY KEY,
              community_id INTEGER REFERENCES communities(id) ON DELETE CASCADE,
+             user_id VARCHAR(255),
              is_active BOOLEAN DEFAULT true, left_at TIMESTAMP, removed_at TIMESTAMP);
+         CREATE TABLE hub_users (id SERIAL PRIMARY KEY);
          CREATE TABLE app_catalog (app_id VARCHAR(255) PRIMARY KEY);
          CREATE TABLE bundle_reputation_adjustments (
              id BIGSERIAL PRIMARY KEY,
@@ -126,6 +175,9 @@ async fn world_with_members(extra_members: usize) -> World {
              reason_code VARCHAR(100) NOT NULL,
              occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
              reversal_of BIGINT REFERENCES bundle_reputation_adjustments(id));
+         CREATE TABLE bundle_tenant_availability (tenant_id INTEGER, app_id TEXT, available BOOLEAN);
+         CREATE TABLE app_global_installs (app_id TEXT, version TEXT, superseded_by BIGINT, revoked_at TIMESTAMPTZ);
+         CREATE TABLE app_version_uploads (app_id TEXT, version TEXT, manifest_json JSONB);
          INSERT INTO tenants (id, slug) VALUES (1, 't1');
          INSERT INTO communities (id, tenant_id) VALUES (10, 1);
          INSERT INTO app_catalog (app_id) VALUES ('waddles.core.test-reputation');",
@@ -141,6 +193,19 @@ async fn world_with_members(extra_members: usize) -> World {
     .await;
     exec(&su, SHIPPED_DDL).await;
     exec(&su, HOST_OPS_DDL).await;
+    exec(&su, CONTRACT_DDL).await;
+    // The tenant's single ACTIVE reputation-logic app is the test bundle: the contract's
+    // exclusivity rule (`reputation_active_logic_app`) only lets that app write activity deltas.
+    exec(
+        &su,
+        &format!(
+            "INSERT INTO bundle_tenant_availability VALUES ({TENANT}, '{APP_ID}', true);
+             INSERT INTO app_global_installs VALUES ('{APP_ID}', '1.0.0', NULL, NULL);
+             INSERT INTO app_version_uploads VALUES
+                 ('{APP_ID}', '1.0.0', '{{\"provides\": [\"reputation-logic\"]}}'::jsonb);"
+        ),
+    )
+    .await;
     let mut members = Vec::new();
     for _ in 0..=extra_members {
         let m = Uuid::new_v4();
@@ -244,6 +309,19 @@ async fn build_caps(cfg: &ConnectConfig) -> StageCapabilities {
         flag: Arc::new(StaticGate(true)),
         auto_ban_flag: None,
     })
+    // A write's idempotency key is derived from the invocation's replay-stable event id (never
+    // guest input); a fresh UUID per built stack is a distinct delivered event.
+    .with_identity(
+        IdentityWiring {
+            directory: Arc::new(NoDirectory) as Arc<dyn MemberDirectory>,
+            handles: None,
+            flag: Arc::new(StaticGate(true)),
+        },
+        Arc::new(
+            InvocationIdentity::new("twitch", Some("acct".to_string()), vec![])
+                .with_event_id(Uuid::new_v4().to_string()),
+        ),
+    )
 }
 
 fn call(op: &str, args: serde_json::Value) -> HostCallBody {
@@ -268,13 +346,13 @@ async fn adjust_then_get_through_gate_and_real_store_with_ledger_row() {
         ))
         .await
         .unwrap();
-    assert_eq!(out, serde_json::json!({"balance": 3}));
+    assert_eq!(out, serde_json::json!({"balance": SCORE_DEFAULT + 3}));
     let out = w
         .caps
         .handle(call("reputation.get", serde_json::json!({"user": m})))
         .await
         .unwrap();
-    assert_eq!(out, serde_json::json!({"balance": 3}));
+    assert_eq!(out, serde_json::json!({"balance": SCORE_DEFAULT + 3}));
     assert_eq!(
         scalar(&w.su, "SELECT COUNT(*) FROM bundle_reputation_adjustments").await,
         1
@@ -285,7 +363,7 @@ async fn adjust_then_get_through_gate_and_real_store_with_ledger_row() {
             "SELECT balance FROM bundle_reputation_scores WHERE community_id = 10"
         )
         .await,
-        3
+        SCORE_DEFAULT + 3
     );
 }
 
@@ -422,7 +500,7 @@ async fn a_zero_delta_is_invalid_args_writes_nothing_and_consumes_no_quota() {
         ))
         .await
         .unwrap();
-    assert_eq!(out, serde_json::json!({"balance": 5}));
+    assert_eq!(out, serde_json::json!({"balance": SCORE_DEFAULT + 5}));
 }
 
 /// regression: pr-741 review -- the per-scope daily cap (catalog: 50 for
@@ -430,11 +508,20 @@ async fn a_zero_delta_is_invalid_args_writes_nothing_and_consumes_no_quota() {
 /// to live only in the gate's in-memory ledger, so a restart or another replica
 /// reset it. Spend the whole budget through one stack, then build a FRESH stack
 /// (new gate + empty in-memory ledger + new pool, i.e. a restart / second
-/// replica): it must still refuse, and only the durable store can be why.
+/// replica): it must still refuse, and only the durable SQL contract can be why.
+/// Since the contract rewrite the durable cap is the SQL-owned per-app rolling-24h cap in the
+/// community policy row (`activity_app_daily_cap`), surfaced as `rate_limited`; the test pins
+/// that row to the catalog's 50 so both layers share one ceiling.
 #[tokio::test]
 async fn the_per_scope_cap_survives_a_gate_restart_and_a_second_replica() {
     let w = world_with_members(10).await;
     assert_eq!(w.members.len(), 11);
+    exec(
+        &w.su,
+        "INSERT INTO bundle_reputation_policy (tenant_id, community_id, activity_app_daily_cap) \
+         VALUES (1, 10, 50)",
+    )
+    .await;
 
     // 10 distinct users x 5 (the per-call and per-user ceiling) = 50, the
     // whole per-scope budget. Distinct users so only the SCOPE cap can bind.
@@ -447,7 +534,7 @@ async fn the_per_scope_cap_survives_a_gate_restart_and_a_second_replica() {
             ))
             .await
             .unwrap();
-        assert_eq!(out, serde_json::json!({"balance": 5}));
+        assert_eq!(out, serde_json::json!({"balance": SCORE_DEFAULT + 5}));
     }
     let sum_sql = "SELECT COALESCE(SUM(ABS(delta)), 0)::BIGINT FROM bundle_reputation_adjustments";
     assert_eq!(scalar(&w.su, sum_sql).await, 50);
@@ -464,14 +551,14 @@ async fn the_per_scope_cap_survives_a_gate_restart_and_a_second_replica() {
     assert_eq!(err.code, "quota_exceeded");
 
     // ... and so do a restarted stack and a second replica, whose gates hold NO
-    // in-memory state at all -- the refusal can only come from the store.
+    // in-memory state at all -- the refusal can only come from the SQL contract.
     for label in ["restarted", "second replica"] {
         let stack = build_caps(&w.cfg).await;
         let err = stack
             .handle(call("reputation.adjust", adjust_one.clone()))
             .await
             .unwrap_err();
-        assert_eq!(err.code, "quota_exceeded", "{label}");
+        assert_eq!(err.code, "rate_limited", "{label}");
     }
     // Nothing was written by any refused call.
     assert_eq!(scalar(&w.su, sum_sql).await, 50);
@@ -489,5 +576,5 @@ async fn the_per_scope_cap_survives_a_gate_restart_and_a_second_replica() {
         ))
         .await
         .unwrap();
-    assert_eq!(out, serde_json::json!({"balance": 0}));
+    assert_eq!(out, serde_json::json!({"balance": SCORE_DEFAULT}));
 }

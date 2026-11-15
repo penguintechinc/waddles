@@ -134,6 +134,7 @@ def _pair(dal: Any, community_id: int, *guilds: str, enabled: bool = True) -> No
             direction="bidirectional",
             role_name_prefix="[T]",
             actor_user_id=None,
+            ownership_verified=True,
         )
         if enabled:
             update_pairing(dal, community_id, p.id, sync_enabled=True)

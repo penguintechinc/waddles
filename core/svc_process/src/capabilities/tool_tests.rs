@@ -170,6 +170,7 @@ async fn fake_executor(behavior: Behavior) -> FakeExecutor {
                         runtime: "runc".to_string(),
                         verified: false,
                     },
+                    executor_id: None,
                 }),
             ),
         )

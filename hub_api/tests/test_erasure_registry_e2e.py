@@ -398,7 +398,10 @@ class TestNoTierGate:
             "email",
             "suppression_keys",
             "external_stores",
+            # Audit attribution for the bootstrap-account refusal -- who asked, never entitlement.
+            "actor_user_id",
         }
+        assert not [p for p in params if any(w in p for w in ("tier", "license", "flag", "plan"))]
 
 
 class TestPiiFreeTelemetry:

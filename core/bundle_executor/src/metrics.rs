@@ -45,7 +45,7 @@ pub const SLOW_BUCKETS_S: [f64; 13] = [
 
 /// Every instrument name this module registers -- asserted against emitted
 /// data in tests and mirrored in `docs/observability/data-plane-metrics.md`.
-pub const METRIC_NAMES: [&str; 21] = [
+pub const METRIC_NAMES: [&str; 26] = [
     "waddles_executor_load_seconds",
     "waddles_executor_loads_total",
     "waddles_executor_unloads_total",
@@ -67,6 +67,12 @@ pub const METRIC_NAMES: [&str; 21] = [
     "waddles_executor_connector_call_seconds",
     "waddles_executor_wire_frames_shed_total",
     "waddles_executor_wire_backpressure_total",
+    // Executor-scale CONTRACT names (KEDA/alerts key on these exactly).
+    "executor_loaded_modules",
+    "executor_memory_bytes",
+    "executor_load_duration_seconds",
+    "executor_precompile_fallback_total",
+    "executor_module_evictions_total",
 ];
 
 /// The OTel instrument name behind a documented (Prometheus-form) metric
@@ -208,6 +214,11 @@ pub struct ExecutorMetrics {
     connector_call_seconds: Histogram<f64>,
     wire_frames_shed: Counter<u64>,
     wire_backpressure: Counter<u64>,
+    loaded_modules: Gauge<u64>,
+    memory_bytes: Gauge<u64>,
+    load_duration_seconds: Histogram<f64>,
+    precompile_fallback: Counter<u64>,
+    module_evictions: Counter<u64>,
 }
 
 /// Keeps `waddles_executor_invocations_active` accurate on every exit path
@@ -331,11 +342,78 @@ impl ExecutorMetrics {
                 "Connector-world export calls by export and outcome (ok, guest_error, fuel_exhausted, \
                  deadline, memory_limit, trap, pool_exhausted, instantiate_failed, internal)",
             ),
+            loaded_modules: meter
+                .u64_gauge(instrument_name("executor_loaded_modules"))
+                .with_description(
+                    "Compiled modules resident in the process-wide shared cache (all stages)",
+                )
+                .build(),
+            memory_bytes: meter
+                .u64_gauge(instrument_name("executor_memory_bytes"))
+                .with_description(
+                    "Estimated resident bytes of compiled code held by the shared module cache",
+                )
+                .with_unit("By")
+                .build(),
+            load_duration_seconds: hist(
+                "executor_load_duration_seconds",
+                "Time to make one module resident, by source (aot, compile) and result",
+                &SLOW_BUCKETS_S,
+            ),
+            precompile_fallback: counter(
+                "executor_precompile_fallback_total",
+                "Loads that could not use a precompiled .cwasm and JIT-compiled instead, by reason",
+            ),
+            module_evictions: counter(
+                "executor_module_evictions_total",
+                "Idle unpinned modules evicted from the shared cache to honour EXECUTOR_MEMORY_BUDGET_MB",
+            ),
             connector_call_seconds: hist(
                 "waddles_executor_connector_call_seconds",
                 "Connector-world export call time (slot wait excluded), by export and outcome",
                 &LATENCY_BUCKETS_S,
             ),
+        }
+    }
+
+    /// Shared module cache residency (`executor_loaded_modules`,
+    /// `executor_memory_bytes`), recorded after every cache mutation.
+    pub fn set_module_cache(&self, modules: usize, bytes: u64) {
+        self.loaded_modules
+            .record(u64::try_from(modules).unwrap_or(u64::MAX), &[]);
+        self.memory_bytes.record(bytes, &[]);
+    }
+
+    /// One module made resident (`executor_load_duration_seconds`): `source`
+    /// is `aot` or `compile`, `result` `ok` or `error`.
+    pub fn record_module_load(
+        &self,
+        source: &'static str,
+        result: &'static str,
+        elapsed: Duration,
+    ) {
+        self.load_duration_seconds.record(
+            elapsed.as_secs_f64(),
+            &[
+                KeyValue::new("source", source),
+                KeyValue::new("result", result),
+            ],
+        );
+    }
+
+    /// One AOT miss that fell back to a JIT compile
+    /// (`executor_precompile_fallback_total{reason}`); `reason` is a closed
+    /// vocabulary: `fetch`, `signature`, `deserialize`.
+    pub fn record_precompile_fallback(&self, reason: &'static str) {
+        self.precompile_fallback
+            .add(1, &[KeyValue::new("reason", reason)]);
+    }
+
+    /// `count` modules evicted for budget (`executor_module_evictions_total`).
+    pub fn record_module_evictions(&self, count: usize) {
+        if count > 0 {
+            self.module_evictions
+                .add(u64::try_from(count).unwrap_or(u64::MAX), &[]);
         }
     }
 
@@ -1081,6 +1159,10 @@ mod tests {
         m.record_connector_call("a", "on-frame", "ok", Duration::from_millis(1));
         m.record_frame_shed("log");
         m.record_wire_backpressure("waited");
+        m.set_module_cache(1, 1024);
+        m.record_module_load("aot", "ok", Duration::from_millis(1));
+        m.record_precompile_fallback("signature");
+        m.record_module_evictions(1);
 
         let exported: std::collections::BTreeSet<String> =
             h.points().into_iter().map(|p| p.name).collect();
@@ -1092,7 +1174,7 @@ mod tests {
             );
         }
         // Verification Integrity: report the denominator, and fail on zero.
-        assert_eq!(METRIC_NAMES.len(), 21);
+        assert_eq!(METRIC_NAMES.len(), 26);
         assert!(
             exported.len() >= METRIC_NAMES.len(),
             "examined {} exported series for {} documented names",

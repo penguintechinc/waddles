@@ -151,6 +151,16 @@ def _seed(container: str) -> dict[str, int]:
     ids["admin_user"] = int(
         _sql(container, "INSERT INTO hub_users (username) VALUES ('live-admin') RETURNING id")
     )
+    # Channel-ownership proof (#1271): binding a Twitch channel requires the installing hub user to
+    # have OAuth-linked the broadcaster's Twitch account (a `hub_user_identities` row, which the
+    # social-login / account-linking flow writes). The harness's admin is that linked owner of both
+    # fake channels -- the real `_prove_ownership` path still runs; nothing is bypassed.
+    for channel_id in (CHANNEL_ID, OTHER_CHANNEL_ID):
+        _sql(
+            container,
+            "INSERT INTO hub_user_identities (hub_user_id, platform, platform_user_id) "  # noqa: S608
+            f"VALUES ({ids['admin_user']}, 'twitch', '{channel_id}')",
+        )
     for key, name, tenant in (
         ("a", "live-a", "tenant"),
         ("b", "live-b", "tenant"),
@@ -168,7 +178,7 @@ def _seed(container: str) -> dict[str, int]:
 
 async def _serve(manifest_path: Path) -> None:
     with migrated_postgres("connection-resolver-live") as pg:
-        ids = _seed("waddles-migtest-connection-resolver-live")
+        ids = _seed(pg.container)
         identities_env = _chart_identities_env()
         os.environ["SERVICE_JWT_IDENTITIES"] = identities_env
         identities = load_identities_from_env(env="alpha")
@@ -265,7 +275,7 @@ async def _serve(manifest_path: Path) -> None:
             "community_a": ids["a"],
             "community_b": ids["b"],
             "community_other_tenant": ids["c"],
-            "pg_container": "waddles-migtest-connection-resolver-live",
+            "pg_container": pg.container,
             "sa_tokens": SA_TOKENS,
             "twitch_bot_tokens": twitch_bot_tokens,
             "twitch_channels": [CHANNEL_LOGIN, OTHER_CHANNEL_LOGIN],

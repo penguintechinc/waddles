@@ -179,6 +179,7 @@ mod tests {
             bundle_reputation_password: None,
             bundle_economy_password: None,
             bundle_platform_table_password: None,
+            identity_dek: Default::default(),
         };
         AppState::new(
             config,
@@ -217,6 +218,7 @@ mod tests {
             bundle_reputation_password: None,
             bundle_economy_password: None,
             bundle_platform_table_password: None,
+            identity_dek: Default::default(),
         };
         let state = AppState::new(
             config,
@@ -272,6 +274,7 @@ mod tests {
             bundle_reputation_password: None,
             bundle_economy_password: None,
             bundle_platform_table_password: None,
+            identity_dek: Default::default(),
         };
         let state = AppState::new(
             config,

@@ -2,7 +2,7 @@
 schema_version: 2
 app_id: waddles.core.example.twitch-clips
 name: Twitch Clips Bundle (Rust)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -73,12 +73,12 @@ requested_tools:
 - tool: twitch.clip.list
   access: read
   target_app_id: waddles.core.service.twitch
-config_schema: &id002
+community_config_schema: &id002
   type: object
   properties:
     who_can_clip:
       type: string
-      enum: &id001
+      enum:
       - everyone
       - subscribers
       - vip
@@ -87,7 +87,12 @@ config_schema: &id002
       default: mods
     who_can_list:
       type: string
-      enum: *id001
+      enum:
+      - everyone
+      - subscribers
+      - vip
+      - mods
+      - broadcaster
       default: everyone
     user_cooldown_secs:
       type: integer
@@ -109,6 +114,7 @@ config_schema: &id002
       - string
       - 'null'
       maxLength: 100
+      default: null
     announce_template:
       type: string
       maxLength: 200
@@ -121,6 +127,7 @@ config_schema: &id002
       - string
       - 'null'
       pattern: ^[0-9]{15,25}$
+      default: null
     list_limit:
       type: integer
       minimum: 1

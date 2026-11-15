@@ -8,6 +8,7 @@ installed bundles request tools from is refused with a typed 409 unless `?force=
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
@@ -23,6 +24,8 @@ from services import bundle_global_state_service as svc
 from services.bundle_telemetry import bundle_span
 from services.current_user import get_current_user_id
 from services.errors import ApiError
+
+logger = logging.getLogger(__name__)
 
 bundle_superadmin_bp = Blueprint(
     "v1_bundle_superadmin", __name__, url_prefix="/api/v1/superadmin/bundles"
@@ -123,6 +126,7 @@ async def post_disable(app_id: str) -> BundleStateResponse | tuple[dict[str, Any
                 _install_dal(), app_id=app_id, actor_id=get_current_user_id(request), force=force
             )
     except ApiError as exc:
+        logger.warning("post_disable rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return BundleStateResponse(
         success=True,
@@ -145,6 +149,7 @@ async def post_enable(app_id: str) -> BundleStateResponse | tuple[dict[str, Any]
                 _install_dal(), app_id=app_id, actor_id=get_current_user_id(request)
             )
     except ApiError as exc:
+        logger.warning("post_enable rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return BundleStateResponse(
         success=True, appId=app_id, status=svc.STATUS_ACTIVE, changed=changed, tenantsHidden=0

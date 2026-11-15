@@ -643,4 +643,134 @@ mod tests {
         assert!(ok(500, 400).is_err());
         assert!(ok(400, 851).is_err());
     }
+
+    /// A store that implements ONLY the required methods (a source-compatible double).
+    struct RequiredOnly;
+
+    impl ReputationStore for RequiredOnly {
+        fn get<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _user: uuid::Uuid,
+        ) -> BoxFuture<'a, Result<i64, ReputationError>> {
+            Box::pin(async { Ok(600) })
+        }
+
+        fn adjust<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _user: uuid::Uuid,
+            _delta: i32,
+            _reason: &'a str,
+            _caps: ReputationCaps,
+            _key: &'a IdempotencyKey,
+        ) -> BoxFuture<'a, Result<i64, ReputationError>> {
+            Box::pin(async { Ok(601) })
+        }
+
+        fn adjust_many<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _items: &'a [(uuid::Uuid, i32)],
+            _reason: &'a str,
+            _caps: ReputationCaps,
+            _key: &'a IdempotencyKey,
+        ) -> BoxFuture<'a, Result<(), ReputationError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn get_many<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _users: &'a [uuid::Uuid],
+        ) -> BoxFuture<'a, Result<Vec<ScoreEntry>, ReputationError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn leaderboard<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _limit: u32,
+        ) -> BoxFuture<'a, Result<Vec<ScoreEntry>, ReputationError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    /// Every optional store op fails LOUDLY (`backend`, naming the op) on a store that does not
+    /// implement it -- never a silent empty result or a fabricated success -- while the
+    /// required ops keep working.
+    #[tokio::test]
+    async fn unimplemented_store_ops_fail_loud_naming_the_op() {
+        let store = RequiredOnly;
+        let scope = ReputationScope {
+            tenant_id: 1,
+            community_id: 10,
+            app_id: "waddles.test.app".to_string(),
+        };
+        let user = uuid::Uuid::nil();
+        let key = IdempotencyKey::new("k:1").unwrap();
+        let caps = ReputationCaps {
+            per_user_daily_abs_max: 10,
+            per_scope_daily_abs_max: 100,
+        };
+        assert_eq!(store.get(&scope, user).await, Ok(600));
+
+        let backend = |op: &str| {
+            Err::<(), _>(ReputationError::Backend(format!(
+                "reputation store does not implement {op}"
+            )))
+        };
+        assert_eq!(
+            store
+                .override_score(&scope, user, 700, "r", &key)
+                .await
+                .map(|_| ()),
+            backend("override_score")
+        );
+        assert_eq!(
+            store
+                .apply(&scope, user, 1, ReasonClass::Activity, "src", caps, &key)
+                .await
+                .map(|_| ()),
+            backend("apply")
+        );
+        assert_eq!(
+            store.get_tenant(&scope, user).await.map(|_| ()),
+            backend("get_tenant")
+        );
+        assert_eq!(
+            store.history(&scope, user, 5, None).await.map(|_| ()),
+            backend("history")
+        );
+        assert_eq!(
+            store.below_threshold(&scope, 600, 5).await.map(|_| ()),
+            backend("below_threshold")
+        );
+        assert_eq!(
+            store.tenant_policy(&scope).await.map(|_| ()),
+            backend("tenant_policy")
+        );
+        assert_eq!(
+            store.active_logic_app(&scope).await.map(|_| ()),
+            backend("active_logic_app")
+        );
+        assert_eq!(
+            store.is_soft_banned(&scope, user).await.map(|_| ()),
+            backend("is_soft_banned")
+        );
+        assert_eq!(
+            store
+                .soft_ban(&scope, user, FLOOR_SOFT_BAN_REASON)
+                .await
+                .map(|_| ()),
+            backend("soft_ban")
+        );
+        assert_eq!(
+            store
+                .lift_soft_ban(&scope, user, FLOOR_SOFT_BAN_REASON)
+                .await
+                .map(|_| ()),
+            backend("lift_soft_ban")
+        );
+    }
 }

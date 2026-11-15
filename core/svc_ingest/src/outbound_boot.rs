@@ -332,6 +332,7 @@ pub type ProdExecutor = SenderExecutor<WireTemplateBuilder, ProdSlots, CachedFla
 /// an unset variable uses the default, a malformed one is logged and the default is used.
 fn youtube_daily_budget() -> u32 {
     match std::env::var("YOUTUBE_COMMUNITY_DAILY_QUOTA_UNITS") {
+        // nosemgrep: rust-silent-unwrap-or-default -- closure logs via tracing::warn! before returning default budget
         Ok(v) => v.trim().parse().unwrap_or_else(|_| {
             tracing::warn!("YOUTUBE_COMMUNITY_DAILY_QUOTA_UNITS is not an integer; using default");
             youtube_duties::DEFAULT_DAILY_BUDGET_UNITS
