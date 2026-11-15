@@ -24,7 +24,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from services.community_authz import require_community_scope
-from services.errors import bad_request, forbidden, not_found
+from services.errors import bad_request, not_found
+from services.scope_registry import SCOPE_PROFILE_MANAGE
 from services.storage_service import (
     MAX_BANNER_SIZE_BYTES,
     MAX_LOGO_SIZE_BYTES,
@@ -34,7 +35,6 @@ from services.storage_service import (
 )
 
 VALID_VISIBILITIES = ("public", "registered", "members_only")
-_ADMIN_ROLE_NAMES = frozenset({"community-owner", "community-admin", "super-admin"})
 #: OR-check, mirrors `requireCommunityAdmin`'s own `scopes.includes('community:manage_members')
 #: || scopes.includes('community:manage_channels')`.
 _ADMIN_SCOPES = ("community:manage_members", "community:manage_channels")
@@ -201,11 +201,10 @@ async def update_community_profile(
     async_dal: Any, dal: Any, *, community_id: int, user_id: int, fields: dict[str, Any]
 ) -> CommunityProfile:
     """Update a community's profile. Owner/admin only (stricter than logo/banner)."""
-    role = await require_community_scope(
-        async_dal, dal, community_id=community_id, user_id=user_id, any_of=_ADMIN_SCOPES
+    # Dedicated per-action scope (admin-kind only by default) -- never a role-name check.
+    await require_community_scope(
+        async_dal, dal, community_id=community_id, user_id=user_id, any_of=(SCOPE_PROFILE_MANAGE,)
     )
-    if role.name not in _ADMIN_ROLE_NAMES:
-        raise forbidden("Admin access required")
 
     visibility = fields.get("visibility")
     if visibility and visibility not in VALID_VISIBILITIES:

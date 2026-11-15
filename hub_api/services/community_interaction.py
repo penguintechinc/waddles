@@ -641,7 +641,9 @@ def update_community_role(
     if "scopes" in payload:
         guard_scope_edit(kind)
         new_scopes = normalize_scopes(payload["scopes"])
-        current = set((existing.base_claims or {}).get("scopes", []))
+        current = set(effective_scopes(kind, (existing.base_claims or {}).get("scopes", [])))
+        # No downgrading a role more powerful than the editor: they must hold every current scope.
+        guard_grant(editor_scopes, current)
         guard_grant(editor_scopes, set(new_scopes) - current)
         fields["base_claims"] = {"scopes": new_scopes}
     if "priority" in payload and kind == KIND_CUSTOM:
@@ -658,7 +660,9 @@ def update_community_role(
     return None
 
 
-def delete_community_role(dal: Any, community_id: int, role_id: int) -> str | None:
+def delete_community_role(
+    dal: Any, community_id: int, role_id: int, *, editor_scopes: frozenset[str]
+) -> str | None:
     """Delete a custom role (members move to `member`); predefined roles are refused (409)."""
     ensure_community_tables(dal)
     existing = (
@@ -670,7 +674,12 @@ def delete_community_role(dal: Any, community_id: int, role_id: int) -> str | No
     )
     if existing is None:
         return "__not_found__"
-    guard_delete(role_kind_of(existing))
+    kind = role_kind_of(existing)
+    guard_delete(kind)
+    # No deleting a role more powerful than the editor: they must hold every scope it carries.
+    guard_grant(
+        editor_scopes, effective_scopes(kind, (existing.base_claims or {}).get("scopes", []))
+    )
 
     member_role = (
         dal(

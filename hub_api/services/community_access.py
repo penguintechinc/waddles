@@ -46,12 +46,13 @@ from typing import Any
 from flask_core.tenancy import TenantContext
 from quart import Request
 
-from services.community_authz import community_belongs_to_tenant, is_super_admin
+from services.community_authz import (
+    community_belongs_to_tenant,
+    get_caller_community_role,
+    is_super_admin,
+)
 from services.errors import forbidden
-
-#: `community_members.role` values Node's own controllers treat as
-#: community-admin-tier (see module docstring).
-_ADMIN_ROLES = ("community-owner", "community-admin")
+from services.scope_registry import SCOPE_COMMUNITY_ADMIN
 
 
 async def _require_community_in_tenant(
@@ -86,7 +87,7 @@ async def require_community_admin(
     community_id: int,
     user_id: int,
 ) -> None:
-    """Raise 403 unless `user_id` is an active owner/admin of `community_id` in `ctx`'s tenant.
+    """Raise 403 unless `user_id` holds `community:admin` in `community_id` (inside `ctx`'s tenant).
 
     Port of Node's `requireCommunityAdmin` -- gates every overlay route
     and every admin-facing calls route (`blueprints/v1/overlay.py`,
@@ -110,14 +111,11 @@ async def require_community_admin(
 
     await _require_community_in_tenant(async_dal, dal, ctx, community_id=community_id)
 
-    membership_query = dal(
-        (dal.community_members.community_id == community_id)
-        & (dal.community_members.user_id == str(user_id))
-        & (dal.community_members.is_active == True)  # noqa: E712 - pydal query operator
-        & (dal.community_members.role.belongs(_ADMIN_ROLES))
+    # Scope-based (dedicated `community:admin`, held by the admin kind), never a role-name match.
+    caller_role = await get_caller_community_role(
+        async_dal, dal, community_id=community_id, user_id=user_id
     )
-    rows = await async_dal.select_async(membership_query, dal.community_members.id)
-    if not rows:
+    if caller_role is None or SCOPE_COMMUNITY_ADMIN not in caller_role.scopes:
         raise forbidden("Community admin access required")
 
 

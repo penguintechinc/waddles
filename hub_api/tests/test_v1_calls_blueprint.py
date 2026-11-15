@@ -86,9 +86,7 @@ def proxy_stub(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
 def _owner(overlay_db: Any, *, scope: str) -> tuple[dict[str, str], int]:
     community_id = seed_community(overlay_db)
     user_id = 701
-    seed_membership(
-        overlay_db, community_id=community_id, user_id=user_id, role="community-owner"
-    )
+    seed_membership(overlay_db, community_id=community_id, user_id=user_id, role="community-owner")
     token = make_user_token(user_id=user_id, scope=scope)
     return {"Authorization": f"Bearer {token}"}, community_id
 
@@ -96,9 +94,7 @@ def _owner(overlay_db: Any, *, scope: str) -> tuple[dict[str, str], int]:
 def _plain_member(overlay_db: Any, *, scope: str) -> tuple[dict[str, str], int]:
     community_id = seed_community(overlay_db)
     user_id = 702
-    seed_membership(
-        overlay_db, community_id=community_id, user_id=user_id, role="community-member"
-    )
+    seed_membership(overlay_db, community_id=community_id, user_id=user_id, role="community-member")
     token = make_user_token(user_id=user_id, scope=scope)
     return {"Authorization": f"Bearer {token}"}, community_id
 
@@ -151,6 +147,26 @@ class TestAdminRouteAuth:
     ) -> None:
         """A real, active membership with role='community-member' is still not an admin."""
         headers, community_id = _plain_member(overlay_db, scope=SCOPE_ADMIN)
+        response = await client.open(
+            path_fn(community_id), method=method, headers=headers, json=body
+        )
+        assert response.status_code == 403
+        proxy_stub.assert_not_awaited()
+
+    @pytest.mark.parametrize("method,path_fn,body", _ADMIN_ROUTES)
+    async def test_admin_route_moderator_scopes_are_not_community_admin(
+        self,
+        client: Any,
+        overlay_db: Any,
+        proxy_stub: AsyncMock,
+        method: str,
+        path_fn: Any,
+        body: dict[str, Any] | None,
+    ) -> None:
+        """Authorization is the `community:admin` scope: a moderator-kind member lacks it."""
+        community_id = seed_community(overlay_db)
+        seed_membership(overlay_db, community_id=community_id, user_id=703, role="moderator")
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=703, scope=SCOPE_ADMIN)}"}
         response = await client.open(
             path_fn(community_id), method=method, headers=headers, json=body
         )
@@ -332,9 +348,7 @@ class TestMemberVoiceRoutes:
         -- `join_voice_room` never reads `request.get_json()` at all.
         """
         community_id = seed_community(overlay_db)
-        seed_membership(
-            overlay_db, community_id=community_id, user_id=42, role="community-member"
-        )
+        seed_membership(overlay_db, community_id=community_id, user_id=42, role="community-member")
         token = make_user_token(user_id=42, scope=SCOPE_WRITE)
         proxy_stub.return_value = ProxyResult(ok=True, status_code=200, body={"token": "t"})
         response = await client.post(
@@ -380,9 +394,7 @@ class TestAdminRouteSuccessPaths:
     `create_call_room`/`delete_call_room`/`raised-hands` 404.
     """
 
-    async def test_get_call_room(
-        self, client: Any, overlay_db: Any, proxy_stub: AsyncMock
-    ) -> None:
+    async def test_get_call_room(self, client: Any, overlay_db: Any, proxy_stub: AsyncMock) -> None:
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
         proxy_stub.return_value = ProxyResult(
             ok=True, status_code=200, body={"room_name": "room1", "is_locked": False}

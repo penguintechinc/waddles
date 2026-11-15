@@ -212,6 +212,7 @@ class TestMembers:
 
     async def test_update_member_role_success(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
+        self._seed_role(admin_db, community_id, "moderator", 2, ["community:manage_channels"])
         _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
         response = await client.put(
             f"/api/v1/admin/{community_id}/members/42/role",
@@ -219,6 +220,21 @@ class TestMembers:
             json={"role": "moderator"},
         )
         assert response.status_code == 200
+
+    async def test_update_member_role_undefined_role_fails_closed(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        """A valid role NAME with no role row in this community is refused, never assigned."""
+        community_id = _seed_community(admin_db)
+        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        response = await client.put(
+            f"/api/v1/admin/{community_id}/members/42/role",
+            headers=_headers(),
+            json={"role": "moderator"},
+        )
+        assert response.status_code == 400
+        row = admin_db.dal(admin_db.dal.community_members.user_id == "42").select().first()
+        assert row.role == "member"
 
     async def test_update_member_role_invalid_role_is_400(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)

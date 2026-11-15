@@ -455,13 +455,50 @@ def seed_community(
     return community_id
 
 
+_ROLE_KINDS = {"community-admin": 1, "community-owner": 1, "moderator": 2}
+
+
+def _seed_kind_role(dal: Any, community_id: int, name: str) -> int | None:
+    """Create (once) the predefined role row for `name`, as the 0117 trigger does for real seeding.
+
+    Authorization reads scopes from `community_roles`, so a member seeded by NAME alone holds
+    nothing; admin/owner get the admin kind (computed full scope set), moderator the moderator kind.
+    Names with no predefined kind return None (a bare member row, no scopes).
+    """
+    kind = _ROLE_KINDS.get(name)
+    if kind is None or "community_roles" not in dal.tables:
+        return None
+    existing = (
+        dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == name))
+        .select()
+        .first()
+    )
+    if existing is not None:
+        return int(existing.id)
+    scopes = ["community:manage_channels", "channels:moderate"] if kind == 2 else []
+    return int(
+        dal.community_roles.insert(
+            community_id=community_id,
+            name=name,
+            is_system=True,
+            role_kind=kind,
+            base_claims={"scopes": scopes},
+        )
+    )
+
+
 def seed_membership(
     overlay_db: Any, *, community_id: int, user_id: int, role: str = "community-owner"
 ) -> None:
     """Insert one active `community_members` row for `user_id` in `community_id`."""
     dal = overlay_db.dal
+    role_id = _seed_kind_role(dal, community_id, role)
     dal.community_members.insert(
-        community_id=community_id, user_id=str(user_id), role=role, is_active=True
+        community_id=community_id,
+        user_id=str(user_id),
+        role=role,
+        is_active=True,
+        community_role_id=role_id,
     )
     dal.commit()
 

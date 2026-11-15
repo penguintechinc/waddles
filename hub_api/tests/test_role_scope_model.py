@@ -249,14 +249,29 @@ class TestModeratorEdit:
         assert (await response.get_json())["code"] == "SCOPE_ESCALATION"
         assert dal.community_roles[roles["moderator"]].base_claims["scopes"] == MODERATOR_SCOPES
 
-    async def test_editor_may_remove_scopes_it_lacks(
+    async def test_editor_must_hold_every_current_scope_to_edit(
+        self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
+    ) -> None:
+        """No downgrading a role more powerful than yourself, even just removing scopes."""
+        dal, community_id = community_db
+        response = await _put(
+            client,
+            _url(community_id, roles["moderator"]),
+            _limited(auth_headers, "roles:manage channels:read community:read"),
+            {"scopes": ["channels:read", "community:read"]},
+        )
+        assert response.status_code == 403
+        assert (await response.get_json())["code"] == "SCOPE_ESCALATION"
+        assert dal.community_roles[roles["moderator"]].base_claims["scopes"] == MODERATOR_SCOPES
+
+    async def test_editor_holding_all_current_scopes_may_remove_some(
         self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
     ) -> None:
         dal, community_id = community_db
         response = await _put(
             client,
             _url(community_id, roles["moderator"]),
-            _limited(auth_headers, "roles:manage channels:read community:read"),
+            _limited(auth_headers, "roles:manage " + " ".join(MODERATOR_SCOPES)),
             {"scopes": ["channels:read", "community:read"]},
         )
         assert response.status_code == 200
@@ -325,6 +340,62 @@ class TestCustomRoleCrud:
         assert deleted.status_code == 200
 
 
+class TestNoDeletingStrongerRole:
+    async def test_cannot_delete_custom_role_holding_scopes_editor_lacks(
+        self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
+    ) -> None:
+        dal, community_id = community_db
+        strong = dal.community_roles.insert(
+            community_id=community_id,
+            name="strong",
+            is_system=False,
+            role_kind=0,
+            base_claims={"scopes": ["channels:moderate", "channels:read"]},
+        )
+        dal.commit()
+        response = await client.delete(
+            _url(community_id, strong), headers=_limited(auth_headers, "roles:manage channels:read")
+        )
+        assert response.status_code == 403
+        assert (await response.get_json())["code"] == "SCOPE_ESCALATION"
+        assert dal.community_roles[strong] is not None
+
+    async def test_can_delete_custom_role_whose_scopes_editor_holds(
+        self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
+    ) -> None:
+        _, community_id = community_db
+        response = await client.delete(
+            _url(community_id, roles["vip"]),
+            headers=_limited(auth_headers, "roles:manage channels:read"),
+        )
+        assert response.status_code == 200
+
+
+class TestDedicatedScopes:
+    def test_per_action_scopes_registered_and_admin_only(self) -> None:
+        for scope in (reg.SCOPE_GITHUB_MANAGE, reg.SCOPE_COMMUNITY_ADMIN, reg.SCOPE_PROFILE_MANAGE):
+            assert scope in reg.all_scopes()
+            assert scope in reg.effective_scopes(reg.KIND_ADMIN, [])
+            assert scope not in reg.effective_scopes(reg.KIND_MODERATOR, MODERATOR_SCOPES)
+
+    def test_moderator_scopes_do_not_satisfy_community_admin_gates(
+        self, community_db: Any, roles: dict[str, int]
+    ) -> None:
+        dal, community_id = community_db
+        dal.community_members.insert(
+            community_id=community_id,
+            user_id="51",
+            role="moderator",
+            community_role_id=roles["moderator"],
+            is_active=True,
+        )
+        dal.commit()
+        held = member_scopes_sync(dal, community_id, 51)
+        assert held and reg.SCOPE_GITHUB_MANAGE not in held
+        assert reg.SCOPE_COMMUNITY_ADMIN not in held
+        assert reg.SCOPE_PROFILE_MANAGE not in held
+
+
 class TestScopeEndpointAndSync:
     async def test_scope_registry_endpoint(
         self, client: Any, auth_headers: Any, community_db: Any
@@ -374,6 +445,8 @@ class TestNoRoleNameAuthorization:
             "_BYPASS_ROLES",
             '"platform-admin" in',
             "role.belongs([",
+            "_ADMIN_ROLE_NAMES",
+            '"community-owner", "community-admin")',
         ],
     )
     def test_removed_constructs_stay_removed(self, needle: str) -> None:

@@ -31,6 +31,10 @@ KIND_FIXED: Final[int] = 3
 
 #: Scope that authorizes role create/edit/delete. Held by the computed admin role only by default.
 SCOPE_ROLES_MANAGE: Final[str] = "roles:manage"
+#: Per-action scopes (dedicated, never satisfied by broad moderator scopes); admin-kind holds all.
+SCOPE_GITHUB_MANAGE: Final[str] = "github:manage"
+SCOPE_COMMUNITY_ADMIN: Final[str] = "community:admin"
+SCOPE_PROFILE_MANAGE: Final[str] = "community.profile:manage"
 #: Global-admin literal on a JWT; the only token claim that bypasses community checks.
 SCOPE_GLOBAL_ADMIN: Final[str] = "users:admin"
 
@@ -77,6 +81,9 @@ register_scopes(
         "resource:pin": "Pin resources",
         "resource:moderate": "Moderate resources",
         SCOPE_ROLES_MANAGE: "Create, edit and delete roles",
+        SCOPE_GITHUB_MANAGE: "Manage the community GitHub sync connections",
+        SCOPE_COMMUNITY_ADMIN: "Administer the community (overlays, calls admin)",
+        SCOPE_PROFILE_MANAGE: "Edit the community profile",
     }
 )
 

@@ -108,8 +108,14 @@ def _seed_community(
 
 
 def _seed_role(auth_db: Any, *, community_id: int, name: str, scopes: list[str]) -> int:
+    kind = {"community-admin": 1, "community-owner": 1, "moderator": 2}.get(name, 0)
     role_id: int = auth_db.dal.community_roles.insert(
-        community_id=community_id, name=name, priority=0, base_claims={"scopes": scopes}
+        community_id=community_id,
+        name=name,
+        is_system=kind != 0,
+        role_kind=kind,
+        priority=0,
+        base_claims={"scopes": scopes},
     )
     auth_db.dal.commit()
     return role_id

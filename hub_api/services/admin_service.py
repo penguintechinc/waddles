@@ -312,21 +312,23 @@ async def update_member_role(
         dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == role))
     )
     role_row = role_rows.first()
-    community_role_id = role_row.id if role_row else None
-    if role_row is not None:
-        # Scope-based escalation guard (never a role-name check): the caller must hold every scope
-        # of the role being assigned.
-        stored = (role_row.base_claims or {}).get("scopes", [])
-        target_scopes = effective_scopes(getattr(role_row, "role_kind", None), stored)
-        caller_role = await community_authz.get_caller_community_role(
-            async_dal, dal, community_id=community_id, user_id=caller_id or -1
-        )
-        # A caller with no membership here (tenant/global admin bypass) may assign anything except
-        # an admin-kind role, which needs a member who themselves hold the full scope set.
-        enforce = caller_role is not None or getattr(role_row, "role_kind", None) == KIND_ADMIN
-        held = caller_role.scopes if caller_role is not None else frozenset()
-        if enforce and not target_scopes <= held:
-            raise forbidden("Cannot assign a role holding scopes you do not hold")
+    if role_row is None:
+        # Fail closed: an undefined role is never assigned, and the scope guard below never skipped.
+        raise bad_request("Role is not defined for this community")
+    community_role_id = role_row.id
+    # Scope-based escalation guard (never a role-name check): the caller must hold every scope
+    # of the role being assigned.
+    stored = (role_row.base_claims or {}).get("scopes", [])
+    target_scopes = effective_scopes(getattr(role_row, "role_kind", None), stored)
+    caller_role = await community_authz.get_caller_community_role(
+        async_dal, dal, community_id=community_id, user_id=caller_id or -1
+    )
+    # A caller with no membership here (tenant/global admin bypass) may assign anything except
+    # an admin-kind role, which needs a member who themselves hold the full scope set.
+    enforce = caller_role is not None or getattr(role_row, "role_kind", None) == KIND_ADMIN
+    held = caller_role.scopes if caller_role is not None else frozenset()
+    if enforce and not target_scopes <= held:
+        raise forbidden("Cannot assign a role holding scopes you do not hold")
 
     await async_dal.update_async(
         (dal.community_members.community_id == community_id)

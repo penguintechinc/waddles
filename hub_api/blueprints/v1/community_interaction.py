@@ -254,8 +254,10 @@ async def admin_delete_role(community_id: int, role_id: int) -> tuple[dict[str, 
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
     try:
-        _roles_manage_scopes(community_id)
-        err = delete_community_role(current_app.config["dal"], community_id, role_id)
+        editor = _roles_manage_scopes(community_id)
+        err = delete_community_role(
+            current_app.config["dal"], community_id, role_id, editor_scopes=editor
+        )
     except ApiError as exc:
         return _guard_error(exc)
     if err == "__not_found__":

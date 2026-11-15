@@ -31,6 +31,8 @@ The kind is set by migration `0117_community_role_kind` (backfill plus a `BEFORE
   admins hold every registered scope).
 * The editor can only **grant** scopes they hold themselves (403 `SCOPE_ESCALATION`). Removing a scope
   the editor lacks is allowed.
+* The editor must hold **every scope currently on the target role** to edit its scopes or delete it
+  (no downgrading or deleting a role more powerful than yourself).
 * Scopes must be registered (400 `UNKNOWN_SCOPE`).
 * Each mutation is recorded as `role.definition_changed` in the audit chain (declarative route
   classification in `services/audit_events.py`) and logged with ids and a scope count only.
@@ -59,8 +61,15 @@ no data change and never reaches the moderator or custom roles until an authoriz
 |---|---|
 | `_BYPASS_ROLES` / `"platform-admin" in roles` JWT-claim bypass (`community_authz`) | `users:admin` token scope |
 | `_COMMUNITY_ADMIN_ROLES` (`marketplace_billing_service`) | `member_scopes_sync` and admin scopes |
-| `role.belongs(["admin","owner"])` (`github_sync_service`) | membership scopes and `ADMIN_SCOPES` |
-| `ADMIN_PROMOTION_ROLES` (`admin_service.update_member_role`) | assigner must hold every scope of the assigned role |
+| `role.belongs(["admin","owner"])` (`github_sync_service`) | dedicated `github:manage` scope |
+| `_ADMIN_ROLES` (`community_access.require_community_admin`, overlay/calls admin) | dedicated `community:admin` scope |
+| `_ADMIN_ROLE_NAMES` (`community_profile_service.update_community_profile`) | dedicated `community.profile:manage` scope |
+| `ADMIN_PROMOTION_ROLES` (`admin_service.update_member_role`) | assigner must hold every scope of the assigned role; an undefined role is refused (400), never assigned |
 
-Retained on purpose: `target.role == "community-owner"` in `admin_service` (member change/removal)
+Per-action scopes (`github:manage`, `community:admin`, `community.profile:manage`, `roles:manage`) are
+registered, so the admin kind holds them automatically and the moderator kind does not unless an
+authorized admin grants them.
+
+Retained on purpose: `tenant_admins.role` -> scope bundle expansion at token issuance (that is the
+role-to-scopes step itself), and `target.role == "community-owner"` in `admin_service` (member change/removal)
 protects the community's owner row, a data invariant on the *target*, not authorization of the caller.
