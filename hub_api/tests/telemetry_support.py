@@ -11,6 +11,7 @@ import asyncio
 import logging
 import socket
 import time
+import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent import futures
 from typing import Any
@@ -206,6 +207,11 @@ def _enable(monkeypatch: pytest.MonkeyPatch, endpoint: str, **extra: str) -> Non
 def _build_app() -> Quart:
     """The real hub-api app plus a few test-only routes (before first request, so legal)."""
     app = create_app(_test_config())
+    # The global rate limiter keys by client IP in a SHARED Valkey (CI has a real one on localhost),
+    # so every test app dialled from 127.0.0.1 would drain one bucket across the whole suite and the
+    # telemetry probes would start getting 429. A per-app namespace gives each app a fresh bucket
+    # without touching production limiting (the namespace is read on every check).
+    app.config["rate_limiter"].namespace = f"hub_api_rate_limit_test_{uuid.uuid4().hex}"
     probe = logging.getLogger("hub_api.test_probe")
 
     @app.get("/api/v1/_otel/items/<int:item_id>")

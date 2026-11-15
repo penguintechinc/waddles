@@ -35,6 +35,7 @@ from urllib.parse import urlencode
 import bcrypt
 import httpx
 from flask_core.auth import (
+    DEFAULT_TENANT_SLUG,
     JWT_CLOCK_SKEW_SECONDS,
     SCOPE_BUNDLES,
     create_jwt_token,
@@ -253,7 +254,7 @@ async def create_session_token(
     session the audit log cannot account for is never issued (entitled tenants only).
     """
     roles, scopes = await _scopes_for(async_dal, dal, user=user, tenant_id=tenant_id)
-    resolved_tenant = tenant_slug or "default"
+    resolved_tenant = tenant_slug or DEFAULT_TENANT_SLUG
 
     await record_session_issued(
         user_id=user.id if user is not None else None,
@@ -488,7 +489,7 @@ async def login(
     *,
     email: str,
     password: str,
-    tenant_slug: str = "default",
+    tenant_slug: str = DEFAULT_TENANT_SLUG,
 ) -> LoginResult:
     """Login."""
     if not email or not password:

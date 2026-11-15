@@ -259,3 +259,6 @@ coverage/
 /sdk/waddle-sdk-cs/**/obj/
 /sdk/waddle-sdk-cs/**/TestResults/
 /.validation-target/
+
+# make test-hub-api venv (scripts/test-hub-api.sh)
+.venv-hub-api/

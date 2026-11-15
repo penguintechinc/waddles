@@ -1,7 +1,9 @@
 """Chart <-> database credential round trip on a real Postgres (H-1 / H-3).
 
-Renders the alpha chart with `helm template`, takes the db-migrate HOOK Secret exactly as the
-Job would receive it (`DATABASE_URL`, `WADDLES_DB_SERVICE_ROLE_PASSWORDS`, ...), provisions a
+Renders the alpha chart with `helm template`, then runs the REAL runtime provision-secrets hook
+(files/provision-secrets.sh, against the rendered spec + inputs Secret, via the chart's
+`provision_harness`): Helm no longer renders the generated Secrets, the cluster derives them at
+install time. Takes the db-migrate Secret exactly as the Job would receive it (`DATABASE_URL`, `WADDLES_DB_SERVICE_ROLE_PASSWORDS`, ...), provisions a
 fresh-replayed database from it (alembic + the same `service_roles.py reconcile --strict`
 `migrations/run-alembic.sh` runs), then authenticates as EVERY workload container the chart
 renders using precisely the env Kubernetes would hand it (`DB_USER`, the role's
@@ -27,6 +29,10 @@ import yaml
 from pg_docker import DOCKER_AVAILABLE, REPO_ROOT, alembic_cli, empty_postgres
 
 CHART = REPO_ROOT / "k8s" / "helm" / "waddlebot"
+
+# The chart's runtime-secret harness lives beside its render tests.
+sys.path.insert(0, str(CHART / "tests"))
+from provision_harness import with_provisioned  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     not (DOCKER_AVAILABLE and shutil.which("helm")), reason="docker and helm are required"
@@ -56,7 +62,8 @@ def _render_alpha() -> list[dict[str, Any]]:
 
 
 def test_every_rendered_workload_identity_authenticates_against_the_provisioned_database() -> None:
-    docs = _render_alpha()
+    # Rendered workloads + the Secrets the provision-secrets hook creates at install time.
+    docs = with_provisioned(_render_alpha())
     secrets = {
         d["metadata"]["name"]: dict(d.get("stringData") or {})
         for d in docs
