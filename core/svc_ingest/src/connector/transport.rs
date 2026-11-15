@@ -118,6 +118,13 @@ pub trait Transport: Send {
     /// close. Must be cancel-safe (the driver races it against shutdown).
     async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, TransportError>;
 
+    /// The command-latency first door of the frame `next_frame` just returned, when the transport
+    /// knows an earlier instant than the driver's own receipt (an HTTP door that resolved the edge
+    /// stamp). Taken once per frame. Default `None`: the driver stamps its own receipt (`gateway`).
+    fn frame_first_door(&mut self) -> Option<(u64, command_latency::Door)> {
+        None
+    }
+
     /// How often the driver should ask the connector for a heartbeat body
     /// (`receiver.on-heartbeat-due`, spec S3.5). `None` (the default) means
     /// this transport has no heartbeat -- a declared capability, not a

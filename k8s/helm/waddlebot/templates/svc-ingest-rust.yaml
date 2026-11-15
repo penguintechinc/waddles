@@ -153,6 +153,13 @@ spec:
         - name: HUB_API_GRPC_ENDPOINT
           value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
+        {{- if and (.Values.interactionsGateway | default dict).enabled ((.Values.interactionsGateway | default dict).edgeRequestStart | default dict).enabled }}
+        # Command-latency first door: trust the Gateway-stamped `x-request-start` ONLY where the
+        # interactions HTTPRoute overwrites it (templates/interactions-gateway.yaml). Otherwise a
+        # client-sent header is ignored and the handler entry time is the first door.
+        - name: INGEST_TRUST_EDGE_REQUEST_START
+          value: "true"
+        {{- end }}
         {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         # waddles.ingest-dynamic-connections env baseline: svc-ingest resolves each event's
         # guild/channel to a numeric scope via hub-api and stamps schema-v3 envelopes (an

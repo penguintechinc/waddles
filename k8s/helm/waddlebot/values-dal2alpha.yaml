@@ -528,6 +528,12 @@ httproute:
       port: 8080
       timeoutSeconds: 3600
 
+# Discord interactions / webhooks through the shared Gateway (command-latency first door): the
+# route stamps `x-request-start` at the Cilium LB and svc-ingest trusts it. Listener/namespace
+# admission is the same `gateway-access` label the hub-webui route already needs.
+interactionsGateway:
+  enabled: true
+
 # Operator-provisioned Secret (never rendered/overwritten by this chart).
 platformCredentials:
   existingSecret: "waddlebot-platform-credentials"

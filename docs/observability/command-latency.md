@@ -31,14 +31,42 @@ Everything here sits behind the core-mechanism opt-out kill switch **`waddles.di
   can at worst skip or skew its own latency sample.
 * **First door per path:** Discord gateway loop (`ingest/discord.rs`): the instant the decoded gateway frame is
   returned, before the permissions lookup (`d:g`). Connector runtime (`connector/driver.rs::process_frame`): the
-  instant the transport hands the driver a frame (`d:g`; ws gateway, webhook queue, poll). Any path not wired stamps
+  instant the transport hands the driver a frame (`d:g`; ws gateway, poll). HTTP webhooks / interactions (`/intake/webhook`):
+  the HTTP handler's entry instant, or the trusted Gateway `x-request-start` (`d:h`, door `http`; see "First door on the HTTP
+  / interactions path"). Any path not wired stamps
   its own publish-entry time (`d:p`, a lower bound, never a silent zero).
 * **Clocks:** hops that cross pods compare wall clocks (NTP skew, sub-ms to a few ms on one cluster). Queue wait is
   computed from the Valkey `XADD` entry id (server clock) vs the consumer pod's clock.
-* **Command label** comes from a registered-command registry (`WADDLES_COMMAND_LATENCY_COMMANDS=ping,roll` on
-  svc-process, the only place decrypted text is in memory); text is read in place, never stored or logged; anything
-  unregistered is `other`. **`bundle_lang`** comes from `WADDLES_BUNDLE_LANGS=app_id:lang,...` on svc-action
-  (closed set `rust|python|csharp|go|js|other`, unmapped = `unknown`).
+* **Labels** come from the DATABASE READ REPLICA, never env lists and never user text (owner decision
+  2026-11-15). `command` = a registered command name (`app_commands.command`, read by svc-process, the only
+  place decrypted text is in memory; text is read in place, never stored or logged). `bundle` = a registered
+  app bundle's `app_id`, `bundle_lang` = that bundle's newest version language (`app_versions.app_id,language`,
+  read by svc-action; closed set `rust|python|csharp|go|js|other`). Anything unregistered is `other`
+  (`bundle_lang` of an unmapped app = `unknown`). See "Label registries" below.
+
+## Label registries (command / bundle / bundle_lang)
+
+```text
+ replica (DATABASE_REPLICA_URL, per-service RO role)         command_latency::registry (process-wide, bounded)
+   app_commands(command)        -- svc-process  --seed/refresh/miss-->  commands  (cap 256)  -> `command`
+   app_versions(app_id,language) -- svc-action  --seed/refresh/miss-->  bundles   (cap 256)  -> `bundle`, `bundle_lang`
+```
+
+* **Seed** at start (retried every 15 s until it succeeds; labels are `other`/`unknown` meanwhile), **periodic
+  refresh** every 5 min, **lazy-load on miss**: a `!`/`/`-prefixed, label-shaped, unregistered token (or an unmapped
+  `app_id`) wakes the refresher, rate limited to one read per 15 s however many misses arrive. A failed read keeps the
+  last snapshot and logs WARN (`command-latency label registry refresh failed`). Plain chat never triggers a read.
+* **Replica only:** with `DATABASE_REPLICA_URL` unset there is NO primary fallback; one ERROR is logged and labels stay
+  `other`. The Helm chart already renders `DATABASE_REPLICA_URL` for both stages when
+  `infrastructure.postgresql.readReplicas.host` is set.
+* **Bounded:** at most 256 commands (most widely registered first) and 256 bundles; more fold into `other`
+  (WARN at refresh). Worst case series per histogram = (256 + 1) x (256 + 1) x 6 langs x outcomes x doors, but real
+  deployments register tens, and the registry cannot grow past the cap by construction.
+* **Least privilege (alembic `0112_latency_label_reads`, mirrored in `config/postgres/service-roles.yaml`):**
+  `waddles_svc_process` gets `SELECT (command)` on `app_commands` only (no tenant/community/app column);
+  `waddles_svc_action` gets `SELECT (app_id, language)` on `app_versions` on top of `(id)`. SELECT only.
+* **Visibility note:** the command vocabulary spans all tenants (it is a metrics label set, visible only to whoever
+  can read the metrics backend); it never carries who registered a command.
 
 ## Traces (one distributed trace per command)
 
@@ -73,8 +101,8 @@ ALWAYS, run services at `parentbased_always_on` (the default) and tail-sample in
 | Exposed name | Type | Labels |
 |---|---|---|
 | `waddles_command_hop_seconds` | histogram | `hop` = `ingest_publish`, `queue_wait`, `process_stage`, `action_queue_wait`, `dispatch_to_invoke`, `executor_to_outbound`, `outbound_call` |
-| `waddles_command_e2e_seconds` | histogram | `command`, `bundle_lang`, `outcome` (`ok`,`refused`,`timeout`,`error`), `door` (`gateway`,`sink`,`http`,`publish`) |
-| `waddles_command_e2e_over_budget_total` | counter | `command`, `bundle_lang`, `outcome` (e2e >= 1.0 s) |
+| `waddles_command_e2e_seconds` | histogram | `command`, `bundle`, `bundle_lang`, `outcome` (`ok`,`refused`,`timeout`,`error`), `door` (`gateway`,`sink`,`http`,`publish`) |
+| `waddles_command_e2e_over_budget_total` | counter | `command`, `bundle`, `bundle_lang`, `outcome` (e2e >= 1.0 s) |
 | `waddles_command_latency_marker_invalid_total` | counter | `reason` (`skewed`,`stale`,`missing`) |
 | `waddles_canary_e2e_seconds` | histogram | `outcome` |
 | `waddles_canary_failures_total` | counter | `reason` (`timeout`,`misconfigured`,`publish_failed`,`store_unavailable`,`not_ok`,`result_unreadable`) |
@@ -143,29 +171,56 @@ ignores the license bypass domain (default OFF everywhere until deliberately ena
 5. Canary traffic goes through reputation/economy/analytics like any command in that community; confirm that is fine
    for a dedicated community.
 
-## First door on the HTTP / ingress path (read-only findings, nothing applied)
+## First door on the HTTP / interactions path (Gateway route + edge `x-request-start`)
 
-* On dal2alpha the shared Cilium Gateway (`gateway-system/shared`, class `cilium-shared`) has ONE route for
-  `waddles-alpha.penguintech.cloud`: `/` -> `waddlebot-hub-webui-v3:8080`. **svc-ingest (`:8200`) is not exposed
-  through the gateway at all today**; Discord interactions/webhooks (`POST /intake/webhook/{route_key}`) have no
-  ingress route on alpha. So there is no gateway first door to stamp yet.
-* What the LB offers: Gateway API `RequestHeaderModifier` only sets STATIC values (no request-start time). The Envoy
-  config is generated and owned by the Cilium operator (`CiliumEnvoyConfig/cilium-gateway-shared`), not patchable from
-  a chart. Envoy can stamp `x-request-start` via `request_headers_to_add: %START_TIME(%s.%3f)%` or log
-  `%START_TIME%`/`x-envoy-upstream-service-time`; Hubble L7 flow records carry timestamps for the LB hop.
-* **Prepared in code:** `command_latency::first_door::parse_request_start` accepts `t=<s.ms>`, `<s.ms>`, `<ms>` and
-  `<s>`, refuses implausible values; it is not wired into the webhook intake because verified webhook bodies cross an
-  `mpsc` to the connector driver with no side channel (a future change adds a received-at to that frame). Until then
-  an HTTP webhook's first door is the driver's frame receipt (`d:g`), excluding the LB leg.
+Owner decision 2026-11-15: Discord interactions / webhooks come in through the shared Cilium Gateway and the SLA
+clock starts at that first door (the Cilium LB, NOT Cloudflare).
+
+```text
+ Discord -> Cloudflare -> NAT -> Cilium Gateway (shared)  --HTTPRoute /intake/webhook, POST-->  svc-ingest :8200
+                                  | RequestHeaderModifier SET x-request-start = t=%START_TIME(%s.%3f)%
+                                  v                                    (Envoy operator, overwrites a client value)
+        svc-ingest http handler: first_door_for(headers) -> t0 (edge stamp if trusted+plausible, else handler entry)
+        -> WebhookIngress::handle_from_at -> mpsc Queued{bytes, first_door_ms} -> WebhookTransport::frame_first_door
+        -> ConnectorDriver::process_frame(with_first_door(t0, door=http)) -> publish stamps t0 -> ... -> e2e (door=http)
+```
+
+* **Chart** (`k8s/helm/waddlebot/templates/interactions-gateway.yaml`, values `interactionsGateway`): an HTTPRoute of
+  its own (`<release>-interactions`, `POST` + PathPrefix `/intake/webhook`, longer prefix wins over hub-webui's `/`)
+  on the same shared Gateway parentRef as `httproute`, plus a CiliumNetworkPolicy admitting the Gateway (reserved
+  `ingress` entity + the Gateway namespace) to svc-ingest's HTTP port ONLY (never the metrics port). **Alpha
+  (`values-dal2alpha.yaml`) enables it; every other environment is off by default and supported** (set
+  `interactionsGateway.enabled=true` with `httproute.enabled` and the Rust data plane). Enabled without a Gateway is a
+  render error, never a silent skip. Chart tests: `k8s/helm/waddlebot/tests/test_interactions_gateway_render.py`
+  (helm 3.17.3 and helm 4, every `values-*.yaml`).
+* **Stamp semantics:** `RequestHeaderModifier.set` OVERWRITES (never appends) so a client-supplied `x-request-start`
+  cannot survive; svc-ingest additionally refuses a request carrying several values. svc-ingest trusts the header only
+  when `INGEST_TRUST_EDGE_REQUEST_START=true` (rendered exactly when the stamping route is on); otherwise a
+  client-sent header is ignored and the handler entry time is the first door.
+* **Skew bounds** (`command_latency::first_door::resolve_edge_start`): a stamp more than 5 s ahead of the pod clock or
+  unparseable -> refused `skewed` (this includes an Envoy operator the gateway did NOT expand, i.e. the literal
+  `%START_TIME(...)%`); a stamp up to 5 s ahead reads as "no edge leg"; older than `MAX_EDGE_LEG_MS` (5 s) -> refused
+  `stale`; absent while trusted -> `missing`. Every refusal falls back to the handler entry time, increments
+  `waddles_command_latency_marker_invalid_total{reason}` and logs one WARN (no value). The door label is `http` in all
+  cases. With the edge stamp used, the `ingest_publish` hop includes the LB -> pod leg (no separate hop).
+* **UNVERIFIED on a live cluster:** that the Cilium Gateway's Envoy expands `%START_TIME(%s.%3f)%` inside a Gateway API
+  header modifier value (Envoy evaluates command operators in `request_headers_to_add`, which is what the Gateway API
+  filter is translated to). After the first alpha deploy, check `make command-latency-report` /
+  `waddles_command_latency_marker_invalid_total`: a steady `skewed` rate means the operator is not expanded; then use the
+  fallback admin step 2 below. Nothing breaks in that case, the clock just starts at the handler.
 
 ### Admin / infra owner handoff (config this repo cannot apply)
 
-1. **Expose** `/intake/webhook` (svc-ingest `:8200`) through the Gateway with its own HTTPRoute if interactions must
-   arrive via the LB (security review: webhook signature verification stays in ingest).
-2. **Stamp t0 at the gateway:** a Cilium/Envoy route-level `request_headers_to_add` of `x-request-start:
-   t=%START_TIME(%s.%3f)%` (needs a CiliumEnvoyConfig-capable owner of the shared gateway), or enable Envoy access logs
-   with `%START_TIME%` and correlate by `x-request-id`. Strip a client-supplied `x-request-start` at the gateway.
-3. **Collector tail sampling** (traces) so error and over-budget commands are always kept:
+1. **Shared Gateway listener admission:** the `https` listener of `gateway-system/shared` must admit the Waddles
+   namespace (label `gateway-access: shared-dal2a`, already required by the hub-webui route; no new step on alpha).
+   Other environments: the equivalent label/selector on their Gateway.
+2. **Only if the header modifier does not expand `%START_TIME%`:** a `CiliumEnvoyConfig`-capable owner of the shared
+   Gateway adds a route-level `request_headers_to_add` `x-request-start: t=%START_TIME(%s.%3f)%` with
+   `append_action: OVERWRITE_IF_EXISTS_OR_ADD` for host `waddles-alpha.penguintech.cloud` path `/intake/webhook`, or
+   enables Envoy access logs with `%START_TIME%` correlated by `x-request-id`.
+3. **Discord Developer Portal:** set the application's *Interactions Endpoint URL* to
+   `https://<public host>/intake/webhook/<route_key>` (route registered in svc-ingest; owner action, never automated).
+4. **Collector tail sampling** (traces) so error and over-budget commands are always kept:
    ```yaml
    processors:
      tail_sampling:
@@ -175,9 +230,11 @@ ignores the license bypass domain (default OFF everywhere until deliberately ena
          - {name: keep-slow,   type: latency,     latency: {threshold_ms: 1000}}
          - {name: sample-rest, type: probabilistic, probabilistic: {sampling_percentage: 10}}
    ```
-4. **Per-service env:** `WADDLES_COMMAND_LATENCY_COMMANDS` (svc-process), `WADDLES_BUNDLE_LANGS` (svc-action),
-   `OTEL_EXPORTER_OTLP_ENDPOINT` + a collector allowed by the executor's egress policy if executor metrics are wanted.
-5. Canary provisioning (owner decisions above) and its `CANARY_*` env on svc-ingest and svc-action.
+5. **Per-service env:** `OTEL_EXPORTER_OTLP_ENDPOINT` + a collector allowed by the executor's egress policy if executor
+   metrics are wanted. **A read-replica host** (`infrastructure.postgresql.readReplicas.host` -> `DATABASE_REPLICA_URL`)
+   for svc-process and svc-action: the label registries never read the primary, so without it `command` / `bundle` stay
+   `other` (one ERROR at start).
+6. Canary provisioning (owner decisions above) and its `CANARY_*` env on svc-ingest and svc-action.
 
 ## Latency suspects in the hot path (code reading; nothing measured, nothing optimized in this PR)
 

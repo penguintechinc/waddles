@@ -1,0 +1,100 @@
+{{- /*
+Interactions / webhook door through the shared Cilium Gateway (command-latency SLA first door).
+
+  Discord interactions + generic webhooks:  POST /intake/webhook/{route_key}  -> svc-ingest-rust :http
+
+Renders, only when `interactionsGateway.enabled`:
+  1. an HTTPRoute (own object -- the hub-webui `/` route is untouched; the longer PathPrefix wins)
+     attached to the SAME shared Gateway listener as `httproute`, whose RequestHeaderModifier SETS
+     (overwrites, never appends -- so a client-supplied value cannot survive) `x-request-start` to
+     Envoy's request start time, so the SLA clock starts at the first door (the Cilium LB, not
+     Cloudflare);
+  2. a CiliumNetworkPolicy admitting the Gateway (reserved `ingress` entity + the Gateway namespace)
+     to svc-ingest-rust on its HTTP port ONLY (never the metrics port); the workload's own CNP keeps
+     everything else same-namespace-only.
+
+Fails loudly (render error) when enabled without `httproute.enabled`: there is no Gateway to attach to.
+svc-ingest trusts the header only when `edgeRequestStart.enabled` (see svc-ingest-rust.yaml,
+INGEST_TRUST_EDGE_REQUEST_START); without it the HTTP handler's own entry time is the first door.
+*/ -}}
+{{- $ig := .Values.interactionsGateway | default dict }}
+{{- if $ig.enabled }}
+{{- if not .Values.httproute.enabled }}
+{{- fail "interactionsGateway.enabled requires httproute.enabled (the shared Gateway parentRef is taken from httproute.*)" }}
+{{- end }}
+{{- if not (and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcIngest.enabled) }}
+{{- fail "interactionsGateway.enabled requires pipeline.rustDataPlane.enabled and pipeline.rustDataPlane.svcIngest.enabled (the route's backend is svc-ingest-rust)" }}
+{{- end }}
+{{- $hosts := $ig.hostnames | default .Values.httproute.hostnames }}
+{{- $port := .Values.pipeline.rustDataPlane.svcIngest.port }}
+{{- $erq := $ig.edgeRequestStart | default dict }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-interactions
+  namespace: {{ include "waddlebot.namespace" . }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-ingest-rust
+spec:
+  parentRefs:
+    - name: {{ .Values.httproute.gatewayName }}
+      namespace: {{ .Values.httproute.gatewayNamespace }}
+      sectionName: https
+  hostnames:
+    {{- range $hosts }}
+    - {{ . | quote }}
+    {{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ $ig.pathPrefix | default "/intake/webhook" | quote }}
+          method: POST
+      timeouts:
+        request: {{ printf "%ds" (($ig.timeoutSeconds | default 10) | int) }}
+        backendRequest: {{ printf "%ds" (($ig.timeoutSeconds | default 10) | int) }}
+      {{- if $erq.enabled }}
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            # `set` OVERWRITES any client-supplied header of this name; the value is an Envoy
+            # command operator evaluated per request (epoch seconds.millis of request start).
+            set:
+              - name: {{ $erq.headerName | default "x-request-start" | quote }}
+                value: {{ $erq.value | default "t=%START_TIME(%s.%3f)%" | quote }}
+      {{- end }}
+      backendRefs:
+        - name: {{ include "waddlebot.fullname" . }}-svc-ingest-rust
+          port: {{ $port }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-ingest-interactions-gateway
+  namespace: {{ include "waddlebot.namespace" . }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-ingest-rust
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-ingest-rust
+  ingress:
+    # Gateway -> svc-ingest on the HTTP intake port ONLY (never the metrics port); additive to the
+    # workload CNP's same-namespace allow.
+    - fromEntities:
+        - ingress
+      toPorts:
+        - ports:
+            - port: {{ $port | quote }}
+              protocol: TCP
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: {{ .Values.httproute.gatewayNamespace }}
+      toPorts:
+        - ports:
+            - port: {{ $port | quote }}
+              protocol: TCP
+{{- end }}

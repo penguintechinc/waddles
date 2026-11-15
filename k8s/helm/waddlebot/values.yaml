@@ -2738,6 +2738,28 @@ httproute:
   hostnames: []
   rules: []
 
+# Interactions / webhook door through the shared Gateway (templates/interactions-gateway.yaml):
+# POST /intake/webhook/{route_key} -> svc-ingest-rust, plus the edge-stamped `x-request-start` so the
+# command-latency SLA clock starts at the first door (the Cilium LB, not Cloudflare). Requires
+# `httproute.enabled` (same shared Gateway parentRef) and the Rust data plane. OFF by default;
+# supported in every environment. Enabling adds a CNP admitting the Gateway to svc-ingest's HTTP port
+# only. NOTE: the shared Gateway's listener must admit this namespace (namespaceLabels
+# `gateway-access`, already required by `httproute`).
+interactionsGateway:
+  enabled: false
+  # Defaults to httproute.hostnames.
+  hostnames: []
+  pathPrefix: /intake/webhook
+  # Discord requires an interaction response within 3 s; the route must not outlive it by much.
+  timeoutSeconds: 10
+  edgeRequestStart:
+    # Stamp the header at the Gateway AND make svc-ingest trust it (INGEST_TRUST_EDGE_REQUEST_START).
+    enabled: true
+    headerName: x-request-start
+    # Envoy command operator, evaluated per request by the Gateway's Envoy: epoch seconds.millis.
+    # RequestHeaderModifier `set` overwrites any client-supplied value.
+    value: "t=%START_TIME(%s.%3f)%"
+
 # Network Policies — namespace-level ingress isolation
 # When enabled, denies all cross-namespace ingress and allows only
 # same-namespace traffic + ingress controller traffic.

@@ -52,6 +52,48 @@ pub const DISCORD_ACK_DEADLINE: Duration = Duration::from_millis(2500);
 /// Platform slug whose routes use the interaction-ack contract.
 const DISCORD: &str = "discord";
 
+/// Header the trusted edge (Cilium Gateway) SETS to the request-start instant.
+pub const REQUEST_START_HEADER: &str = "x-request-start";
+
+/// Env switch: trust [`REQUEST_START_HEADER`] as the edge stamp. Off by default -- a client can send
+/// the header itself, so it is honoured only where the Gateway route overwrites it (the chart sets
+/// this exactly when `interactionsGateway.edgeRequestStart.enabled`).
+pub const TRUST_EDGE_ENV: &str = "INGEST_TRUST_EDGE_REQUEST_START";
+
+/// Whether the edge request-start header is trusted (read once; `true`/`1` enable).
+fn trust_edge() -> bool {
+    static TRUST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRUST.get_or_init(|| {
+        std::env::var(TRUST_EDGE_ENV)
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    })
+}
+
+/// Resolves the command-latency first door of this request: the edge stamp when trusted and
+/// plausible, else the handler entry instant (`entry_ms`). A refused stamp is counted
+/// (`waddles_command_latency_marker_invalid_total`) and logged at WARN without the value. `None`
+/// behind the telemetry kill switch (no stamp is carried at all).
+fn first_door_for(headers: &HeaderMap, entry_ms: u64, trust: bool) -> Option<u64> {
+    if command_latency::switch::is_disabled() {
+        return None;
+    }
+    let values: Vec<&str> = headers
+        .get_all(REQUEST_START_HEADER)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    let edge = command_latency::first_door::resolve_edge_start(&values, entry_ms, trust);
+    if let Some(reason) = edge.refused {
+        command_latency::metrics::metrics().record_marker_invalid(reason);
+        tracing::warn!(
+            reason,
+            "edge request-start stamp refused; using the handler entry time as the first door"
+        );
+    }
+    Some(edge.t0_ms)
+}
+
 /// Host-side interaction response for a VERIFIED Discord interaction body:
 /// PING -> PONG, commands/modals/components -> deferred ack (the connector does
 /// the real work asynchronously). `None` for an unsupported type (loud 400).
@@ -92,6 +134,8 @@ async fn intake(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    // First door of this HTTP request, taken before anything else runs.
+    let first_door = first_door_for(&headers, command_latency::stamp::now_ms(), trust_edge());
     let Some(ingress) = state.webhook.as_ref() else {
         tracing::warn!("generic webhook ingress not configured; rejecting delivery");
         return render(WebhookOutcome::Unavailable);
@@ -103,7 +147,14 @@ async fn intake(
     if ingress.owner_of(&route_key).as_deref() != Some(DISCORD) {
         return render(
             ingress
-                .handle_from(&route_key, source.as_deref(), &headers, &body, now)
+                .handle_from_at(
+                    &route_key,
+                    source.as_deref(),
+                    &headers,
+                    &body,
+                    now,
+                    first_door,
+                )
                 .await,
         );
     }
@@ -112,7 +163,7 @@ async fn intake(
     let ing = Arc::clone(ingress);
     let (key, hdrs, payload) = (route_key.clone(), headers, body.clone());
     let mut task = tokio::spawn(async move {
-        ing.handle_from(&key, source.as_deref(), &hdrs, &payload, now)
+        ing.handle_from_at(&key, source.as_deref(), &hdrs, &payload, now, first_door)
             .await
     });
     match tokio::time::timeout(DISCORD_ACK_DEADLINE, &mut task).await {
@@ -145,6 +196,60 @@ async fn intake(
             );
             render(WebhookOutcome::Unavailable)
         }
+    }
+}
+
+#[cfg(test)]
+mod first_door_tests {
+    use super::*;
+
+    /// Serialises the tests that flip the process-wide telemetry kill switch.
+    static SWITCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn hdrs(values: &[&str]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for v in values {
+            h.append(REQUEST_START_HEADER, v.parse().unwrap());
+        }
+        h
+    }
+
+    /// Trusted + plausible edge stamp starts the clock at the edge; every other case starts it at
+    /// the handler entry and (when trusted) is counted/logged, never an error.
+    #[test]
+    fn first_door_is_the_edge_stamp_only_when_trusted_and_plausible() {
+        let _g = SWITCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        command_latency::switch::set_disabled(false);
+        let entry = 1_731_575_000_500;
+        assert_eq!(
+            first_door_for(&hdrs(&["t=1731575000.430"]), entry, true),
+            Some(1_731_575_000_430)
+        );
+        assert_eq!(
+            first_door_for(&hdrs(&["1731575000.430"]), entry, false),
+            Some(entry),
+            "untrusted: a client-supplied header never moves the clock"
+        );
+        for bad in [
+            hdrs(&[]),
+            hdrs(&["%START_TIME(%s.%3f)%"]),
+            hdrs(&["1731575000.1", "1731575000.2"]),
+            hdrs(&["1731574000.000"]),
+        ] {
+            assert_eq!(first_door_for(&bad, entry, true), Some(entry));
+        }
+    }
+
+    /// Behind the telemetry kill switch no first door is carried at all.
+    #[test]
+    fn kill_switch_carries_no_first_door() {
+        let _g = SWITCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        command_latency::switch::set_disabled(true);
+        assert_eq!(
+            first_door_for(&hdrs(&["1731575000.4"]), 1_731_575_000_500, true),
+            None
+        );
+        command_latency::switch::set_disabled(false);
     }
 }
 
