@@ -26,20 +26,27 @@ svc-process / svc-action  handle_context (verified envelope scope only)
 * Code: `core/bundle_config_db/src/lib.rs` (`DbConfigSource`, `RoutedConfigSource`; its own crate so hub_client stays sea-orm-free,
   `CONFIG_SQL`), wired in svc-process / svc-action via
   `bundle_config_db::connect_and_install`.
-* One statement answers like hub-api's `get_runtime_config`: the community must belong to the
-  tenant (`community_id = 0` = tenant-wide), the app must be active for the scope (a community
-  activation beats the tenant-wide one), and the result is the manifest
-  `community_config_schema.properties.*.default` values `||` the latest saved config (a saved key
-  wins). An inactive/cross-tenant scope is simply absent (lazy `get` -> `NOT_FOUND`). Ids are
-  numeric only, never slugs.
-* Role/grants: alembic `0107_bundle_config_db_reads` + `config/postgres/service-roles.yaml`
+* One statement answers like hub-api's `get_runtime_config`: the app must be active for the scope
+  (`community_id = 0` = tenant-wide; a community activation beats the tenant-wide one), and the
+  result is the manifest `community_config_schema.properties.*.default` values `||` the latest
+  saved config (a saved key wins). An inactive scope is simply absent (lazy `get` ->
+  `NOT_FOUND`). Ids are numeric only, never slugs.
+* **Tenant isolation without `communities`:** the `(tenant, community)` pair is the stage's own
+  verified envelope scope and every table read is filtered by that `tenant_id`, so a scope only
+  ever sees its own tenant's defaults and saved config (a mismatched pair resolves to that
+  tenant's defaults at worst, never another tenant's data). hub-api's extra community-in-tenant
+  check is therefore not repeated, which keeps svc-process off `communities` (least privilege,
+  `test_0055`); alembic 0108 revokes the column grant 0107 first gave it. Tested in
+  `bundle_config_db_pg.rs` (tenant 1 asking for tenant 2's community id never sees tenant 2's
+  config).
+* Role/grants: alembic `0107_bundle_config_db_reads` + `0108_revoke_cfg_communities` + `config/postgres/service-roles.yaml`
   (`columns:`) give `waddles_svc_process` and `waddles_svc_action` **SELECT-only, column-scoped**
   access: `bundle_community_config(tenant_id, community_id, app_id, version, config)`,
   `app_active_versions(app_id, tenant_id, community_id, version_id)`, `app_versions(id)`,
-  `app_version_uploads(id, app_version_id, manifest_json)` and (svc-process;
-  svc-action has table-level) `communities(id, tenant_id)`. Never `updated_by`, `schema_sha256`,
-  staging keys, digests; no writes. Downgrade REVOKEs exactly these (no column ACL left behind,
-  so a later `DROP ROLE` works).
+  `app_version_uploads(id, app_version_id, manifest_json)`. No `communities` access (0108 revoked
+  0107's svc-process grant; svc-action's pre-existing table-level grant is untouched). Never
+  `updated_by`, `schema_sha256`, staging keys, digests; no writes. Downgrades REVOKE exactly these
+  (no column ACL left behind, so a later `DROP ROLE` works).
 * Connection env: `DATABASE_REPLICA_URL` (read-only replica DSN); when unset the primary
   `DATABASE_URL` is used and a WARN is logged. The chart renders the replica DSN from
   `infrastructure.postgresql.readReplicas.host` (empty on alpha: no replica yet). The DSN carries
@@ -103,7 +110,7 @@ hub-api `SET waddles:bundle_config:v:{tenant}:{community}:{app} <version> EX 7d`
   without it; CI starts the container via `rust-core-libs.yml` `postgres: true` for bundle_config_db):
   batched warm-up = 1 query, lazy-load, invalidation refresh, read-only role refused writes and
   non-granted columns, DB-down serves stale.
-* Real migration chain: `alembic/tests/test_0107_bundle_config_db_reads.py` (the Rust statement is
+* Real migration chain: `alembic/tests/test_0107_bundle_config_db_reads.py` + `test_0108_revoke_cfg_communities.py` (the Rust statement is
   extracted from the source and run as each real role; downgrade/upgrade; `DROP ROLE`).
 * Chart: `k8s/helm/waddlebot/tests/test_bundle_config_db_replica_env_render.py`.
 * Real Valkey: `hub_api/tests/test_bundle_config_publish_valkey.py`,

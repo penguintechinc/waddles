@@ -11,6 +11,7 @@ on:
       - 'core/bundle_capability_gate/**'
       - 'core/bundle_tool_call/**'
       - 'core/circuit_breaker/**'
+      - 'core/command_latency/**'
       - 'core/discord_mentions/**'
       - 'core/hub_client/**'
       - 'core/bundle_config_db/**'
@@ -60,6 +61,7 @@ jobs:
             core/bundle_capability_gate/**
             core/bundle_tool_call/**
             core/circuit_breaker/**
+            core/command_latency/**
             core/discord_mentions/**
             core/hub_client/**
             core/bundle_config_db/**

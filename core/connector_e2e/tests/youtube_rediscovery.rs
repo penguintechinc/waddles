@@ -39,7 +39,7 @@ use svc_ingest::connector_runtime::boot::{
 };
 use svc_ingest::connector_runtime::feed::{DesiredConnection, DynFeed, FeedError, TransportPlan};
 use svc_ingest::connector_runtime::scoped::ScopeLookup;
-use svc_ingest::identity_crypto::LocalDevDekProvider;
+use svc_ingest::identity_crypto::{ConfiguredDekProvider, LocalDevDekProvider};
 use svc_ingest::scope_resolver::{ResolvedScope, Unresolved};
 use tokio::sync::oneshot;
 use wiremock::matchers::method;
@@ -393,7 +393,9 @@ async fn an_ended_live_chat_waits_then_rediscovers_the_new_stream_of_the_same_ch
                 vec![7u8; 32],
             )])),
             active_kid: "k1".into(),
-            dek: Arc::new(LocalDevDekProvider::new("local", "YT_REDISC_KEK").unwrap()),
+            dek: Arc::new(ConfiguredDekProvider::local_dev(
+                LocalDevDekProvider::new("local", "YT_REDISC_KEK").unwrap(),
+            )),
             identity_metrics: prometheus::IntCounterVec::new(
                 prometheus::Opts::new("yt_rediscovery_identity_total", "test"),
                 &["tenant", "status"],

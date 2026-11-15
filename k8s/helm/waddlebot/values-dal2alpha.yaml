@@ -44,6 +44,12 @@ global:
   # POSTURE: dedicated-cluster (stricter than local alpha). The "alpha" tier string is kept ONLY because the
   # chart gates secret self-provisioning on it; every alpha-exempt transport/network shortcut is off here.
   deploymentTier: "alpha"
+  # Send logs/metrics/traces to the in-cluster SigNoz (namespace `signoz`) -- see
+  # docs/observability/sending-telemetry-to-signoz.md. Base defaults: gRPC :4317, parentbased ratio sampler.
+  otel:
+    enabled: true
+    environment: "alpha"
+    samplerRatio: "1.0"
   # Dedicated transit trust root for Postgres / SeaweedFS S3 / Valkey: a namespaced SelfSigned Issuer -> root CA -> CA Issuer
   # rendered by the chart (PREREQ: cert-manager with the NameConstraints feature gate). Clients trust only that root; the
   # hostApiTls/grpcTls identities below keep waddlebot-internal-ca. Overrides global.valkeyTls.externalSecret (cert-manager owns
