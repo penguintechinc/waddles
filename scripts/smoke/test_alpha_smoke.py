@@ -45,6 +45,17 @@ def test_unknown_arg_rejected():
     assert res.returncode == 2
 
 
+def test_no_pod_exec_and_reuses_shared_probe():
+    """Runner SA cannot pods/exec: the script must port-forward and reuse scripts/ci/hub_api_probe.py."""
+    code = "\n".join(
+        line for line in SCRIPT.read_text().splitlines() if not line.lstrip().startswith("#")
+    )
+    assert " exec " not in code and "kubectl exec" not in code
+    assert "port-forward" in code
+    assert "scripts/ci/hub_api_probe.py" in code
+    assert (SCRIPT.parents[2] / "scripts" / "ci" / "hub_api_probe.py").is_file()
+
+
 def _load_checker():
     """Import alpha_checks.py as a module."""
     import importlib.util

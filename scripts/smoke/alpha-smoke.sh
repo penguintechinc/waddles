@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Repeatable alpha smoke test: proves the deployed Waddles on dal2alpha is functional.
 #
-# Checks (K8s layer here, HTTP layer in scripts/smoke/alpha_checks.py run inside a pod):
+# Checks (K8s layer here; HTTP layer = scripts/smoke/alpha_checks.py run on the caller's host against
+# kubectl port-forwards -- no pods/exec, no extra pod; same approach as the deploy gate, #1337):
 #   k8s: all Deployments ready (count examined)        -- check_deployments
 #   k8s: Helm release status == deployed               -- check_helm
 #   k8s: seeder: helm deployed AND job absent/Succeeded AND no Failed pods -- check_seeder
@@ -17,8 +18,9 @@
 #   SKIP: bundle activation round-trip (only mutating paths exist)
 #
 # Env: KUBE_CONTEXT (default dal2alpha), NAMESPACE (waddlebot), RELEASE (waddlebot),
-#      SMOKE_IMAGE (default: digest-pinned image from chart values waitForHubApi.image),
-#      SMOKE_FIRST_PARTY_VENDOR (penguintechinc). Exit 0 only if checks>0 and failed==0.
+#      SMOKE_FIRST_PARTY_VENDOR (penguintechinc), ADMIN_EMAIL/ADMIN_PASSWORD (optional override; default
+#      read from the Secret, never printed). Exit 0 only if checks>0 and failed==0.
+# RBAC needed: get deploy/pods/jobs/secret, create pods/portforward (no pods/exec).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,10 +29,10 @@ CTX="${KUBE_CONTEXT:-dal2alpha}"
 NS="${NAMESPACE:-waddlebot}"
 RELEASE="${RELEASE:-waddlebot}"
 VENDOR="${SMOKE_FIRST_PARTY_VENDOR:-penguintechinc}"
-POD="alpha-smoke-$(date +%s)-$$"
 SECRET="${RELEASE}-hub-admin-bootstrap"
 RESULTS=()
-POD_CREATED=0
+PF_PIDS=()
+WORKDIR="$(mktemp -d)"
 
 k() { kubectl --context "$CTX" -n "$NS" "$@"; }
 
@@ -40,19 +42,27 @@ redact() { sed -E 's/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/<jwt-reda
 # record appends "name|STATUS|detail" to the results list.
 record() { RESULTS+=("$1|$2|$3"); printf '[%s] %s %s\n' "$2" "$1" "$3" | redact; }
 
-# resolve_image reads the digest-pinned python image already used by the chart.
-resolve_image() {
-    if [ -n "${SMOKE_IMAGE:-}" ]; then echo "$SMOKE_IMAGE"; return; fi
-    sed -nE 's/^[[:space:]]*image: "(python:3\.13-slim-bookworm@sha256:[0-9a-f]{64})".*/\1/p' \
-        "$REPO_ROOT/k8s/helm/waddlebot/values.yaml" | head -1
+# cleanup stops port-forwards and removes the scratch dir; best-effort, never a gate.
+cleanup() {
+    local pid
+    for pid in "${PF_PIDS[@]+"${PF_PIDS[@]}"}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    rm -rf "$WORKDIR"
 }
 
-# cleanup deletes the smoke pod; best-effort, never a gate.
-cleanup() {
-    if [ "$POD_CREATED" = 1 ]; then
-        k delete pod "$POD" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-    fi
+# free_port prints an unused local TCP port.
+free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'; }
+
+# start_pf <deploy> <container-port> sets PF_LPORT to a local port forwarded to the Deployment.
+start_pf() {
+    PF_LPORT="$(free_port)"
+    k port-forward "deploy/$1" "${PF_LPORT}:$2" >"$WORKDIR/pf-$1.log" 2>&1 &
+    PF_PIDS+=("$!")
 }
+
+# deploy_port <deploy> prints the first containerPort of the Deployment's first container.
+deploy_port() { k get deploy "$1" -o jsonpath='{.spec.template.spec.containers[0].ports[0].containerPort}'; }
 
 # summarize prints the table and counts; returns non-zero on any failure or zero checks.
 summarize() {
@@ -114,64 +124,45 @@ check_seeder() {
     fi
 }
 
-# run_http_checks starts a PSA-restricted pod and executes alpha_checks.py inside it.
+# run_http_checks port-forwards hub-api + hub-webui, gates readiness with the shared
+# scripts/ci/hub_api_probe.py (count-verified), then runs alpha_checks.py locally against them.
 run_http_checks() {
-    local image line name status detail n=0
-    image="$(resolve_image)"
-    if [ -z "$image" ]; then record http-image FAIL "no pinned image resolved"; return; fi
-    k apply -f - >/dev/null <<YAML
-apiVersion: v1
-kind: Pod
-metadata:
-  name: $POD
-  labels: {app.kubernetes.io/name: alpha-smoke}
-spec:
-  restartPolicy: Never
-  automountServiceAccountToken: false
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 10001
-    runAsGroup: 10001
-    seccompProfile: {type: RuntimeDefault}
-  containers:
-  - name: smoke
-    image: $image
-    command: ["python3", "-c", "import time; time.sleep(600)"]
-    env:
-    - {name: SMOKE_FIRST_PARTY_VENDOR, value: "$VENDOR"}
-    - name: ADMIN_EMAIL
-      valueFrom: {secretKeyRef: {name: $SECRET, key: INITIAL_ADMIN_EMAIL}}
-    - name: ADMIN_PASSWORD
-      valueFrom: {secretKeyRef: {name: $SECRET, key: INITIAL_ADMIN_PASSWORD}}
-    securityContext:
-      allowPrivilegeEscalation: false
-      readOnlyRootFilesystem: true
-      capabilities: {drop: ["ALL"]}
-    resources:
-      requests: {cpu: 50m, memory: 64Mi}
-      limits: {cpu: 200m, memory: 128Mi}
-YAML
-    POD_CREATED=1
-    if ! k wait --for=condition=Ready "pod/$POD" --timeout=180s >/dev/null; then
-        record smoke-pod FAIL "pod not Ready in 180s"; return
+    local api="${RELEASE}-hub-api-v3" web="${RELEASE}-hub-webui-v3" api_port web_port api_lport web_lport
+    local out rc=0 line name status detail n=0 email password
+    api_port="$(deploy_port "$api" 2>/dev/null || true)"; web_port="$(deploy_port "$web" 2>/dev/null || true)"
+    if [ -z "$api_port" ] || [ -z "$web_port" ]; then
+        record http-ports FAIL "container port not found api='${api_port}' webui='${web_port}'"; return
     fi
-    record smoke-pod PASS "psa-restricted pod ready"
-    local out rc=0
-    out="$(k exec -i "$POD" -- python3 - <"$SCRIPT_DIR/alpha_checks.py" 2>&1)" || rc=$?
+    start_pf "$api" "$api_port"; api_lport="$PF_LPORT"
+    start_pf "$web" "$web_port"; web_lport="$PF_LPORT"
+    record port-forward PASS "api=$api:$api_port webui=$web:$web_port"
+
+    if out="$(python3 "$REPO_ROOT/scripts/ci/hub_api_probe.py" --base-url "http://127.0.0.1:${api_lport}" \
+        --paths /health /ready --attempts 20 --delay 2 --timeout 5 2>&1)"; then
+        record hub-api-probe PASS "$(printf '%s\n' "$out" | tail -1)"
+    else
+        record hub-api-probe FAIL "$(printf '%s\n' "$out" | tail -1)"; return
+    fi
+
+    email="${ADMIN_EMAIL:-$(k get secret "$SECRET" -o jsonpath='{.data.INITIAL_ADMIN_EMAIL}' 2>/dev/null | base64 -d 2>/dev/null || true)}"
+    password="${ADMIN_PASSWORD:-$(k get secret "$SECRET" -o jsonpath='{.data.INITIAL_ADMIN_PASSWORD}' 2>/dev/null | base64 -d 2>/dev/null || true)}"
+    out="$(SMOKE_API="http://127.0.0.1:${api_lport}" SMOKE_WEBUI="http://127.0.0.1:${web_lport}" \
+        SMOKE_FIRST_PARTY_VENDOR="$VENDOR" ADMIN_EMAIL="$email" ADMIN_PASSWORD="$password" \
+        python3 "$SCRIPT_DIR/alpha_checks.py" 2>&1)" || rc=$?
     while IFS= read -r line; do
         case "$line" in RESULT\|*) ;; *) continue;; esac
         IFS='|' read -r _ name status detail <<<"$line"
         record "$name" "$status" "$detail"; n=$((n + 1))
     done <<<"$out"
-    if [ "$rc" -ne 0 ]; then record in-pod-checker FAIL "exec exit $rc"; fi
-    if [ "$n" -eq 0 ]; then record in-pod-checker FAIL "no results returned"; fi
+    if [ "$rc" -ne 0 ]; then record alpha-checks FAIL "checker exit $rc"; fi
+    if [ "$n" -eq 0 ]; then record alpha-checks FAIL "no results returned"; fi
 }
 
 # main runs K8s-layer then HTTP-layer checks and prints the summary.
 main() {
     trap cleanup EXIT
     case "${1:-}" in
-        -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0;;
+        -h|--help) sed -n '2,23p' "${BASH_SOURCE[0]}"; exit 0;;
         "") ;;
         *) echo "unknown arg: $1" >&2; exit 2;;
     esac
