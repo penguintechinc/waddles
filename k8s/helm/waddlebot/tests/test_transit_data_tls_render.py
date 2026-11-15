@@ -233,7 +233,9 @@ def test_every_cache_url_is_rediss_with_ca_pinned(values):
             assert "ssl_cert_reqs=required" in v and "ssl_ca_certs=/etc/waddles/ca/valkey-ca.crt" in v, k
             assert "ssl_check_hostname=true" in v, k
     cfg = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "waddlebot-config")
-    assert cfg["data"]["REDIS_PORT"] == "6380"
+    # No bare host/port in the shared ConfigMap (nothing read it): clients dial only the
+    # rediss:// URLs above, so a plaintext-port fallback cannot creep back in through it.
+    assert "REDIS_PORT" not in cfg["data"] and "REDIS_HOST" not in cfg["data"]
 
 
 @pytest.mark.parametrize("values", _ENVS)
