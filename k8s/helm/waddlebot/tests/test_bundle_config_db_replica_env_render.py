@@ -85,6 +85,15 @@ def default_docs() -> list[dict[str, Any]]:
 
 
 @pytest.fixture(scope="module")
+def optout_docs() -> list[dict[str, Any]]:
+    """Alpha render with replicas explicitly opted out (reads fall back to the primary)."""
+    return _render(
+        "infrastructure.postgresql.readReplicas.enabled=false",
+        "infrastructure.postgresql.readReplicas.optOut=true",
+    )
+
+
+@pytest.fixture(scope="module")
 def replica_docs() -> list[dict[str, Any]]:
     """Alpha render with a replica host configured."""
     return _render(f"infrastructure.postgresql.readReplicas.host={_REPLICA_HOST}")
@@ -92,16 +101,27 @@ def replica_docs() -> list[dict[str, Any]]:
 
 @pytest.mark.parametrize(("pod", "role"), sorted(_PODS.items()))
 def test_no_replica_host_renders_primary_only(
-    default_docs: list[dict[str, Any]], pod: str, role: str
+    optout_docs: list[dict[str, Any]], pod: str, role: str
 ) -> None:
-    """Unset host: own-role DATABASE_URL only (stage falls back to primary at WARN), no replica DSN."""
-    env = _env(default_docs, pod)
+    """Replicas opted out + unset host: own-role DATABASE_URL only (primary fallback at WARN), no replica DSN."""
+    env = _env(optout_docs, pod)
     names = [e["name"] for e in env]
     assert "DATABASE_REPLICA_URL" not in names
     by_name = {e["name"]: e for e in env}
     assert by_name["DB_USER"]["value"] == role
     assert by_name["DATABASE_URL"]["value"].startswith(
         f"postgresql://{role}:$(DB_PASSWORD)@"
+    )
+
+
+@pytest.mark.parametrize(("pod", "role"), sorted(_PODS.items()))
+def test_default_reads_go_to_the_ro_service(
+    default_docs: list[dict[str, Any]], pod: str, role: str
+) -> None:
+    """Default topology (replicas on): DATABASE_REPLICA_URL targets the in-chart -ro Service as this pod's role."""
+    env = {e["name"]: e for e in _env(default_docs, pod)}
+    assert env["DATABASE_REPLICA_URL"]["value"].startswith(
+        f"postgresql://{role}:$(DB_PASSWORD)@infra-postgres-ro.waddlebot.svc.cluster.local:"
     )
 
 

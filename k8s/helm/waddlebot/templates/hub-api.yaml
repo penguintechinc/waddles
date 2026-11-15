@@ -149,6 +149,9 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 8 }}
+        # Reads default to the read replicas (hub_api/config.py database_read_replica_url -> init_database
+        # read_replica_uri); same role, -ro Service. Absent when no replica exists (primary only).
+{{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_hub_api" "name" "DATABASE_READ_REPLICA_URL") | nindent 8 }}
         {{- if .Values.bundleStorageV2.migrator.enabled }}
         # Bundle storage v2: DDL role (waddles_bundle_migrator) password; hub-api only, never
         # mounted into the data-plane pods. Operator-managed existingSecret, off by default.

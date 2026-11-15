@@ -129,11 +129,26 @@ the self-signed root certificate; the key is never projected into a client). Sta
 {{- define "waddlebot.transitTls.pgDnsNames" -}}
 {{- $s := .Values.infrastructure.postgresql.service.name -}}
 {{- $ns := .Values.namespace -}}
+{{- $names := list -}}
 {{- if include "waddlebot.transitTls.cm" . -}}
-{{- list (printf "%s.%s.svc.cluster.local" $s $ns) | toJson -}}
+{{- $names = append $names (printf "%s.%s.svc.cluster.local" $s $ns) -}}
 {{- else -}}
-{{- list $s (printf "%s.%s" $s $ns) (printf "%s.%s.svc" $s $ns) (printf "%s.%s.svc.cluster.local" $s $ns) | toJson -}}
+{{- $names = concat $names (list $s (printf "%s.%s" $s $ns) (printf "%s.%s.svc" $s $ns) (printf "%s.%s.svc.cluster.local" $s $ns)) -}}
 {{- end -}}
+{{- /* Replica topology: the -ro Service clients dial, the headless replica Service and each replica pod's stable DNS name (same cert, same Secret). */ -}}
+{{- if include "waddlebot.postgres.replicasActive" . -}}
+{{- $ro := include "waddlebot.postgres.roName" . -}}
+{{- $hl := include "waddlebot.postgres.replicaHeadlessName" . -}}
+{{- $names = append $names (printf "%s.%s.svc.cluster.local" $ro $ns) -}}
+{{- $names = append $names (printf "%s.%s.svc.cluster.local" $hl $ns) -}}
+{{- range $i := until (int .Values.infrastructure.postgresql.readReplicas.count) -}}
+{{- $names = append $names (printf "postgres-replica-%d.%s.%s.svc.cluster.local" $i $hl $ns) -}}
+{{- end -}}
+{{- if not (include "waddlebot.transitTls.cm" .) -}}
+{{- $names = concat $names (list $ro (printf "%s.%s" $ro $ns) (printf "%s.%s.svc" $ro $ns)) -}}
+{{- end -}}
+{{- end -}}
+{{- $names | toJson -}}
 {{- end }}
 
 {{- define "waddlebot.transitTls.s3DnsNames" -}}
@@ -174,6 +189,11 @@ subdomains, i.e. the durable per-pod names). The root can therefore never sign a
 {{- $ns := .Values.namespace -}}
 {{- $out := list -}}
 {{- if .Values.infrastructure.postgresql.enabled -}}{{- $out = append $out (printf "%s.%s.svc.cluster.local" .Values.infrastructure.postgresql.service.name $ns) -}}{{- end -}}
+{{- /* Replica topology: the -ro Service and the replica headless Service (its per-pod names are subdomains). */ -}}
+{{- if include "waddlebot.postgres.replicasActive" . -}}
+{{- $out = append $out (printf "%s.%s.svc.cluster.local" (include "waddlebot.postgres.roName" .) $ns) -}}
+{{- $out = append $out (printf "%s.%s.svc.cluster.local" (include "waddlebot.postgres.replicaHeadlessName" .) $ns) -}}
+{{- end -}}
 {{- if .Values.infrastructure.seaweedfs.enabled -}}{{- $out = append $out (printf "%s.%s.svc.cluster.local" .Values.infrastructure.seaweedfs.service.name $ns) -}}{{- end -}}
 {{- if .Values.infrastructure.redis.tls.enabled -}}
 {{- $out = append $out (printf "%s.%s.svc.cluster.local" .Values.infrastructure.redis.service.name $ns) -}}

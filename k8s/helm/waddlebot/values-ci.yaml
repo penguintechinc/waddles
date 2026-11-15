@@ -85,6 +85,10 @@ spire:
   enabled: false
 
 infrastructure:
+  postgresql:
+    # kind CI: one replica is enough to exercise streaming replication + the -ro Service (default is 2).
+    readReplicas:
+      count: 1
   valkeyDurable:
     enabled: true
     replicas: 1

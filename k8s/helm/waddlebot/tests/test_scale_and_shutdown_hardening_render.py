@@ -174,7 +174,7 @@ class TestAutoscalingAndPdb:
         # test_executor_statefulset_render.py); nothing else opts in on alpha.
         assert _of_kind(alpha_docs, "HorizontalPodAutoscaler") == []
         pdbs = [d["metadata"]["name"] for d in _of_kind(alpha_docs, "PodDisruptionBudget")]
-        assert pdbs == ["waddlebot-svc-bundles-executor"], pdbs  # 2 executor replicas
+        assert pdbs == ["postgres-replica", "waddlebot-svc-bundles-executor"], pdbs  # 2 postgres replicas + 2 executor replicas
 
     @pytest.mark.parametrize(
         ("values", "extra", "replicas"),
@@ -215,8 +215,8 @@ class TestAutoscalingAndPdb:
         docs = _render("values-alpha.yaml", ["autoscaling.services.hubApi.enabled=true",
                                              "autoscaling.defaults.minReplicas=1"])
         assert _of_kind(docs, "HorizontalPodAutoscaler")
-        # only the executor's own PDB (fixed 2 replicas) remains
-        assert [d["metadata"]["name"] for d in _of_kind(docs, "PodDisruptionBudget")] == ["waddlebot-svc-bundles-executor"]
+        # only the fixed-2-replica workloads' PDBs remain: postgres replicas + the executor
+        assert sorted(d["metadata"]["name"] for d in _of_kind(docs, "PodDisruptionBudget")) == ["postgres-replica", "waddlebot-svc-bundles-executor"]
 
     def test_pdb_disable_flag(self) -> None:
         docs = _render("values-alpha.yaml", ["autoscaling.services.hubApi.enabled=true",

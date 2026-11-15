@@ -593,14 +593,44 @@ infrastructure:
         - waddles_legacy_action_serverless
         - waddles_legacy_trigger_streaming
         - waddles_legacy_trigger_webhooks
+    # PRIMARY + READ-REPLICA topology (default ON). Primary = StatefulSet `postgres` (1 pod, existing
+    # PVC `persistence.name`); replicas = StatefulSet `postgres-replica` (volumeClaimTemplates, physical
+    # streaming replication, one slot per replica). Writes -> `service.name` (rw); reads ->
+    # `<service.name>-ro` (load-balanced across ready replicas). See README "PostgreSQL topology".
     readReplicas:
-      enabled: false
+      enabled: true
+      # Default 2: one replica per node (preferred podAntiAffinity, also away from the primary) so reads
+      # survive losing a node, and a PDB (minAvailable 1) keeps one serving during drains. Count 1 is
+      # allowed (no PDB). Fewer than 1 requires optOut: true.
       count: 2
-      # Read-only replica Service FQDN (inside the Postgres server cert's SANs) that the data plane
-      # (svc-process, svc-action) reads per-community bundle config from (issue #1306; env
-      # DATABASE_REPLICA_URL, same column-scoped per-service role as the primary). Empty = no
-      # replica: the stages fall back to the primary DATABASE_URL and log a WARN (alpha).
+      # Explicit opt-out of replicas (enabled=false or count=0). Without it the render FAILS: the
+      # owner default is primary + replicas, never silently a lone primary.
+      optOut: false
+      # Read endpoint FQDN used for DATABASE_REPLICA_URL / DATABASE_READ_REPLICA_URL / DB_READER_HOST.
+      # Empty (default) = the in-chart `<service.name>-ro` FQDN when replicas are active; a value
+      # overrides it (external replica). Empty + no replicas = reads fall back to the primary.
       host: ""
+      # Replica is Ready only while streaming AND (replay caught up with received WAL OR replay age
+      # below this many seconds) -- see templates/infrastructure/postgres.yaml probe script.
+      maxLagSeconds: 30
+      replicationUser: waddles_replicator
+      # Replication password Secret (key PW_WADDLES_REPLICATOR). Empty = `<fullname>-db-replication`,
+      # generated create-if-absent by the provision-secrets hook; mounted ONLY into postgres pods.
+      replicationSecret: ""
+      # Primary WAL retention for replicas. maxSlotWalKeepSize bounds the disk a dead replica's slot
+      # can pin on the primary (a replica beyond it is invalidated and must be re-seeded: delete its PVC).
+      walKeepSize: "512MB"
+      maxSlotWalKeepSize: "4GB"
+      persistence:
+        size: ""          # empty = same as primary persistence.size
+        storageClass: ""  # empty = cluster default
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "2000m"
+          memory: "2Gi"
 
   # Redis Cache & Sessions
   redis:
@@ -2855,10 +2885,9 @@ egressPolicy:
   # In-cluster destinations the data plane is still allowed to reach
   # directly (everything else in-cluster is same-namespace-only via
   # network-policies.yaml; these are the specific service ports needed).
-  # postgresReplicaPort currently points at the same primary Postgres
-  # (infrastructure.postgresql) — no read replica is provisioned yet (see
-  # pipeline.rustDataPlane.svcProcess.dbReaderHost's own comment); this
-  # becomes a distinct endpoint once one exists, no CNP change needed.
+  # postgresReplicaPort: port of the read-replica pods (role=replica, StatefulSet
+  # postgres-replica). The data-plane egress CNPs allow it to the replica pods; the primary's
+  # port (service.port) is allowed separately.
   # NOTE: values.yaml is raw YAML, not template-evaluated — these mirror
   # infrastructure.redis.service.port / infrastructure.postgresql.service.port
   # / pipeline.hubApi.grpcPort / infrastructure.seaweedfs.service.s3Port above;

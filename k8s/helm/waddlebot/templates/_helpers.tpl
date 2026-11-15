@@ -205,19 +205,62 @@ Usage inside a container's `env:` list:
 {{- end }}
 
 {{/*
-Read-only REPLICA DSN for a data-plane workload's direct bundle-config reads (issue #1306;
-core/bundle_config_db/src/lib.rs). Renders `DATABASE_REPLICA_URL` ONLY when
-infrastructure.postgresql.readReplicas.host is set -- same role + `$(DB_PASSWORD)` expansion as
-waddlebot.dbEnv (NEVER the secret itself), so it MUST be included AFTER waddlebot.dbEnv in the
-container's `env:` list. Unset (alpha/local: no replica) renders nothing and the stage falls back
-to the primary `DATABASE_URL` with a WARN log; the SAME column-scoped role works on both.
+Replica topology (infrastructure.postgresql.readReplicas). "true" only when the in-chart Postgres is on
+and replicas are enabled with count>=1. Enabled=false or count<1 FAILS the render unless
+readReplicas.optOut=true: the owner default is primary + replicas, never a silent lone primary.
+*/}}
+{{- define "waddlebot.postgres.replicasActive" -}}
+{{- $pg := .Values.infrastructure.postgresql -}}
+{{- if $pg.enabled -}}
+{{- $rr := $pg.readReplicas -}}
+{{- $count := int ($rr.count | default 0) -}}
+{{- if and $rr.enabled (ge $count 1) -}}
+true
+{{- else if not $rr.optOut -}}
+{{- fail "infrastructure.postgresql.readReplicas: replicas are the default topology; enabled=false or count<1 requires readReplicas.optOut=true (explicit opt-out)" -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/* Read-only Service name (selects replica pods) and its FQDN (in the server cert SANs). */}}
+{{- define "waddlebot.postgres.roName" -}}
+{{- printf "%s-ro" .Values.infrastructure.postgresql.service.name -}}
+{{- end }}
+{{- define "waddlebot.postgres.replicaHeadlessName" -}}
+{{- printf "%s-replica-hl" .Values.infrastructure.postgresql.service.name -}}
+{{- end }}
+{{- define "waddlebot.postgres.replicationSecretName" -}}
+{{- .Values.infrastructure.postgresql.readReplicas.replicationSecret | default (printf "%s-db-replication" (include "waddlebot.fullname" .)) -}}
+{{- end }}
+{{- define "waddlebot.postgres.roHost" -}}
+{{- printf "%s.%s.svc.cluster.local" (include "waddlebot.postgres.roName" .) .Values.namespace -}}
+{{- end }}
+
+{{/*
+Host that read-only consumers dial: explicit readReplicas.host, else the -ro FQDN when replicas are active,
+else "" (no replica: consumers fall back to the primary).
+*/}}
+{{- define "waddlebot.postgres.readHost" -}}
+{{- $host := .Values.infrastructure.postgresql.readReplicas.host | default "" -}}
+{{- if $host -}}{{ $host }}
+{{- else if include "waddlebot.postgres.replicasActive" . -}}{{ include "waddlebot.postgres.roHost" . }}
+{{- end -}}
+{{- end }}
+
+{{/*
+Read-only REPLICA DSN for a workload's replica reads. Renders `<name>` (default DATABASE_REPLICA_URL, issue #1306;
+core/bundle_config_db/src/lib.rs) ONLY when a read host resolves (waddlebot.postgres.readHost: explicit host, else the
+in-chart -ro Service) -- same role + `$(DB_PASSWORD)` expansion as waddlebot.dbEnv (NEVER the secret itself), so it
+MUST be included AFTER waddlebot.dbEnv in the container's `env:` list. No replica renders nothing and the stage falls
+back to the primary `DATABASE_URL` with a WARN log; the SAME column-scoped role works on both.
 Usage: {{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
+       {{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_hub_api" "name" "DATABASE_READ_REPLICA_URL") | nindent 8 }}
 */}}
 {{- define "waddlebot.dbReplicaEnv" -}}
 {{- include "waddlebot.db.requireRole" . -}}
-{{- $host := .root.Values.infrastructure.postgresql.readReplicas.host | default "" -}}
+{{- $host := include "waddlebot.postgres.readHost" .root -}}
 {{- if $host }}
-- name: DATABASE_REPLICA_URL
+- name: {{ .name | default "DATABASE_REPLICA_URL" }}
   value: {{ printf "postgresql://%s:$(DB_PASSWORD)@%s:%v/%s" .role $host (include "waddlebot.postgres.port" .root) (include "waddlebot.postgres.database" .root) | quote }}
 {{- end }}
 {{- end }}

@@ -52,7 +52,8 @@ def _docs(values, extra=()):
 
 def _svc(docs, selector_name):
     """Return the Service whose selector targets app.kubernetes.io/name=<selector_name>."""
-    hits = [d for d in docs if d["kind"] == "Service" and d["spec"].get("selector", {}).get("app.kubernetes.io/name") == selector_name]
+    hits = [d for d in docs if d["kind"] == "Service" and d["spec"].get("selector", {}).get("app.kubernetes.io/name") == selector_name
+            and d["spec"]["selector"].get("app.kubernetes.io/role") != "replica"]  # the -ro/headless replica Services are asserted in test_postgres_primary_replicas_render.py
     assert len(hits) == 1, (selector_name, len(hits))
     return hits[0]
 
@@ -153,7 +154,7 @@ def test_secret_is_a_pre_hook_so_migration_hooks_can_mount_it(values):
 @pytest.mark.parametrize("values", _ENVS)
 def test_postgres_is_tls_only(values):
     docs = _docs(values)
-    dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "postgres")
+    dep = next(d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "postgres")
     args = dep["spec"]["template"]["spec"]["containers"][0]["args"]
     for want in ("ssl=on", "ssl_cert_file=/etc/postgres-tls/tls.crt", "ssl_key_file=/etc/postgres-tls/tls.key",
                  "ssl_min_protocol_version=TLSv1.2", "hba_file=/etc/postgres-hba/pg_hba.conf"):
@@ -338,7 +339,7 @@ def test_cert_manager_mode_uses_a_dedicated_namespaced_transit_root(values):
     assert _fqdn(docs, "seaweedfs") in next(s["dnsNames"] for n, s in certs.items() if n.endswith("-seaweedfs-tls"))
     valkey_sans = next(s["dnsNames"] for n, s in certs.items() if n.endswith("-valkey-tls"))
     assert sum(1 for n in valkey_sans if n.startswith("valkey-durable-")) >= 1, valkey_sans
-    pg = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "postgres")
+    pg = next(d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "postgres")
     vol = next(v for v in pg["spec"]["template"]["spec"]["volumes"] if v["name"] == "transit-tls")
     assert vol["secret"]["secretName"] in certs and [i["key"] for i in vol["secret"]["items"]] == ["tls.crt", "tls.key"]
 

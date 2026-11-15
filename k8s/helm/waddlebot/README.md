@@ -192,8 +192,50 @@ Set `--set global.imagePullPolicy=Always` per deployment only when deploying a m
 | `infrastructure.postgresql.replicas` | Number of replicas | `1` |
 | `infrastructure.postgresql.persistence.enabled` | Enable persistence | `true` |
 | `infrastructure.postgresql.persistence.size` | PVC size | `20Gi` |
-| `infrastructure.postgresql.readReplicas.enabled` | Enable read replicas | `false` |
+| `infrastructure.postgresql.readReplicas.enabled` | Enable read replicas | `true` |
+| `infrastructure.postgresql.readReplicas.optOut` | Required `true` to run with no replicas (enabled=false or count=0); otherwise the render fails | `false` |
+| `infrastructure.postgresql.readReplicas.maxLagSeconds` | Replica readiness lag threshold | `30` |
 | `infrastructure.postgresql.readReplicas.count` | Number of read replicas | `2` |
+
+#### PostgreSQL topology
+
+Default = **primary + read replicas** (physical streaming replication, TLS verify-full, one slot per replica).
+
+```
+ writers (hub-api DATABASE_URL, svc-* DATABASE_URL, migrations)
+        |                                      readers (hub-api DATABASE_READ_REPLICA_URL,
+        v                                       svc-process/svc-action DATABASE_REPLICA_URL + DB_READER_HOST)
+ Service infra-postgres (rw)                          |
+        |                                             v
+ StatefulSet postgres (1 pod, PVC postgres-data)   Service infra-postgres-ro  (ready replicas only)
+   + replication-bootstrap sidecar                     |        |
+        ^   WAL stream (slot replica_0..N-1)           v        v
+        +------------------------------------ postgres-replica-0 .. N-1 (own PVC each)
+```
+
+| Item | Default / behaviour |
+|------|---------------------|
+| Primary | StatefulSet `postgres`, replicas 1, RollingUpdate (delete-then-create, never two postmasters); mounts the standalone PVC `postgres-data` by `claimName` (`helm.sh/resource-policy: keep`) |
+| Replicas | StatefulSet `postgres-replica`, `readReplicas.count` = 2 (one per node via preferred anti-affinity, HA for reads); PDB minAvailable 1 when count >= 2; seeded by `pg_basebackup -R -S replica_<ordinal>` only when PGDATA is empty |
+| Replication role | `waddles_replicator` (REPLICATION LOGIN), password `PW_WADDLES_REPLICATOR` in Secret `<fullname>-db-replication` (generated create-if-absent by the provision-secrets hook, mounted only into postgres pods); role + slots (re)asserted every 5 min by the primary sidecar |
+| Readiness (replica) | in recovery AND WAL receiver `streaming` AND (received LSN == replayed LSN OR replay age < `maxLagSeconds`) — a lagging replica leaves the `-ro` Service automatically |
+| Read endpoint | `<service.name>-ro` FQDN (in TLS SANs); `readReplicas.host` overrides |
+| Opt-out | `readReplicas.optOut: true` together with `enabled: false` or `count: 0`; otherwise the render fails. Reads then fall back to the primary |
+| WAL bound | `walKeepSize` 512MB, `maxSlotWalKeepSize` 4GB: a dead replica cannot fill the primary disk; an invalidated replica is rebuilt by deleting its PVC + pod |
+
+**Replication-lag metric and alert.** The chart ships no postgres_exporter and no in-chart collector, so lag is exposed through the external SigNoz collector's `postgresql` receiver (see `docs/observability/sending-telemetry-to-signoz.md`): point it at the primary (`infra-postgres`) with a monitoring role and enable `postgresql.replication.data_delay` / `postgresql.wal.lag`. Alert: `postgresql.wal.lag` (or `replay_lag` from `pg_stat_replication`) > `maxLagSeconds` for 5 minutes, per replica. Quick check: `kubectl -n waddlebot exec postgres-0 -c postgres -- psql -U waddlebot -c "select application_name, state, replay_lag from pg_stat_replication"`.
+
+**Read policy.** Reads default to replicas where the code has a seam (hub-api read pool, svc-process/svc-action reader). Writes and read-your-own-write paths stay on the primary.
+
+##### Alpha upgrade (existing Deployment `postgres` -> StatefulSet; PVC preserved)
+
+The old Deployment mounts PVC `postgres-data` (ReadWriteOnce). Helm creates new resources before deleting removed ones, so the old pod could still hold PGDATA when `postgres-0` starts; scale it down first.
+
+1. Confirm the PVC and take a safety copy of its state: `kubectl --context dal2alpha -n waddlebot get pvc postgres-data` (never delete it; the chart now marks it `keep`).
+2. Stop the old primary: `kubectl --context dal2alpha -n waddlebot scale deploy/postgres --replicas=0` and wait until `kubectl ... get pods -l app.kubernetes.io/name=postgres` shows no old pod.
+3. `helm3 upgrade waddlebot k8s/helm/waddlebot -f values-alpha.yaml --kube-context dal2alpha -n waddlebot` (Helm v3.17.3, see repo notes). The provision-secrets hook creates `<fullname>-db-replication`; the old Deployment is removed by Helm; `postgres-0` starts on the existing PVC, then `postgres-replica-0/1` base-backup from it.
+4. Verify: `kubectl ... get sts postgres postgres-replica`; `kubectl ... exec postgres-0 -c postgres -- psql -U waddlebot -c "select application_name,state,sync_state,replay_lag from pg_stat_replication"` shows 2 `streaming` rows; `kubectl ... get endpoints infra-postgres-ro` lists both replica IPs; `select slot_name,active from pg_replication_slots` shows replica_0/1 active.
+5. Rollback: `kubectl ... scale sts/postgres --replicas=0` and `sts/postgres-replica --replicas=0`, `helm3 rollback waddlebot <prev>` (recreates the Deployment on the same, untouched PVC). Replica PVCs (`postgres-data-postgres-replica-N`) are disposable copies; the primary data is never rewritten by this change (a primary restart only adds WAL settings).
 
 #### Redis
 

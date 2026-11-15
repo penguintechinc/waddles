@@ -160,7 +160,7 @@ def test_owner_credential_reaches_only_postgres_and_the_migrate_job(
         if "waddlebot-db-admin" in _secret_refs(container)
     }
     has_postgres = any(
-        d.get("kind") == "Deployment" and d["metadata"]["name"] == "postgres" for d in docs
+        d.get("kind") == "StatefulSet" and d["metadata"]["name"] == "postgres" for d in docs
     )
     # values-local points at an external database, so no in-chart Postgres Deployment exists
     assert consumers == ({"postgres"} if has_postgres else set()), (
@@ -369,7 +369,7 @@ def test_unknown_role_in_a_template_fails_the_render(helm_available: None) -> No
 
 
 @pytest.mark.parametrize("env_name", ["alpha", "beta"])  # values-local runs no in-cluster Postgres
-def test_postgres_deployment_is_recreate_never_rolling(
+def test_postgres_primary_is_single_writer_statefulset(
     renders: dict[str, list[dict[str, Any]]], env_name: str
 ) -> None:
     """Postgres must never surge a second pod onto its single ReadWriteOnce data volume.
@@ -382,8 +382,10 @@ def test_postgres_deployment_is_recreate_never_rolling(
     found = [
         d
         for d in renders[env_name]
-        if d.get("kind") == "Deployment" and d["metadata"]["name"] == "postgres"
+        if d.get("kind") == "StatefulSet" and d["metadata"]["name"] == "postgres"
     ]
-    assert len(found) == 1, f"expected exactly one postgres Deployment, found {len(found)}"
-    strategy = found[0]["spec"]["strategy"]
-    assert strategy == {"type": "Recreate"}, strategy
+    assert len(found) == 1, f"expected exactly one postgres StatefulSet, found {len(found)}"
+    spec = found[0]["spec"]
+    # A StatefulSet never surges: replicas:1 + RollingUpdate = delete-then-create (one postmaster per PGDATA).
+    assert spec["replicas"] == 1, spec["replicas"]
+    assert spec["updateStrategy"] == {"type": "RollingUpdate"}, spec["updateStrategy"]
