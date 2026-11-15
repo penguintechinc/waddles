@@ -649,6 +649,52 @@ class TestAllowlistAndCrossCommunity:
         assert fake.removes == [(G_B, "u1", R_DST)]
         assert dal(dal.discord_role_mirror_grants.mapping_id > 0).count() == 0
 
+    def _cyclic_pair(self, dal: Any, cid: int) -> list[int]:
+        t = dal.discord_role_mirror_mappings
+        ids = [
+            t.insert(
+                community_id=cid,
+                source_guild_id=sg,
+                source_role_id=sr,
+                target_guild_id=tg,
+                target_role_id=tr,
+            )
+            for sg, sr, tg, tr in ((G_A, R_SRC, G_B, R_DST), (G_B, R_DST, G_A, R_SRC))
+        ]
+        dal.discord_role_mirror_grants.insert(
+            mapping_id=ids[0], platform="discord", platform_user_id="u1"
+        )
+        dal.commit()
+        return ids
+
+    async def test_cyclic_revoke_keeps_rows_on_incomplete_snapshot(
+        self, guild_pairing_db: Any
+    ) -> None:
+        """An unproven (incomplete) target snapshot never deletes ledger rows; retried later."""
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        ids = self._cyclic_pair(dal, cid)
+        fake = _FakeGuilds({G_A: {"u1": {R_SRC}}, G_B: {"u2": set()}}, complete=False)
+        await _run(dal, fake)
+        assert fake.removes == []
+        assert dal(dal.discord_role_mirror_grants.mapping_id == ids[0]).count() == 1
+        row = dal(dal.discord_role_mirror_mappings.id == ids[0]).select().first()
+        assert row.last_error == "MirrorCycle:incomplete_snapshot"
+
+    async def test_cyclic_revoke_never_calls_discord_for_unpaired_guild(
+        self, guild_pairing_db: Any
+    ) -> None:
+        """Parity with NotPairedError: an unpaired target guild is never touched, rows stay."""
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A)
+        ids = self._cyclic_pair(dal, cid)
+        fake = _FakeGuilds({G_A: {"u1": {R_SRC}}, G_B: {"u1": {R_DST}}})
+        await _run(dal, fake)
+        assert fake.removes == []
+        assert dal(dal.discord_role_mirror_grants.mapping_id == ids[0]).count() == 1
+        row = dal(dal.discord_role_mirror_mappings.id == ids[0]).select().first()
+        assert row.last_error == "MirrorCycle:not_paired"
+
     async def test_three_guild_cycle_is_refused_and_lock_is_global(
         self, guild_pairing_db: Any
     ) -> None:

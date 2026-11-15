@@ -597,6 +597,7 @@ async def _revoke_cyclic_mapping(
     client: DiscordRoleTargetClient,
     cache: dict[str, _GuildState],
     summary: MirrorSummary,
+    paired_guilds: set[str],
 ) -> None:
     """Fail closed on a mapping that lies on a mirror cycle: grant nothing, revoke its ledger.
 
@@ -609,22 +610,38 @@ async def _revoke_cyclic_mapping(
     grants_t = dal.discord_role_mirror_grants
     removed = 0
     error = "MirrorCycle"
-    try:
-        target = await _snapshot(client, cache, dst_guild)
-        for row in dal(
-            (grants_t.mapping_id == mapping_id) & (grants_t.platform == "discord")
-        ).select():
-            uid = str(row.platform_user_id)
-            roles = target.roles.get(uid)
-            if roles is not None and dst_role in roles:
-                if not await client.remove_role(guild_id=dst_guild, user_id=uid, role_id=dst_role):
-                    continue  # keep the ledger row; retry next pass
-                removed += 1
-                roles.discard(dst_role)
-            dal((grants_t.mapping_id == mapping_id) & (grants_t.platform_user_id == uid)).delete()
-            dal.commit()
-    except (DiscordSyncError, TransportUnavailable) as exc:
-        error = f"MirrorCycle:{type(exc).__name__}"
+    if dst_guild not in paired_guilds:
+        # Parity with NotPairedError in _reconcile_mapping: no Discord calls for unpaired guilds.
+        error = "MirrorCycle:not_paired"
+    else:
+        try:
+            target = await _snapshot(client, cache, dst_guild)
+            for row in dal(
+                (grants_t.mapping_id == mapping_id) & (grants_t.platform == "discord")
+            ).select():
+                uid = str(row.platform_user_id)
+                roles = target.roles.get(uid)
+                if roles is None or dst_role not in roles:
+                    present = False
+                else:
+                    present = True
+                if not present and not target.complete:
+                    # Absence is unproven on an incomplete snapshot: keep the row, retry next pass.
+                    error = "MirrorCycle:incomplete_snapshot"
+                    continue
+                if present and roles is not None:
+                    if not await client.remove_role(
+                        guild_id=dst_guild, user_id=uid, role_id=dst_role
+                    ):
+                        continue  # keep the ledger row; retry next pass
+                    removed += 1
+                    roles.discard(dst_role)
+                dal(
+                    (grants_t.mapping_id == mapping_id) & (grants_t.platform_user_id == uid)
+                ).delete()
+                dal.commit()
+        except (DiscordSyncError, TransportUnavailable) as exc:
+            error = f"MirrorCycle:{type(exc).__name__}"
     _record_result(dal, mapping_id, added=0, removed=removed, skipped=0, error=error)
     summary.roles_removed += removed
     summary.mappings_failed += 1
@@ -716,7 +733,7 @@ async def reconcile_role_mirrors(
         for row in rows:
             async with bundle_span("role_sync.mirror", mapping_id=int(row.id)):
                 if int(row.id) in cyclic:
-                    await _revoke_cyclic_mapping(dal, row, client, cache, summary)
+                    await _revoke_cyclic_mapping(dal, row, client, cache, summary, paired_guilds)
                 else:
                     await _reconcile_mapping(dal, row, client, cache, summary, paired_guilds)
     return summary
