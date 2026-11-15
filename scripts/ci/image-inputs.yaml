@@ -167,6 +167,7 @@ images:
       - core/connection_resolver/**
       - core/egress_assertion/**
       - core/hub_client/**
+      - core/bundle_host_surface/**
       - core/service_auth/**
 
   svc-action:
@@ -192,6 +193,7 @@ images:
       - core/discord_mentions/**
       - core/egress_assertion/**
       - core/hub_client/**
+      - core/bundle_host_surface/**
       - core/service_auth/**
 
   svc-presentation:
@@ -206,6 +208,7 @@ images:
       - core/svc_presentation/src/**
       - core/egress_detokenizer/**
       - core/hub_client/**
+      - core/bundle_host_surface/**
       - core/overlay_auth/**
       - core/overlay_schema/**
       - core/service_auth/**

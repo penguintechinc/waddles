@@ -319,7 +319,7 @@ tls_block_kept() { # <blk> -> returns 0 if existing secret is complete & matches
 
 resolve_block() { # <block file> ; fills ${WORK}/fin (all final values) and ${WORK}/new (changes)
   local blk="$1" kind key how arg opts cur v fin src tries legacy_ref dec inp
-  local tls_kept=0 tls_init=0 ca_dir ca_tag ca_key ca_cn days cert_key key_key cn dns_csv uri_csv ref_sec ref_k joined part
+  local anytier=0 tls_kept=0 tls_init=0 ca_dir ca_tag ca_key ca_cn days cert_key key_key cn dns_csv uri_csv ref_sec ref_k joined part
   : > "${WORK}/keys"; MARKER_KEY=""; CERT_ID=""; CERT_SANS=""
   while IFS='|' read -r -u 3 kind key how arg opts; do
     case "${kind}" in
@@ -334,6 +334,10 @@ resolve_block() { # <block file> ; fills ${WORK}/fin (all final values) and ${WO
         case "${kind}" in
           tls_ca)
             ca_tag="${key}"; ca_key="${how}"; ca_cn="${arg}"; days="${opts:-365}"
+            # `<days>[,anytier]`: `anytier` = internal identity generated create-if-absent in EVERY tier
+            # (owner policy; never overwritten -- a present key is kept above). Without it the
+            # historical alpha/local-only guard below applies.
+            anytier=0; case ",${days}," in *,anytier,*) anytier=1 ;; esac; days="${days%%,*}"
             printf '%s\n' "${ca_key}" >> "${WORK}/keys"
             cur="$(cur_b64 "${ca_key}")"
             inp="${INPUTS_DIR}/${CUR_NAME}__${ca_key}"
@@ -345,7 +349,7 @@ resolve_block() { # <block file> ; fills ${WORK}/fin (all final values) and ${WO
             else
               case "${DEPLOYMENT_TIER}" in
                 alpha|local) ;;
-                *) die "secret/${CUR_NAME}: key ${ca_key} not found and DEPLOYMENT_TIER=${DEPLOYMENT_TIER} is outside alpha/local -- auto-generation is alpha/local only" ;;
+                *) [ "${anytier}" -eq 1 ] || die "secret/${CUR_NAME}: key ${ca_key} not found and DEPLOYMENT_TIER=${DEPLOYMENT_TIER} is outside alpha/local -- auto-generation is alpha/local only" ;;
               esac
               ca_dir="${WORK}/tls_ca/${ca_tag}"
               gen_p256_ca "${ca_dir}" "${ca_cn}" "${days}" || die "secret/${CUR_NAME}: P-256 CA generation failed"
@@ -357,6 +361,7 @@ resolve_block() { # <block file> ; fills ${WORK}/fin (all final values) and ${WO
             ;;
           tls_leaf)
             IFS='|' read -r _ ca_tag cert_key key_key cn dns_csv uri_csv days <<< "${kind}|${key}|${how}|${arg}|${opts}"
+            anytier=0; case ",${days}," in *,anytier,*) anytier=1 ;; esac; days="${days%%,*}"
             printf '%s\n%s\n' "${cert_key}" "${key_key}" >> "${WORK}/keys"
             cur="$(cur_b64 "${cert_key}")"
             local cur_k="$(cur_b64 "${key_key}")"
@@ -375,7 +380,7 @@ resolve_block() { # <block file> ; fills ${WORK}/fin (all final values) and ${WO
             else
               case "${DEPLOYMENT_TIER}" in
                 alpha|local) ;;
-                *) die "secret/${CUR_NAME}: keys ${cert_key},${key_key} not found and DEPLOYMENT_TIER=${DEPLOYMENT_TIER} is outside alpha/local -- auto-generation is alpha/local only" ;;
+                *) [ "${anytier}" -eq 1 ] || die "secret/${CUR_NAME}: keys ${cert_key},${key_key} not found and DEPLOYMENT_TIER=${DEPLOYMENT_TIER} is outside alpha/local -- auto-generation is alpha/local only" ;;
               esac
               ca_dir="${WORK}/tls_ca/${ca_tag}"
               gen_p256_ca "${ca_dir}" "${ca_tag}" "${days:-365}" || die "secret/${CUR_NAME}: P-256 CA init failed"

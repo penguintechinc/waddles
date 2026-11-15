@@ -141,8 +141,9 @@ global:
   # TLS material for svc-presentation's in-cluster surface gRPC listener
   # (waddles.presentation.internal.v1.SurfaceService on pipeline.svcPresentation.grpcPort;
   # core/svc_presentation/src/surfaces/ingress.rs -- the listener REFUSES to start in plaintext off
-  # loopback). Generated at runtime by the provision-secrets Job (ECDSA P-256 via OpenSSL, its own
-  # CA, SANs = the svc-presentation Service DNS names) exactly like hub-api's gRPC identity; the
+  # loopback). Generated at runtime by the provision-secrets Job IN EVERY TIER (ECDSA P-256 via
+  # OpenSSL, own CA, SANs = the svc-presentation Service DNS names; create-if-absent, a present
+  # Secret is never overwritten -- owner policy for internal identities); the
   # callers (svc-action-rust, svc-process-rust) mount ONLY the CA (PRESENTATION_GRPC_CA_FILE).
   # NEVER a literal cert/key in git; populate via --set-file or an out-of-git values override /
   # ExternalSecret.
@@ -152,8 +153,9 @@ global:
     tls:
       crt: ""
       key: ""
-    # true delegates provisioning of the <fullname>-presentation-grpc-tls Secret (keys ca.crt,
-    # tls.crt, tls.key) to an out-of-band ExternalSecret/SealedSecret controller.
+    # OPTIONAL override (default false in every tier): true delegates provisioning of the
+    # <fullname>-presentation-grpc-tls Secret (keys ca.crt, tls.crt, tls.key) to an out-of-band
+    # ExternalSecret/SealedSecret controller instead of the runtime provisioner.
     externalSecret: false
 
   # fix/valkey-tls-alpha -- TLS material for the Valkey (infra-redis) cache/streams

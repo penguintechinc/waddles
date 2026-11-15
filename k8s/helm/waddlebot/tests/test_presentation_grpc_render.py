@@ -27,7 +27,12 @@ from cryptography import x509
 from provision_harness import with_provisioned  # type: ignore[import-not-found]
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
-_ALPHA_VALUES = _CHART_DIR / "values-alpha.yaml"
+_VALUES = {
+    "alpha": _CHART_DIR / "values-alpha.yaml",
+    "beta": _CHART_DIR / "values-beta.yaml",
+    "gamma": _CHART_DIR / "values-gamma.yaml",
+    "production": _CHART_DIR / "values-production.yaml",
+}
 _SECRET_SUFFIX = "-presentation-grpc-tls"
 _GRPC_PORT = "50051"
 _CALLERS = ("svc-action-rust", "svc-process-rust")
@@ -36,12 +41,12 @@ _HELM_BINARIES = [b for b in ("helm3", "helm4") if shutil.which(b)] or (
 )
 
 
-def _render(binary: str) -> list[dict[str, Any]]:
+def _render_raw(binary: str, tier: str) -> list[dict[str, Any]]:
     result = subprocess.run(
         [
             binary, "template", "waddlebot", str(_CHART_DIR),
             "--kube-version", "1.30.0",
-            "--values", str(_ALPHA_VALUES),
+            "--values", str(_VALUES[tier]),
         ],
         capture_output=True,
         text=True,
@@ -51,12 +56,27 @@ def _render(binary: str) -> list[dict[str, Any]]:
         pytest.fail(f"{binary} template failed:\n{result.stdout}\n{result.stderr}")
     docs = [doc for doc in yaml.safe_load_all(result.stdout) if doc]
     assert docs, f"{binary} template produced zero documents -- cannot be a pass"
-    return with_provisioned(docs)
+    return docs
 
 
-@pytest.fixture(scope="module", params=_HELM_BINARIES or [pytest.param("none", marks=pytest.mark.skip(reason="no helm CLI"))])
+def _render(binary: str, tier: str) -> list[dict[str, Any]]:
+    return with_provisioned(_render_raw(binary, tier))
+
+
+@pytest.fixture(
+    scope="module",
+    params=[
+        (b, t)
+        for b in (_HELM_BINARIES or ["none"])
+        for t in _VALUES
+    ],
+    ids=lambda p: f"{p[0]}-{p[1]}",
+)
 def docs(request: pytest.FixtureRequest) -> list[dict[str, Any]]:
-    return _render(request.param)
+    binary, tier = request.param
+    if binary == "none":
+        pytest.skip("no helm CLI")
+    return _render(binary, tier)
 
 
 def _by_kind(docs: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
@@ -222,3 +242,33 @@ class TestCallers:
     def test_action_keeps_the_push_scope(self, docs: list[dict[str, Any]]) -> None:
         rendered = yaml.safe_dump_all(docs)
         assert "presentation.overlay:push" in rendered
+
+
+@pytest.mark.parametrize("tier", list(_VALUES))
+def test_secret_is_generated_in_every_tier_and_never_overwritten(tier: str) -> None:
+    """Owner policy: internal identities are create-if-absent in EVERY tier, never regenerated."""
+    if not _HELM_BINARIES:
+        pytest.skip("no helm CLI")
+    raw = _render_raw(_HELM_BINARIES[0], tier)
+    first = with_provisioned(raw)
+    secrets = [d for d in first if d.get("x-provisioned") and d["metadata"]["name"].endswith(_SECRET_SUFFIX)]
+    assert len(secrets) == 1, f"{tier}: presentation gRPC Secret must be generated, got {len(secrets)}"
+    generated = dict(secrets[0]["stringData"])
+    assert {"ca.crt", "tls.crt", "tls.key"} <= set(generated)
+    # Second run with the Secret already present: every key is kept verbatim.
+    name = secrets[0]["metadata"]["name"]
+    again = with_provisioned(
+        raw,
+        existing={name: generated},
+        existing_annotations={name: dict(secrets[0]["metadata"]["annotations"])},
+    )
+    kept = [d for d in again if d.get("x-provisioned") and d["metadata"]["name"].endswith(_SECRET_SUFFIX)]
+    assert kept and all(kept[0]["stringData"][k] == generated[k] for k in ("ca.crt", "tls.crt", "tls.key")), (
+        f"{tier}: an existing presentation gRPC Secret was overwritten"
+    )
+
+
+@pytest.mark.parametrize("tier", ["beta", "gamma", "production"])
+def test_no_tier_forces_an_external_secret(tier: str) -> None:
+    text = _VALUES[tier].read_text()
+    assert "presentationGrpcTls" not in text, f"values-{tier}.yaml must not override presentationGrpcTls"
