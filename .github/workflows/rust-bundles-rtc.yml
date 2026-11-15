@@ -4,8 +4,8 @@ name: Rust RTC bundles (rooms + webrtc)
 # rooms/SFU) and bundles/rust/rooms (app bundle). Per crate: cargo fmt --check, clippy -D warnings,
 # host cargo test (executed-test count printed; zero fails), and the wasm32-wasip2 component build
 # with the same cargo-component / wasm-tools pins as bundles/Dockerfile.core-bundles.
-# Contract test (scripts/ci/tests/test_rooms_webrtc_contract.py) is NOT wired here yet: the file
-# lands with plan task T3; wiring it before it exists would be a zero-examined failure.
+# A separate `rooms-webrtc-contract` job runs scripts/ci/tests/test_rooms_webrtc_contract.py (rooms
+# consumed tool calls vs webrtc exported_tools schemas); the counted step fails on zero tests passed.
 
 on:
   push:
@@ -15,6 +15,7 @@ on:
       - 'bundles/rust/webrtc/**'
       - 'wit/waddle-bundle/**'
       - 'sdk/waddle-sdk-rs/**'
+      - 'scripts/ci/tests/test_rooms_webrtc_contract.py'
       - '.github/workflows/rust-bundles-rtc.yml'
   pull_request:
     branches: [main, 'release/**']
@@ -23,6 +24,7 @@ on:
       - 'bundles/rust/webrtc/**'
       - 'wit/waddle-bundle/**'
       - 'sdk/waddle-sdk-rs/**'
+      - 'scripts/ci/tests/test_rooms_webrtc_contract.py'
       - '.github/workflows/rust-bundles-rtc.yml'
   workflow_dispatch:
 
@@ -37,7 +39,7 @@ jobs:
   rtc-bundle:
     name: "${{ matrix.bundle }}: fmt + clippy + test + wasm32-wasip2 component"
     # Canonical runner-routing expression (github-actions-workflows skill). Non-main = dal2alpha.
-    runs-on: ${{ fromJSON((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'release' || github.base_ref == 'main') && '"ubuntu-24.04"' || '{"group":"dal2alpha"}') }}
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -132,5 +134,36 @@ jobs:
           echo "bundle ${{ matrix.bundle }}: passed=${passed} (expect >0)"
           if [ "$passed" -le 0 ]; then
             echo "::error::${{ matrix.bundle }}: zero tests passed; a gate that examined nothing fails" >&2
+            exit 1
+          fi
+
+  rooms-webrtc-contract:
+    name: rooms <-> webrtc tool contract (counted)
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Install gate-test deps (hash-locked)
+        run: python3 -m pip install --disable-pip-version-check --no-cache-dir --require-hashes -r scripts/ci/tests/requirements-gate-test.txt
+
+      # Counted: pytest exits non-zero on any failure; zero passed tests also fails.
+      - name: rooms/webrtc contract test (counted)
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP}/rooms-webrtc-contract.log"
+          python3 -m pytest scripts/ci/tests/test_rooms_webrtc_contract.py -v -p no:cacheprovider 2>&1 | tee "$log"
+          passed="$(grep -Eo '[0-9]+ passed' "$log" | tail -1 | awk '{print $1+0}')"
+          echo "rooms-webrtc contract: passed=${passed:-0} (expect >0)"
+          if [ "${passed:-0}" -le 0 ]; then
+            echo "::error::zero contract tests passed; a gate that examined nothing fails" >&2
             exit 1
           fi

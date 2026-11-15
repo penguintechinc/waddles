@@ -8152,7 +8152,7 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Acknowledge a raised hand (admin).
+      summary: 'Acknowledge a raised hand (admin) -- 501: not a svc-streaming concern.'
   /api/v1/admin/{community_id}/calls/rooms/{room_name}/kick:
     post:
       description: ''
@@ -8172,7 +8172,8 @@ paths:
         content:
           application/json:
             schema:
-              description: Request DTO for `POST .../kick`.
+              description: Request DTO for `POST .../kick` -- `identity` is the participant's
+                UUID.
               properties:
                 identity:
                   title: Identity
@@ -8260,7 +8261,8 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Get raised hands queue (admin).
+      summary: 'Raised-hands queue (admin) -- 501: not a svc-streaming concern, see
+        module docstring.'
   /api/v1/admin/{community_id}/calls/rooms/{room_name}/unlock:
     post:
       description: ''
@@ -17550,7 +17552,7 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Join a voice room -- mints a LiveKit token for THIS caller, THIS room,
+      summary: Join a voice room -- mints a room token for THIS caller, THIS room,
         only if a member.
   /api/v1/community/{community_id}/interact/voice/rooms/{room_name}/leave:
     post:
@@ -17570,7 +17572,7 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Leave a voice room (member).
+      summary: Leave a voice room (member) -- always acts as oneself (actor == participant).
   /api/v1/community/{community_id}/leaderboard/messages:
     get:
       description: ''
