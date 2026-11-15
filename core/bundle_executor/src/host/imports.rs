@@ -101,6 +101,11 @@ struct BundleContextWire {
     message_id: String,
     #[serde(default)]
     config_json: String,
+    /// Platform web base URL (stage `PUBLIC_WEBUI_URL`), when configured. The WIT record has
+    /// no field for it, so it is surfaced to guests as the `web_base_url` key of
+    /// `config-json` (see [`BundleContextWire::effective_config_json`]).
+    #[serde(default)]
+    web_base_url: Option<String>,
     /// Authoritative numeric scope, supplied by the stage for `stage-v2`
     /// bundles. Absent from a stage that predates numeric scope; the v1
     /// `context.get-context` ignores it, `context-v2.get-context` treats
@@ -174,6 +179,7 @@ impl context_v2::Host for ExecState {
             error!("get-context-v2: no scope guard on a v2 instance; returning the empty context");
             return BundleContextWire::default().into_v2();
         }
+        let config_json = wire.effective_config_json();
         context_v2::BundleContext {
             tenant_id: i64::from(scope.0),
             community_id: scope.1,
@@ -183,18 +189,49 @@ impl context_v2::Host for ExecState {
             feature: wire.feature,
             version: wire.version,
             message_id: wire.message_id,
-            config_json: if wire.config_json.is_empty() {
-                "{}".to_string()
-            } else {
-                wire.config_json
-            },
+            config_json,
         }
     }
 }
 
+/// Removes the host-reserved `web_base_url` key from a parsed config at every depth.
+fn strip_reserved_key(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    obj.remove("web_base_url");
+    for v in obj.values_mut() {
+        strip_reserved_value(v);
+    }
+}
+
+/// Recursive step of [`strip_reserved_key`] over arrays and nested objects.
+fn strip_reserved_value(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(o) => strip_reserved_key(o),
+        serde_json::Value::Array(a) => a.iter_mut().for_each(strip_reserved_value),
+        _ => {}
+    }
+}
+
 impl BundleContextWire {
+    /// The guest-visible `config-json`. The config is ALWAYS parsed and re-serialised (so the
+    /// guest can never see bytes this function did not produce, and there is no parser
+    /// differential): a non-object or malformed config becomes `{}`, every `web_base_url` key
+    /// (any depth; JSON unicode escapes are already decoded by the parser) is removed, and only
+    /// THEN is the host-provided `web_base_url` inserted. The key is host-reserved.
+    fn effective_config_json(&self) -> String {
+        let mut obj = match serde_json::from_str::<serde_json::Value>(self.config_json.trim()) {
+            Ok(serde_json::Value::Object(o)) => o,
+            _ => serde_json::Map::new(),
+        };
+        strip_reserved_key(&mut obj);
+        if let Some(url) = self.web_base_url.as_deref().filter(|u| !u.is_empty()) {
+            obj.insert("web_base_url".to_string(), serde_json::json!(url));
+        }
+        serde_json::Value::Object(obj).to_string()
+    }
+
     /// The empty-but-well-formed v2 context: `tenant-id == 0` (no scope).
     fn into_v2(self) -> context_v2::BundleContext {
+        let config_json = self.effective_config_json();
         context_v2::BundleContext {
             tenant_id: 0,
             community_id: 0,
@@ -206,17 +243,14 @@ impl BundleContextWire {
             feature: self.feature,
             version: self.version,
             message_id: String::new(),
-            config_json: if self.config_json.is_empty() {
-                "{}".to_string()
-            } else {
-                self.config_json
-            },
+            config_json,
         }
     }
 }
 
 impl From<BundleContextWire> for context::BundleContext {
     fn from(w: BundleContextWire) -> Self {
+        let config_json = w.effective_config_json();
         context::BundleContext {
             tenant: w.tenant,
             community: w.community,
@@ -224,11 +258,7 @@ impl From<BundleContextWire> for context::BundleContext {
             feature: w.feature,
             version: w.version,
             message_id: w.message_id,
-            config_json: if w.config_json.is_empty() {
-                "{}".to_string()
-            } else {
-                w.config_json
-            },
+            config_json,
         }
     }
 }
@@ -778,6 +808,83 @@ pub(crate) mod tests {
         assert_eq!(ctx.tenant, "t1");
         assert_eq!(ctx.community, Some("c1".to_string()));
         assert_eq!(ctx.config_json, "{\"k\":1}");
+    }
+
+    #[tokio::test]
+    async fn context_folds_host_web_base_url_into_config_json_and_host_wins() {
+        let bridge = one_shot_bridge(Ok(serde_json::json!({
+            "tenant": "t1", "community": "c1", "app_id": "waddles.test.app",
+            "feature": "process", "version": "1", "message_id": "m1",
+            "config_json": "{\"k\":1,\"web_base_url\":\"https://evil.example\"}",
+            "web_base_url": "https://app.example.org"
+        })));
+        let mut state = state_with(bridge);
+        let ctx = context::Host::get_context(&mut state).await;
+        let v: serde_json::Value = serde_json::from_str(&ctx.config_json).unwrap();
+        assert_eq!(v["k"], 1);
+        assert_eq!(v["web_base_url"], "https://app.example.org");
+    }
+
+    #[test]
+    fn effective_config_json_handles_empty_invalid_and_absent() {
+        let w = |cfg: &str, url: Option<&str>| BundleContextWire {
+            config_json: cfg.to_string(),
+            web_base_url: url.map(str::to_string),
+            ..Default::default()
+        };
+        assert_eq!(w("", None).effective_config_json(), "{}");
+        assert_eq!(w("{\"a\":2}", None).effective_config_json(), "{\"a\":2}");
+        let v: serde_json::Value =
+            serde_json::from_str(&w("", Some("https://a.example")).effective_config_json()).unwrap();
+        assert_eq!(v, serde_json::json!({"web_base_url": "https://a.example"}));
+        let v: serde_json::Value =
+            serde_json::from_str(&w("not json", Some("https://a.example")).effective_config_json()).unwrap();
+        assert_eq!(v, serde_json::json!({"web_base_url": "https://a.example"}));
+        assert_eq!(w("", Some("")).effective_config_json(), "{}");
+        // Host-reserved key: a community-supplied value never reaches the guest, whatever the
+        // spelling (unicode escapes decode to the same key), nesting, or host setting.
+        for cfg in [
+            r#"{"a":1,"web_base_url":"https://evil.example"}"#,
+            r#"{"a":1,"web_base_url":"https://evil.example"}"#,
+            r#"{"a":1,"web_base_url":"https://evil.example"}"#,
+            r#"  {"a":1, "web_base_url" : "https://evil.example" }  "#,
+            r#"{"web_base_url":"https://x.example","a":1,"web_base_url":"https://evil.example"}"#,
+        ] {
+            let out: serde_json::Value =
+                serde_json::from_str(&w(cfg, None).effective_config_json()).unwrap();
+            assert_eq!(out, serde_json::json!({"a": 1}), "{cfg}");
+            let out: serde_json::Value = serde_json::from_str(
+                &w(cfg, Some("https://app.example.org")).effective_config_json(),
+            )
+            .unwrap();
+            assert_eq!(
+                out,
+                serde_json::json!({"a": 1, "web_base_url": "https://app.example.org"}),
+                "{cfg}"
+            );
+        }
+        // Nested occurrences are stripped too.
+        let nested = r#"{"a":{"web_base_url":"https://evil.example","b":2},"l":[{"web_base_url":1}]}"#;
+        let out: serde_json::Value =
+            serde_json::from_str(&w(nested, None).effective_config_json()).unwrap();
+        assert_eq!(out, serde_json::json!({"a": {"b": 2}, "l": [{}]}));
+        // Malformed or non-object config becomes `{}` (never passed through raw).
+        for bad in [
+            "not json",
+            r#"{"web_base_url":"https://evil.example""#,
+            "[1,2]",
+            r#""s""#,
+            "null",
+            "7",
+        ] {
+            assert_eq!(w(bad, None).effective_config_json(), "{}", "{bad}");
+        }
+        let out: serde_json::Value = serde_json::from_str(
+            &w(r#"{"web_base_url":"https://evil.example""#, Some("https://app.example.org"))
+                .effective_config_json(),
+        )
+        .unwrap();
+        assert_eq!(out, serde_json::json!({"web_base_url": "https://app.example.org"}));
     }
 
     #[tokio::test]
@@ -1358,6 +1465,7 @@ mod no_scope_tests {
             version: "1".into(),
             message_id: "m1".into(),
             config_json: String::new(),
+            web_base_url: None,
             tenant_id: Some(5),
             community_id: Some(2),
         };

@@ -2754,6 +2754,16 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     }
 
     fn handle_context(&self, scope: &InvokeScope) -> Result<serde_json::Value, HostResultError> {
+        self.handle_context_with_base(scope, std::env::var(PUBLIC_WEBUI_URL_ENV).ok().as_deref())
+    }
+
+    /// `handle_context` with the public web base URL injected (the env read is the caller's
+    /// job so tests never touch process-global state).
+    fn handle_context_with_base(
+        &self,
+        scope: &InvokeScope,
+        web_base_url: Option<&str>,
+    ) -> Result<serde_json::Value, HostResultError> {
         self.gate
             .authorize(
                 &scope.gate_scope(),
@@ -2775,6 +2785,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         if scope.tenant_id >= 1 && scope.community_id >= 0 {
             ctx["tenant_id"] = serde_json::json!(i64::from(scope.tenant_id));
             ctx["community_id"] = serde_json::json!(scope.community_id);
+        }
+        // Platform web base URL (omitted when unset/invalid): lets service bundles build
+        // user-facing links such as the community music page. Not a secret.
+        if let Some(base) = normalize_web_base_url(web_base_url) {
+            ctx["web_base_url"] = serde_json::json!(base);
         }
         Ok(ctx)
     }
@@ -3525,6 +3540,23 @@ pub fn boxed(handler: impl CapabilityHandler + 'static) -> Arc<dyn CapabilityHan
     Arc::new(handler)
 }
 
+/// Env var carrying the public web UI base URL (for links bundles hand to users).
+const PUBLIC_WEBUI_URL_ENV: &str = "PUBLIC_WEBUI_URL";
+
+/// Normalises the configured public web base URL: trimmed, `https://` (or `http://` for dev
+/// only), trailing slashes dropped; anything else (unset, empty, other scheme, no host) is
+/// `None` so the context simply omits `web_base_url` instead of handing out a bad link base.
+fn normalize_web_base_url(raw: Option<&str>) -> Option<String> {
+    let t = raw?.trim().trim_end_matches('/');
+    let host = t
+        .strip_prefix("https://")
+        .or_else(|| t.strip_prefix("http://"))?;
+    if host.is_empty() || host.starts_with('/') || host.bytes().any(|b| b.is_ascii_whitespace()) {
+        return None;
+    }
+    Some(t.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4161,6 +4193,35 @@ mod tests {
         let ctx = h.handle_context(&scope()).expect("context");
         assert_eq!(ctx["tenant_id"], 7);
         assert_eq!(ctx["community_id"], 3);
+    }
+
+    /// `web_base_url` normalisation: https (or dev http), trimmed, no trailing slash; else None.
+    #[test]
+    fn web_base_url_is_normalised_or_omitted() {
+        for (raw, want) in [
+            (Some("https://app.example.org"), Some("https://app.example.org")),
+            (Some("  https://app.example.org/// "), Some("https://app.example.org")),
+            (Some("http://localhost:8080/"), Some("http://localhost:8080")),
+            (Some("https://app.example.org/sub"), Some("https://app.example.org/sub")),
+        ] {
+            assert_eq!(normalize_web_base_url(raw).as_deref(), want, "{raw:?}");
+        }
+        for bad in [None, Some(""), Some("   "), Some("ftp://x.example"), Some("javascript:1"),
+            Some("https://"), Some("https:///x"), Some("app.example.org"), Some("https://a b.example")] {
+            assert_eq!(normalize_web_base_url(bad), None, "{bad:?}");
+        }
+    }
+
+    /// The bundle context carries `web_base_url` only when the platform configured one.
+    #[test]
+    fn get_context_carries_web_base_url_only_when_set() {
+        let h = caps(FakeRelayQueue::default());
+        let with = h.handle_context_with_base(&scope(), Some("https://app.example.org/")).expect("context");
+        assert_eq!(with["web_base_url"], "https://app.example.org");
+        for unset in [None, Some(""), Some("ftp://nope")] {
+            let ctx = h.handle_context_with_base(&scope(), unset).expect("context");
+            assert!(ctx.get("web_base_url").is_none(), "{unset:?}");
+        }
     }
 
     /// Kill switch `waddles.disable-bundle-community-config`: OFF/unset serves config, ON adds none.

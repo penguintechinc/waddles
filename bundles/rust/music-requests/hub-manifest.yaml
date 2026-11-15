@@ -1,0 +1,387 @@
+# hub-api install-pipeline manifest (bundle_manifest_v2, schema_version 2) for the music-requests SERVICE bundle.
+# `kind: service` is accepted only via the trusted core-bundle seeder. exported_tools are identical to bundle.yaml.
+# Tables (data.schema) are community-scoped by the host; requester is a user_ref anonymized on erasure.
+schema_version: 2
+app_id: waddles.core.service.music-requests
+name: Music Requests Service Bundle (Rust)
+version: 1.0.0
+feature: waddles.core.service
+module: core
+provider: builtin
+author: github:penguintechinc
+language: rust
+artifact: prebuilt
+execution_model: native
+is_default: false
+kind: service
+stages:
+  action:
+    entry: waddle:bundle/tool-provider#call
+egress: []
+data:
+  tables:
+  - requests
+  - history
+  - settings
+  - artist_plays
+  - song_plays
+  schema:
+    tables:
+    - name: requests
+      columns:
+      - name: title
+        type: text(200)
+      - name: artist
+        type: text(200)
+      - name: source_url
+        type: text(500)
+      - name: provider
+        type: text(16)
+      - name: duration_ms
+        type: int4
+      - name: requester
+        type: user_ref
+        nullable: true
+        on_erasure: anonymize
+      - name: kind
+        type: int4
+      - name: status
+        type: int4
+      - name: queued_at
+        type: timestamptz
+      - name: started_at
+        type: timestamptz
+        nullable: true
+      - name: seq
+        type: int4
+      indexes:
+      - columns:
+        - status
+        - queued_at
+    - name: history
+      columns:
+      - name: title
+        type: text(200)
+      - name: artist
+        type: text(200)
+      - name: source_url
+        type: text(500)
+      - name: provider
+        type: text(16)
+      - name: duration_ms
+        type: int4
+      - name: played_at
+        type: timestamptz
+      - name: requester
+        type: user_ref
+        nullable: true
+        on_erasure: anonymize
+      - name: kind
+        type: int4
+      indexes:
+      - columns:
+        - played_at
+    - name: settings
+      columns:
+      - name: skey
+        type: text(32)
+      - name: ival
+        type: int4
+      indexes:
+      - columns:
+        - skey
+        unique: true
+    - name: artist_plays
+      columns:
+      - name: artist_key
+        type: text(200)
+      - name: artist
+        type: text(200)
+      - name: plays
+        type: int4
+      indexes:
+      - columns:
+        - artist_key
+        unique: true
+      - columns:
+        - plays
+    - name: song_plays
+      columns:
+      - name: song_key
+        type: text(64)
+      - name: title
+        type: text(200)
+      - name: artist
+        type: text(200)
+      - name: plays
+        type: int4
+      indexes:
+      - columns:
+        - song_key
+        unique: true
+      - columns:
+        - plays
+limits:
+  timeout_ms: 3000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+- id: storage.tables
+  justification: Queue, history, settings and play counters live in manifest-declared community-scoped tables
+  params:
+    schema: data.schema
+routes_to: []
+exported_tools:
+- name: requests.list
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 100
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:requests.read
+- name: requests.add
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      title:
+        type: string
+        minLength: 1
+        maxLength: 200
+      artist:
+        type: string
+        maxLength: 200
+      source_url:
+        type: string
+        maxLength: 500
+        pattern: ^(https://.*)?$
+      duration_ms:
+        type: integer
+        minimum: 0
+        maximum: 86400000
+      kind:
+        type: string
+        enum:
+        - viewer
+        - dj
+    required:
+    - title
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:requests.write
+- name: requests.cancel_own
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      id:
+        type: integer
+        minimum: 1
+        maximum: 2147483647
+    required:
+    - id
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:requests.write
+- name: requests.remove
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      id:
+        type: integer
+        minimum: 1
+        maximum: 2147483647
+    required:
+    - id
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:requests.manage
+- name: requests.advance
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:requests.manage
+- name: requests.advance_due
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:requests.read
+- name: requests.import
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      items:
+        type: array
+        maxItems: 100
+        items:
+          type: object
+          properties:
+            title:
+              type: string
+              minLength: 1
+              maxLength: 200
+            artist:
+              type: string
+              maxLength: 200
+            source_url:
+              type: string
+              maxLength: 500
+              pattern: ^(https://.*)?$
+            duration_ms:
+              type: integer
+              minimum: 0
+              maximum: 86400000
+          required:
+          - title
+          additionalProperties: false
+    required:
+    - items
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:requests.manage
+- name: history.list
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 50
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:requests.read
+- name: config.get
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:requests.read
+- name: config.set
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      max_per_user:
+        type: integer
+        minimum: 1
+        maximum: 50
+      max_queue:
+        type: integer
+        minimum: 1
+        maximum: 500
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:requests.manage
+- name: dj.get
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:requests.read
+- name: dj.set
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      enabled:
+        type: boolean
+    required:
+    - enabled
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:dj.manage
+- name: page.link
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:requests.read
+- name: music.stats.top
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      kind:
+        type: string
+        enum:
+        - artist
+        - song
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 25
+    required:
+    - kind
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:stats.read
+- name: settings.set
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      dmca_safe:
+        type: boolean
+    required:
+    - dmca_safe
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: music:settings.write

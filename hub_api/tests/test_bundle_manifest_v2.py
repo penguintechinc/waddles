@@ -527,6 +527,69 @@ def test_exported_tool_required_scope_outside_vocabulary_is_rejected(bad: object
     assert exc.value.reason == "invalid_tool_required_scope"
 
 
+MUSIC_SCOPES = [
+    "music:requests.read",
+    "music:requests.write",
+    "music:requests.manage",
+    "music:dj.manage",
+    "music:stats.read",
+    "music:settings.write",
+]
+
+
+@pytest.mark.parametrize("scope", MUSIC_SCOPES)
+def test_music_required_scopes_are_accepted(scope: str) -> None:
+    manifest = _parse_trusted(
+        {"kind": "service", "exported_tools": [_tool("t", required_scope=scope)]}
+    )
+    assert manifest.exported_tools[0].required_scope == scope  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "bad", ["music:requests.admin", "music:requests", "music:*", "music:dj.read", "music:settings"]
+)
+def test_unknown_music_scopes_are_rejected(bad: str) -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse_trusted({"kind": "service", "exported_tools": [_tool(required_scope=bad)]})
+    assert exc.value.reason == "invalid_tool_required_scope"
+
+
+def test_music_requests_service_manifests_parse_and_agree() -> None:
+    """Both shipped music-requests manifests parse, share exported_tools, and scope every tool."""
+    import pathlib
+
+    import yaml
+
+    root = pathlib.Path(__file__).resolve().parents[2] / "bundles/rust/music-requests"
+    hub = yaml.safe_load((root / "hub-manifest.yaml").read_text())
+    comp = yaml.safe_load((root / "bundle.yaml").read_text())
+    assert hub["exported_tools"] == comp["exported_tools"]
+    assert hub["data"] == comp["data"]
+    parsed = parse_bundle_manifest_v2(
+        hub,
+        known_custom_platforms=frozenset(),
+        allow_wildcard_consumes=False,
+        allow_prebuilt=True,
+        trusted_source=True,
+    )
+    scopes = {t.name: t.required_scope for t in parsed.exported_tools}  # type: ignore[attr-defined]
+    assert len(scopes) == 15 and None not in scopes.values()
+    assert scopes["requests.add"] == "music:requests.write"
+    assert scopes["requests.remove"] == "music:requests.manage"
+    assert scopes["requests.import"] == "music:requests.manage"
+    assert scopes["dj.set"] == "music:dj.manage"
+    assert scopes["music.stats.top"] == "music:stats.read"
+    assert scopes["settings.set"] == "music:settings.write"
+    assert {t["name"] for t in hub["data"]["schema"]["tables"]} == set(hub["data"]["tables"])
+    requester_cols = [
+        c
+        for tb in hub["data"]["schema"]["tables"]
+        for c in tb["columns"]
+        if c["type"] == "user_ref"
+    ]
+    assert requester_cols and all(c.get("on_erasure") == "anonymize" for c in requester_cols)
+
+
 def test_exported_tools_duplicate_name() -> None:
     with pytest.raises(ManifestV2Error) as exc:
         _parse_trusted({"kind": "service", "exported_tools": [_tool("x"), _tool("x")]})
