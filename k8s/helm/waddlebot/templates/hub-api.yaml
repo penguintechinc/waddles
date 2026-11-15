@@ -207,8 +207,6 @@ spec:
         {{- end }}
         - name: MODULE_NAME
           value: "hub-api"
-        - name: PIPELINE_STAGE
-          value: "hub-api"
         - name: MODULE_PORT
           value: {{ .Values.pipeline.hubApi.port | quote }}
         - name: GRPC_PORT

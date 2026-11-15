@@ -10,7 +10,6 @@
 #
 # Options:
 #   --helm              Use Helm chart for deployment (default)
-#   --manifests         Use raw Kubernetes manifests for deployment
 #   --build-images      Build and push Docker images to cluster registry
 #   --skip-build        Skip image building (use existing images)
 #   --skip-setup        Skip MicroK8s setup and addon enabling
@@ -211,22 +210,6 @@ deploy_with_helm() {
     log_success "Helm deployment initiated"
 }
 
-deploy_with_manifests() {
-    log_info "Deploying WaddleBot with raw Kubernetes manifests..."
-
-    MANIFESTS_DIR="${SCRIPT_DIR}/manifests"
-
-    if [[ ! -d "$MANIFESTS_DIR" ]]; then
-        log_error "Manifests directory not found at: $MANIFESTS_DIR"
-        exit 1
-    fi
-
-    # Apply manifests using kustomize
-    microk8s kubectl apply -k "$MANIFESTS_DIR"
-
-    log_success "Manifest deployment initiated"
-}
-
 wait_for_deployment() {
     log_info "Waiting for pods to be ready..."
 
@@ -274,13 +257,8 @@ configure_access() {
 uninstall() {
     log_info "Uninstalling WaddleBot from MicroK8s..."
 
-    if [[ "$DEPLOYMENT_METHOD" == "helm" ]]; then
-        log_info "Uninstalling Helm release..."
-        microk8s helm uninstall waddlebot -n "$NAMESPACE" || log_warning "Helm release not found"
-    else
-        log_info "Deleting Kubernetes resources..."
-        microk8s kubectl delete -k "${SCRIPT_DIR}/manifests" || log_warning "Resources may not exist"
-    fi
+    log_info "Uninstalling Helm release..."
+    microk8s helm uninstall waddlebot -n "$NAMESPACE" || log_warning "Helm release not found"
 
     # Delete namespace
     log_info "Deleting namespace..."
@@ -294,10 +272,6 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --helm)
             DEPLOYMENT_METHOD="helm"
-            shift
-            ;;
-        --manifests)
-            DEPLOYMENT_METHOD="manifests"
             shift
             ;;
         --build-images)
@@ -345,11 +319,7 @@ main() {
     setup_microk8s
     build_and_push_images
 
-    if [[ "$DEPLOYMENT_METHOD" == "helm" ]]; then
-        deploy_with_helm
-    else
-        deploy_with_manifests
-    fi
+    deploy_with_helm
 
     wait_for_deployment
     configure_access

@@ -10,7 +10,7 @@
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
         test-data-plane-parity test-connector-parity gen-connector-parity-expected \
-        test-helm-matrix test-helm-matrix-quick audit-chart-values
+        test-helm-matrix test-helm-matrix-quick audit-chart-values audit-chart-values-deep
 
 dev:
 	$(error dev: docker-compose is deprecated -- deploy to Kubernetes via scripts/deploy-alpha.sh)
@@ -73,6 +73,13 @@ audit-chart-values:
 	@python3 -m pytest -q -p no:cacheprovider scripts/ci/audit-chart-values/test_audit_chart_values.py
 	@python3 scripts/ci/audit-chart-values/audit_chart_values.py k8s/helm/waddlebot \
 		--allowlist scripts/ci/audit-chart-values/allowlist.txt
+
+# Deep chart audit (~3 min, needs helm): every rendered env var of our containers must have a reader
+# in the code dirs (allowlist: scripts/ci/audit-chart-values/env-allowlist.txt), and a
+# delete-and-render pass over every values key must agree with the static audit. HELM=<binary>.
+audit-chart-values-deep: audit-chart-values
+	@HELM="$${HELM:-helm}" python3 -m pytest -q -p no:cacheprovider scripts/ci/audit-chart-values/test_audit_chart_deep.py
+	@python3 scripts/ci/audit-chart-values/audit_chart_deep.py k8s/helm/waddlebot --helm "$${HELM:-helm}"
 
 # USER DECISION (2026-10-01, fix/chart-fresh-install-hooks): db-migrate now runs
 # post-install -- helm upgrade --install in alpha-deploy.sh must never pass

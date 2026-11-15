@@ -67,8 +67,6 @@ spec:
 {{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         - name: MODULE_NAME
           value: "svc-core"
-        - name: PIPELINE_STAGE
-          value: "core"
         - name: MODULE_PORT
           value: {{ .Values.pipeline.svcCore.port | quote }}
         - name: GRPC_PORT

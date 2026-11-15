@@ -97,7 +97,9 @@ def test_executor_identity_budget_and_cpu_limit() -> None:
     assert env["POD_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.name"
     assert env["EXECUTOR_POOL"]["value"] == "default"
     assert env["EXECUTOR_MEMORY_BUDGET_MB"]["value"] == "15360"
-    assert env["EXECUTOR_PRECOMPILED_PREFIX"]["value"] == "precompiled"
+    # The AOT prefix is the crate constant (core/bundle_executor/src/precompile.rs PRECOMPILED_PREFIX),
+    # not configuration: no env var for it (nothing read EXECUTOR_PRECOMPILED_PREFIX).
+    assert "EXECUTOR_PRECOMPILED_PREFIX" not in env
     assert env["EXECUTOR_MAX_CONCURRENT_COMPILES"]["value"] == "2"
     assert env["STAGE_HOST_API_ADDR"]["value"] == "waddlebot-svc-process-rust:8301,waddlebot-svc-action-rust:8302"
     c = sts["spec"]["template"]["spec"]["containers"][0]

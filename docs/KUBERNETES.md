@@ -127,11 +127,9 @@ cd /home/penguin/code/Waddles/k8s
 ## Deployment Tool by Environment
 
 **Helm is the only supported deployment path, alpha through production** — see
-[`QUICKSTART.md`](../QUICKSTART.md#deploy-with-helm). `k8s/kustomize/` exists in this repo but is
-deprecated (see [`ARCHITECTURE.md`](../ARCHITECTURE.md#build-status-caveats)); do not use it for
-new deployments. The install scripts below (`install-microk8s.sh`, `install-k8s.sh`) also expose a
-`--manifests` flag that applies k8s/manifests/ (not a real path — that directory does not exist in
-this repo today) via Kustomize, so `--manifests` is non-functional. Use the default `--helm` deployment method.
+[`QUICKSTART.md`](../QUICKSTART.md#deploy-with-helm). The legacy Kustomize overlays and raw
+manifests were removed; the install scripts below (`install-microk8s.sh`, `install-k8s.sh`) deploy
+the Helm chart only.
 
 | Environment | Tool |
 |---|---|
@@ -515,15 +513,12 @@ kubectl top nodes
 kubectl top pods -n waddlebot
 ```
 
-**Apply HPA Configurations**:
-```bash
-# Apply all HPA configs
-kubectl apply -f k8s/hpa/
-
-# Or individually
-kubectl apply -f k8s/hpa/router-hpa.yaml
-kubectl apply -f k8s/hpa/receiver-modules-hpa.yaml
-kubectl apply -f k8s/hpa/action-modules-hpa.yaml
+**Enable HPAs** (rendered by the chart, `templates/autoscaling.yaml`):
+```yaml
+autoscaling:
+  services:
+    hubApi: { enabled: true }
+    svcProcessRust: { enabled: true }
 ```
 
 **HPA Configuration Example** (Router):
@@ -976,8 +971,7 @@ kubectl set resources deployment router -n waddlebot \
   --limits=cpu=2000m,memory=2Gi \
   --requests=cpu=500m,memory=512Mi
 
-# Enable HPA
-kubectl apply -f k8s/hpa/router-hpa.yaml
+# Enable HPA: set autoscaling.services.<key>.enabled=true in the values file, then helm upgrade
 ```
 
 ### Application Errors
@@ -1294,7 +1288,6 @@ spec:
 - [`QUICKSTART.md`](../QUICKSTART.md) — fastest path to a running Helm deployment
 - [`ARCHITECTURE.md`](../ARCHITECTURE.md) — the v3.0.x 8-container pipeline and build status
 - [`WORKFLOWS.md`](../WORKFLOWS.md) — GitHub Actions CI/CD workflows
-- [`k8s/hpa/README.md`](../../k8s/hpa/README.md) — the separate Kustomize-based HPA overlay
 - [`k8s/helm/waddlebot/README.md`](../../k8s/helm/waddlebot/README.md) — Helm chart documentation
 
 ---

@@ -57,8 +57,6 @@ spec:
         env:
         - name: MODULE_NAME
           value: "svc-rtc"
-        - name: PIPELINE_STAGE
-          value: "rtc"
         - name: MODULE_PORT
           value: {{ .Values.pipeline.svcRtc.port | quote }}
         livenessProbe:

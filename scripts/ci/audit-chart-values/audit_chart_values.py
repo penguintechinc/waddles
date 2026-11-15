@@ -185,6 +185,22 @@ def load_templates(directory: str) -> dict[str, str]:
     return out
 
 
+def load_subcharts(chart: str) -> dict[str, dict[str, str]]:
+    """Vendored subcharts' template actions, keyed by the name (or alias) the parent values use."""
+    subcharts = {}
+    for d in sorted(glob.glob(os.path.join(chart, "charts", "*", "templates"))):
+        with open(
+            os.path.join(os.path.dirname(d), "Chart.yaml"), encoding="utf-8"
+        ) as fh:
+            name = (yaml.safe_load(fh) or {}).get("name", "")
+        with open(os.path.join(chart, "Chart.yaml"), encoding="utf-8") as fh:
+            for dep in (yaml.safe_load(fh) or {}).get("dependencies", []) or []:
+                if dep.get("name") == name:
+                    name = dep.get("alias") or name
+        subcharts[name] = {f: actions_only(t) for f, t in load_templates(d).items()}
+    return subcharts
+
+
 def load_allowlist(path: str | None) -> dict[str, str]:
     """Allowlist: `key-or-helper  # reason` per line; a reason is mandatory."""
     allow: dict[str, str] = {}
@@ -218,16 +234,7 @@ def main(argv: list[str] | None = None) -> int:
 
     raw = load_templates(os.path.join(args.chart, "templates"))
     templates = {f: actions_only(t) for f, t in raw.items()}
-    subcharts = {}
-    for d in sorted(glob.glob(os.path.join(args.chart, "charts", "*", "templates"))):
-        chart_yaml = os.path.join(os.path.dirname(d), "Chart.yaml")
-        with open(chart_yaml, encoding="utf-8") as fh:
-            name = (yaml.safe_load(fh) or {}).get("name", "")
-        with open(os.path.join(args.chart, "Chart.yaml"), encoding="utf-8") as fh:
-            for dep in (yaml.safe_load(fh) or {}).get("dependencies", []) or []:
-                if dep.get("name") == name:
-                    name = dep.get("alias") or name
-        subcharts[name] = {f: actions_only(t) for f, t in load_templates(d).items()}
+    subcharts = load_subcharts(args.chart)
 
     allow = load_allowlist(args.allowlist)
     n_keys, dead = dead_values(args.chart, templates, subcharts)

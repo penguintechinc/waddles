@@ -2073,9 +2073,6 @@ pipeline:
       # BUNDLE_MAX_PRECOMPILED_BYTES: optional cap on one signed .cwasm object fetched from the
       # bucket. Empty = unset (crate default 256 MiB); oversized objects fall back (loudly) to JIT.
       maxPrecompiledBytes: ""
-      # Signed AOT artifact prefix in the bundle bucket (precompiled/<engine_fp>/<digest>.cwasm),
-      # produced by the precompile Jobs (part D, executor-precompile*.yaml).
-      precompiledPrefix: "precompiled"
       # Node-disk bound for the local .cwasm staging emptyDir (EXECUTOR_PRECOMPILE_DIR).
       precompileCacheSizeLimit: "4Gi"
       # svc-bundles-executor-autoscaling.yaml. mode: none | keda | hpa-external (see that

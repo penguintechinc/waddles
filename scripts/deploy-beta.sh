@@ -32,12 +32,10 @@ declare -A SERVICES=(
 
 # Deployment tool by environment:
 #   Beta  (dal2-beta)        → Helm (this script)
-#   Alpha (local MicroK8s)   → Helm (scripts/deploy-alpha.sh) -- Kustomize is deprecated,
-#                              see k8s/kustomize/ for the (unused) legacy overlays.
+#   Alpha (local MicroK8s)   → Helm (scripts/deploy-alpha.sh). Helm only -- no Kustomize.
 
 # Default values — unique epoch tag per skill (never reuse beta-latest)
 TAG="${TAG:-beta-$(date +%s)}"
-DEPLOY_METHOD="helm"
 SERVICES_TO_BUILD=()
 SKIP_BUILD=false
 BUILD_PARALLEL=6
@@ -82,7 +80,6 @@ Usage: $0 [OPTIONS]
 
 OPTIONS:
   --tag TAG              Image tag to build and deploy (default: beta-<epoch>)
-  --method METHOD        Deployment method: helm or kustomize (default: helm)
   --service SERVICE      Build and deploy specific service (can be used multiple times)
   --parallel N           Max parallel builds (default: 6, set to 1 for sequential)
   --skip-build           Skip building images, only deploy (requires pre-built images)
@@ -121,14 +118,6 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --tag)
             TAG="$2"
-            shift 2
-            ;;
-        --method)
-            DEPLOY_METHOD="$2"
-            if [[ "$DEPLOY_METHOD" != "helm" && "$DEPLOY_METHOD" != "kustomize" ]]; then
-                log_error "Invalid deployment method: $DEPLOY_METHOD (must be 'helm' or 'kustomize')"
-                exit 1
-            fi
             shift 2
             ;;
         --service)
@@ -188,21 +177,11 @@ check_prerequisites() {
     fi
     log_success "kubectl found: $(kubectl version --client --short 2>/dev/null || echo 'installed')"
 
-    if [ "$DEPLOY_METHOD" = "helm" ]; then
-        if ! command_exists helm; then
-            log_error "Helm is not installed or not in PATH (required for --method helm)"
-            exit 1
-        fi
-        log_success "Helm found: $(helm version --short 2>/dev/null || echo 'installed')"
+    if ! command_exists helm; then
+        log_error "Helm is not installed or not in PATH"
+        exit 1
     fi
-
-    if [ "$DEPLOY_METHOD" = "kustomize" ]; then
-        if ! command_exists kustomize; then
-            log_error "kustomize is not installed or not in PATH (required for --method kustomize)"
-            exit 1
-        fi
-        log_success "kustomize found: $(kustomize version 2>/dev/null || echo 'installed')"
-    fi
+    log_success "Helm found: $(helm version --short 2>/dev/null || echo 'installed')"
 
     # Check if we're in the right directory
     if [ ! -f "${PROJECT_ROOT}/docker-compose.yml" ] || [ ! -d "${PROJECT_ROOT}/admin/hub_module" ]; then
@@ -503,56 +482,6 @@ verify_deployment() {
     echo ""
 }
 
-# Deploy via Kustomize
-do_deploy_kustomize() {
-    log_section "Deploying to Beta Cluster with Kustomize"
-
-    local OVERLAY_DIR="${PROJECT_ROOT}/k8s/kustomize/overlays/beta"
-
-    # Create namespace if it doesn't exist
-    log_info "Checking if namespace ${NAMESPACE} exists..."
-    if [ "$DRY_RUN" = true ]; then
-        log_info "[DRY-RUN] kubectl --context ${KUBE_CONTEXT} get namespace ${NAMESPACE}"
-    else
-        if ! kubectl --context "${KUBE_CONTEXT}" get namespace "${NAMESPACE}" &>/dev/null; then
-            log_warning "Namespace ${NAMESPACE} does not exist, creating..."
-            kubectl --context "${KUBE_CONTEXT}" create namespace "${NAMESPACE}" || true
-            log_success "Namespace ${NAMESPACE} created"
-        else
-            log_success "Namespace ${NAMESPACE} already exists"
-        fi
-    fi
-
-    # Set image tags in overlay using kustomize edit
-    log_info "Setting image tags to ${TAG} in kustomize overlay..."
-    if [ "$DRY_RUN" = true ]; then
-        log_info "[DRY-RUN] Would set all image tags to ${TAG} in ${OVERLAY_DIR}"
-    else
-        pushd "${OVERLAY_DIR}" > /dev/null
-        for svc in "${!SERVICES[@]}"; do
-            kustomize edit set image "${svc}=${REGISTRY}/${svc}:${TAG}"
-        done
-        popd > /dev/null
-        log_success "Image tags set to ${TAG}"
-    fi
-
-    # Apply kustomize overlay
-    log_info "Applying kustomize overlay..."
-    kustomize_cmd="kustomize build ${OVERLAY_DIR} | kubectl --context ${KUBE_CONTEXT} apply -n ${NAMESPACE} -f -"
-
-    if [ "$DRY_RUN" = true ]; then
-        log_info "[DRY-RUN] ${kustomize_cmd}"
-        log_info "[DRY-RUN] kustomize build output:"
-        kustomize build "${OVERLAY_DIR}" | head -50
-    else
-        if ! eval "${kustomize_cmd}"; then
-            log_error "Kustomize deployment failed"
-            exit 1
-        fi
-        log_success "Kustomize deployment successful"
-    fi
-}
-
 # Rollback to previous deployment (Helm)
 do_rollback() {
     log_section "Rolling Back Deployment (Helm)"
@@ -573,41 +502,10 @@ do_rollback() {
     verify_deployment
 }
 
-# Rollback to previous deployment (Kustomize)
-do_rollback_kustomize() {
-    log_section "Rolling Back Deployment (Kustomize)"
-
-    if [ "$DRY_RUN" = true ]; then
-        log_info "[DRY-RUN] Would rollback all deployments to previous revision"
-        return 0
-    fi
-
-    log_info "Rolling back all deployments..."
-    local deployments
-    deployments=$(kubectl --context "${KUBE_CONTEXT}" get deployments -n "${NAMESPACE}" -o name 2>/dev/null)
-
-    if [ -z "$deployments" ]; then
-        log_error "No deployments found in namespace ${NAMESPACE}"
-        exit 1
-    fi
-
-    for deploy in $deployments; do
-        log_info "Rolling back ${deploy}..."
-        if kubectl --context "${KUBE_CONTEXT}" rollout undo "${deploy}" -n "${NAMESPACE}"; then
-            log_success "${deploy} rolled back"
-        else
-            log_warning "Failed to rollback ${deploy}"
-        fi
-    done
-
-    verify_deployment
-}
-
 # Main execution
 main() {
     log_section "WaddleBot Beta Deployment Script"
     log_info "Tag: ${TAG}"
-    log_info "Method: ${DEPLOY_METHOD}"
     log_info "Namespace: ${NAMESPACE}"
     log_info "Kube Context: ${KUBE_CONTEXT}"
     if [ "$DRY_RUN" = true ]; then
@@ -617,18 +515,10 @@ main() {
     check_prerequisites
 
     if [ "$DO_ROLLBACK" = true ]; then
-        if [ "$DEPLOY_METHOD" = "kustomize" ]; then
-            do_rollback_kustomize
-        else
-            do_rollback
-        fi
+        do_rollback
     else
         build_and_push_images
-        if [ "$DEPLOY_METHOD" = "kustomize" ]; then
-            do_deploy_kustomize
-        else
-            do_deploy
-        fi
+        do_deploy
         verify_deployment
     fi
 
