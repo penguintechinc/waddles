@@ -13,6 +13,7 @@ pub mod egress;
 pub mod error;
 pub mod http;
 pub mod ingest;
+pub mod jwt_keys;
 pub mod orchestrator;
 pub mod pipeline;
 pub mod redact;
@@ -89,6 +90,14 @@ where
     // `WhipState` so a `POST /whip/{token}` hand-off reaches the same
     // dispatch loop as RTMP/SRT.
     let (ingest_tx, ingest_rx) = tokio::sync::mpsc::channel::<ingest::IngestSession>(256);
+
+    // --- Platform JWT verifying keys (ES256 public keys from `platform_vault`).
+    // Hard cutover: no shared secret exists any more; with no usable key every
+    // authenticated request is refused (`no_key`/`bad_kid`) and `/readyz`
+    // reports `jwt_keys` degraded. A seed failure is logged, never fatal --
+    // ingest must keep serving, and the poller keeps retrying.
+    let mut config = config;
+    config.jwt_keys = init_jwt_keys(&config).await;
 
     let state =
         http::AppState::new_with_ingest_tx(config.clone(), prom_registry, ingest_tx.clone());
@@ -221,6 +230,48 @@ where
     Ok(())
 }
 
+/// Env override for the connection string of the read-only role that can
+/// `SELECT` `platform_vault.public_keys`; unset = the service's own DB URL.
+const PLATFORM_KEYS_DATABASE_URL_ENV: &str = "PLATFORM_KEYS_DATABASE_URL";
+
+/// How long startup waits for the first key snapshot before serving anyway.
+const JWT_KEYS_SEED_WAIT: Duration = Duration::from_secs(10);
+
+/// Per-query timeout of the key loader's connection.
+const JWT_KEYS_DB_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Builds the ES256 verifying-key cache over `platform_vault.public_keys`
+/// (type `JWT_SIGNING`), seeds it with a bounded wait and starts the poller.
+/// Never panics and never logs the connection string.
+async fn init_jwt_keys(config: &config::Config) -> jwt_keys::JwtKeys {
+    let url = std::env::var(PLATFORM_KEYS_DATABASE_URL_ENV)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| db::connection_url(config));
+    let loader = Arc::new(platform_keys::pg::PgKeyLoader::new(
+        url,
+        JWT_KEYS_DB_TIMEOUT,
+    ));
+    let cache = match platform_keys::KeyCache::new(loader, jwt_keys::JwtKeys::cache_config()) {
+        Ok(cache) => Arc::new(cache),
+        Err(err) => {
+            tracing::error!(error = %err, "platform JWT key cache misconfigured; all authenticated requests will be refused");
+            return jwt_keys::JwtKeys::None;
+        }
+    };
+    match cache.seed(JWT_KEYS_SEED_WAIT).await {
+        Ok(()) => tracing::info!("platform JWT verifying keys loaded"),
+        Err(err) => tracing::error!(
+            error = %err,
+            "platform JWT verifying keys not available at startup; authenticated requests refused until the poller loads them"
+        ),
+    }
+    // Detached for the process lifetime: the poller stops when the runtime exits.
+    let (stop, _poller) = cache.spawn_poller();
+    std::mem::forget(stop);
+    jwt_keys::JwtKeys::from_cache(cache)
+}
+
 /// Waits for SIGINT (Ctrl-C) or SIGTERM (Kubernetes pod termination) and
 /// returns, letting `axum::serve`'s graceful shutdown drain in-flight
 /// requests rather than dropping connections mid-response.
@@ -311,7 +362,7 @@ mod record_status_tests {
             db_password: config::Secret::new("x"),
             cache_password: None,
             service_api_key: config::Secret::new("x"),
-            jwt_hmac_secret: None,
+            jwt_keys: crate::jwt_keys::JwtKeys::None,
         };
         let mut state = http::AppState::new(cfg, prometheus::Registry::new());
         state.record = readiness;

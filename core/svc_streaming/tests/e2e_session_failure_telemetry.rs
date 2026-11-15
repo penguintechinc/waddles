@@ -113,7 +113,7 @@ async fn every_session_failure_reason_is_counted_and_none_is_recorded_as_started
         db_password: Secret::new("unused"),
         cache_password: None,
         service_api_key: Secret::new("unused"),
-        jwt_hmac_secret: None,
+        jwt_keys: svc_streaming::jwt_keys::JwtKeys::None,
     };
 
     let prom = prometheus::Registry::new();

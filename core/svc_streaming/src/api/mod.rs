@@ -251,7 +251,7 @@ mod tests {
             db_password: crate::config::Secret::new("x"),
             cache_password: None,
             service_api_key: crate::config::Secret::new("x"),
-            jwt_hmac_secret: None,
+            jwt_keys: crate::jwt_keys::JwtKeys::None,
         };
         let state = AppState::new(config, prometheus::Registry::new());
         let app = router(default_engine()).with_state(state);

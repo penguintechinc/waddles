@@ -215,7 +215,7 @@ async fn run_scenario(sc: Scenario) {
         db_password: Secret::new("unused"),
         cache_password: None,
         service_api_key: Secret::new("unused"),
-        jwt_hmac_secret: None,
+        jwt_keys: svc_streaming::jwt_keys::JwtKeys::None,
     };
 
     let db = svc_streaming::db::get_or_connect(&config)

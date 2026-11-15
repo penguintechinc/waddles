@@ -14,7 +14,6 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{Request, StatusCode};
 use clap::Parser;
 use http_body_util::BodyExt;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use tower::ServiceExt;
 
@@ -27,7 +26,7 @@ use svc_streaming::pipeline::{
     PipelineStatus,
 };
 
-const HMAC_SECRET: &str = "test-hmac-secret";
+mod jwt_common;
 /// Seeded in `tenants`/`communities` below: tenant id 1 ("tenant-abc") owns
 /// community 10; community 20 belongs to a different tenant (id 2) and has
 /// no matching row in `tenants`, exercising the cross-tenant 403 path.
@@ -140,7 +139,7 @@ fn test_state() -> AppState {
         db_password: Secret::new("db-pass"),
         cache_password: None,
         service_api_key: Secret::new("service-key"),
-        jwt_hmac_secret: Some(Secret::new(HMAC_SECRET)),
+        jwt_keys: jwt_common::keys(),
     };
     AppState::new(config, prometheus::Registry::new())
 }
@@ -153,12 +152,7 @@ async fn build_app() -> (axum::Router, DatabaseConnection, SharedEngine) {
 }
 
 fn sign_token(claims: &Claims) -> String {
-    encode(
-        &Header::new(Algorithm::HS256),
-        claims,
-        &EncodingKey::from_secret(HMAC_SECRET.as_bytes()),
-    )
-    .unwrap()
+    jwt_common::sign(claims)
 }
 
 fn claims_for_tenant(state: &AppState, tenant: &str) -> Claims {
@@ -1197,7 +1191,7 @@ async fn build_app_capturing(hub_api_url: &str) -> (axum::Router, DatabaseConnec
             db_password: Secret::new("db-pass"),
             cache_password: None,
             service_api_key: Secret::new("service-key"),
-            jwt_hmac_secret: Some(Secret::new(HMAC_SECRET)),
+            jwt_keys: jwt_common::keys(),
         },
         prometheus::Registry::new(),
     );

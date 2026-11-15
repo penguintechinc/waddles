@@ -716,7 +716,7 @@ mod tests {
             db_password: Secret::new("db-pass"),
             cache_password: None,
             service_api_key: Secret::new("service-key"),
-            jwt_hmac_secret: None,
+            jwt_keys: crate::jwt_keys::JwtKeys::None,
         };
 
         let listener = SrtListener::from_config(&cfg);

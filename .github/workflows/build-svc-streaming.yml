@@ -21,12 +21,14 @@ on:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
     paths:
       - 'core/svc_streaming/**'
+      - 'core/platform_keys/**'
       - '.version'
       - '.github/workflows/build-svc-streaming.yml'
   pull_request:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
     paths:
       - 'core/svc_streaming/**'
+      - 'core/platform_keys/**'
       - '.github/workflows/build-svc-streaming.yml'
   merge_group:
     types: [checks_requested]
@@ -47,6 +49,7 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   MODULE_NAME: svc-streaming
   MODULE_PATH: core/svc_streaming
+  BUILD_CONTEXT: core
   # amd64-only, same toggle as the other build-*.yml workflows. The GPU variants
   # are amd64 hardware; cpu could go multi-arch later without changing the variants.
   BUILD_PLATFORM: linux/amd64
@@ -169,7 +172,7 @@ jobs:
         id: build
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         with:
-          context: ${{ env.MODULE_PATH }}
+          context: ${{ env.BUILD_CONTEXT }}
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
           target: ${{ matrix.variant }}
           push: true
@@ -249,7 +252,7 @@ jobs:
       - name: Build image (${{ matrix.variant }}, not pushed)
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         with:
-          context: ${{ env.MODULE_PATH }}
+          context: ${{ env.BUILD_CONTEXT }}
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
           target: ${{ matrix.variant }}
           push: false

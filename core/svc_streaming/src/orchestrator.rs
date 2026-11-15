@@ -1457,7 +1457,7 @@ mod tests {
             db_password: crate::config::Secret::new("x"),
             cache_password: None,
             service_api_key: crate::config::Secret::new("x"),
-            jwt_hmac_secret: None,
+            jwt_keys: crate::jwt_keys::JwtKeys::None,
         };
         let registry = prometheus::Registry::new();
         let supervisor = Arc::new(FfmpegSupervisor::new(

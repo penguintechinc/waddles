@@ -28,6 +28,9 @@ use tower::ServiceExt;
 use svc_streaming::config::{CliConfig, Config, Secret};
 use svc_streaming::http::{router, AppState};
 
+mod jwt_common;
+
+/// A legacy shared-secret string: only ever used to forge HS* tokens that must be refused.
 const SECRET: &str = "jwt-metrics-test-secret";
 
 /// `(metric name, label name -> value, value)` for every exported point.
@@ -90,8 +93,8 @@ fn token(header: &Value, claims: &Value) -> String {
     let message = format!("{}.{}", b64(header), b64(claims));
     let signature = jsonwebtoken::crypto::sign(
         message.as_bytes(),
-        &EncodingKey::from_secret(SECRET.as_bytes()),
-        Algorithm::HS256,
+        &jwt_common::fixture().encoding,
+        Algorithm::ES256,
     )
     .expect("sign");
     format!("{message}.{signature}")
@@ -105,7 +108,7 @@ fn state() -> AppState {
             db_password: Secret::new("db-pass"),
             cache_password: None,
             service_api_key: Secret::new("service-key"),
-            jwt_hmac_secret: Some(Secret::new(SECRET)),
+            jwt_keys: jwt_common::keys(),
         },
         prometheus::Registry::new(),
     )
@@ -148,7 +151,7 @@ async fn the_router_maps_rejections_and_reports_into_the_shared_metric_stream() 
         "sub": "user-1", "iss": iss, "aud": aud, "iat": now, "exp": now + 3600,
         "scope": "streaming:read", "tenant": "tenant-abc", "teams": [], "roles": [],
     });
-    let header = json!({"alg": "HS256", "typ": "JWT", "kid": "hs256-v1"});
+    let header = json!({"alg": "ES256", "typ": "JWT", "kid": jwt_common::KID});
 
     // 200: valid.
     assert_eq!(status(&app, &token(&header, &claims)).await, StatusCode::OK);
@@ -190,19 +193,19 @@ async fn the_router_maps_rejections_and_reports_into_the_shared_metric_stream() 
             .iter()
             .filter(|(name, attrs, _)| {
                 name == "waddles_jwt_verifications_total"
-                    && attrs.get("verifier").map(String::as_str) == Some("platform_hs256")
+                    && attrs.get("verifier").map(String::as_str) == Some("platform_es256")
                     && attrs.get("alg").map(String::as_str) == Some(alg)
                     && attrs.get("outcome").map(String::as_str) == Some(outcome)
             })
             .map(|(_, _, value)| *value)
             .sum()
     };
-    assert_eq!(count("hs256", "ok"), 1);
+    assert_eq!(count("es256", "ok"), 1);
     assert_eq!(count("none", "alg_none"), 1);
     assert_eq!(count("hs512", "alg_mismatch"), 1);
-    assert_eq!(count("hs256", "forbidden_header"), 1);
-    assert_eq!(count("hs256", "missing_claim"), 1);
-    assert_eq!(count("hs256", "expired"), 1);
+    assert_eq!(count("es256", "forbidden_header"), 1);
+    assert_eq!(count("es256", "missing_claim"), 1);
+    assert_eq!(count("es256", "expired"), 1);
 
     let total: u64 = points
         .iter()

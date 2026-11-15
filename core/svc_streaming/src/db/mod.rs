@@ -18,7 +18,7 @@ pub mod entities;
 /// through `CliConfig` -- `src/config.rs` is owned by a different chunk,
 /// so this mirrors the README's documented `DB_TYPE` behavior without
 /// editing that file.
-fn connection_url(config: &Config) -> String {
+pub(crate) fn connection_url(config: &Config) -> String {
     let cli = &config.cli;
     match std::env::var("DB_TYPE").as_deref() {
         Ok("sqlite") => format!("sqlite://{name}?mode=rwc", name = cli.db_name),
@@ -91,7 +91,7 @@ mod tests {
             db_password: Secret::new("test-password"),
             cache_password: None,
             service_api_key: Secret::new("x"),
-            jwt_hmac_secret: None,
+            jwt_keys: crate::jwt_keys::JwtKeys::None,
         }
     }
 
@@ -134,7 +134,7 @@ mod tests {
             db_password: Secret::new("unused"),
             cache_password: None,
             service_api_key: Secret::new("x"),
-            jwt_hmac_secret: None,
+            jwt_keys: crate::jwt_keys::JwtKeys::None,
         };
         let first = get_or_connect(&config).await.expect("connects");
         // Second call returns the cached connection rather than

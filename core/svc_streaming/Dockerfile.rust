@@ -45,13 +45,16 @@ RUN apt-get update \
         cmake=3.25.1-1 build-essential=12.9 curl=7.88.1-10+deb12u15 ca-certificates=20250419~deb12u2 \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
+# Build context is `core/` (the `platform-keys` path dependency lives beside this crate, like svc_action's).
+COPY platform_keys/Cargo.toml ./platform_keys/Cargo.toml
+COPY platform_keys/src ./platform_keys/src
+WORKDIR /build/svc_streaming
+COPY svc_streaming/Cargo.toml svc_streaming/Cargo.lock ./
 # tests/ must exist: Cargo.toml declares [[test]] e2e_real_media with an
 # implicit path, and cargo refuses to parse the manifest without it (even for
 # `cargo build`). Tests are not compiled by the release build.
-COPY tests ./tests
-COPY src ./src
+COPY svc_streaming/tests ./tests
+COPY svc_streaming/src ./src
 # Bump CACHE_EPOCH (workflow build-arg, repo variable ALPHA_CACHE_EPOCH) to abandon every cache mount id
 # below and force a clean rebuild; the value is also part of the RUN layer cache key.
 ARG CACHE_EPOCH=1
@@ -69,7 +72,7 @@ ARG CACHE_EPOCH=1
 # deploy-set runners (release pushes) can reach the BuildKit pod -- docs/ALPHA_CHANGED_ONLY_BUILDS.md.
 RUN --mount=type=cache,id=waddles-cargo-registry-svc-streaming-v${CACHE_EPOCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=waddles-cargo-git-svc-streaming-v${CACHE_EPOCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=waddles-target-svc-streaming-v${CACHE_EPOCH},target=/build/target,sharing=locked \
+    --mount=type=cache,id=waddles-target-svc-streaming-v${CACHE_EPOCH},target=/build/svc_streaming/target,sharing=locked \
     cargo build --release --locked \
     && install -D -m 0755 target/release/svc-streaming /out/svc-streaming
 

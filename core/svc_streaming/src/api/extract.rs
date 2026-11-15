@@ -85,7 +85,7 @@ mod tests {
             db_password: Secret::new("x"),
             cache_password: None,
             service_api_key: Secret::new("x"),
-            jwt_hmac_secret: None,
+            jwt_keys: crate::jwt_keys::JwtKeys::None,
         };
         AppState::new(config, prometheus::Registry::new())
     }

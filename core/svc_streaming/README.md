@@ -181,9 +181,12 @@ the raw path or an ingest credential.
 | `CACHE_PASSWORD` | *(optional, env-only)* | |
 | `SERVICE_API_KEY` | *(required, env-only)* | `X-Service-Key` value for `/api/v1/internal/*` |
 | `JWT_ISSUER`/`JWT_AUDIENCE` | `https://auth.penguintech.io`/`svc-streaming` | |
-| `JWT_HMAC_SECRET` | *(optional, env-only)* | HS256 verification key; no key configured = 401 on every authenticated route |
-| `JWT_JWKS_URL` | *(unset)* | Declared, RS256/JWKS verification not implemented yet |
+| `PLATFORM_KEYS_DATABASE_URL` | *(unset = the service DB URL)* | Optional override: connection string of the read-only role that can `SELECT` `platform_vault.public_keys` (env-only, never logged) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`/`_PROTOCOL`/`_HEADERS`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | unset | Standard OTLP env config; unset endpoint = tracing-only (no OTLP export attempted) |
+
+### Platform JWT verification (ES256)
+
+User/session JWTs are verified as **ES256 only**: the algorithm is pinned in code (`alg` from the token is only compared, never trusted; `none`, `HS*`, `RS*`, `EdDSA` and unknown values are refused), a `kid` is required, and `iss`/`aud` are enforced. The `kid` resolves to a **public** key (65-byte uncompressed P-256 point) from `platform_vault.public_keys` through the `platform-keys` cache: seeded at startup, lazy-loaded on an unknown kid, refreshed every 60 s, last-known keys kept on a database outage. A rotated key verifies only until `rotated_at + 2 h` (and only while the snapshot is fresh); an unknown, expired or stale kid is refused. There is **no shared secret** (the old HMAC env var and JWKS URL option are gone); with no usable key every authenticated route returns 401 and `/readyz` reports `jwt_keys` degraded. The service DB role needs `SELECT` on `platform_vault.public_keys` (or set `PLATFORM_KEYS_DATABASE_URL`).
 
 All secrets are env-only, never accepted as a CLI flag (`config.rs`).
 
@@ -237,6 +240,7 @@ together into one running service -- see Runtime Wiring below.
 | `src/orchestrator.rs` | Ingest -> pipeline -> egress wiring: `Orchestrator`, `PipelineRegistry`, `DbIngestAuth`, `RefreshingSrtAuth` | **S12** -- Implemented |
 | `src/config.rs` | Env-driven `Config`/`CliConfig`, secrets never as CLI args | Implemented |
 | `src/telemetry.rs`, `src/telemetry/` | `tracing` + OTLP traces/metrics + Prometheus registry; `stream.rs` (stream latency/stage/external-call instruments), `trace_context.rs` (W3C propagation, route-template request spans) | Implemented (OTel *logs* export not wired -- no `opentelemetry-appender-tracing` in the approved dependency set yet) |
+| `src/jwt_keys.rs` | ES256 verifying keys: `platform_keys::KeyCache` over `platform_vault.public_keys` (type 3 `JWT_SIGNING`, 2 h verify window for rotated keys) | Implemented |
 | `src/http/` | Router (community JWT + internal ServiceKey + HLS + WHIP/WHEP mounts), `/health`, `/readyz`, two-document OpenAPI split | Implemented |
 | `src/api/` | Control-plane `/api/v1/*` routes | Implemented |
 | `src/pipeline/` | `PipelineSpec`/model types, `ffmpeg` argv builder, `FfmpegSupervisor` lifecycle | Implemented |

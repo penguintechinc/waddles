@@ -2239,6 +2239,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
+name = "platform-keys"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "opentelemetry",
+ "sea-orm",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pluralizer"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3846,6 +3858,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "platform-keys",
  "prometheus",
  "rcgen",
  "reqwest 0.12.28",

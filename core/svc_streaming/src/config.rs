@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use thiserror::Error;
 
+use crate::jwt_keys::JwtKeys;
 use crate::pipeline::encoder::EncoderPreference;
 
 /// Errors that can occur while loading configuration.
@@ -142,10 +143,6 @@ pub struct CliConfig {
     /// Expected JWT `aud` claim.
     #[arg(long, env = "JWT_AUDIENCE", default_value = "svc-streaming")]
     pub jwt_audience: String,
-    /// JWKS endpoint for RS256 verification; when unset, HS256 with
-    /// `JWT_HMAC_SECRET` (env-only, see [`Config::load`]) is used instead.
-    #[arg(long, env = "JWT_JWKS_URL")]
-    pub jwt_jwks_url: Option<String>,
 
     /// Base URL of hub-api's token ledger (`POST
     /// /api/v1/marketplace/communities/{id}/tokens/debit`) -- see
@@ -221,7 +218,9 @@ pub struct Config {
     pub db_password: Secret,
     pub cache_password: Option<Secret>,
     pub service_api_key: Secret,
-    pub jwt_hmac_secret: Option<Secret>,
+    /// ES256 verifying keys for the platform user/session JWT (public keys from
+    /// `platform_vault`, wired in `run_with_shutdown`; [`JwtKeys::None`] until then).
+    pub jwt_keys: JwtKeys,
 }
 
 impl fmt::Debug for Config {
@@ -234,10 +233,7 @@ impl fmt::Debug for Config {
                 &self.cache_password.as_ref().map(|_| Secret::new("")),
             )
             .field("service_api_key", &Secret::new(""))
-            .field(
-                "jwt_hmac_secret",
-                &self.jwt_hmac_secret.as_ref().map(|_| Secret::new("")),
-            )
+            .field("jwt_keys", &self.jwt_keys)
             .finish()
     }
 }
@@ -259,13 +255,12 @@ impl Config {
         let db_password = Secret::new(env_required("DB_PASSWORD")?);
         let cache_password = std::env::var("CACHE_PASSWORD").ok().map(Secret::new);
         let service_api_key = Secret::new(env_required("SERVICE_API_KEY")?);
-        let jwt_hmac_secret = std::env::var("JWT_HMAC_SECRET").ok().map(Secret::new);
         Ok(Self {
             cli,
             db_password,
             cache_password,
             service_api_key,
-            jwt_hmac_secret,
+            jwt_keys: JwtKeys::None,
         })
     }
 }
@@ -284,12 +279,7 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn clear_secret_env() {
-        for var in [
-            "DB_PASSWORD",
-            "CACHE_PASSWORD",
-            "SERVICE_API_KEY",
-            "JWT_HMAC_SECRET",
-        ] {
+        for var in ["DB_PASSWORD", "CACHE_PASSWORD", "SERVICE_API_KEY"] {
             // SAFETY: serialized by ENV_LOCK, no concurrent readers/writers
             // of these specific variables within the test process.
             unsafe { std::env::remove_var(var) };

@@ -38,7 +38,7 @@ utoipa-swagger-ui = { version = "=10.0.2", features = ["axum"] }
 # pure-Rust `rsa` crate, which carries RUSTSEC-2023-0071 (Marvin Attack --
 # RSA private-key timing side-channel, no fix available) -- a live network
 # service verifying tokens is exactly the exposed scenario the advisory
-# warns about, even though this scaffold only exercises the HS256 path.
+# warns about, even though this crate only exercises the ES256 path.
 # `aws_lc_rs` avoids that dependency entirely (requires cmake + a C/C++
 # compiler in the Docker builder stage -- see `Dockerfile.rust`).
 jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["use_pem", "aws_lc_rs"] }
@@ -107,6 +107,9 @@ hyper-util = { version = "=0.1.20", features = ["server-auto", "tokio", "service
 ffmpeg-sidecar = "=2.7.0"
 hls_m3u8 = "=0.7.0"
 object_store = { version = "=0.14.1", features = ["aws"] }
+# Verifying-key cache over `platform_vault.public_keys` (Secrets T10): the platform user/session
+# JWT verifier is ES256 against these public keys, not a shared HMAC secret.
+platform-keys = { path = "../platform_keys" }
 
 # Direct process-group signalling (`killpg`) and non-reaping exit detection
 # (`waitid(WNOWAIT)`) for `pipeline::process_group` -- the supervisor used to
