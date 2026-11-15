@@ -94,7 +94,7 @@ kubectl --context dal2alpha -n waddlebot create configmap waddlebot-internal-ca-
   --from-literal=ca.crt="$(kubectl --context dal2alpha -n waddlebot get secret waddlebot-hub-api-http-tls -o jsonpath='{.data.ca\.crt}' | base64 -d)" \
   --dry-run=client -o yaml | kubectl --context dal2alpha apply -f -
 ```
-Needs the Gateway API `BackendTLSPolicy` CRD (`gateway.networking.k8s.io/v1alpha3`); override with
+Needs the Gateway API `BackendTLSPolicy` CRD (`gateway.networking.k8s.io/v1`); override with
 `httproute.backendTls.apiVersion` if the cluster serves another version.
 
 ## 5. Waddles (helm 3.17.x -- NOT v4, helm#31361 fresh-install bug)

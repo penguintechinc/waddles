@@ -2762,7 +2762,7 @@ httproute:
   # via a BackendTLSPolicy verifying the internal CA. caPem (public CA cert, optional) renders the
   # CA ConfigMap; otherwise caConfigMapName must pre-exist (k8s/dal2alpha/APPLY.md).
   backendTls:
-    apiVersion: gateway.networking.k8s.io/v1alpha3
+    apiVersion: gateway.networking.k8s.io/v1
     caConfigMapName: ""
     caPem: ""
 
