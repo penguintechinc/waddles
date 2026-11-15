@@ -746,6 +746,33 @@ def get_channel_permission_overrides(
 _OVERRIDE_SCOPES = frozenset({"permanent", "temporary", "both"})
 
 
+def _role_covered(role: Any, editor_scopes: frozenset[str]) -> bool:
+    """True when the editor holds every scope `role` holds (admin-kind roles hold the full set)."""
+    stored = (role.base_claims or {}).get("scopes", [])
+    return effective_scopes(getattr(role, "role_kind", None), stored) <= editor_scopes
+
+
+def _protected_role_ids(
+    dal: Any, community_id: int, channel_id: int, editor_scopes: frozenset[str]
+) -> set[int]:
+    """Role ids with an override on this channel whose scopes the editor does not fully cover."""
+    table = dal.hub_channel_permission_overrides
+    role_ids = {int(r.community_role_id) for r in dal(table.hub_channel_id == channel_id).select()}
+    protected: set[int] = set()
+    for role_id in role_ids:
+        role = (
+            dal(
+                (dal.community_roles.id == role_id)
+                & (dal.community_roles.community_id == community_id)
+            )
+            .select()
+            .first()
+        )
+        if role is None or not _role_covered(role, editor_scopes):
+            protected.add(role_id)
+    return protected
+
+
 def _validated_overrides(
     dal: Any, community_id: int, overrides: list[dict[str, Any]], editor_scopes: frozenset[str]
 ) -> list[dict[str, Any]]:
@@ -791,7 +818,7 @@ def update_channel_permission_overrides(
     *,
     editor_scopes: frozenset[str],
 ) -> bool:
-    """Replace all overrides for one channel; invalidates every member's claims cache."""
+    """Replace the editor-covered overrides of one channel; clears every member's claims cache."""
     ensure_community_tables(dal)
     if (
         dal((dal.hub_channels.id == channel_id) & (dal.hub_channels.community_id == community_id))
@@ -802,7 +829,14 @@ def update_channel_permission_overrides(
         return False
 
     clean = _validated_overrides(dal, community_id, overrides, editor_scopes)
-    dal(dal.hub_channel_permission_overrides.hub_channel_id == channel_id).delete()
+    # Replace only rows for roles the editor fully covers; rows for higher-privileged roles
+    # survive untouched (no blanket delete -> a PUT can never strip or invert an admin's override).
+    table = dal.hub_channel_permission_overrides
+    protected = _protected_role_ids(dal, community_id, channel_id, editor_scopes)
+    query = table.hub_channel_id == channel_id
+    if protected:
+        query = query & ~table.community_role_id.belongs(protected)
+    dal(query).delete()
     for item in clean:
         dal.hub_channel_permission_overrides.insert(
             hub_channel_id=channel_id,

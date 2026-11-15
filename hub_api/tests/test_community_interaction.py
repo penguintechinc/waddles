@@ -893,6 +893,48 @@ class TestChannelOverrideEscalation:
         )
         assert response.status_code == 200
 
+    async def test_moderator_cannot_touch_admin_role_overrides(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        """Privilege inversion: no deny on an admin role, and a PUT never strips its override."""
+        community_id, channel_id, role_id = await self._setup(community_db)
+        dal, _ = community_db
+        admin_role = int(
+            dal.community_roles.insert(
+                community_id=community_id,
+                name="community-admin",
+                is_system=True,
+                role_kind=1,
+                base_claims={"scopes": []},
+                priority=100,
+            )
+        )
+        dal.hub_channel_permission_overrides.insert(
+            hub_channel_id=channel_id,
+            community_role_id=admin_role,
+            grant_scopes=["channels:read"],
+            deny_scopes=[],
+            scope="both",
+        )
+        dal.commit()
+        denied = await self._put(
+            client,
+            auth_headers,
+            (community_id, channel_id, admin_role),
+            {"denyScopes": ["channels:read"]},
+        )
+        assert denied.status_code == 403
+        # A PUT that omits the admin role's override (entries for a covered role only) keeps it.
+        ok = await self._put(
+            client, auth_headers, (community_id, channel_id, role_id), {"grantScopes": []}
+        )
+        assert ok.status_code == 200
+        rows = dal(dal.hub_channel_permission_overrides.hub_channel_id == channel_id).select()
+        by_role = {int(r.community_role_id): r for r in rows}
+        assert admin_role in by_role
+        assert list(by_role[admin_role].grant_scopes) == ["channels:read"]
+        assert list(by_role[admin_role].deny_scopes) == []
+
 
 class TestMemberChannels:
     async def test_list_channels_without_current_user_falls_back(
