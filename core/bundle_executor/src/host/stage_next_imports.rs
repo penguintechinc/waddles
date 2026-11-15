@@ -375,3 +375,6 @@ impl overlay::Host for ExecState {
         Err(overlay_not_implemented())
     }
 }
+
+#[cfg(test)]
+mod tests;
