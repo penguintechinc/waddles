@@ -170,63 +170,6 @@
         "required": ["avatars", "updated_ms"],
         "additionalProperties": false
       }
-    },
-    "waddles.core.example.dj.now_playing": {
-      "doc": "DJ 'now playing' card (dj `PublicState.now_playing`), published by the dj app. `now_playing: null` = nothing playing. No requester identity.",
-      "replay": true,
-      "max_payload_bytes": 4096,
-      "rate_limit_per_minute": 120,
-      "schema": {
-        "type": "object",
-        "properties": {
-          "now_playing": {
-            "oneOf": [
-              {
-                "$ref": "#/definitions/public_track"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "updated_ms": {
-            "type": "integer",
-            "minimum": 0
-          }
-        },
-        "required": [
-          "now_playing",
-          "updated_ms"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "waddles.core.example.dj.queue": {
-      "doc": "DJ 'up next' list (dj `PublicState.queue`), at most 50 tracks, published by the dj app. No requester identity.",
-      "replay": true,
-      "max_payload_bytes": 16384,
-      "rate_limit_per_minute": 120,
-      "schema": {
-        "type": "object",
-        "properties": {
-          "queue": {
-            "type": "array",
-            "maxItems": 50,
-            "items": {
-              "$ref": "#/definitions/public_track"
-            }
-          },
-          "updated_ms": {
-            "type": "integer",
-            "minimum": 0
-          }
-        },
-        "required": [
-          "queue",
-          "updated_ms"
-        ],
-        "additionalProperties": false
-      }
     }
   }
 }

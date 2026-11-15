@@ -177,6 +177,7 @@ fn on_adds_a_dj_pick_after_viewer_requests_and_announces_it() {
             "dj.get",
             "requests.advance_due",
             "requests.list",
+            "history.list",
             "music.stats.top",
             "music.stats.top",
             "requests.add"
@@ -964,6 +965,57 @@ fn top_songs_fill_the_gap_when_the_ai_has_nothing_and_respect_cooldown_and_dupes
         1,
         "{titles:?}"
     );
+}
+
+#[test]
+fn recent_history_is_never_replayed_case_insensitively() {
+    let h = host();
+    on(&h);
+    // the model's first hint and a top song were both played recently (case differs)
+    h.svc(|s| {
+        s.history = vec![
+            ("HEROES tonight".into(), "janji".into()),
+            ("random banger".into(), "SOME BAND".into()),
+        ];
+        s.stats_songs = vec![("Random Banger".into(), "Some Band".into(), 9)];
+    });
+    suggest(&h, &[("Heroes Tonight", "Janji"), ("On And On", "Cartoon")]);
+    let r = dj(&h, "m1", "!dj fill");
+    assert!(r.contains("On And On") && !r.contains("Heroes"), "{r}");
+    let titles: Vec<String> = h.svc(|s| s.queue.iter().map(|q| q.title.clone()).collect());
+    assert_eq!(titles, ["On And On"]);
+    // the stats-fill candidate that was just played is skipped too (no AI hints this time)
+    h.svc(|s| s.queue.clear());
+    h.now.set(h.now.get() + 3_700_000);
+    suggest(&h, &[]);
+    let r = dj(&h, "m2", "!dj fill");
+    assert!(!r.contains("Random Banger"), "{r}");
+    assert!(h.svc(|s| s.queue.is_empty()), "nothing replayed");
+    // the read used the bounded window and carried no requester
+    let hist: Vec<_> = h
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.1 == "history.list")
+        .map(|c| c.2.clone())
+        .collect();
+    assert_eq!(hist.len(), 2);
+    assert!(hist.iter().all(|a| a["limit"] == 25));
+}
+
+#[test]
+fn missing_history_scope_or_outage_just_means_no_replay_filter() {
+    let h = host();
+    on(&h);
+    h.svc(|s| s.history = vec![("Heroes Tonight".into(), "Janji".into())]);
+    h.deny_history.set(true);
+    suggest(&h, &[("Heroes Tonight", "Janji")]);
+    assert!(dj(&h, "m1", "!dj fill").contains("Heroes Tonight"));
+    let h = host();
+    on(&h);
+    h.fail_tools.borrow_mut().push("history.list".into());
+    suggest(&h, &[("Heroes Tonight", "Janji")]);
+    assert!(dj(&h, "m2", "!dj fill").contains("Heroes Tonight"));
 }
 
 #[test]

@@ -14,7 +14,8 @@ const BUNDLE_MANIFEST: &str = include_str!("../bundle.yaml");
 /// Tools of `waddles.core.service.music-requests` the DJ may request (from
 /// `docs/music-requests-service.md`): every one must be granted, and nothing else.
 const REQUESTS_TARGET: &str = "waddles.core.service.music-requests";
-const REQUESTS_TOOLS: [&str; 8] = [
+const REQUESTS_TOOLS: [&str; 9] = [
+    "history.list",
     "settings.set",
     "music.stats.top",
     "requests.list",

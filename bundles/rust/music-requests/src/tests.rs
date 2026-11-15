@@ -298,7 +298,7 @@ fn ctx(actor: Option<&str>, scopes: &[&str]) -> ToolContext {
 }
 
 fn member(a: &str) -> ToolContext {
-    ctx(Some(a), &[SCOPE_READ, SCOPE_WRITE])
+    ctx(Some(a), &[SCOPE_READ, SCOPE_WRITE, SCOPE_HISTORY_READ])
 }
 
 fn admin() -> ToolContext {
@@ -307,6 +307,7 @@ fn admin() -> ToolContext {
         &[
             SCOPE_READ,
             SCOPE_WRITE,
+            SCOPE_HISTORY_READ,
             SCOPE_MANAGE,
             SCOPE_DJ_MANAGE,
             SCOPE_SETTINGS_WRITE,
@@ -593,6 +594,22 @@ fn advance_writes_history_and_promotes_next() {
         r.ok(&member(ALICE), "history.list", json!({"limit": 1}))["items"][0]["title"],
         "Second"
     );
+}
+
+#[test]
+fn history_list_refuses_a_caller_without_the_history_scope() {
+    let r = rig();
+    let no_scope = ctx(Some(ALICE), &[SCOPE_READ, SCOPE_WRITE, SCOPE_STATS_READ]);
+    assert!(matches!(
+        r.call(&no_scope, "history.list", json!({})),
+        Err(ToolError::Forbidden)
+    ));
+    let anon = ctx(None, &[]);
+    assert!(matches!(
+        r.call(&anon, "history.list", json!({})),
+        Err(ToolError::Forbidden)
+    ));
+    r.ok(&member(ALICE), "history.list", json!({}));
 }
 
 #[test]

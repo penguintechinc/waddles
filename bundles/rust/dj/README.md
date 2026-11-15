@@ -34,6 +34,9 @@ Planning (every invocation re-reads the queue first; there is still **no periodi
    songs fill gaps. Stats are never sent to the model (viewer-influenced text); only the DJ's own queued titles go to
    `ai.complete` as "avoid". Replays are blocked by the replay cooldown (the DJ's own recent picks) and by anything
    already queued/playing. No grant or an outage just means no weighting.
+5b. **No replay:** the planner reads `history.list {limit:25}` (read-only, no requester; scope `music:history.read`, host-enforced)
+   and skips any candidate (playlist, AI hint or top-song fill) whose title + artist, case-insensitive, matches a recently
+   played song. No grant or an outage just means no filter.
 6. **DMCA-safe mode** is the service's single per-community flag (`requests.list.dmca_safe`, read on every plan; the
    DJ's old local `dmca_safe` setting is gone). **Fail closed:** an unknown / missing / unparseable flag, or the
    old local flag still stored, means safe-only, never off. **Carry-over:** a community that had the old local flag ON gets
@@ -97,7 +100,7 @@ Queue service (`waddles.core.service.music-requests`, scopes enforced by the hos
 sends an actor or community): `requests.list {limit}` -> `{now_playing, queue, total_queued, ai_dj_on}`,
 `requests.advance_due {}`, `requests.add {title, artist, source_url?, duration_ms, kind:"dj"}` -> `{item, position}`
 (errors `queue_full`, `duplicate`, `invalid_url`; needs `music:requests.manage`), `requests.import {items<=100}`,
-`music.stats.top {kind:artist|song, limit<=25}` -> `{items:[{title?,artist,plays}]}`, `settings.set {dmca_safe}` (migration only), `dj.get {}` / `dj.set {enabled}` -> `{enabled}`. Items never carry a requester.
+`history.list {limit<=50}` -> `{items:[{title,artist,...}]}`, `music.stats.top {kind:artist|song, limit<=25}` -> `{items:[{title?,artist,plays}]}`, `settings.set {dmca_safe}` (migration only), `dj.get {}` / `dj.set {enabled}` -> `{enabled}`. Items never carry a requester.
 Without the grant every call is `NotGranted` and the DJ replies that it is not allowed to use the music queue.
 
 Providers (derived from `bundles/contracts/*.v1.json`; tests `include_str!` them, so drift fails the build):

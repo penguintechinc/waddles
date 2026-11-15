@@ -29,7 +29,8 @@ No platform alembic table is needed (bundle tables are provisioned by the instal
 
 | scope | tools | role bundles |
 |---|---|---|
-| `music:requests.read` | `requests.list`, `requests.advance_due`, `history.list`, `config.get`, `dj.get`, `page.link` | member, vip, moderator, admin, owner |
+| `music:history.read` | `history.list` | member, vip, moderator, admin, owner |
+| `music:requests.read` | `requests.list`, `requests.advance_due`, `config.get`, `dj.get`, `page.link` | member, vip, moderator, admin, owner |
 | `music:requests.write` | `requests.add`, `requests.cancel_own` | member+ |
 | `music:requests.manage` | `requests.remove`, `requests.advance`, `requests.import`, `config.set` | moderator, admin, owner |
 | `music:dj.manage` | `dj.set` | moderator, admin, owner |

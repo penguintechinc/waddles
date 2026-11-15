@@ -2,7 +2,8 @@
 //! (contract: `docs/music-requests-service.md`).
 //!
 //! Tools used: `requests.list`, `requests.add` (kind `dj`), `requests.advance_due`,
-//! `requests.import` (one-shot legacy migration), `dj.get`, `dj.set`. Scopes are
+//! `requests.import` (one-shot legacy migration), `history.list` (read-only, no-replay),
+//! `dj.get`, `dj.set`. Scopes are
 //! enforced by the HOST from the invoking actor; this client never sends an actor.
 //! Items carry no requester, and nothing here ever asks for one.
 
@@ -194,4 +195,25 @@ pub fn import(host: &dyn Host, items: &[Value], idem: &str) -> Result<u64, ReqEr
 pub fn import_already_done(e: &ReqError) -> bool {
     matches!(e, ReqError::Rejected(c)
         if c.contains("already") || c.contains("imported") || c.contains("not_empty"))
+}
+
+/// One `history.list` row: what was played, never who requested it.
+#[derive(Clone, Debug, Deserialize)]
+pub struct HistItem {
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+}
+
+/// `history.list` (scope `music:history.read`, host-enforced): the newest `limit` played
+/// songs (1..50), used so the DJ never replays a recent song.
+pub fn history_list(host: &dyn Host, limit: u32) -> Result<Vec<HistItem>, ReqError> {
+    let v = call(
+        host,
+        "history.list",
+        json!({"limit": limit.clamp(1, 50)}),
+        None,
+    )?;
+    serde_json::from_value(v.get("items").cloned().unwrap_or(Value::Null))
+        .map_err(|_| ReqError::BadResponse)
 }

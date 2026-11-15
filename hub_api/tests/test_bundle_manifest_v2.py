@@ -529,6 +529,7 @@ def test_exported_tool_required_scope_outside_vocabulary_is_rejected(bad: object
 
 MUSIC_SCOPES = [
     "music:requests.read",
+    "music:history.read",
     "music:requests.write",
     "music:requests.manage",
     "music:dj.manage",

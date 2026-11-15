@@ -281,7 +281,7 @@ exported_tools:
     additionalProperties: false
   output_schema:
     type: object
-  required_scope: music:requests.read
+  required_scope: music:history.read
 - name: config.get
   access: read
   risk: normal

@@ -180,6 +180,8 @@ pub struct Svc {
     /// `music.stats.top` data: (artist, plays) and (title, artist, plays).
     pub stats_artists: Vec<(String, u64)>,
     pub stats_songs: Vec<(String, String, u64)>,
+    /// `history.list` data, newest first: (title, artist).
+    pub history: Vec<(String, String)>,
 }
 
 impl Default for Svc {
@@ -195,6 +197,7 @@ impl Default for Svc {
             dmca_safe: false,
             stats_artists: vec![],
             stats_songs: vec![],
+            history: vec![],
         }
     }
 }
@@ -229,6 +232,8 @@ pub struct FakeHost {
     pub has_dj_manage: Cell<bool>,
     /// The actor lacks `music:stats.read` (host answers Forbidden).
     pub deny_stats: Cell<bool>,
+    /// The actor lacks `music:history.read` (host answers Forbidden for `history.list`).
+    pub deny_history: Cell<bool>,
     /// The actor lacks `music:settings.write` (host answers Forbidden for `settings.set`).
     pub deny_settings: Cell<bool>,
     /// How `requests.list` reports `dmca_safe`: 0 = real value, 1 = field missing, 2 = garbage.
@@ -258,6 +263,7 @@ impl FakeHost {
             has_dj_manage: Cell::new(true),
             deny_stats: Cell::new(false),
             deny_settings: Cell::new(false),
+            deny_history: Cell::new(false),
             dmca_list_mode: Cell::new(0),
             add_args: RefCell::default(),
             page_size: Cell::new(0),
@@ -489,6 +495,20 @@ impl FakeHost {
                 let on = args["dmca_safe"].as_bool().expect("dmca_safe bool");
                 self.svc(|s| s.dmca_safe = on);
                 Ok(json!({"dmca_safe": on, "purged": 0}))
+            }
+            "history.list" => {
+                unknown(&["limit"]);
+                if self.deny_history.get() {
+                    return Err(ToolErr::Forbidden);
+                }
+                let lim = obj.get("limit").and_then(Value::as_u64).unwrap_or(5) as usize;
+                assert!((1..=50).contains(&lim), "limit bounds");
+                Ok(self.svc(|s| {
+                    json!({"items": s.history.iter().take(lim).map(|(t, a)| json!({
+                        "title": t, "artist": a, "source_url": "", "duration_ms": 1000,
+                        "played_at": "2026-11-15T00:00:00Z", "dmca_safe_item": true
+                    })).collect::<Vec<_>>()})
+                }))
             }
             "music.stats.top" => {
                 unknown(&["kind", "limit"]);
