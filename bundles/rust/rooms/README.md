@@ -71,3 +71,14 @@ State is community-scoped kv (`room.<uuid>`, `acl.<room>.<actor>`,
 
 Contract with the service: `tests/contract_calls.json` is pinned by a unit test here and by
 `scripts/ci/tests/test_rooms_webrtc_contract.py` against the webrtc manifest.
+
+## Identity (per-community pseudonym)
+
+The app's actor is the caller's per-community call-participant pseudonym, obtained through the webrtc
+tool `participant.self` (host-derived `__ctx.participant`), never the global community `user_uuid`. ACL keys,
+`created_by`, join-token participants and every svc-streaming id therefore use the same id hub-api's REST layer
+uses. Unresolvable => the command is refused (fail closed). Note: ACL entries / rooms created before this
+change were keyed by the old id and must be recreated (alpha only; nothing is migrated).
+
+Rooms created here are NOT yet registered in hub-api's `call_rooms` record (REST join refuses non-staff for
+them): blocked on a RecordRoom path (no hub-api RPC exists; svc-streaming room facts T2b has not landed).

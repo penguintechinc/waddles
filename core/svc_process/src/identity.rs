@@ -224,6 +224,74 @@ pub trait MemberDirectory: Send + Sync {
         scope: IdentityScope,
         user: Uuid,
     ) -> BoxFuture<'a, Result<Uuid, IdentityError>>;
+
+    /// The input of the per-community call-participant pseudonym for the ACTIVE
+    /// member of `scope` with this platform account (see [`call_participant_id`]).
+    /// Directories that cannot answer report `Unavailable` (fail closed).
+    fn call_basis<'a>(
+        &'a self,
+        _scope: IdentityScope,
+        _platform: &'a str,
+        _platform_user_id: &'a str,
+    ) -> BoxFuture<'a, Result<CallBasis, IdentityError>> {
+        Box::pin(async {
+            Err(IdentityError::Unavailable(
+                "call participant basis not supported by this directory".to_string(),
+            ))
+        })
+    }
+}
+
+/// What a member's per-community call-participant pseudonym is derived from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallBasis {
+    /// A hub-linked member: the numeric `hub_users.id`.
+    Hub(i64),
+    /// A platform-only member (no hub account): their per-tenant pseudonym
+    /// `community_members.user_uuid`, used as-is (hub-api resolves it the same way).
+    Pseudonym(Uuid),
+}
+
+/// Namespace of the per-community call-participant pseudonym. MUST equal
+/// `_PARTICIPANT_NS` in `hub_api/services/call_participants.py`; pinned by the shared
+/// vector `docs/contracts/call_participant_id_vectors.json` (Rust + Python tests).
+pub const CALL_PARTICIPANT_NS: Uuid = Uuid::from_u128(0x6f3c1c1e_5b8e_4a67_9d3b_2f0c8f3f6a11);
+
+/// The per-community call-participant UUID of a hub-linked user:
+/// `uuid5(CALL_PARTICIPANT_NS, "<tenant slug>:<community id>:<hub user id>")`.
+/// Identical to hub-api's `identity_uuid`, so chat and REST address the same
+/// participant while the global `hub_users.uuid` never reaches svc-streaming.
+pub fn call_participant_id(tenant_slug: &str, community_id: i32, hub_user_id: i64) -> Uuid {
+    Uuid::new_v5(
+        &CALL_PARTICIPANT_NS,
+        format!("{tenant_slug}:{community_id}:{hub_user_id}").as_bytes(),
+    )
+}
+
+/// Resolves the TRIGGERING actor's call-participant pseudonym (host-derived, never
+/// guest input). Active members only; no platform account id, an inactive/unlinked
+/// member or a directory failure is an `Err` (the caller leaves the participant unset).
+pub async fn resolve_participant(
+    wiring: &IdentityWiring,
+    inv: &InvocationIdentity,
+    scope: IdentityScope,
+    tenant_slug: &str,
+) -> Result<Uuid, IdentityError> {
+    let Some(platform_user_id) = inv.actor_platform_user_id.as_deref() else {
+        return Err(IdentityError::NotLinked);
+    };
+    let basis = tokio::time::timeout(
+        DIRECTORY_QUERY_TIMEOUT,
+        wiring
+            .directory
+            .call_basis(scope, &inv.platform, platform_user_id),
+    )
+    .await
+    .map_err(|_| IdentityError::Unavailable("participant lookup timed out".to_string()))??;
+    match basis {
+        CallBasis::Hub(id) => Ok(call_participant_id(tenant_slug, scope.community_id, id)),
+        CallBasis::Pseudonym(u) => non_nil(u),
+    }
 }
 
 /// Resolves a free-text handle reference to its stable identity UUID entirely
@@ -843,6 +911,14 @@ const ROLE_SQL: &str = "SELECT role, is_active_member AS is_active \
      WHERE tenant_id = $1 AND community_id = $2 AND platform = $3 AND platform_user_id = $4 \
      LIMIT 2";
 
+/// Active member's call-participant basis by platform account id (hub user id is
+/// NULL for a platform-only member; alembic 0111).
+const PARTICIPANT_SQL: &str = "SELECT hub_user_id::bigint AS hub_user_id, \
+     user_uuid::text AS user_uuid, is_active_member AS is_active \
+     FROM community_member_identities \
+     WHERE tenant_id = $1 AND community_id = $2 AND platform = $3 AND platform_user_id = $4 \
+     LIMIT 2";
+
 /// Active-membership confirmation by `user_uuid` (the partial unique index
 /// `(community_id, user_uuid)` guarantees at most one row).
 const CONFIRM_SQL: &str = "SELECT is_active_member AS is_active \
@@ -961,6 +1037,51 @@ impl MemberDirectory for PgMemberDirectory {
             match role.map(|r| r.trim().to_string()) {
                 Some(r) if !r.is_empty() => Ok(r),
                 _ => Err(IdentityError::NotLinked),
+            }
+        })
+    }
+
+    fn call_basis<'a>(
+        &'a self,
+        scope: IdentityScope,
+        platform: &'a str,
+        platform_user_id: &'a str,
+    ) -> BoxFuture<'a, Result<CallBasis, IdentityError>> {
+        Box::pin(async move {
+            let rows = self
+                .query(
+                    PARTICIPANT_SQL,
+                    vec![
+                        Value::Int(Some(scope.tenant_id)),
+                        Value::Int(Some(scope.community_id)),
+                        Value::String(Some(platform.to_string())),
+                        Value::String(Some(platform_user_id.to_string())),
+                    ],
+                )
+                .await?;
+            let row = match rows.as_slice() {
+                [] => return Err(IdentityError::NotAMember),
+                [row] => row,
+                _ => {
+                    return Err(IdentityError::Backend(
+                        "more than one membership row for one platform account".to_string(),
+                    ))
+                }
+            };
+            let active: bool = row.try_get("", "is_active").map_err(backend)?;
+            if !active {
+                return Err(IdentityError::NotAMember);
+            }
+            let hub: Option<i64> = row.try_get("", "hub_user_id").map_err(backend)?;
+            if let Some(id) = hub {
+                return Ok(CallBasis::Hub(id));
+            }
+            let user: Option<String> = row.try_get("", "user_uuid").map_err(backend)?;
+            match user {
+                None => Err(IdentityError::NotLinked),
+                Some(text) => Uuid::parse_str(&text)
+                    .map(CallBasis::Pseudonym)
+                    .map_err(|_| IdentityError::Backend("malformed user_uuid column".to_string())),
             }
         })
     }
@@ -1151,6 +1272,110 @@ mod tests {
                 }
             })
         }
+    }
+
+    /// A directory that only answers `call_basis` (everything else is unused here).
+    struct BasisDirectory(Result<CallBasis, fn() -> IdentityError>);
+
+    impl MemberDirectory for BasisDirectory {
+        fn member_by_platform_id<'a>(
+            &'a self,
+            _: IdentityScope,
+            _: &'a str,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<Uuid, IdentityError>> {
+            Box::pin(async { Err(IdentityError::NotAMember) })
+        }
+        fn role_for<'a>(
+            &'a self,
+            _: IdentityScope,
+            _: &'a str,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<String, IdentityError>> {
+            Box::pin(async { Err(IdentityError::NotLinked) })
+        }
+        fn confirm_member<'a>(
+            &'a self,
+            _: IdentityScope,
+            _: Uuid,
+        ) -> BoxFuture<'a, Result<Uuid, IdentityError>> {
+            Box::pin(async { Err(IdentityError::NotAMember) })
+        }
+        fn call_basis<'a>(
+            &'a self,
+            _: IdentityScope,
+            _: &'a str,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<CallBasis, IdentityError>> {
+            Box::pin(async move {
+                match &self.0 {
+                    Ok(b) => Ok(*b),
+                    Err(f) => Err(f()),
+                }
+            })
+        }
+    }
+
+    fn basis_wiring(r: Result<CallBasis, fn() -> IdentityError>) -> IdentityWiring {
+        IdentityWiring {
+            directory: Arc::new(BasisDirectory(r)),
+            handles: None,
+            flag: Arc::new(FixedGate(true)),
+        }
+    }
+
+    #[test]
+    fn call_participant_id_matches_the_shared_hub_api_vectors() {
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/contracts/call_participant_id_vectors.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            v["namespace"].as_str().unwrap(),
+            CALL_PARTICIPANT_NS.to_string()
+        );
+        let vectors = v["vectors"].as_array().unwrap();
+        assert!(!vectors.is_empty(), "zero vectors examined");
+        for x in vectors {
+            let got = call_participant_id(
+                x["tenant"].as_str().unwrap(),
+                i32::try_from(x["community_id"].as_i64().unwrap()).unwrap(),
+                x["user_id"].as_i64().unwrap(),
+            );
+            assert_eq!(got.to_string(), x["participant"].as_str().unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn participant_is_per_community_and_never_the_global_uuid() {
+        let inv = actor_inv(Some("123"), vec![]);
+        let w = basis_wiring(Ok(CallBasis::Hub(42)));
+        let a = resolve_participant(&w, &inv, SCOPE, "acme").await.unwrap();
+        let other = IdentityScope { community_id: SCOPE.community_id + 1, ..SCOPE };
+        let b = resolve_participant(&w, &inv, other, "acme").await.unwrap();
+        assert_ne!(a, b, "same person, different community => different id");
+        assert_eq!(a, call_participant_id("acme", SCOPE.community_id, 42));
+    }
+
+    #[tokio::test]
+    async fn platform_only_member_uses_its_pseudonym_and_failures_fail_closed() {
+        let inv = actor_inv(Some("123"), vec![]);
+        let p = Uuid::new_v4();
+        let w = basis_wiring(Ok(CallBasis::Pseudonym(p)));
+        assert_eq!(resolve_participant(&w, &inv, SCOPE, "acme").await.unwrap(), p);
+        let w = basis_wiring(Ok(CallBasis::Pseudonym(Uuid::nil())));
+        assert!(resolve_participant(&w, &inv, SCOPE, "acme").await.is_err());
+        let w = basis_wiring(Err(|| IdentityError::NotAMember));
+        assert_eq!(
+            resolve_participant(&w, &inv, SCOPE, "acme").await,
+            Err(IdentityError::NotAMember)
+        );
+        let none = actor_inv(None, vec![]);
+        let w = basis_wiring(Ok(CallBasis::Hub(1)));
+        assert_eq!(
+            resolve_participant(&w, &none, SCOPE, "acme").await,
+            Err(IdentityError::NotLinked)
+        );
     }
 
     struct FakeHandles(Result<Uuid, fn() -> IdentityError>, AtomicUsize);

@@ -771,6 +771,7 @@ fn scope_gate_refuses_no_actor_and_scopes_without_actor() {
     let forged = ActorContext {
         actor: None,
         scopes: vec!["community:admin".to_string()],
+        participant: None,
     };
     assert_eq!(
         plan_as(&forged, "admin_op").unwrap_err().code(),

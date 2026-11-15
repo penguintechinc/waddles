@@ -1710,7 +1710,7 @@ bundles:
   # WebRTC control-plane SERVICE bundle (Rust `kind: service`, `stage-tools-webrtc` world): tools over
   # svc-streaming's rooms/SFU. Host seams for the `webrtc` capability are pending (see PR body).
   - app_id: waddles.core.service.webrtc
-    version: "1.2.0"
+    version: "1.3.0"
     language: rust
     wit_world: stage-tools-webrtc
     kind: service
@@ -1724,7 +1724,7 @@ bundles:
   # Rooms APP bundle (Rust, `stage-next-tools` world): per-community / per-event / virtual rooms over
   # the webrtc service's tools. Replaces hub_api calls.py + calls_proxy.py and Go module_rtc.
   - app_id: waddles.core.app.rooms
-    version: "1.2.0"
+    version: "1.3.0"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/rooms

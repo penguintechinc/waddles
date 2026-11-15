@@ -1219,6 +1219,7 @@ fn tool_mutation_keys_are_domain_separated_and_read_calls_cannot_mutate() {
     another_actor.actor = bundle_tool_call::ActorContext {
         actor: Some(ACTOR_UUID.into()),
         scopes: vec![],
+        participant: None,
     };
     assert_ne!(original, key(&parent, &another_actor).unwrap());
     parent.tenant_id += 1;

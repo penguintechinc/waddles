@@ -19,7 +19,7 @@ use waddle_sdk::tool::{ToolContext, ToolError, ToolRegistry};
 use crate::grants::{GrantRole, HandOp, LEAVE_TOOL, moderation_scope};
 
 /// Every tool name this bundle exposes (also the only labels ever logged).
-pub const TOOL_NAMES: [&str; 28] = [
+pub const TOOL_NAMES: [&str; 29] = [
     "room.create",
     "room.get",
     "room.close",
@@ -48,6 +48,7 @@ pub const TOOL_NAMES: [&str; 28] = [
     "room.hand.list_all",
     "room.hand.ack",
     "room.hand.reset",
+    "participant.self",
 ];
 
 /// Largest room label (display text, never a key).
@@ -284,6 +285,23 @@ fn token_revoke_all(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value
 /// actor holds `community:admin` (the manifest's `required_scope` is enforced
 /// before dispatch, so reaching this handler IS the proof). Takes no arguments
 /// and never reads actor/scope data from the caller.
+/// `participant.self`: the caller's host-derived per-community call-participant id (the same
+/// pseudonym hub-api's REST layer uses), so a front-end app can compare it with the
+/// participant ids svc-streaming reports without ever holding the global user uuid.
+fn participant_self(_: &dyn Media, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    object(&args, &[])?;
+    let id = ctx
+        .participant
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .filter(|p| is_uuid(p))
+        .ok_or(ToolError::Forbidden)?;
+    if !ctx.has_scope("community:member") {
+        return Err(ToolError::NotGranted);
+    }
+    Ok(json!({"participant": id}))
+}
+
 fn admin_verify(_: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
     object(&args, &[])?;
     Ok(json!({"verified": true}))
@@ -492,8 +510,10 @@ fn verified_actor(ctx: &ToolContext, op: HandOp) -> Result<Actor, ToolError> {
 
 /// [`verified_actor`] for any tool, given the scope it declares in its manifest.
 fn verified_actor_scope(ctx: &ToolContext, scope: &str) -> Result<Actor, ToolError> {
+    // The id sent to svc-streaming is the HOST-derived per-community pseudonym, never
+    // the global `actor` user uuid; no pseudonym => forbidden (fail closed, no fallback).
     let id = ctx
-        .actor
+        .participant
         .as_deref()
         .map(str::to_ascii_lowercase)
         .filter(|a| is_uuid(a))
@@ -686,6 +706,7 @@ pub fn build_registry(media: Arc<dyn Media>) -> ToolRegistry {
     );
     reg(&mut r, "token.revoke_all", Box::new(token_revoke_all));
     reg(&mut r, "admin.verify", Box::new(admin_verify));
+    reg(&mut r, "participant.self", Box::new(participant_self));
     reg(&mut r, "room.list", Box::new(rooms_list));
     reg(&mut r, "room.participants", Box::new(participants));
     let gone: &'static [&'static str] = &["room_id", "participant_id", "sessions_closed"];
@@ -1240,8 +1261,38 @@ mod tests {
     /// `args` as the host would deliver them: with the verified actor and its
     /// host-derived scopes injected under the reserved context key.
     fn ctx(who: &str, scopes: &[&str], mut args: Value) -> Value {
-        args["__ctx"] = json!({"actor": who, "scopes": scopes});
+        args["__ctx"] = json!({"actor": GLOBAL, "scopes": scopes, "participant": who});
         args
+    }
+
+    /// The caller's GLOBAL user uuid: must never appear in a host request.
+    const GLOBAL: &str = "99999999-9999-9999-9999-999999999999";
+
+    #[test]
+    fn participant_self_returns_the_host_pseudonym_and_fails_closed() {
+        let f = Fake::ok(json!({}));
+        let out = call(&f, "participant.self", ctx(USER, &MEMBER_SCOPES, json!({}))).unwrap();
+        assert_eq!(out, json!({"participant": USER}));
+        assert!(f.calls().is_empty());
+        // No pseudonym (host could not derive it): forbidden, never the global uuid.
+        let no_p = json!({"__ctx": {"actor": GLOBAL, "scopes": MEMBER_SCOPES}});
+        assert!(matches!(
+            call(&f, "participant.self", no_p),
+            Err(ToolError::Forbidden)
+        ));
+        assert!(matches!(
+            call(&f, "participant.self", ctx(USER, &[], json!({}))),
+            Err(ToolError::Forbidden | ToolError::NotGranted)
+        ));
+    }
+
+    #[test]
+    fn hand_calls_send_the_pseudonym_and_never_the_global_uuid() {
+        let f = Fake::ok(json!({"room_id": ROOM, "hands": []}));
+        let _ = call(&f, "room.hand.list", ctx(USER, &MEMBER_SCOPES, room_args()));
+        let sent = format!("{:?}", f.calls());
+        assert!(sent.contains(USER), "pseudonym is the actor id: {sent}");
+        assert!(!sent.contains(GLOBAL), "global uuid leaked: {sent}");
     }
 
     fn room_args() -> Value {
@@ -1582,6 +1633,6 @@ mod tests {
         for op in HandOp::ALL {
             assert!(TOOL_NAMES.contains(&op.tool()), "{}", op.tool());
         }
-        assert_eq!(TOOL_NAMES.len(), 21 + HandOp::ALL.len());
+        assert_eq!(TOOL_NAMES.len(), 22 + HandOp::ALL.len());
     }
 }

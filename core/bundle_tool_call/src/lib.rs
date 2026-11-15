@@ -62,6 +62,12 @@ pub struct ActorContext {
     pub actor: Option<String>,
     /// Sorted, deduplicated host-derived scopes.
     pub scopes: Vec<String>,
+    /// The actor's PER-COMMUNITY call-participant pseudonym
+    /// (`uuid5(NS, "<tenant>:<community>:<user>")`, host-derived; the same value
+    /// hub-api's REST layer uses). It is the only identity a call/media service
+    /// may send downstream: the global `user_uuid` in `actor` must not leave the
+    /// platform. `None` when the host could not derive it (fail closed).
+    pub participant: Option<String>,
 }
 
 impl ActorContext {
@@ -78,7 +84,15 @@ impl ActorContext {
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),
+            participant: None,
         }
+    }
+
+    /// Attaches the host-derived per-community call-participant pseudonym.
+    #[must_use]
+    pub fn with_participant(mut self, participant: impl Into<String>) -> Self {
+        self.participant = Some(participant.into());
+        self
     }
 
     /// `true` only when the verified actor holds `scope` exactly.
@@ -628,10 +642,11 @@ pub fn nested_payload(plan: &ToolPlan) -> Result<serde_json::Value, ToolRefusal>
     if let Some(obj) = args.as_object_mut() {
         obj.remove(CTX_ARG);
         if plan.actor.actor.is_some() {
-            obj.insert(
-                CTX_ARG.to_string(),
-                serde_json::json!({"actor": plan.actor.actor, "scopes": plan.actor.scopes}),
-            );
+            let mut ctx = serde_json::json!({"actor": plan.actor.actor, "scopes": plan.actor.scopes});
+            if let Some(participant) = &plan.actor.participant {
+                ctx["participant"] = serde_json::Value::String(participant.clone());
+            }
+            obj.insert(CTX_ARG.to_string(), ctx);
         }
     } else if plan.actor.actor.is_some() {
         return Err(bad(

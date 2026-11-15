@@ -24,7 +24,7 @@ use bindings::waddle::bundle::metrics::Label;
 use bindings::waddle::bundle::types::{
     PlatformEvent, StageEnvelope, TransportError, TransportResult, UnsupportedStage,
 };
-use bindings::waddle::bundle::{clock, context, flags, identity, kv, log, metrics, relay, tool};
+use bindings::waddle::bundle::{clock, context, flags, kv, log, metrics, relay, tool};
 use logic::{Ident, Store, ToolFail, Tools};
 use serde_json::{Value, json};
 
@@ -61,12 +61,20 @@ impl Store for WasmKv {
     }
 }
 
-/// The host-verified actor (community `user-uuid`).
+/// The host-verified actor as its PER-COMMUNITY call-participant pseudonym (the id hub-api's
+/// REST layer and svc-streaming use). It comes from the webrtc service's `participant.self`
+/// tool, which reads the host-derived `__ctx.participant`; the global community `user-uuid`
+/// is never used for rooms, ACLs or tokens. No pseudonym => unresolved (fail closed).
 struct WasmIdent;
 
 impl Ident for WasmIdent {
     fn actor(&self) -> Result<String, String> {
-        identity::resolve_actor().map_err(|_| "actor unresolved".to_string())
+        WasmTools
+            .invoke("participant.self", &json!({}), None)
+            .ok()
+            .and_then(|v| v.get("participant").and_then(Value::as_str).map(str::to_string))
+            .filter(|p| logic::is_uuid(p))
+            .ok_or_else(|| "actor unresolved".to_string())
     }
 }
 
