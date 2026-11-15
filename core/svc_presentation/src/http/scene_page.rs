@@ -40,7 +40,11 @@ pub fn scene_error(err: SceneError) -> ApiError {
 
 /// Builds an HTML page response with the security headers every page carries. The page URL holds
 /// the VIEW key, hence `no-store` + `no-referrer`.
-pub fn html_response(page: &'static str, csp: Option<&str>, what: &str) -> Result<Response, ApiError> {
+pub fn html_response(
+    page: &'static str,
+    csp: Option<&str>,
+    what: &str,
+) -> Result<Response, ApiError> {
     let csp = csp.ok_or_else(|| {
         ApiError::Internal(anyhow::anyhow!(
             "malformed {what} template: exactly one inline script is required for the CSP hash"
@@ -99,10 +103,10 @@ pub struct LiveQuery {
     pub widget: Option<String>,
 }
 
-/// `true` for ids built from `[A-Za-z0-9._-]`, 1..=128 bytes -- the shape bundle and widget ids
-/// take, and nothing that could smuggle a path separator into a hub key.
+/// `true` for ids built from `[A-Za-z0-9._-]`, starting alphanumeric, 1..=128 bytes -- the shape
+/// bundle and widget ids take, and nothing that could smuggle a path separator or `..` into a hub key.
 pub fn valid_id(id: &str) -> bool {
-    !id.is_empty()
+    id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
         && id.len() <= 128
         && id
             .bytes()
@@ -142,7 +146,9 @@ pub async fn live(
         let (app, widget) = spec
             .split_once('/')
             .filter(|(a, w)| valid_id(a) && valid_id(w))
-            .ok_or_else(|| ApiError::BadRequest("widget must be <bundle_app_id>/<widget_id>".into()))?;
+            .ok_or_else(|| {
+                ApiError::BadRequest("widget must be <bundle_app_id>/<widget_id>".into())
+            })?;
         let binding: WidgetBinding = state
             .scene
             .find_widget(community_id, app, widget)
@@ -150,12 +156,29 @@ pub async fn live(
             .map_err(scene_error)?
             .filter(|b| b.allow_standalone_output)
             .ok_or_else(|| ApiError::NotFound("unknown widget".to_string()))?;
-        keys = keys_for_widget(&state, app, widget, binding.output_kind, binding.surface_id.as_deref());
+        keys = keys_for_widget(
+            &state,
+            app,
+            widget,
+            binding.output_kind,
+            binding.surface_id.as_deref(),
+        );
     } else {
-        let layout = state.scene.layout(community_id).await.map_err(scene_error)?;
+        let layout = state
+            .scene
+            .layout(community_id)
+            .await
+            .map_err(scene_error)?;
         for c in layout.components.iter().filter(|c| c.visible) {
-            let surface = (c.output_kind == WidgetOutputKind::Surface).then_some(c.surface_id.as_str());
-            for key in keys_for_widget(&state, &c.bundle_app_id, &c.widget_id, c.output_kind, surface) {
+            let surface =
+                (c.output_kind == WidgetOutputKind::Surface).then_some(c.surface_id.as_str());
+            for key in keys_for_widget(
+                &state,
+                &c.bundle_app_id,
+                &c.widget_id,
+                c.output_kind,
+                surface,
+            ) {
                 if !keys.contains(&key) {
                     keys.push(key);
                 }
@@ -174,14 +197,14 @@ mod tests {
 
     #[test]
     fn scene_page_has_exactly_one_script_and_a_tight_csp() {
-        let csp = crate::scene::build_csp(
-            SCENE_PAGE,
-            &crate::scene::img_origins("", ""),
-        )
-        .expect("exactly one script");
+        let csp = crate::scene::build_csp(SCENE_PAGE, &crate::scene::img_origins("", ""))
+            .expect("exactly one script");
         assert!(csp.contains("script-src 'sha256-"));
         assert!(csp.contains("connect-src 'self'"));
-        let img = csp.split(';').find(|d| d.trim().starts_with("img-src")).unwrap();
+        let img = csp
+            .split(';')
+            .find(|d| d.trim().starts_with("img-src"))
+            .unwrap();
         assert!(img.contains("'self'"));
         for forbidden in ["http:", "data:", "*"] {
             assert!(!img.contains(forbidden), "{img}");
@@ -191,7 +214,11 @@ mod tests {
     #[test]
     fn page_script_has_a_single_markup_sink_and_no_code_execution() {
         let script = crate::scene::inline_script(SCENE_PAGE).unwrap();
-        assert_eq!(script.matches("innerHTML").count(), 1, "one sanitized-html sink only");
+        assert_eq!(
+            script.matches("innerHTML").count(),
+            1,
+            "one sanitized-html sink only"
+        );
         for banned in [
             "outerHTML",
             "insertAdjacentHTML",
@@ -210,7 +237,18 @@ mod tests {
     fn id_grammar_rejects_separators_and_oversize() {
         assert!(valid_id("waddles.core.dj"));
         assert!(valid_id("now_playing-2"));
-        for bad in ["", "a/b", "a b", "a?b", "../x", "é", &"a".repeat(129)] {
+        for bad in [
+            "",
+            "a/b",
+            "a b",
+            "a?b",
+            "../x",
+            "..",
+            ".hidden",
+            "-x",
+            "é",
+            &"a".repeat(129),
+        ] {
             assert!(!valid_id(bad), "{bad:?}");
         }
     }
@@ -221,7 +259,10 @@ mod tests {
         let r = html_response(SCENE_PAGE, Some("default-src 'none'"), "scene").unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(r.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
-        assert_eq!(r.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+        assert_eq!(
+            r.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            "nosniff"
+        );
         assert!(r.headers().contains_key(header::CONTENT_SECURITY_POLICY));
         assert!(html_response(SCENE_PAGE, Some("bad\nvalue"), "scene").is_err());
     }
@@ -233,7 +274,10 @@ mod tests {
             ApiError::NotFound(_)
         ));
         assert!(matches!(
-            scene_error(SceneError::BadCode { column: "x", code: 1 }),
+            scene_error(SceneError::BadCode {
+                column: "x",
+                code: 1
+            }),
             ApiError::Internal(_)
         ));
     }

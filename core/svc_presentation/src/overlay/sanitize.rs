@@ -42,9 +42,26 @@ const ALLOWED_TAGS: &[&str] = &[
 
 /// Tags removed together with everything inside them.
 const DROP_WITH_CONTENT: &[&str] = &[
-    "script", "style", "iframe", "frame", "frameset", "object", "embed", "applet", "form",
-    "textarea", "select", "button", "noscript", "template", "title", "math", "foreignobject",
-    "link", "meta", "base",
+    "script",
+    "style",
+    "iframe",
+    "frame",
+    "frameset",
+    "object",
+    "embed",
+    "applet",
+    "form",
+    "textarea",
+    "select",
+    "button",
+    "noscript",
+    "template",
+    "title",
+    "math",
+    "foreignobject",
+    "link",
+    "meta",
+    "base",
 ];
 
 /// Attributes allowed on every allowed tag.
@@ -93,15 +110,15 @@ fn tag_attributes() -> HashMap<&'static str, HashSet<&'static str>> {
         svg_paint.iter().chain(extra.iter()).copied().collect()
     };
     HashMap::from([
-        (
-            "img",
-            HashSet::from(["src", "alt", "width", "height"]),
-        ),
+        ("img", HashSet::from(["src", "alt", "width", "height"])),
         ("svg", with_paint(&["viewBox", "width", "height"])),
         ("g", with_paint(&["transform"])),
         ("path", with_paint(&["d"])),
         ("circle", with_paint(&["cx", "cy", "r"])),
-        ("rect", with_paint(&["x", "y", "width", "height", "rx", "ry"])),
+        (
+            "rect",
+            with_paint(&["x", "y", "width", "height", "rx", "ry"]),
+        ),
         ("line", with_paint(&["x1", "y1", "x2", "y2"])),
         ("polygon", with_paint(&["points"])),
         ("polyline", with_paint(&["points"])),
@@ -124,7 +141,8 @@ fn is_safe_css_value(value: &str) -> bool {
     }
     !value.is_empty()
         && value.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, ' ' | '#' | '%' | '.' | ',' | '(' | ')' | '-' | '+' | '/')
+            c.is_ascii_alphanumeric()
+                || matches!(c, ' ' | '#' | '%' | '.' | ',' | '(' | ')' | '-' | '+' | '/')
         })
 }
 
@@ -185,10 +203,36 @@ mod tests {
 
     /// Substrings that must never survive in sanitized output (lowercased comparison).
     const FORBIDDEN: &[&str] = &[
-        "<script", "</script", "<iframe", "<object", "<embed", "<form", "<style", "<link",
-        "<meta", "<base", "<math", "<a ", "<a>", "onerror", "onload", "onclick", "onmouseover",
-        "onfocus", "onanimationstart", "javascript:", "vbscript:", "data:", "expression(",
-        "url(", "srcdoc", "xlink:href", "href=", "<foreignobject", "id=", "name=",
+        "<script",
+        "</script",
+        "<iframe",
+        "<object",
+        "<embed",
+        "<form",
+        "<style",
+        "<link",
+        "<meta",
+        "<base",
+        "<math",
+        "<a ",
+        "<a>",
+        "onerror",
+        "onload",
+        "onclick",
+        "onmouseover",
+        "onfocus",
+        "onanimationstart",
+        "javascript:",
+        "vbscript:",
+        "data:",
+        "expression(",
+        "url(",
+        "srcdoc",
+        "xlink:href",
+        "href=",
+        "<foreignobject",
+        "id=",
+        "name=",
     ];
 
     fn assert_clean(input: &str) -> String {
@@ -216,7 +260,10 @@ mod tests {
         );
         assert!(out.contains("class=\"sw-avatar\""), "{out}");
         assert!(out.contains("style=\"left: 20px; top: 10px\""), "{out}");
-        assert!(out.contains("src=\"https://cdn.example.com/jedi.png\""), "{out}");
+        assert!(
+            out.contains("src=\"https://cdn.example.com/jedi.png\""),
+            "{out}"
+        );
         assert!(out.contains("<span>Master</span>"), "{out}");
     }
 
@@ -296,6 +343,10 @@ mod tests {
             r#"<input autofocus onfocus=alert(1)>"#,
             r#"<body onload=alert(1)>"#,
             r#"<marquee onstart=alert(1)>x</marquee>"#,
+            // RUSTSEC-2026-0533: mutation XSS across the SVG/MathML namespace boundary.
+            r#"<svg><foreignObject><math><iframe><!--</iframe><img src onerror=alert(1)>-->"#,
+            r#"<math><mi><svg><iframe><!--</iframe><img src onerror=alert(1)>-->"#,
+            r#"<svg><foreignObject><math><mi><svg><style><!--</style><img src onerror=alert(1)>-->"#,
         ];
         for input in corpus {
             assert_clean(input);
@@ -373,11 +424,15 @@ mod tests {
         let direct = sanitize_widget_html(&format!("<p>hi {token}</p>")).unwrap();
         assert!(!direct.contains("{user:"), "{direct}");
         assert!(direct.contains("Unknown User"), "{direct}");
-        assert!(direct.starts_with("<p>") && direct.ends_with("</p>"), "{direct}");
+        assert!(
+            direct.starts_with("<p>") && direct.ends_with("</p>"),
+            "{direct}"
+        );
         // Markup that is stripped can splice a token together: it must still be caught.
-        let spliced =
-            sanitize_widget_html("<p>{us<blink></blink>er:11111111-1111-1111-1111-111111111111}</p>")
-                .unwrap();
+        let spliced = sanitize_widget_html(
+            "<p>{us<blink></blink>er:11111111-1111-1111-1111-111111111111}</p>",
+        )
+        .unwrap();
         assert!(!spliced.contains("{user:"), "{spliced}");
         assert!(spliced.contains("Unknown User"), "{spliced}");
     }

@@ -70,7 +70,9 @@ impl ApiError {
             ApiError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             ApiError::PayloadTooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
-            ApiError::Unprocessable(_) => (StatusCode::UNPROCESSABLE_ENTITY, "unprocessable_entity"),
+            ApiError::Unprocessable(_) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "unprocessable_entity")
+            }
             ApiError::TooManyRequests { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             ApiError::Unimplemented(_) => (StatusCode::NOT_IMPLEMENTED, "not_implemented"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
@@ -142,17 +144,25 @@ mod tests {
     #[tokio::test]
     async fn widget_errors_map_to_413_422_429_with_retry_after() {
         assert_eq!(
-            ApiError::PayloadTooLarge("x".into()).into_response().status(),
+            ApiError::PayloadTooLarge("x".into())
+                .into_response()
+                .status(),
             StatusCode::PAYLOAD_TOO_LARGE
         );
         assert_eq!(
             ApiError::Unprocessable("x".into()).into_response().status(),
             StatusCode::UNPROCESSABLE_ENTITY
         );
-        let limited = ApiError::TooManyRequests { retry_after_secs: 7 }.into_response();
+        let limited = ApiError::TooManyRequests {
+            retry_after_secs: 7,
+        }
+        .into_response();
         assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
-            limited.headers().get(axum::http::header::RETRY_AFTER).unwrap(),
+            limited
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .unwrap(),
             "7"
         );
     }

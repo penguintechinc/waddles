@@ -186,7 +186,8 @@ impl AppState {
             &config.cli.widget_img_src_allowlist,
             &config.cli.image_bucket_endpoint,
         );
-        let scene_csp = crate::scene::build_csp(scene_page::SCENE_PAGE, &img_origins).map(Arc::from);
+        let scene_csp =
+            crate::scene::build_csp(scene_page::SCENE_PAGE, &img_origins).map(Arc::from);
         let widget_csp =
             crate::scene::build_csp(widget_page::WIDGET_PAGE, &img_origins).map(Arc::from);
         Self {

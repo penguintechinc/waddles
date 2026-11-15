@@ -158,14 +158,15 @@ fn widget_frame(kind: WidgetOutputKind, body: &WidgetPushPayload) -> Result<Valu
             Ok(json!({"output_kind": "text", "text": cleaned}))
         }
         WidgetOutputKind::Image => {
-            let url = body
-                .image_url
-                .as_deref()
-                .ok_or_else(|| ApiError::Unprocessable("image widget requires `image_url`".into()))?;
+            let url = body.image_url.as_deref().ok_or_else(|| {
+                ApiError::Unprocessable("image widget requires `image_url`".into())
+            })?;
             let plain = url.len() <= MAX_IMAGE_URL_BYTES
                 && url.starts_with("https://")
                 && url.len() > "https://".len()
-                && !url.bytes().any(|b| b <= b' ' || matches!(b, b'<' | b'>' | b'"' | b'\'' | b'\\'));
+                && !url
+                    .bytes()
+                    .any(|b| b <= b' ' || matches!(b, b'<' | b'>' | b'"' | b'\'' | b'\\'));
             if !plain {
                 return Err(ApiError::Unprocessable(
                     "`image_url` must be a plain https URL".into(),
@@ -202,8 +203,9 @@ pub async fn push(
     // 1. The widget must be registered/placed for THIS community with its bundle enabled.
     let binding = resolve_widget(&state, community_id, &params).await?;
     // 2. The pushed kind must be the registered one: no html into a text widget, no re-typing.
-    let wire_kind = WidgetOutputKind::from_label(&body.output_kind)
-        .ok_or_else(|| ApiError::BadRequest(format!("unsupported output_kind {:?}", body.output_kind)))?;
+    let wire_kind = WidgetOutputKind::from_label(&body.output_kind).ok_or_else(|| {
+        ApiError::BadRequest(format!("unsupported output_kind {:?}", body.output_kind))
+    })?;
     if wire_kind != binding.output_kind {
         return Err(ApiError::Unprocessable(
             "output_kind does not match the widget's registered kind".to_string(),
@@ -259,7 +261,10 @@ mod tests {
     fn widget_page_has_exactly_one_script_and_a_tight_csp() {
         let csp = crate::scene::build_csp(WIDGET_PAGE, &crate::scene::img_origins("", ""))
             .expect("exactly one script");
-        let img = csp.split(';').find(|d| d.trim().starts_with("img-src")).unwrap();
+        let img = csp
+            .split(';')
+            .find(|d| d.trim().starts_with("img-src"))
+            .unwrap();
         assert!(img.contains("'self'"));
         for forbidden in ["http:", "data:", "*"] {
             assert!(!img.contains(forbidden), "{img}");
@@ -288,9 +293,15 @@ mod tests {
     #[test]
     fn image_frames_accept_only_plain_https_urls() {
         let mut b = body("image");
-        for ok in ["https://i.ytimg.com/vi/x/hq.jpg", "https://a.example/b.png?x=1"] {
+        for ok in [
+            "https://i.ytimg.com/vi/x/hq.jpg",
+            "https://a.example/b.png?x=1",
+        ] {
             b.image_url = Some(ok.into());
-            assert_eq!(widget_frame(WidgetOutputKind::Image, &b).unwrap()["image_url"], ok);
+            assert_eq!(
+                widget_frame(WidgetOutputKind::Image, &b).unwrap()["image_url"],
+                ok
+            );
         }
         for bad in [
             "http://a.example/b.png",
@@ -304,11 +315,17 @@ mod tests {
         ] {
             b.image_url = Some(bad.into());
             assert!(
-                matches!(widget_frame(WidgetOutputKind::Image, &b), Err(ApiError::Unprocessable(_))),
+                matches!(
+                    widget_frame(WidgetOutputKind::Image, &b),
+                    Err(ApiError::Unprocessable(_))
+                ),
                 "{bad}"
             );
         }
-        b.image_url = Some(format!("https://a.example/{}", "x".repeat(MAX_IMAGE_URL_BYTES)));
+        b.image_url = Some(format!(
+            "https://a.example/{}",
+            "x".repeat(MAX_IMAGE_URL_BYTES)
+        ));
         assert!(widget_frame(WidgetOutputKind::Image, &b).is_err());
         b.image_url = None;
         assert!(widget_frame(WidgetOutputKind::Image, &b).is_err());
@@ -336,8 +353,12 @@ mod tests {
     #[test]
     fn publish_errors_map_to_rest_statuses() {
         assert!(matches!(
-            publish_error_to_api(PublishError::RateLimited { retry_after_secs: 3 }),
-            ApiError::TooManyRequests { retry_after_secs: 3 }
+            publish_error_to_api(PublishError::RateLimited {
+                retry_after_secs: 3
+            }),
+            ApiError::TooManyRequests {
+                retry_after_secs: 3
+            }
         ));
         assert!(matches!(
             publish_error_to_api(PublishError::Saturated),

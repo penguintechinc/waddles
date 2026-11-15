@@ -33,8 +33,8 @@
   var canvasH = 1080;
   // instance_id -> {el, c}; widgets are addressed by (bundle_app_id, widget_id), never widget_id alone.
   var byInstance = new Map();
-  var url = new URL(window.location.href);
-  var key = url.searchParams.get('key') || '';
+  var params = new URLSearchParams(window.location.search);
+  var key = params.get('key') || '';
   var overlayCode = window.location.pathname.split('/').filter(Boolean)[0] || '';
 
   function showStatus(text) { statusEl.textContent = text; statusEl.hidden = !text; }

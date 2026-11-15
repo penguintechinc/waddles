@@ -170,10 +170,13 @@ hub_client = { path = "../hub_client", version = "=0.1.0" }
 # Server-side HTML/SVG sanitizer for sanitized-html widgets (`overlay::sanitize`), replacing the
 # hand-rolled tag scanner: html5ever-backed, so the sanitizer and the browser agree on what the
 # markup is. Supply-chain validated before adoption: maintained by a rust-lang member (notriddle),
-# MIT OR Apache-2.0, ~21M downloads, repo github.com/rust-ammonia/ammonia, no build script or
-# install-time execution. =4.2.4 (published 2026-10-17) rather than 4.2.5 (published 2026-11-13,
-# under the two-week age floor). Hash-locked by the committed Cargo.lock; `cargo deny check` clean.
-ammonia = "=4.2.4"
+# MIT OR Apache-2.0, ~21M downloads, repo github.com/rust-ammonia/ammonia, no build script.
+# =4.2.5 is the RUSTSEC-2026-0533 fix (mutation XSS via embedded SVG/MathML -- exactly the SVG
+# subset widgets may use); 4.2.4 fails `cargo deny`. 4.2.5 (published 2026-11-13) is under the
+# two-week age floor, accepted ONLY because it is the advisory's remedy: the 4.2.4 -> 4.2.5 diff
+# was reviewed (two namespace checks in src/lib.rs plus regression tests; lockfile churn only).
+# Hash-locked by the committed Cargo.lock.
+ammonia = "=4.2.5"
 # Bundle surface contract validation (`surfaces::contract`): compiled with remote `$ref`
 # resolution compiled out (no `resolve-http`/`resolve-file`), so a hostile schema can never make
 # the service fetch anything.

@@ -68,7 +68,11 @@ impl SceneStore for FakeScene {
     ) -> Result<Option<WidgetBinding>, SceneError> {
         Ok(self
             .widgets
-            .get(&(community_id, bundle_app_id.to_string(), widget_id.to_string()))
+            .get(&(
+                community_id,
+                bundle_app_id.to_string(),
+                widget_id.to_string(),
+            ))
             .cloned())
     }
 }
@@ -153,12 +157,25 @@ async fn a_bundle_publish_travels_grpc_and_is_cached_and_isolated_by_community()
     let endpoint = serve_grpc(state.clone()).await;
     let host = SurfaceHost::new(&endpoint, None, Arc::new(RealTokens)).unwrap();
     let body = json!({"now_playing": track(), "updated_ms": 5}).to_string();
-    host.publish(&policy(), 42, "waddles.core.example.music.now_playing", &body)
-        .await
+    host.publish(
+        &policy(),
+        42,
+        "waddles.core.example.music.now_playing",
+        &body,
+    )
+    .await
+    .unwrap();
+    let cached = state
+        .surfaces
+        .hub
+        .replay_for(42, "waddles.core.example.music.now_playing")
         .unwrap();
-    let cached = state.surfaces.hub.replay_for(42, "waddles.core.example.music.now_playing").unwrap();
     assert_eq!(cached.payload["now_playing"]["title"], "T");
-    assert!(state.surfaces.hub.replay_for(43, "waddles.core.example.music.now_playing").is_none());
+    assert!(state
+        .surfaces
+        .hub
+        .replay_for(43, "waddles.core.example.music.now_playing")
+        .is_none());
 }
 
 #[tokio::test]
@@ -168,7 +185,12 @@ async fn a_token_scoped_to_another_community_is_denied_and_nothing_is_published(
     let host = SurfaceHost::new(&endpoint, None, Arc::new(WrongCommunityTokens(99))).unwrap();
     let body = json!({"now_playing": null, "updated_ms": 1}).to_string();
     let err = host
-        .publish(&policy(), 42, "waddles.core.example.music.now_playing", &body)
+        .publish(
+            &policy(),
+            42,
+            "waddles.core.example.music.now_playing",
+            &body,
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code(), "denied");
@@ -219,7 +241,13 @@ async fn contract_refusals_map_to_the_stable_guest_codes_over_grpc() {
 
     // Schema violation -> invalid, naming locations but never values.
     let e = host
-        .publish(&p, 42, "clip.alert", &json!({"clip_id":"a b","url":"javascript:alert(1)","title":"t","created_ms":1}).to_string())
+        .publish(
+            &p,
+            42,
+            "clip.alert",
+            &json!({"clip_id":"a b","url":"javascript:alert(1)","title":"t","created_ms":1})
+                .to_string(),
+        )
         .await
         .unwrap_err();
     assert_eq!(e.code(), "invalid");
@@ -232,16 +260,26 @@ async fn contract_refusals_map_to_the_stable_guest_codes_over_grpc() {
     // Over the surface's own cap (4096) but under the host's hard cap -> too_large.
     let big = json!({"now_playing": null, "updated_ms": 1, "pad": "x".repeat(5000)}).to_string();
     assert_eq!(
-        host.publish(&p, 42, "waddles.core.example.music.now_playing", &big).await.unwrap_err().code(),
+        host.publish(&p, 42, "waddles.core.example.music.now_playing", &big)
+            .await
+            .unwrap_err()
+            .code(),
         "too_large"
     );
     // Control characters -> invalid.
     let ctl = json!({"alert_type":"info","message":"a\u{1b}[31m"}).to_string();
     assert_eq!(
-        host.publish(&p, 42, "alert", &ctl).await.unwrap_err().code(),
+        host.publish(&p, 42, "alert", &ctl)
+            .await
+            .unwrap_err()
+            .code(),
         "invalid"
     );
-    assert_eq!(state.surfaces.hub.replay_len(), 0, "nothing invalid may be cached");
+    assert_eq!(
+        state.surfaces.hub.replay_len(),
+        0,
+        "nothing invalid may be cached"
+    );
 }
 
 #[tokio::test]
@@ -308,7 +346,10 @@ async fn send(
         .unwrap();
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 fn push_uri(widget: &str) -> String {
@@ -362,9 +403,24 @@ async fn a_widget_registered_for_another_community_is_refused() {
 #[tokio::test]
 async fn a_text_push_lands_on_the_widgets_own_channel_only() {
     let scene = FakeScene::default()
-        .with_widget(42, APP, "banner", binding(WidgetOutputKind::Text, None, true))
-        .with_widget(42, APP, "other", binding(WidgetOutputKind::Text, None, true))
-        .with_widget(43, APP, "banner", binding(WidgetOutputKind::Text, None, true));
+        .with_widget(
+            42,
+            APP,
+            "banner",
+            binding(WidgetOutputKind::Text, None, true),
+        )
+        .with_widget(
+            42,
+            APP,
+            "other",
+            binding(WidgetOutputKind::Text, None, true),
+        )
+        .with_widget(
+            43,
+            APP,
+            "banner",
+            binding(WidgetOutputKind::Text, None, true),
+        );
     let state = widget_state(scene).await;
     let mut own = state.surfaces.hub.subscribe(42, &widget_key(APP, "banner"));
     let mut sibling = state.surfaces.hub.subscribe(42, &widget_key(APP, "other"));
@@ -406,11 +462,21 @@ async fn a_surface_widget_publishes_to_its_own_declared_surface_not_a_neighbours
         42,
         APP,
         "now_playing",
-        binding(WidgetOutputKind::Surface, Some("waddles.core.example.music.now_playing"), true),
+        binding(
+            WidgetOutputKind::Surface,
+            Some("waddles.core.example.music.now_playing"),
+            true,
+        ),
     );
     let state = widget_state(scene).await;
-    let mut queue_sub = state.surfaces.hub.subscribe(42, "waddles.core.example.music.queue");
-    let mut own_sub = state.surfaces.hub.subscribe(42, "waddles.core.example.music.now_playing");
+    let mut queue_sub = state
+        .surfaces
+        .hub
+        .subscribe(42, "waddles.core.example.music.queue");
+    let mut own_sub = state
+        .surfaces
+        .hub
+        .subscribe(42, "waddles.core.example.music.now_playing");
 
     let (status, body) = send(
         router(state.clone()),
@@ -448,7 +514,12 @@ async fn a_surface_widget_publishes_to_its_own_declared_surface_not_a_neighbours
 async fn pushes_must_match_the_registered_kind_and_html_is_sanitized() {
     let scene = FakeScene::default()
         .with_widget(42, APP, "t", binding(WidgetOutputKind::Text, None, true))
-        .with_widget(42, APP, "h", binding(WidgetOutputKind::SanitizedHtml, None, true))
+        .with_widget(
+            42,
+            APP,
+            "h",
+            binding(WidgetOutputKind::SanitizedHtml, None, true),
+        )
         .with_widget(42, APP, "i", binding(WidgetOutputKind::Image, None, true))
         .with_widget(42, APP, "s", binding(WidgetOutputKind::Surface, None, true));
     let state = widget_state(scene).await;
@@ -523,7 +594,14 @@ async fn widget_push_requires_a_credential_for_the_codes_community() {
     );
     let state = widget_state(scene).await;
     let body = json!({"output_kind":"text","text":"x"});
-    let (status, _) = send(router(state.clone()), "POST", &push_uri("banner"), None, body.clone()).await;
+    let (status, _) = send(
+        router(state.clone()),
+        "POST",
+        &push_uri("banner"),
+        None,
+        body.clone(),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _) = send(
         router(state.clone()),
@@ -613,15 +691,31 @@ async fn the_scene_page_carries_a_tight_csp_and_security_headers() {
     assert_img_src_is_tight(&csp);
     assert!(csp.contains("script-src 'sha256-"));
     assert_eq!(r.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
-    assert_eq!(r.headers().get(header::REFERRER_POLICY).unwrap(), "no-referrer");
-    assert_eq!(r.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+    assert_eq!(
+        r.headers().get(header::REFERRER_POLICY).unwrap(),
+        "no-referrer"
+    );
+    assert_eq!(
+        r.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+        "nosniff"
+    );
 }
 
 #[tokio::test]
 async fn the_widget_page_has_the_same_csp_and_refuses_unknown_or_non_standalone_widgets() {
     let scene = FakeScene::default()
-        .with_widget(42, APP, "badge", binding(WidgetOutputKind::SanitizedHtml, None, true))
-        .with_widget(42, APP, "hidden", binding(WidgetOutputKind::Text, None, false));
+        .with_widget(
+            42,
+            APP,
+            "badge",
+            binding(WidgetOutputKind::SanitizedHtml, None, true),
+        )
+        .with_widget(
+            42,
+            APP,
+            "hidden",
+            binding(WidgetOutputKind::Text, None, false),
+        );
     let (state, token) = viewed_state(scene);
     let ok = get(
         router(state.clone()),
@@ -678,7 +772,11 @@ async fn the_scene_layout_route_serves_the_canvas_for_every_resolution_code() {
             },
         );
         let (state, token) = viewed_state(scene);
-        let r = get(router(state), &format!("/{CODE_42}/scene/layout?key={token}")).await;
+        let r = get(
+            router(state),
+            &format!("/{CODE_42}/scene/layout?key={token}"),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
         let v: Value =
             serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
@@ -698,7 +796,10 @@ async fn the_scene_layout_reads_the_stored_canvas_code_from_the_database() {
     let token = generate_view_token();
     let db = MockDatabase::new(DatabaseBackend::Postgres)
         .append_query_results([vec![overlay_view_row(&token)]])
-        .append_query_results([vec![community::Model { id: 42, tenant_id: 3 }]])
+        .append_query_results([vec![community::Model {
+            id: 42,
+            tenant_id: 3,
+        }]])
         .append_query_results([vec![presentation_canvas::Model {
             id: 1,
             community_id: 42,
@@ -708,12 +809,22 @@ async fn the_scene_layout_reads_the_stored_canvas_code_from_the_database() {
         .into_connection();
     let mut state = AppState::new(config_with(&[]), prometheus::Registry::new(), db);
     state.overlay_codes = test_overlay_codes();
-    let r = get(router(state), &format!("/{CODE_42}/scene/layout?key={token}")).await;
+    let r = get(
+        router(state),
+        &format!("/{CODE_42}/scene/layout?key={token}"),
+    )
+    .await;
     assert_eq!(r.status(), StatusCode::OK);
     let v: Value =
         serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(v["canvas"]["resolution"], "4k");
-    assert_eq!((v["canvas"]["width"].as_i64(), v["canvas"]["height"].as_i64()), (Some(3840), Some(2160)));
+    assert_eq!(
+        (
+            v["canvas"]["width"].as_i64(),
+            v["canvas"]["height"].as_i64()
+        ),
+        (Some(3840), Some(2160))
+    );
 }
 
 fn overlay_view_row(token: &str) -> svc_presentation::db::entities::overlay_view_credential::Model {
@@ -732,17 +843,12 @@ async fn read_events(body: Body, want: usize, deadline: Duration) -> Vec<Value> 
     let mut body = body;
     let mut text = String::new();
     let _ = tokio::time::timeout(deadline, async {
-        loop {
-            match body.frame().await {
-                Some(Ok(frame)) => {
-                    if let Some(d) = frame.data_ref() {
-                        text.push_str(&String::from_utf8_lossy(d));
-                        if text.matches("data:").count() >= want {
-                            break;
-                        }
-                    }
+        while let Some(Ok(frame)) = body.frame().await {
+            if let Some(d) = frame.data_ref() {
+                text.push_str(&String::from_utf8_lossy(d));
+                if text.matches("data:").count() >= want {
+                    break;
                 }
-                _ => break,
             }
         }
     })
@@ -761,41 +867,106 @@ async fn scene_live_replays_and_streams_only_this_scenes_widgets() {
         SceneLayoutDto {
             canvas: CanvasDto::default(),
             components: vec![
-                component("00000000-0000-0000-0000-000000000001", "banner", WidgetOutputKind::Text, "custom"),
-                component("00000000-0000-0000-0000-000000000002", "np", WidgetOutputKind::Surface, "waddles.core.example.music.now_playing"),
+                component(
+                    "00000000-0000-0000-0000-000000000001",
+                    "banner",
+                    WidgetOutputKind::Text,
+                    "custom",
+                ),
+                component(
+                    "00000000-0000-0000-0000-000000000002",
+                    "np",
+                    WidgetOutputKind::Surface,
+                    "waddles.core.example.music.now_playing",
+                ),
             ],
         },
     );
     let (state, token) = viewed_state(scene);
     // Last state replays on connect; an unplaced widget's frame and another community's must not.
-    state.surfaces.hub.publish(42, &widget_key(APP, "banner"), true, json!({"output_kind":"text","text":"replayed"}));
-    state.surfaces.hub.publish(42, &widget_key(APP, "unplaced"), true, json!({"output_kind":"text","text":"SECRET"}));
-    state.surfaces.hub.publish(43, &widget_key(APP, "banner"), true, json!({"output_kind":"text","text":"OTHER"}));
-    let r = get(router(state.clone()), &format!("/{CODE_42}/scene/live?key={token}")).await;
+    state.surfaces.hub.publish(
+        42,
+        &widget_key(APP, "banner"),
+        true,
+        json!({"output_kind":"text","text":"replayed"}),
+    );
+    state.surfaces.hub.publish(
+        42,
+        &widget_key(APP, "unplaced"),
+        true,
+        json!({"output_kind":"text","text":"SECRET"}),
+    );
+    state.surfaces.hub.publish(
+        43,
+        &widget_key(APP, "banner"),
+        true,
+        json!({"output_kind":"text","text":"OTHER"}),
+    );
+    let r = get(
+        router(state.clone()),
+        &format!("/{CODE_42}/scene/live?key={token}"),
+    )
+    .await;
     assert_eq!(r.status(), StatusCode::OK);
     let publisher = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(150)).await;
-        publisher.surfaces.hub.publish(42, "waddles.core.example.music.now_playing", true, json!({"now_playing":null,"updated_ms":1}));
-        publisher.surfaces.hub.publish(42, "waddles.core.example.music.queue", true, json!({"queue":[],"updated_ms":1}));
+        publisher.surfaces.hub.publish(
+            42,
+            "waddles.core.example.music.now_playing",
+            true,
+            json!({"now_playing":null,"updated_ms":1}),
+        );
+        publisher.surfaces.hub.publish(
+            42,
+            "waddles.core.example.music.queue",
+            true,
+            json!({"queue":[],"updated_ms":1}),
+        );
     });
     let events = read_events(r.into_body(), 3, Duration::from_secs(3)).await;
     let rendered = serde_json::to_string(&events).unwrap();
     assert!(rendered.contains("replayed"), "{rendered}");
-    assert!(rendered.contains("waddles.core.example.music.now_playing"), "{rendered}");
+    assert!(
+        rendered.contains("waddles.core.example.music.now_playing"),
+        "{rendered}"
+    );
     assert!(!rendered.contains("SECRET"), "{rendered}");
     assert!(!rendered.contains("OTHER"), "{rendered}");
-    assert!(!rendered.contains("waddles.core.example.music.queue"), "unplaced surface leaked: {rendered}");
+    assert!(
+        !rendered.contains("waddles.core.example.music.queue"),
+        "unplaced surface leaked: {rendered}"
+    );
 }
 
 #[tokio::test]
 async fn widget_live_streams_exactly_one_widget_and_validates_the_spec() {
     let scene = FakeScene::default()
-        .with_widget(42, APP, "banner", binding(WidgetOutputKind::Text, None, true))
-        .with_widget(42, APP, "closed", binding(WidgetOutputKind::Text, None, false));
+        .with_widget(
+            42,
+            APP,
+            "banner",
+            binding(WidgetOutputKind::Text, None, true),
+        )
+        .with_widget(
+            42,
+            APP,
+            "closed",
+            binding(WidgetOutputKind::Text, None, false),
+        );
     let (state, token) = viewed_state(scene);
-    state.surfaces.hub.publish(42, &widget_key(APP, "banner"), true, json!({"output_kind":"text","text":"mine"}));
-    state.surfaces.hub.publish(42, &widget_key(APP, "closed"), true, json!({"output_kind":"text","text":"NOT-MINE"}));
+    state.surfaces.hub.publish(
+        42,
+        &widget_key(APP, "banner"),
+        true,
+        json!({"output_kind":"text","text":"mine"}),
+    );
+    state.surfaces.hub.publish(
+        42,
+        &widget_key(APP, "closed"),
+        true,
+        json!({"output_kind":"text","text":"NOT-MINE"}),
+    );
     let r = get(
         router(state.clone()),
         &format!("/{CODE_42}/scene/live?key={token}&widget={APP}/banner"),
@@ -804,7 +975,10 @@ async fn widget_live_streams_exactly_one_widget_and_validates_the_spec() {
     assert_eq!(r.status(), StatusCode::OK);
     let events = read_events(r.into_body(), 2, Duration::from_secs(2)).await;
     let rendered = serde_json::to_string(&events).unwrap();
-    assert!(rendered.contains("mine") && !rendered.contains("NOT-MINE"), "{rendered}");
+    assert!(
+        rendered.contains("mine") && !rendered.contains("NOT-MINE"),
+        "{rendered}"
+    );
 
     for (spec, want) in [
         (format!("{APP}/closed"), StatusCode::NOT_FOUND),
@@ -813,10 +987,12 @@ async fn widget_live_streams_exactly_one_widget_and_validates_the_spec() {
         ("a/b/c".to_string(), StatusCode::BAD_REQUEST),
         ("..%2F..".to_string(), StatusCode::BAD_REQUEST),
     ] {
-        let (state, token) = viewed_state(
-            FakeScene::default()
-                .with_widget(42, APP, "closed", binding(WidgetOutputKind::Text, None, false)),
-        );
+        let (state, token) = viewed_state(FakeScene::default().with_widget(
+            42,
+            APP,
+            "closed",
+            binding(WidgetOutputKind::Text, None, false),
+        ));
         let r = get(
             router(state),
             &format!("/{CODE_42}/scene/live?key={token}&widget={spec}"),
@@ -844,19 +1020,29 @@ async fn the_surface_viewer_routes_stay_but_there_is_no_http_publish_route() {
             Request::builder()
                 .method("POST")
                 .uri("/internal/surfaces/42/alert/publish")
-                .header(header::AUTHORIZATION, format!("Bearer {}", sign_push_token(42)))
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", sign_push_token(42)),
+                )
                 .body(Body::from(r#"{"alert_type":"info","message":"m"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert!(
-        matches!(r.status(), StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED),
+        matches!(
+            r.status(),
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+        ),
         "{}",
         r.status()
     );
     assert_eq!(state.surfaces.hub.replay_len(), 0);
-    let page = get(router(state), &format!("/surfaces/{CODE_42}/view?key={token}")).await;
+    let page = get(
+        router(state),
+        &format!("/surfaces/{CODE_42}/view?key={token}"),
+    )
+    .await;
     assert_eq!(page.status(), StatusCode::OK);
 }
 

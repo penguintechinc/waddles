@@ -239,7 +239,12 @@ mod tests {
         let mut a = h.subscribe(1, "waddles.core.example.music.queue");
         let mut other_community = h.subscribe(2, "waddles.core.example.music.queue");
         let mut other_surface = h.subscribe(1, "waddles.core.example.music.now_playing");
-        h.publish(1, "waddles.core.example.music.queue", true, json!({"queue": []}));
+        h.publish(
+            1,
+            "waddles.core.example.music.queue",
+            true,
+            json!({"queue": []}),
+        );
         match a.recv().await {
             Some(Recv::Frame(f)) => assert_eq!(f.surface, "waddles.core.example.music.queue"),
             _ => panic!("expected frame"),

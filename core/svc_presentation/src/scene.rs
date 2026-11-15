@@ -20,7 +20,9 @@ use overlay_schema::{
     CanvasDto, CanvasResolution, SceneComponentDto, SceneLayoutDto, WidgetOutputKind,
     MAX_SCENE_COMPONENTS, STATUS_VISIBLE,
 };
-use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+};
 use sha2::{Digest, Sha256};
 
 use crate::db::entities::{
@@ -96,8 +98,8 @@ impl SeaOrmSceneStore {
 
     /// The community's tenant (derived, never supplied).
     async fn tenant_of(&self, community_id: i64) -> Result<(i32, i32), SceneError> {
-        let id = i32::try_from(community_id)
-            .map_err(|_| SceneError::CommunityNotFound(community_id))?;
+        let id =
+            i32::try_from(community_id).map_err(|_| SceneError::CommunityNotFound(community_id))?;
         let row = community::Entity::find_by_id(id)
             .one(&self.db)
             .await?
@@ -165,7 +167,11 @@ impl SceneStore for SeaOrmSceneStore {
                 props: r.props,
             });
         }
-        tracing::debug!(community_id, components = components.len(), "scene layout loaded");
+        tracing::debug!(
+            community_id,
+            components = components.len(),
+            "scene layout loaded"
+        );
         Ok(SceneLayoutDto { canvas, components })
     }
 
@@ -234,7 +240,10 @@ impl SceneStore for SeaOrmSceneStore {
                 allow_standalone_output: true,
             }));
         }
-        tracing::debug!(community_id, "widget lookup refused: not registered or placed");
+        tracing::debug!(
+            community_id,
+            "widget lookup refused: not registered or placed"
+        );
         Ok(None)
     }
 }
@@ -257,14 +266,18 @@ pub fn valid_img_origin(origin: &str) -> bool {
         && host
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-');
-    let port_ok = port.is_none_or(|p| !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()));
+    let port_ok =
+        port.is_none_or(|p| !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()));
     host_ok && port_ok
 }
 
 /// The image origins pages may load from: the built-in artwork CDNs, the configured extras and
 /// the image-bucket origin (signed upload URLs), deduplicated, invalid entries dropped loudly.
 pub fn img_origins(extra_csv: &str, bucket_endpoint: &str) -> Vec<String> {
-    let mut out: Vec<String> = DEFAULT_IMG_ORIGINS.iter().map(|s| (*s).to_string()).collect();
+    let mut out: Vec<String> = DEFAULT_IMG_ORIGINS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
     let candidates = extra_csv
         .split(',')
         .map(str::trim)
@@ -273,7 +286,10 @@ pub fn img_origins(extra_csv: &str, bucket_endpoint: &str) -> Vec<String> {
     for origin in candidates {
         let origin = origin.trim_end_matches('/');
         if !valid_img_origin(origin) {
-            tracing::warn!(origin, "ignoring an image origin that is not a plain https origin");
+            tracing::warn!(
+                origin,
+                "ignoring an image origin that is not a plain https origin"
+            );
             continue;
         }
         if !out.iter().any(|o| o == origin) {
@@ -377,7 +393,11 @@ mod tests {
 
     #[tokio::test]
     async fn layout_reads_the_canvas_code_and_derives_dimensions() {
-        for (code, label, w, h) in [(1, "1080p", 1920, 1080), (2, "2k", 2560, 1440), (3, "4k", 3840, 2160)] {
+        for (code, label, w, h) in [
+            (1, "1080p", 1920, 1080),
+            (2, "2k", 2560, 1440),
+            (3, "4k", 3840, 2160),
+        ] {
             let db = MockDatabase::new(DatabaseBackend::Postgres)
                 .append_query_results([vec![community_row()]])
                 .append_query_results([vec![canvas(code)]])
@@ -410,7 +430,10 @@ mod tests {
             .into_connection();
         assert!(matches!(
             SeaOrmSceneStore::new(db).layout(7).await,
-            Err(SceneError::BadCode { column: "canvas_resolution_code", code: 9 })
+            Err(SceneError::BadCode {
+                column: "canvas_resolution_code",
+                code: 9
+            })
         ));
 
         let db = MockDatabase::new(DatabaseBackend::Postgres)
@@ -420,13 +443,18 @@ mod tests {
             .into_connection();
         assert!(matches!(
             SeaOrmSceneStore::new(db).layout(7).await,
-            Err(SceneError::BadCode { column: "output_kind_code", code: 99 })
+            Err(SceneError::BadCode {
+                column: "output_kind_code",
+                code: 99
+            })
         ));
     }
 
     #[tokio::test]
     async fn layout_caps_components_and_unknown_communities_fail() {
-        let many: Vec<_> = (0..=MAX_SCENE_COMPONENTS).map(|_| component("w", 1, 1)).collect();
+        let many: Vec<_> = (0..=MAX_SCENE_COMPONENTS)
+            .map(|_| component("w", 1, 1))
+            .collect();
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![community_row()]])
             .append_query_results([vec![canvas(1)]])
@@ -444,7 +472,9 @@ mod tests {
         ));
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
         assert!(matches!(
-            SeaOrmSceneStore::new(db).layout(i64::from(i32::MAX) + 1).await,
+            SeaOrmSceneStore::new(db)
+                .layout(i64::from(i32::MAX) + 1)
+                .await,
             Err(SceneError::CommunityNotFound(_))
         ));
     }
@@ -456,7 +486,10 @@ mod tests {
             .append_query_results([Vec::<app_activation::Model>::new()])
             .into_connection();
         assert_eq!(
-            SeaOrmSceneStore::new(db).find_widget(7, "waddles.core.dj", "w").await.unwrap(),
+            SeaOrmSceneStore::new(db)
+                .find_widget(7, "waddles.core.dj", "w")
+                .await
+                .unwrap(),
             None
         );
     }
@@ -475,7 +508,10 @@ mod tests {
             .unwrap();
         assert_eq!(b.output_kind, WidgetOutputKind::SanitizedHtml);
         assert!(!b.allow_standalone_output);
-        assert_eq!(b.surface_id.as_deref(), Some("waddles.core.example.music.queue"));
+        assert_eq!(
+            b.surface_id.as_deref(),
+            Some("waddles.core.example.music.queue")
+        );
 
         // Not in the registry, but visibly placed: a surface widget keeps its surface.
         let db = MockDatabase::new(DatabaseBackend::Postgres)
@@ -490,7 +526,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(b.output_kind, WidgetOutputKind::Surface);
-        assert_eq!(b.surface_id.as_deref(), Some("waddles.core.example.music.now_playing"));
+        assert_eq!(
+            b.surface_id.as_deref(),
+            Some("waddles.core.example.music.now_playing")
+        );
         assert!(b.allow_standalone_output);
 
         // A placed non-surface widget has no surface.
@@ -517,7 +556,10 @@ mod tests {
             .append_query_results([Vec::<overlay_scene_component::Model>::new()])
             .into_connection();
         assert_eq!(
-            SeaOrmSceneStore::new(db).find_widget(7, "waddles.core.dj", "ghost").await.unwrap(),
+            SeaOrmSceneStore::new(db)
+                .find_widget(7, "waddles.core.dj", "ghost")
+                .await
+                .unwrap(),
             None
         );
     }
@@ -530,8 +572,13 @@ mod tests {
             .append_query_results([vec![registry(77, true)]])
             .into_connection();
         assert!(matches!(
-            SeaOrmSceneStore::new(db).find_widget(7, "waddles.core.dj", "w").await,
-            Err(SceneError::BadCode { column: "output_kind_code", code: 77 })
+            SeaOrmSceneStore::new(db)
+                .find_widget(7, "waddles.core.dj", "w")
+                .await,
+            Err(SceneError::BadCode {
+                column: "output_kind_code",
+                code: 77
+            })
         ));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![community_row()]])
@@ -540,14 +587,23 @@ mod tests {
             .append_query_results([vec![component("w", 77, 1)]])
             .into_connection();
         assert!(matches!(
-            SeaOrmSceneStore::new(db).find_widget(7, "waddles.core.dj", "w").await,
-            Err(SceneError::BadCode { column: "output_kind_code", code: 77 })
+            SeaOrmSceneStore::new(db)
+                .find_widget(7, "waddles.core.dj", "w")
+                .await,
+            Err(SceneError::BadCode {
+                column: "output_kind_code",
+                code: 77
+            })
         ));
     }
 
     #[test]
     fn img_origin_grammar() {
-        for ok in ["https://i.ytimg.com", "https://cdn.example.com:8443", "https://a-b.example.org"] {
+        for ok in [
+            "https://i.ytimg.com",
+            "https://cdn.example.com:8443",
+            "https://a-b.example.org",
+        ] {
             assert!(valid_img_origin(ok), "{ok}");
         }
         for bad in [
@@ -595,14 +651,24 @@ mod tests {
         assert!(csp.contains("default-src 'none'"));
         assert!(csp.contains("connect-src 'self'"));
         assert!(csp.contains("img-src 'self' https://i.ytimg.com"));
-        let img = csp.split(';').find(|d| d.trim().starts_with("img-src")).unwrap();
+        let img = csp
+            .split(';')
+            .find(|d| d.trim().starts_with("img-src"))
+            .unwrap();
         for forbidden in ["http:", "data:", " https: ", "*", "blob:"] {
             assert!(!img.contains(forbidden), "{forbidden} in {img}");
         }
         assert!(!csp.contains("unsafe-eval"));
         assert!(!csp.contains("script-src 'unsafe-inline'"));
         // Invalid origins handed in directly never reach the header.
-        let csp = build_csp(page, &["https://*.evil.com".to_string(), "https://ok.example.com".to_string()]).unwrap();
+        let csp = build_csp(
+            page,
+            &[
+                "https://*.evil.com".to_string(),
+                "https://ok.example.com".to_string(),
+            ],
+        )
+        .unwrap();
         assert!(!csp.contains("evil"));
         assert!(csp.contains("https://ok.example.com"));
         // Not exactly one script -> no CSP (fail loud at the handler).

@@ -285,7 +285,11 @@ mod tests {
         ] {
             assert!(s.contract.get(id).is_some(), "{id}");
         }
-        assert!(s.contract.get("waddles.core.example.music.queue").unwrap().replay());
+        assert!(s
+            .contract
+            .get("waddles.core.example.music.queue")
+            .unwrap()
+            .replay());
         assert!(!s.contract.get("clip.alert").unwrap().replay());
     }
 
@@ -304,23 +308,40 @@ mod tests {
         let s = svc();
         let body = json!({"now_playing": track(), "updated_ms": 5}).to_string();
         let f = s
-            .process(7, "waddles.core.example.music.now_playing", body.as_bytes(), Instant::now())
+            .process(
+                7,
+                "waddles.core.example.music.now_playing",
+                body.as_bytes(),
+                Instant::now(),
+            )
             .unwrap();
         assert_eq!(f.surface, "waddles.core.example.music.now_playing");
-        assert!(s.hub.replay_for(7, "waddles.core.example.music.now_playing").is_some());
-        assert!(s.hub.replay_for(8, "waddles.core.example.music.now_playing").is_none());
+        assert!(s
+            .hub
+            .replay_for(7, "waddles.core.example.music.now_playing")
+            .is_some());
+        assert!(s
+            .hub
+            .replay_for(8, "waddles.core.example.music.now_playing")
+            .is_none());
     }
 
     #[test]
     fn schema_violations_are_rejected_without_echoing_values() {
         let s = svc();
         for (surface, bad) in [
-            ("waddles.core.example.music.now_playing", json!({"now_playing": null})),
+            (
+                "waddles.core.example.music.now_playing",
+                json!({"now_playing": null}),
+            ),
             (
                 "waddles.core.example.music.now_playing",
                 json!({"now_playing": null, "updated_ms": 1, "html": "<b>"}),
             ),
-            ("waddles.core.example.music.queue", json!({"queue": "x", "updated_ms": 1})),
+            (
+                "waddles.core.example.music.queue",
+                json!({"queue": "x", "updated_ms": 1}),
+            ),
             (
                 "clip.alert",
                 json!({"clip_id":"a b","url":"https://x.tv/c","title":"t","created_ms":1}),
@@ -354,7 +375,12 @@ mod tests {
         let tracks: Vec<_> = (0..51).map(|_| json!({"id":1,"provider":"p","track_id":"t","title":"","artist":"","duration_s":1})).collect();
         let body = json!({"queue": tracks, "updated_ms": 1}).to_string();
         assert!(matches!(
-            s.process(1, "waddles.core.example.music.queue", body.as_bytes(), Instant::now()),
+            s.process(
+                1,
+                "waddles.core.example.music.queue",
+                body.as_bytes(),
+                Instant::now()
+            ),
             Err(PublishError::Invalid(_))
         ));
     }
@@ -364,7 +390,12 @@ mod tests {
         let s = svc();
         let big = vec![b' '; 5000];
         assert!(matches!(
-            s.process(1, "waddles.core.example.music.now_playing", &big, Instant::now()),
+            s.process(
+                1,
+                "waddles.core.example.music.now_playing",
+                &big,
+                Instant::now()
+            ),
             Err(PublishError::TooLarge { max: 4096 })
         ));
         assert!(matches!(

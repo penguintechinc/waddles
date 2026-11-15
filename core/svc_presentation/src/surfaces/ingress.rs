@@ -13,7 +13,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Instant;
 
-use bundle_host_surface::pb::surface_service_server::{SurfaceService as SurfaceRpc, SurfaceServiceServer};
+use bundle_host_surface::pb::surface_service_server::{
+    SurfaceService as SurfaceRpc, SurfaceServiceServer,
+};
 use bundle_host_surface::pb::{PublishRequest, PublishResponse};
 use bundle_host_surface::{API_VERSION, RETRY_AFTER_MS_KEY};
 use overlay_auth::OverlayAuthError;
@@ -145,7 +147,12 @@ impl SurfaceRpc for SurfaceIngress {
         } else {
             false
         };
-        tracing::debug!(community_id, seq = frame.seq, bridged, "surface frame published");
+        tracing::debug!(
+            community_id,
+            seq = frame.seq,
+            bridged,
+            "surface frame published"
+        );
         Ok(Response::new(PublishResponse { seq: frame.seq }))
     }
 }

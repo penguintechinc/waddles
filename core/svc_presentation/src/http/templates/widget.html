@@ -27,8 +27,8 @@
 (function () {
   var container = document.getElementById('widget-container');
   var statusEl = document.getElementById('status');
-  var url = new URL(window.location.href);
-  var key = url.searchParams.get('key') || '';
+  var params = new URLSearchParams(window.location.search);
+  var key = params.get('key') || '';
   // /<overlay_code>/widget/<bundle_app_id>/<widget_id>
   var parts = window.location.pathname.split('/').filter(Boolean);
   var overlayCode = parts[0] || '';
