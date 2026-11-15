@@ -86,7 +86,7 @@ exported_tools:
           format: uuid
       subscriber_count:
         type: integer
-  required_scope: community:admin
+  required_scope: rooms:create
 - name: room.update
   access: write
   risk: dangerous
@@ -106,10 +106,14 @@ exported_tools:
       allow_guests:
         type: boolean
       starts_at:
-        type: integer
+        type:
+        - integer
+        - 'null'
         minimum: 0
       ends_at:
-        type: integer
+        type:
+        - integer
+        - 'null'
         minimum: 0
     required:
     - room_id
@@ -138,7 +142,7 @@ exported_tools:
           format: uuid
       subscriber_count:
         type: integer
-  required_scope: community:moderate
+  required_scope: rooms:update
 - name: room.get
   access: read
   risk: normal
@@ -211,7 +215,7 @@ exported_tools:
           format: uuid
       subscriber_count:
         type: integer
-  required_scope: community:admin
+  required_scope: rooms:close
 - name: token.issue
   access: write
   risk: dangerous

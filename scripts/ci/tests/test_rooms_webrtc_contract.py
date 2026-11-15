@@ -115,8 +115,15 @@ def test_rooms_requested_tools_and_permissions_name_only_exported_tools() -> Non
 
 def test_privileged_tools_carry_the_admin_scope_rooms_relies_on() -> None:
     tools = {t["name"]: t for t in _manifest(WEBRTC / "hub-manifest.yaml")["exported_tools"]}
-    for name in ("room.create", "room.close", "token.revoke_all", "admin.verify"):
+    for name in ("token.revoke_all", "admin.verify"):
         assert tools[name].get("required_scope") == "community:admin", name
+    # Room management uses dedicated scopes (a role is only a bundle of them), never a role.
+    for name, scope in (
+        ("room.create", "rooms:create"),
+        ("room.update", "rooms:update"),
+        ("room.close", "rooms:close"),
+    ):
+        assert tools[name].get("required_scope") == scope, name
 
 
 def test_webrtc_bundle_and_hub_manifests_agree_on_tools() -> None:

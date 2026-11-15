@@ -34,7 +34,8 @@ use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 
 use super::{
-    ActorRole, HandView, IssueRequest, RoomError, RoomFacts, RoomKind, RoomService, RouteMode,
+    ActorRole, FactsPatch, HandView, IssueRequest, RoomError, RoomFacts, RoomKind, RoomService,
+    RouteMode,
 };
 
 /// Errors building/running the listener.
@@ -161,10 +162,20 @@ struct CreateReq {
     ends_at: Option<i64>,
     #[serde(default)]
     allow_guests: bool,
-    /// The caller's verified role (the webrtc tool derives it from host-verified scopes).
-    /// Required for any non-default fact, never for a plain open community room.
+    /// The room-management scopes the host verified for the caller (forwarded by the webrtc
+    /// tool; never a role name). A non-default fact needs its specific scope, a plain open
+    /// community room needs none.
     #[serde(default)]
-    actor_role: Option<ActorRole>,
+    actor_scopes: Vec<String>,
+}
+
+/// Scope for kind / schedule facts and for `room.update`.
+pub const SCOPE_ROOMS_UPDATE: &str = "rooms:update";
+/// Scope for enabling guests.
+pub const SCOPE_ROOMS_GUESTS: &str = "rooms:guests";
+
+fn has(scopes: &[String], s: &str) -> bool {
+    scopes.iter().any(|x| x == s)
 }
 
 impl CreateReq {
@@ -179,25 +190,35 @@ impl CreateReq {
     }
 }
 
-/// `room.update`: the full new fact set for a room, set by a verified moderator/admin.
+/// Distinguishes an omitted field (`None`: unchanged) from an explicit `null`
+/// (`Some(None)`: clear the bound).
+fn double_option<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i64>::deserialize(d).map(Some)
+}
+
+/// `room.update`: a PATCH of a room's facts (omitted = unchanged), by a verified admin only.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateReq {
     community_id: String,
     room_id: Uuid,
     #[serde(default)]
-    kind: RoomKind,
+    kind: Option<RoomKind>,
     #[serde(default)]
-    closed: bool,
+    closed: Option<bool>,
+    #[serde(default, deserialize_with = "double_option")]
+    starts_at: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    ends_at: Option<Option<i64>>,
     #[serde(default)]
-    starts_at: Option<i64>,
-    #[serde(default)]
-    ends_at: Option<i64>,
-    #[serde(default)]
-    allow_guests: bool,
-    /// The verified actor (pseudonym uuid) and role the webrtc tool forwards.
+    allow_guests: Option<bool>,
+    /// The verified actor (pseudonym uuid) and host-verified scopes the webrtc tool forwards.
     actor_id: Uuid,
-    actor_role: ActorRole,
+    #[serde(default)]
+    actor_scopes: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -324,10 +345,16 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
         "room.create" => {
             let r: CreateReq = parse(body)?;
             let facts = r.facts();
-            // Defence in depth: anything but the open-community default needs a verified
-            // moderator/admin role from the caller.
-            if facts != RoomFacts::default() && !r.actor_role.is_some_and(ActorRole::is_moderator) {
-                return Err(RoomError::Forbidden("room facts require a moderator"));
+            // Defence in depth, per specific scope: kind/schedule facts need `rooms:update`,
+            // enabling guests needs `rooms:guests`; the open-community default needs none.
+            let kind_or_window = facts.kind != RoomKind::Community
+                || facts.starts_at.is_some()
+                || facts.ends_at.is_some();
+            if kind_or_window && !has(&r.actor_scopes, SCOPE_ROOMS_UPDATE) {
+                return Err(RoomError::Forbidden("room facts require rooms:update"));
+            }
+            if facts.allow_guests && !has(&r.actor_scopes, SCOPE_ROOMS_GUESTS) {
+                return Err(RoomError::Forbidden("guests require rooms:guests"));
             }
             let info = svc
                 .create_with_facts(
@@ -343,10 +370,16 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
         }
         "room.update" => {
             let r: UpdateReq = parse(body)?;
-            if !r.actor_role.is_moderator() {
-                return Err(RoomError::Forbidden("room facts require a moderator"));
+            tracing::debug!(actor_id = %r.actor_id, room_id = %r.room_id, "host room.update");
+            // The dedicated `rooms:update` scope (a moderator bundle does not carry it);
+            // enabling guests additionally needs `rooms:guests`.
+            if !has(&r.actor_scopes, SCOPE_ROOMS_UPDATE) {
+                return Err(RoomError::Forbidden("room.update requires rooms:update"));
             }
-            let facts = RoomFacts {
+            if r.allow_guests == Some(true) && !has(&r.actor_scopes, SCOPE_ROOMS_GUESTS) {
+                return Err(RoomError::Forbidden("guests require rooms:guests"));
+            }
+            let patch = FactsPatch {
                 kind: r.kind,
                 closed: r.closed,
                 starts_at: r.starts_at,
@@ -354,7 +387,7 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
                 allow_guests: r.allow_guests,
             };
             Ok(json!(
-                svc.update_facts(&r.community_id, r.room_id, facts).await?
+                svc.patch_facts(&r.community_id, r.room_id, patch).await?
             ))
         }
         "room.get" => {

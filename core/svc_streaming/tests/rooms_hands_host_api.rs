@@ -98,7 +98,11 @@ impl Room {
     }
 
     async fn op(&self, op: &str, extra: Value) -> (StatusCode, Value) {
-        let mut body = json!({"api_version": "v1", "community_id": "7", "room_id": self.id});
+        // Only the hand/staff ops carry a contract version; the moderation ops refuse the field.
+        let mut body = json!({"community_id": "7", "room_id": self.id});
+        if op.starts_with("room.hand.") || op.starts_with("room.staff.") {
+            body["api_version"] = json!("v1");
+        }
         for (k, v) in extra.as_object().unwrap() {
             body[k] = v.clone();
         }

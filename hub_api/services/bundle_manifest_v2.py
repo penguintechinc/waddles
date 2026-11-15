@@ -568,6 +568,12 @@ TOOL_REQUIRED_SCOPES = frozenset(
         "community:moderate",
         "community:admin",
         "community:owner",
+        # Dedicated room-management scopes (admin/owner bundles carry them; a moderator
+        # does not yet) -- mirrors `scopes_for_role` in `core/bundle_tool_call`.
+        "rooms:create",
+        "rooms:update",
+        "rooms:close",
+        "rooms:guests",
     }
 )
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")

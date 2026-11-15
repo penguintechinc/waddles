@@ -286,6 +286,17 @@ pub struct RoomFacts {
     pub allow_guests: bool,
 }
 
+/// A partial facts change: `None` leaves a field as it is; for the window bounds
+/// `Some(None)` clears the bound.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FactsPatch {
+    pub kind: Option<RoomKind>,
+    pub closed: Option<bool>,
+    pub starts_at: Option<Option<i64>>,
+    pub ends_at: Option<Option<i64>>,
+    pub allow_guests: Option<bool>,
+}
+
 impl RoomFacts {
     /// Rejects a malformed window (negative bound, or `starts_at >= ends_at`).
     pub fn validate(&self) -> Result<(), RoomError> {
@@ -909,13 +920,54 @@ impl RoomService {
         room_id: Uuid,
         facts: RoomFacts,
     ) -> Result<RoomInfo, RoomError> {
-        facts.validate()?;
-        let (info, members) = {
+        self.apply_facts(community_id, room_id, |_| Ok(facts)).await
+    }
+
+    /// PATCH semantics: only the fields present in `patch` change, atomically with the read
+    /// of the current facts. A town hall's kind never changes and nothing becomes a town
+    /// hall through here (town halls are created by hub-api only).
+    pub async fn patch_facts(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        patch: FactsPatch,
+    ) -> Result<RoomInfo, RoomError> {
+        self.apply_facts(community_id, room_id, |cur| {
+            if cur.kind != RoomKind::TownHall && patch.kind == Some(RoomKind::TownHall) {
+                return Err(RoomError::Forbidden(
+                    "a room cannot be made a town hall here",
+                ));
+            }
+            if cur.kind == RoomKind::TownHall && patch.kind.is_some_and(|k| k != cur.kind) {
+                return Err(RoomError::Forbidden("a town hall's kind cannot be changed"));
+            }
+            Ok(RoomFacts {
+                kind: patch.kind.unwrap_or(cur.kind),
+                closed: patch.closed.unwrap_or(cur.closed),
+                starts_at: patch.starts_at.unwrap_or(cur.starts_at),
+                ends_at: patch.ends_at.unwrap_or(cur.ends_at),
+                allow_guests: patch.allow_guests.unwrap_or(cur.allow_guests),
+            })
+        })
+        .await
+    }
+
+    /// Computes the new facts from the current ones under the room lock, validates, stores,
+    /// then ends every live session the new facts no longer admit.
+    async fn apply_facts(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        f: impl FnOnce(&RoomFacts) -> Result<RoomFacts, RoomError>,
+    ) -> Result<RoomInfo, RoomError> {
+        let (info, members, facts) = {
             let mut rooms = self.rooms.write().await;
             match rooms.get_mut(&room_id) {
                 Some(r) if r.community_id == community_id => {
+                    let facts = f(&r.facts)?;
+                    facts.validate()?;
                     r.facts = facts;
-                    (Self::info(room_id, r), r.members.clone())
+                    (Self::info(room_id, r), r.members.clone(), facts)
                 }
                 _ => return Err(RoomError::NotFound),
             }
@@ -1256,6 +1308,7 @@ impl RoomService {
     }
 
     /// Registers (replacing any prior) a publisher; returns the session id.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn add_publisher(
         &self,
         room_id: Uuid,
@@ -3145,9 +3198,9 @@ mod tests {
         .unwrap();
         let rooms = s.rooms.read().await;
         let room = rooms.get(&r.room_id).unwrap();
-        assert!(RoomService::join_allowed(room, member, false).is_err());
+        assert!(RoomService::join_allowed(room, member, false, 0).is_err());
         assert!(
-            RoomService::join_allowed(room, staff, false).is_err(),
+            RoomService::join_allowed(room, staff, false, 0).is_err(),
             "closed refuses staff too"
         );
         drop(rooms);
@@ -3156,17 +3209,17 @@ mod tests {
             .unwrap();
         let rooms = s.rooms.read().await;
         let room = rooms.get(&r.room_id).unwrap();
-        assert!(RoomService::join_allowed(room, member, false).is_err());
-        assert!(RoomService::join_allowed(room, staff, true).is_ok());
-        assert!(RoomService::join_allowed(room, Uuid::new_v4(), false).is_err());
+        assert!(RoomService::join_allowed(room, member, false, 0).is_err());
+        assert!(RoomService::join_allowed(room, staff, true, 0).is_ok());
+        assert!(RoomService::join_allowed(room, Uuid::new_v4(), false, 0).is_err());
         drop(rooms);
         s.update_facts("7", r.room_id, facts(RoomKind::Stage))
             .await
             .unwrap();
         let rooms = s.rooms.read().await;
         let room = rooms.get(&r.room_id).unwrap();
-        assert!(RoomService::join_allowed(room, member, true).is_err());
-        assert!(RoomService::join_allowed(room, member, false).is_ok());
+        assert!(RoomService::join_allowed(room, member, true, 0).is_err());
+        assert!(RoomService::join_allowed(room, member, false, 0).is_ok());
     }
 
     #[tokio::test]
@@ -3447,8 +3500,136 @@ mod tests {
         for step in 1..=5 {
             p2.fetch_add(5, Ordering::Relaxed);
             v2.fetch_add(5, Ordering::Relaxed);
-            assert_eq!(s.sweep_at(t + step * 200).await, 0);
+            s.sweep_at(t + step * 200).await;
+            assert_eq!(counts(&s, r2.room_id).await, (1, 1), "step {step}");
         }
         drop(viewer);
+    }
+
+    #[tokio::test]
+    async fn patch_facts_changes_only_what_is_named_and_protects_town_halls() {
+        let s = moderated();
+        let open = RoomFacts {
+            kind: RoomKind::Stage,
+            allow_guests: true,
+            starts_at: Some(100),
+            ends_at: Some(200),
+            ..RoomFacts::default()
+        };
+        let r = s
+            .create_with_facts("7", None, None, RouteMode::Sfu, None, open)
+            .await
+            .unwrap();
+        // Omitted fields are unchanged.
+        let p = s
+            .patch_facts(
+                "7",
+                r.room_id,
+                FactsPatch {
+                    closed: Some(true),
+                    ..FactsPatch::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            p.facts,
+            RoomFacts {
+                closed: true,
+                ..open
+            }
+        );
+        // An empty patch changes nothing; Some(None) clears one bound only.
+        assert_eq!(
+            s.patch_facts("7", r.room_id, FactsPatch::default())
+                .await
+                .unwrap()
+                .facts,
+            p.facts
+        );
+        let c = s
+            .patch_facts(
+                "7",
+                r.room_id,
+                FactsPatch {
+                    ends_at: Some(None),
+                    ..FactsPatch::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!((c.facts.starts_at, c.facts.ends_at), (Some(100), None));
+        // Nothing becomes a town hall through a patch.
+        assert!(matches!(
+            s.patch_facts(
+                "7",
+                r.room_id,
+                FactsPatch {
+                    kind: Some(RoomKind::TownHall),
+                    ..FactsPatch::default()
+                }
+            )
+            .await,
+            Err(RoomError::Forbidden(_))
+        ));
+        // A town hall's kind is immutable, but its other facts can be patched.
+        let th = s
+            .create_with_facts(
+                "7",
+                None,
+                None,
+                RouteMode::Sfu,
+                None,
+                facts(RoomKind::TownHall),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            s.patch_facts(
+                "7",
+                th.room_id,
+                FactsPatch {
+                    kind: Some(RoomKind::Community),
+                    ..FactsPatch::default()
+                }
+            )
+            .await,
+            Err(RoomError::Forbidden(_))
+        ));
+        let ok = s
+            .patch_facts(
+                "7",
+                th.room_id,
+                FactsPatch {
+                    allow_guests: Some(true),
+                    kind: Some(RoomKind::TownHall),
+                    ..FactsPatch::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(ok.facts.allow_guests && ok.facts.kind == RoomKind::TownHall);
+        // A resulting invalid window is refused and nothing changes.
+        assert!(matches!(
+            s.patch_facts(
+                "7",
+                r.room_id,
+                FactsPatch {
+                    starts_at: Some(Some(500)),
+                    ends_at: Some(Some(400)),
+                    ..FactsPatch::default()
+                }
+            )
+            .await,
+            Err(RoomError::Invalid(_))
+        ));
+        assert_eq!(
+            s.get("7", r.room_id).await.unwrap().facts.starts_at,
+            Some(100)
+        );
+        assert!(matches!(
+            s.patch_facts("8", r.room_id, FactsPatch::default()).await,
+            Err(RoomError::NotFound)
+        ));
     }
 }

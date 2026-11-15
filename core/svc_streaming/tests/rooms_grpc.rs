@@ -34,7 +34,7 @@ async fn every_proto_rpc_is_declared_served_and_auth_gated() {
         .map(|l| l.split('(').next().unwrap().trim().to_string())
         .collect();
     let constant: BTreeSet<String> = RPC_NAMES.iter().map(|s| s.to_string()).collect();
-    assert_eq!(declared.len(), 18, "denominator: {declared:?}");
+    assert_eq!(declared.len(), 19, "denominator: {declared:?}");
     assert_eq!(declared, constant, "RPC_NAMES drifted from rooms.proto");
 
     // 2. Each one is routed and demands a token: no token -> Unauthenticated, never
@@ -63,6 +63,7 @@ async fn every_proto_rpc_is_declared_served_and_auth_gated() {
     );
     gate!(create_room, CreateRoomRequest::default(), "CreateRoom");
     gate!(delete_room, DeleteRoomRequest::default(), "DeleteRoom");
+    gate!(update_room, UpdateRoomRequest::default(), "UpdateRoom");
     gate!(join_room, JoinRoomRequest::default(), "JoinRoom");
     gate!(leave_room, LeaveRoomRequest::default(), "LeaveRoom");
     gate!(

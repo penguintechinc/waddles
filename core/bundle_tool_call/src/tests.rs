@@ -740,6 +740,19 @@ fn role_scope_map_is_cumulative_and_fails_closed() {
     assert_eq!(scopes_for_role("owner"), scopes_for_role("community-owner"));
     assert!(scopes_for_role("community-admin").contains(&"community:moderate"));
     assert!(!scopes_for_role("moderator").contains(&"community:admin"));
+    // Dedicated room scopes: admin/owner bundles carry all of them, a moderator none yet.
+    for s in [
+        "rooms:create",
+        "rooms:update",
+        "rooms:close",
+        "rooms:guests",
+    ] {
+        assert!(scopes_for_role("community-admin").contains(&s), "{s}");
+        assert!(scopes_for_role("owner").contains(&s), "{s}");
+        for r in ["moderator", "vip", "member"] {
+            assert!(!scopes_for_role(r).contains(&s), "{r} must not hold {s}");
+        }
+    }
     assert!(!scopes_for_role("vip").contains(&"community:moderate"));
     for bad in ["", "admin", "COMMUNITY-ADMIN", "root"] {
         assert!(scopes_for_role(bad).is_empty(), "{bad:?}");

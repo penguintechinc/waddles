@@ -107,5 +107,5 @@ global `hub_users.uuid` never leaves the platform. No pseudonym in the context =
 Any non-default fact (`allow_guests=true`, `kind != community`, a schedule window) additionally needs the
 verified caller to hold `community:moderate` or `community:admin` (checked in the tool, forwarded as `actor_role`,
 and re-checked by the host `room.create`). `room.update {room_id, kind?, closed?, allow_guests?, starts_at?, ends_at?}`
-(`community:moderate`, risk `dangerous`) replaces a room's facts on svc-streaming and ends every live session that
+(`community:admin`, risk `dangerous`, PATCH: omitted facts unchanged, `null` clears a schedule bound, never sets or changes a town hall) updates a room's facts on svc-streaming and ends every live session that
 would no longer be admitted; the rooms app calls it from `room.set_access` / `room.set_schedule`.
