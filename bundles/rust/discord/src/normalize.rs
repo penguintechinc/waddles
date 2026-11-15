@@ -253,6 +253,59 @@ pub fn role_event(change: RoleChange, d: &Value, occurred_at: &str) -> Result<Ev
     })
 }
 
+/// Free-text arguments of a chat-input command: the fixed `args` string option,
+/// else every top-level string/number/bool option value joined by spaces (typed
+/// options are opt-in per command later; this keeps `parse_command` working).
+fn command_args(data: Option<&Value>) -> String {
+    let Some(opts) = data
+        .and_then(|d| d.get("options"))
+        .and_then(Value::as_array)
+    else {
+        return String::new();
+    };
+    let one = |o: &Value| match o.get("value") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Number(n)) => Some(n.to_string()),
+        Some(Value::Bool(b)) => Some(b.to_string()),
+        _ => None,
+    };
+    if let Some(a) = opts
+        .iter()
+        .find(|o| o.get("name").and_then(Value::as_str) == Some("args"))
+        .and_then(one)
+    {
+        return a.trim().to_string();
+    }
+    opts.iter().filter_map(one).collect::<Vec<_>>().join(" ")
+}
+
+/// Modal-submit values as `{custom_id: value}` (text inputs only); `null` when absent.
+fn modal_fields(data: Option<&Value>) -> Value {
+    let Some(rows) = data
+        .and_then(|d| d.get("components"))
+        .and_then(Value::as_array)
+    else {
+        return Value::Null;
+    };
+    let mut out = serde_json::Map::new();
+    for row in rows {
+        for c in row
+            .get("components")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let (Some(id), Some(v)) = (
+                c.get("custom_id").and_then(Value::as_str),
+                c.get("value").and_then(Value::as_str),
+            ) {
+                out.insert(id.to_string(), Value::String(v.to_string()));
+            }
+        }
+    }
+    Value::Object(out)
+}
+
 /// Maps an interaction `type` to its event-type suffix. PING (1) is handled by
 /// the host (3-second PONG deadline) and is NOT an event.
 fn interaction_kind(t: u64) -> Option<&'static str> {
@@ -322,6 +375,18 @@ pub fn interaction_event(
         None => Value::Null,
     };
 
+    // Platform-neutral command text: the synthesized `/verb args` line existing
+    // bundles' verb parser consumes unchanged. Non-command interactions carry none.
+    let args = if t == 2 {
+        command_args(data)
+    } else {
+        String::new()
+    };
+    let text = match (t, data.and_then(|d| d.get("name")).and_then(Value::as_str)) {
+        (2, Some(name)) if args.is_empty() => format!("/{name}"),
+        (2, Some(name)) => format!("/{name} {args}"),
+        _ => String::new(),
+    };
     let payload = json!({
         "interaction_id": id,
         "guild_id": guild_id,
@@ -331,6 +396,10 @@ pub fn interaction_event(
         "custom_id": field("custom_id"),
         "options": field("options"),
         "values": field("values"),
+        "trigger": "webhook",
+        "args": args,
+        "text": text,
+        "fields": modal_fields(data),
         "is_mod": perms.is_mod,
         "is_broadcaster": perms.is_broadcaster,
     });
@@ -520,6 +589,57 @@ mod tests {
             );
             assert_eq!(e.actor.as_deref(), Some("uuid-of-444"));
         }
+    }
+
+    #[test]
+    fn command_text_args_modal_fields_and_trigger_are_platform_neutral() {
+        let e = interaction_event(
+            &interaction(
+                2,
+                json!({"name":"ping","options":[{"name":"args","type":3,"value":" a b "}]}),
+            ),
+            "t",
+            &tok,
+        )
+        .unwrap()
+        .unwrap();
+        let p: Value = serde_json::from_str(&e.payload_json).unwrap();
+        assert_eq!(
+            (p["text"].as_str(), p["args"].as_str()),
+            (Some("/ping a b"), Some("a b"))
+        );
+        assert_eq!(p["trigger"], "webhook");
+        let bare = interaction_event(&interaction(2, json!({"name":"ping"})), "t", &tok)
+            .unwrap()
+            .unwrap();
+        let p: Value = serde_json::from_str(&bare.payload_json).unwrap();
+        assert_eq!(p["text"], "/ping");
+        let btn = interaction_event(
+            &interaction(3, json!({"custom_id":"ok","values":["a"]})),
+            "t",
+            &tok,
+        )
+        .unwrap()
+        .unwrap();
+        let p: Value = serde_json::from_str(&btn.payload_json).unwrap();
+        assert_eq!(
+            (
+                p["text"].as_str(),
+                p["custom_id"].as_str(),
+                p["values"][0].as_str()
+            ),
+            (Some(""), Some("ok"), Some("a"))
+        );
+        let modal = interaction_event(
+            &interaction(5, json!({"custom_id":"m","components":[{"type":1,"components":[{"type":4,"custom_id":"reason","value":"spam"}]}]})),
+            "t",
+            &tok,
+        )
+        .unwrap()
+        .unwrap();
+        let p: Value = serde_json::from_str(&modal.payload_json).unwrap();
+        assert_eq!(p["fields"]["reason"], "spam");
+        assert!(!modal.payload_json.contains("SECRET-TOKEN"));
     }
 
     #[test]

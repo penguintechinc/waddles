@@ -92,7 +92,7 @@ async def test_write_bundle_sidecar_overwrites_the_sidecar_with_canonical_json()
 # regression: bundle publish/fetch bucket split after SeaweedFS migration (#508/#509) --
 # upload_bundle_component() must target BUNDLE_BUCKET_NAME (core/bundle_executor's own
 # bucket), NEVER S3_BUCKET_NAME ("waddlebot-assets", avatars/community assets only) -- a
-# publish into the wrong bucket "succeeds" but 404s for every bundle-executor fetch.
+# publish into the wrong bucket "succeeds" but 404s for every svc-bundles-executor fetch.
 
 
 def test_bundle_bucket_defaults_match_the_bundle_executor_chart_default(

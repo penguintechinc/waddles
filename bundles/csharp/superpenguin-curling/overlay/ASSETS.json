@@ -1,0 +1,103 @@
+{
+  "upstream_repo": "https://github.com/Psychoboy/PenguinTwitchBot",
+  "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+  "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)",
+  "files": [
+    {
+      "path": "curling.html",
+      "sha256": "f3103ba4060e7b177d8a92576eb1e74cb2ad3927472eeb78eddf2596530346c1",
+      "size": 2888,
+      "upstream_path": "PenguinTwitchBot/wwwroot/curling.html",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "js/curling.js",
+      "sha256": "05dd16adb27f9e6ecf7f811b0acbf6fa37652c6fb812f7e6e9f5ce3047bb02ad",
+      "size": 72412,
+      "upstream_path": "PenguinTwitchBot/wwwroot/js/curling.js",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/curling_foul.wav",
+      "sha256": "d5f386e45015fbb96d461aa7106b97bb19b6a7247c349b8e3b39ba990b574487",
+      "size": 97064,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/curling_foul.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/curling_hit.wav",
+      "sha256": "a9169ce84c03f78a23faf900a0ee8ef7dfa910106915b527dda535b4aee9147b",
+      "size": 24740,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/curling_hit.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/curling_score.wav",
+      "sha256": "985b199e7af8a6b5767e79ef0ecf9a7db7503a286e8fdd3bf7fdc33b38d18be4",
+      "size": 75014,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/curling_score.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/curling_slide.wav",
+      "sha256": "f8ca716124a81d4b22882dd3bd3bb6fce1908a7b705818193aa7e7284090eca3",
+      "size": 105884,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/curling_slide.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/curling_sweep.wav",
+      "sha256": "edeb6c3bc479816348e7d0bcf2254311816d5fb1a655bf5f2c0c0f295af2c455",
+      "size": 48554,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/curling_sweep.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/curling_win.wav",
+      "sha256": "994929d699dd62bb92853976d1a3032e72d49fe0683f403a41cd975cc7b92f8b",
+      "size": 119114,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/curling_win.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    }
+  ],
+  "third_party_or_unclear": [
+    {
+      "path": "js/ws-client.js",
+      "reason": "upstream host WebSocket plumbing (topic subscription), not game material; the Waddles overlay transport differs, so not vendored",
+      "vendored": false
+    },
+    {
+      "path": "js/ws-status.js",
+      "reason": "upstream host WebSocket status badge, not game material; not vendored",
+      "vendored": false
+    },
+    {
+      "path": "js/reconnecting-websocket/reconnectingWS.min.js",
+      "reason": "third-party library with its own LICENSE.txt in upstream; not vendored",
+      "vendored": false
+    },
+    {
+      "path": "fonts.googleapis.com Fredoka/Rubik",
+      "reason": "loaded remotely by curling.html at runtime (Google Fonts, OFL); not vendored",
+      "vendored": false
+    },
+    {
+      "path": "themes and stone/house/character/emote images",
+      "reason": "stored in the upstream settings database and resolved from Twitch emotes at runtime, not files in the repo; nothing to vendor",
+      "vendored": false
+    }
+  ],
+  "notes": [
+    "curling.html and js/curling.js are vendored unmodified; curling.html still references /js/drop-games-common.js and /js/drop-games-audio.js (vendored once in superpenguin-dropgame-core/overlay/common) and the upstream WebSocket scripts listed as unvendored; see README browser-source section.",
+    "The repo carries no per-asset attribution for the .wav files; they are treated as covered by the repo MIT LICENSE. round_start.wav/round_end.wav (the default session sounds) are in the shared core overlay/common/media.",
+    "curling.js computes the stone path/score itself from the message fields (effectivePower, condition, ...); the server-side result in the Waddles envelope is authoritative for the payout. See SCHEMA.md."
+  ]
+}

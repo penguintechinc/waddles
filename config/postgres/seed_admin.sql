@@ -42,7 +42,6 @@ INSERT INTO hub_users (
     username,
     password_hash,
     is_active,
-    is_super_admin,
     email_verified,
     created_at,
     updated_at
@@ -52,15 +51,28 @@ INSERT INTO hub_users (
     crypt(:'admin_password', gen_salt('bf', 12)),
     true,
     true,
-    true,
     NOW(),
     NOW()
 ) ON CONFLICT (email) DO UPDATE SET
     password_hash = EXCLUDED.password_hash,
-    is_super_admin = true,
     is_active = true,
     email_verified = true,
     updated_at = NOW();
+
+-- Global admin = member + tenant admin of the reserved `system` tenant (no is_super_admin flag).
+INSERT INTO tenants (slug, display_name, is_global)
+    SELECT 'system', 'System', FALSE
+    WHERE NOT EXISTS (SELECT 1 FROM tenants WHERE slug = 'system');
+
+INSERT INTO tenant_members (tenant_id, user_id)
+    SELECT t.id, u.id FROM tenants t, hub_users u
+    WHERE t.slug = 'system' AND u.email = :'admin_email'
+ON CONFLICT (tenant_id, user_id) DO NOTHING;
+
+INSERT INTO tenant_admins (tenant_id, user_id, role)
+    SELECT t.id, u.id, 'tenant-owner' FROM tenants t, hub_users u
+    WHERE t.slug = 'system' AND u.email = :'admin_email'
+ON CONFLICT (tenant_id, user_id) DO NOTHING;
 
 -- =============================================================================
 -- Create Global Community (if not exists)

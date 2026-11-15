@@ -43,16 +43,44 @@ function filterHeaders(headers) {
   return out;
 }
 
+/** Parse a comma-separated hostname list into lowercase, port-free entries. */
+export function parseHostnames(list) {
+  return (list ?? '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/**
+ * Build upstream request headers. X-Forwarded-Host is ALWAYS stripped from the
+ * client and re-set only when the edge Host (case-insensitive, port stripped)
+ * is one of this deployment's configured public hostnames; otherwise none is
+ * sent and hub-api falls back to no license bypass.
+ */
+function buildUpstreamHeaders(req, upstreamHost, allowedHosts) {
+  const headers = filterHeaders(req.headers);
+  delete headers['x-forwarded-host'];
+  headers.host = upstreamHost;
+  const edgeHost = String(req.headers.host ?? '');
+  const bare = edgeHost.replace(/:\d+$/, '').toLowerCase();
+  if (bare && allowedHosts.has(bare)) {
+    headers['x-forwarded-host'] = edgeHost;
+  }
+  return headers;
+}
+
 /**
  * Build an Express-compatible middleware proxying every request to `target`.
  *
  * Mount with `app.use('/api', createProxy(url))`: the full original URL
  * (including the '/api' prefix Express strips from req.url) is forwarded, the
  * method, headers (incl. Authorization) and body are streamed through
- * unchanged, the Host header is set to the upstream host, and an unreachable
+ * unchanged, the Host header is set to the upstream host (the original is preserved in a
+ * server-set X-Forwarded-Host, overwriting any client value), and an unreachable
  * upstream yields a 502.
  */
-export function createProxy(target) {
+export function createProxy(target, publicHostnames = parseHostnames(process.env.PUBLIC_HOSTNAMES)) {
+  const allowedHosts = new Set(publicHostnames);
   const upstream = new URL(target);
   const transport = upstream.protocol === 'https:' ? https : http;
   const basePath = upstream.pathname.replace(/\/+$/, '');
@@ -66,7 +94,7 @@ export function createProxy(target) {
         port: upstream.port || undefined,
         method: req.method,
         path: basePath + req.originalUrl,
-        headers: { ...filterHeaders(req.headers), host: upstream.host },
+        headers: buildUpstreamHeaders(req, upstream.host, allowedHosts),
         agent,
       },
       (upstreamRes) => {

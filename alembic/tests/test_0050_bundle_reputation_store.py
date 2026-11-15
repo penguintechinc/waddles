@@ -87,7 +87,9 @@ class TestSchema:
             "updated_at",
         }
 
-    def test_community_members_gained_a_nullable_user_uuid(self, pg_db: PgTestDatabase) -> None:
+    def test_community_members_gained_a_nullable_user_uuid(
+        self, pg_db: PgTestDatabase
+    ) -> None:
         with _connect(pg_db) as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT data_type, is_nullable FROM information_schema.columns "
@@ -99,10 +101,13 @@ class TestSchema:
         self, pg_db: PgTestDatabase
     ) -> None:
         with _connect(pg_db) as conn, conn.cursor() as cur:
-            cur.execute("INSERT INTO communities (name, tenant_id) VALUES ('c', 1) RETURNING id")
+            cur.execute(
+                "INSERT INTO communities (name, tenant_id) VALUES ('c', 1) RETURNING id"
+            )
             cid = cur.fetchone()[0]
             cur.execute(
-                "INSERT INTO community_members (community_id) VALUES (%s), (%s)", (cid, cid)
+                "INSERT INTO community_members (community_id) VALUES (%s), (%s)",
+                (cid, cid),
             )  # two NULL user_uuid rows are fine
             # 0048_identity_forged_uuid's membership trigger always DERIVES user_uuid and
             # discards a caller-supplied value, so it would mask the unique index under test;
@@ -127,7 +132,9 @@ class TestSchema:
                 # the (transactional) DISABLE TRIGGER, so nothing leaks into later tests.
                 conn.rollback()
 
-    def test_public_has_no_access_to_the_scores_table(self, pg_db: PgTestDatabase) -> None:
+    def test_public_has_no_access_to_the_scores_table(
+        self, pg_db: PgTestDatabase
+    ) -> None:
         with _connect(pg_db) as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT has_table_privilege('public', 'bundle_reputation_scores', 'SELECT')"
@@ -137,7 +144,9 @@ class TestSchema:
 
 @requires_docker
 class TestRolePrivilegeBoundary:
-    def test_role_exists_nologin_without_a_staged_password(self, pg_db: PgTestDatabase) -> None:
+    def test_role_exists_nologin_without_a_staged_password(
+        self, pg_db: PgTestDatabase
+    ) -> None:
         with _connect(pg_db) as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole "
@@ -151,11 +160,12 @@ class TestRolePrivilegeBoundary:
     ) -> None:
         checks = {
             ("bundle_reputation_scores", "SELECT"): True,
-            ("bundle_reputation_scores", "INSERT"): True,
-            ("bundle_reputation_scores", "UPDATE"): True,
+            # 0097 revoked every direct write: all writes go through reputation_apply().
+            ("bundle_reputation_scores", "INSERT"): False,
+            ("bundle_reputation_scores", "UPDATE"): False,
             ("bundle_reputation_scores", "DELETE"): False,
             ("bundle_reputation_adjustments", "SELECT"): True,
-            ("bundle_reputation_adjustments", "INSERT"): True,
+            ("bundle_reputation_adjustments", "INSERT"): False,
             # The ledger is append-only for this role: no rewrite, no delete.
             ("bundle_reputation_adjustments", "UPDATE"): False,
             ("bundle_reputation_adjustments", "DELETE"): False,
@@ -171,7 +181,9 @@ class TestRolePrivilegeBoundary:
         }
         with _connect(pg_db) as conn, conn.cursor() as cur:
             for (table, priv), expected in checks.items():
-                cur.execute("SELECT has_table_privilege(%s, %s, %s)", (_ROLE, table, priv))
+                cur.execute(
+                    "SELECT has_table_privilege(%s, %s, %s)", (_ROLE, table, priv)
+                )
                 assert cur.fetchone() == (expected,), f"{table} {priv}"
 
     def test_member_table_select_is_column_scoped(self, pg_db: PgTestDatabase) -> None:
@@ -189,5 +201,8 @@ class TestRolePrivilegeBoundary:
                 )
                 assert cur.fetchone() == (expected,), column
             # Whole-table SELECT (every column) must NOT be granted.
-            cur.execute("SELECT has_table_privilege(%s, 'community_members', 'SELECT')", (_ROLE,))
+            cur.execute(
+                "SELECT has_table_privilege(%s, 'community_members', 'SELECT')",
+                (_ROLE,),
+            )
             assert cur.fetchone() == (False,)

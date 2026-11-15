@@ -676,6 +676,7 @@ async fn run_runtime(
             connector_metrics,
             metrics,
             frame_metrics: None,
+            frame_tap: None,
             webhook: None,
             activator: None,
             spectrum: Some(store),

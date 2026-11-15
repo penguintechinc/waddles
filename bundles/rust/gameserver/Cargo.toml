@@ -1,0 +1,26 @@
+[package]
+name = "waddle-bundle-gameserver-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Game-server SERVICE bundle: an always-on `kind: service` bundle on the `stage-tools` world that exports `tool-provider` (gameserver.rcon.exec, gameserver.status.query, gameserver.server.*). Server addresses and RCON passwords are HOST-side connection secrets; the guest only speaks the wire protocols over a host-owned, SSRF-guarded stream."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "=0.44.0", features = ["bitflags"] }
+waddle-sdk-rs = { path = "../../../sdk/waddle-sdk-rs", version = "=0.1.0" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[package.metadata.component]
+package = "waddle:bundle-gameserver-service"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-bundle"
+world = "stage-tools"
+
+[package.metadata.component.dependencies]

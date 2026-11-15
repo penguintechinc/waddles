@@ -125,7 +125,7 @@ class TestGracefulShutdown:
     @pytest.mark.parametrize("fixture", ["alpha_docs", "base_docs"])
     def test_grace_and_prestop_on_every_deployment(self, fixture: str, request: pytest.FixtureRequest) -> None:
         deployments = _of_kind(request.getfixturevalue(fixture), "Deployment")
-        assert len(deployments) >= 14, f"examined only {len(deployments)} Deployments"
+        assert len(deployments) >= 10, f"examined only {len(deployments)} Deployments"
         for dep in deployments:
             pod = dep["spec"]["template"]["spec"]
             name = dep["metadata"]["name"]
@@ -169,9 +169,33 @@ class TestStartupProbe:
 class TestAutoscalingAndPdb:
     """HPA/PDB are consumed config, gated per service, never on singletons."""
 
-    def test_off_by_default_in_alpha(self, alpha_docs: list[dict[str, Any]]) -> None:
-        assert not _of_kind(alpha_docs, "HorizontalPodAutoscaler")
-        assert not _of_kind(alpha_docs, "PodDisruptionBudget")  # all single-replica
+    def test_alpha_autoscales_nothing_by_default(self, alpha_docs: list[dict[str, Any]]) -> None:
+        # The executor left the cpu/mem HPA registry (StatefulSet + KEDA/HPA-external, see
+        # test_executor_statefulset_render.py); nothing else opts in on alpha.
+        assert _of_kind(alpha_docs, "HorizontalPodAutoscaler") == []
+        pdbs = [d["metadata"]["name"] for d in _of_kind(alpha_docs, "PodDisruptionBudget")]
+        assert pdbs == ["waddlebot-svc-bundles-executor"], pdbs  # 2 executor replicas
+
+    @pytest.mark.parametrize(
+        ("values", "extra", "replicas"),
+        [
+            ("values-alpha.yaml", [], 2),
+            ("values-dal2alpha.yaml", [], 2),
+            ("values-beta.yaml", ["global.deploymentTier=alpha"], 2),
+            ("values-gamma.yaml", ["global.deploymentTier=alpha"], 2),
+            ("values-production.yaml", ["global.deploymentTier=alpha"], 3),
+        ],
+    )
+    def test_svc_bundles_executor_statefulset_per_env(self, values: str, extra: list[str], replicas: int) -> None:
+        docs = _render(values, extra)
+        sts = [d for d in _of_kind(docs, "StatefulSet") if "executor" in d["metadata"]["name"]]
+        assert [d["metadata"]["name"] for d in sts] == ["waddlebot-svc-bundles-executor"]
+        assert not [d for d in _of_kind(docs, "Deployment") if "executor" in d["metadata"]["name"]]
+        assert sts[0]["spec"]["replicas"] == replicas
+        assert not [d for d in _of_kind(docs, "HorizontalPodAutoscaler") if "executor" in d["metadata"]["name"]]
+        pdb = _by_suffix(docs, "PodDisruptionBudget", "svc-bundles-executor")
+        assert pdb["spec"]["maxUnavailable"] == 1
+        assert pdb["spec"]["selector"]["matchLabels"]["app.kubernetes.io/component"] == "svc-bundles-executor"
 
     def test_hpa_and_pdb_render_for_scalable_service(self) -> None:
         docs = _render("values-alpha.yaml", ["autoscaling.services.hubApi.enabled=true"])
@@ -191,7 +215,8 @@ class TestAutoscalingAndPdb:
         docs = _render("values-alpha.yaml", ["autoscaling.services.hubApi.enabled=true",
                                              "autoscaling.defaults.minReplicas=1"])
         assert _of_kind(docs, "HorizontalPodAutoscaler")
-        assert not _of_kind(docs, "PodDisruptionBudget")
+        # only the executor's own PDB (fixed 2 replicas) remains
+        assert [d["metadata"]["name"] for d in _of_kind(docs, "PodDisruptionBudget")] == ["waddlebot-svc-bundles-executor"]
 
     def test_pdb_disable_flag(self) -> None:
         docs = _render("values-alpha.yaml", ["autoscaling.services.hubApi.enabled=true",
@@ -203,13 +228,14 @@ class TestAutoscalingAndPdb:
         docs = _render("values-alpha.yaml", ["autoscaling.defaults.enabled=true"])
         hpas = _of_kind(docs, "HorizontalPodAutoscaler")
         pdbs = _of_kind(docs, "PodDisruptionBudget")
-        assert len(hpas) >= 5, f"expected the Rust stages + hub-api HPAs, got {len(hpas)}"
+        # hub-api, hub-webui, svc-process-rust, svc-action-rust (executor uses KEDA/HPA-external)
+        assert len(hpas) >= 4, f"expected the Rust stages + hub-api HPAs, got {len(hpas)}"
         for doc in hpas + pdbs:
             name = doc["metadata"]["name"]
             assert not any(name.endswith(s) for s in _SINGLETONS), f"{doc['kind']} on singleton {name}"
         assert not any(d["metadata"]["name"].endswith("svc-ingest-rust") for d in hpas)  # lease holder: no HPA
         # the Rust data plane is covered
-        for suffix in ("svc-action-rust", "svc-process-rust", "bundle-executor"):
+        for suffix in ("svc-action-rust", "svc-process-rust"):
             _by_suffix(docs, "HorizontalPodAutoscaler", suffix)
 
     def test_production_values_enable_hpa(self) -> None:

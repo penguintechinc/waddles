@@ -2,8 +2,8 @@
 
 Reuses the `install_dal`/`bundle_install_db` fixtures every other bundle-install test uses
 (`tests/conftest.py`) -- same schema, same `TENANT_SLUG` ("acme-corp") seeded tenant row, so a
-catalog entry here targets that slug rather than "global" (the seeder never hardcodes a tenant
-slug; "global" is only `bundles/core-bundles.yaml`'s own default).
+catalog entry here targets that slug rather than "default" (the seeder never hardcodes a tenant
+slug; "default" is only `bundles/core-bundles.yaml`'s own default).
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -787,11 +789,11 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
     assert not missing, f"expected core bundles missing from bundles/core-bundles.yaml: {missing}"
 
     for entry in entries:
-        # ActivationTarget(tenant_slug="global") defaults community_id=None -- every real
+        # ActivationTarget(tenant_slug="default") defaults community_id=None -- every real
         # catalog entry activates tenant-wide, never scoped to one community (seeder.
         # ActivationTarget's own docstring: community_id=None is NOT a skip, see
         # activate_tenant_wide()).
-        assert entry.activation_targets == (ActivationTarget(tenant_slug="global"),)
+        assert entry.activation_targets == (ActivationTarget(tenant_slug="default"),)
 
     # regression: csping 1.0.0 is permanently retired (fix/csping-version-bump) -- alpha's
     # app_versions already had a 1.0.0 row published from the pre-#573 Dockerfile.core-bundles
@@ -804,7 +806,7 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
     assert versions_by_app_id["waddles.core.example.csping"] == "1.0.3"
 
 
-def test_load_catalog_defaults_a_missing_activation_targets_to_global(tmp_path: Path) -> None:
+def test_load_catalog_defaults_a_missing_activation_targets_to_default(tmp_path: Path) -> None:
     catalog_path = tmp_path / "catalog.yaml"
     catalog_path.write_text(
         yaml.safe_dump(
@@ -823,7 +825,7 @@ def test_load_catalog_defaults_a_missing_activation_targets_to_global(tmp_path: 
         encoding="utf-8",
     )
     entries = load_catalog(catalog_path)
-    assert entries[0].activation_targets == (ActivationTarget(tenant_slug="global"),)
+    assert entries[0].activation_targets == (ActivationTarget(tenant_slug="default"),)
 
 
 def test_load_catalog_accepts_a_connector_tools_wit_world_row(tmp_path: Path) -> None:
@@ -873,7 +875,7 @@ def test_env_override_replaces_every_entrys_activation_targets(
         language="rust",
         manifest_path="ping.manifest.yaml",
         artifact_path="ping.wasm",
-        activation_targets=(ActivationTarget(tenant_slug="global"),),
+        activation_targets=(ActivationTarget(tenant_slug="default"),),
     )
     resolved = seeder._resolve_activation_targets(entry)
     assert resolved == (
@@ -1483,7 +1485,7 @@ def test_load_platform_connections_extends_the_static_catalog_with_the_env_overr
             {
                 "platform_connections": [
                     {
-                        "tenant_slug": "global",
+                        "tenant_slug": "default",
                         "platform": "twitch",
                         "source_id": "static-source",
                         "label": "static",
@@ -1499,7 +1501,7 @@ def test_load_platform_connections_extends_the_static_catalog_with_the_env_overr
         json.dumps(
             [
                 {
-                    "tenant_slug": "global",
+                    "tenant_slug": "default",
                     "platform": "discord",
                     "source_id": "dg-474965105759748096",
                 }
@@ -1511,10 +1513,10 @@ def test_load_platform_connections_extends_the_static_catalog_with_the_env_overr
 
     assert connections == (
         seeder.PlatformConnection(
-            tenant_slug="global", platform="twitch", source_id="static-source", label="static"
+            tenant_slug="default", platform="twitch", source_id="static-source", label="static"
         ),
         seeder.PlatformConnection(
-            tenant_slug="global",
+            tenant_slug="default",
             platform="discord",
             source_id="dg-474965105759748096",
             label="dg-474965105759748096",
@@ -2078,6 +2080,9 @@ _CONNECTOR_APP_IDS = (
     "waddles.core.service.youtube",
     "waddles.core.service.wix",
 )
+#: Connectors whose manifest declares the dangerous `connector.pii.read`. Wix is events-only (it
+#: syncs Wix Events and ingests no member data), so it declares -- and is granted -- none.
+_PII_READ_CONNECTORS = frozenset(_CONNECTOR_APP_IDS) - {"waddles.core.service.wix"}
 
 
 def test_real_catalog_has_the_connector_tools_rows() -> None:
@@ -2124,17 +2129,18 @@ def test_real_catalog_has_the_spectrum_connector_row() -> None:
 
 
 @pytest.mark.parametrize("app_id", _CONNECTOR_APP_IDS)
-async def test_seed_one_seeds_each_real_connector_row_and_grants_pii_read(
+async def test_seed_one_seeds_each_real_connector_row_and_grants_its_declared_permissions(
     app_id: str, install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Seeds every connector from the REAL catalog + REAL hub-manifest (wasm bytes faked).
 
     `wit_world: connector-tools` never reaches the seeder's validation, so the row seeds like any
-    rust service; as a `waddles.core.*` bundle the seeder pre-grants every declared permission,
-    including the dangerous `connector.pii.read`.
+    rust service; as a `waddles.core.*` bundle the seeder pre-grants EVERY declared permission
+    and nothing else -- including the dangerous `connector.pii.read` only where the manifest
+    declares it (not for the events-only Wix connector).
     """
     _patch_validator_and_storage(monkeypatch)
-    bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
+    bundles_dir = Path(__file__).resolve().parents[2] / "bundles"  # noqa: ASYNC240
     catalog = {e.app_id: e for e in load_catalog(bundles_dir / "core-bundles.yaml")}
     real = catalog[app_id]
     (tmp_path / real.manifest_path).write_bytes(
@@ -2155,7 +2161,16 @@ async def test_seed_one_seeds_each_real_connector_row_and_grants_pii_read(
 
     assert [r.outcome for r in results] == ["made_available", "activated"]
     grants = await install_dal(install_dal.community_permission_grants.app_id == app_id).select()
-    assert "connector.pii.read" in {row.permission_id for row in grants}
+    granted = {row.permission_id for row in grants}
+    declared = {
+        p["id"]
+        for p in yaml.safe_load((bundles_dir / real.source_dir / "hub-manifest.yaml").read_text())[
+            "permissions"
+        ]
+    }
+    assert declared, f"{app_id} declares no permissions"
+    assert granted == declared
+    assert ("connector.pii.read" in granted) == (app_id in _PII_READ_CONNECTORS)
 
 
 def test_real_catalog_manifest_and_artifact_filenames_are_unique() -> None:
@@ -2171,3 +2186,290 @@ def test_real_catalog_manifest_and_artifact_filenames_are_unique() -> None:
         names = [r[key] for r in rows]
         dupes = sorted({n for n in names if names.count(n) > 1})
         assert not dupes, f"duplicate {key} in core-bundles.yaml: {dupes}"
+
+
+def _service_manifest() -> Any:
+    """The `_MANIFEST` fixture parsed, then flipped to `kind: service` (trusted-source shape)."""
+    import dataclasses
+
+    from services.bundle_manifest_v2 import parse_bundle_manifest_v2
+
+    manifest = parse_bundle_manifest_v2(
+        dict(_MANIFEST),
+        known_custom_platforms=frozenset(),
+        allow_wildcard_consumes=False,
+        allow_prebuilt=True,
+        trusted_source=True,
+    )
+    return dataclasses.replace(manifest, kind="service")
+
+
+async def test_ensure_app_catalog_row_writes_the_manifest_kind_on_insert(install_dal: Any) -> None:
+    """Regression: a fresh catalog row carries the manifest kind, not the column default.
+
+    The INSERT used to omit `kind`, so every seeded `kind: service` bundle was catalogued as
+    an app and `_validate_requested_tool_targets` rejected it (`tool_target_not_service`).
+    """
+    manifest = _service_manifest()
+    await seeder._ensure_app_catalog_row(install_dal, manifest)
+    row = (await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()).first()
+    assert row.kind == "service"
+
+
+@pytest.mark.parametrize("stale_kind", ["app", None])
+async def test_ensure_app_catalog_row_repairs_a_stale_kind_idempotently(
+    install_dal: Any, stale_kind: str | None
+) -> None:
+    """A row seeded before the fix (kind 'app'/NULL) is reconciled to the manifest kind."""
+    from services.bundle_install_dal import raw_sql_write
+
+    manifest = _service_manifest()
+    await seeder._ensure_app_catalog_row(install_dal, manifest)
+    await raw_sql_write(
+        install_dal,
+        "UPDATE app_catalog SET kind = :k WHERE app_id = :a",
+        {"k": stale_kind, "a": manifest.app_id},
+    )
+    for _ in range(2):  # second pass is a no-op
+        await seeder._ensure_app_catalog_row(install_dal, manifest)
+        row = (
+            await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()
+        ).first()
+        assert row.kind == "service"
+
+
+async def test_ensure_app_catalog_row_persists_vendor_attribution(install_dal: Any) -> None:
+    """A fresh catalog row stores author/source_url so the marketplace can derive its vendor."""
+    manifest = _service_manifest()
+    await seeder._ensure_app_catalog_row(install_dal, manifest)
+    row = (await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()).first()
+    assert row.author == "github:penguintechinc"
+
+
+async def test_ensure_app_catalog_row_backfills_null_attribution_idempotently(
+    install_dal: Any,
+) -> None:
+    """Rows seeded before attribution was written (NULL author/source_url) are reconciled."""
+    import dataclasses
+
+    from services.bundle_install_dal import raw_sql_write
+
+    manifest = dataclasses.replace(
+        _service_manifest(), source_url="https://github.com/penguintechinc/waddles/tree/main/x"
+    )
+    await seeder._ensure_app_catalog_row(install_dal, manifest)
+    await raw_sql_write(
+        install_dal,
+        "UPDATE app_catalog SET author = NULL, source_url = NULL WHERE app_id = :a",
+        {"a": manifest.app_id},
+    )
+    for _ in range(2):  # second pass is a no-op
+        await seeder._ensure_app_catalog_row(install_dal, manifest)
+        row = (
+            await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()
+        ).first()
+        assert row.author == "github:penguintechinc"
+        assert row.source_url == manifest.source_url
+
+
+@pytest.mark.parametrize(
+    ("author", "source_url", "ok"),
+    [
+        pytest.param("github:some-org", None, True, id="github-author"),
+        pytest.param("Plain Name", "https://github.com/some-org/repo/tree/main/x", True, id="url"),
+        pytest.param("Plain Name", None, False, id="neither"),
+        pytest.param(None, "https://gitlab.com/o/r", False, id="non-github-url"),
+    ],
+)
+def test_assert_vendor_derivable(author: str | None, source_url: str | None, ok: bool) -> None:
+    """The seeder refuses a bundle that no GitHub org can be attributed to."""
+    import dataclasses
+
+    manifest = dataclasses.replace(_service_manifest(), author=author, source_url=source_url)
+    if ok:
+        seeder._assert_vendor_derivable(manifest)
+    else:
+        with pytest.raises(CoreBundleSeederError, match="vendor"):
+            seeder._assert_vendor_derivable(manifest)
+
+
+def test_every_real_core_bundle_manifest_has_a_derivable_vendor() -> None:
+    """Denominator-counted: every shipped first-party manifest passes the seeder vendor gate."""
+    from services.bundle_manifest_v2 import parse_bundle_manifest_v2
+
+    bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
+    entries = seeder.load_catalog(bundles_dir / "core-bundles.yaml")
+    checked = 0
+    for entry in entries:
+        raw = yaml.safe_load((bundles_dir / entry.source_dir / "hub-manifest.yaml").read_text())
+        manifest = parse_bundle_manifest_v2(
+            raw,
+            known_custom_platforms=frozenset(),
+            allow_wildcard_consumes=False,
+            allow_prebuilt=True,
+            trusted_source=True,
+        )
+        seeder._assert_vendor_derivable(manifest)
+        checked += 1
+    assert checked >= 100, f"only {checked} manifests examined"
+
+
+def _single_row_catalog(tmp_path: Path, entry: CatalogEntry, language: str) -> Path:
+    """Write a one-row catalog for `entry` with the given `language`; return its path."""
+    catalog_path = tmp_path / "core-bundles.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(
+            {
+                "bundles": [
+                    {
+                        "app_id": entry.app_id,
+                        "version": entry.version,
+                        "language": language,
+                        "manifest_path": "ping.manifest.yaml",
+                        "artifact_path": "ping.wasm",
+                        "activation_targets": [{"tenant_slug": TENANT_SLUG}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return catalog_path
+
+
+@pytest.mark.parametrize(
+    "language", ["python", "javascript", "nodejs", "typescript", "TypeScript", "ruby"]
+)
+async def test_scripted_digest_mismatch_is_a_logged_counted_noop_keeping_the_row(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    language: str,
+) -> None:
+    """Policy: scripted (python/node/ts) bundles are not byte-checked; logged, counted, kept."""
+    _patch_validator_and_storage(monkeypatch)
+    rust_entry = _write_bundle(tmp_path)
+    entry = replace(rust_entry, language=language)
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    before = (await install_dal(install_dal.app_versions.app_id == entry.app_id).select()).first()
+
+    (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES + b"-different-content")
+    drift: list[str] = []
+    with caplog.at_level("INFO", logger="waddles.hub_api.core_bundle_seeder"):
+        await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock(), digest_drift=drift)
+
+    rows = await install_dal(install_dal.app_versions.app_id == entry.app_id).select()
+    assert len(rows) == 1
+    assert rows.first().artifact_digest == before.artifact_digest  # existing row kept
+    assert len(drift) == 1
+    assert f"existing={before.artifact_digest[:12]}" in drift[0]
+    assert f"{entry.app_id}@{entry.version}" in drift[0]
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelname == "WARNING" and "byte-check not enforced (policy)" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert entry.app_id in warnings[0].getMessage()
+    assert warnings[0].existing_digest_prefix == before.artifact_digest[:12]
+    assert warnings[0].this_build_digest_prefix != warnings[0].existing_digest_prefix
+
+
+@pytest.mark.parametrize(
+    "language", ["python", "javascript", "nodejs", "typescript", "TypeScript", "ruby"]
+)
+async def test_run_scripted_digest_mismatch_is_not_a_conflict_or_failure(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    language: str,
+) -> None:
+    """`_run()`: exit 0, NOT in skipped_conflicts, counted in digest_drift_not_enforced."""
+    _patch_validator_and_storage(monkeypatch)
+    _patch_run_dependencies(install_dal, monkeypatch)
+    entry = _write_bundle(tmp_path)
+    catalog_path = _single_row_catalog(tmp_path, entry, language)
+
+    assert await seeder._run(tmp_path, catalog_path) == 0
+    (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES + b"-drifted")
+    with caplog.at_level("INFO", logger="waddles.hub_api.core_bundle_seeder"):
+        assert await seeder._run(tmp_path, catalog_path) == 0
+
+    summary = [
+        r for r in caplog.records if r.getMessage().startswith("core-bundle-seeder: summary")
+    ][-1]
+    assert summary.failures == 0
+    assert summary.skipped_conflicts == []
+    assert len(summary.digest_drift_not_enforced) == 1
+    assert not [r for r in caplog.records if getattr(r, "error_code", None) == "digest_conflict"]
+
+
+@pytest.mark.parametrize("language", ["rust", "csharp", "go", "RUST"])
+async def test_compiled_digest_mismatch_still_raises_digest_conflict(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str
+) -> None:
+    """Compiled (rust/csharp/go) bundles keep the strict 409 digest_conflict byte check."""
+    _patch_validator_and_storage(monkeypatch)
+    entry = replace(_write_bundle(tmp_path), language=language)
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES + b"-different-content")
+
+    drift: list[str] = []
+    with pytest.raises(ApiError) as excinfo:
+        await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock(), digest_drift=drift)
+    assert excinfo.value.code == "digest_conflict"
+    assert excinfo.value.status_code == 409
+    assert drift == []
+
+
+async def test_unknown_catalog_language_fails_loud(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A language that is neither compiled nor scripted is a loud seeder error, not a guess."""
+    _patch_validator_and_storage(monkeypatch)
+    entry = replace(_write_bundle(tmp_path), language="cobol")
+    with pytest.raises(CoreBundleSeederError, match="unknown catalog language 'cobol'"):
+        await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+
+async def test_run_unknown_catalog_language_fails_the_run(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_run()` counts an unknown-language row as a failure (non-zero exit)."""
+    _patch_validator_and_storage(monkeypatch)
+    _patch_run_dependencies(install_dal, monkeypatch)
+    entry = _write_bundle(tmp_path)
+    catalog_path = _single_row_catalog(tmp_path, entry, "cobol")
+    assert await seeder._run(tmp_path, catalog_path) == 1
+
+
+def test_every_catalog_language_is_classified_compiled_or_scripted() -> None:
+    """Every real catalog row's language is known to the digest policy (no unknown fails loud)."""
+    catalog = Path(__file__).resolve().parents[2] / "bundles" / "core-bundles.yaml"
+    entries = seeder.load_catalog(catalog)
+    assert len(entries) >= 100
+    known = seeder.COMPILED_LANGUAGES | seeder.SCRIPTED_LANGUAGES
+    unknown = {seeder.normalize_language(e.language) for e in entries} - known
+    assert not unknown, f"unclassified catalog languages: {unknown}"
+
+
+def test_language_classes_are_disjoint_and_exactly_the_owner_policy() -> None:
+    """Compiled = rust/csharp/go; scripted = python + node aliases + typescript + ruby; disjoint."""
+    assert seeder.COMPILED_LANGUAGES == frozenset({"rust", "csharp", "go"})
+    assert seeder.SCRIPTED_LANGUAGES == frozenset(
+        {"python", "javascript", "nodejs", "typescript", "ruby"}
+    )
+    assert not seeder.COMPILED_LANGUAGES & seeder.SCRIPTED_LANGUAGES
+    assert seeder.normalize_language("  NodeJS ") == "nodejs"
+
+
+def test_language_sets_stay_plain_frozenset_string_literals() -> None:
+    """The Rust executor_profile parity test parses these textually -- keep the literal shape."""
+    src = (Path(__file__).resolve().parents[1] / "cli" / "seed_core_bundles.py").read_text()
+    for name in ("COMPILED_LANGUAGES", "SCRIPTED_LANGUAGES"):
+        match = re.search(
+            rf"^{name} = frozenset\(\{{((?:\s*\"[a-z0-9_-]+\",?)+)\s*\}}\)$", src, re.M
+        )
+        assert match, f"{name} is no longer a plain frozenset literal of string literals"

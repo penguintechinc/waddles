@@ -64,6 +64,8 @@ pub struct AppState {
     /// Shared WHEP (WebRTC egress) signaling state -- always present so
     /// `/whep/*` is always mounted.
     pub whep_state: Arc<WhepState>,
+    /// WebRTC rooms (local SFU) -- `/rtc/rooms/*` data plane + host-API control.
+    pub rooms: Arc<crate::rooms::RoomService>,
     /// HTTP client for hub-api's transcode-token ledger
     /// (`crate::billing::token_ledger`) -- used by
     /// `crate::api::lifecycle::start`'s TRANSCODE admission check. Always
@@ -143,7 +145,22 @@ impl AppState {
             bind_addr,
             rtc_metrics.clone(),
         ));
-        let whep_state = Arc::new(WhepState::new(pc_factory, rtc_metrics, DEFAULT_MAX_VIEWERS));
+        let room_keys = crate::rooms::token::TokenKeys::from_env()
+            .expect("WEBRTC_ROOM_TOKEN_SECRET, when set, must be at least 32 bytes");
+        let mut whep = WhepState::new(pc_factory.clone(), rtc_metrics.clone(), DEFAULT_MAX_VIEWERS);
+        if let Some(k) = room_keys.clone() {
+            whep = whep.with_viewer_auth(k);
+        }
+        let whep_state = Arc::new(whep);
+        let rooms = Arc::new(
+            crate::rooms::RoomService::new(
+                pc_factory,
+                rtc_metrics,
+                room_keys,
+                config.cli.public_base_url.clone(),
+            )
+            .with_whep(whep_state.clone()),
+        );
         let engine: SharedEngine = Arc::new(crate::pipeline::StubSupervisor);
         let hls_router_state = HlsRouterState::new(
             stream_data_dir,
@@ -159,6 +176,7 @@ impl AppState {
             hls_router_state,
             whip_state,
             whep_state,
+            rooms,
             token_ledger: Arc::new(TokenLedgerClient::new()),
             record: RecordReadiness::default(),
         }
@@ -250,6 +268,7 @@ pub fn router(state: AppState) -> Router {
         ))
         .merge(crate::ingest::whip::router(state.whip_state.clone()))
         .merge(crate::egress::whep::router(state.whep_state.clone()))
+        .merge(crate::rooms::media::router(state.rooms.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             record_http_metrics,

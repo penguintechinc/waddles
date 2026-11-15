@@ -92,7 +92,7 @@ def test_rust_runtime_is_the_only_presentation_deployment(rust_docs: list[dict[s
     services = _by_name(rust_docs, "Service", "-svc-presentation")
     assert len(services) == 1
     container = deployments[0]["spec"]["template"]["spec"]["containers"][0]
-    assert "svc-presentation-rust" in container["image"]
+    assert container["image"].rsplit("/", 1)[-1].startswith("svc-presentation:")
     assert "PUSH_JWKS_ENDPOINT" in _env(deployments[0])  # Rust-only config surface
 
 

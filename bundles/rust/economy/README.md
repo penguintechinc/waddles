@@ -14,6 +14,26 @@ append-only idempotency ledgers. Each mutation calls one atomic host operation.
 Admin adjustments deliberately bypass daily earn windows while retaining the
 community supply ceiling.
 
+## Elevated tools and the trust model
+
+This service is an **I/O layer**: simple tools that translate into atomic DB calls.
+Game rules (odds, who may steal from whom, cooldowns) live in **app bundles**. Because
+the service itself holds broad money grants, an app that can call its tools must not
+inherit that power. The host therefore also checks the **calling app's own admin-approved
+grant** (per app, per community, recorded with the approving admin, with admin-set caps and
+an audit row per call):
+
+| Tool | Caller (app) needs |
+|---|---|
+| `transfer_from {from, to, amount, reason}` (+ tool-level idempotency key) -- moves a NON-actor member's funds; result `{from, to, amount, from_balance, to_balance, alias}` | `economy.transfer_from` |
+| `adjust_balance` with a negative delta on a user who is not the invoking actor | `economy.transfer_from` |
+| `adjust_balance` +, `points_set`, `points_adjust`, `exchange`, `pay_pot` | `economy.app_mint` |
+| `adjust_balance` -, `transfer`, `give` on the invoking actor's OWN funds; reads | the existing `tool.call` grant only |
+
+`reason` is a PII-free code (`[a-z0-9_.-]{1,64}`). Grant `params`: `max_per_op`,
+`max_per_day`, `max_per_target_per_day`. Details: `docs/reference/bundle-host-imports.md`
+(*Elevated app-caller primitives*).
+
 Community/app-scoped KV key `policy` may contain JSON
 `{"alias":"waddlebucks","rate_num":1000,"rate_den":500}`. An absent key uses
 these defaults. Invalid or unavailable configuration fails closed. Exchange is

@@ -236,7 +236,7 @@ spec:
         severity: critical
         team: waddles
       annotations:
-        summary: '{{ $labels.job }} has no bundle-executor session'
+        summary: '{{ $labels.job }} has no svc-bundles-executor session'
         description: Every dispatch from {{ $labels.instance }} is dead-lettering until an executor reconnects.
     - alert: WaddlesExecutorHeartbeatTimeouts
       expr: increase(host_api_heartbeat_timeouts_total[15m]) > 0

@@ -326,9 +326,14 @@ impl<B: DekBroker> HubApiDekProvider<B> {
             }
         }
 
-        // The trailing `1` is the fixed seal-protocol version (hub-api
-        // `key.proto`), not the DEK version.
-        let context = format!("{}|{}|{}|1", self.service_id, tenant_id, self.purpose);
+        // Seal context (hub-api `key.proto`, same construction as `GetStreamDek`):
+        // `<service>|<tenant>|<purpose>|<dek_version>`, the version being the one the
+        // broker returned. Binding it stops a response for one version being replayed as
+        // another.
+        let context = format!(
+            "{}|{}|{}|{}",
+            self.service_id, tenant_id, self.purpose, sealed.dek_version
+        );
         let dek = hpke_seal_open(
             client_secret,
             &sealed.enc,

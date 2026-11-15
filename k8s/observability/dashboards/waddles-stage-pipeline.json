@@ -1,7 +1,7 @@
 {
   "uid": "waddles-stage-pipeline",
   "title": "Waddles / stage pipeline and executor (OTel)",
-  "description": "The OTel metrics of svc-process, svc-action (scraped from /metrics) and the bundle-executor's own series (OTLP push only when OTEL_EXPORTER_OTLP_ENDPOINT is set on the executor - those panels stay empty otherwise). See docs/observability/data-plane-metrics.md.",
+  "description": "The OTel metrics of svc-process, svc-action (scraped from /metrics) and the svc-bundles-executor's own series (OTLP push only when OTEL_EXPORTER_OTLP_ENDPOINT is set on the executor - those panels stay empty otherwise). See docs/observability/data-plane-metrics.md.",
   "tags": [
     "waddles",
     "observability-as-code"
@@ -1082,7 +1082,7 @@
     {
       "id": 18,
       "type": "row",
-      "title": "bundle-executor process (own series; OTLP opt-in)",
+      "title": "svc-bundles-executor process (own series; OTLP opt-in)",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -1113,7 +1113,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max(waddles_executor_connection_up)",
+          "expr": "min(waddles_executor_connection_up)",
           "legendFormat": "",
           "refId": "A",
           "range": true

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verifies bundles/Dockerfile.core-bundles's Rust example-bundle artifact --
-# waddles.core.example.ping (rust-bundle-builder stage) -- is byte-reproducible: two
+# waddles.core.example.ping (bundle-ping stage) -- is byte-reproducible: two
 # independent `--no-cache` builds of the FULL core-bundles image, each from a clean docker
 # build cache, must produce the exact same sha256 for ping.wasm.
 #
@@ -9,7 +9,7 @@
 # the same nominal waddles.core.example.ping@1.0.0 artifact across a manual onboarding, a live
 # pipeline env, and a CI-built image. bundles/Dockerfile.core-bundles pins
 # SOURCE_DATE_EPOCH/CARGO_INCREMENTAL/RUSTFLAGS remap-path-prefix/codegen-units/strip in the
-# rust-bundle-builder stage to close that gap (see that file's own comment block for what each
+# rust-bundle-base stage to close that gap (see that file's own comment block for what each
 # pin closes).
 #
 # waddles.core.example.pyping (python-bundles-builder stage, componentize-py) is INTENTIONALLY
@@ -21,6 +21,13 @@
 # the Rust artifact is reproducible without being permanently red on a known, harder problem:
 # https://github.com/penguintechinc/waddles/issues/521 -- do not silently re-add pyping here
 # without first closing that issue.
+#
+# Policy (2026-11-13): the core-bundle-seeder's byte-identical digest check is enforced for
+# COMPILED bundles only (Rust/C#/Go) -- exactly what this gate proves reproducible. Python
+# (componentize-py), Node.js (javascript/nodejs), TypeScript and Ruby bundles are scripted and NOT
+# byte-checked by the seeder (a mismatch is a logged, counted no-op, see
+# hub_api/cli/seed_core_bundles.py SCRIPTED_LANGUAGES). Signature + hash checks for
+# all packages are deferred to v3.2.x.
 #
 # This script builds the FULL final image (not just one stage) so it also exercises the
 # hub-deps-builder stage and the final COPY layout exactly as the seeder image is actually
@@ -99,6 +106,7 @@ check_artifact "waddles.core.service.discord" "/core-bundles/discord-connector.w
 check_artifact "waddles.core.service.youtube" "/core-bundles/youtube.wasm"
 check_artifact "waddles.core.service.spectrum" "/core-bundles/spectrum.wasm"
 check_artifact "waddles.core.service.wix" "/core-bundles/wix-connector.wasm"
+check_artifact "waddles.core.app.calendar" "/core-bundles/calendar.wasm"
 
 # critical-rules.md Verification Integrity: zero items examined is a FAILURE, not a pass --
 # a check that silently compared nothing must not report green.

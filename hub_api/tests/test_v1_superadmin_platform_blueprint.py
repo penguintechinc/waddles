@@ -20,16 +20,37 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.superadmin import superadmin_bp
+from services.tenant_key_provisioning import TenantKeyProvisioningError
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
+class _Runtime:
+    """Stand-in envelope runtime; real key provisioning is covered on Postgres elsewhere."""
+
+    service = object()
+
+
 @pytest.fixture
-def app(admin_db: Any) -> Quart:
+def provisioned(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, str]]:
+    """Replace key provisioning with a recorder (the real one needs the Postgres key store)."""
+    calls: list[tuple[int, str]] = []
+
+    async def _fake(dal: Any, service: Any, *, tenant_id: int, slug: str) -> None:
+        calls.append((tenant_id, slug))
+
+    monkeypatch.setattr("blueprints.v1.superadmin.provision_new_tenant", _fake)
+    return calls
+
+
+@pytest.fixture
+def app(admin_db: Any, provisioned: list[tuple[int, str]]) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
     quart_app.register_blueprint(superadmin_bp)
     quart_app.config["dal"] = admin_db.dal
     quart_app.config["async_dal"] = admin_db
+    quart_app.config["envelope_runtime"] = _Runtime()
+    quart_app.config["install_dal"] = object()
     return quart_app
 
 
@@ -217,110 +238,6 @@ class TestCommunityManagement:
         assert response.status_code == 400
 
 
-class TestMarketplaceModules:
-    async def test_get_all_modules_empty(self, client: Any) -> None:
-        response = await client.get("/api/v1/superadmin/marketplace/modules", headers=_headers())
-        assert response.status_code == 200
-        body = await response.get_json()
-        assert body["modules"] == []
-
-    async def test_create_module_success(self, client: Any) -> None:
-        response = await client.post(
-            "/api/v1/superadmin/marketplace/modules",
-            headers=_headers(),
-            json={"name": "trivia"},
-        )
-        assert response.status_code == 201
-        body = await response.get_json()
-        assert body["module"]["name"] == "trivia"
-        assert body["module"]["dbAccount"]["provisioned"] is False  # no Postgres function in sqlite
-
-    async def test_create_module_missing_name_is_400(self, client: Any) -> None:
-        response = await client.post(
-            "/api/v1/superadmin/marketplace/modules", headers=_headers(), json={}
-        )
-        assert response.status_code == 400
-
-    async def test_create_module_duplicate_name_is_409(self, client: Any, admin_db: Any) -> None:
-        _seed_module(admin_db, name="trivia")
-        response = await client.post(
-            "/api/v1/superadmin/marketplace/modules",
-            headers=_headers(),
-            json={"name": "trivia"},
-        )
-        assert response.status_code == 409
-
-    async def test_get_all_modules_with_ratings(self, client: Any, admin_db: Any) -> None:
-        dal = admin_db.dal
-        module_id = _seed_module(admin_db, name="trivia")
-        dal.hub_module_reviews.insert(module_id=module_id, rating=4)
-        dal.hub_module_reviews.insert(module_id=module_id, rating=5)
-        dal.commit()
-        response = await client.get("/api/v1/superadmin/marketplace/modules", headers=_headers())
-        body = await response.get_json()
-        assert body["modules"][0]["avgRating"] == "4.5"
-        assert body["modules"][0]["reviewCount"] == 2
-
-    async def test_update_module_success(self, client: Any, admin_db: Any) -> None:
-        module_id = _seed_module(admin_db)
-        response = await client.put(
-            f"/api/v1/superadmin/marketplace/modules/{module_id}",
-            headers=_headers(),
-            json={"displayName": "Updated"},
-        )
-        assert response.status_code == 200
-
-    async def test_update_module_not_found_is_404(self, client: Any) -> None:
-        response = await client.put(
-            "/api/v1/superadmin/marketplace/modules/9999",
-            headers=_headers(),
-            json={"displayName": "X"},
-        )
-        assert response.status_code == 404
-
-    async def test_publish_module_success(self, client: Any, admin_db: Any) -> None:
-        module_id = _seed_module(admin_db, is_published=False)
-        response = await client.put(
-            f"/api/v1/superadmin/marketplace/modules/{module_id}/publish",
-            headers=_headers(),
-            json={"isPublished": True},
-        )
-        assert response.status_code == 200
-        body = await response.get_json()
-        assert body["message"] == "Module published"
-
-    async def test_publish_module_not_found_is_404(self, client: Any) -> None:
-        response = await client.put(
-            "/api/v1/superadmin/marketplace/modules/9999/publish",
-            headers=_headers(),
-            json={"isPublished": True},
-        )
-        assert response.status_code == 404
-
-    async def test_delete_module_success(self, client: Any, admin_db: Any) -> None:
-        module_id = _seed_module(admin_db)
-        response = await client.delete(
-            f"/api/v1/superadmin/marketplace/modules/{module_id}", headers=_headers()
-        )
-        assert response.status_code == 200
-
-    async def test_delete_module_blocked_by_installations(self, client: Any, admin_db: Any) -> None:
-        dal = admin_db.dal
-        module_id = _seed_module(admin_db)
-        dal.hub_module_installations.insert(community_id=1, module_id=module_id, is_enabled=True)
-        dal.commit()
-        response = await client.delete(
-            f"/api/v1/superadmin/marketplace/modules/{module_id}", headers=_headers()
-        )
-        assert response.status_code == 400
-
-    async def test_delete_module_not_found_is_404(self, client: Any) -> None:
-        response = await client.delete(
-            "/api/v1/superadmin/marketplace/modules/9999", headers=_headers()
-        )
-        assert response.status_code == 404
-
-
 class TestTenantManagement:
     async def test_list_tenants(self, client: Any) -> None:
         response = await client.get("/api/v1/superadmin/tenants", headers=_headers())
@@ -342,6 +259,51 @@ class TestTenantManagement:
         assert response.status_code == 201
         body = await response.get_json()
         assert body["tenant"]["slug"] == "new-tenant"
+
+    async def test_create_tenant_provisions_its_key(
+        self, client: Any, admin_db: Any, provisioned: list[tuple[int, str]]
+    ) -> None:
+        admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).update(slug="system")
+        admin_db.dal.commit()
+        response = await client.post(
+            "/api/v1/superadmin/tenants",
+            headers=_headers(tenant="system"),
+            json={"slug": "keyed-tenant", "displayName": "Keyed"},
+        )
+        body = await response.get_json()
+        assert response.status_code == 201
+        assert provisioned == [(body["tenant"]["id"], "keyed-tenant")]
+
+    async def test_create_tenant_aborts_when_the_key_cannot_be_provisioned(
+        self, client: Any, admin_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _boom(dal: Any, service: Any, *, tenant_id: int, slug: str) -> None:
+            raise TenantKeyProvisioningError("kms down")
+
+        monkeypatch.setattr("blueprints.v1.superadmin.provision_new_tenant", _boom)
+        admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).update(slug="system")
+        admin_db.dal.commit()
+        response = await client.post(
+            "/api/v1/superadmin/tenants",
+            headers=_headers(tenant="system"),
+            json={"slug": "doomed", "displayName": "Doomed"},
+        )
+        assert response.status_code == 503
+        assert (await response.get_json())["error"]["code"] == "TENANT_KEY_UNAVAILABLE"
+
+    async def test_create_tenant_without_envelope_runtime_creates_nothing(
+        self, client: Any, app: Quart, admin_db: Any
+    ) -> None:
+        app.config["envelope_runtime"] = None
+        admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).update(slug="system")
+        admin_db.dal.commit()
+        response = await client.post(
+            "/api/v1/superadmin/tenants",
+            headers=_headers(tenant="system"),
+            json={"slug": "never", "displayName": "Never"},
+        )
+        assert response.status_code == 503
+        assert admin_db.dal(admin_db.dal.tenants.slug == "never").select().first() is None
 
     async def test_create_tenant_invalid_slug_is_400(self, client: Any) -> None:
         response = await client.post(

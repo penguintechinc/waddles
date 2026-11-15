@@ -116,7 +116,24 @@ async fn intake(
             .await
     });
     match tokio::time::timeout(DISCORD_ACK_DEADLINE, &mut task).await {
-        Ok(Ok(outcome)) => render_discord(outcome, &body),
+        Ok(Ok(outcome)) => {
+            // The Ed25519 check already passed (Accepted/Duplicate are only returned for a
+            // verified delivery). Store the reply token host-side BEFORE acking: an
+            // interaction that could never be answered is refused loudly (503), never
+            // acked and orphaned.
+            // PING needs no reply token (answered inline), so it needs no store.
+            if outcome == WebhookOutcome::Accepted && !crate::interaction_tap::is_ping(&body) {
+                let Some(store) = state.interactions.as_ref() else {
+                    tracing::error!("discord interaction arrived with no token store configured");
+                    return render(WebhookOutcome::Unavailable);
+                };
+                if let Err(reason) = crate::interaction_tap::store_verified(store, &body).await {
+                    tracing::error!(reason, "discord interaction not stored; answering 503");
+                    return render(WebhookOutcome::Unavailable);
+                }
+            }
+            render_discord(outcome, &body)
+        }
         Ok(Err(err)) => {
             tracing::error!(error = %err, "discord webhook task failed");
             render(WebhookOutcome::Unavailable)

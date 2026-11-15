@@ -190,7 +190,7 @@ actually serves it to a poller — declaring `stages` alone is not enough:
 -- Tenant-wide (every community under this tenant can use it)
 INSERT INTO app_tenant_availability (tenant_id, app_id, available)
 SELECT t.id, 'waddles.<module>.<feature>.<name>', TRUE
-FROM tenants t WHERE t.slug = 'global'
+FROM tenants t WHERE t.slug = 'default'
 ON CONFLICT (tenant_id, app_id) DO NOTHING;
 
 -- OR community-scoped (one specific community only) — use app_activations instead:
@@ -237,7 +237,7 @@ ON CONFLICT (app_id) DO NOTHING;
 INSERT INTO app_tenant_availability (tenant_id, app_id, available)
 SELECT t.id, 'waddles.bot.<platform>.default', TRUE
 FROM tenants t
-WHERE t.slug = 'global'
+WHERE t.slug = 'default'
 ON CONFLICT (tenant_id, app_id) DO NOTHING;
 ```
 

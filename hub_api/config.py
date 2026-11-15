@@ -288,6 +288,11 @@ class HubAPIConfig:
     session_absolute_ttl_seconds: int = 30 * 24 * 3600
     refresh_reuse_grace_seconds: int = 10
 
+    # Public base URL Twitch POSTs EventSub notifications to (`TWITCH_EVENTSUB_CALLBACK_BASE_URL`,
+    # e.g. https://ingest.example/ -- the svc-ingest webhook intake). Deliberately NO default:
+    # empty means EventSub reconciliation refuses (503) rather than registering a bogus callback.
+    eventsub_callback_base_url: str = ""
+
     def __post_init__(self) -> None:
         """Refuse a session policy whose idle window outlives its absolute cap."""
         if self.refresh_token_ttl_seconds > self.session_absolute_ttl_seconds:
@@ -332,7 +337,7 @@ class HubAPIConfig:
             db_retry_delay=int(os.getenv("DB_RETRY_DELAY", "5")),
             secret_key=require_secret_key(),
             jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256"),
-            default_tenant_slug=os.getenv("DEFAULT_TENANT_SLUG", "global"),
+            default_tenant_slug=os.getenv("DEFAULT_TENANT_SLUG", "default"),
             posthog_api_key=os.getenv("POSTHOG_API_KEY") or os.getenv("POSTHOG_KEY"),
             posthog_host=os.getenv("POSTHOG_HOST", "https://license.penguintech.io"),
             license_server_url=os.getenv("LICENSE_SERVER_URL", "https://license.penguintech.io"),
@@ -385,4 +390,7 @@ class HubAPIConfig:
             refresh_reuse_grace_seconds=_bounded_int_env(
                 "REFRESH_REUSE_GRACE_SECONDS", 10, minimum=0, maximum=60
             ),
+            eventsub_callback_base_url=os.getenv("TWITCH_EVENTSUB_CALLBACK_BASE_URL", "")
+            .strip()
+            .rstrip("/"),
         )

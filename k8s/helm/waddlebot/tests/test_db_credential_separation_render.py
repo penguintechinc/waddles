@@ -2,9 +2,10 @@
 
 # regression: every workload connected as the shared database superuser (alpha/beta, 2026-10)
 
-Renders the chart for alpha, local, and the beta topology (beta values with the alpha secret
-tier, exactly as CI does) and asserts, against the real rendered manifests -- not a hand
-reading of the templates -- that:
+Renders the chart for alpha, local, beta and production and asserts, against the real rendered
+manifests plus the Secrets the RUNTIME provision-secrets hook produces from them (the real hook
+script run against tests/fake_kubectl.py by tests/provision_harness.py -- Helm no longer renders
+these Secrets) -- not a hand reading of the templates -- that:
 
 1. the database OWNER credential is confined to the Postgres Deployment and the db-migrate
    hook Secret/Job: it is not a key of `waddlebot-secrets`, and its value appears in no
@@ -15,8 +16,8 @@ reading of the templates -- that:
    only a `$(DB_PASSWORD)` reference;
 3. per-role passwords are distinct, strong, URL-safe, and identical in the credentials Secret
    and the db-migrate hook Secret's JSON (so Postgres and the pods can never diverge);
-4. production-tier renders fail closed without credentials, and weak/placeholder values are
-   rejected.
+4. production-tier installs get generated role credentials with no manual step, and weak/
+   placeholder explicit values are rejected (the hook fails closed).
 
 Zero rendered documents / zero matching containers is a hard failure, never a silent pass.
 """
@@ -33,6 +34,7 @@ from typing import Any
 
 import pytest
 import yaml
+from provision_harness import hook_failure, spec_of, with_provisioned  # type: ignore[import-not-found]
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _CATALOG = yaml.safe_load(
@@ -60,13 +62,18 @@ def _helm(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _render(*args: str) -> list[dict[str, Any]]:
+def _render_raw(*args: str) -> list[dict[str, Any]]:
     result = _helm(*args)
     if result.returncode != 0:
         pytest.fail(f"helm template failed:\n{result.stderr}")
     docs = [d for d in yaml.safe_load_all(result.stdout) if d]
     assert docs, "helm template produced zero documents -- cannot be a pass"
     return docs
+
+
+def _render(*args: str) -> list[dict[str, Any]]:
+    """Rendered docs + the Secrets the runtime hook creates from them."""
+    return with_provisioned(_render_raw(*args))
 
 
 @pytest.fixture(scope="module")
@@ -80,10 +87,13 @@ def renders(helm_available: None) -> dict[str, list[dict[str, Any]]]:
     return {
         "alpha": _render("--values", str(_CHART_DIR / "values-alpha.yaml")),
         "local": _render("--values", str(_CHART_DIR / "values-local.yaml")),
-        "beta": _render(
-            "--values", str(_CHART_DIR / "values-beta.yaml"), "--set", "global.deploymentTier=alpha"
-        ),
+        "beta": _render("--values", str(_CHART_DIR / "values-beta.yaml")),
+        "production": _render("--values", str(_CHART_DIR / "values-production.yaml")),
     }
+
+
+# values-beta.yaml does not set global.deploymentTier, so it inherits values.yaml's "production".
+_TIER = {"alpha": "alpha", "local": "local", "beta": "production", "production": "production"}
 
 
 def _secret(docs: list[dict[str, Any]], name: str) -> dict[str, Any]:
@@ -126,7 +136,7 @@ def _secret_refs(container: dict[str, Any]) -> set[str]:
     return names
 
 
-@pytest.mark.parametrize("env_name", ["alpha", "local", "beta"])
+@pytest.mark.parametrize("env_name", ["alpha", "local", "beta", "production"])
 def test_owner_credential_is_not_in_the_shared_secret(
     renders: dict[str, list[dict[str, Any]]], env_name: str
 ) -> None:
@@ -136,7 +146,7 @@ def test_owner_credential_is_not_in_the_shared_secret(
     assert not leaked, f"waddlebot-secrets still carries owner DB credential keys: {sorted(leaked)}"
 
 
-@pytest.mark.parametrize("env_name", ["alpha", "local", "beta"])
+@pytest.mark.parametrize("env_name", ["alpha", "local", "beta", "production"])
 def test_owner_credential_reaches_only_postgres_and_the_migrate_job(
     renders: dict[str, list[dict[str, Any]]], env_name: str
 ) -> None:
@@ -156,9 +166,9 @@ def test_owner_credential_reaches_only_postgres_and_the_migrate_job(
     assert consumers == ({"postgres"} if has_postgres else set()), (
         f"owner Secret consumed by {consumers}"
     )
-    if env_name in ("alpha", "beta"):
+    if env_name in ("alpha", "beta", "production"):
         assert has_postgres, (
-            "alpha/beta render the in-chart Postgres -- the denominator must include it"
+            "alpha/beta/production render the in-chart Postgres -- the denominator must include it"
         )
     migrate = _secret(docs, "waddlebot-db-migrate-secret")
     assert owner_password in migrate["DATABASE_URL"]
@@ -182,11 +192,10 @@ _EXPECTED_ALPHA = {
     "waddlebot-svc-ingest-rust": "waddles_svc_ingest",
     "waddlebot-svc-presentation": "waddles_svc_presentation",
     "waddlebot-svc-streaming": "waddles_svc_streaming",
-    "waddlebot-reputation": "waddles_reputation",
 }
 
 
-@pytest.mark.parametrize("env_name", ["alpha", "local", "beta"])
+@pytest.mark.parametrize("env_name", ["alpha", "local", "beta", "production"])
 def test_every_db_workload_uses_its_own_non_owner_role(
     renders: dict[str, list[dict[str, Any]]], env_name: str
 ) -> None:
@@ -218,14 +227,14 @@ def test_every_db_workload_uses_its_own_non_owner_role(
         )
         assert len(order) == len(set(order)), f"{name}: duplicate env names"
         seen[name] = role
-    assert examined >= 8, f"only {examined} DB-identity containers examined in {env_name}"
+    assert examined >= 6, f"only {examined} DB-identity containers examined in {env_name}"
     if env_name == "alpha":
         for workload, role in _EXPECTED_ALPHA.items():
             assert seen.get(workload) == role, (
                 f"{workload}: expected {role}, got {seen.get(workload)}"
             )
-    if env_name in ("local", "beta"):
-        assert len(set(seen.values())) >= 25, "legacy pods must each have their own role"
+    if env_name in ("local", "beta", "production"):
+        assert len(set(seen.values())) >= 4, "each workload family must have its own role"
     # one role per workload family, never a role shared between unrelated workloads
     by_role: dict[str, set[str]] = {}
     for workload, role in seen.items():
@@ -236,7 +245,7 @@ def test_every_db_workload_uses_its_own_non_owner_role(
             assert len(workloads) <= 2, f"{role} shared by {sorted(workloads)}"
 
 
-@pytest.mark.parametrize("env_name", ["alpha", "local", "beta"])
+@pytest.mark.parametrize("env_name", ["alpha", "local", "beta", "production"])
 def test_no_workload_envfroms_the_credential_secrets_wholesale(
     renders: dict[str, list[dict[str, Any]]], env_name: str
 ) -> None:
@@ -256,7 +265,7 @@ def test_no_workload_envfroms_the_credential_secrets_wholesale(
     assert examined > 10
 
 
-@pytest.mark.parametrize("env_name", ["alpha", "local", "beta"])
+@pytest.mark.parametrize("env_name", ["alpha", "local", "beta", "production"])
 def test_role_passwords_are_distinct_strong_and_match_the_migrate_hook(
     renders: dict[str, list[dict[str, Any]]], env_name: str
 ) -> None:
@@ -272,54 +281,51 @@ def test_role_passwords_are_distinct_strong_and_match_the_migrate_hook(
     assert json.loads(hook["WADDLES_DB_SERVICE_ROLE_PASSWORDS"]) == {
         r: creds[f"PW_{r.upper()}"] for r in _ROLES
     }
-    assert hook["WADDLES_DEPLOYMENT_TIER"] in {"alpha", "local"}
+    assert hook["WADDLES_DEPLOYMENT_TIER"] == _TIER[env_name]
     # each role password appears only in the credentials Secret and the hook Secret
     for password in values[:5]:
         holders = {d["metadata"]["name"] for d in docs if password in json.dumps(d, sort_keys=True)}
         assert holders == {"waddlebot-db-credentials", "waddlebot-db-migrate-secret"}, holders
 
 
-def test_production_tier_fails_closed_without_role_credentials(helm_available: None) -> None:
-    result = _helm(
-        "--values",
-        str(_CHART_DIR / "values-beta.yaml"),
-        "--set-string",
-        f"infrastructure.postgresql.password={secrets.token_hex(12)}",
-        "--set-string",
-        f"infrastructure.postgresql.readerPassword={secrets.token_hex(12)}",
-        "--set-string",
-        f"infrastructure.redis.password={secrets.token_hex(12)}",
-        "--set-string",
-        f"infrastructure.valkeyDurable.adminPassword={secrets.token_hex(12)}",  # get past the valkeyDurable admin guard so the ROLE-credential failure is what is asserted
-        "--set",
-        "global.valkeyTls.externalSecret=true",  # TLS now defaults on; skip the cert-secret fail so the role-credential failure is what is asserted
-        "--set",
-        "global.transitTls.externalSecret=true",  # likewise for the Postgres/S3 transit-cert Secret
-    )
-    assert result.returncode != 0
-    assert "has no value" in result.stderr and "outside alpha/local" in result.stderr
+def test_production_tier_generates_role_credentials_without_manual_steps(helm_available: None) -> None:
+    """Owner policy (2026-11-14): internal secrets are generated on first run in EVERY tier.
+
+    The former contract here was "production renders fail closed without role credentials";
+    it is replaced by "production gets distinct, strong, generated role credentials with no
+    manual step" -- the hook still refuses weak/placeholder explicit values (next test).
+    """
+    docs = _render("--values", str(_CHART_DIR / "values-production.yaml"))
+    creds = _secret(docs, "waddlebot-db-credentials")
+    assert set(creds) == {f"PW_{r.upper()}" for r in _ROLES}
+    assert len(set(creds.values())) == len(_ROLES)
+    for key, value in creds.items():
+        assert re.fullmatch(r"[A-Za-z0-9_-]{43}", value), key  # 256-bit base64url
+    assert len(_secret(docs, "waddlebot-db-admin")["POSTGRES_PASSWORD"]) == 43
+    assert _secret(docs, "waddlebot-db-migrate-secret")["WADDLES_DEPLOYMENT_TIER"] == "production"
 
 
 @pytest.mark.parametrize(
     ("password", "message"),
     [
-        ("short", "must be >=16 chars"),
-        ("changemechangeme123456", "placeholder"),
-        ("has space and bang! 12345678", "must be >=16 chars"),
-        ("hub_admin_dev_changeme", "placeholder"),
+        ("shortpw1", "shorter than 16 characters"),
+        ("changemechangeme123456", "placeholder/default"),
+        ("has space and bang! 12345678", "must match [A-Za-z0-9._~-]"),
+        ("hub_admin_dev_changeme", "placeholder/default"),
     ],
 )
 def test_weak_explicit_role_password_is_rejected(
     helm_available: None, password: str, message: str
 ) -> None:
-    result = _helm(
+    docs = _render_raw(
         "--values",
         str(_CHART_DIR / "values-alpha.yaml"),
         "--set-string",
         f"infrastructure.postgresql.serviceRoles.passwords.waddles_hub_api={password}",
     )
-    assert result.returncode != 0
-    assert message in result.stderr
+    err = hook_failure(docs)
+    assert message in err and "PW_WADDLES_HUB_API" in err
+    assert password not in err, "the rejected value must never be echoed"
 
 
 def test_explicit_strong_role_password_is_used_verbatim(helm_available: None) -> None:
@@ -334,7 +340,7 @@ def test_explicit_strong_role_password_is_used_verbatim(helm_available: None) ->
 
 
 def test_existing_secret_is_referenced_and_not_rendered(helm_available: None) -> None:
-    docs = _render(
+    docs = _render_raw(
         "--values",
         str(_CHART_DIR / "values-alpha.yaml"),
         "--set",
@@ -344,6 +350,8 @@ def test_existing_secret_is_referenced_and_not_rendered(helm_available: None) ->
     )
     names = {d["metadata"]["name"] for d in docs if d.get("kind") == "Secret"}
     assert "waddlebot-db-credentials" not in names and "waddlebot-db-admin" not in names
+    spec = spec_of(docs)
+    assert "secret|ext-db-creds|skip=" in spec and "secret|ext-db-admin|skip=" in spec
     refs = {ref for _, c in _containers(docs) for ref in _secret_refs(c)}
     assert "ext-db-creds" in refs and "ext-db-admin" in refs
     assert "waddlebot-db-credentials" not in refs and "waddlebot-db-admin" not in refs

@@ -2,6 +2,7 @@
 """Client and server classes corresponding to protobuf-defined services."""
 
 import grpc
+
 from waddles.hub.internal.v1 import key_pb2 as waddles_dot_hub_dot_internal_dot_v1_dot_key__pb2
 
 GRPC_GENERATED_VERSION = "1.81.1"
@@ -40,6 +41,12 @@ class KeyServiceStub:
             response_deserializer=waddles_dot_hub_dot_internal_dot_v1_dot_key__pb2.GetStreamDekResponse.FromString,
             _registered_method=True,
         )
+        self.GetTenantDek = channel.unary_unary(
+            "/waddles.hub.internal.v1.KeyService/GetTenantDek",
+            request_serializer=waddles_dot_hub_dot_internal_dot_v1_dot_key__pb2.GetTenantDekRequest.SerializeToString,
+            response_deserializer=waddles_dot_hub_dot_internal_dot_v1_dot_key__pb2.GetTenantDekResponse.FromString,
+            _registered_method=True,
+        )
 
 
 class KeyServiceServicer:
@@ -53,6 +60,20 @@ class KeyServiceServicer:
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
+    def GetTenantDek(self, request, context):
+        """Returns a tenant's at-rest DEK sealed to the caller's ephemeral X25519 key. The data
+        plane (svc-ingest/svc-process/svc-action) holds the unwrapped DEK in memory and does the
+        AEAD itself (spec 2026-11-08-tenant-at-rest-encryption). Required scope:
+        "keys:tenant-dek:read"; the token's tenant claim must be "system" (operator plane).
+        Errors: INVALID_ARGUMENT (bad request), PERMISSION_DENIED (caller not allow-listed / SVID
+        mismatch / non-system tenant), NOT_FOUND (no usable key for the tenant), UNAVAILABLE (key
+        provider down or revoked -- retryable, never a fallback key), RESOURCE_EXHAUSTED (rate
+        limit), INTERNAL (audit write failed; the key is withheld).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
 
 def add_KeyServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -60,6 +81,11 @@ def add_KeyServiceServicer_to_server(servicer, server):
             servicer.GetStreamDek,
             request_deserializer=waddles_dot_hub_dot_internal_dot_v1_dot_key__pb2.GetStreamDekRequest.FromString,
             response_serializer=waddles_dot_hub_dot_internal_dot_v1_dot_key__pb2.GetStreamDekResponse.SerializeToString,
+        ),
+        "GetTenantDek": grpc.unary_unary_rpc_method_handler(
+            servicer.GetTenantDek,
+            request_deserializer=waddles_dot_hub_dot_internal_dot_v1_dot_key__pb2.GetTenantDekRequest.FromString,
+            response_serializer=waddles_dot_hub_dot_internal_dot_v1_dot_key__pb2.GetTenantDekResponse.SerializeToString,
         ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -92,6 +118,36 @@ class KeyService:
             "/waddles.hub.internal.v1.KeyService/GetStreamDek",
             waddles_dot_hub_dot_internal_dot_v1_dot_key__pb2.GetStreamDekRequest.SerializeToString,
             waddles_dot_hub_dot_internal_dot_v1_dot_key__pb2.GetStreamDekResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def GetTenantDek(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/waddles.hub.internal.v1.KeyService/GetTenantDek",
+            waddles_dot_hub_dot_internal_dot_v1_dot_key__pb2.GetTenantDekRequest.SerializeToString,
+            waddles_dot_hub_dot_internal_dot_v1_dot_key__pb2.GetTenantDekResponse.FromString,
             options,
             channel_credentials,
             insecure,

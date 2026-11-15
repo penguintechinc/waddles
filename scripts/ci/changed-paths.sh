@@ -214,8 +214,8 @@ while IFS= read -r -d '' f; do
   # --- Node / frontend --------------------------------------------------------
   case "${f}" in
     *.js|*.jsx|*.mjs|*.cjs|*.ts|*.tsx|*.vue|*.css|*.scss|*.html|package.json|*/package.json|\
-    package-lock.json|*/package-lock.json|website/*|admin/hub_module/frontend/*|admin/hub_module/backend/*|\
-    admin/marketplace_module/backend/*|tests/e2e/*|tests/integration/*|tests/smoke/*|tests/api/*)
+    package-lock.json|*/package-lock.json|website/*|admin/hub_module/frontend/*|\
+    tests/e2e/*|tests/integration/*|tests/smoke/*|tests/api/*)
       HIT[node]=true ;;
   esac
 

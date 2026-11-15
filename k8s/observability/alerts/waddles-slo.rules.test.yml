@@ -94,7 +94,7 @@ tests:
         alertname: WaddlesExecutorDisconnected
         exp_alerts:
           - exp_labels: {severity: critical, team: waddles, job: svc-process, instance: "a:9090"}
-            exp_annotations: {description: "Every dispatch from a:9090 is dead-lettering until an executor reconnects.", summary: "svc-process has no bundle-executor session"}
+            exp_annotations: {description: "Every dispatch from a:9090 is dead-lettering until an executor reconnects.", summary: "svc-process has no svc-bundles-executor session"}
       - eval_time: 10m
         alertname: WaddlesConsumerLoopDown
         exp_alerts:

@@ -171,6 +171,11 @@ pub struct SupervisorDeps {
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::pii_minter`'s doc.
     pub pii_minter: Option<Arc<dyn crate::pii_tokenize::IdentityMinter>>,
+    /// ONE instance shared by every binding consumer (never one per binding)
+    /// so a message read by ~160 per-app consumers is tokenized once -- cloned
+    /// into every consumer's own `ProcessDeps`, see
+    /// `crate::spine::ProcessDeps::tokenize_memo`'s doc.
+    pub tokenize_memo: Arc<crate::tokenize_memo::TokenizeMemo>,
     /// The SAME `Arc<ActiveDigests>` instance `crate::changelog_consumer`
     /// writes to on every `load`/`unload` (`ConsumerState::active_digests`)
     /// -- shared (never copied) into every spawned binding consumer's own
@@ -195,6 +200,8 @@ pub struct SupervisorDeps {
     pub economy_wiring: Option<crate::capabilities::EconomyWiring>,
     /// See `crate::spine::ProcessDeps::platform_table_wiring`'s doc.
     pub platform_table_wiring: Option<crate::capabilities::PlatformTableWiring>,
+    /// See `crate::spine::ProcessDeps::gameserver_net_wiring`'s doc.
+    pub gameserver_net_wiring: Option<crate::capabilities::GameServerNetWiring>,
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::identity_wiring`'s doc.
     pub identity_wiring: Option<crate::identity::IdentityWiring>,
@@ -204,6 +211,66 @@ pub struct SupervisorDeps {
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::media_wiring`'s doc.
     pub media_wiring: Option<crate::media::MediaWiring>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::dek_provider`'s doc.
+    pub dek_provider: Option<hub_client::dek::ConfiguredDekProvider>,
+}
+
+impl SupervisorDeps {
+    /// The per-`(app, scope)` [`ProcessDeps`]: the supervisor's shared wirings plus this app's own
+    /// digest source and numeric scope. Used by every binding consumer and by the hub-api
+    /// bundle-admin path (`crate::bundle_admin`), so both run against identical wiring.
+    pub fn process_deps(
+        &self,
+        app_id: &str,
+        tenant_id: i32,
+        community_id: i32,
+        spine: SpineClient,
+    ) -> ProcessDeps<SpineClient> {
+        ProcessDeps {
+            app_id: app_id.to_string(),
+            digest_source: DigestSource::Active {
+                scope: (tenant_id, community_id, app_id.to_string()),
+                digests: Arc::clone(&self.active_digests),
+            },
+            version: "1".to_string(),
+            component_key: String::new(),
+            sidecar_key: String::new(),
+            key_ring: self.key_ring.clone(),
+            connections: Arc::clone(&self.connections),
+            call_timeout_ms: self.call_timeout_ms,
+            load_state: Arc::new(LoadState::new()),
+            approved_targets: self.approved_targets.clone(),
+            consumer_id: self.spine_cfg.consumer_id.clone(),
+            spine,
+            metrics: self.metrics.clone(),
+            license: Arc::clone(&self.license),
+            kv_conn: self.kv_conn.clone(),
+            kv_capabilities: Arc::clone(&self.kv_capabilities),
+            kv_sealing: self.kv_sealing.clone(),
+            gate: Arc::clone(&self.gate),
+            tenant_id,
+            community_id,
+            // Shared, poll-refreshed handle -- `spine::handle_delivered`
+            // resolves this PER DELIVERY (`SupervisorDeps::
+            // app_version_snapshot`'s doc), never once here at connect time.
+            app_version_snapshot: self.app_version_snapshot.clone(),
+            egress: Arc::clone(&self.egress),
+            pii_gate: Arc::clone(&self.pii_gate),
+            pii_minter: self.pii_minter.clone(),
+            tokenize_memo: Arc::clone(&self.tokenize_memo),
+            db_wiring: self.db_wiring.clone(),
+            breaker: Arc::clone(&self.breaker),
+            reputation_wiring: self.reputation_wiring.clone(),
+            economy_wiring: self.economy_wiring.clone(),
+            platform_table_wiring: self.platform_table_wiring.clone(),
+            gameserver_net_wiring: self.gameserver_net_wiring.clone(),
+            identity_wiring: self.identity_wiring.clone(),
+            ai_wiring: self.ai_wiring.clone(),
+            media_wiring: self.media_wiring.clone(),
+            dek_provider: self.dek_provider.clone(),
+        }
+    }
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -318,50 +385,12 @@ async fn run_binding_consumer(
             }
         };
 
-        let process_deps = ProcessDeps {
-            app_id: binding.app_id.clone(),
-            digest_source: DigestSource::Active {
-                scope: (
-                    binding.tenant_id,
-                    binding.community_id,
-                    binding.app_id.clone(),
-                ),
-                digests: Arc::clone(&deps.active_digests),
-            },
-            version: "1".to_string(),
-            component_key: String::new(),
-            sidecar_key: String::new(),
-            key_ring: deps.key_ring.clone(),
-            connections: Arc::clone(&deps.connections),
-            call_timeout_ms: deps.call_timeout_ms,
-            load_state: Arc::new(LoadState::new()),
-            approved_targets: deps.approved_targets.clone(),
-            consumer_id: deps.spine_cfg.consumer_id.clone(),
-            spine: spine_client,
-            metrics: deps.metrics.clone(),
-            license: Arc::clone(&deps.license),
-            kv_conn: deps.kv_conn.clone(),
-            kv_capabilities: Arc::clone(&deps.kv_capabilities),
-            kv_sealing: deps.kv_sealing.clone(),
-            gate: Arc::clone(&deps.gate),
-            tenant_id: binding.tenant_id,
-            community_id: binding.community_id,
-            // Shared, poll-refreshed handle -- `spine::handle_delivered`
-            // resolves this PER DELIVERY (`SupervisorDeps::
-            // app_version_snapshot`'s doc), never once here at connect time.
-            app_version_snapshot: deps.app_version_snapshot.clone(),
-            egress: Arc::clone(&deps.egress),
-            pii_gate: Arc::clone(&deps.pii_gate),
-            pii_minter: deps.pii_minter.clone(),
-            db_wiring: deps.db_wiring.clone(),
-            breaker: Arc::clone(&deps.breaker),
-            reputation_wiring: deps.reputation_wiring.clone(),
-            economy_wiring: deps.economy_wiring.clone(),
-            platform_table_wiring: deps.platform_table_wiring.clone(),
-            identity_wiring: deps.identity_wiring.clone(),
-            ai_wiring: deps.ai_wiring.clone(),
-            media_wiring: deps.media_wiring.clone(),
-        };
+        let process_deps = deps.process_deps(
+            &binding.app_id,
+            binding.tenant_id,
+            binding.community_id,
+            spine_client,
+        );
 
         let (inner_tx, inner_rx) = oneshot::channel();
         let run_fut =

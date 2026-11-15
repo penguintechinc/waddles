@@ -181,6 +181,7 @@ pub fn opus_publisher_track() -> (Arc<TrackLocalStaticRTP>, u32) {
 pub fn synthetic_packet(seq: u16, ssrc: u32) -> rtc::rtp::Packet {
     rtc::rtp::Packet {
         header: rtc::rtp::Header {
+            version: 2,
             sequence_number: seq,
             timestamp: u32::from(seq) * 960,
             ssrc,
@@ -302,4 +303,84 @@ pub fn assert_status(response: &axum::response::Response, expected: StatusCode) 
         expected,
         "unexpected status (body not shown -- caller can add {{:?}} if debugging)"
     );
+}
+
+/// Deterministic WHEP boot nonce used by [`whep_with_auth`] so tests can mint tokens.
+pub const TEST_BOOT: u64 = 0x5EED5;
+
+/// The pipeline epoch of a never-revoked pipeline under [`TEST_BOOT`].
+pub const TEST_EPOCH0: u64 = TEST_BOOT << svc_streaming::egress::whep::EPOCH_COUNTER_BITS;
+
+/// Test signing secret shared by every WHEP viewer-token test (>= 32 bytes).
+pub const VIEWER_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+/// A signed WHEP viewer token for `community`/`pipeline` valid for `ttl` seconds
+/// (negative = already expired), with the given `scope`.
+pub fn viewer_token(community: &str, pipeline: Uuid, ttl: i64, scope: &str, sub: Uuid) -> String {
+    viewer_token_epoch(community, pipeline, ttl, scope, sub, TEST_EPOCH0)
+}
+
+/// [`viewer_token`] for a specific pipeline token epoch.
+pub fn viewer_token_epoch(
+    community: &str,
+    pipeline: Uuid,
+    ttl: i64,
+    scope: &str,
+    sub: Uuid,
+    epoch: u64,
+) -> String {
+    use svc_streaming::rooms::token::{
+        RoomClaims, TokenKeys, ROOM_TOKEN_AUDIENCE, ROOM_TOKEN_ISSUER,
+    };
+    let now = chrono::Utc::now().timestamp();
+    TokenKeys::new(VIEWER_SECRET)
+        .unwrap()
+        .sign(&RoomClaims {
+            iss: ROOM_TOKEN_ISSUER.into(),
+            aud: ROOM_TOKEN_AUDIENCE.into(),
+            sub: sub.to_string(),
+            room: pipeline.to_string(),
+            community: community.into(),
+            publish: false,
+            subscribe: true,
+            source: None,
+            jti: Uuid::new_v4().to_string(),
+            iat: now,
+            exp: now + ttl,
+            scope: scope.into(),
+            epoch,
+        })
+        .unwrap()
+}
+
+/// `POST` with an SDP body and a bearer token.
+pub fn post_sdp_auth(path: &str, token: &str, body: impl Into<String>) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/sdp")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::from(body.into()))
+        .unwrap()
+}
+
+/// `DELETE` with a bearer token.
+pub fn delete_auth(path: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// A `WhepState` with viewer authentication enabled using [`VIEWER_SECRET`].
+pub fn whep_with_auth(
+    factory: std::sync::Arc<PeerConnectionFactory>,
+    metrics: svc_streaming::rtc::metrics::RtcMetrics,
+    max_viewers: usize,
+) -> svc_streaming::egress::whep::WhepState {
+    svc_streaming::egress::whep::WhepState::new(factory, metrics, max_viewers)
+        .with_boot_id(TEST_BOOT)
+        .with_viewer_auth(svc_streaming::rooms::token::TokenKeys::new(VIEWER_SECRET).unwrap())
 }

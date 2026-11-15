@@ -3,7 +3,7 @@
 
 `scripts/ci/check-alpha-render-bundle-executor.py` (fix/alpha-deploy-executor-and-
 failfast) already asserts no legacy single-app env var renders against
-values-alpha.yaml specifically, but it hard-requires at least one bundle-executor
+values-alpha.yaml specifically, but it hard-requires at least one svc-bundles-executor
 Deployment to be present (alpha-only: beta/gamma/production disable
 `rustDataPlane.bundleExecutor{,Action}` and would never reach its legacy-env
 assertion at all). This script carries the SAME legacy-env-name list but is a

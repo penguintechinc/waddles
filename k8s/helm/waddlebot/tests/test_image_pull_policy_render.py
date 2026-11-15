@@ -3,7 +3,7 @@
 # regression: hardcoded `imagePullPolicy: Always` on hub-api + the Rust data-plane
 # Deployments hung the #480 kind upgrade-path job (and would break a local alpha deploy)
 
-hub-api, svc-{action,ingest,process}-rust, svc-presentation and both bundle-executor
+hub-api, svc-{action,ingest,process}-rust, svc-presentation and both svc-bundles-executor
 Deployments used to hardcode `imagePullPolicy: Always`. Every deploy now carries a unique
 per-deploy `global.imageTag`, so `Always` buys nothing -- and it is fatal for
 locally-loaded images (kind e2e, alpha local builds): the node already has the image,
@@ -37,7 +37,7 @@ import yaml
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"}
 
-# (rendered Deployment metadata.name suffix, container name) -- the seven sites that used
+# (rendered Deployment metadata.name suffix, container name) -- the six sites that used
 # to hardcode `Always`. Matched by suffix so the release-name prefix never matters.
 _FORMERLY_HARDCODED = {
     ("hub-api-v3", "hub-api"),
@@ -45,8 +45,7 @@ _FORMERLY_HARDCODED = {
     ("svc-ingest-rust", "svc-ingest-rust"),
     ("svc-action-rust", "svc-action-rust"),
     ("svc-presentation", "svc-presentation"),
-    ("bundle-executor", "bundle-executor"),
-    ("bundle-executor-action", "bundle-executor"),
+    ("svc-bundles-executor", "svc-bundles-executor"),
 }
 
 # Env values files. beta/gamma/production pin a deploymentTier that needs real secrets an
@@ -107,9 +106,6 @@ def _formerly_hardcoded(
     for workload, name, container in _containers(docs):
         for suffix, cname in _FORMERLY_HARDCODED:
             if name == cname and workload.endswith(suffix):
-                # bundle-executor-action also ends with "-action"; exact-suffix match above
-                # keeps "bundle-executor" and "bundle-executor-action" distinct because the
-                # shorter suffix never ends the longer workload name.
                 matched[(suffix, cname)] = container
     return matched
 
@@ -131,7 +127,7 @@ class TestFormerlyHardcodedWorkloads:
     """The seven formerly-`Always` containers resolve their policy from values."""
 
     def test_all_seven_sites_render_in_alpha(self, alpha_docs: list[dict[str, Any]]) -> None:
-        """Denominator guard: all seven sites must be present, or the next tests prove nothing."""
+        """Denominator guard: all six sites must be present, or the next tests prove nothing."""
         matched = _formerly_hardcoded(alpha_docs)
         assert set(matched) == _FORMERLY_HARDCODED, (
             f"examined {len(matched)}/{len(_FORMERLY_HARDCODED)} sites; "

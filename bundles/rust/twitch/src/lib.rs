@@ -3,11 +3,15 @@
 //! component glue at the bottom only maps it onto the generated WIT types.
 //! The connector holds no secret, no raw target and no transport code.
 pub mod channel_ops;
+pub mod clips;
 pub mod common;
 pub mod eventsub;
 pub mod eventsub_sub;
+pub mod helix;
 pub mod irc;
+pub mod live;
 pub mod moderation;
+pub mod schedule;
 pub mod sender;
 pub mod tools;
 
@@ -25,7 +29,7 @@ mod component {
         Action, Guest as SenderGuest, Header, HttpRequestTpl,
     };
     use super::bindings::waddle::bundle::tool::ToolError as WitError;
-    use super::bindings::waddle::bundle::{flags, http, log};
+    use super::bindings::waddle::bundle::{clock, flags, http, log};
     use super::bindings::waddle::connector::identity;
     use super::bindings::waddle::connector::types::{
         ConnectionCtx, FrameError, HandshakePayload, NormalizedEvent, RawFrame,
@@ -33,7 +37,7 @@ mod component {
     use super::common::{
         CONNECTOR_FLAG, CONNECTOR_FLAG_DEFAULT, FrameErr, PLATFORM, gate_decision, resolve_actors,
     };
-    use super::tools::{HelixHost, IdentityHost, SECRET_REFS, build_registry};
+    use super::tools::{ClockHost, HelixHost, IdentityHost, SECRET_REFS, build_registry};
     use super::{eventsub, irc, sender};
     use waddle_sdk::tool::{ToolError, ToolRegistry};
 
@@ -181,13 +185,20 @@ mod component {
         }
     }
 
+    struct WasmClock;
+    impl ClockHost for WasmClock {
+        fn now_rfc3339(&self) -> String {
+            clock::now_rfc3339()
+        }
+    }
+
     static REGISTRY: OnceLock<ToolRegistry> = OnceLock::new();
 
     impl ToolGuest for Component {
         fn call(name: String, args: Vec<u8>) -> Result<Vec<u8>, WitError> {
             gate().map_err(|_| WitError::NotGranted)?;
             let reg =
-                REGISTRY.get_or_init(|| build_registry(Arc::new(WasmHelix), Arc::new(WasmIdent)));
+                REGISTRY.get_or_init(|| build_registry(Arc::new(WasmHelix), Arc::new(WasmIdent), Arc::new(WasmClock)));
             let res = reg.call(&name, &args);
             log_op(&name, usize::from(res.is_ok()));
             res.map_err(|e| match e {

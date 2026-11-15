@@ -32,17 +32,6 @@ if "flask_core" not in sys.modules:
     sys.modules["flask_core"] = _stub
 # --- end shim
 
-# --- libs/ on sys.path (module-package tests, e.g. bot_module.features)
-# Module packages (bot_module, and social/marketing/customer_module as they
-# land) are siblings of flask_core under libs/, not inside it, and register
-# their Feature contracts against flask_core.feature_registry -- so their
-# tests need libs/ importable the same way flask_core itself is. Real
-# package imports (bot_module has its own __init__.py), no stub needed.
-_LIBS_DIR = _PKG_DIR.parent.parent
-if str(_LIBS_DIR) not in sys.path:
-    sys.path.insert(0, str(_LIBS_DIR))
-# --- end libs/ path
-
 
 @pytest.fixture(autouse=True)
 def _isolated_token_revocation():

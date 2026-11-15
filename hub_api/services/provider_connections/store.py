@@ -55,6 +55,7 @@ _REQUIRED_CONNECTION_COLUMNS: Final = (
     "sealed_secret",
     "secret_version",
     "sealed_api_credential",
+    "ownership_verified",
 )
 
 
@@ -100,6 +101,9 @@ class ConnectionRow:
     secret_version: int = 1
     #: Whether an outbound API credential is stored (a flag; the ciphertext is never read here).
     has_api_credential: bool = False
+    #: Migration 0103: the installer proved they own the resource (linked account or own token).
+    #: Only verified rows are unique across tenants; legacy rows stay ``False`` until re-verified.
+    ownership_verified: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -217,6 +221,7 @@ def _connection_columns(t: _Tables) -> list[Any]:
         c.connection_kind,
         c.secret_version,
         c.sealed_api_credential.is_not(None).label("has_api_credential"),
+        c.ownership_verified,
     ]
 
 
@@ -255,6 +260,7 @@ def _connection_from(row: Any) -> ConnectionRow:
         connection_kind=int(row.connection_kind),
         secret_version=int(row.secret_version),
         has_api_credential=bool(row.has_api_credential),
+        ownership_verified=bool(row.ownership_verified),
     )
 
 
@@ -333,6 +339,30 @@ async def community_tenant_id(db: Any, community_id: int) -> int | None:
     return int(value) if value is not None else None
 
 
+async def count_community_connections(db: Any, *, community_id: int, platform: str) -> int:
+    """How many live (non-revoked) ``platform`` connections ``community_id`` holds.
+
+    Backs the per-community cap (:attr:`AdapterSpec.max_connections_per_community`); the database
+    trigger from migration 0082 is the race-proof twin of this read.
+    """
+    t = _tables(db)
+    async with db.engine.connect() as conn:
+        value = (
+            await conn.execute(
+                select(func.count())
+                .select_from(
+                    t.grants.join(t.connections, t.connections.c.id == t.grants.c.connection_id)
+                )
+                .where(
+                    t.grants.c.community_id == community_id,
+                    t.grants.c.status != GRANT_REVOKED,
+                    t.connections.c.platform == platform,
+                )
+            )
+        ).scalar_one()
+    return int(value)
+
+
 async def insert_connection(
     db: Any,
     *,
@@ -349,6 +379,7 @@ async def insert_connection(
     enabled: bool,
     now: datetime,
     connection_kind: int,
+    ownership_verified: bool = False,
 ) -> Binding:
     """Atomically create the link (layer 2) and this community's approved grant (layer 3).
 
@@ -356,6 +387,10 @@ async def insert_connection(
     (:class:`ConnectionConflict`) to overwrite an existing link for the same resource: the unique
     key ``(tenant, platform, resource)`` means someone already installed it, and silently replacing
     their tokens would be a takeover, not a create.
+
+    ``ownership_verified`` records the bind-time ownership proof. One channel may legitimately be
+    bound to many communities, across tenants (N:M), so it is NOT globally unique; squatting is
+    prevented by the proof itself, and svc-ingest never routes an unverified duplicate.
 
     ``public_id`` is minted by the caller *before* sealing because it is part of the tokens' AAD
     (finding M4); the row is stored with it and with the secrets' ``seal_version``.
@@ -401,6 +436,7 @@ async def insert_connection(
                     resource_metadata=dict(resource_metadata),
                     expires_at=expires_at,
                     installed_by_user_id=installed_by_user_id,
+                    ownership_verified=ownership_verified,
                     created_at=now,
                     updated_at=now,
                 )
@@ -802,3 +838,29 @@ async def reseal_legacy(
             )
         )
     return True
+
+
+async def user_has_platform_identity(
+    db: Any, *, user_id: int, platform: str, platform_user_id: str
+) -> bool:
+    """``True`` when hub user ``user_id`` OAuth-linked ``platform`` account ``platform_user_id``.
+
+    The proof of ownership for a channel binding: ``hub_user_identities`` rows are only written by
+    the social-login / account-linking OAuth2 flow, so a match means the user authenticated as
+    that platform account. A missing table fails loudly (:class:`SchemaMissing`), never "no".
+    """
+    identities = db.metadata.tables.get("hub_user_identities")
+    if identities is None:
+        raise SchemaMissing("table hub_user_identities not present -- run migrations")
+    i = identities.c
+    async with db.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                select(i.hub_user_id).where(
+                    i.hub_user_id == user_id,
+                    i.platform == platform,
+                    i.platform_user_id == platform_user_id,
+                )
+            )
+        ).first()
+    return row is not None

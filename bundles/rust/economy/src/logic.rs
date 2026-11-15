@@ -12,6 +12,16 @@ pub trait EconomyHost: Send + Sync {
     fn credit(&self, user: &str, amount: u64) -> Result<i64, ToolError>;
     fn debit(&self, user: &str, amount: u64) -> Result<i64, ToolError>;
     fn transfer(&self, from: &str, to: &str, amount: u64) -> Result<(), ToolError>;
+    /// ELEVATED primitive: moves a NON-actor member's funds; returns
+    /// `(from_balance, to_balance)`. The host additionally requires the CALLING
+    /// app's approved `economy.transfer_from` grant and enforces its caps.
+    fn transfer_from(
+        &self,
+        from: &str,
+        to: &str,
+        amount: u64,
+        reason: &str,
+    ) -> Result<(i64, i64), ToolError>;
     fn admin_set(&self, user: &str, value: u64) -> Result<i64, ToolError>;
     fn admin_delta(&self, user: &str, delta: i64) -> Result<i64, ToolError>;
     fn pay_pot(&self, winners: &[(String, u64)]) -> Result<(), ToolError>;
@@ -96,6 +106,26 @@ fn user(args: &Value, key: &str) -> Result<String, ToolError> {
     Ok(s.to_ascii_lowercase())
 }
 
+/// The audit reason: a short PII-free code (`[a-z0-9_.-]{1,64}`), so the audit
+/// table can never carry prose a caller typed in.
+fn reason(args: &Value) -> Result<String, ToolError> {
+    let s = args
+        .get("reason")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("reason must be a code string"))?;
+    if s.is_empty()
+        || s.len() > 64
+        || !s.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'.' | b'-')
+        })
+    {
+        return Err(invalid(
+            "reason must be a code of 1..=64 chars from [a-z0-9_.-]",
+        ));
+    }
+    Ok(s.to_string())
+}
+
 /// Bounds JSON integers to the host's signed balance representation.
 fn amount(args: &Value, key: &str, minimum: u64) -> Result<u64, ToolError> {
     args.get(key)
@@ -134,6 +164,7 @@ pub fn build_registry(host: Arc<dyn EconomyHost>, store: Arc<dyn ConfigStore>) -
         "adjust_balance",
         "transfer",
         "give",
+        "transfer_from",
         "points_set",
         "points_adjust",
         "pay_pot",
@@ -191,6 +222,23 @@ fn run(
             }
             host.transfer(&from, &to, amount)?;
             Ok(json!({"from": from, "to": to, "amount": amount, "alias": config.alias}))
+        }
+        "transfer_from" => {
+            fields(&args, &["from", "to", "amount", "reason"])?;
+            write(ctx)?;
+            let from = user(&args, "from")?;
+            let to = user(&args, "to")?;
+            let amount = amount(&args, "amount", 1)?;
+            if from == to {
+                return Err(invalid("cannot transfer to oneself"));
+            }
+            let reason = reason(&args)?;
+            let (from_balance, to_balance) = host.transfer_from(&from, &to, amount, &reason)?;
+            Ok(json!({
+                "from": from, "to": to, "amount": amount,
+                "from_balance": from_balance, "to_balance": to_balance,
+                "alias": config.alias
+            }))
         }
         "points_set" => {
             fields(&args, &["user", "balance"])?;
@@ -304,6 +352,16 @@ mod tests {
         fn transfer(&self, f: &str, t: &str, n: u64) -> Result<(), ToolError> {
             self.record(format!("transfer:{f}:{t}:{n}"));
             Ok(())
+        }
+        fn transfer_from(
+            &self,
+            f: &str,
+            t: &str,
+            n: u64,
+            r: &str,
+        ) -> Result<(i64, i64), ToolError> {
+            self.record(format!("transfer_from:{f}:{t}:{n}:{r}"));
+            Ok((7, 33))
         }
         fn admin_set(&self, u: &str, n: u64) -> Result<i64, ToolError> {
             self.record(format!("admin:{u}:{n}"));
@@ -453,6 +511,64 @@ mod tests {
         assert!(h.calls.lock().unwrap().is_empty(), "no mint was attempted");
         call(&r, "exchange", admin_keyed(args)).unwrap();
         assert_eq!(h.calls.lock().unwrap().len(), 1);
+    }
+    #[test]
+    fn transfer_from_is_one_keyed_host_call_returning_both_balances() {
+        let (r, h) = setup(None);
+        let out = call(
+            &r,
+            "transfer_from",
+            keyed(json!({"from":ALICE,"to":BOB,"amount":5,"reason":"steal"})),
+        )
+        .unwrap();
+        // Pinned result shape (consumed by the Steal contract fixture).
+        let mut keys: Vec<&str> = out.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["alias", "amount", "from", "from_balance", "to", "to_balance"]
+        );
+        assert_eq!(out["from"], ALICE);
+        assert_eq!(out["to"], BOB);
+        assert_eq!(out["from_balance"], 7);
+        assert_eq!(out["to_balance"], 33);
+        assert_eq!(out["amount"], 5);
+        assert_eq!(
+            h.calls.lock().unwrap().as_slice(),
+            [format!("transfer_from:{ALICE}:{BOB}:5:steal")]
+        );
+    }
+    #[test]
+    fn transfer_from_rejects_bad_input_before_any_host_call() {
+        let (r, h) = setup(None);
+        let good = json!({"from":ALICE,"to":BOB,"amount":5,"reason":"steal"});
+        let mut cases: Vec<Value> = Vec::new();
+        for (k, v) in [
+            ("amount", json!(0)),
+            ("amount", json!(-3)),
+            ("to", json!(ALICE)),
+            ("to", json!("bob")),
+            ("reason", json!("")),
+            ("reason", json!("Free text with PII")),
+            ("reason", json!("x".repeat(65))),
+            ("reason", json!(7)),
+        ] {
+            let mut c = good.clone();
+            c[k] = v;
+            cases.push(keyed(c));
+        }
+        let mut extra = good.clone();
+        extra["actor"] = json!(ALICE);
+        cases.push(keyed(extra));
+        let mut missing = good.clone();
+        missing.as_object_mut().unwrap().remove("reason");
+        cases.push(keyed(missing));
+        // No idempotency key at all.
+        cases.push(good);
+        for c in cases {
+            assert!(call(&r, "transfer_from", c.clone()).is_err(), "{c}");
+        }
+        assert!(h.calls.lock().unwrap().is_empty());
     }
     #[test]
     fn invalid_inputs_and_missing_keys_never_reach_money_host() {

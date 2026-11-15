@@ -1,0 +1,136 @@
+schema_version: 2
+app_id: waddles.integrations.superpenguin.racing
+name: Racing (SuperPenguinTV Drop Games)
+version: 1.0.0
+feature: waddles.integrations.superpenguin
+module: integrations
+provider: thirdparty
+language: csharp
+artifact: component
+execution_model: wasi-component
+is_default: false
+author: github/psychoboy
+collection: superpenguintv
+license: MIT
+category: alternatives
+source_url: https://github.com/Psychoboy/PenguinTwitchBot
+notice: |
+  Ported from PenguinTwitchBot (Bot/Commands/Games/Racing/RacingGameService.cs and
+  RacingMessageSettings.cs, github.com/Psychoboy/PenguinTwitchBot) by Psychoboy (github:Psychoboy), used with permission.
+
+  MIT License
+
+  Copyright (c) 2023 Psychoboy
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+stages:
+  process:
+    entry: waddle:bundle/process-stage#transform
+    consumes:
+    - platform: twitch
+      event_types:
+      - chat.message
+      filters:
+        command_prefix:
+        - '!race'
+        - '!racing'
+        - '!kart'
+        - '!grandprix'
+    - platform: discord
+      event_types:
+      - chat.message
+      filters:
+        command_prefix:
+        - '!race'
+        - '!racing'
+        - '!kart'
+        - '!grandprix'
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: waddle:bundle/action-stage#dispatch
+    config: {}
+    spec:
+      required_config: []
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+- id: storage.kv
+  justification: the race window (record, roster slots, atomic grid counter, frozen result, per-racer payout
+    progress), the per-user 5 s cooldown, the per-event join replay record, the TickScheduler board
+    for the join-window deadline and the once-a-day widget-registered marker
+- id: identity.resolve
+  justification: resolve the invoking actor to a community user uuid (uuid-only, no
+    names)
+- id: chat.send:discord
+  justification: replies to the invoking user/channel via the relay host import (relay.push
+    -> chat.send:discord)
+- id: chat.send:twitch
+  justification: replies to the invoking user/channel via the relay host import (relay.push
+    -> chat.send:twitch)
+- id: tool.call:waddles.core.service.economy:points_view
+  justification: Use the economy service points_view contract; the app owns only game
+    rules
+  params:
+    write: false
+- id: tool.call:waddles.core.service.economy:get_balance
+  justification: Use the economy service get_balance contract; the app owns only game
+    rules
+  params:
+    write: false
+- id: tool.call:waddles.core.service.economy:adjust_balance
+  justification: Credit the pot to the finishers (or refund a voided window) through the economy
+    service adjust_balance contract with deterministic per-race idempotency keys; the app owns only game rules
+  params:
+    write: true
+- id: economy.wager
+  justification: App-owned game wagering and maximum-bet policy; each join debits the
+    stake with one atomic wager(stake, 0) (the pot is paid later by the settlement)
+  params:
+    max_bet: 500
+- id: overlay.media
+  justification: registers the Racing widget once and pushes structured envelopes (join lobby frame,
+    finished-race keyframes per lane, void notice) to the overlay after the money moved; a failed
+    push is logged and never reverses a payout
+  params:
+    mode: data
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: 1.0.0
+  min_version: 1.0.0
+  max_version: null
+requested_tools:
+- tool: points_view
+  access: read
+  target_app_id: waddles.core.service.economy
+- tool: get_balance
+  access: read
+  target_app_id: waddles.core.service.economy
+- tool: adjust_balance
+  access: write
+  target_app_id: waddles.core.service.economy

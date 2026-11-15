@@ -375,7 +375,7 @@ mod tests {
             "ok",
             std::time::Duration::from_millis(5),
         );
-        metrics.set_connection_up(true);
+        metrics.set_connection_up(true, "svc-process");
 
         // Shutdown flushes the periodic reader synchronously, driving the
         // exporter's gRPC call on the runtime; run it off the async threads.

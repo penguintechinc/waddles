@@ -15,8 +15,7 @@
   "secret": {
     "fields": {
       "accessKeyId": "FAKE-ACCESS-KEY-ID",
-      "secretAccessKey": "FAKE-SECRET-ACCESS-KEY",
-      "sessionToken": null
+      "secretAccessKey": "FAKE-SECRET-ACCESS-KEY"
     },
     "scheme": 4
   },

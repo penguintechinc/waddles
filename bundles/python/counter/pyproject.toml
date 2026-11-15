@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-counter"
-version = "1.0.1"
+version = "1.0.2"
 description = "generic per-community named counters (!counter <name>, !counter add/sub/set/reset/del/list; optional public add/sub for chatters)"
 requires-python = ">=3.13"
 dependencies = []

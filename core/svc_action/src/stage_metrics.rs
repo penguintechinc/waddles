@@ -278,6 +278,10 @@ pub struct StageMetrics {
     group_pending: Histogram<u64>,
     insecure_transport: Gauge<u64>,
     boundary_violations: Counter<u64>,
+    load_inflight: Gauge<u64>,
+    queue_wait: Histogram<f64>,
+    pool_exhausted: Counter<u64>,
+    slot_owner_changes: Counter<u64>,
 }
 
 impl StageMetrics {
@@ -385,6 +389,51 @@ impl StageMetrics {
                 "waddles_tenant_boundary_violations_total",
                 "Hop-verification (tenant boundary) failures, by stage and reason",
             ),
+            load_inflight: meter
+                .u64_gauge(instrument_name("stage_load_inflight"))
+                .with_description("Bundle Loads this stage has sent and not yet seen answered")
+                .build(),
+            queue_wait: latency(
+                "queue_wait_seconds",
+                "Time a stream entry waited before the stage dispatched it, by hash slot",
+            ),
+            pool_exhausted: counter(
+                "pool_exhausted_total",
+                "Executor invokes refused with pool_exhausted back-pressure, by hash slot",
+            ),
+            slot_owner_changes: counter(
+                "executor_slot_owner_changes_total",
+                "Hash slots whose owner executor set changed after a membership change",
+            ),
+        }
+    }
+
+    /// Sets `stage_load_inflight` to the current in-flight Load count.
+    pub fn set_load_inflight(&self, inflight: usize) {
+        self.load_inflight.record(
+            u64::try_from(inflight).unwrap_or(u64::MAX),
+            &[KeyValue::new("stage", STAGE)],
+        );
+    }
+
+    /// Records one entry's queue wait (`queue_wait_seconds`) against the
+    /// app's hash slot and executor pool (bounded: 1024 slots x a handful of
+    /// pools; app_id is NOT a label here).
+    pub fn record_queue_wait(&self, app_id: &str, wait: Duration) {
+        self.queue_wait
+            .record(wait.as_secs_f64(), &scale_labels(app_id));
+    }
+
+    /// Counts one `pool_exhausted` executor refusal (`pool_exhausted_total`).
+    pub fn record_pool_exhausted(&self, app_id: &str) {
+        self.pool_exhausted.add(1, &scale_labels(app_id));
+    }
+
+    /// Adds `changed` slot-owner changes (`executor_slot_owner_changes_total`).
+    pub fn record_slot_owner_changes(&self, changed: u64) {
+        if changed > 0 {
+            self.slot_owner_changes
+                .add(changed, &[KeyValue::new("stage", STAGE)]);
         }
     }
 
@@ -612,6 +661,35 @@ impl penguin_spine::SpineMetrics for StageMetrics {
             ],
         );
     }
+}
+
+/// Default executor pool name when `EXECUTOR_POOL` is unset (phase 1 has a
+/// single shared pool; dedicated tenant pools are phase 2).
+pub const DEFAULT_EXECUTOR_POOL: &str = "default";
+
+/// The executor pool this stage dispatches to (`EXECUTOR_POOL`, else
+/// [`DEFAULT_EXECUTOR_POOL`]) -- the `executor_pool` attribute KEDA selects
+/// on. Read once; the handshake carries no pool field yet.
+pub fn executor_pool() -> &'static str {
+    static POOL: OnceLock<String> = OnceLock::new();
+    POOL.get_or_init(|| pool_name(std::env::var("EXECUTOR_POOL").ok()))
+}
+
+/// Normalizes a configured pool name: trimmed, empty/unset -> default.
+fn pool_name(raw: Option<String>) -> String {
+    raw.map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| DEFAULT_EXECUTOR_POOL.to_string())
+}
+
+/// `stage` + `executor_pool` + `slot` attributes for the autoscaling
+/// metrics (`queue_wait_seconds`, `pool_exhausted_total`).
+fn scale_labels(app_id: &str) -> [KeyValue; 3] {
+    [
+        KeyValue::new("stage", STAGE),
+        KeyValue::new("executor_pool", executor_pool()),
+        KeyValue::new("slot", i64::from(bundle_active_set::slot(app_id))),
+    ]
 }
 
 /// The process-wide [`StageMetrics`], built on first use from the global
@@ -860,6 +938,37 @@ mod tests {
             ),
             1.0
         );
+    }
+
+    /// The executor scale-out metrics are emitted with the stage and the
+    /// `executor_pool` attribute KEDA selects on.
+    #[test]
+    fn scale_out_metrics_carry_stage_and_executor_pool() {
+        let (h, m) = fresh();
+        m.record_queue_wait("waddles.test.q", Duration::from_millis(250));
+        m.record_pool_exhausted("waddles.test.q");
+        m.set_load_inflight(3);
+        m.record_slot_owner_changes(0);
+        m.record_slot_owner_changes(7);
+        let pool = [("stage", "action"), ("executor_pool", executor_pool())];
+        assert_eq!(h.count("queue_wait_seconds", &pool), 1.0);
+        assert_eq!(h.count("pool_exhausted_total", &pool), 1.0);
+        assert_eq!(
+            h.last("stage_load_inflight", &[("stage", "action")])
+                .map(|p| p.value),
+            Some(3.0)
+        );
+        assert_eq!(
+            h.count("executor_slot_owner_changes_total", &[("stage", "action")]),
+            7.0
+        );
+    }
+
+    #[test]
+    fn pool_name_defaults_and_trims() {
+        assert_eq!(pool_name(None), DEFAULT_EXECUTOR_POOL);
+        assert_eq!(pool_name(Some("  ".into())), DEFAULT_EXECUTOR_POOL);
+        assert_eq!(pool_name(Some(" ent-a ".into())), "ent-a");
     }
 
     #[test]

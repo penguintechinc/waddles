@@ -1,6 +1,6 @@
 name: Build svc-action
 
-# Publishes the Rust data-plane svc-action image (`svc-action-rust`) built
+# Publishes the Rust data-plane svc-action image (`svc-action`) built
 # from `core/svc_action/Dockerfile.rust`. See build-svc-ingest.yml for the
 # full rationale (self-contained build, `-rust` naming, gated Trivy scan,
 # and the PR-path job split so a build-context regression like gh-475 now
@@ -36,7 +36,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  MODULE_NAME: svc-action-rust
+  MODULE_NAME: svc-action
   MODULE_PATH: core/svc_action
   # Dockerfile.rust COPYs the sibling `bundle_active_set` crate (same-repo
   # path dependency), so the build context must be `core/` (the parent of

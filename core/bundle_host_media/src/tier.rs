@@ -8,13 +8,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use hub_client::bearer_request;
+use hub_client::pb::media_service_client::MediaServiceClient;
+use hub_client::pb::{GetEffectiveTierRequest, MediaTier};
+use tonic::transport::Channel;
 
 use crate::auth::BearerSource;
 use crate::types::{MediaError, Scope, Tier, LICENSE_UNKNOWN};
 
-/// hub-api path (pinned by `tests/hub_contract.rs` against the Python blueprint).
-pub const EFFECTIVE_TIER_PATH: &str = "/api/v1/internal/media/effective-tier";
-/// Machine-JWT scope hub-api requires for [`EFFECTIVE_TIER_PATH`].
+/// Full gRPC method name (pinned by `tests/hub_contract.rs` against hub-api's servicer).
+pub const EFFECTIVE_TIER_METHOD: &str = "/waddles.hub.internal.v1.MediaService/GetEffectiveTier";
+/// Machine-JWT scope hub-api requires for [`EFFECTIVE_TIER_METHOD`].
 pub const TIER_SCOPE: &str = "media:tier:resolve";
 
 /// Why a tier could not be established.
@@ -51,35 +55,34 @@ pub async fn require_professional(
     }
 }
 
-/// Production resolver: hub-api
-/// `POST /api/v1/internal/media/effective-tier` `{tenant_id, community_id}`
-/// (machine JWT, scope `media:tier:resolve`) -> `{"tier"}`, already
-/// max(tenant, community) and fail-closed to `free` hub-side (404 = community
-/// not in tenant -> refused). Last-known values
-/// are served within `grace` when hub-api is unreachable; a never-seen scope with
-/// hub-api down is refused.
+/// Production resolver: hub-api's internal gRPC `MediaService.GetEffectiveTier`
+/// `{tenant_id, community_id}` (machine JWT in metadata, scope `media:tier:resolve`) -> the
+/// tier enum, already max(tenant, community) and fail-closed to `free` hub-side
+/// (`NOT_FOUND` = community not in tenant -> refused). Last-known values are served within
+/// `grace` when hub-api is unreachable; a never-seen scope with hub-api down is refused.
+/// The [`Channel`] is the process's long-lived, lazily re-dialling connection to hub-api.
 pub struct HubTierResolver {
-    http: reqwest::Client,
-    base_url: String,
+    rpc: MediaServiceClient<Channel>,
     bearer: Arc<dyn BearerSource>,
+    deadline: Duration,
     fresh_ttl: Duration,
     grace: Duration,
     cache: Mutex<HashMap<(i64, i32), (Tier, Instant)>>,
 }
 
 impl HubTierResolver {
-    /// `base_url` like `http://hub-api:8204` (no trailing slash needed).
+    /// `channel` from `hub_client::lazy_channel`; `deadline` per RPC (hub-api rejects > 5s).
     pub fn new(
-        http: reqwest::Client,
-        base_url: impl Into<String>,
+        channel: Channel,
         bearer: Arc<dyn BearerSource>,
+        deadline: Duration,
         fresh_ttl: Duration,
         grace: Duration,
     ) -> Self {
         Self {
-            http,
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            rpc: MediaServiceClient::new(channel),
             bearer,
+            deadline,
             fresh_ttl,
             grace,
             cache: Mutex::new(HashMap::new()),
@@ -103,34 +106,31 @@ impl HubTierResolver {
     }
 
     async fn fetch(&self, scope: &Scope) -> Result<Tier, TierError> {
-        #[derive(serde::Deserialize)]
-        struct Body {
-            tier: String,
-        }
         let token = self
             .bearer
             .bearer()
             .await
             .map_err(|e| TierError::Unavailable(format!("machine jwt: {e}")))?;
-        let resp = self
-            .http
-            .post(format!("{}{}", self.base_url, EFFECTIVE_TIER_PATH))
-            .bearer_auth(token.as_ref())
-            .json(&serde_json::json!({
-                "tenant_id": scope.tenant_id,
-                "community_id": scope.community_id,
-            }))
-            .send()
-            .await
-            .map_err(|e| TierError::Unavailable(format!("request failed: {}", e.without_url())))?;
-        if !resp.status().is_success() {
-            return Err(TierError::Unavailable(format!(
-                "hub-api status {}",
-                resp.status().as_u16()
-            )));
+        let request = bearer_request(
+            GetEffectiveTierRequest {
+                tenant_id: scope.tenant_id,
+                community_id: i64::from(scope.community_id),
+            },
+            token.as_ref(),
+            self.deadline,
+        )
+        .map_err(|_| TierError::Unavailable("invalid token metadata".into()))?;
+        let mut rpc = self.rpc.clone();
+        let reply = rpc.get_effective_tier(request).await.map_err(|status| {
+            // Only the status CODE is reported -- never server text.
+            TierError::Unavailable(format!("hub-api status {:?}", status.code()))
+        })?;
+        match MediaTier::try_from(reply.into_inner().tier) {
+            Ok(MediaTier::Free) => Ok(Tier::Free),
+            Ok(MediaTier::Professional) => Ok(Tier::Professional),
+            Ok(MediaTier::Enterprise) => Ok(Tier::Enterprise),
+            _ => Err(TierError::Unknown),
         }
-        let body: Body = resp.json().await.map_err(|_| TierError::Unknown)?;
-        Tier::parse(&body.tier).ok_or(TierError::Unknown)
     }
 }
 

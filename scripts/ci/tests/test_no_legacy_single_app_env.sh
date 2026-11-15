@@ -3,7 +3,7 @@
 #
 # `check-alpha-render-bundle-executor.py` (fix/alpha-deploy-executor-and-failfast)
 # already asserts no legacy single-app env var renders against values-alpha.yaml,
-# but hard-requires a bundle-executor Deployment to be present -- beta/gamma/
+# but hard-requires a svc-bundles-executor Deployment to be present -- beta/gamma/
 # production all disable rustDataPlane.bundleExecutor{,Action} and would never
 # reach that assertion. This test runs the env-agnostic
 # check-no-legacy-single-app-env.py against a BARE render (no env-specific

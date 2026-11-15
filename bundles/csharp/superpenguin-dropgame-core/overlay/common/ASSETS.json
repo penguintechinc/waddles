@@ -1,0 +1,43 @@
+{
+  "upstream_repo": "https://github.com/Psychoboy/PenguinTwitchBot",
+  "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+  "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)",
+  "files": [
+    {
+      "path": "js/drop-games-audio.js",
+      "sha256": "14ad5d206b6d7e3673b63b2a596f50e1fd7c82910ede35727fd5815a365862c4",
+      "size": 8959,
+      "upstream_path": "PenguinTwitchBot/wwwroot/js/drop-games-audio.js",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "js/drop-games-common.js",
+      "sha256": "1a9b620ddfe60c37d7023c5efe07f3679d35428137f750f7e902a8cb6299e937",
+      "size": 88644,
+      "upstream_path": "PenguinTwitchBot/wwwroot/js/drop-games-common.js",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/round_end.wav",
+      "sha256": "5748c8f9eb1ff1a169446f1d5adc98b3524229125bd8e5f66052d28489302fa3",
+      "size": 66194,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/round_end.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/round_start.wav",
+      "sha256": "aaf2531dd9c1f51dff1d4470f422f8c3b852e79344690b97cebc8cf311c5fe1f",
+      "size": 75014,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/round_start.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    }
+  ],
+  "third_party_or_unclear": [],
+  "notes": [
+    "Shared by every drop game; vendored once here. js/drop-games-common.js and js/drop-games-audio.js are the upstream shared overlay runtime; media/round_start.wav and media/round_end.wav are upstream's default session start/end sounds. The repo carries no per-asset attribution for the .wav files; they are treated as covered by the repo MIT LICENSE."
+  ]
+}

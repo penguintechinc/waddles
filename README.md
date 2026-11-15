@@ -58,7 +58,7 @@ For in-depth service architectures, transport security, and stream specification
 ## App Bundle Model & WASM Sandbox
 
 - **Logical Hierarchy**: `Core → Module → Feature → App (Bundle)`.
-- **Security & Multi-Tenant Isolation**: All App Bundles execute as **WASI 0.2 WebAssembly components** inside a credential-less executor (`bundle-executor`) under a **gVisor `RuntimeClass` (`runsc`)**, providing memory safety and strict capability-scoped isolation.
+- **Security & Multi-Tenant Isolation**: All App Bundles execute as **WASI 0.2 WebAssembly components** inside a credential-less executor (`svc-bundles-executor`) under a **gVisor `RuntimeClass` (`runsc`)**, providing memory safety and strict capability-scoped isolation.
 - **Polyglot Language Portability**: WebAssembly provides full language freedom — **any application or language that compiles to WASI 0.2 can run as an App Bundle**. Tier 1 SDKs support Python, Rust, and JavaScript/TypeScript, while prebuilt WASI 0.2 components compiled from any language (C/C++, Go, Zig, Swift, etc.) are supported out of the box (Tier 2).
 - **Lifecycle & Coexistence**: 3-tier lifecycle (`installed ⊆ available ⊆ activated`). Multiple bundles for the same Feature can run side-by-side per community.
 

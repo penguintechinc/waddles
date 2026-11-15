@@ -23,8 +23,6 @@
     "reaction.add",
     "message.embed",
     "webhook.create",
-    "commands.register",
-    "commands.register.guild",
     "interaction.callback",
     "interaction.followup"
   ],
@@ -36,5 +34,5 @@
     "mod.add",
     "mod.remove"
   ],
-  "kick": []
+  "kick": ["chat.send", "mod.ban", "mod.timeout", "mod.unban"]
 }

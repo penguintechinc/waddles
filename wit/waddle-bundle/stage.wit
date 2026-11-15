@@ -522,6 +522,76 @@ interface reputation {
   /// The top `limit` (1..=100) active members by score, highest first (ties
   /// by user id). Members never adjusted (implicit 0) are not listed.
   leaderboard: func(limit: u32) -> result<list<score-entry>, error>;
+
+  /// Outcome of an [`apply`] / [`apply-moderation`] call.
+  record apply-outcome {
+    new-score: s64,
+    /// `false` = the host already applied this event+ordinal (idempotent replay).
+    applied: bool,
+  }
+
+  /// One audit-ledger row of a user's history (UUID/numeric only, no PII).
+  record history-entry {
+    id: s64,
+    delta: s32,
+    reason-code: string,
+    kind: string,
+    balance-after: option<s64>,
+    /// RFC 3339 UTC.
+    occurred-at: string,
+  }
+
+  /// A user's aggregate across the tenant's communities.
+  record tenant-score {
+    score: s64,
+    /// How many communities contributed a score row.
+    communities: u32,
+  }
+
+  /// The tenant's auto-ban policy (set by tenant admins via hub-api).
+  record tenant-policy {
+    auto-ban-enabled: bool,
+    auto-ban-floor: s64,
+    at-risk-threshold: s64,
+  }
+
+  /// ACTIVITY-class idempotent delta (`reputation.community.write`, per-call
+  /// bound +/-5): applied through the shared `reputation_apply()` SQL function
+  /// with the host-derived key `<event id>:reputation_apply:<ordinal>`. `reason`
+  /// is a machine code (`[a-z0-9._:-]`, <= 100). The class is fixed by the
+  /// import, never a guest argument.
+  apply: func(user: string, delta: s32, reason: string) -> result<apply-outcome, error>;
+
+  /// MODERATION-class idempotent delta (`reputation.moderation.write`, larger
+  /// per-call bound, core/approved bundles only; `denied("not_granted")`
+  /// without the grant).
+  apply-moderation: func(user: string, delta: s32, reason: string) -> result<apply-outcome, error>;
+
+  /// `reputation.tenant.read` (core only): `user`'s aggregate across this
+  /// tenant's communities. Never crosses tenants.
+  get-tenant: func(user: string) -> result<tenant-score, error>;
+
+  /// `reputation.tenant.read` (core only): this tenant's auto-ban policy, or
+  /// none when the tenant has not set one.
+  get-tenant-policy: func() -> result<option<tenant-policy>, error>;
+
+  /// `reputation.history.read` (core only): newest-first ledger page for `user`
+  /// in this community, 1..=100 rows with `id < before` when given.
+  history: func(user: string, limit: u32, before: option<s64>) -> result<list<history-entry>, error>;
+
+  /// Active members scored strictly below `threshold`, lowest first (1..=100).
+  below-threshold: func(threshold: s64, limit: u32) -> result<list<score-entry>, error>;
+
+  /// Whether `user` is soft-banned in this community (cannot WIN anything).
+  is-soft-banned: func(user: string) -> result<bool, error>;
+
+  /// `reputation.moderation.write`: records an active soft ban; `false` if one
+  /// was already active.
+  soft-ban: func(user: string, reason: string) -> result<bool, error>;
+
+  /// `reputation.moderation.write`: lifts the active soft ban only if it was
+  /// recorded with exactly `only-reason` (a manual ban is never lifted).
+  lift-soft-ban: func(user: string, only-reason: string) -> result<bool, error>;
 }
 
 /// The shared community currency (issue #714), cloned from `reputation`'s
@@ -694,6 +764,27 @@ interface economy {
   /// ratio <= 1000x) and an exchange that would credit nothing is `invalid`.
   /// Needs `economy.credit`; mint-capped like `credit`. Returns the NEW balance.
   exchange: func(user: string, from-amount: u64, rate-num: u32, rate-den: u32) -> result<s64, error>;
+
+  /// The NEW balances of both parties of a `transfer-from`.
+  record transfer-result {
+    from-balance: s64,
+    to-balance: s64,
+  }
+
+  /// ELEVATED PRIMITIVE (the economy SERVICE bundle only): atomically moves
+  /// `amount` (>= 1) from `from-user` -- who need NOT be the invocation's actor
+  /// -- to `to-user` (both active members, distinct). Game rules (who may steal
+  /// from whom, odds, cooldowns) live in the calling APP bundle; this is the
+  /// I/O primitive. Needs the service's own `economy.transfer_from` grant AND
+  /// the CALLING app's explicit, admin-approved `economy.transfer_from` grant
+  /// (`denied("elevated_not_granted")` / `denied("not_granted")` otherwise).
+  /// Bounded host-side by the admin-set caps in that grant (per call -> `over-cap`,
+  /// per app per day and per victim per day -> `denied("quota_exceeded")`).
+  /// `reason` is a PII-free audit code (`[a-z0-9_.-]{1,64}`). Idempotent per
+  /// event and ordinal: a replay returns the original balances; the same key
+  /// with other parameters is `denied("idempotency_conflict")`. Fully audited
+  /// (calling app, approving grant, from, to, amount, reason).
+  transfer-from: func(from-user: string, to-user: string, amount: u64, reason: string) -> result<transfer-result, error>;
 }
 
 /// Resolves WHO an invocation is about to the community `user-uuid` that
@@ -935,6 +1026,34 @@ interface log {
   write: func(lvl: level, message: string, fields-json: string);
 }
 
+/// Real metrics for bundles (counter / histogram / gauge), mapped host-side onto OTel
+/// instruments named `waddles_bundle_<kind>_<name>` (kind = counter|histogram|gauge). Capability: always granted; the HOST enforces the
+/// bounds so a bundle can never blow up cardinality or spoof identity:
+/// * `name` matches `^[a-z][a-z0-9_]{0,47}$`; at most 32 distinct names per bundle, and a name is
+///   bound to ONE instrument kind;
+/// * at most 4 labels per call; keys `^[a-z][a-z0-9_]{0,31}$` (never `app_id`, which the host
+///   always stamps itself); values `^[A-Za-z0-9_.-]{1,32}$` -- no free text -- and at most 16
+///   distinct values per (name, key): further values are folded into `other`;
+/// * `counter-add` delta <= 1_000_000; `histogram-record` finite and >= 0; `gauge-set` finite.
+/// Labels carry ids/enums/outcomes only -- never user-supplied text or PII.
+interface metrics {
+  variant error {
+    /// The metric name is malformed, or already bound to another instrument kind.
+    invalid-name,
+    /// A label key/value is malformed, reserved, or there are too many labels.
+    invalid-label,
+    /// The bundle already uses its maximum number of distinct metric names.
+    limit-exceeded,
+    /// The value is non-finite, negative where it must not be, or over the delta cap.
+    invalid-value,
+  }
+  record label { key: string, value: string }
+
+  counter-add: func(name: string, delta: u64, labels: list<label>) -> result<_, error>;
+  histogram-record: func(name: string, value: f64, labels: list<label>) -> result<_, error>;
+  gauge-set: func(name: string, value: f64, labels: list<label>) -> result<_, error>;
+}
+
 /// Capability: always granted.
 interface clock {
   /// Milliseconds since the Unix epoch, as the stage sees it.
@@ -1022,6 +1141,7 @@ world stage-next {
   import %flags;
   import log;
   import clock;
+  import metrics;
   import overlay;
   import reputation;
   import economy;
@@ -1133,6 +1253,7 @@ world stage-v2 {
   import %flags;
   import log;
   import clock;
+  import metrics;
   import overlay;
   import reputation;
   import economy;

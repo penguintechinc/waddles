@@ -48,6 +48,7 @@ from quart_schema import validate_request, validate_response
 from services import bot_ai_chatter, bot_ai_knowledge, bot_rcon, bot_shoutout
 from services.bot_tables import bind_bot_tables, community_belongs_to_tenant
 from services.errors import ApiError
+from services.global_identity import is_global_admin_sync
 
 bot_bp = Blueprint("v1_bot", __name__, url_prefix="/api/v1/admin")
 
@@ -431,6 +432,8 @@ async def get_ai_chatter_config(community_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
+    if not bot_ai_chatter.is_configured():
+        return {"error": "service_unavailable", "service": bot_ai_chatter.SERVICE_NAME}, 503
     config = await bot_ai_chatter.get_chatter_config(community_id)
     return AIChatterConfigResponse(success=True, config=_chatter_dto(config))
 
@@ -445,6 +448,8 @@ async def update_ai_chatter_config(data: AIChatterConfigRequest, community_id: i
     denied = await _require_community(community_id)
     if denied:
         return denied
+    if not bot_ai_chatter.is_configured():
+        return {"error": "service_unavailable", "service": bot_ai_chatter.SERVICE_NAME}, 503
     update = bot_ai_chatter.AIChatterConfigUpdate(
         enabled=data.enabled,
         max_responses_per_window=data.max_responses_per_window,
@@ -626,11 +631,10 @@ async def _check_optional_community(community_id: int | None) -> tuple[dict[str,
 
 
 def _is_super_admin_sync(dal: Any, user_id: int) -> bool:
-    """DB-authoritative `hub_users.is_super_admin` lookup (never the JWT `roles` claim)."""
+    """DB-authoritative system-tenant-admin lookup (never the JWT `roles` claim)."""
     if user_id <= 0:
         return False
-    row = dal(dal.hub_users.id == user_id).select().first()
-    return bool(row is not None and row.is_super_admin)
+    return is_global_admin_sync(dal, user_id)
 
 
 async def _caller_is_super_admin() -> bool:

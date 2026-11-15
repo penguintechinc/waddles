@@ -69,7 +69,7 @@ use bundle_host_db::{
 };
 use bundle_host_economy::{
     pot_account, AdminAdjust, EconomyCaps, EconomyError, EconomyScope, EconomyStore,
-    IdempotencyKey, DEFAULT_MAX_SUPPLY,
+    ElevatedPermission, ElevatedRequest, IdempotencyKey, DEFAULT_MAX_SUPPLY,
 };
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
@@ -88,12 +88,21 @@ use crate::license::FeatureGate;
 use crate::media::MediaWiring;
 use crate::stage_metrics::{self, StageMetrics};
 
+mod gameserver_net;
+pub use gameserver_net::{GameServerNetWiring, BUNDLE_GAMESERVER_NET_CAPABILITY_FLAG};
 mod tool;
 pub use tool::ToolContext;
 
 /// The community scope the verified caller must hold for `reputation.override`
 /// (mirrors the reputation bundle's manifest `required_scope`).
 const REPUTATION_OVERRIDE_SCOPE: &str = "community:admin";
+/// The first-party reputation SERVICE bundle: when it is the origin of the
+/// call chain (chain length 1) its activity writes are core internals and are
+/// exempt from the logic-bundle exclusivity check.
+const REPUTATION_SERVICE_APP_ID: &str = "waddles.core.service.reputation";
+/// Scope a HUMAN-originated moderation-class reputation call must hold (admins
+/// hold it too: the role mapping is cumulative).
+const REPUTATION_MODERATE_SCOPE: &str = "community:moderate";
 
 /// The durable rolling-24h absolute-delta caps the store enforces for
 /// `reputation.community.write` -- the catalog's own `per_user_daily_abs_max`
@@ -101,10 +110,14 @@ const REPUTATION_OVERRIDE_SCOPE: &str = "community:admin";
 /// community), so the in-memory gate quota and the durable store caps can
 /// never disagree about the ceilings.
 fn reputation_caps() -> ReputationCaps {
-    match PermissionFamily::ReputationCommunityWrite
-        .catalog_entry()
-        .default_quota
-    {
+    reputation_caps_for(PermissionFamily::ReputationCommunityWrite)
+}
+
+/// The durable caps of one reputation write family (activity
+/// `reputation.community.write`, or `reputation.moderation.write`), taken from
+/// the catalog so the gate's in-memory quota and the store can never disagree.
+fn reputation_caps_for(family: PermissionFamily) -> ReputationCaps {
+    match family.catalog_entry().default_quota {
         Quota::ReputationDelta {
             per_user_daily_abs_max,
             per_scope_daily_abs_max,
@@ -563,6 +576,11 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// `None` until [`Self::with_object_storage`] -- every `object_storage.*` call
     /// denies `not_implemented` in that state.
     object_storage: Option<ObjectStorageWiring>,
+    /// `None` until [`Self::with_gameserver_net`] -- every `gameserver_net.*` call denies
+    /// `not_implemented` in that state.
+    gameserver_net: Option<GameServerNetWiring>,
+    /// This invocation's open game-server sessions (closed when the invocation ends).
+    gs_sessions: Arc<gameserver_net::SessionTable>,
     /// `None` until [`Self::with_identity`] -- every `identity.*` call denies
     /// `not_implemented` in that state (never panics, never a default or
     /// guessed identity).
@@ -591,6 +609,10 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// guest then sees no scope and fails closed). Set only via
     /// [`Self::with_verified_scope`] from the verified envelope.
     verified_scope: Option<(i32, i32)>,
+    /// Live per-community config cache (`hub_client::bundle_config`); `None` until
+    /// [`Self::with_bundle_config`] (hub-api not configured) -- `get-context` then carries no
+    /// `config_json` (the guest sees `{}`), exactly as before this feature.
+    bundle_config: Option<Arc<hub_client::bundle_config::BundleConfigCache>>,
     /// The OTel instruments every `host-call` served by this value is timed
     /// into (`waddles_host_call_latency_seconds`). Always the process-wide
     /// set in production; tests swap it via `with_stage_metrics` so they can
@@ -599,6 +621,73 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// `None` until [`Self::with_tool`] -- every `tool.*` call denies
     /// `not_implemented` in that state (never a silent no-op).
     tool: Option<ToolContext>,
+    /// The bundle that invoked THIS invocation through `tool.invoke` (host-derived
+    /// from the call plan, never guest input); `None` for a top-level invocation.
+    /// The economy service's elevated primitives are checked against THIS app's
+    /// grants, not the service's own.
+    tool_caller: Option<ToolCaller>,
+}
+
+/// One economy call that needs the CALLING app's elevated grant: which
+/// approval, what the audit/caps meter, and who the parties are.
+#[derive(Clone, Debug)]
+struct ElevatedPlan {
+    permission: ElevatedPermission,
+    /// Short audit label (`transfer_from`, `credit`, `debit`, ...); also the
+    /// audit `reason` code of the non-`transfer_from` ops.
+    op: &'static str,
+    /// The member whose funds move (`transfer_from`) or who is credited/set;
+    /// the community pot account for multi-target ops.
+    target: uuid::Uuid,
+    /// The member the gate membership-checks (`None` for the pot bucket).
+    gate_user: Option<uuid::Uuid>,
+    counterparty: Option<uuid::Uuid>,
+    /// What the caps meter (>= 0).
+    amount: i64,
+    reason: String,
+}
+
+impl ElevatedPlan {
+    /// A single-target elevated op whose audit reason is its own label.
+    fn single(
+        permission: ElevatedPermission,
+        op: &'static str,
+        user: uuid::Uuid,
+        amount: i64,
+    ) -> Self {
+        Self {
+            permission,
+            op,
+            target: user,
+            gate_user: Some(user),
+            counterparty: None,
+            amount,
+            reason: op.to_string(),
+        }
+    }
+
+    /// A multi-target mint-class op, bucketed on the community pot account.
+    fn multi(op: &'static str, bucket: uuid::Uuid, amount: i64) -> Self {
+        Self {
+            permission: ElevatedPermission::AppMint,
+            op,
+            target: bucket,
+            gate_user: None,
+            counterparty: None,
+            amount,
+            reason: op.to_string(),
+        }
+    }
+}
+
+/// The direct caller of a nested `tool.invoke` hop: the calling app and the
+/// platform-installed version whose grants apply to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolCaller {
+    /// The calling bundle's app id (host-derived from the tool call plan).
+    pub app_id: String,
+    /// The calling bundle's active version id (the grant-set pin).
+    pub app_version: i64,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
@@ -641,6 +730,8 @@ impl<K: KvBackend> StageCapabilities<K> {
             economy: None,
             platform_table: None,
             object_storage: None,
+            gameserver_net: None,
+            gs_sessions: Arc::new(gameserver_net::SessionTable::default()),
             identity: None,
             ai: None,
             ai_deadline: None,
@@ -648,8 +739,10 @@ impl<K: KvBackend> StageCapabilities<K> {
             media_deadline: None,
             invocation_identity: None,
             verified_scope: None,
+            bundle_config: None,
             stage_metrics: stage_metrics::stage_metrics(),
             tool: None,
+            tool_caller: None,
         }
     }
 
@@ -660,6 +753,41 @@ impl<K: KvBackend> StageCapabilities<K> {
     pub fn with_verified_scope(mut self, scope: Option<(i32, i32)>) -> Self {
         self.verified_scope = scope;
         self
+    }
+
+    /// Attaches the live community-config cache so `get-context` carries `config_json`.
+    #[must_use]
+    pub fn with_bundle_config(
+        mut self,
+        cache: Option<Arc<hub_client::bundle_config::BundleConfigCache>>,
+    ) -> Self {
+        self.bundle_config = cache;
+        self
+    }
+
+    /// Adds `config_json` (this community's merged live config for this app) to the
+    /// `get-context` reply. Served ONLY for the verified envelope scope -- the same
+    /// `(tenant_id, community_id)` guard as the ids themselves -- so an unverified/legacy
+    /// invoke never receives another scope's config. The key's `app_id` is host-derived.
+    async fn attach_config_json(&self, ctx: &mut serde_json::Value) {
+        let (Some(cache), Some((tenant_id, community_id))) =
+            (&self.bundle_config, self.verified_scope)
+        else {
+            return;
+        };
+        if tenant_id < 1 || community_id < 0 {
+            return;
+        }
+        let key = hub_client::bundle_config::ConfigKey::new(
+            i64::from(tenant_id),
+            i64::from(community_id),
+            self.app_id.clone(),
+        );
+        // Kill switch ON: no lookup, no `config_json` (pre-feature behaviour).
+        let Some(config) = cache.lookup_if_enabled(&key).await else {
+            return;
+        };
+        ctx["config_json"] = serde_json::json!(&*config);
     }
 
     /// Test seam: routes this value's host-call timings into `metrics`
@@ -1457,6 +1585,15 @@ impl<K: KvBackend> StageCapabilities<K> {
                 rate_num: i64,
                 rate_den: i64,
             },
+            // ELEVATED primitive: moves a NON-actor member's funds. Only an
+            // app bundle holding the approved `economy.transfer_from` grant,
+            // calling through the economy service, may use it.
+            TransferFrom {
+                from: uuid::Uuid,
+                to: uuid::Uuid,
+                amount: i64,
+                reason: String,
+            },
         }
 
         /// A mutation's claimed idempotency slot: the mutation kind, the
@@ -1492,6 +1629,24 @@ impl<K: KvBackend> StageCapabilities<K> {
                 }
                 let amount = economy_amount_arg(args, "amount", 1)?;
                 Op::Transfer { from, to, amount }
+            }
+            "economy.transfer_from" => {
+                let from = economy_user_arg(args, "from")?;
+                let to = economy_user_arg(args, "to")?;
+                if from == to {
+                    return Err(denied("invalid_args", "cannot transfer to oneself"));
+                }
+                let reason = args
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| denied("invalid_args", "reason must be a code string"))?;
+                bundle_host_economy::validate_reason(reason).map_err(economy_error_to_host)?;
+                Op::TransferFrom {
+                    from,
+                    to,
+                    amount: economy_amount_arg(args, "amount", 1)?,
+                    reason: reason.to_string(),
+                }
             }
             "economy.credit" => Op::Credit {
                 user: economy_user_arg(args, "user")?,
@@ -1578,12 +1733,123 @@ impl<K: KvBackend> StageCapabilities<K> {
         // account whose funds the call would move (a wager's player, a
         // transfer's sender) -- the one [`Self::bind_actor`] must tie to the
         // invocation's actor.
+        // ELEVATED classification (economy service reached by an APP bundle through
+        // `tool.invoke`): every dangerous primitive additionally needs the CALLING
+        // app's own explicit, admin-approved grant (see `ElevatedPlan`). A debit
+        // of the invocation's own actor stays on the lighter, actor-bound path; a
+        // debit of anyone else is `transfer_from`-class.
+        let scope = EconomyScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+        };
+        let non_actor_debit = match (&op, &self.tool_caller) {
+            (Op::Debit { user, .. } | Op::ConditionalDebit { user, .. }, Some(_)) => {
+                !self.actor_is(*user).await?
+            }
+            _ => false,
+        };
+        let via_app = self.tool_caller.is_some();
+        let elevated: Option<ElevatedPlan> = match &op {
+            Op::TransferFrom {
+                from,
+                to,
+                amount,
+                reason,
+            } => {
+                if !via_app {
+                    // No calling app means no grant to check: loud refusal.
+                    return Err(denied(
+                        "elevated_not_granted",
+                        "transfer_from is available only to app bundles calling through the economy service",
+                    ));
+                }
+                Some(ElevatedPlan {
+                    permission: ElevatedPermission::TransferFrom,
+                    op: "transfer_from",
+                    target: *from,
+                    gate_user: Some(*from),
+                    counterparty: Some(*to),
+                    amount: *amount,
+                    reason: reason.clone(),
+                })
+            }
+            Op::Debit { user, amount } if via_app && non_actor_debit => Some(ElevatedPlan::single(
+                ElevatedPermission::TransferFrom,
+                "debit",
+                *user,
+                *amount,
+            )),
+            Op::ConditionalDebit { user, amount, .. } if via_app && non_actor_debit => {
+                Some(ElevatedPlan::single(
+                    ElevatedPermission::TransferFrom,
+                    "cond_debit",
+                    *user,
+                    *amount,
+                ))
+            }
+            Op::Credit { user, amount } if via_app => Some(ElevatedPlan::single(
+                ElevatedPermission::AppMint,
+                "credit",
+                *user,
+                *amount,
+            )),
+            Op::Exchange {
+                user,
+                from_amount,
+                rate_num,
+                rate_den,
+            } if via_app => {
+                // The credited amount (floor(from * num / den)), the quantity the
+                // caps meter; widened so the product cannot overflow.
+                let credited = (i128::from(*from_amount) * i128::from(*rate_num)
+                    / i128::from(*rate_den).max(1))
+                .clamp(0, i128::from(i64::MAX)) as i64;
+                Some(ElevatedPlan::single(
+                    ElevatedPermission::AppMint,
+                    "exchange",
+                    *user,
+                    credited,
+                ))
+            }
+            Op::AdminAdjust { user, adjust } if via_app => {
+                let magnitude = match adjust {
+                    AdminAdjust::Delta(d) => i64::try_from(d.unsigned_abs()).unwrap_or(i64::MAX),
+                    AdminAdjust::Set(v) => *v,
+                };
+                Some(ElevatedPlan::single(
+                    ElevatedPermission::AppMint,
+                    "admin_adjust",
+                    *user,
+                    magnitude,
+                ))
+            }
+            // Multi-target ops are metered against the community pot account as
+            // the per-target bucket (the per-app daily cap still bounds them).
+            Op::BatchCredit(entries) if via_app => Some(ElevatedPlan::multi(
+                "batch_credit",
+                pot_account(&scope),
+                entries.iter().fold(0i64, |t, (_, a)| t.saturating_add(*a)),
+            )),
+            Op::PayPot(winners) if via_app => Some(ElevatedPlan::multi(
+                "pay_pot",
+                pot_account(&scope),
+                winners.iter().fold(0i64, |t, (_, a)| t.saturating_add(*a)),
+            )),
+            _ => None,
+        };
+
         let claim: Option<MutationClaim> = match &op {
             Op::Wager { user, .. } => Some(("wager", Some(*user))),
             Op::Transfer { from, .. } => Some(("transfer", Some(*from))),
-            // Spends and the exchange move the ACTOR's own funds: bound.
-            Op::Debit { user, .. } => Some(("debit", Some(*user))),
-            Op::ConditionalDebit { user, .. } => Some(("conditional_debit", Some(*user))),
+            // Spends and the exchange move the ACTOR's own funds: bound -- except
+            // an elevated debit of a non-actor, authorized by the app's grant.
+            Op::Debit { user, .. } => Some(("debit", (!non_actor_debit).then_some(*user))),
+            Op::ConditionalDebit { user, .. } => {
+                Some(("conditional_debit", (!non_actor_debit).then_some(*user)))
+            }
+            // Moves a non-actor's funds under the calling app's elevated grant.
+            Op::TransferFrom { .. } => Some(("transfer_from", None)),
             Op::Exchange { user, .. } => Some(("exchange", Some(*user))),
             // Mints, the admin adjust and the pot payout pay INTO accounts and
             // never pull a member's funds: keyed, gated by their own grant, not
@@ -1657,6 +1923,15 @@ impl<K: KvBackend> StageCapabilities<K> {
                 None,
             ),
             Op::PayPot(_) => (PermissionId::EconomyPotPay, None, None, None, None),
+            // The SERVICE's own grant to expose the primitive (amount-less: the
+            // durable store meters it under the calling app's caps below).
+            Op::TransferFrom { from, to, .. } => (
+                PermissionId::EconomyTransferFrom,
+                None,
+                None,
+                Some(*from),
+                Some(*to),
+            ),
         };
         // The stage's admin guarantee for the store: true ONLY when the gate
         // just authorized the bundle's `economy.admin_adjust` grant for this
@@ -1678,6 +1953,14 @@ impl<K: KvBackend> StageCapabilities<K> {
             )
             .map_err(denied_from_gate)?;
 
+        // The CALLING app's own elevated grant (fast in-memory pre-filter; the
+        // store re-reads the live grant row inside the write transaction). An
+        // absent grant is an explicit denial, never a silent fallback to the
+        // service's own (broader) grants.
+        if let (Some(plan), Some(caller)) = (&elevated, &self.tool_caller) {
+            self.authorize_caller_elevated(plan, caller)?;
+        }
+
         let Some(wiring) = &self.economy else {
             return Err(denied(
                 "not_implemented",
@@ -1691,12 +1974,6 @@ impl<K: KvBackend> StageCapabilities<K> {
                 "economy capability is disabled (waddles.bundle-economy-capability is OFF)",
             ));
         }
-
-        let scope = EconomyScope {
-            tenant_id: self.tenant_id,
-            community_id: self.community_id,
-            app_id: self.app_id.clone(),
-        };
 
         // Actor binding + idempotency key for the money movers. Neither is
         // optional: with no resolvable actor, or no event to anchor a key to,
@@ -1727,186 +2004,265 @@ impl<K: KvBackend> StageCapabilities<K> {
             reservation = Some((invocation, kind, ordinal));
         }
 
-        let result = match op {
-            Op::Balance(user) => wiring
-                .store
-                .balance(&scope, user)
-                .await
-                .map(|balance| serde_json::json!({ "balance": balance })),
-            Op::MaxBet(user) => {
-                // The cap is the grant's declared `max_bet` clamped to the
-                // catalog ceiling: the exact number the gate enforces on a
-                // wager's stake.
-                let cap = family
-                    .economy_amount_bound(&authorized.params)
-                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
-                wiring
-                    .store
-                    .max_bet(&scope, user, cap)
-                    .await
-                    .map(|max_bet| serde_json::json!({ "max_bet": max_bet }))
+        // Elevated primitives other than `transfer_from` (which audits inside its
+        // own transaction) are first ADMITTED: the store re-reads the calling
+        // app's live grant, enforces the admin-set caps and writes a reserved
+        // audit row; it is settled after the primitive ran.
+        let is_transfer_from = matches!(op, Op::TransferFrom { .. });
+        let mut reserved: Option<i64> = None;
+        let result = 'run: {
+            if let (Some(plan), Some(caller), false) =
+                (&elevated, &self.tool_caller, is_transfer_from)
+            {
+                let Some(key) = idempotency.as_ref() else {
+                    break 'run Err(EconomyError::Backend(
+                        "elevated mutation has no idempotency key".to_string(),
+                    ));
+                };
+                let req = ElevatedRequest {
+                    caller_app: &caller.app_id,
+                    permission: plan.permission,
+                    op: plan.op,
+                    target: plan.target,
+                    counterparty: plan.counterparty,
+                    amount: plan.amount,
+                    reason: &plan.reason,
+                    key,
+                };
+                match wiring.store.elevated_reserve(&scope, &req).await {
+                    Ok(id) => reserved = Some(id),
+                    Err(e) => break 'run Err(e),
+                }
             }
-            Op::Wager {
-                user,
-                stake,
-                payout,
-            } => {
-                let cap = family
-                    .economy_amount_bound(&authorized.params)
-                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
-                let key = idempotency
-                    .as_ref()
-                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
-                wiring
-                    .store
-                    .wager(
-                        &scope,
-                        user,
-                        stake,
-                        payout,
-                        cap,
-                        economy_max_supply(),
-                        economy_caps(family),
-                        key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::Transfer { from, to, amount } => {
-                let cap = family
-                    .economy_amount_bound(&authorized.params)
-                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
-                let key = idempotency
-                    .as_ref()
-                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
-                wiring
-                    .store
-                    .transfer(&scope, from, to, amount, cap, economy_caps(family), key)
-                    .await
-                    .map(|()| serde_json::json!({}))
-            }
-            Op::Credit { user, amount } => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
-                    .store
-                    .credit(
-                        &scope,
-                        user,
+            match op {
+                Op::TransferFrom {
+                    from,
+                    to,
+                    amount,
+                    reason,
+                } => {
+                    let (Some(caller), Some(key)) = (&self.tool_caller, idempotency.as_ref())
+                    else {
+                        break 'run Err(EconomyError::ElevatedNotGranted);
+                    };
+                    let req = ElevatedRequest {
+                        caller_app: &caller.app_id,
+                        permission: ElevatedPermission::TransferFrom,
+                        op: "transfer_from",
+                        target: from,
+                        counterparty: Some(to),
                         amount,
-                        cap,
-                        economy_max_supply(),
-                        economy_caps(family),
+                        reason: &reason,
                         key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::BatchCredit(entries) => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
+                    };
+                    wiring.store.transfer_from(&scope, &req).await.map(|o| {
+                        serde_json::json!({
+                            "from_balance": o.from_balance,
+                            "to_balance": o.to_balance,
+                        })
+                    })
+                }
+                Op::Balance(user) => wiring
                     .store
-                    .batch_credit(
-                        &scope,
-                        &entries,
-                        cap,
-                        economy_max_supply(),
-                        economy_caps(family),
-                        key,
-                    )
+                    .balance(&scope, user)
                     .await
-                    .map(|()| serde_json::json!({}))
+                    .map(|balance| serde_json::json!({ "balance": balance })),
+                Op::MaxBet(user) => {
+                    // The cap is the grant's declared `max_bet` clamped to the
+                    // catalog ceiling: the exact number the gate enforces on a
+                    // wager's stake.
+                    let cap = family
+                        .economy_amount_bound(&authorized.params)
+                        .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                    wiring
+                        .store
+                        .max_bet(&scope, user, cap)
+                        .await
+                        .map(|max_bet| serde_json::json!({ "max_bet": max_bet }))
+                }
+                Op::Wager {
+                    user,
+                    stake,
+                    payout,
+                } => {
+                    let cap = family
+                        .economy_amount_bound(&authorized.params)
+                        .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                    let key = idempotency.as_ref().ok_or_else(|| {
+                        denied("backend", "economy mutation has no idempotency key")
+                    })?;
+                    wiring
+                        .store
+                        .wager(
+                            &scope,
+                            user,
+                            stake,
+                            payout,
+                            cap,
+                            economy_max_supply(),
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::Transfer { from, to, amount } => {
+                    let cap = family
+                        .economy_amount_bound(&authorized.params)
+                        .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                    let key = idempotency.as_ref().ok_or_else(|| {
+                        denied("backend", "economy mutation has no idempotency key")
+                    })?;
+                    wiring
+                        .store
+                        .transfer(&scope, from, to, amount, cap, economy_caps(family), key)
+                        .await
+                        .map(|()| serde_json::json!({}))
+                }
+                Op::Credit { user, amount } => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .credit(
+                            &scope,
+                            user,
+                            amount,
+                            cap,
+                            economy_max_supply(),
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::BatchCredit(entries) => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .batch_credit(
+                            &scope,
+                            &entries,
+                            cap,
+                            economy_max_supply(),
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|()| serde_json::json!({}))
+                }
+                Op::Debit { user, amount } => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .debit(&scope, user, amount, cap, economy_caps(family), key)
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::ConditionalDebit {
+                    user,
+                    amount,
+                    min_balance,
+                } => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .conditional_debit(
+                            &scope,
+                            user,
+                            amount,
+                            min_balance,
+                            cap,
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::AdminAdjust { user, adjust } => {
+                    let key = idempotency.as_ref().ok_or_else(|| {
+                        denied("backend", "economy mutation has no idempotency key")
+                    })?;
+                    wiring
+                        .store
+                        .admin_adjust(
+                            &scope,
+                            user,
+                            adjust,
+                            economy_max_supply(),
+                            admin_gate_passed,
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::PayPot(winners) => {
+                    let key = idempotency.as_ref().ok_or_else(|| {
+                        denied("backend", "economy mutation has no idempotency key")
+                    })?;
+                    // The pot is host-derived (the bundle never names it).
+                    wiring
+                        .store
+                        .pay_pot(&scope, pot_account(&scope), &winners, key)
+                        .await
+                        .map(|()| serde_json::json!({}))
+                }
+                Op::Exchange {
+                    user,
+                    from_amount,
+                    rate_num,
+                    rate_den,
+                } => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .exchange(
+                            &scope,
+                            user,
+                            from_amount,
+                            rate_num,
+                            rate_den,
+                            cap,
+                            economy_max_supply(),
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::Leaderboard(limit) => {
+                    wiring.store.leaderboard(&scope, limit).await.map(|rows| {
+                        serde_json::json!({
+                            "entries": rows
+                                .into_iter()
+                                .map(|r| serde_json::json!({
+                                    "user": r.user.to_string(),
+                                    "balance": r.balance,
+                                }))
+                                .collect::<Vec<_>>(),
+                        })
+                    })
+                }
             }
-            Op::Debit { user, amount } => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
-                    .store
-                    .debit(&scope, user, amount, cap, economy_caps(family), key)
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::ConditionalDebit {
-                user,
-                amount,
-                min_balance,
-            } => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
-                    .store
-                    .conditional_debit(
-                        &scope,
-                        user,
-                        amount,
-                        min_balance,
-                        cap,
-                        economy_caps(family),
-                        key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::AdminAdjust { user, adjust } => {
-                let key = idempotency
-                    .as_ref()
-                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
-                wiring
-                    .store
-                    .admin_adjust(
-                        &scope,
-                        user,
-                        adjust,
-                        economy_max_supply(),
-                        admin_gate_passed,
-                        key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::PayPot(winners) => {
-                let key = idempotency
-                    .as_ref()
-                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
-                // The pot is host-derived (the bundle never names it).
-                wiring
-                    .store
-                    .pay_pot(&scope, pot_account(&scope), &winners, key)
-                    .await
-                    .map(|()| serde_json::json!({}))
-            }
-            Op::Exchange {
-                user,
-                from_amount,
-                rate_num,
-                rate_den,
-            } => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
-                    .store
-                    .exchange(
-                        &scope,
-                        user,
-                        from_amount,
-                        rate_num,
-                        rate_den,
-                        cap,
-                        economy_max_supply(),
-                        economy_caps(family),
-                        key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::Leaderboard(limit) => wiring.store.leaderboard(&scope, limit).await.map(|rows| {
-                serde_json::json!({
-                    "entries": rows
-                        .into_iter()
-                        .map(|r| serde_json::json!({
-                            "user": r.user.to_string(),
-                            "balance": r.balance,
-                        }))
-                        .collect::<Vec<_>>(),
-                })
-            }),
         };
+        // Settle an elevated reservation: applied/failed are definitive; an
+        // INDETERMINATE backend failure leaves it reserved (still counted
+        // against the caps -- the conservative side).
+        if let Some(audit_id) = reserved {
+            let applied = match &result {
+                Ok(_) => Some(true),
+                Err(EconomyError::Backend(_)) => None,
+                Err(_) => Some(false),
+            };
+            if let Some(applied) = applied {
+                if let Err(e) = wiring
+                    .store
+                    .elevated_settle(&scope, audit_id, applied)
+                    .await
+                {
+                    tracing::warn!(audit_id, error = %e, "elevated audit settle failed; the reservation stays counted");
+                }
+            }
+        }
         // A backend failure is INDETERMINATE (it may have committed before the
         // connection died): give the ordinal back so the guest's retry of the
         // same call presents the SAME key and is applied at most once. Every
@@ -1917,6 +2273,61 @@ impl<K: KvBackend> StageCapabilities<K> {
             invocation.release_mutation(kind, ordinal);
         }
         result.map_err(economy_error_to_host)
+    }
+
+    /// `true` iff the invocation's host-resolved actor IS `named`. An actor that
+    /// cannot be resolved because nobody is linked (or the actor is no longer a
+    /// member) is `false` -- the elevated path then needs the calling app's
+    /// grant -- while a resolver outage fails CLOSED (error), never guessing.
+    async fn actor_is(&self, named: uuid::Uuid) -> Result<bool, HostResultError> {
+        let (Some(wiring), Some(invocation)) = (&self.identity, &self.invocation_identity) else {
+            return Ok(false);
+        };
+        let scope = IdentityScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+        };
+        match identity::resolve_actor(wiring, invocation, scope).await {
+            Ok(actor) => Ok(actor == named),
+            Err(IdentityError::NotLinked | IdentityError::NotAMember) => Ok(false),
+            Err(e) => Err(identity_error_to_host(e)),
+        }
+    }
+
+    /// Authorizes an elevated economy call against the CALLING app's own grant
+    /// (its tenant/community/app/version scope, never the service's), through
+    /// the standard gate: explicit `not_granted` when the app was never
+    /// approved, `user_not_in_scope` for a non-member party, rate limiting.
+    fn authorize_caller_elevated(
+        &self,
+        plan: &ElevatedPlan,
+        caller: &ToolCaller,
+    ) -> Result<(), HostResultError> {
+        let scope = HostInvokeScopeBuilder::new()
+            .tenant_id(self.tenant_id)
+            .community_id(self.community_id)
+            .app_id(caller.app_id.clone())
+            .app_version(caller.app_version)
+            .tenant_tier(TenantTier::Free)
+            .build()
+            .map_err(|_| denied("backend", "calling app scope is invalid"))?;
+        let permission = match plan.permission {
+            ElevatedPermission::TransferFrom => PermissionId::EconomyTransferFrom,
+            ElevatedPermission::AppMint => PermissionId::EconomyAppMint,
+        };
+        self.gate
+            .authorize(
+                &scope,
+                permission,
+                ResourceRef::EconomyScoped(EconomyTarget {
+                    target_user: plan.gate_user,
+                    counterparty: plan.counterparty,
+                    amount: None,
+                    payout: None,
+                }),
+            )
+            .map(|_| ())
+            .map_err(denied_from_gate)
     }
 
     /// Binds an economy money mover to the invocation's authenticated actor:
@@ -2309,6 +2720,69 @@ impl<K: KvBackend> StageCapabilities<K> {
         }
     }
 
+    /// Reputation-logic exclusivity (contract): an ACTIVITY-class write
+    /// (`reputation.adjust` / `adjust_many` / `apply`) is allowed only when the
+    /// invocation's ORIGIN (first app of the tool-call chain -- the accrual
+    /// logic bundle reaches the host through the core reputation service) is
+    /// the tenant's ACTIVE reputation-logic app, as reported by the SQL
+    /// function `reputation_active_logic_app(tenant)` (which is where the
+    /// manifest's `provides: reputation-logic` and the 409 exclusivity are
+    /// enforced), or a core reputation-service internal (the service invoked
+    /// directly, chain length 1). Everything else -- including a bundle that
+    /// does not provide reputation-logic, or a tenant with no active logic app
+    /// -- is `forbidden`; a lookup failure fails closed, and so do absent wiring
+    /// (`not_implemented`) and the flag OFF (`feature_disabled`).
+    async fn enforce_logic_exclusivity(&self) -> Result<(), HostResultError> {
+        // Fail CLOSED here, not only downstream: no wiring or the capability flag
+        // OFF means no activity write is allowed, whatever the caller is.
+        let Some(wiring) = &self.reputation else {
+            return Err(denied(
+                "not_implemented",
+                "reputation capability is not provisioned in this deployment \
+                 (BUNDLE_REPUTATION_PASSWORD unset or connection failed)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "reputation capability is disabled (waddles.bundle-reputation-capability is OFF)",
+            ));
+        }
+        let chain: &[String] = match &self.tool {
+            Some(t) if !t.chain.is_empty() => &t.chain,
+            _ => std::slice::from_ref(&self.app_id),
+        };
+        let origin = chain[0].as_str();
+        if chain.len() == 1 && origin == REPUTATION_SERVICE_APP_ID {
+            return Ok(());
+        }
+        let scope = self.reputation_scope();
+        match wiring.store.active_logic_app(&scope).await {
+            Ok(Some(active)) if active == origin => Ok(()),
+            Ok(_) => {
+                tracing::info!(
+                    app_id = %self.app_id, community_id = self.community_id,
+                    "reputation activity write refused: caller is not the active reputation-logic bundle"
+                );
+                Err(denied(
+                    "forbidden",
+                    "activity-class reputation writes are restricted to the tenant's active reputation-logic bundle",
+                ))
+            }
+            Err(e) => Err(reputation_error_to_host(e)),
+        }
+    }
+
+    /// The host-derived [`ReputationScope`] of this invocation (tenant,
+    /// community and app are never guest input).
+    fn reputation_scope(&self) -> ReputationScope {
+        ReputationScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+        }
+    }
+
     /// `reputation.get` / `reputation.adjust` (`wit/waddle-bundle/stage.wit`
     /// `interface reputation`), carried as `capability = db`,
     /// `op = "reputation.*"` (`penguin-bundle-host`'s closed `CapabilityKind`
@@ -2338,6 +2812,15 @@ impl<K: KvBackend> StageCapabilities<K> {
             | "reputation.adjust_many"
             | "reputation.get_many"
             | "reputation.leaderboard" => return self.handle_reputation_ext(call).await,
+            "reputation.apply"
+            | "reputation.apply_moderation"
+            | "reputation.get_tenant"
+            | "reputation.get_tenant_policy"
+            | "reputation.history"
+            | "reputation.below_threshold"
+            | "reputation.is_soft_banned"
+            | "reputation.soft_ban"
+            | "reputation.lift_soft_ban" => return self.handle_reputation_v2(call).await,
             other => {
                 return Err(denied(
                     "unknown_op",
@@ -2381,6 +2864,9 @@ impl<K: KvBackend> StageCapabilities<K> {
             ));
         }
 
+        if is_adjust {
+            self.enforce_logic_exclusivity().await?;
+        }
         let permission = if is_adjust {
             PermissionId::ReputationCommunityWrite
         } else {
@@ -2412,17 +2898,53 @@ impl<K: KvBackend> StageCapabilities<K> {
             ));
         }
 
-        let scope = ReputationScope {
-            tenant_id: self.tenant_id,
-            community_id: self.community_id,
-            app_id: self.app_id.clone(),
-        };
+        let scope = self.reputation_scope();
+        // The idempotency key is REQUIRED for a write (host-derived from the
+        // replay-stable event id, never guest input): without one a retried
+        // call would double-count, so the call is refused as invalid.
+        let mut adjust_key: Option<bundle_host_reputation::IdempotencyKey> = None;
+        let mut adjust_reservation: Option<(&InvocationIdentity, u32)> = None;
+        if is_adjust {
+            let slot = self.invocation_identity.as_deref().and_then(|inv| {
+                inv.reserve_mutation("reputation_adjust")
+                    .map(|(e, o)| (inv, e.to_string(), o))
+            });
+            let Some((inv, event_id, ordinal)) = slot else {
+                return Err(denied(
+                    "invalid_args",
+                    "idempotency key required: this invocation carries no replay-stable event id",
+                ));
+            };
+            adjust_key = Some(
+                bundle_host_reputation::IdempotencyKey::for_event(
+                    &event_id,
+                    "reputation_adjust",
+                    ordinal,
+                )
+                .map_err(reputation_error_to_host)?,
+            );
+            adjust_reservation = Some((inv, ordinal));
+        }
         let balance = match (delta, reason) {
             (Some(delta), Some(reason)) => {
-                wiring
-                    .store
-                    .adjust(&scope, user, delta, reason, reputation_caps())
-                    .await
+                let result = match (&adjust_key, &adjust_reservation) {
+                    (Some(k), _) => {
+                        wiring
+                            .store
+                            .adjust(&scope, user, delta, reason, reputation_caps(), k)
+                            .await
+                    }
+                    _ => Err(ReputationError::Backend(
+                        "reputation adjust has no idempotency key".to_string(),
+                    )),
+                };
+                if let (Some((inv, ordinal)), Err(ReputationError::Backend(_))) =
+                    (adjust_reservation, &result)
+                {
+                    // A failed attempt hands its ordinal back so a retry reuses the key.
+                    inv.release_mutation("reputation_adjust", ordinal);
+                }
+                result
             }
             _ => wiring.store.get(&scope, user).await,
         }
@@ -2631,18 +3153,17 @@ impl<K: KvBackend> StageCapabilities<K> {
         // other tool in the component, nor a direct WIT call, can override on
         // behalf of a non-admin. Checked BEFORE the gate so a refused caller
         // never burns the admin quota (10/min) a real admin needs.
+        if matches!(op, Op::AdjustMany { .. }) {
+            self.enforce_logic_exclusivity().await?;
+        }
+
         if matches!(op, Op::Override { .. }) {
-            let actor = self.resolve_verified_actor().await;
-            if !actor.has_scope(REPUTATION_OVERRIDE_SCOPE) {
-                tracing::info!(
-                    app_id = %self.app_id, community_id = self.community_id,
-                    "reputation.override refused: caller lacks community:admin"
-                );
-                return Err(denied(
-                    "forbidden",
-                    format!("reputation.override requires the caller to hold {REPUTATION_OVERRIDE_SCOPE}"),
-                ));
-            }
+            // Admin override is `admin_override` (class 3): the SQL denies it to the
+            // bundle role, so it is hub-api only and never served by the host.
+            return Err(denied(
+                "forbidden",
+                "reputation.override is hub-api only (admin_override is denied to the bundle role)",
+            ));
         }
 
         match &op {
@@ -2703,8 +3224,8 @@ impl<K: KvBackend> StageCapabilities<K> {
                 (self.invocation_identity.as_deref(), slot)
             else {
                 return Err(denied(
-                    "not_implemented",
-                    "this invocation carries no replay-stable event id; reputation mutations cannot be made idempotent",
+                    "invalid_args",
+                    "idempotency key required: this invocation carries no replay-stable event id",
                 ));
             };
             key = Some(
@@ -2714,11 +3235,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             reservation = Some((invocation, kind, ordinal));
         }
 
-        let scope = ReputationScope {
-            tenant_id: self.tenant_id,
-            community_id: self.community_id,
-            app_id: self.app_id.clone(),
-        };
+        let scope = self.reputation_scope();
         let no_key = || denied("backend", "reputation mutation has no idempotency key");
         let entries_json = |rows: Vec<bundle_host_reputation::ScoreEntry>| {
             serde_json::json!({
@@ -2772,6 +3289,447 @@ impl<K: KvBackend> StageCapabilities<K> {
             if !matches!(e, ReputationError::Backend(_)) {
                 self.refund_adjust_many(items);
             }
+        }
+        result.map_err(reputation_error_to_host)
+    }
+
+    /// `reputation.apply` / `apply_moderation` / `get_tenant` /
+    /// `get_tenant_policy` / `history` / `below_threshold` / `is_soft_banned` /
+    /// `soft_ban` / `lift_soft_ban` (reputation unification, v3.0.X).
+    ///
+    /// Fail-loud order as the other reputation handlers: (1) argument parsing;
+    /// (2) a real community; (3) the core-only rule for the ops whose
+    /// permission is first-party-only (`history`, the tenant reads, moderation
+    /// writes): a non-`waddles.core.` app is refused `forbidden` BEFORE the
+    /// gate; (4) the idempotency ordinal of a mutating op (before the gate);
+    /// (5) the gate; (6) wiring/flag; (7) the store. The reason CLASS is fixed
+    /// by the op (`apply` = activity under `reputation.community.write`,
+    /// `apply_moderation` = moderation under `reputation.moderation.write`),
+    /// never read from the guest. Scope is always host-derived.
+    async fn handle_reputation_v2(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        use bundle_host_reputation::ReasonClass;
+
+        enum Op {
+            Apply {
+                user: uuid::Uuid,
+                delta: i32,
+                reason: String,
+                class: ReasonClass,
+            },
+            GetTenant(uuid::Uuid),
+            TenantPolicy,
+            History {
+                user: uuid::Uuid,
+                limit: u32,
+                before: Option<i64>,
+            },
+            BelowThreshold {
+                threshold: i64,
+                limit: u32,
+            },
+            IsSoftBanned(uuid::Uuid),
+            SoftBan {
+                user: uuid::Uuid,
+                reason: String,
+            },
+            LiftSoftBan {
+                user: uuid::Uuid,
+                only_reason: String,
+            },
+        }
+
+        fn user_of(args: &serde_json::Value) -> Result<uuid::Uuid, HostResultError> {
+            args.get("user")
+                .and_then(|v| v.as_str())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .ok_or_else(|| denied("invalid_args", "user must be a UUID string"))
+        }
+        fn str_of(args: &serde_json::Value, key: &str) -> Result<String, HostResultError> {
+            let v = args
+                .get(key)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| denied("invalid_args", format!("{key} must be a string")))?;
+            bundle_host_reputation::validate_reason(v).map_err(reputation_error_to_host)?;
+            Ok(v.to_string())
+        }
+        fn limit_of(args: &serde_json::Value, max: u32) -> Result<u32, HostResultError> {
+            args.get("limit")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|v| (1..=max).contains(v))
+                .ok_or_else(|| denied("invalid_args", format!("limit must be 1..={max}")))
+        }
+
+        let args = &call.args;
+        let op = match call.op.as_str() {
+            "reputation.apply" | "reputation.apply_moderation" => {
+                let class = if call.op == "reputation.apply" {
+                    ReasonClass::Activity
+                } else {
+                    ReasonClass::Moderation
+                };
+                let delta = args
+                    .get("delta")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|v| i32::try_from(v).ok())
+                    .ok_or_else(|| denied("invalid_args", "delta must be an i32"))?;
+                bundle_host_reputation::ScoreScale::LEGACY
+                    .check_delta(class, delta)
+                    .map_err(reputation_error_to_host)?;
+                Op::Apply {
+                    user: user_of(args)?,
+                    delta,
+                    reason: str_of(args, "reason")?,
+                    class,
+                }
+            }
+            "reputation.get_tenant" => Op::GetTenant(user_of(args)?),
+            "reputation.get_tenant_policy" => Op::TenantPolicy,
+            "reputation.history" => {
+                Op::History {
+                    user: user_of(args)?,
+                    limit: limit_of(args, bundle_host_reputation::MAX_HISTORY_LIMIT)?,
+                    before: match args.get("before") {
+                        None | Some(serde_json::Value::Null) => None,
+                        Some(v) => Some(v.as_i64().filter(|b| *b > 0).ok_or_else(|| {
+                            denied("invalid_args", "before must be a positive id")
+                        })?),
+                    },
+                }
+            }
+            "reputation.below_threshold" => Op::BelowThreshold {
+                threshold: args
+                    .get("threshold")
+                    .and_then(|v| v.as_i64())
+                    .filter(|t| {
+                        (bundle_host_reputation::SCALE_MIN..=bundle_host_reputation::SCALE_MAX + 1)
+                            .contains(t)
+                    })
+                    .ok_or_else(|| denied("invalid_args", "threshold must be 300..=851"))?,
+                limit: limit_of(args, bundle_host_reputation::MAX_LEADERBOARD_LIMIT)?,
+            },
+            "reputation.is_soft_banned" => Op::IsSoftBanned(user_of(args)?),
+            "reputation.soft_ban" => Op::SoftBan {
+                user: user_of(args)?,
+                reason: str_of(args, "reason")?,
+            },
+            "reputation.lift_soft_ban" => Op::LiftSoftBan {
+                user: user_of(args)?,
+                only_reason: str_of(args, "only_reason")?,
+            },
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("reputation op {other:?} not supported"),
+                ))
+            }
+        };
+
+        if self.community_id == 0 || self.community.is_none() {
+            return Err(denied(
+                "invalid_args",
+                "reputation is community-scoped; this activation has no community",
+            ));
+        }
+
+        // Activity-class apply: only the tenant's ACTIVE reputation-logic bundle
+        // (or a core service internal) may write -- see `enforce_logic_exclusivity`.
+        if matches!(
+            op,
+            Op::Apply {
+                class: ReasonClass::Activity,
+                ..
+            }
+        ) {
+            self.enforce_logic_exclusivity().await?;
+        }
+
+        // Manual soft bans are hub-api-only (contract): a bundle may set/clear
+        // ONLY the score-floor soft ban, identified by its fixed reason.
+        if let Op::SoftBan { reason, .. }
+        | Op::LiftSoftBan {
+            only_reason: reason,
+            ..
+        } = &op
+        {
+            if reason != bundle_host_reputation::FLOOR_SOFT_BAN_REASON {
+                return Err(denied(
+                    "forbidden",
+                    "manual soft bans are managed through hub-api only; a bundle may only set or clear the score-floor soft ban",
+                ));
+            }
+        }
+
+        // Core-only ops: the permission is first-party-only by policy.
+        let core_only = matches!(
+            op,
+            Op::GetTenant(_)
+                | Op::TenantPolicy
+                | Op::History { .. }
+                | Op::SoftBan { .. }
+                | Op::LiftSoftBan { .. }
+        ) || matches!(
+            op,
+            Op::Apply {
+                class: ReasonClass::Moderation,
+                ..
+            }
+        );
+        if core_only && !self.app_id.starts_with("waddles.core.") {
+            return Err(denied(
+                "forbidden",
+                "this reputation operation is restricted to first-party core bundles",
+            ));
+        }
+
+        // Moderation-class writes (`apply_moderation`, `soft_ban`, `lift_soft_ban`):
+        // the bundle's grant says the APP may, not that THIS caller may. A
+        // human-originated invocation must hold a moderator/admin scope for this
+        // community (host-verified actor, never guest input). Only a
+        // system-originated invocation (HOST-derived from the verified event
+        // type: the automatic floor evaluation, a moderation outcome) is exempt.
+        // Checked BEFORE the gate so a refused caller never burns quota.
+        let moderation_write = matches!(
+            op,
+            Op::SoftBan { .. }
+                | Op::LiftSoftBan { .. }
+                | Op::Apply {
+                    class: ReasonClass::Moderation,
+                    ..
+                }
+        );
+        // A POSITIVE moderation delta raises a score with the larger cap: that is
+        // an `admin_override` (class 3), which the SQL denies the bundle role, so
+        // it is hub-api only -- forbidden for everyone here, admin scope or not.
+        if matches!(
+            op,
+            Op::Apply {
+                class: ReasonClass::Moderation,
+                delta: d,
+                ..
+            } if d > 0
+        ) {
+            return Err(denied(
+                "forbidden",
+                "a positive moderation delta is an admin override (hub-api only)",
+            ));
+        }
+        if moderation_write {
+            let system = self
+                .invocation_identity
+                .as_deref()
+                .is_some_and(|i| i.is_system_originated());
+            if !system {
+                let actor = self.resolve_verified_actor().await;
+                if !(actor.has_scope(REPUTATION_MODERATE_SCOPE)
+                    || actor.has_scope(REPUTATION_OVERRIDE_SCOPE))
+                {
+                    tracing::info!(
+                        app_id = %self.app_id, community_id = self.community_id,
+                        "reputation moderation write refused: caller lacks community:moderate"
+                    );
+                    return Err(denied(
+                        "forbidden",
+                        format!(
+                            "this reputation operation requires the caller to hold {REPUTATION_MODERATE_SCOPE}"
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // Idempotency ordinal of the one mutating, replay-sensitive op.
+        let claimed = matches!(op, Op::Apply { .. }).then(|| {
+            self.invocation_identity
+                .as_deref()
+                .and_then(|inv| inv.reserve_mutation("reputation_apply"))
+                .map(|(event_id, ordinal)| (event_id.to_string(), ordinal))
+        });
+
+        // Gate. Soft-ban writes carry no magnitude, so they authorize as a plain
+        // (rate-limited) moderation-write call and are bounded by the store's
+        // durable count-based toggle quota (typed `rate_limited`), not refunded.
+        match &op {
+            Op::Apply {
+                user, delta, class, ..
+            } => {
+                let perm = match class {
+                    ReasonClass::Activity => PermissionId::ReputationCommunityWrite,
+                    ReasonClass::Moderation => PermissionId::ReputationModerationWrite,
+                };
+                self.authorize_reputation(perm, Some(*user), Some(*delta))?;
+            }
+            Op::SoftBan { user, .. } | Op::LiftSoftBan { user, .. } => self.authorize_reputation(
+                PermissionId::ReputationModerationWrite,
+                Some(*user),
+                None,
+            )?,
+            Op::GetTenant(user) => {
+                self.authorize_reputation(PermissionId::ReputationTenantRead, Some(*user), None)?
+            }
+            Op::TenantPolicy => {
+                self.authorize_reputation(PermissionId::ReputationTenantRead, None, None)?
+            }
+            Op::History { user, .. } => {
+                self.authorize_reputation(PermissionId::ReputationHistoryRead, Some(*user), None)?
+            }
+            Op::BelowThreshold { .. } => {
+                self.authorize_reputation(PermissionId::ReputationRead, None, None)?
+            }
+            Op::IsSoftBanned(user) => {
+                self.authorize_reputation(PermissionId::ReputationRead, Some(*user), None)?
+            }
+        }
+
+        let Some(wiring) = &self.reputation else {
+            return Err(denied(
+                "not_implemented",
+                "reputation capability is not provisioned in this deployment \
+                 (BUNDLE_REPUTATION_PASSWORD unset or connection failed)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "reputation capability is disabled (waddles.bundle-reputation-capability is OFF)",
+            ));
+        }
+
+        let mut key: Option<bundle_host_reputation::IdempotencyKey> = None;
+        let mut reservation: Option<(&InvocationIdentity, &'static str, u32)> = None;
+        if let Some(slot) = claimed {
+            let (Some(invocation), Some((event_id, ordinal))) =
+                (self.invocation_identity.as_deref(), slot)
+            else {
+                return Err(denied(
+                    "invalid_args",
+                    "idempotency key required: this invocation carries no replay-stable event id",
+                ));
+            };
+            key = Some(
+                bundle_host_reputation::IdempotencyKey::for_event(
+                    &event_id,
+                    "reputation_apply",
+                    ordinal,
+                )
+                .map_err(reputation_error_to_host)?,
+            );
+            reservation = Some((invocation, "reputation_apply", ordinal));
+        }
+
+        let scope = self.reputation_scope();
+        let result: Result<serde_json::Value, ReputationError> = match &op {
+            Op::Apply {
+                user,
+                delta,
+                reason,
+                class,
+            } => {
+                let family = match class {
+                    ReasonClass::Activity => PermissionFamily::ReputationCommunityWrite,
+                    ReasonClass::Moderation => PermissionFamily::ReputationModerationWrite,
+                };
+                let key = key.as_ref().ok_or_else(|| {
+                    denied("backend", "reputation mutation has no idempotency key")
+                })?;
+                wiring
+                    .store
+                    .apply(
+                        &scope,
+                        *user,
+                        *delta,
+                        *class,
+                        reason,
+                        reputation_caps_for(family),
+                        key,
+                    )
+                    .await
+                    .map(|o| serde_json::json!({ "new_score": o.new_score, "applied": o.applied }))
+            }
+            Op::GetTenant(user) => wiring
+                .store
+                .get_tenant(&scope, *user)
+                .await
+                .map(|t| serde_json::json!({ "score": t.score, "communities": t.communities })),
+            Op::TenantPolicy => wiring.store.tenant_policy(&scope).await.map(|p| {
+                serde_json::json!({ "policy": p.map(|p| serde_json::json!({
+                    "auto_ban_enabled": p.auto_ban_enabled,
+                    "auto_ban_floor": p.auto_ban_floor,
+                    "at_risk_threshold": p.at_risk_threshold,
+                })) })
+            }),
+            Op::History {
+                user,
+                limit,
+                before,
+            } => wiring
+                .store
+                .history(&scope, *user, *limit, *before)
+                .await
+                .map(|rows| {
+                    serde_json::json!({ "entries": rows.into_iter().map(|e| serde_json::json!({
+                        "id": e.id, "delta": e.delta, "reason_code": e.reason_code,
+                        "kind": e.kind, "balance_after": e.balance_after,
+                        "occurred_at": e.occurred_at,
+                    })).collect::<Vec<_>>() })
+                }),
+            Op::BelowThreshold { threshold, limit } => wiring
+                .store
+                .below_threshold(&scope, *threshold, *limit)
+                .await
+                .map(|rows| {
+                    serde_json::json!({ "entries": rows.into_iter().map(|r| serde_json::json!({
+                        "user": r.user.to_string(), "score": r.score,
+                    })).collect::<Vec<_>>() })
+                }),
+            Op::IsSoftBanned(user) => wiring
+                .store
+                .is_soft_banned(&scope, *user)
+                .await
+                .map(|b| serde_json::json!({ "flag": b })),
+            Op::SoftBan { user, reason } => wiring
+                .store
+                .soft_ban(&scope, *user, reason)
+                .await
+                .map(|b| serde_json::json!({ "flag": b })),
+            Op::LiftSoftBan { user, only_reason } => wiring
+                .store
+                .lift_soft_ban(&scope, *user, only_reason)
+                .await
+                .map(|b| serde_json::json!({ "flag": b })),
+        };
+        // An idempotent REPLAY applied nothing: hand its magnitude back so a
+        // redelivered event never burns the user's daily quota twice.
+        if let (
+            Op::Apply {
+                user, delta, class, ..
+            },
+            Ok(v),
+        ) = (&op, &result)
+        {
+            if v.get("applied") == Some(&serde_json::Value::Bool(false)) {
+                let perm = match class {
+                    ReasonClass::Activity => PermissionId::ReputationCommunityWrite,
+                    ReasonClass::Moderation => PermissionId::ReputationModerationWrite,
+                };
+                self.gate.refund(
+                    &self.gate_scope(),
+                    perm,
+                    &ResourceRef::ReputationScoped(ReputationTarget {
+                        target_user: Some(*user),
+                        scope_kind: ScopeKind::Community,
+                        delta: Some(*delta),
+                    }),
+                );
+            }
+        }
+        if let (Some((invocation, kind, ordinal)), Err(ReputationError::Backend(_))) =
+            (reservation, &result)
+        {
+            invocation.release_mutation(kind, ordinal);
         }
         result.map_err(reputation_error_to_host)
     }
@@ -2915,10 +3873,10 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// (never `call.app_id`).
     async fn handle_kv(&self, call: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
         // Gate call FIRST (spec SS5) -- `storage.kv`, `AppScoped`. This
-        // supersedes `bundle_host_kv::authorize::authorize_kv`'s interim
-        // always-grant stand-in as the real security boundary; that inner
-        // seam remains harmlessly redundant until it is retired in a
-        // follow-on cleanup.
+        // is the real security boundary. NOTE `bundle_host_kv::authorize::authorize_kv`'s
+        // interim check inside `KvHost` still runs AFTER this and is NOT a no-op: it denies
+        // (`not_granted`) any app whose install summary lacks the `storage.kv` capability
+        // -- see `hub_api` `_derive_capabilities` and migration 0106.
         self.gate
             .authorize(
                 &self.gate_scope(),
@@ -2939,13 +3897,21 @@ impl<K: KvBackend> StageCapabilities<K> {
         )
         .with_ids(self.tenant_id, self.community_id);
 
+        // Every failed kv call is reported from here (ERROR/WARN log with the underlying
+        // KvError kind + message, `waddles_bundle_kv_errors_total{stage,op,kind}`): the guest
+        // only sees the collapsed wire error, so this is the one place an operator can see why.
+        let observe = |e: KvError| {
+            bundle_host_kv::report_failure("process", &call.op, &kv_scope, &e);
+            e
+        };
+
         match call.op.as_str() {
             "get" => {
                 let args: KvKeyArgs = parse_kv_args(&call.args)?;
                 let value = kv
                     .get(&kv_scope, call.call_id, &args.key)
                     .await
-                    .map_err(kv_err_to_host)?;
+                    .map_err(|e| kv_err_to_host(observe(e)))?;
                 Ok(serde_json::json!({ "value": value }))
             }
             "set" => {
@@ -2958,14 +3924,14 @@ impl<K: KvBackend> StageCapabilities<K> {
                     args.ttl_seconds,
                 )
                 .await
-                .map_err(kv_err_to_host)?;
+                .map_err(|e| kv_err_to_host(observe(e)))?;
                 Ok(serde_json::json!({}))
             }
             "delete" => {
                 let args: KvKeyArgs = parse_kv_args(&call.args)?;
                 kv.delete(&kv_scope, call.call_id, &args.key)
                     .await
-                    .map_err(kv_err_to_host)?;
+                    .map_err(|e| kv_err_to_host(observe(e)))?;
                 Ok(serde_json::json!({}))
             }
             "increment" => {
@@ -2979,7 +3945,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                         args.ttl_seconds,
                     )
                     .await
-                    .map_err(kv_err_to_host)?;
+                    .map_err(|e| kv_err_to_host(observe(e)))?;
                 Ok(serde_json::json!({ "value": value }))
             }
             "get_versioned" => {
@@ -2987,7 +3953,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                 let found = kv
                     .get_versioned(&kv_scope, call.call_id, &args.key)
                     .await
-                    .map_err(kv_err_to_host_v2)?;
+                    .map_err(|e| kv_err_to_host_v2(observe(e)))?;
                 Ok(match found {
                     Some((value, version)) => {
                         serde_json::json!({ "value": value, "version": version })
@@ -3007,7 +3973,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                         args.ttl_seconds,
                     )
                     .await
-                    .map_err(kv_err_to_host_v2)?;
+                    .map_err(|e| kv_err_to_host_v2(observe(e)))?;
                 Ok(match r {
                     bundle_host_kv::KvCasResult::Swapped(v) => {
                         serde_json::json!({ "swapped": true, "version": v })
@@ -3022,7 +3988,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                 let r = kv
                     .delete_if(&kv_scope, call.call_id, &args.key, args.expected_version)
                     .await
-                    .map_err(kv_err_to_host_v2)?;
+                    .map_err(|e| kv_err_to_host_v2(observe(e)))?;
                 Ok(match r {
                     bundle_host_kv::KvDeleteIfResult::Deleted => {
                         serde_json::json!({ "deleted": true, "version": 0 })
@@ -3043,7 +4009,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                         args.limit,
                     )
                     .await
-                    .map_err(kv_err_to_host_v2)?;
+                    .map_err(|e| kv_err_to_host_v2(observe(e)))?;
                 Ok(serde_json::json!({ "keys": page.keys, "next_cursor": page.next_cursor }))
             }
             other => Err(denied(
@@ -3540,7 +4506,11 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
         self.gate.ensure_grants_loaded(&self.gate_scope()).await;
         match call.capability {
             CapabilityKind::Clock => self.handle_clock(&call.op),
-            CapabilityKind::Context => self.handle_context(),
+            CapabilityKind::Context => {
+                let mut ctx = self.handle_context()?;
+                self.attach_config_json(&mut ctx).await;
+                Ok(ctx)
+            }
             CapabilityKind::Log => self.handle_log(&call.args),
             CapabilityKind::Kv => self.handle_kv(&call).await,
             // Gate call FIRST (spec SS5, PR #433): the classified
@@ -3585,6 +4555,9 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             // `platform_table.*` ops (spec 2026-11-06): own gate permissions
             // (`platform.table.<op>:<table>.<column>`), own handler, never the
             // `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("gameserver_net.") => {
+                self.handle_gameserver_net(&call).await
+            }
             CapabilityKind::Db if call.op.starts_with("object_storage.") => {
                 self.handle_object_storage(&call).await
             }
@@ -3794,6 +4767,79 @@ mod tests {
     /// The default fixture: [`test_egress`] (an empty catalog, so every
     /// `http` call denies `host_not_declared` once the gate has already
     /// granted the classified permission) plus a [`permissive_gate`].
+    /// Kill switch `waddles.disable-bundle-community-config`: OFF/unset serves config, ON adds none.
+    #[tokio::test]
+    async fn get_context_config_kill_switch_both_states() {
+        use hub_client::bundle_config::{
+            BundleConfigCache, CacheConfig, ConfigKey, StaticConfigSource, StaticLiveGate,
+        };
+        let src = Arc::new(StaticConfigSource::new());
+        src.set(
+            ConfigKey::new(10, 7, "waddles.bot.commands.default"),
+            3,
+            r#"{"x":1}"#,
+        );
+        for (live, expect) in [(true, true), (false, false)] {
+            let cache = Arc::new(BundleConfigCache::new(
+                Arc::clone(&src) as Arc<dyn hub_client::bundle_config::ConfigSource>,
+                None,
+                CacheConfig::default(),
+            ));
+            cache.set_gate(Arc::new(StaticLiveGate(live)));
+            let h = caps()
+                .with_verified_scope(Some((10, 7)))
+                .with_bundle_config(Some(Arc::clone(&cache)));
+            let mut ctx = h.handle_context().expect("context");
+            h.attach_config_json(&mut ctx).await;
+            assert_eq!(ctx.get("config_json").is_some(), expect);
+            assert_eq!(cache.len() == 1, expect, "disabled switch must not load");
+        }
+    }
+
+    /// Live community config rides `get-context` only for the verified envelope scope.
+    #[tokio::test]
+    async fn get_context_carries_live_community_config_only_for_the_verified_scope() {
+        use hub_client::bundle_config::{
+            BundleConfigCache, CacheConfig, ConfigKey, StaticConfigSource,
+        };
+        let src = Arc::new(StaticConfigSource::new());
+        src.set(
+            ConfigKey::new(10, 7, "waddles.bot.commands.default"),
+            3,
+            r#"{"default_duration_minutes":45}"#,
+        );
+        let cache = Arc::new(BundleConfigCache::new(src, None, CacheConfig::default()));
+        let with = caps()
+            .with_verified_scope(Some((10, 7)))
+            .with_bundle_config(Some(Arc::clone(&cache)));
+        let mut ctx = with.handle_context().expect("context");
+        with.attach_config_json(&mut ctx).await;
+        assert_eq!(ctx["config_json"], r#"{"default_duration_minutes":45}"#);
+
+        // No verified scope (legacy envelope): no config, never another scope's.
+        let unverified = caps().with_bundle_config(Some(Arc::clone(&cache)));
+        let mut ctx = unverified.handle_context().expect("context");
+        unverified.attach_config_json(&mut ctx).await;
+        assert!(ctx.get("config_json").is_none());
+
+        // Another community of the same tenant has no entry: hub-api refuses -> loud empty `{}`.
+        let other = caps()
+            .with_verified_scope(Some((10, 8)))
+            .with_bundle_config(Some(cache));
+        let mut ctx = other.handle_context().expect("context");
+        other.attach_config_json(&mut ctx).await;
+        assert_eq!(ctx["config_json"], "{}");
+    }
+
+    /// Without a cache (hub-api not configured) `get-context` is unchanged.
+    #[tokio::test]
+    async fn get_context_has_no_config_json_without_a_cache() {
+        let c = caps().with_verified_scope(Some((10, 7)));
+        let mut ctx = c.handle_context().expect("context");
+        c.attach_config_json(&mut ctx).await;
+        assert!(ctx.get("config_json").is_none());
+    }
+
     /// A v3 envelope's verified ids reach `get-context`; without them the
     /// numeric keys are absent (a v2 guest fails closed).
     #[test]
@@ -5093,6 +6139,80 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "backend"); // KvError::wire_code() collapse
+    }
+
+    /// Records `(level, "field=value ...")` for every tracing event while it is the default
+    /// subscriber (tracing core API only -- no new dev-dependency).
+    #[derive(Default, Clone)]
+    struct CapturedEvents(Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>);
+
+    struct FieldText(String);
+
+    impl tracing::field::Visit for FieldText {
+        fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={:?} ", f.name(), v);
+        }
+    }
+
+    impl tracing::Subscriber for CapturedEvents {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, e: &tracing::Event<'_>) {
+            let mut f = FieldText(String::new());
+            e.record(&mut f);
+            self.0.lock().unwrap().push((*e.metadata().level(), f.0));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Regression (alpha kv outage): the guest only sees the collapsed `backend` wire error, so
+    /// the host MUST log the underlying kv error kind + message at ERROR. Before this, the only
+    /// trace was a bare INFO line and the real reason (`not_granted`) was invisible.
+    #[tokio::test]
+    async fn a_failed_kv_call_logs_the_underlying_error_kind_and_message_at_error() {
+        let captured = CapturedEvents::default();
+        let _guard = tracing::subscriber::set_default(captured.clone());
+        let c = caps_with_kv_and_capabilities(&[]);
+        let err = c
+            .handle(call(
+                CapabilityKind::Kv,
+                "get",
+                serde_json::json!({"key": "k"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code, "backend",
+            "the guest-visible wire error is unchanged"
+        );
+
+        let events = captured.0.lock().unwrap().clone();
+        let line = events
+            .iter()
+            .find(|(level, line)| {
+                *level == tracing::Level::ERROR && line.contains("bundle kv call failed")
+            })
+            .map(|(_, line)| line.clone())
+            .unwrap_or_else(|| panic!("no ERROR 'bundle kv call failed' event in {events:?}"));
+        assert!(line.contains("error_kind=\"not_granted\""), "{line}");
+        assert!(
+            line.contains("storage.kv is not declared"),
+            "underlying message missing: {line}"
+        );
+        assert!(line.contains("stage=\"process\""), "{line}");
+        assert!(line.contains("op=\"get\""), "{line}");
+        assert!(
+            !line.contains("\"k\""),
+            "the guest key must never be logged: {line}"
+        );
     }
 
     #[tokio::test]

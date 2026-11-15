@@ -1,0 +1,36 @@
+{
+  "tool": "twitch.schedule.create",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "start_time": {
+        "type": "string"
+      },
+      "timezone": {
+        "type": "string",
+        "minLength": 1
+      },
+      "duration": {
+        "type": "integer",
+        "minimum": 30,
+        "maximum": 1380
+      },
+      "title": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 140
+      },
+      "is_recurring": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "start_time",
+      "timezone",
+      "duration",
+      "title",
+      "is_recurring"
+    ],
+    "additionalProperties": false
+  }
+}

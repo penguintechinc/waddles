@@ -1,19 +1,34 @@
 # hub-api -- Quart control-plane service (Task 0.5 scaffold).
 #
-# Multi-stage, rootless. Base digest reused from services/interactive-social/
+# Multi-stage, rootless. Base digest reused from the other python:3.13-slim-bookworm
 # Dockerfile (already pinned in this repo -- devops-containers.md forbids
 # inventing a second one for the same python:3.13-slim-bookworm tag).
 FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS builder
 WORKDIR /app
 
 COPY hub_api/requirements.txt .
-RUN pip install --no-cache-dir --require-hashes -r requirements.txt
+# pip download cache mount (id waddles-pip-v<CACHE_EPOCH>): used ONLY for this `--require-hashes`
+# install, so every wheel that can enter the shared cache is hash-verified. Bump CACHE_EPOCH
+# (workflow build-arg, repo variable ALPHA_CACHE_EPOCH) to abandon the cache.
+ARG CACHE_EPOCH=1
+# (DL3042 below: the pip cache is a BuildKit cache mount, used only with --require-hashes)
+# hadolint ignore=DL3042
+RUN --mount=type=cache,id=waddles-pip-hub-api-v${CACHE_EPOCH},target=/root/.cache/pip,sharing=locked \
+    pip install --require-hashes -r requirements.txt
 
 # flask_core (libs/flask_core) is a real installable package (setup.py) --
-# pip install it directly rather than sys.path surgery at runtime; its own
-# requirements.in is the source of truth for its transitive deps.
+# pip install it directly rather than sys.path surgery at runtime. Every one of its runtime
+# dependencies (libs/flask_core/requirements.in) is already in hub_api/requirements.txt and was
+# installed above with --require-hashes, so flask_core itself goes in with --no-deps (nothing is
+# resolved from the network) and --no-build-isolation (isolation would fetch setuptools
+# unhashed). setuptools comes from the hash-locked hub_api/build-tools/requirements.txt and is
+# removed again so it never ships. scripts/ci/check-dockerfile-pip-hashes.py enforces all of it.
+COPY hub_api/build-tools/requirements.txt /tmp/build-tools-requirements.txt
 COPY libs/flask_core /app/libs/flask_core
-RUN pip install --no-cache-dir /app/libs/flask_core
+RUN pip install --no-cache-dir --require-hashes -r /tmp/build-tools-requirements.txt && \
+    pip install --no-cache-dir --no-deps --no-build-isolation /app/libs/flask_core && \
+    pip uninstall -y setuptools && \
+    rm -f /tmp/build-tools-requirements.txt
 
 # wasm-tools -- `services/bundle_component_validator.py`'s WIT world
 # conformance check (`wasm-tools component wit --json`) on every vendor
@@ -45,7 +60,7 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-COPY hub_api/app.py hub_api/config.py hub_api/bootstrap.py ./
+COPY hub_api/app.py hub_api/config.py hub_api/bootstrap.py hub_api/telemetry.py ./
 COPY hub_api/blueprints ./blueprints
 COPY hub_api/routers ./routers
 COPY hub_api/openapi ./openapi

@@ -45,7 +45,7 @@ pub const SLOW_BUCKETS_S: [f64; 13] = [
 
 /// Every instrument name this module registers -- asserted against emitted
 /// data in tests and mirrored in `docs/observability/data-plane-metrics.md`.
-pub const METRIC_NAMES: [&str; 21] = [
+pub const METRIC_NAMES: [&str; 26] = [
     "waddles_executor_load_seconds",
     "waddles_executor_loads_total",
     "waddles_executor_unloads_total",
@@ -67,6 +67,12 @@ pub const METRIC_NAMES: [&str; 21] = [
     "waddles_executor_connector_call_seconds",
     "waddles_executor_wire_frames_shed_total",
     "waddles_executor_wire_backpressure_total",
+    // Executor-scale CONTRACT names (KEDA/alerts key on these exactly).
+    "executor_loaded_modules",
+    "executor_memory_bytes",
+    "executor_load_duration_seconds",
+    "executor_precompile_fallback_total",
+    "executor_module_evictions_total",
 ];
 
 /// The OTel instrument name behind a documented (Prometheus-form) metric
@@ -208,6 +214,11 @@ pub struct ExecutorMetrics {
     connector_call_seconds: Histogram<f64>,
     wire_frames_shed: Counter<u64>,
     wire_backpressure: Counter<u64>,
+    loaded_modules: Gauge<u64>,
+    memory_bytes: Gauge<u64>,
+    load_duration_seconds: Histogram<f64>,
+    precompile_fallback: Counter<u64>,
+    module_evictions: Counter<u64>,
 }
 
 /// Keeps `waddles_executor_invocations_active` accurate on every exit path
@@ -331,11 +342,78 @@ impl ExecutorMetrics {
                 "Connector-world export calls by export and outcome (ok, guest_error, fuel_exhausted, \
                  deadline, memory_limit, trap, pool_exhausted, instantiate_failed, internal)",
             ),
+            loaded_modules: meter
+                .u64_gauge(instrument_name("executor_loaded_modules"))
+                .with_description(
+                    "Compiled modules resident in the process-wide shared cache (all stages)",
+                )
+                .build(),
+            memory_bytes: meter
+                .u64_gauge(instrument_name("executor_memory_bytes"))
+                .with_description(
+                    "Estimated resident bytes of compiled code held by the shared module cache",
+                )
+                .with_unit("By")
+                .build(),
+            load_duration_seconds: hist(
+                "executor_load_duration_seconds",
+                "Time to make one module resident, by source (aot, compile) and result",
+                &SLOW_BUCKETS_S,
+            ),
+            precompile_fallback: counter(
+                "executor_precompile_fallback_total",
+                "Loads that could not use a precompiled .cwasm and JIT-compiled instead, by reason",
+            ),
+            module_evictions: counter(
+                "executor_module_evictions_total",
+                "Idle unpinned modules evicted from the shared cache to honour EXECUTOR_MEMORY_BUDGET_MB",
+            ),
             connector_call_seconds: hist(
                 "waddles_executor_connector_call_seconds",
                 "Connector-world export call time (slot wait excluded), by export and outcome",
                 &LATENCY_BUCKETS_S,
             ),
+        }
+    }
+
+    /// Shared module cache residency (`executor_loaded_modules`,
+    /// `executor_memory_bytes`), recorded after every cache mutation.
+    pub fn set_module_cache(&self, modules: usize, bytes: u64) {
+        self.loaded_modules
+            .record(u64::try_from(modules).unwrap_or(u64::MAX), &[]);
+        self.memory_bytes.record(bytes, &[]);
+    }
+
+    /// One module made resident (`executor_load_duration_seconds`): `source`
+    /// is `aot` or `compile`, `result` `ok` or `error`.
+    pub fn record_module_load(
+        &self,
+        source: &'static str,
+        result: &'static str,
+        elapsed: Duration,
+    ) {
+        self.load_duration_seconds.record(
+            elapsed.as_secs_f64(),
+            &[
+                KeyValue::new("source", source),
+                KeyValue::new("result", result),
+            ],
+        );
+    }
+
+    /// One AOT miss that fell back to a JIT compile
+    /// (`executor_precompile_fallback_total{reason}`); `reason` is a closed
+    /// vocabulary: `fetch`, `signature`, `deserialize`.
+    pub fn record_precompile_fallback(&self, reason: &'static str) {
+        self.precompile_fallback
+            .add(1, &[KeyValue::new("reason", reason)]);
+    }
+
+    /// `count` modules evicted for budget (`executor_module_evictions_total`).
+    pub fn record_module_evictions(&self, count: usize) {
+        if count > 0 {
+            self.module_evictions
+                .add(u64::try_from(count).unwrap_or(u64::MAX), &[]);
         }
     }
 
@@ -485,28 +563,40 @@ impl ExecutorMetrics {
     }
 
     /// Counts one host-API connection attempt (`connected` or `failed`).
-    pub fn record_connection_attempt(&self, result: &'static str) {
-        self.connection_attempts
-            .add(1, &[KeyValue::new("result", result)]);
+    pub fn record_connection_attempt(&self, result: &'static str, stage: &str) {
+        self.connection_attempts.add(
+            1,
+            &[
+                KeyValue::new("result", result),
+                KeyValue::new("stage", stage.to_string()),
+            ],
+        );
     }
 
-    /// Sets the session gauge (`waddles_executor_connection_up`): `1` while
-    /// connected, an explicit `0` otherwise so "down" and "not reporting" are
-    /// distinguishable.
-    pub fn set_connection_up(&self, up: bool) {
-        self.connection_up.record(u64::from(up), &[]);
+    /// Sets the per-stage session gauge (`waddles_executor_connection_up`):
+    /// `1` while connected, an explicit `0` otherwise so "down" and "not
+    /// reporting" are distinguishable. One series per configured stage.
+    pub fn set_connection_up(&self, up: bool, stage: &str) {
+        self.connection_up
+            .record(u64::from(up), &[KeyValue::new("stage", stage.to_string())]);
     }
 
     /// Records the length of a session that just ended
     /// (`waddles_executor_session_seconds`).
-    pub fn record_session(&self, elapsed: Duration) {
-        self.session_seconds.record(elapsed.as_secs_f64(), &[]);
+    pub fn record_session(&self, elapsed: Duration, stage: &str) {
+        self.session_seconds.record(
+            elapsed.as_secs_f64(),
+            &[KeyValue::new("stage", stage.to_string())],
+        );
     }
 
     /// Records how long the link was down before this connection
     /// (`waddles_executor_outage_seconds`).
-    pub fn record_outage(&self, elapsed: Duration) {
-        self.outage_seconds.record(elapsed.as_secs_f64(), &[]);
+    pub fn record_outage(&self, elapsed: Duration, stage: &str) {
+        self.outage_seconds.record(
+            elapsed.as_secs_f64(),
+            &[KeyValue::new("stage", stage.to_string())],
+        );
     }
 
     /// Counts one trip round the dial loop (`waddles_executor_reconnects_total`).
@@ -550,6 +640,24 @@ pub fn executor_metrics() -> Arc<ExecutorMetrics> {
         let meter = opentelemetry::global::meter(SCOPE);
         Arc::new(ExecutorMetrics::new(&meter))
     }))
+}
+
+/// The meter `app_id`'s bundle-authored metrics (`host::stage_next_metrics`) record through: the
+/// same global provider as [`executor_metrics`] (one OTLP exporter carries both), but a distinct
+/// instrumentation scope per bundle (`app_id` scope attribute; `""` = the host itself), so one
+/// bundle's instruments can never collide with another's.
+pub fn bundle_meter_for(app_id: &str) -> Meter {
+    #[cfg(test)]
+    {
+        test_support::shared().meter_for_app(app_id)
+    }
+    #[cfg(not(test))]
+    {
+        let scope = opentelemetry::InstrumentationScope::builder(SCOPE)
+            .with_attributes([opentelemetry::KeyValue::new("app_id", app_id.to_owned())])
+            .build();
+        opentelemetry::global::meter_with_scope(scope)
+    }
 }
 
 /// In-memory OTel harness for tests: a real `SdkMeterProvider` whose exports
@@ -599,6 +707,25 @@ pub(crate) mod test_support {
         /// A meter on this harness's provider.
         pub fn meter(&self) -> Meter {
             self.provider.meter("test")
+        }
+
+        /// A meter in its own scope for `app_id` (what production does per bundle).
+        pub fn meter_for_app(&self, app_id: &str) -> Meter {
+            let scope = opentelemetry::InstrumentationScope::builder("test")
+                .with_attributes([opentelemetry::KeyValue::new("app_id", app_id.to_owned())])
+                .build();
+            self.provider.meter_with_scope(scope)
+        }
+
+        /// `BundleMetrics::new`'s meter supplier over this harness's provider.
+        pub fn meter_for_app_fn(&self) -> impl Fn(&str) -> Meter + Send + Sync + 'static {
+            let provider = self.provider.clone();
+            move |app_id: &str| {
+                let scope = opentelemetry::InstrumentationScope::builder("test")
+                    .with_attributes([opentelemetry::KeyValue::new("app_id", app_id.to_owned())])
+                    .build();
+                provider.meter_with_scope(scope)
+            }
         }
 
         /// Flushes and returns every data point exported so far across all
@@ -931,8 +1058,8 @@ mod tests {
         let (h, m) = fresh();
         m.set_bundles_loaded(3);
         m.set_bundles_loaded(0);
-        m.set_connection_up(true);
-        m.set_connection_up(false);
+        m.set_connection_up(true, "svc-process");
+        m.set_connection_up(false, "svc-process");
         assert_eq!(
             h.last("waddles_executor_bundles_loaded", &[])
                 .expect("exported")
@@ -951,11 +1078,11 @@ mod tests {
     #[test]
     fn session_health_series_are_recorded() {
         let (h, m) = fresh();
-        m.record_connection_attempt("connected");
-        m.record_connection_attempt("failed");
-        m.record_connection_attempt("failed");
-        m.record_session(Duration::from_secs(90));
-        m.record_outage(Duration::from_secs(7));
+        m.record_connection_attempt("connected", "svc-process");
+        m.record_connection_attempt("failed", "svc-process");
+        m.record_connection_attempt("failed", "svc-process");
+        m.record_session(Duration::from_secs(90), "svc-process");
+        m.record_outage(Duration::from_secs(7), "svc-process");
         m.record_reconnect();
         m.record_heartbeat_timeout();
         assert_eq!(
@@ -1023,15 +1150,19 @@ mod tests {
         m.record_host_call("kv", "get", "ok", Duration::from_millis(1));
         let _active = m.invocation_started();
         m.set_bundles_loaded(1);
-        m.record_connection_attempt("connected");
-        m.set_connection_up(true);
-        m.record_session(Duration::from_secs(1));
-        m.record_outage(Duration::from_secs(1));
+        m.record_connection_attempt("connected", "svc-process");
+        m.set_connection_up(true, "svc-process");
+        m.record_session(Duration::from_secs(1), "svc-process");
+        m.record_outage(Duration::from_secs(1), "svc-process");
         m.record_reconnect();
         m.record_heartbeat_timeout();
         m.record_connector_call("a", "on-frame", "ok", Duration::from_millis(1));
         m.record_frame_shed("log");
         m.record_wire_backpressure("waited");
+        m.set_module_cache(1, 1024);
+        m.record_module_load("aot", "ok", Duration::from_millis(1));
+        m.record_precompile_fallback("signature");
+        m.record_module_evictions(1);
 
         let exported: std::collections::BTreeSet<String> =
             h.points().into_iter().map(|p| p.name).collect();
@@ -1043,7 +1174,7 @@ mod tests {
             );
         }
         // Verification Integrity: report the denominator, and fail on zero.
-        assert_eq!(METRIC_NAMES.len(), 21);
+        assert_eq!(METRIC_NAMES.len(), 26);
         assert!(
             exported.len() >= METRIC_NAMES.len(),
             "examined {} exported series for {} documented names",

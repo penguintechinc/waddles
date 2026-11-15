@@ -50,6 +50,7 @@ import blueprints.v1.admin_data_privacy as admin_module
 from blueprints.v1.admin_data_privacy import admin_data_privacy_bp
 from services import admin_data_privacy_service as svc
 from services import data_privacy_service as privacy
+from services.global_identity import grant_global_admin_sync
 from services.schema import bind_admin_privacy_tables
 from tests.conftest import OTHER_TENANT_SLUG, TENANT_SLUG, make_user_token
 from tests.entitlement_fakes import FakeFlagGate, FakeLicenseGate, install_entitlement_client
@@ -134,11 +135,12 @@ def _user(db: Any, *, name: str, is_super_admin: bool = False, password: str | N
         username=name,
         display_name=name.title(),
         password_hash=password_hash,
-        is_super_admin=is_super_admin,
         is_active=True,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
+    if is_super_admin:
+        grant_global_admin_sync(db.dal, int(user_id))
     db.dal.commit()
     return int(user_id)  # plain int: a pydal `Reference` crashes quart-schema's test client
 
@@ -935,6 +937,28 @@ class TestErase:
         assert response.status_code == 409
         assert _user_row(db, root).email == "root@example.com"
         assert _audit_rows(db)[0].details["outcome"] == "denied_super_admin"
+
+    async def test_bootstrap_platform_account_cannot_be_erased_from_a_tenant(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        """The non-person bootstrap account: typed 403 + audit, never erased (route level)."""
+        root = _user(db, name="root", is_super_admin=True)
+        _member(db, community_id=world["acme_community"], user_id=root)
+        db.dal(db.dal.hub_users.id == root).update(is_bootstrap=True)
+        db.dal.commit()
+
+        response = await client.post(
+            _base() + f"/users/{root}/erase",
+            headers=_headers(world["admin"]),
+            json={"confirm": True},
+        )
+
+        assert response.status_code == 403
+        body = await response.get_json()
+        assert "PLATFORM_ACCOUNT_PROTECTED" in body["result"]["detail"]
+        assert body["result"]["status"] == "forbidden"
+        assert _user_row(db, root).email == "root@example.com"
+        assert _audit_rows(db)[0].details["outcome"] == "denied_platform_account"
 
     async def test_shared_identity_across_tenants_is_refused(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any

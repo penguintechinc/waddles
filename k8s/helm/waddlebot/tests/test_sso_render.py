@@ -1,15 +1,14 @@
-"""Helm-template assertions for the enterprise SSO key wiring (templates/sso.yaml, _sso.tpl).
+"""Helm-template assertions for the enterprise SSO key wiring (provision-secrets hook, _sso.tpl).
 
-Two layers:
+The SSO key Secret is created at RUNTIME, create-if-absent, in every tier by the provision-secrets
+hook (templates/provision-secrets.yaml) -- never by template-time `lookup`. Two layers:
 
-1. `TestFullChart` renders the REAL chart (alpha values) and checks the Secret is generated
-   in alpha, is a 64-lowercase-hex key, survives `helm.sh/resource-policy: keep`, and is
-   wired into hub-api's Deployment through the one-line include.
-2. `TestTierPolicyIsolated` renders only the SSO templates (the real `_helpers.tpl`,
-   `sso.yaml` and `_sso.tpl`, copied into a scratch chart) under every tier. The full chart
-   cannot be rendered in beta/gamma/production without dozens of unrelated required values,
-   but the SSO policy -- "generate in alpha/local, NEVER fail the release elsewhere" -- is
-   entirely inside these three files, so isolating them tests exactly the code under test.
+1. `TestFullChart` renders the REAL chart (alpha values), runs the real hook against the rendered
+   spec (tests/provision_harness.py) and checks the Secret is a 64-lowercase-hex key, carries
+   `helm.sh/resource-policy: keep`, and is wired into hub-api's Deployment (optional ref).
+2. `TestTierPolicy` renders the full chart in every tier (now possible: no manual secrets) and
+   checks the key is provisioned everywhere SSO is enabled, opt-outs are skips, and the env block
+   (`_sso.tpl`, via a scratch chart probe) honours operator settings.
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ from typing import Any
 
 import pytest
 import yaml
+from provision_harness import materialize, spec_of, with_provisioned  # type: ignore[import-not-found]
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _ALPHA_VALUES = _CHART_DIR / "values-alpha.yaml"
@@ -67,29 +67,29 @@ class TestFullChart:
              "--values", str(_ALPHA_VALUES)]
         )  # fmt: skip
         assert result.returncode == 0, result.stderr
-        return _docs(result.stdout)
+        return with_provisioned(_docs(result.stdout))
 
     def test_alpha_generates_a_64_hex_char_key_secret(self, alpha_docs: list[dict[str, Any]]) -> None:
         found = _secrets(alpha_docs)
         assert len(found) == 1
-        value = base64.b64decode(found[0]["data"]["SSO_ENCRYPTION_KEY"]).decode()
+        assert found[0].get("x-provisioned"), "must come from the runtime hook, never a Helm-rendered Secret"
+        value = found[0]["stringData"]["SSO_ENCRYPTION_KEY"]
         assert re.fullmatch(r"[0-9a-f]{64}", value), "must be lowercase hex (bytes.fromhex)"
 
-    def test_secret_survives_uninstall_and_is_labelled_as_an_auto_provisioned_key(
+    def test_secret_survives_uninstall_and_pruning(self, alpha_docs: list[dict[str, Any]]) -> None:
+        ann = _secrets(alpha_docs)[0]["metadata"]["annotations"]
+        assert ann["helm.sh/resource-policy"] == "keep"
+        assert ann["argocd.argoproj.io/sync-options"] == "Prune=false"
+
+    def test_two_fresh_installs_mint_independent_keys_and_upgrades_keep_them(
         self, alpha_docs: list[dict[str, Any]]
     ) -> None:
-        meta = _secrets(alpha_docs)[0]["metadata"]
-        assert meta["annotations"]["helm.sh/resource-policy"] == "keep"
-        assert meta["labels"]["app.kubernetes.io/component"] == "auto-provisioned-key"
-
-    def test_two_renders_mint_independent_keys(self) -> None:
-        keys = set()
-        for _ in range(2):
-            out = _helm(["template", "waddlebot", str(_CHART_DIR), "--kube-version", "1.30.0",
-                         "--values", str(_ALPHA_VALUES), "--show-only", "templates/sso.yaml"])  # fmt: skip
-            assert out.returncode == 0, out.stderr
-            keys.add(_secrets(_docs(out.stdout))[0]["data"]["SSO_ENCRYPTION_KEY"])
-        assert len(keys) == 2  # randBytes, not a constant
+        rendered = [d for d in alpha_docs if not d.get("x-provisioned")]
+        a = materialize(rendered)[_SECRET_NAME]["data"]["SSO_ENCRYPTION_KEY"]
+        b = materialize(rendered)[_SECRET_NAME]["data"]["SSO_ENCRYPTION_KEY"]
+        assert a != b  # CSPRNG, not a constant
+        kept = materialize(rendered, {_SECRET_NAME: {"SSO_ENCRYPTION_KEY": a}})
+        assert kept[_SECRET_NAME]["data"]["SSO_ENCRYPTION_KEY"] == a  # never rotated by an upgrade
 
     def test_hub_api_receives_the_key_optionally_and_the_tuning_env(self, alpha_docs: list[dict[str, Any]]) -> None:
         deployment = _hub_api(alpha_docs)
@@ -104,7 +104,7 @@ class TestFullChart:
         assert "SSO_GOOGLE_CLIENT_ID" not in env
 
     def test_key_is_never_inlined_as_a_literal_anywhere(self, alpha_docs: list[dict[str, Any]]) -> None:
-        secret_value = base64.b64decode(_secrets(alpha_docs)[0]["data"]["SSO_ENCRYPTION_KEY"]).decode()
+        secret_value = _secrets(alpha_docs)[0]["stringData"]["SSO_ENCRYPTION_KEY"]
         deployment_text = yaml.safe_dump(
             [d for d in alpha_docs if d.get("kind") in {"Deployment", "ConfigMap", "Job"}]
         )
@@ -116,6 +116,7 @@ class TestFullChart:
         assert out.returncode == 0, out.stderr
         docs = _docs(out.stdout)
         assert _secrets(docs) == []
+        assert _SECRET_NAME not in spec_of(docs)
         deployment = _hub_api(docs)
         names = {e["name"] for e in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
         assert not any(n.startswith("SSO_") for n in names)
@@ -123,12 +124,12 @@ class TestFullChart:
 
 @pytest.fixture(scope="module")
 def sso_only_chart(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Scratch chart = real `_helpers.tpl` + `sso.yaml` + `_sso.tpl` + a probe exposing the env block."""
+    """Scratch chart = real `_helpers.tpl` + `_sso.tpl` + a probe exposing the hub-api env block."""
     chart = tmp_path_factory.mktemp("sso-chart")
     (chart / "templates").mkdir()
     (chart / "Chart.yaml").write_text("apiVersion: v2\nname: waddlebot\nversion: 0.0.1\n")
     shutil.copy(_CHART_DIR / "values.yaml", chart / "values.yaml")
-    for name in ("_helpers.tpl", "sso.yaml", "_sso.tpl"):
+    for name in ("_helpers.tpl", "_sso.tpl"):
         shutil.copy(_CHART_DIR / "templates" / name, chart / "templates" / name)
     (chart / "templates" / "probe.yaml").write_text(
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: sso-env-probe\ndata:\n"
@@ -146,45 +147,46 @@ def _render(chart: Path, *sets: str) -> list[dict[str, Any]]:
     return _docs(result.stdout)
 
 
+def _full(values: str, *sets: str) -> list[dict[str, Any]]:
+    args = ["template", "waddlebot", str(_CHART_DIR), "--kube-version", "1.30.0", "--values", str(_CHART_DIR / values)]
+    for s in sets:
+        args += ["--set", s]
+    result = _helm(args)
+    assert result.returncode == 0, f"render must not fail: {result.stderr}"
+    return _docs(result.stdout)
+
+
 def _probe_env(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     probe = next(d for d in docs if d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "sso-env-probe")
     return list(yaml.safe_load(probe["data"]["env"]) or [])
 
 
-class TestTierPolicyIsolated:
-    @pytest.mark.parametrize("tier", ["alpha", "local"])
-    def test_generated_in_alpha_and_local(self, sso_only_chart: Path, tier: str) -> None:
-        docs = _render(sso_only_chart, f"global.deploymentTier={tier}")
-        assert len(_secrets(docs)) == 1
-
-    @pytest.mark.parametrize("tier", ["beta", "gamma", "production"])
-    def test_never_fails_the_release_and_generates_nothing_outside_alpha_local(
-        self, sso_only_chart: Path, tier: str
-    ) -> None:
-        # The deliberate difference from autoProvisionedKeys.*: SSO is entitlement-gated,
-        # so a missing key must not stop beta/gamma/production installing.
-        docs = _render(sso_only_chart, f"global.deploymentTier={tier}")
-        assert _secrets(docs) == []
-        env = {e["name"]: e for e in _probe_env(docs)}
+class TestTierPolicy:
+    @pytest.mark.parametrize("values", ["values-alpha.yaml", "values-local.yaml", "values-beta.yaml",
+                                        "values-gamma.yaml", "values-production.yaml"])  # fmt: skip
+    def test_provisioned_in_every_tier_and_never_fails_the_release(self, values: str) -> None:
+        # Owner policy (2026-11-14): generated on first run in EVERY tier (was alpha/local only).
+        # hub-api's ref stays optional: SSO is entitlement-gated and an externally owned key may lag.
+        docs = _full(values, "sso.enabled=true")
+        assert f"secret|{_SECRET_NAME}|\nkey|SSO_ENCRYPTION_KEY|gen|hex:32|hex64" in spec_of(docs)
+        assert _secrets(docs) == [], "never rendered by Helm"
+        env = {e["name"]: e for e in _hub_api(docs)["spec"]["template"]["spec"]["containers"][0]["env"]}
         assert env["SSO_ENCRYPTION_KEY"]["valueFrom"]["secretKeyRef"]["optional"] is True
 
-    def test_external_secret_flag_skips_generation_even_in_alpha(self, sso_only_chart: Path) -> None:
-        docs = _render(
-            sso_only_chart, "global.deploymentTier=alpha", "sso.encryptionKey.externalSecret=true"
-        )
-        assert _secrets(docs) == []
+    def test_external_secret_flag_skips_generation(self) -> None:
+        docs = _full("values-alpha.yaml", "sso.enabled=true", "sso.encryptionKey.externalSecret=true")
+        spec = spec_of(docs)
+        assert f"secret|{_SECRET_NAME}|skip=sso.encryptionKey.externalSecret" in spec
+        assert "key|SSO_ENCRYPTION_KEY" not in spec
+        assert _SECRET_NAME not in materialize(docs)
 
     def test_custom_secret_name_and_key_are_honoured(self, sso_only_chart: Path) -> None:
-        docs = _render(
-            sso_only_chart,
-            "global.deploymentTier=alpha",
-            "sso.encryptionKey.secretName=my-sso",
-            "sso.encryptionKey.secretKey=KEY",
-        )
-        secret = next(d for d in docs if d.get("kind") == "Secret")
-        assert secret["metadata"]["name"] == "my-sso"
-        assert "KEY" in secret["data"]
-        ref = {e["name"]: e for e in _probe_env(docs)}["SSO_ENCRYPTION_KEY"]["valueFrom"]["secretKeyRef"]
+        docs = _full("values-alpha.yaml", "sso.enabled=true", "sso.encryptionKey.secretName=my-sso",
+                     "sso.encryptionKey.secretKey=KEY")  # fmt: skip
+        out = materialize(docs)
+        assert re.fullmatch(r"[0-9a-f]{64}", out["my-sso"]["data"]["KEY"])
+        probe = _render(sso_only_chart, "sso.encryptionKey.secretName=my-sso", "sso.encryptionKey.secretKey=KEY")
+        ref = {e["name"]: e for e in _probe_env(probe)}["SSO_ENCRYPTION_KEY"]["valueFrom"]["secretKeyRef"]
         assert (ref["name"], ref["key"]) == ("my-sso", "KEY")
 
     def test_disabled_renders_nothing(self, sso_only_chart: Path) -> None:

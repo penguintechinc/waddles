@@ -80,6 +80,7 @@ spec:
           containerPort: {{ .Values.egressProxy.metricsPort }}
           protocol: TCP
         env:
+        {{- include "waddlebot.otel.env" (dict "root" $ "service" "egress-proxy") | nindent 8 }}
         - name: PROXY_LISTEN_PORT
           value: {{ .Values.egressProxy.port | quote }}
         - name: ALLOWED_PORTS

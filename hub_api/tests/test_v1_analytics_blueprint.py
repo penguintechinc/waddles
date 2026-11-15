@@ -32,6 +32,7 @@ from quart_schema import QuartSchema
 
 import blueprints.v1.analytics as analytics_module
 from blueprints.v1.analytics import analytics_bp
+from services import analytics_service
 from services.analytics_proxy import ProxyResult
 
 
@@ -42,12 +43,27 @@ def app(community_db: Any) -> Quart:
     QuartSchema(quart_app)
     quart_app.register_blueprint(analytics_bp)
     quart_app.config["dal"] = dal
+    quart_app.config["async_dal"] = dal
     return quart_app
 
 
 @pytest.fixture
 def client(app: Quart) -> Any:
     return app.test_client()
+
+
+REPUTATION_STATS = {
+    "stats": {"total": 5, "avg": 600.0, "median": 600.0, "min": 400, "max": 800},
+    "histogram": [{"range": "0-50", "count": 5}],
+}
+
+
+@pytest.fixture(autouse=True)
+def reputation_stats_stub(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Reputation stats now come from SQL over the bundle store, not the analytics-core proxy."""
+    stub = AsyncMock(return_value=REPUTATION_STATS)
+    monkeypatch.setattr(analytics_service, "reputation_stats", stub)
+    return stub
 
 
 @pytest.fixture
@@ -161,14 +177,16 @@ class TestPlatformScopeGate:
         )
 
     async def test_platform_reputation_relays_proxy_body(
-        self, client: Any, auth_headers: Any, proxy_stub: Any
+        self, client: Any, auth_headers: Any, proxy_stub: Any, reputation_stats_stub: Any
     ) -> None:
         response = await client.get(
             "/api/v1/analytics/platform/reputation",
             headers=auth_headers(scope="analytics:read"),
         )
         assert response.status_code == 200
-        proxy_stub.assert_awaited_once_with("/api/v1/analytics/platform/reputation")
+        assert await response.get_json() == {"success": True, **REPUTATION_STATS}
+        reputation_stats_stub.assert_awaited_once()
+        proxy_stub.assert_not_awaited()  # no analytics-core hop for reputation any more
 
 
 # ---------------------------------------------------------------------------
@@ -183,11 +201,6 @@ class TestPlatformOverview:
         async def fake_get(path: str, **kwargs: Any) -> ProxyResult:
             if path.endswith("/summary"):
                 body = {"success": True, "data": {"total_users": 5, "total_communities": 2}}
-            elif path.endswith("/reputation"):
-                body = {
-                    "success": True,
-                    "data": {"stats": {"total": 5}, "histogram": [{"range": "0-50", "count": 5}]},
-                }
             else:
                 body = {"success": True, "data": {"segments": []}}
             return ProxyResult(ok=True, status_code=200, body=body)

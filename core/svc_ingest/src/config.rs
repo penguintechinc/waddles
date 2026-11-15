@@ -83,8 +83,14 @@ pub struct CliConfig {
     /// Feeds `penguin_spine::Scope` for every fixed-platform receiver
     /// (`Config::ingest_scope`); not yet consumed by any HTTP handler
     /// (no tenant-scoped routes exist until the generic intake work lands).
-    #[arg(long, env = "RUNNER_TENANT_SLUG", default_value = "global")]
+    #[arg(long, env = "RUNNER_TENANT_SLUG", default_value = "default")]
     pub runner_tenant_slug: String,
+
+    /// Numeric id of the default tenant -- the ONLY tenant the process-wide
+    /// `DISCORD_BOT_TOKEN` application may serve (`crate::tenant_discord`).
+    /// `0` (unset) makes every positive tenant non-default (fail closed).
+    #[arg(long, env = "DEFAULT_TENANT_ID", default_value_t = 0)]
+    pub default_tenant_id: i64,
 
     /// This runner instance's community scope, empty meaning tenant-wide
     /// (`penguin_spine::Scope`'s `_tenant` segment) -- see
@@ -115,6 +121,13 @@ pub struct CliConfig {
     #[arg(long, env = "WADDLES_ENVIRONMENT", default_value = "")]
     pub environment: String,
 
+    /// This workload's own SPIFFE id (`spiffe://penguintech.io/<env>/<service>`). Its last
+    /// segment is the service name in the stream-DEK seal context, so it must match the id
+    /// hub-api authenticates this pod as. Required on the key-broker path; boot fails loud
+    /// when it is missing or malformed.
+    #[arg(long, env = "SPIFFE_ID", default_value = "")]
+    pub spiffe_id: String,
+
     /// hub-api machine-JWT bootstrap endpoint (`service_auth::MachineJwtClient`).
     #[arg(long, env = "SERVICE_JWT_TOKEN_ENDPOINT", default_value = "")]
     pub service_jwt_token_endpoint: String,
@@ -127,13 +140,31 @@ pub struct CliConfig {
     )]
     pub service_jwt_sa_token_path: String,
 
-    /// Base URL of hub-api's distribution endpoint this service will poll
-    /// once the generic-intake work lands (`GET
-    /// {HUB_API_URL}/api/v1/distribution/sources`, spec S4.1). Only used
-    /// today to report a configuration snapshot on `/health` -- no
-    /// outbound call is made yet.
+    /// hub-api base URL. Only used today for the scope resolver and to report a configuration
+    /// snapshot on `/health`. Bundle distribution is internal gRPC
+    /// (`DistributionService.ListBundles`), never REST; there is no `distribution/sources` REST
+    /// route in hub-api to poll.
     #[arg(long, env = "HUB_API_URL", default_value = "http://hub-api:8204")]
     pub hub_api_url: String,
+
+    /// hub-api's internal gRPC endpoint (`https://<hub-api>:50204`), used by the connection
+    /// resolver (`ProviderConnectionService`). Empty = unset; every consumer then fails loud at
+    /// boot (see [`CliConfig::resolver_config`]) -- there is no REST fallback.
+    #[arg(long, env = "HUB_API_GRPC_ENDPOINT", default_value = "")]
+    pub hub_api_grpc_endpoint: String,
+
+    /// PEM CA bundle that signed hub-api's gRPC server certificate (`HUB_API_GRPC_CA_FILE`);
+    /// empty = unset (webpki roots).
+    #[arg(long, env = "HUB_API_GRPC_CA_FILE", default_value = "")]
+    pub hub_api_grpc_ca_file: String,
+
+    /// Plain env/values off-switch for egress detokenization, independent of the
+    /// `waddles.core.disable-pii-detokenization` PostHog kill-switch (for environments with no
+    /// in-cluster PostHog). `Some(false)` makes every outbound send carry its `{user:<token>}`
+    /// placeholders; unset/`true` leaves the PostHog-gated default (enabled). Only ever
+    /// disables; loudly logged at startup.
+    #[arg(long, env = "PII_DETOKENIZATION_ENABLED")]
+    pub pii_detokenization_enabled_override: Option<bool>,
 
     /// The `kid` every newly-minted `binding.mac` is stamped with
     /// (`penguin_spine::compute_binding_mac`'s `kid` argument) -- must name
@@ -254,6 +285,21 @@ pub enum TwitchMode {
     Off,
 }
 
+/// Refuses to start with the env Discord application (`DISCORD_BOT_TOKEN`) and no
+/// default-tenant id: that app serves ONLY the default tenant, and an unset/`0`
+/// id would make the gateway refuse every event (or worse, guess). No silent default.
+pub fn validate_default_tenant(cfg: &Config) -> Result<(), ConfigError> {
+    if cfg.discord_bot_token.is_some() && cfg.cli.default_tenant_id <= 0 {
+        return Err(ConfigError::InvalidValue {
+            field: "DEFAULT_TENANT_ID",
+            reason: "must be the default tenant's numeric id (>= 1) when DISCORD_BOT_TOKEN \
+                     is set: the env Discord app serves only the default tenant"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Decides the Twitch inbound mode from configuration. Flag ON plus a static
 /// `TWITCH_IRC_NICK`/`TWITCH_IRC_CHANNEL` is a fatal conflict (never a silent
 /// precedence choice); the error names the settings, never the token.
@@ -280,6 +326,28 @@ pub fn validate_twitch_mode(cfg: &Config) -> Result<TwitchMode, ConfigError> {
 }
 
 impl CliConfig {
+    /// The connection-resolver configuration for this process: hub-api's gRPC endpoint + CA,
+    /// the machine-token bootstrap and the deployment environment.
+    ///
+    /// # Errors
+    /// `HUB_API_GRPC_ENDPOINT` unset -- the resolver has no REST fallback, so a missing
+    /// endpoint is a loud boot failure, never a silent degrade.
+    pub fn resolver_config(&self) -> anyhow::Result<connection_resolver::ResolverConfig> {
+        if self.hub_api_grpc_endpoint.trim().is_empty() {
+            anyhow::bail!(
+                "HUB_API_GRPC_ENDPOINT is required: the connection resolver reaches hub-api over \
+                 internal gRPC (there is no REST fallback)"
+            );
+        }
+        Ok(connection_resolver::ResolverConfig::new(
+            self.hub_api_grpc_endpoint.clone(),
+            self.environment.clone(),
+            self.service_jwt_token_endpoint.clone(),
+            self.service_jwt_sa_token_path.clone(),
+        )
+        .with_grpc_ca(Some(self.hub_api_grpc_ca_file.clone())))
+    }
+
     /// Validates cross-field invariants `clap`'s per-arg parsing can't
     /// express.
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -666,7 +734,7 @@ mod tests {
         let cli = CliConfig::parse_from(["svc-ingest"]);
         assert_eq!(cli.http_port, 8200);
         assert_eq!(cli.metrics_port, 9090);
-        assert_eq!(cli.runner_tenant_slug, "global");
+        assert_eq!(cli.runner_tenant_slug, "default");
         assert_eq!(cli.runner_community, "");
         assert_eq!(cli.twitch_irc_host, "irc.chat.twitch.tv");
         assert_eq!(cli.twitch_irc_port, 6697);
@@ -739,6 +807,37 @@ mod tests {
         assert!(!rendered.contains("super-secret-bot-token"));
         assert!(!rendered.contains("aabbcc"));
         clear_secret_env();
+    }
+
+    #[test]
+    fn env_discord_app_requires_a_default_tenant_id() {
+        let mk = |args: &[&str], tok: Option<&str>| Config {
+            cli: CliConfig::parse_from(args),
+            twitch_irc_oauth_token: None,
+            discord_bot_token: tok.map(Secret::new),
+            envelope_binding_keys: None,
+            twitch_eventsub_secret: None,
+            ingest_dev_kek: None,
+            waddles_env: "production".to_string(),
+        };
+        let cases = [
+            (mk(&["svc-ingest"], Some("t")), false),
+            (
+                mk(&["svc-ingest", "--default-tenant-id", "0"], Some("t")),
+                false,
+            ),
+            (
+                mk(&["svc-ingest", "--default-tenant-id", "1"], Some("t")),
+                true,
+            ),
+            (mk(&["svc-ingest"], None), true),
+        ];
+        let mut examined = 0;
+        for (cfg, ok) in cases {
+            examined += 1;
+            assert_eq!(validate_default_tenant(&cfg).is_ok(), ok);
+        }
+        assert_eq!(examined, 4);
     }
 
     #[test]

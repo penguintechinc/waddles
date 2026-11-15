@@ -15,7 +15,7 @@ importing the new interfaces (worlds `stage-next`, `stage-v2`, `stage-tools`).
 Source of truth: `wit/waddle-bundle/storage-v2.wit`. Host: `core/bundle_host_db/src/v2`,
 `core/bundle_host_kv`. Executor: `core/bundle_executor/src/host/stage_next_storage_v2.rs`.
 Guest helpers: `sdk/waddle-sdk-rs/src/storage_v2.rs`. DDL/provisioning:
-`hub_api/services/bundle_data_v2.py`, alembic `0082_bundle_data_v2`.
+`hub_api/services/bundle_data_v2.py`, alembic `0087_bundle_data_v2`.
 
 ## Security model (unchanged principles, new surface)
 

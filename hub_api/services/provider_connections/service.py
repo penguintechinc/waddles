@@ -43,6 +43,7 @@ from services.provider_connections.adapter import (
     Credentials,
     MetadataDiscoverer,
     ProviderAdapter,
+    ResolvedResource,
     validate_credentials_shape,
     validate_metadata,
     validate_token_shape,
@@ -53,6 +54,7 @@ from services.provider_connections.errors import (
     ConnectionNotUsable,
     FeatureNotEnabled,
     InvalidConnectionInput,
+    OwnershipNotProven,
     ProviderConnectionError,
     ProviderUnavailable,
     RefreshNotConfigured,
@@ -73,6 +75,7 @@ from services.provider_connections.telemetry import (
     dataplane_list_size,
     log_failure,
     operation_span,
+    ownership_counter,
     token_refresh_counter,
 )
 from services.provider_connections.vault import (
@@ -90,6 +93,8 @@ DEFAULT_REFRESH_SKEW: Final = timedelta(seconds=120)
 FACT_TENANT_ID: Final = "tenant_id"
 #: Hard ceiling on one data-plane list page.
 MAX_PAGE_SIZE: Final = 1000
+#: Data-plane binding metadata key: ``"true"`` when the row's owner was proven at bind time.
+METADATA_OWNERSHIP_VERIFIED: Final = "ownership_verified"
 
 
 #: Two-gate feature (PostHog flag default OFF + Professional tier) for the static-secret kinds.
@@ -236,9 +241,13 @@ class ProviderConnectionService:
                 # Same answer for "no such community" and "someone else's": no existence oracle,
                 # and no provider call is spent on a community the caller cannot touch.
                 raise ConnectionNotFound("community not found")
+            await self._assert_under_community_cap(spec, community_id)
 
             account = await adapter.validate_credentials(credentials)
             resource = await adapter.resolve_resource(credentials, account, clean_metadata)
+            verified = await self._prove_ownership(
+                spec, resource, actor_user_id=actor_user_id, community_id=community_id
+            )
             facts = self._compose_facts(adapter, account.scopes, resource.facts)
             facts.update(self._metadata_inputs(spec, clean_metadata))
             # Framework-owned, never in an adapter allow-list (so never served): lets a refresh
@@ -274,6 +283,7 @@ class ProviderConnectionService:
                 enabled=enabled,
                 now=now,
                 connection_kind=int(ConnectionKind.PLATFORM_OAUTH),
+                ownership_verified=verified,
             )
             if account.expires_at is not None and not credentials.refresh_token:
                 logger.info(
@@ -291,6 +301,72 @@ class ProviderConnectionService:
                 enabled,
             )
             return self._view(binding)
+
+    async def _prove_ownership(
+        self,
+        spec: AdapterSpec,
+        resource: ResolvedResource,
+        *,
+        actor_user_id: int | None,
+        community_id: int,
+    ) -> bool:
+        """Prove the installer owns ``resource``; refuse (403) a provider that requires it.
+
+        Proof, in order: the verified credential belongs to the owner (``owner_proven_by_token``),
+        else the installing hub user has OAuth-linked the owner's account on
+        ``spec.ownership_identity_platform`` (the social-login / account-linking flow). Owner only:
+        a moderator is NOT an owner (the linking flow grants no moderated-channels scope).
+        Returns ``True`` when proven, ``False`` for a provider with no ownership notion.
+        """
+        if not spec.requires_ownership:
+            return False
+        owner = resource.owner_platform_user_id
+        if owner and resource.owner_proven_by_token:
+            ownership_counter.add(1, {"provider": spec.provider, "outcome": "token_owner"})
+            return True
+        if (
+            owner
+            and actor_user_id is not None
+            and spec.ownership_identity_platform is not None
+            and await store.user_has_platform_identity(
+                self._db,
+                user_id=actor_user_id,
+                platform=spec.ownership_identity_platform,
+                platform_user_id=owner,
+            )
+        ):
+            ownership_counter.add(1, {"provider": spec.provider, "outcome": "linked_account"})
+            return True
+        ownership_counter.add(1, {"provider": spec.provider, "outcome": "rejected"})
+        logger.warning(
+            "provider_connections.ownership_rejected provider=%s community_id=%d "
+            "linked_platform=%s -- installer is not the channel owner",
+            spec.provider,
+            community_id,
+            spec.ownership_identity_platform or "none",
+        )
+        raise OwnershipNotProven(
+            f"link your {spec.display_name} account (the channel owner's) to Waddles before "
+            "connecting this channel; only the channel owner can bind it"
+        )
+
+    async def _assert_under_community_cap(self, spec: AdapterSpec, community_id: int) -> None:
+        """Refuse (409) a connection beyond the provider's per-community cap, before any call.
+
+        The count is advisory under concurrency; the database trigger is the authority, and its
+        violation surfaces as the same :class:`ConnectionConflict` from the store.
+        """
+        cap = spec.max_connections_per_community
+        if cap is None:
+            return
+        held = await store.count_community_connections(
+            self._db, community_id=community_id, platform=spec.platform
+        )
+        if held >= cap:
+            raise ConnectionConflict(
+                f"this community already has the maximum number of {spec.display_name} "
+                f"connections ({cap})"
+            )
 
     async def create_static(
         self,
@@ -454,6 +530,7 @@ class ProviderConnectionService:
                     access_token=access_token,
                     refresh_token=refresh_token,
                     api_credential=api_credential,
+                    actor_user_id=actor_user_id,
                 )
             if enabled is not None and enabled != binding.grant.enabled:
                 updated = await store.set_enabled(
@@ -489,8 +566,13 @@ class ProviderConnectionService:
         access_token: str | None,
         refresh_token: str | None,
         api_credential: Mapping[str, Any] | None = None,
+        actor_user_id: int | None = None,
     ) -> Binding:
-        """Re-verify against the provider, then rewrite the (unshared) link in one transaction."""
+        """Re-verify against the provider, then rewrite the (unshared) link in one transaction.
+
+        A provider that ``requires_ownership`` re-proves it here (403 otherwise): a re-target or
+        credential swap is a fresh bind, and a proven edit marks a legacy row verified.
+        """
         spec = adapter.spec
         api_document = self._validated_api_credential(spec, api_credential)
         if api_document and access_token is None and metadata is None:
@@ -547,6 +629,10 @@ class ProviderConnectionService:
         resource = await adapter.resolve_resource(credentials, account, clean_metadata)
         if metadata is None and resource.resource_id != binding.connection.resource_id:
             raise ConnectionConflict("those credentials authorize a different resource")
+        if spec.requires_ownership:
+            values["ownership_verified"] = await self._prove_ownership(
+                spec, resource, actor_user_id=actor_user_id, community_id=community_id
+            )
         facts = self._compose_facts(adapter, account.scopes, resource.facts)
         facts.update(self._metadata_inputs(spec, clean_metadata))
         facts[FACT_TENANT_ID] = tenant_id
@@ -720,7 +806,12 @@ class ProviderConnectionService:
             return DataPlanePage(items=items, next_after=next_after)
 
     async def resolve(
-        self, *, community_id: int, connection_id: int, static_allowed: bool = False
+        self,
+        *,
+        community_id: int,
+        connection_id: int,
+        static_allowed: bool = False,
+        only_provider: str | None = None,
     ) -> ResolvedCredentials:
         """Hand the data plane a fresh access token for one usable binding (refresh if stale).
 
@@ -732,6 +823,10 @@ class ProviderConnectionService:
             self._db, community_id=community_id, connection_id=connection_id
         )
         if state is None:
+            raise ConnectionNotFound("connection not found")
+        if only_provider is not None and state.connection.platform != only_provider:
+            # Provider-restricted credential: same answer as "no such connection" (no oracle),
+            # and nothing is refreshed or opened for a provider it may not touch.
             raise ConnectionNotFound("connection not found")
         provider = state.connection.platform
         adapter = self._registry.get(provider)
@@ -1154,12 +1249,25 @@ class ProviderConnectionService:
             capabilities=capabilities,
             expires_at=conn.expires_at,
             updated_at=conn.updated_at,
-            metadata={
-                k: v for k, v in conn.resource_metadata.items() if k in spec.runtime_metadata_keys
-            },
+            metadata=_dataplane_metadata(spec, conn),
             kind=conn.connection_kind,
             secret_version=conn.secret_version,
         )
+
+
+def _dataplane_metadata(spec: AdapterSpec, conn: store.ConnectionRow) -> dict[str, Any]:
+    """The adapter's runtime keys, plus the framework-owned ownership flag where it applies.
+
+    ``ownership_verified`` (``"true"``/``"false"``) is set only for a provider that
+    ``requires_ownership``: svc-ingest's dedup keeps every verified binding of a channel (N:M) and
+    drops an unverified duplicate of it, never all claimants.
+    """
+    out: dict[str, Any] = {
+        k: v for k, v in conn.resource_metadata.items() if k in spec.runtime_metadata_keys
+    }
+    if spec.requires_ownership:
+        out[METADATA_OWNERSHIP_VERIFIED] = "true" if conn.ownership_verified else "false"
+    return out
 
 
 def _effective_capabilities(adapter: ProviderAdapter, conn: store.ConnectionRow) -> list[str]:

@@ -28,6 +28,7 @@ touching the DB.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -35,14 +36,20 @@ from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
-from quart import Blueprint, current_app, request
+from quart import Blueprint, after_this_request, current_app, request
 from quart_schema import validate_response
 
 from services import discord_guild_roles as roles_svc
+from services import discord_role_mirror as mirror_svc
+from services import discord_server_install as server_install_svc
+from services import guild_ownership as ownership_svc
 from services import guild_pairing as pairing_svc
+from services import install_state_binding as binding
 from services.community_common import community_in_tenant
 from services.current_user import get_current_user_id
-from services.errors import ApiError, bad_request, not_found, payment_required
+from services.errors import ApiError, bad_request, conflict, not_found, payment_required
+
+logger = logging.getLogger(__name__)
 
 guild_pairing_bp = Blueprint("v1_guild_pairing", __name__, url_prefix="/api/v1")
 
@@ -95,6 +102,22 @@ class DiscordGuildRolesResponse:
 
     success: bool
     roles: list[roles_svc.DiscordRole]
+
+
+@dataclass(slots=True, frozen=True)
+class RoleMirrorMappingResponse:
+    """Single mirror-mapping response envelope."""
+
+    success: bool
+    mapping: mirror_svc.RoleMirrorMapping
+
+
+@dataclass(slots=True, frozen=True)
+class RoleMirrorMappingListResponse:
+    """List-of-mirror-mappings response envelope."""
+
+    success: bool
+    mappings: list[mirror_svc.RoleMirrorMapping]
 
 
 # ---------------------------------------------------------------------------
@@ -164,19 +187,119 @@ async def create_pairing(
         return _err(bad_request("Request body must be a JSON object"))
 
     actor_user_id = get_current_user_id(request)
+    guild_id = str(body.get("discord_guild_id", "")).strip()
     try:
+        if not guild_id.isdigit():
+            raise bad_request("discord_guild_id must be a non-empty numeric Discord snowflake")
+        if any(
+            p.discord_guild_id == guild_id for p in pairing_svc.list_pairings(_dal(), community_id)
+        ):
+            raise conflict("This Discord server is already paired with this community")
+        # Authority, not just presence: the guild must have been installed through the
+        # OAuth flow under this tenant with an approved grant for THIS community.
+        # Existing pairings are not re-validated (grandfathered); only new creates.
+        if not server_install_svc.community_has_install_grant(_dal(), community_id, guild_id):
+            raise ApiError(
+                "This Discord server has not been installed for this community. "
+                'Use "Add Discord server" to install the bot and pair it.',
+                403,
+                "DISCORD_INSTALL_REQUIRED",
+            )
+        # Only pair a guild the tenant's bot is actually in (409 DISCORD_BOT_NOT_IN_GUILD).
+        await roles_svc.verify_bot_in_guild(_dal(), community_id, guild_id)
+        # S3: the tenant's own bot must be in the guild and the actor must administer it.
+        await ownership_svc.verify_guild_control(
+            _dal(), community_id, guild_id, actor_user_id=actor_user_id
+        )
         pairing = pairing_svc.create_pairing(
             _dal(),
             community_id,
-            discord_guild_id=str(body.get("discord_guild_id", "")),
-            direction=str(body.get("direction", "")),
-            role_name_prefix=str(body.get("role_name_prefix", "")),
+            discord_guild_id=guild_id,
+            direction=str(body.get("direction") or server_install_svc.PAIRING_DIRECTION),
+            role_name_prefix=str(
+                body.get("role_name_prefix") or server_install_svc.DEFAULT_ROLE_NAME_PREFIX
+            ),
             sync_enabled=bool(body.get("sync_enabled", False)),
+            propagate_moderators=bool(body.get("propagate_moderators", False)),
+            ownership_verified=True,
             actor_user_id=actor_user_id,
         )
     except ApiError as exc:
+        logger.warning("create_pairing rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return GuildPairingResponse(success=True, pairing=pairing), 201
+
+
+@dataclass(slots=True, frozen=True)
+class ServerInstallAuthorizeResponse:
+    """`authorize_url` envelope for the add-Discord-server flow -- never a secret."""
+
+    success: bool
+    authorize_url: str
+
+
+#: Browser-binding cookie for the add-server flow (``__Host-`` HttpOnly Secure SameSite=Lax).
+SERVER_INSTALL_BINDING_COOKIE = binding.cookie_name("dc_server_install")
+
+
+def _install_redirect_uri() -> str:
+    """The shared Discord install callback (`blueprints.v1.tenant_discord_install`)."""
+    cfg = current_app.config.get("HUB_API_CONFIG")
+    base = str(getattr(cfg, "identity_callback_base_url", "") or "").rstrip("/")
+    return f"{base}/api/v1/discord/install/callback"
+
+
+@guild_pairing_bp.route(
+    "/communities/<int:community_id>/discord/server-install/authorize", methods=["POST"]
+)
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@validate_response(ServerInstallAuthorizeResponse)
+async def start_server_install(
+    community_id: int,
+) -> ServerInstallAuthorizeResponse | tuple[dict[str, object], int]:
+    """`POST /api/v1/communities/<id>/discord/server-install/authorize`.
+
+    Body `{"sync_enabled": bool}`. Returns Discord's bot-authorize URL; the callback records
+    the install and pairs the returned guild with this community.
+    """
+    gate_error = await _feature_gate_and_tenant_check(community_id)
+    if gate_error is not None:
+        return gate_error
+    body = await request.get_json(force=True, silent=True) or {}
+    if not isinstance(body, dict):
+        return _err(bad_request("Request body must be a JSON object"))
+    sync_enabled = body.get("sync_enabled", False)
+    if not isinstance(sync_enabled, bool):
+        return _err(bad_request("sync_enabled must be a boolean"))
+    nonce = binding.new_nonce()
+    try:
+        url = await server_install_svc.build_server_install_url(
+            _dal(),
+            community_id=community_id,
+            admin_user_id=get_current_user_id(request),
+            sync_enabled=sync_enabled,
+            redirect_uri=_install_redirect_uri(),
+            binding_nonce=nonce,
+        )
+    except ApiError as exc:
+        logger.warning(
+            "start_server_install rejected: code=%s status=%s", exc.code, exc.status_code
+        )
+        return _err(exc)
+
+    @after_this_request
+    def _bind_browser(response: Any) -> Any:
+        """Bind the state to THIS browser."""
+        binding.set_binding_cookie(
+            response,
+            SERVER_INSTALL_BINDING_COOKIE,
+            nonce,
+            server_install_svc.DEFAULT_TTL_SECONDS,
+        )
+        return response
+
+    return ServerInstallAuthorizeResponse(success=True, authorize_url=url)
 
 
 # ---------------------------------------------------------------------------
@@ -213,8 +336,12 @@ async def update_pairing(
             sync_enabled=body["sync_enabled"] if "sync_enabled" in body else None,
             direction=body.get("direction"),
             role_name_prefix=body.get("role_name_prefix"),
+            propagate_moderators=(
+                bool(body["propagate_moderators"]) if "propagate_moderators" in body else None
+            ),
         )
     except ApiError as exc:
+        logger.warning("update_pairing rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return GuildPairingResponse(success=True, pairing=pairing)
 
@@ -283,7 +410,7 @@ async def create_binding(
         return _err(bad_request("Request body must be a JSON object"))
 
     try:
-        binding = pairing_svc.create_binding(
+        binding = await pairing_svc.create_binding_checked(
             _dal(),
             community_id,
             pairing_id,
@@ -293,6 +420,7 @@ async def create_binding(
             community_role=body.get("community_role"),
         )
     except ApiError as exc:
+        logger.warning("create_binding rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return RoleSyncBindingResponse(success=True, binding=binding), 201
 
@@ -318,9 +446,6 @@ async def delete_binding(community_id: int, pairing_id: int, binding_id: int) ->
     return "", 204
 
 
-BLUEPRINTS: list[Blueprint] = [guild_pairing_bp]
-
-
 # ---------------------------------------------------------------------------
 # Discord guild roles (role-sync mapping dropdown source)
 # ---------------------------------------------------------------------------
@@ -344,3 +469,77 @@ async def list_discord_roles(
     except ApiError as exc:
         return _err(exc)
     return DiscordGuildRolesResponse(success=True, roles=roles)
+
+
+# ---------------------------------------------------------------------------
+# Cross-guild Discord role mirror (migration 0099)
+# ---------------------------------------------------------------------------
+
+
+async def _list_roles_for_mirror(dal: Any, community_id: int, guild_id: str) -> list[Any]:
+    """Role lister used to prove both mapped roles exist (live Discord check)."""
+    return await roles_svc.list_guild_roles(dal, community_id, guild_id=guild_id)
+
+
+@guild_pairing_bp.route("/communities/<int:community_id>/discord/role-mirrors", methods=["GET"])
+@tenant_middleware  # type: ignore[untyped-decorator]
+@require_scope("community.guild_pairing:read")  # type: ignore[untyped-decorator]
+@validate_response(RoleMirrorMappingListResponse)
+async def list_role_mirrors(
+    community_id: int,
+) -> RoleMirrorMappingListResponse | tuple[dict[str, object], int]:
+    """`GET /api/v1/communities/<id>/discord/role-mirrors` -- mappings + last sync counters."""
+    gate_error = await _feature_gate_and_tenant_check(community_id)
+    if gate_error is not None:
+        return gate_error
+    return RoleMirrorMappingListResponse(
+        success=True, mappings=mirror_svc.list_mappings(_dal(), community_id)
+    )
+
+
+@guild_pairing_bp.route("/communities/<int:community_id>/discord/role-mirrors", methods=["POST"])
+@tenant_middleware  # type: ignore[untyped-decorator]
+@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@validate_response(RoleMirrorMappingResponse, status_code=201)
+async def create_role_mirror(
+    community_id: int,
+) -> tuple[RoleMirrorMappingResponse, int] | tuple[dict[str, object], int]:
+    """`POST /api/v1/communities/<id>/discord/role-mirrors` -- one-way source -> target mapping."""
+    gate_error = await _feature_gate_and_tenant_check(community_id)
+    if gate_error is not None:
+        return gate_error
+    body = await request.get_json(force=True, silent=True) or {}
+    if not isinstance(body, dict):
+        return _err(bad_request("Request body must be a JSON object"))
+    try:
+        mapping = await mirror_svc.create_mapping(
+            _dal(),
+            community_id,
+            source_guild_id=body.get("source_guild_id", ""),
+            source_role_id=body.get("source_role_id", ""),
+            target_guild_id=body.get("target_guild_id", ""),
+            target_role_id=body.get("target_role_id", ""),
+            list_roles=_list_roles_for_mirror,
+        )
+    except ApiError as exc:
+        logger.warning("create_role_mirror rejected: code=%s status=%s", exc.code, exc.status_code)
+        return _err(exc)
+    return RoleMirrorMappingResponse(success=True, mapping=mapping), 201
+
+
+@guild_pairing_bp.route(
+    "/communities/<int:community_id>/discord/role-mirrors/<int:mapping_id>", methods=["DELETE"]
+)
+@tenant_middleware  # type: ignore[untyped-decorator]
+@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+async def delete_role_mirror(community_id: int, mapping_id: int) -> tuple[Any, int]:
+    """`DELETE /api/v1/communities/<id>/discord/role-mirrors/<mapping_id>`."""
+    gate_error = await _feature_gate_and_tenant_check(community_id)
+    if gate_error is not None:
+        return gate_error
+    if not mirror_svc.delete_mapping(_dal(), community_id, mapping_id):
+        return _err(not_found("Mirror mapping not found"))
+    return "", 204
+
+
+BLUEPRINTS: list[Blueprint] = [guild_pairing_bp]

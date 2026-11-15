@@ -1,0 +1,95 @@
+{
+  "upstream_repo": "https://github.com/Psychoboy/PenguinTwitchBot",
+  "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+  "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)",
+  "files": [
+    {
+      "path": "golf.html",
+      "sha256": "d0d8a0a4b3d8697037eaa645deab0e26605243fe97ae156114fda068821ce5ee",
+      "size": 2879,
+      "upstream_path": "PenguinTwitchBot/wwwroot/golf.html",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "js/golf.js",
+      "sha256": "80f2ba040e86b2e2ba4eb4f511a7037e2967ba86bdcb9032c9f360cb494a9032",
+      "size": 51380,
+      "upstream_path": "PenguinTwitchBot/wwwroot/js/golf.js",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/golf_bounce.wav",
+      "sha256": "14f31dcef9db61961f8cc0cc6ed7931df7c10a9318d6fd77c6df5635eccf4609",
+      "size": 22094,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/golf_bounce.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/golf_cup.wav",
+      "sha256": "863ddca55a282f15fb5f61e7cef1cf42ef9066c277ce4ae7e50503c1d0221ced",
+      "size": 57374,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/golf_cup.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/golf_lipout.wav",
+      "sha256": "fd641088e654d691c8bf0984b322b3ab22d5b683ebaca1cf8d838239d6e7d6ea",
+      "size": 44144,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/golf_lipout.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/golf_strike.wav",
+      "sha256": "a5875bf4c5a3d0d6f6e0477362a8ee30f291a93601ed59fcb8c69abc0dbb9b72",
+      "size": 30912,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/golf_strike.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/golf_win.wav",
+      "sha256": "b7de66a2432c38e987d33ab5a43341d9ee375f4114a5d662c5436383ecc80cb4",
+      "size": 97064,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/golf_win.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    }
+  ],
+  "third_party_or_unclear": [
+    {
+      "path": "js/ws-client.js",
+      "reason": "upstream host WebSocket plumbing (topic subscription), not game material; the Waddles overlay transport differs, so not vendored",
+      "vendored": false
+    },
+    {
+      "path": "js/ws-status.js",
+      "reason": "upstream host WebSocket status badge, not game material; not vendored",
+      "vendored": false
+    },
+    {
+      "path": "js/reconnecting-websocket/reconnectingWS.min.js",
+      "reason": "third-party library with its own LICENSE.txt in upstream; not vendored",
+      "vendored": false
+    },
+    {
+      "path": "fonts.googleapis.com Fredoka/Rubik",
+      "reason": "loaded remotely by golf.html at runtime (Google Fonts, OFL); not vendored",
+      "vendored": false
+    },
+    {
+      "path": "themes and golf ball/green/flag/emote images",
+      "reason": "stored in the upstream settings database (theme golfBallImageUrl/golfGreenImageUrl/golfFlagPinImageUrl) and resolved at runtime, not files in the repo; nothing to vendor",
+      "vendored": false
+    }
+  ],
+  "notes": [
+    "golf.html is vendored unmodified and still references /js/drop-games-common.js, /js/drop-games-audio.js (vendored once in superpenguin-dropgame-core/overlay/common) and the upstream WebSocket scripts listed as unvendored; see README browser-source section.",
+    "golf.js is vendored unmodified: it simulates the shot itself from a golf_shot WebSocket message (client-authoritative upstream); see README for how the envelope maps onto that message and why the server result is authoritative here.",
+    "The repo carries no per-asset attribution for the .wav files; they are treated as covered by the repo MIT LICENSE."
+  ]
+}

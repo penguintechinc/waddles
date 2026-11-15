@@ -91,6 +91,61 @@ public class EconomyServiceClientTests
         Assert.Throws<WaddleToolException>(() => new EconomyServiceClient(tool, "event").Balance(User));
     }
 
+    private const string Victim = "22222222-2222-4222-8222-222222222222";
+
+    /// <summary>Contract fixture: the wire shape the economy `transfer_from` tool must accept (from, to, amount, reason + the invoke-slot idempotency key).</summary>
+    [Fact]
+    public void transfer_from_contract_fixture_pins_args_and_key_slot()
+    {
+        var tool = new FakeToolClient();
+        tool.Handlers[(EconomyServiceTools.Target, "transfer_from")] = _ => Encoding.UTF8.GetBytes("{\"from_balance\":90,\"to_balance\":110}");
+        var client = new EconomyServiceClient(tool, "event-1", "steal");
+        client.TransferFrom(Victim, User, 10, "steal.success");
+        client.TransferFrom(Victim, User, 10, "steal.success");
+        var call = tool.Calls[0];
+        Assert.Equal((EconomyServiceTools.Target, "transfer_from"), (call.Target, call.Tool));
+        Assert.Equal($"{{\"from\":\"{Victim}\",\"to\":\"{User}\",\"amount\":10,\"reason\":\"steal.success\"}}", call.Args);
+        Assert.NotNull(call.Key);
+        Assert.Equal(call.Key, tool.Calls[1].Key);
+        new EconomyServiceClient(tool, "event-2", "steal").TransferFrom(Victim, User, 10, "steal.success");
+        Assert.NotEqual(call.Key, tool.Calls[2].Key);
+    }
+
+    [Fact]
+    public void transfer_from_without_the_dangerous_grant_is_denied_not_granted_and_moves_nothing()
+    {
+        var tool = new FakeToolClient();
+        var ex = Assert.Throws<WaddleEconomyException>(() => new EconomyServiceClient(tool, "event").TransferFrom(Victim, User, 5, "steal.success"));
+        Assert.Equal(EconomyErrorKind.Denied, ex.Kind);
+        Assert.Equal("not_granted", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("insufficient_funds", EconomyErrorKind.InsufficientFunds)]
+    [InlineData("over_cap", EconomyErrorKind.OverCap)]
+    [InlineData("not_a_member", EconomyErrorKind.NotAMember)]
+    public void transfer_from_refusals_keep_their_typed_reason(string code, EconomyErrorKind kind)
+    {
+        var tool = new FakeToolClient();
+        tool.Handlers[(EconomyServiceTools.Target, "transfer_from")] = _ => throw new WaddleToolException(ToolErrorKind.InvalidArgs, code);
+        Assert.Equal(kind, Assert.Throws<WaddleEconomyException>(() => new EconomyServiceClient(tool, "event").TransferFrom(Victim, User, 5, "r")).Kind);
+    }
+
+    [Fact]
+    public void transfer_from_unavailable_and_invalid_inputs()
+    {
+        var tool = new FakeToolClient();
+        tool.Handlers[(EconomyServiceTools.Target, "transfer_from")] = _ => throw new WaddleToolException(ToolErrorKind.Timeout, "slow");
+        Assert.Equal(EconomyErrorKind.Unavailable, Assert.Throws<WaddleEconomyException>(() => new EconomyServiceClient(tool, "e").TransferFrom(Victim, User, 5, "r")).Kind);
+        var c = new EconomyServiceClient(tool, "e");
+        Assert.Throws<WaddleEconomyException>(() => c.TransferFrom(Victim, User, 0, "r"));
+        Assert.Throws<WaddleEconomyException>(() => c.TransferFrom(User, User, 5, "r"));
+        Assert.Throws<WaddleEconomyException>(() => c.TransferFrom(Victim, User, 5, " "));
+        Assert.Throws<WaddleEconomyException>(() => c.TransferFrom(Victim, User, ulong.MaxValue, "r"));
+        tool.Handlers[(EconomyServiceTools.Target, "transfer_from")] = _ => Encoding.UTF8.GetBytes("garbage");
+        Assert.Throws<WaddleToolException>(() => c.TransferFrom(Victim, User, 5, "r"));
+    }
+
     [Fact]
     public void missing_grant_or_message_id_never_uses_a_private_ledger()
     {

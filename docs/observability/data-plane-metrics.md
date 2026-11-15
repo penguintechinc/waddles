@@ -1,4 +1,4 @@
-# Rust data-plane metrics (svc-process, svc-action, bundle-executor)
+# Rust data-plane metrics (svc-process, svc-action, svc-bundles-executor)
 
 OTel **metrics** for the three Rust data-plane runtimes: histograms first (latency, load, size), counters for events,
 gauges for current state. Logs and traces are unchanged (`tracing` + `penguin-logging`); this is the third leg.
@@ -9,7 +9,7 @@ Spec: `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md` §13.1.
 | Service | Pipeline | Destination |
 |---|---|---|
 | svc-process, svc-action | instruments on the **global** meter provider that `penguin-logging` installs (`telemetry::init`) | OTLP push **and** the Prometheus `/metrics` scrape on `:9090` (the provider carries both readers) |
-| bundle-executor | its own meter provider (`telemetry::init_metrics`), OTLP/gRPC only | OTLP push, **only when an endpoint variable is set**; no scrape port |
+| svc-bundles-executor | its own meter provider (`telemetry::init_metrics`), OTLP/gRPC only | OTLP push, **only when an endpoint variable is set**; no scrape port |
 
 Destination is configuration, never code — the standard OTLP variables, set per deployment:
 
@@ -66,6 +66,11 @@ Guest op strings are folded through an allow-list (`KNOWN_OPS`, else `other`); t
 | `waddles_sandbox_trip_total` | counter | `stage, app_id, limit` | executor-reported trips: `timeout`, `memory`, `trap`, `denied` |
 | `waddles_spine_dlq_total` | counter | `stage, reason` | dead-letter writes by the record's `error.kind` |
 | `waddles_tenant_boundary_violations_total` | counter | `stage, reason` | §5.11 hop-verification failures |
+| `waddles_identity_decrypt_failures_total` | counter | `stage, reason` | inbound identity-field decrypt failures (`dek_unavailable`, `dek_unconfigured`, `aead`, `bad_envelope`, `not_an_envelope`); the event is dead-lettered (`IDENTITY_DECRYPT_FAILED`), never dropped |
+| `waddles_process_tokenize_memo_total` | counter | `stage, result` | **process only** — per-message PII-tokenization memo lookups (`core/svc_process/src/tokenize_memo.rs`). `result`: `miss` (this consumer ran the tokenization and the hub-api mint), `hit` (reused a completed entry), `inflight_wait` (joined another consumer's in-flight tokenization), `bypass` (memo skipped, tokenized directly). Healthy: `miss` ≈ distinct messages, `hit + inflight_wait` ≈ messages × (consuming apps − 1) |
+| `waddles_process_tokenize_mint_calls_total` | counter | `stage, outcome` | **process only** — hub-api `MintEphemeralPseudonyms` calls issued by the tokenization pass; `outcome`: `ok`, `error`. Mint calls per message = this ÷ `waddles_process_tokenize_memo_total{result="miss"}` (must be ≤ 1) |
+| `waddles_hub_dek_cache_total` | counter | `result` | **shared by svc-ingest and svc-process** (`core/hub_client/src/dek.rs`, no `stage` label — emitted from the shared client) — every tenant stream-DEK resolution. `result`: `hit` (served from the `(tenant, key version)` cache), `miss` (this caller was the single-flight leader and made the hub-api `KeyService.GetStreamDek` call), `inflight_wait` (waited behind a leader and was served its fresh key), `negative` (answered with a recent failure — own or shared — inside the jittered backoff window, no broker call). Healthy steady state: ~all `hit`; `miss` ≈ tenants × TTL windows (not × consumers); a cold start with N concurrent consumers is 1 `miss` + N−1 `inflight_wait`. A rising `negative` with flat `miss` is a hub-api outage being absorbed without a retry stampede (`waddles_identity_decrypt_failures_total{reason="dek_unavailable"}` shows the dead-letters) |
+| `waddles_hub_service_jwt_total` | counter | `result, scope` | **shared by every service using `service_auth::MachineJwtClient`** — machine-JWT acquisitions per hub-api scope (a handful of configured scopes, e.g. `key:stream-dek:read`). `result`: `reuse` (cache hit — the steady state, ≈ every call), `refresh` (a `MintServiceToken` round trip succeeded: expect ~1 per scope per 12 min at the 900 s token TTL, refreshed at 80% of lifetime), `refresh_failed` (mint failed; callers got the old still-valid token, or the shared error). `refresh` ≈ hub-api `service_jwt.issue` audit lines for that scope — if it tracks request rate, single-flight is broken |
 | `waddles_consumer_skipped_total` | counter | `stage, app_id, reason` | read + acked without an executor call (e.g. `route_denied`) |
 | `waddles_stream_trimmed_total` | counter | `stage` | `XADD` observed the stream at its approximate `MAXLEN` |
 | `waddles_stream_claimed_total` | counter | `stage, app_id` | `XAUTOCLAIM` recoveries |
@@ -92,7 +97,7 @@ Notes:
   consumer per interval.
 - Pre-existing `svc_process_*` / `svc_action_*` / `host_api_*` Prometheus-native series are untouched.
 
-## bundle-executor
+## svc-bundles-executor
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
@@ -110,17 +115,35 @@ Notes:
 | `waddles_executor_host_call_seconds` | histogram | `capability, op, result` | host-call round trip executor→stage→executor; `result`: `ok`, `denied`, `error`, `connection_lost`, `backpressure`, `malformed` |
 | `waddles_executor_sandbox_trip_total` | counter | `app_id, limit` | `timeout`, `memory`, `trap` |
 | `waddles_executor_invocations_active` | gauge (up/down) | — | guests currently executing (decrements on every exit path) |
-| `waddles_executor_bundles_loaded` | gauge | — | resident compiled components (distinct digests); explicit `0` after a disconnect wipe |
-| `waddles_executor_connection_attempts_total` | counter | `result` | `connected`, `failed` |
-| `waddles_executor_connection_up` | gauge | — | `1` while the host-API session is established, explicit `0` otherwise |
-| `waddles_executor_session_seconds` | histogram | — | length of each established session |
-| `waddles_executor_outage_seconds` | histogram | — | downtime between a session ending and the next connecting |
+| `waddles_executor_bundles_loaded` | gauge | — | digests in one stage's registry; explicit `0` after a disconnect wipe |
+| `executor_loaded_modules` | gauge | — | compiled modules resident in the process-wide shared cache (all stages, executor-scale T1) |
+| `executor_memory_bytes` | gauge | — | estimated resident compiled-code bytes in the shared cache (budget `EXECUTOR_MEMORY_BUDGET_MB`) |
+| `executor_load_duration_seconds` | histogram | `source, result` | time to make one module resident; `source`: `aot` (verified `.cwasm` deserialize), `compile` (JIT) |
+| `executor_precompile_fallback_total` | counter | `reason` | AOT misses that fell back to JIT (logged at ERROR); `reason`: `fetch`, `signature`, `deserialize` |
+| `executor_module_evictions_total` | counter | — | idle unpinned modules evicted (LRU) to honour the memory budget; they reload on their next call |
+| `waddles_executor_connection_attempts_total` | counter | `result`, `stage` | `connected`, `failed` |
+| `waddles_executor_connection_up` | gauge | `stage` | `1` while that stage's host-API session is established, explicit `0` otherwise (one series per configured stage) |
+| `waddles_executor_session_seconds` | histogram | `stage` | length of each established session |
+| `waddles_executor_outage_seconds` | histogram | `stage` | downtime between a session ending and the next connecting |
 | `waddles_executor_reconnects_total` | counter | — | trips round the dial loop |
 | `waddles_executor_heartbeat_timeouts_total` | counter | — | sessions dropped as stale |
 
 The executor never creates spans (spec §13.2) and every number is measured by trusted host code around the guest, so a
 hostile bundle cannot forge a series. Its view differs from the stage's `waddles_executor_call_seconds` by exactly the wire
 round trip; both are kept.
+
+## hub-api call protection (stampede control)
+
+Every per-app consumer shares one process-wide stream-DEK provider and one machine-JWT client per scope, so N
+concurrent consumers cost **one** hub-api call, not N:
+
+| Layer | Behaviour | Tunables (code constants) |
+|---|---|---|
+| Machine JWT (`service_auth::MachineJwtClient`) | cached per scope; refreshed at 80% of lifetime (or `exp − 30 s`); one in-flight refresh, waiters share it; a failed refresh is replayed for a jittered ~500 ms (old token served if still valid) | `TOKEN_REFRESH_PERCENT`, `TOKEN_REFRESH_FAILURE_BACKOFF` |
+| Stream DEK (`hub_client::dek::CachedDekProvider`) | TTL cache keyed `(tenant, key version)` (bounded, ≤ 4096 keys); single-flight per key; failures negative-cached with jittered exponential backoff (250 ms → 5 s) and shared by all waiters; an `invalidate` racing a fetch is served but never cached | `NEGATIVE_BACKOFF_BASE/CAP`, `DEK_CACHE_MAX_ENTRIES` |
+| Circuit breaker (`hub_client::CircuitBreaker`, one per RPC class) | opens after 5 consecutive failed *attempts* (`BREAKER_FAILURE_THRESHOLD`; one failed call is ≤ 3 attempts, so a single coalesced failure never opens it); sheds for 30 s (`BREAKER_RESET_AFTER`); then exactly **one** half-open probe; failures of calls already in flight when it opened are ignored (no window extension, one `hub_client.circuit_opened` log per open) | threshold / reset passed to `CircuitBreaker::new` |
+
+Fail-closed is unchanged: no key / no token means the event is dead-lettered, never forwarded as ciphertext or raw PII.
 
 ## How tests prove emission (not just definition)
 
@@ -142,3 +165,22 @@ round trip; both are kept.
 | Capability host crates (`bundle_host_kv`, `_db`, `_economy`, `_reputation`) and `svc_process::identity` register instruments **with** `_seconds`/`_total` suffixes | via the Prometheus bridge they scrape as `…_seconds_seconds` / `…_total_total`, so dashboards querying the single-suffixed names read empty on the scrape path (OTLP→Prometheus translators that de-duplicate are unaffected). Fix = rename the instruments (see *Naming*), a separate, dashboard-visible change |
 | `host_api::Connection::invoke` has no timeout and the read loop's EOF does not fail pending requests | an executor that dies mid-invoke can leave that consumer's `invoke` pending forever; only `heartbeat`/`mark_closed` stop *new* invokes. Found while testing the closed-connection path |
 | `svc_ingest` / `svc_streaming` | out of scope for this change |
+
+## Command latency SLA (svc-ingest, svc-process, svc-action)
+
+Owner SLA: non-external commands p99 < 1 s, first door -> outbound platform call confirmed. The first-door stamp
+rides the envelope's W3C `tracestate` (`waddles=t0:...`), so no payload or spine change. Full design, spans, logs,
+canary, handoff list and the ranked latency suspects: [`command-latency.md`](command-latency.md). Everything is behind
+the opt-out kill switch `waddles.disable-command-latency-telemetry` (unseen/OFF = telemetry ON).
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `waddles_command_hop_seconds` | histogram | `hop` (`ingest_publish`, `queue_wait`, `process_stage`, `action_queue_wait`, `dispatch_to_invoke`, `executor_to_outbound`, `outbound_call`) | seconds one command spent in one hop; 5 ms-10 s buckets with extra resolution at 0.5-1.5 s |
+| `waddles_command_e2e_seconds` | histogram | `command` (registered commands only, else `other`), `bundle_lang` (closed set, unmapped `unknown`), `outcome` (`ok`, `refused`, `timeout`, `error`), `door` (`gateway`, `sink`, `http`, `publish`) | first door -> outbound op confirmed, recorded where svc-action sees the Discord ack |
+| `waddles_command_e2e_over_budget_total` | counter | `command`, `bundle_lang`, `outcome` | e2e >= 1.0 s |
+| `waddles_command_latency_marker_invalid_total` | counter | `reason` (`skewed`, `stale`, `missing`) | first-door stamps refused: a forged/skewed stamp only skips its own sample |
+| `waddles_canary_e2e_seconds` | histogram | `outcome` | synthetic canary command, same end point as a user command |
+| `waddles_canary_failures_total` | counter | `reason` | `timeout` (>5 s), `misconfigured`, `publish_failed`, `store_unavailable`, `not_ok`, `result_unreadable` |
+
+Label policy holds: no id, user, message text, channel or slug is ever a label; `command` is a registry lookup,
+never the user's text.

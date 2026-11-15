@@ -419,6 +419,60 @@ def test_derive_capabilities_includes_kv_when_declared() -> None:
     assert KV_PERMISSION_ID in caps
 
 
+_STRUCTURED_KV = [{"id": KV_PERMISSION_ID, "justification": "persists per-community counters"}]
+
+
+def test_derive_capabilities_includes_kv_for_a_structured_permission_declaration() -> None:
+    """Regression: `- id: storage.kv` (the real schema) must grant `kv`, not just the bare string.
+
+    Before the fix `_derive_capabilities` read only the bare-string `permissions` tuple, so every
+    bundle using the structured shape (count/cringe/hype/...) was denied `kv` by the data plane's
+    interim `authorize_kv` check -- every `!`-command then answered "Something went wrong updating
+    the counter storage".
+    """
+    manifest = _parse_derived_manifest(permissions=_STRUCTURED_KV)
+    assert manifest.permissions == ()  # structured entries never land in the bare-string tuple
+    assert KV_PERMISSION_ID in _derive_capabilities(manifest)
+
+
+def test_derive_capabilities_includes_kv_after_the_trusted_reparse_round_trip() -> None:
+    """The production path (`get_permission_summary`) re-parses the stored manifest blob."""
+    from services.bundle_approval_service import _reparse_trusted
+
+    raw = {**_MANIFEST, "permissions": _STRUCTURED_KV}
+    assert KV_PERMISSION_ID in _derive_capabilities(_reparse_trusted(raw))
+
+
+def test_derive_capabilities_omits_kv_for_an_unrelated_structured_declaration() -> None:
+    manifest = _parse_derived_manifest(
+        permissions=[{"id": "chat.send:discord", "justification": "replies to the invoking user"}]
+    )
+    assert KV_PERMISSION_ID not in _derive_capabilities(manifest)
+
+
+def test_every_shipped_bundle_declaring_storage_kv_derives_the_kv_capability() -> None:
+    """Real-path: each in-repo hub-manifest declaring `storage.kv` yields the capability."""
+    import pathlib
+
+    import yaml
+
+    root = pathlib.Path(__file__).resolve().parents[2] / "bundles"
+    manifests = sorted(root.rglob("hub-manifest.yaml"))
+    declaring = 0
+    for path in manifests:
+        raw = yaml.safe_load(path.read_text())
+        perms = raw.get("permissions") or []
+        ids = {p["id"] if isinstance(p, dict) else p for p in perms}
+        if KV_PERMISSION_ID not in ids:
+            continue
+        declaring += 1
+        from services.bundle_approval_service import _reparse_trusted
+
+        assert KV_PERMISSION_ID in _derive_capabilities(_reparse_trusted(raw)), path
+    assert manifests, "no hub-manifest.yaml examined -- scanner pointed at the wrong root"
+    assert declaring > 0, "no bundle declares storage.kv -- scanner pointed at the wrong root"
+
+
 def test_derive_capabilities_always_includes_the_unconditional_set() -> None:
     manifest = _parse_derived_manifest(permissions=[])
     caps = _derive_capabilities(manifest)
@@ -461,3 +515,38 @@ async def test_uninstall_globally_finishes_the_cascade_then_raises_when_the_audi
         ).select()
     ).first()
     assert revoked.revoked_at is not None
+
+
+async def test_install_version_globally_is_idempotent_for_same_artifact(install_dal: Any) -> None:
+    """Regression: a repeat approve (e.g. after the seeder) hit uq_app_global_installs_current."""
+    await _seed_published(install_dal)
+    kwargs = {"app_id": "waddles.socials.music.default", "version": "3.0.1", "installed_by": 1}
+    first = await install_version_globally(install_dal, **kwargs)
+    second = await install_version_globally(install_dal, **kwargs)
+    assert second.id == first.id
+    rows = await install_dal(install_dal.app_global_installs.version == "3.0.1").select()
+    assert len(list(rows)) == 1
+
+
+async def test_install_version_globally_different_digest_is_409_version_conflict(
+    install_dal: Any,
+) -> None:
+    """A different artifact at an already-installed (app_id, version) is a typed 409, never 500."""
+    await _seed_published(install_dal)
+    kwargs = {"app_id": "waddles.socials.music.default", "version": "3.0.1", "installed_by": 1}
+    await install_version_globally(install_dal, **kwargs)
+    other_id = await install_dal.app_versions.async_insert(
+        app_id="waddles.socials.music.default",
+        version="3.0.1-rebuild",
+        artifact_digest="sha256:" + "b" * 64,
+        language="python",
+        artifact_kind="source",
+        scan_status="scanned",
+    )
+    await install_dal(
+        (install_dal.app_version_uploads.app_id == "waddles.socials.music.default")
+        & (install_dal.app_version_uploads.version == "3.0.1")
+    ).update(app_version_id=other_id)
+    with pytest.raises(ApiError) as exc:
+        await install_version_globally(install_dal, **kwargs)
+    assert (exc.value.status_code, exc.value.code) == (409, "version_conflict")

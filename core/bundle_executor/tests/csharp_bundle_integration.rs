@@ -87,6 +87,7 @@ fn hello_body() -> HelloBody {
             runtime: "runc".to_string(),
             verified: false,
         },
+        executor_id: None,
     }
 }
 

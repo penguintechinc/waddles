@@ -54,8 +54,47 @@ TenantEnvelopeService ──► KmsAdapter (Protocol) ──► PlatformKekAdapt
    parametrized scenarios in `test_service_byok.py` (revocation, outage, exit ramp, no-log-leak).
 5. Chart: provider id + credentials Secret in `_kms.tpl`'s validation and `kms.yaml`.
 
+## Provisioning and data-plane key distribution
+
+`TenantEnvelopeService.ensure_tenant_key` is wired into tenant create, hub-api startup and an
+idempotent backfill (`services/tenant_key_provisioning.py`), and the data plane gets the tenant's
+at-rest data subkey (never the raw DEK) from `KeyService.GetTenantDek`, served by the same
+`StreamDekBroker` as `GetStreamDek` (below). See
+`docs/guides/tenant-key-provisioning.md` for the contract.
+
 ## Tests
 
 `hub_api/tests/envelope/` -- see the module docstrings. Real Postgres (`test_repository_pg.py`) needs docker
 (skipped without it, like the repo's other PG tests); the SeaweedFS E2E is opt-in
 (`make test-seaweedfs-sse-kms`).
+
+## Data-plane DEK invalidation
+
+`rotate_dek` (after the new version commits) and a KMS access-denied revocation `XADD` `keys:tenant-dek:invalidate` with `tenant`, `purpose=at-rest`, `reason` (`rotated`/`revoked`) - the stream `core/bundle_host_crypto` listens on. No key material is carried; the stream is unauthenticated like `bundle:grants:invalidate` (Valkey ACL + TLS). A failed publish logs ERROR (`dek-invalidation-lost`), counts `waddles_envelope_operations_total{operation=dek_invalidation_publish,result=error}`, and raises `DekInvalidationPublishError` on rotation; data-plane caches then fall back to their TTL.
+
+## Stream identity-field DEKs (`KeyService.GetStreamDek`, #442)
+
+A second key lineage, `ingest-stream`, lives in the same `keystore.tenant_encryption_keys`
+table (`purpose='ingest-stream'`), wrapped by the same KEK as the tenant's at-rest keys
+(platform `TENANT_KEK_HEX`, or the tenant's BYOK key once activated). `build_envelope_runtime`
+wires `runtime.stream_service` (lineage-separated subkeys) and registers the stream repository
+as a sibling of the at-rest service, so BYOK activate / disable / re-wrap move both lineages
+together -- a disable never strands stream DEKs under a dropped customer key.
+
+`services/stream_dek_broker.py` serves them over internal gRPC only:
+
+| Field | Contract |
+|---|---|
+| Scope | `key:stream-dek:read` -- granted only to `svc-ingest` + `svc-process` (`serviceJwt.identities`) and re-checked by SPIFFE service name |
+| `tenant_id` | numeric tenant id (never a slug); tenant-bound tokens get only their own tenant, `system` any existing one |
+| `purpose` | `ingest-stream` |
+| `version` | `0` = active (provisioned on first use); `N` = that version (active or retired) |
+| `caller_ephemeral_public_key` | 32 raw X25519 bytes, fresh per request |
+| `sealed_dek` | `enc(32) || AES-256-GCM(ct||tag)`; `key||nonce = HKDF-SHA256(salt=None, ikm=X25519(eph, enc), info=ctx, 44)`, AAD = ctx |
+| ctx | `"<service>|<tenant_id>|<purpose>|<version>"`, service = SPIFFE last segment (`svc-ingest`) |
+| `version` (resp) | the DEK version = key id; ciphertext must carry it |
+| `ttl_seconds` | caller cache TTL, `STREAM_DEK_TTL_SECONDS` (default 600, bounds 60..3600) |
+
+Every decision (issued or refused) writes `keystore.stream_dek_issuances` (alembic 0101); a
+sealed key is returned only after its `issued` row commits. Rotate with
+`runtime.stream_service.rotate_dek(tenant_id)`; old versions stay retrievable.

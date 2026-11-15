@@ -77,6 +77,6 @@ Labels attached to a user, keyed by the user's UUID.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Something went wrong accessing ... storage` | The kv call failed. | Retry; check bundle-executor logs. |
+| `Something went wrong accessing ... storage` | The kv call failed. | Retry; check svc-bundles-executor logs. |
 | `!rsvp` rejected | Caller identity is not linked. | Link your Waddles identity. |
 | Mod verb refused | No role information from the platform. | Run it as the broadcaster. |

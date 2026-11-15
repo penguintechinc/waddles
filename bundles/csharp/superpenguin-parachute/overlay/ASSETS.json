@@ -1,0 +1,119 @@
+{
+  "upstream_repo": "https://github.com/Psychoboy/PenguinTwitchBot",
+  "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+  "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)",
+  "files": [
+    {
+      "path": "js/parachute.js",
+      "sha256": "bed29403894427211ca8542c84ec8e1ae8c03abcfaff242b4ec883079c9019ab",
+      "size": 112764,
+      "upstream_path": "PenguinTwitchBot/wwwroot/js/parachute.js",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/cannonball.wav",
+      "sha256": "d511214318a6fb4fea9081ac3b536b93cd36cd6794f55e618391799235bc73c9",
+      "size": 114704,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/cannonball.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/droplet.wav",
+      "sha256": "6b4d35cbb9642809cc053a3fb3673f4fd9ea22257d6409b16cb6e60e9dda75f3",
+      "size": 42380,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/droplet.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/droplet_hit.wav",
+      "sha256": "f141b8aeb89a9f029d650348f0dad246092bdeacf90a7e870ee99d1ffb1f59de",
+      "size": 10628,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/droplet_hit.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/parachute_drop.wav",
+      "sha256": "25fd1d9076842286634fad742d4461005ed8036e0b4580bac1cc710d4572f3c2",
+      "size": 37088,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/parachute_drop.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/parachute_pop.wav",
+      "sha256": "abd4be3fff85c279b8013eb7c03d12fd4ed5956ab32a1026d43e4a51fba43a35",
+      "size": 30912,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/parachute_pop.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/rocket_explode.wav",
+      "sha256": "ed2effa8f35e82b3689af94e0c43400395668472407ce797bcbbfd241ec8b3ff",
+      "size": 105884,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/rocket_explode.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/rocket_launch.wav",
+      "sha256": "0da47fc5d6ce05deed2c017292cf3b1b66b00654482f8093a62cf39d264d794a",
+      "size": 97064,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/rocket_launch.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/splat.mp3",
+      "sha256": "7083300c8dc7c8356f6efe72e9aadaf2473362b91b7f0bf6e3cd1dbf33ae66fe",
+      "size": 25064,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/splat.mp3",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "parachute.html",
+      "sha256": "25985626b992338d6690e051949c9f7bb0322434e16b9198415a303d3bc46190",
+      "size": 2878,
+      "upstream_path": "PenguinTwitchBot/wwwroot/parachute.html",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    }
+  ],
+  "third_party_or_unclear": [
+    {
+      "path": "js/ws-client.js",
+      "reason": "upstream host WebSocket plumbing (topic subscription), not game material; the Waddles overlay transport differs, so not vendored",
+      "vendored": false
+    },
+    {
+      "path": "js/ws-status.js",
+      "reason": "upstream host WebSocket status badge, not game material; not vendored",
+      "vendored": false
+    },
+    {
+      "path": "js/reconnecting-websocket/reconnectingWS.min.js",
+      "reason": "third-party library with its own LICENSE.txt in upstream; not vendored",
+      "vendored": false
+    },
+    {
+      "path": "fonts.googleapis.com Fredoka/Rubik",
+      "reason": "loaded remotely by parachute.html at runtime (Google Fonts, OFL); not vendored",
+      "vendored": false
+    },
+    {
+      "path": "themes (spring/summer/fall/winter) and character, canopy and droplet images",
+      "reason": "stored in the upstream settings database (DropGameTheme) and resolved from Twitch emotes at runtime, not files in the repo; nothing to vendor",
+      "vendored": false
+    }
+  ],
+  "notes": [
+    "parachute.html is vendored unmodified and still references /js/drop-games-common.js, /js/drop-games-audio.js (vendored once in superpenguin-dropgame-core/overlay/common) and the upstream WebSocket scripts listed as unvendored; see README browser-source section.",
+    "The repo carries no per-asset attribution for the .wav/.mp3 files (parachute_drop, parachute_pop, droplet, droplet_hit, rocket_launch, rocket_explode, cannonball, splat); they are treated as covered by the repo MIT LICENSE, exactly as the plinko sounds are. splat.mp3 and cannonball.wav have no per-file provenance either: confirm with the upstream author before a public release.",
+    "round_start.wav / round_end.wav (the default session sounds named by ParachuteGameSettings.StartSound/EndSound) live in superpenguin-dropgame-core/overlay/common/media."
+  ]
+}

@@ -14,13 +14,13 @@
 -- of being silently lost when SKIP_DB_INIT=true.
 --
 -- SECURITY (CWE-798, OWASP A07): this migration NEVER plants a default or
--- known credential. It creates an initial super-admin ONLY when both
+-- known credential. It creates an initial global admin (system-tenant admin) ONLY when both
 -- waddlebot.initial_admin_email / waddlebot.initial_admin_password custom
 -- GUCs are populated (from the INITIAL_ADMIN_EMAIL / INITIAL_ADMIN_PASSWORD
 -- process env vars -- see alembic/versions/0001_baseline_from_sql_migrations.py
 -- and config/postgres/migrations/run-migrations.sh, which both set these
 -- GUCs via `SELECT set_config(...)` before this file runs, in whichever
--- execution path applies) AND only if no super-admin exists yet. If the env
+-- execution path applies) AND only if no global admin exists yet. If the env
 -- vars are unset, NO admin account is created -- boot continues normally.
 --
 -- Uses pgcrypto's crypt(..., gen_salt('bf', 12)) to produce a real bcrypt
@@ -33,23 +33,52 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- Global identity is derived from tenancy (alembic 0096): the initial admin becomes a member + tenant
+-- admin of the reserved `system` tenant. This file stays valid on BOTH sides of 0096 -- it never
+-- names hub_users.is_super_admin directly (the column is dropped by 0096); a pre-0096 database that
+-- still carries it is detected through information_schema and consulted dynamically.
+CREATE TABLE IF NOT EXISTS tenant_members (
+    id SERIAL PRIMARY KEY,
+    tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES hub_users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (tenant_id, user_id)
+);
+
 DO $$
 DECLARE
     v_admin_email TEXT := NULLIF(current_setting('waddlebot.initial_admin_email', true), '');
     v_admin_password TEXT := NULLIF(current_setting('waddlebot.initial_admin_password', true), '');
     v_admin_id INTEGER;
+    v_system_id INTEGER;
+    v_legacy_admin_exists BOOLEAN := FALSE;
 BEGIN
+    SELECT id INTO v_system_id FROM tenants WHERE slug = 'system';
+    IF v_system_id IS NULL THEN
+        INSERT INTO tenants (slug, display_name, is_global) VALUES ('system', 'System', FALSE)
+        RETURNING id INTO v_system_id;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'hub_users'
+          AND column_name = 'is_super_admin'
+    ) THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM hub_users WHERE is_super_admin = true)'
+            INTO v_legacy_admin_exists;
+    END IF;
+
     IF v_admin_email IS NULL OR v_admin_password IS NULL THEN
         RAISE NOTICE 'INITIAL_ADMIN_EMAIL/INITIAL_ADMIN_PASSWORD not set - skipping initial admin bootstrap. No default admin account is created.';
-    ELSIF EXISTS (SELECT 1 FROM hub_users WHERE is_super_admin = true) THEN
-        RAISE NOTICE 'A super-admin already exists - skipping initial admin bootstrap.';
+    ELSIF v_legacy_admin_exists
+          OR EXISTS (SELECT 1 FROM tenant_admins WHERE tenant_id = v_system_id) THEN
+        RAISE NOTICE 'A global admin already exists - skipping initial admin bootstrap.';
     ELSE
-        INSERT INTO hub_users (email, username, password_hash, is_super_admin, is_active, email_verified)
+        INSERT INTO hub_users (email, username, password_hash, is_active, email_verified)
         VALUES (
             v_admin_email,
             v_admin_email,
             crypt(v_admin_password, gen_salt('bf', 12)),
-            true,
             true,
             true
         )
@@ -57,9 +86,13 @@ BEGIN
         RETURNING id INTO v_admin_id;
 
         IF v_admin_id IS NULL THEN
-            RAISE WARNING 'Initial admin bootstrap: INITIAL_ADMIN_EMAIL is already in use by an existing account - not escalating it to super-admin.';
+            RAISE WARNING 'Initial admin bootstrap: INITIAL_ADMIN_EMAIL is already in use by an existing account - not escalating it to global admin.';
         ELSE
-            RAISE NOTICE 'Initial super-admin created with ID: %', v_admin_id;
+            INSERT INTO tenant_members (tenant_id, user_id) VALUES (v_system_id, v_admin_id)
+            ON CONFLICT (tenant_id, user_id) DO NOTHING;
+            INSERT INTO tenant_admins (tenant_id, user_id, role) VALUES (v_system_id, v_admin_id, 'tenant-owner')
+            ON CONFLICT (tenant_id, user_id) DO NOTHING;
+            RAISE NOTICE 'Initial global admin created with ID: %', v_admin_id;
         END IF;
     END IF;
 END

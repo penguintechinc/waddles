@@ -1,0 +1,61 @@
+# hub-api install-pipeline manifest (bundle_manifest_v2) for the reputation-accrual APP bundle.
+# Keep version/permissions/requested_tools in lockstep with bundle.yaml.
+schema_version: 2
+app_id: waddles.core.app.reputation-accrual
+name: Reputation Accrual Bundle (Rust)
+version: 1.0.0
+feature: waddles.core.app
+module: core
+provider: builtin
+author: github:penguintechinc
+license: AGPL-3.0-or-later
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/reputation-accrual
+language: rust
+artifact: prebuilt
+execution_model: native
+is_default: false
+kind: app
+# provides: reputation-logic  (default reputation LOGIC bundle; mirrored as a top-level key below)
+provides: reputation-logic
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message", "channel.follow", "channel.followed", "channel.subscribe", "channel.subscription.gift", "channel.subscription.gifts", "channel.cheer", "channel.raid", "donation", "tip", "boost", "server_boost", "giveaway.entry", "raffle.entry", "moderation.warn", "moderation.timeout", "moderation.kick", "moderation.ban"]
+      - platform: discord
+        event_types: ["chat.message", "channel.follow", "channel.followed", "channel.subscribe", "channel.subscription.gift", "channel.subscription.gifts", "channel.cheer", "channel.raid", "donation", "tip", "boost", "server_boost", "giveaway.entry", "raffle.entry", "moderation.warn", "moderation.timeout", "moderation.kick", "moderation.ban"]
+      - platform: kick
+        event_types: ["chat.message", "channel.follow", "channel.followed", "channel.subscribe", "channel.subscription.gift", "channel.subscription.gifts", "channel.cheer", "channel.raid", "donation", "tip", "boost", "server_boost", "giveaway.entry", "raffle.entry", "moderation.warn", "moderation.timeout", "moderation.kick", "moderation.ban"]
+      - platform: youtube
+        event_types: ["chat.message", "channel.follow", "channel.followed", "channel.subscribe", "channel.subscription.gift", "channel.subscription.gifts", "channel.cheer", "channel.raid", "donation", "tip", "boost", "server_boost", "giveaway.entry", "raffle.entry", "moderation.warn", "moderation.timeout", "moderation.kick", "moderation.ban"]
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 5000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: flags.read
+    justification: "reads waddles.reputation-accrual (default OFF) and the waddles.disable-bundle-reputation kill switch"
+  - id: storage.kv
+    justification: "per-community accrual config (key accrual), per-user cooldown slots and the 24h low-score notice slot"
+  - id: identity.resolve
+    justification: "resolves the verified actor to a community user UUID (never stores handles)"
+  - id: "tool.call:waddles.core.service.reputation:adjust"
+    justification: "applies ACTIVITY-class reputation deltas (|delta| <= 5) for platform events"
+    params:
+      write: true
+  - id: "tool.call:waddles.core.service.reputation:apply_moderation"
+    justification: "applies MODERATION-class deltas (warn/timeout/kick/ban) to the moderated user"
+    params:
+      write: true
+routes_to: []
+requested_tools:
+  - tool: adjust
+    access: write
+    target_app_id: waddles.core.service.reputation
+  - tool: apply_moderation
+    access: write
+    target_app_id: waddles.core.service.reputation

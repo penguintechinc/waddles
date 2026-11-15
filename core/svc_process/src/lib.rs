@@ -40,6 +40,7 @@
 pub mod active_digests;
 pub mod ai;
 pub mod builtins;
+pub mod bundle_admin;
 pub mod bundle_loader;
 pub mod capabilities;
 pub mod changelog_consumer;
@@ -56,10 +57,12 @@ pub mod license;
 pub mod media;
 pub mod metrics_facade;
 pub mod pii_tokenize;
+pub mod scope_names;
 pub mod source_supervisor;
 pub mod spine;
 pub mod stage_metrics;
 pub mod telemetry;
+pub mod tokenize_memo;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -203,6 +206,96 @@ fn build_ai_wiring(
             None
         }
     }
+}
+
+/// Resolves the deployment environment name the dev-DEK gate is checked against.
+///
+/// An unset `WADDLES_ENV` must never satisfy the dev gate, so it resolves to `production`
+/// (which `LocalDevDekProvider` refuses) -- and the fallback is logged, not silent. A value that
+/// is set but not valid unicode is likewise treated as `production` and logged as an error.
+fn dev_gate_environment(raw: Result<String, std::env::VarError>) -> String {
+    match raw {
+        Ok(name) => name,
+        Err(std::env::VarError::NotPresent) => {
+            tracing::warn!(
+                "WADDLES_ENV is unset; treating the environment as production for the \
+                 INGEST_DEV_KEK gate (the dev key provider will be refused)"
+            );
+            "production".to_string()
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            tracing::error!(
+                "WADDLES_ENV is not valid unicode; treating the environment as production \
+                 for the INGEST_DEV_KEK gate (the dev key provider will be refused)"
+            );
+            "production".to_string()
+        }
+    }
+}
+
+/// Builds this stage's tenant stream-DEK source (`crate::identity_crypto`): the counterpart of
+/// svc-ingest's encrypt side, shared by every consumer through `Config::identity_dek`.
+///
+/// Production posture: `ConfiguredDekProvider::hub` over a `hub_client::HubClient` holding the
+/// `key:stream-dek:read` scope. The machine JWT is minted/cached/refreshed by
+/// `service_auth::MachineJwtClient` from the pod's projected ServiceAccount token; DEKs come
+/// from hub-api's internal gRPC `KeyService`, sealed to a per-call ephemeral X25519 key, and
+/// every failure is fail-closed (the event is dead-lettered, see `spine::decrypt_inbound_event`).
+/// The channel is lazy, so the stage starts before hub-api is reachable.
+///
+/// Dev/alpha only: when `INGEST_DEV_KEK` is set AND `WADDLES_ENV` is `alpha`/`local`,
+/// `LocalDevDekProvider` is used (the same hard gate svc-ingest applies -- it must be the same
+/// KEK there). Set but refused (any other environment) is logged and falls through to the
+/// broker, never to a silently-accepted dev key.
+///
+/// # Errors
+/// `HUB_API_GRPC_ENDPOINT` (https) and `SERVICE_JWT_TOKEN_ENDPOINT` are required: a stage that
+/// could only ever dead-letter every identity-bearing event must not start looking healthy.
+fn build_dek_provider(
+    cli: &config::CliConfig,
+) -> anyhow::Result<hub_client::dek::ConfiguredDekProvider> {
+    use hub_client::dek::{ConfiguredDekProvider, LocalDevDekProvider, STREAM_DEK_SCOPE};
+
+    if std::env::var_os("INGEST_DEV_KEK").is_some() {
+        let env_name = dev_gate_environment(std::env::var("WADDLES_ENV"));
+        match LocalDevDekProvider::new(&env_name, "INGEST_DEV_KEK") {
+            Ok(provider) => return Ok(ConfiguredDekProvider::local_dev(provider)),
+            Err(err) => tracing::error!(
+                error = %err,
+                "INGEST_DEV_KEK is set but LocalDevDekProvider was refused; using the \
+                 hub-api key broker (never a silent dev-key fallback outside alpha/local)"
+            ),
+        }
+    }
+    let endpoint = cli.hub_api_grpc_endpoint.trim();
+    if endpoint.is_empty() || cli.service_jwt_token_endpoint.trim().is_empty() {
+        anyhow::bail!(
+            "identity-field decryption needs HUB_API_GRPC_ENDPOINT and \
+             SERVICE_JWT_TOKEN_ENDPOINT to fetch tenant DEKs from hub-api's key broker; \
+             refusing to start a stage that could only dead-letter every event"
+        );
+    }
+    if !endpoint.to_ascii_lowercase().starts_with("https://") {
+        anyhow::bail!(
+            "HUB_API_GRPC_ENDPOINT must be https:// (tenant DEK delivery is never plaintext)"
+        );
+    }
+    let ca =
+        (!cli.hub_api_grpc_ca_file.trim().is_empty()).then_some(cli.hub_api_grpc_ca_file.as_str());
+    let client = hub_client::HubClient::connect_lazy(
+        endpoint,
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        STREAM_DEK_SCOPE,
+        ca,
+    )
+    .map_err(|e| anyhow::anyhow!("key broker client unavailable: {e}"))?;
+    tracing::info!(
+        endpoint = %endpoint,
+        scope = STREAM_DEK_SCOPE,
+        "identity-field DEKs are fetched from hub-api's KeyService"
+    );
+    Ok(ConfiguredDekProvider::hub(Arc::new(client), "svc-process"))
 }
 
 /// Builds and connects the shared `hub_client::HubClient` the inbound
@@ -406,6 +499,10 @@ where
     // would bind to the no-op default provider and silently record nothing.
     // Every later `stage_metrics::stage_metrics()` call returns this same set.
     let _ = stage_metrics::stage_metrics();
+    // Command-latency kill switch: ENV baseline now, live PostHog value via the refresher.
+    command_latency::switch::init_from_env();
+    let _ = command_latency::metrics::metrics();
+    command_latency::switch::spawn_refresher(license::command_latency_kill_switch_wanted);
     // Route `bundle-capability-gate`'s `metrics`-facade audit counters
     // (grants and denials) into the same OTel pipeline; without a recorder
     // the facade drops them.
@@ -513,6 +610,11 @@ where
         },
         "resolved inbound PII tokenization state"
     );
+    // Installed before any consumer path below clones it out of `config.identity_dek`.
+    let dek_provider = build_dek_provider(&config.cli)?;
+    if config.identity_dek.set(dek_provider).is_err() {
+        anyhow::bail!("identity DEK provider was already installed");
+    }
     let hub_minter: Option<Arc<dyn pii_tokenize::IdentityMinter>> =
         build_hub_client(&config.cli, pii_tokenization_enabled)
             .await?
@@ -1031,6 +1133,84 @@ async fn try_build_platform_table_wiring(
     }
 }
 
+/// Resolver telemetry sink: fixed outcome labels only (no ids, hosts or secrets).
+struct GameServerResolverMetrics;
+
+impl connection_resolver::ResolverMetrics for GameServerResolverMetrics {
+    fn resolve(
+        &self,
+        _kind: connection_resolver::ConnectionKind,
+        outcome: &'static str,
+        latency: Duration,
+    ) {
+        tracing::debug!(outcome, ?latency, "gameserver connection resolve");
+    }
+    fn resolve_failed(&self, outcome: &'static str, latency: Duration) {
+        tracing::warn!(outcome, ?latency, "gameserver connection resolve failed");
+    }
+    fn list(&self, outcome: &'static str) {
+        tracing::debug!(outcome, "gameserver binding list");
+    }
+}
+
+/// Builds the `gameserver-net` bundle host capability's production wiring: a hub-api connection
+/// resolver (machine JWT from the projected SA token) behind a
+/// `bundle_host_gameserver_net::HubServerDirectory`, the guarded network capability with default
+/// limits and the tracing audit sink, gated on
+/// `capabilities::BUNDLE_GAMESERVER_NET_CAPABILITY_FLAG` (default OFF).
+///
+/// An unset `SERVICE_JWT_TOKEN_ENDPOINT` is an INFO-level "not provisioned" `None`; a configured
+/// endpoint the resolver refuses (e.g. plaintext hub URL outside alpha) is an ERROR-level `None`.
+/// Either way every `gameserver_net.*` call denies `not_implemented` -- fail-closed.
+fn try_build_gameserver_net_wiring(
+    cli: &config::CliConfig,
+    license_client: &Arc<penguin_licensing::LicenseClient>,
+) -> Option<capabilities::GameServerNetWiring> {
+    if cli.service_jwt_token_endpoint.is_empty() {
+        tracing::info!(
+            "SERVICE_JWT_TOKEN_ENDPOINT not set; gameserver-net capability unavailable \
+             (every gameserver_net host-call will report not_implemented until provisioned)"
+        );
+        return None;
+    }
+    // Least privilege: the gameserver-only scopes (hub-api refuses them for any other provider).
+    let mut resolver_cfg = connection_resolver::ResolverConfig::new(
+        cli.hub_api_url.clone(),
+        cli.deployment_tier.clone(),
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+    );
+    resolver_cfg.resolve_scope =
+        connection_resolver::SCOPE_CONNECTIONS_RESOLVE_GAMESERVER.to_string();
+    resolver_cfg.list_scope = connection_resolver::SCOPE_CONNECTIONS_LIST_GAMESERVER.to_string();
+    let resolver = match connection_resolver::ConnectionResolver::new(
+        resolver_cfg,
+        Arc::new(GameServerResolverMetrics),
+    ) {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "gameserver-net capability: connection resolver refused its configuration -- \
+                 capability unavailable (every gameserver_net host-call will report \
+                 not_implemented); this is a misconfiguration, not an intentional opt-out"
+            );
+            return None;
+        }
+    };
+    let directory = bundle_host_gameserver_net::HubServerDirectory::new(resolver);
+    Some(capabilities::GameServerNetWiring {
+        net: Arc::new(bundle_host_gameserver_net::GameNet::new(
+            Arc::new(directory),
+            Arc::new(bundle_host_gameserver_net::TracingAudit),
+            bundle_host_gameserver_net::GameNetConfig::default(),
+        )),
+        flag: Arc::new(license::BundleGameServerNetCapabilityGate::new(Arc::clone(
+            license_client,
+        ))),
+    })
+}
+
 /// Builds the `economy` bundle host capability's production wiring (issue
 /// #714, `spine::ProcessDeps::economy_wiring`): connects to the shared
 /// `waddles` Postgres as the least-privilege `waddles_economy_runtime` role
@@ -1366,12 +1546,13 @@ fn try_start_process_loop(
         user: cli.bundle_platform_table_user.clone(),
     };
     let bundle_platform_table_password = config.bundle_platform_table_password.clone();
+    let identity_dek = config.identity_dek.get().cloned();
 
     tokio::spawn(async move {
         // TODO(M4+): tenant/community scope hardcoded to the tenant-wide
         // `global` activation until the distribution poll resolves the
         // real grant set -- see this function's doc.
-        let scope = penguin_spine::Scope::new("global", None);
+        let scope = penguin_spine::Scope::new("default", None);
         let grants: Vec<penguin_spine::Grant> = if !cli.process_ingest_platform.is_empty()
             && !cli.process_ingest_source_id.is_empty()
         {
@@ -1443,6 +1624,8 @@ fn try_start_process_loop(
             &bundle_db_license_client,
         )
         .await;
+        let gameserver_net_wiring =
+            try_build_gameserver_net_wiring(&cli, &bundle_db_license_client);
         let economy_wiring = try_build_economy_wiring(
             &bundle_economy_cfg,
             bundle_economy_password.as_ref(),
@@ -1510,6 +1693,9 @@ fn try_start_process_loop(
         // source's own guest-fault history, so a breaker trip must survive
         // across it (connector spec SS0 condition 5).
         let breaker = Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics));
+        // Same lifetime as the breaker: shared across reconnects so an
+        // in-flight/recent tokenization survives a transport reconnect.
+        let tokenize_memo = Arc::new(tokenize_memo::TokenizeMemo::from_env());
         loop {
             attempt += 1;
             drain_loop_metrics
@@ -1591,10 +1777,13 @@ fn try_start_process_loop(
                 // enabled and the connect failed), and passes it down
                 // unconditionally from here.
                 pii_minter: hub_minter.clone(),
+                tokenize_memo: Arc::clone(&tokenize_memo),
+                dek_provider: identity_dek.clone(),
                 db_wiring: db_wiring.clone(),
                 reputation_wiring: reputation_wiring.clone(),
                 economy_wiring: economy_wiring.clone(),
                 platform_table_wiring: platform_table_wiring.clone(),
+                gameserver_net_wiring: gameserver_net_wiring.clone(),
                 // The legacy single-bundle path runs at the `(0, 0)` fail-closed
                 // scope (no resolved tenant/community), where every
                 // community-scoped capability -- `identity` included -- refuses
@@ -2115,6 +2304,9 @@ fn try_start_changelog_consumer(
                         }
                         None => None,
                     };
+                    deps.gameserver_net_wiring = bundle_db_license_client
+                        .as_ref()
+                        .and_then(|client| try_build_gameserver_net_wiring(&config.cli, client));
                     deps.economy_wiring = match &bundle_db_license_client {
                         Some(client) => {
                             try_build_economy_wiring(
@@ -2164,6 +2356,36 @@ fn try_start_changelog_consumer(
                             None
                         }
                     };
+                    // Live per-community bundle config (`get-context().config_json`): hub-api
+                    // gRPC + Valkey version-key invalidation; non-fatal when unconfigured.
+                    // The version key lives on hub-api's own (durable spine) Valkey, not the
+                    // dedicated kv instance.
+                    let config_probe_conn = match build_redis_client(&deps.spine_cfg) {
+                        Some(client) => client.get_multiplexed_async_connection().await.ok(),
+                        None => None,
+                    };
+                    // Read path (issue #1306): the read-only replica database directly
+                    // (`DATABASE_REPLICA_URL`, primary `DATABASE_URL` fallback at WARN), never
+                    // hub-api on the hot path; hub-api gRPC remains only behind the
+                    // `waddles.disable-db-bundle-config-reads` kill switch.
+                    let live_cache = bundle_config_db::connect_and_install(
+                        &config.cli.hub_api_grpc_endpoint,
+                        &config.cli.service_jwt_token_endpoint,
+                        &config.cli.service_jwt_sa_token_path,
+                        (!config.cli.hub_api_grpc_ca_file.is_empty())
+                            .then_some(config.cli.hub_api_grpc_ca_file.as_str()),
+                        config_probe_conn,
+                        &bundle_config_db::DbReadConfig::from_env(),
+                    )
+                    .await;
+                    if let Some(cache) = &live_cache {
+                        cache.set_gate(Arc::new(license::LiveBundleConfigGate(
+                            bundle_db_license_client.clone(),
+                        )));
+                        cache.set_read_path_gate(Arc::new(license::DbConfigReadsGate(
+                            bundle_db_license_client.clone(),
+                        )));
+                    }
                     // Per-tenant at-rest sealing of bundle kv values; see
                     // `crate::kv_sealing`. The gate honours the opt-out
                     // kill-switch when a license client exists, else seals.
@@ -2179,20 +2401,29 @@ fn try_start_changelog_consumer(
                         ),
                     }
                     deps.kv_sealing = Some(sealing);
-                    Some(Arc::new(source_supervisor::SpineConsumerSupervisor {
-                        deps: Arc::new(deps),
-                    })
-                        as Arc<dyn source_supervisor::ConsumerSupervisor>)
+                    let deps = Arc::new(deps);
+                    start_bundle_admin_consumer(&deps).await;
+                    Some(
+                        Arc::new(source_supervisor::SpineConsumerSupervisor { deps })
+                            as Arc<dyn source_supervisor::ConsumerSupervisor>,
+                    )
                 }
                 None => None,
             };
 
+        // Executor slot sharding kill switch (unseen = sharding ON). No
+        // license client means "flag unseen", i.e. sharding ON, never off.
+        let sharding_gate: Arc<dyn license::FeatureGate> = match &bundle_db_license_client {
+            Some(client) => Arc::new(license::ExecutorShardingGate::new(Arc::clone(client))),
+            None => Arc::new(license::StaticGate(true)),
+        };
         changelog_consumer::run(
             db,
             poll_interval,
             full_reconcile_interval,
             call_timeout_ms,
             gate,
+            sharding_gate,
             connections,
             spawner,
             excluded_metric,
@@ -2206,6 +2437,62 @@ fn try_start_changelog_consumer(
         )
         .await;
     });
+}
+
+/// Starts the hub-api bundle-admin consumer (`bundle_admin`) when `BUNDLE_ADMIN_REQUEST_KEYS` is
+/// configured. Unset: logged at WARN (hub-api's admin calls will time out loudly, nothing falls
+/// back). Set but invalid, or Valkey/spine unreachable: logged at ERROR and not started.
+async fn start_bundle_admin_consumer(deps: &Arc<source_supervisor::SupervisorDeps>) {
+    let Ok(raw) = std::env::var("BUNDLE_ADMIN_REQUEST_KEYS") else {
+        tracing::warn!(
+            "BUNDLE_ADMIN_REQUEST_KEYS unset; hub-api bundle-admin requests are not consumed"
+        );
+        return;
+    };
+    let ring = match bundle_admin::KeyRing::parse(&raw) {
+        Ok(r) => Arc::new(r),
+        Err(err) => {
+            tracing::error!(error = %err, "bundle-admin consumer not started");
+            return;
+        }
+    };
+    let Some(client) = build_redis_client(&deps.spine_cfg) else {
+        tracing::error!("bundle-admin consumer: valkey client could not be built; not started");
+        return;
+    };
+    let spine = match penguin_spine::SpineClient::connect(
+        deps.spine_cfg.clone(),
+        deps.metrics.clone(),
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::error!(error = %err, "bundle-admin consumer: spine connect failed; not started");
+            return;
+        }
+    };
+    let conn = match client.get_multiplexed_async_connection().await {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!(code = ?err.kind(), "bundle-admin consumer: valkey connect failed; not started");
+            return;
+        }
+    };
+    let backend = Arc::new(bundle_admin::ValkeyBackend::new(conn));
+    let executor = Arc::new(bundle_admin::StageAdminExecutor::new(
+        Arc::clone(deps),
+        spine,
+    ));
+    tracing::info!(keys = ring.len(), "bundle-admin consumer started");
+    tokio::spawn(bundle_admin::run_consumer(
+        client,
+        ring,
+        backend,
+        executor,
+        16,
+        shutdown_signal(),
+    ));
 }
 
 /// Everything the source-binding supervisor needs -- built eagerly, with no
@@ -2287,6 +2574,9 @@ async fn build_source_supervisor_deps(
         active_digests,
         pii_gate,
         pii_minter,
+        // ONE memo for the whole supervisor so every per-app consumer of a
+        // message shares a single tokenization (`tokenize_memo` module doc).
+        tokenize_memo: Arc::new(tokenize_memo::TokenizeMemo::from_env()),
         // Same "opened async inside the spawned task, this function stays
         // synchronous/no-I/O" placement as `kv_conn` above -- see
         // `try_start_changelog_consumer`'s own spawned block.
@@ -2298,9 +2588,14 @@ async fn build_source_supervisor_deps(
         reputation_wiring: None,
         economy_wiring: None,
         platform_table_wiring: None,
+        gameserver_net_wiring: None,
         identity_wiring: None,
         ai_wiring: None,
         media_wiring: None,
+        // The shared, once-built tenant stream-DEK source (`build_dek_provider`); `None`
+        // only before `run_with_shutdown` has installed it, in which case every event that
+        // carries an encrypted identity field is dead-lettered (fail closed).
+        dek_provider: config.identity_dek.get().cloned(),
     })
 }
 
@@ -2360,8 +2655,63 @@ pub async fn run_healthcheck() -> anyhow::Result<()> {
     }
 }
 
+/// How often the `db` v2 schema registry is re-read from
+/// `bundle_data.table_registry` (hub-api provisioning metadata).
+const V2_REGISTRY_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Loads the v2 registry once (logging loudly on failure -- the table may not
+/// exist until alembic 0082 has run, in which case every v2 call reports
+/// `invalid_table` until a later refresh succeeds) and keeps it fresh on a
+/// fixed interval. A failed refresh keeps the previous registry: never a
+/// partial or emptied view.
+async fn spawn_v2_registry_refresh(
+    conn: sea_orm::DatabaseConnection,
+    registry: Arc<bundle_host_db::v2::SchemaRegistryV2>,
+) {
+    match bundle_host_db::v2::load_registry(&conn, &registry).await {
+        Ok(n) => tracing::info!(bundles = n, "db v2: schema registry loaded"),
+        Err(e) => tracing::error!(
+            error = %e,
+            "db v2: initial schema registry load failed (has alembic 0087_bundle_data_v2 run?); \
+             db v2 calls will report invalid_table until a refresh succeeds"
+        ),
+    }
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(V2_REGISTRY_REFRESH);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            if let Err(e) = bundle_host_db::v2::load_registry(&conn, &registry).await {
+                tracing::error!(error = %e, "db v2: schema registry refresh failed; keeping previous registry");
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dev_gate_environment_defaults_to_production_never_a_dev_env() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        assert_eq!(dev_gate_environment(Ok("alpha".to_string())), "alpha");
+        for unusable in [
+            Err(std::env::VarError::NotPresent),
+            Err(std::env::VarError::NotUnicode(OsString::from_vec(vec![
+                0xff,
+            ]))),
+        ] {
+            let name = dev_gate_environment(unusable);
+            assert_eq!(name, "production");
+            // The fallback must be refused by the dev-key gate itself, end to end.
+            assert!(matches!(
+                hub_client::dek::LocalDevDekProvider::from_kek(&name, [7u8; 32]),
+                Err(hub_client::dek::LocalDevDekProviderError::EnvironmentNotAllowed(_))
+            ));
+        }
+    }
+
     /// Wiring: bundle-kv goes to `VALKEY_KV_URL` (dedicated), the spine config
     /// stays on the durable `VALKEY_URL`; unset kv URL => None (no fallback).
     #[test]
@@ -2496,6 +2846,10 @@ mod tests {
             unsafe {
                 std::env::set_var("DB_PASSWORD", "test-db-pass");
                 std::env::set_var("SERVICE_API_KEY", "test-api-key");
+                // The stage refuses to start without a tenant-DEK source; the hard-gated
+                // dev/alpha KEK is the in-process stand-in for hub-api's key broker here.
+                std::env::set_var("WADDLES_ENV", "local");
+                std::env::set_var("INGEST_DEV_KEK", "k".repeat(48));
             }
             // Fixed high ports rather than `0` (OS-assigned):
             // `run_with_shutdown` needs the bound port back out to hit it,
@@ -2557,6 +2911,7 @@ mod tests {
             bundle_reputation_password: None,
             bundle_economy_password: None,
             bundle_platform_table_password: None,
+            identity_dek: Default::default(),
         }
     }
 
@@ -3407,6 +3762,7 @@ mod tests {
             bundle_reputation_password: None,
             bundle_economy_password: None,
             bundle_platform_table_password: None,
+            identity_dek: Default::default(),
         };
         let state = crate::http::AppState::new(
             config,
@@ -3428,37 +3784,200 @@ mod tests {
 
         assert!(result.is_ok(), "run_healthcheck must succeed: {result:?}");
     }
-}
 
-/// How often the `db` v2 schema registry is re-read from
-/// `bundle_data.table_registry` (hub-api provisioning metadata).
-const V2_REGISTRY_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Loads the v2 registry once (logging loudly on failure -- the table may not
-/// exist until alembic 0082 has run, in which case every v2 call reports
-/// `invalid_table` until a later refresh succeeds) and keeps it fresh on a
-/// fixed interval. A failed refresh keeps the previous registry: never a
-/// partial or emptied view.
-async fn spawn_v2_registry_refresh(
-    conn: sea_orm::DatabaseConnection,
-    registry: Arc<bundle_host_db::v2::SchemaRegistryV2>,
-) {
-    match bundle_host_db::v2::load_registry(&conn, &registry).await {
-        Ok(n) => tracing::info!(bundles = n, "db v2: schema registry loaded"),
-        Err(e) => tracing::error!(
-            error = %e,
-            "db v2: initial schema registry load failed (has alembic 0082_bundle_data_v2 run?); \
-             db v2 calls will report invalid_table until a refresh succeeds"
-        ),
+    /// `BUNDLE_REPUTATION_PASSWORD` unset leaves the reputation capability unwired.
+    #[tokio::test]
+    async fn try_build_reputation_wiring_is_none_when_password_unset() {
+        let cfg = bundle_host_reputation::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_bundle_reputation".to_string(),
+        };
+        let wiring = try_build_reputation_wiring(
+            &cfg,
+            None,
+            &test_license_client(),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(wiring.is_none());
     }
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(V2_REGISTRY_REFRESH);
-        tick.tick().await;
-        loop {
-            tick.tick().await;
-            if let Err(e) = bundle_host_db::v2::load_registry(&conn, &registry).await {
-                tracing::error!(error = %e, "db v2: schema registry refresh failed; keeping previous registry");
+
+    /// A configured reputation password with an unreachable DB degrades to `None`, never panics.
+    #[tokio::test]
+    async fn try_build_reputation_wiring_is_none_when_connection_fails() {
+        let cfg = bundle_host_reputation::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_bundle_reputation".to_string(),
+        };
+        let password = crate::config::Secret::new("irrelevant");
+        let wiring = try_build_reputation_wiring(
+            &cfg,
+            Some(&password),
+            &test_license_client(),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(wiring.is_none());
+    }
+
+    /// `BUNDLE_ECONOMY_PASSWORD` unset leaves the economy capability unwired.
+    #[tokio::test]
+    async fn try_build_economy_wiring_is_none_when_password_unset() {
+        let cfg = bundle_host_economy::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_economy_runtime".to_string(),
+        };
+        let wiring = try_build_economy_wiring(
+            &cfg,
+            None,
+            &test_license_client(),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(wiring.is_none());
+    }
+
+    /// A configured economy password with an unreachable DB degrades to `None`.
+    #[tokio::test]
+    async fn try_build_economy_wiring_is_none_when_connection_fails() {
+        let cfg = bundle_host_economy::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_economy_runtime".to_string(),
+        };
+        let password = crate::config::Secret::new("irrelevant");
+        let wiring = try_build_economy_wiring(
+            &cfg,
+            Some(&password),
+            &test_license_client(),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(wiring.is_none());
+    }
+
+    /// `BUNDLE_PLATFORM_TABLE_PASSWORD` unset leaves platform-table unwired.
+    #[tokio::test]
+    async fn try_build_platform_table_wiring_is_none_when_password_unset() {
+        let cfg = bundle_host_platform_table::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_platform_table".to_string(),
+        };
+        let wiring = try_build_platform_table_wiring(&cfg, None, &test_license_client()).await;
+        assert!(wiring.is_none());
+    }
+
+    /// A configured platform-table password with an unreachable DB degrades to `None`.
+    #[tokio::test]
+    async fn try_build_platform_table_wiring_is_none_when_connection_fails() {
+        let cfg = bundle_host_platform_table::ConnectConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            name: "waddlebot".to_string(),
+            user: "waddles_platform_table".to_string(),
+        };
+        let password = crate::config::Secret::new("irrelevant");
+        let wiring =
+            try_build_platform_table_wiring(&cfg, Some(&password), &test_license_client()).await;
+        assert!(wiring.is_none());
+    }
+
+    /// An unset `SERVICE_JWT_TOKEN_ENDPOINT` leaves gameserver-net unwired.
+    #[tokio::test]
+    async fn try_build_gameserver_net_wiring_is_none_without_token_endpoint() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert!(cli.service_jwt_token_endpoint.is_empty());
+        assert!(try_build_gameserver_net_wiring(&cli, &test_license_client()).is_none());
+    }
+
+    /// With a token endpoint configured the gameserver-net wiring builds with its flag OFF.
+    #[tokio::test]
+    async fn try_build_gameserver_net_wiring_builds_with_flag_off_by_default() {
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--service-jwt-token-endpoint",
+            "https://hub.example.invalid/token",
+        ]);
+        if let Some(w) = try_build_gameserver_net_wiring(&cli, &test_license_client()) {
+            assert!(
+                !w.flag.enabled().await,
+                "the gameserver-net capability flag must default OFF"
+            );
+        }
+    }
+
+    /// The production supervisor spawns a real consumer per binding that survives an
+    /// unreachable Valkey (retrying with backoff) and stops promptly on `stop_all`.
+    #[tokio::test]
+    async fn spine_consumer_supervisor_survives_unreachable_valkey_and_stops_on_request() {
+        {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
+                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
             }
         }
-    });
+        let config = test_config(CliConfig::parse_from(["svc-process"]));
+        let deps = build_source_supervisor_deps(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            Arc::new(license::test_support::FixedGate(true)),
+            sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+            bundle_active_set::ActiveVersionSnapshot::new(),
+            test_egress_guard(),
+            Arc::new(active_digests::ActiveDigests::new()),
+            Arc::new(license::test_support::FixedGate(true)),
+            None,
+            Arc::new(()),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+        )
+        .await
+        .expect("valid config builds the supervisor deps");
+        // SAFETY: serialized by ENV_LOCK above.
+        unsafe {
+            std::env::remove_var("VALKEY_URL");
+            std::env::remove_var("VALKEY_PASSWORD");
+        }
+        let spawner = source_supervisor::SpineConsumerSupervisor {
+            deps: Arc::new(deps),
+        };
+        let metrics = test_source_supervisor_metrics();
+        let binding = source_supervisor::ResolvedBinding {
+            tenant_id: 1,
+            community_id: 2,
+            tenant_slug: "acme".to_string(),
+            community_name: Some("main".to_string()),
+            app_id: "waddles.core.service.test".to_string(),
+            platform: "twitch".to_string(),
+            source_id: "chan".to_string(),
+        };
+        let mut running = source_supervisor::RunningConsumers::new();
+        source_supervisor::reconcile(&mut running, &[binding], &spawner, &metrics).await;
+        assert_eq!(running.len(), 1);
+        assert_eq!(metrics.active_consumers.get(), 1);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            source_supervisor::stop_all(&mut running, &metrics),
+        )
+        .await
+        .expect("stop_all must return once shutdown is signalled");
+        assert!(running.is_empty());
+        assert_eq!(metrics.active_consumers.get(), 0);
+    }
 }

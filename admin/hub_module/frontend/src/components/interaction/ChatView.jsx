@@ -1,7 +1,14 @@
 import { useState, useEffect, useRef } from 'react';
 import { HashtagIcon, PaperAirplaneIcon } from '@heroicons/react/24/outline';
+import api from '../../services/api';
+import RealtimeUnavailableBanner from '../chat/RealtimeUnavailableBanner';
 
-export default function ChatView({ channel, socket }) {
+/**
+ * Channel chat view. With a live socket it joins/streams; when `degraded`
+ * (realtime flag off or reconnects exhausted) it shows the REST history,
+ * a visible notice, and a disabled send box (no REST send path exists yet).
+ */
+export default function ChatView({ channel, socket, degraded = false }) {
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef(null);
@@ -16,7 +23,25 @@ export default function ChatView({ channel, socket }) {
   }, [messages]);
 
   useEffect(() => {
-    if (!socket || !channel) return;
+    if (!degraded || !channel) return undefined;
+    let cancelled = false;
+    api
+      .get(`/api/v1/community/${channel.communityId}/chat/history`, {
+        params: { channelName: 'hub-channel-' + channel.id },
+      })
+      .then((res) => {
+        if (!cancelled) setMessages(res.data?.messages || []);
+      })
+      .catch((err) => {
+        console.error('[ChatView] History load failed', { message: err?.message });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [degraded, channel?.id, channel?.communityId]);
+
+  useEffect(() => {
+    if (!socket || !channel || degraded) return;
 
     const roomName = 'hub-channel-' + channel.id;
 
@@ -62,11 +87,11 @@ export default function ChatView({ channel, socket }) {
       socket.off('chat:history', handleHistory);
       setMessages([]);
     };
-  }, [socket, channel?.id, channel?.communityId]);
+  }, [socket, degraded, channel?.id, channel?.communityId]);
 
   const handleSend = () => {
     const trimmed = inputValue.trim();
-    if (!trimmed || !socket || !channel) return;
+    if (!trimmed || !socket || !channel || degraded) return;
 
     socket.emit('chat:message', {
       communityId: channel.communityId,
@@ -114,6 +139,8 @@ export default function ChatView({ channel, socket }) {
           )}
         </div>
       </div>
+
+      {degraded && <RealtimeUnavailableBanner />}
 
       {/* Messages area */}
       <div className="bg-navy-950 flex-1 overflow-y-auto p-4 space-y-3">
@@ -174,13 +201,14 @@ export default function ChatView({ channel, socket }) {
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
+            disabled={degraded}
             placeholder={`Message #${channel.name}`}
             className="flex-1 bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm placeholder-navy-500 focus:outline-none focus:border-gold-500 focus:ring-1 focus:ring-gold-500"
           />
           <button
             aria-label="Send message"
             onClick={handleSend}
-            disabled={!inputValue.trim()}
+            disabled={degraded || !inputValue.trim()}
             className="bg-gold-500 text-navy-900 hover:bg-gold-400 rounded-lg px-4 py-2 flex items-center gap-1.5 text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <PaperAirplaneIcon className="w-4 h-4" />

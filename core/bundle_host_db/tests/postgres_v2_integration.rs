@@ -5,7 +5,7 @@
 //! The table DDL restates what `hub_api/services/bundle_data_ddl.py`
 //! (`generate_v2_table_ddl`) emits (same platform columns, `FORCE ROW LEVEL
 //! SECURITY`, tenant+community policy, `(tenant_id, community_id, ...)`
-//! indexes) and the `bundle_data` schema restates alembic `0082_bundle_data_v2`
+//! indexes) and the `bundle_data` schema restates alembic `0087_bundle_data_v2`
 //! -- keep them in lockstep, exactly as `postgres_integration.rs` does for v1.
 
 use std::time::Duration;

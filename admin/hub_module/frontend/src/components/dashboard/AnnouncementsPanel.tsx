@@ -2,20 +2,9 @@ import { Link } from 'react-router-dom';
 import { MapPinIcon, MegaphoneIcon } from '@heroicons/react/24/outline';
 import { useAnnouncements } from '../../hooks/useCommunityPanels';
 import type { Announcement } from '../../services/communityOverviewApi';
-import { Alert, Badge, Card, CardHeader, type BadgeTone } from '../ui';
-import { getErrorMessage } from '../ui/errors';
-
-/** Statuses meaning "this community/plan/role simply has no announcements feed for you": not an error. */
-const EXPECTED_DENIALS = new Set([401, 402, 403, 404]);
+import { Badge, Card, CardHeader, PanelState, type BadgeTone } from '../ui';
 
 const TYPE_TONE: Record<string, BadgeTone> = { important: 'red', event: 'gold', update: 'sky' };
-
-function statusOf(error: unknown): number | undefined {
-  if (typeof error !== 'object' || error === null || !('response' in error)) return undefined;
-  const response = error.response;
-  if (typeof response !== 'object' || response === null || !('status' in response)) return undefined;
-  return typeof response.status === 'number' ? response.status : undefined;
-}
 
 function AnnouncementItem({ announcement }: { announcement: Announcement }) {
   return (
@@ -41,22 +30,12 @@ function AnnouncementItem({ announcement }: { announcement: Announcement }) {
 }
 
 /**
- * Latest published announcements. Renders nothing when there are none or when the server
- * says this plan/role has no feed (expected 401-404); any other failure is shown, not hidden.
+ * Latest published announcements (community admins only; the server rejects everyone else, so
+ * non-managers are never queried). Every response shows a state: empty, plan (402), unavailable (503), error.
  */
 export function AnnouncementsPanel({ communityId, canManage }: { communityId: number; canManage: boolean }) {
-  const query = useAnnouncements(communityId, 5, true);
-  if (query.isPending) return null;
-  if (query.isError) {
-    const status = statusOf(query.error);
-    if (status !== undefined && EXPECTED_DENIALS.has(status)) return null;
-    return (
-      <Alert tone="warning" title="We could not load announcements" className="mb-8">
-        {getErrorMessage(query.error)}
-      </Alert>
-    );
-  }
-  if (query.data.length === 0) return null;
+  const query = useAnnouncements(communityId, 5, canManage);
+  if (!canManage) return null;
   return (
     <Card as="section" className="mb-8" aria-label="Announcements">
       <CardHeader
@@ -67,18 +46,28 @@ export function AnnouncementsPanel({ communityId, canManage }: { communityId: nu
           </span>
         }
         actions={
-          canManage ? (
-            <Link to={`/admin/${communityId}/announcements`} className="text-sm text-interactive hover:text-interactive-hover">
-              Manage
-            </Link>
-          ) : null
+          <Link to={`/admin/${communityId}/announcements`} className="text-sm text-interactive hover:text-interactive-hover">
+            Manage
+          </Link>
         }
       />
-      <ul className="divide-y divide-line">
-        {query.data.slice(0, 3).map((announcement) => (
-          <AnnouncementItem key={announcement.id} announcement={announcement} />
-        ))}
-      </ul>
+      <PanelState
+        query={query}
+        feature="Announcements"
+        isEmpty={(items) => items.length === 0}
+        emptyTitle="No announcements yet"
+        emptyDescription="Published announcements appear here. Announcement channels are set up in your connections."
+        emptyAction={{ to: `/admin/${communityId}/connections`, label: 'Connect Discord or Twitch' }}
+        className="py-8"
+      >
+        {(items) => (
+          <ul className="divide-y divide-line">
+            {items.slice(0, 3).map((announcement) => (
+              <AnnouncementItem key={announcement.id} announcement={announcement} />
+            ))}
+          </ul>
+        )}
+      </PanelState>
     </Card>
   );
 }

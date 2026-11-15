@@ -1,0 +1,132 @@
+{
+  "upstream_repo": "https://github.com/Psychoboy/PenguinTwitchBot",
+  "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+  "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)",
+  "files": [
+    {
+      "path": "help/drop-games/racing.md",
+      "sha256": "1f386da20ec4d226ed64543d20086452cbe5a5f97972e42dc5bd9905724c8c69",
+      "size": 7766,
+      "upstream_path": "PenguinTwitchBot/wwwroot/help/drop-games/racing.md",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "js/racing.js",
+      "sha256": "6e798ea7ef0cffd4d97671e6ca1c573f4ab1a78ca99680b4cd17ce0e32016257",
+      "size": 134207,
+      "upstream_path": "PenguinTwitchBot/wwwroot/js/racing.js",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/racing_boost.wav",
+      "sha256": "1a85538d7af5c0dd48b1dc80926a925a803f4399e8e244b53fb21af78dd01611",
+      "size": 127052,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/racing_boost.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/racing_countdown.wav",
+      "sha256": "f2a2149f300ae49c2390b7bcba36c25a3e973768359e0713a411e39d4856d947",
+      "size": 38852,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/racing_countdown.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/racing_crash.wav",
+      "sha256": "02b325ff6ce212b9b85cb449045d58a09a7688390d76eee0d3d8553f69b0ea62",
+      "size": 74132,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/racing_crash.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/racing_end.wav",
+      "sha256": "bb28494b46f5564d8fbf04875b5ee6b9891c825fe9c926ce3415f2c80d613e10",
+      "size": 238184,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/racing_end.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/racing_engine.wav",
+      "sha256": "e9eb4e3d0ffae40c6a2062123cbd68dfae01e6c9f24e4e32962f41b3bd183ad9",
+      "size": 194084,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/racing_engine.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/racing_screech.wav",
+      "sha256": "95756f21e01b5e456b82a7ce6bb6ac69d233a9a770a367c3e7a745cbe29b8a89",
+      "size": 119996,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/racing_screech.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/racing_start.wav",
+      "sha256": "a86949d3509b313608e65ace1f19d9d8892b36ce3df60b798bbb6a5dad40a138",
+      "size": 291104,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/racing_start.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/racing_win.wav",
+      "sha256": "2c0348ab1fb6f91b3798feec66df62e98b9b44ac0697ef305e424812d7b4285b",
+      "size": 282284,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/racing_win.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "racing.html",
+      "sha256": "396f1936ee7cf374ef466af9ab9f95ab369b908a10c7a48a481ad8f13c436bfa",
+      "size": 2871,
+      "upstream_path": "PenguinTwitchBot/wwwroot/racing.html",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    }
+  ],
+  "third_party_or_unclear": [
+    {
+      "path": "js/ws-client.js",
+      "reason": "upstream host WebSocket plumbing (topic subscription), not game material; the Waddles overlay transport differs, so not vendored",
+      "vendored": false
+    },
+    {
+      "path": "js/ws-status.js",
+      "reason": "upstream host WebSocket status badge, not game material; not vendored",
+      "vendored": false
+    },
+    {
+      "path": "js/reconnecting-websocket/reconnectingWS.min.js",
+      "reason": "third-party library with its own LICENSE.txt in upstream; not vendored",
+      "vendored": false
+    },
+    {
+      "path": "fonts.googleapis.com Fredoka/Rubik",
+      "reason": "loaded remotely by racing.html at runtime (Google Fonts, OFL); not vendored",
+      "vendored": false
+    },
+    {
+      "path": "themes, vehicle and emote images",
+      "reason": "stored in the upstream settings database and resolved from Twitch/7TV/BTTV/FFZ emotes at runtime, not files in the repo; nothing to vendor",
+      "vendored": false
+    },
+    {
+      "path": "tools/generate_racing_sounds.py",
+      "reason": "upstream generator script for the racing_*.wav files (build tooling, not overlay material); the generated wavs are vendored, the script is not",
+      "vendored": false
+    }
+  ],
+  "notes": [
+    "racing.html and js/racing.js are vendored unmodified; they still reference /js/drop-games-common.js and /js/drop-games-audio.js (vendored once in superpenguin-dropgame-core/overlay/common) and the upstream WebSocket scripts listed as unvendored; see README browser-source section.",
+    "help/drop-games/racing.md is the upstream user documentation (describes upstream modes the port does not implement; see README Deviations).",
+    "The repo carries no per-asset attribution for the .wav files; they are generated by the upstream tools/generate_racing_sounds.py and treated as covered by the repo MIT LICENSE."
+  ]
+}

@@ -272,6 +272,7 @@ impl ConnectorProfile for YoutubeProfile {
             platform: PLATFORM,
             community_id: b.community_id,
             connection_id: b.connection_id,
+            lane: Default::default(),
         };
         // A rediscovered chat replaces the binding's own only while the
         // binding still pins the id it was found against.

@@ -15,8 +15,12 @@ caller acts on the `Destination`.
 | Route (only one today) | `StatefulPlatformReply` -> Discord outbound drain (`chat.send`) |
 | No route | `DispatchError::NoDestination` -> refused `unsupported_op`, counted, never silent |
 
-Flag OFF: unchanged inline REST send. Flag ON: Discord `chat.send` is queued
-to the outbound drain (detokenize -> LPUSH -> ack-wait -> meter once).
+There is no inline REST send any more: Discord `chat.send` is always queued to
+svc-ingest's outbound drain (LPUSH -> ack-wait -> meter once), whatever the flag
+says; svc-action holds no Discord bot token. The text is queued TOKENIZED --
+`{user:<uuid>}` is never resolved here (PII boundary: only svc-ingest's drain and
+svc-presentation hold real names). `chat.send` envelopes also carry the MAC-bound
+numeric `tenant_id` so the drain can resolve the placeholders.
 
 ### Outbound producer contract (P6a producer-completeness)
 

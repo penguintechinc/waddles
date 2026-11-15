@@ -28,6 +28,8 @@ use crate::outbound_creds_discord::DiscordCredentialSource;
 pub const API_BASE: &str = "https://discord.com/api/v10";
 /// The connector's `secret-refs` handle for the bot credential.
 pub const BOT_HANDLE: &str = "discord-bot";
+/// The app-scoped handle resolving the binding's application (client) id.
+pub const APP_ID_HANDLE: &str = "app.application_id";
 
 /// One bot-authenticated, SSRF-guarded Discord REST caller.
 pub(crate) struct Rest<'a> {
@@ -128,7 +130,11 @@ impl<C: DiscordCredentialSource> SlotSource for DiscordSlots<C> {
         if req.platform != "discord" {
             return Err(SlotError::Refused("unsupported_platform"));
         }
-        if req.handles.iter().any(|h| *h != BOT_HANDLE) {
+        if req
+            .handles
+            .iter()
+            .any(|h| *h != BOT_HANDLE && *h != APP_ID_HANDLE)
+        {
             return Err(SlotError::Refused("unknown_handle"));
         }
         // A guild-scoped op (scheduled events) has no channel to prove; every
@@ -159,6 +165,20 @@ impl<C: DiscordCredentialSource> SlotSource for DiscordSlots<C> {
             BOT_HANDLE.to_string(),
             SlotValue::new(binding.bot_token.expose().to_owned()),
         );
+        if req.handles.contains(&APP_ID_HANDLE) {
+            // The application the community's own bot belongs to; absent = refused, never guessed.
+            let app = binding
+                .application_id
+                .clone()
+                .ok_or(SlotError::Refused("application_id_unconfigured"))?;
+            out.insert(APP_ID_HANDLE.to_string(), SlotValue::new(app));
+        }
         Ok(out)
+    }
+
+    /// Discord supports the app-scoped `app.application_id` handle (the binding's own
+    /// application id); a user-scoped token is never substituted for it.
+    fn supports_app_credentials(&self, platform: &str) -> bool {
+        platform == "discord"
     }
 }

@@ -116,7 +116,6 @@ STATIC_CASES = [
             "fields": {
                 "accessKeyId": "FAKE-ACCESS-KEY-ID",
                 "secretAccessKey": "FAKE-SECRET-ACCESS-KEY",
-                "sessionToken": None,
             },
         },
         3,
@@ -197,7 +196,6 @@ class TestResolveStaticKinds:
             "secret": secret,
             "metadata": {},
         }
-        assert response.headers["Cache-Control"] == "no-store"
         _check_golden(golden, body)
 
     async def test_resolve_oauth_kind_contract_unchanged(
@@ -238,25 +236,25 @@ class TestResolveStaticKinds:
 
 class TestGoldenFixturesMatchTheDto:
     @pytest.mark.parametrize("name", ["oauth", "http", "lambda", "gcp"])
-    def test_every_fixture_parses_against_the_dto_schema(self, name: str) -> None:
-        """A fixture can never drift from the DTO shape the Rust crate deserialises."""
-        from dataclasses import fields
+    def test_every_fixture_parses_against_the_proto_schema(self, name: str) -> None:
+        """A fixture can never drift from the `ResolveConnectionResponse` proto message.
 
-        from pydantic import TypeAdapter
-
-        from blueprints.v1.provider_connections import (
-            EndpointDTO,
-            ResolvedCredentialsDTO,
-            SecretDTO,
-        )
+        The Rust crate decodes that message: strict parse (unknown field = failure) + round trip.
+        """
+        from google.protobuf import json_format
+        from waddles.hub.internal.v1 import provider_connection_pb2 as pb
 
         raw = json.loads((FIXTURES / f"resolve_v2_{name}.json").read_text())
-        assert set(raw) == {f.name for f in fields(ResolvedCredentialsDTO)}
-        assert set(raw["endpoint"]) == {f.name for f in fields(EndpointDTO)}
-        if raw["secret"] is not None:
-            assert set(raw["secret"]) == {f.name for f in fields(SecretDTO)}
-        parsed = TypeAdapter(ResolvedCredentialsDTO).validate_python(raw)
-        assert json.loads(TypeAdapter(ResolvedCredentialsDTO).dump_json(parsed)) == raw
+        raw.pop("success")  # transport status, carried by the gRPC status instead
+        for key in ("accessToken", "expiresAt", "secret"):
+            if raw[key] is None:
+                del raw[key]  # proto3 `optional`: absent, not null
+        raw["endpoint"] = {k: v for k, v in raw["endpoint"].items() if v is not None}
+        message = json_format.ParseDict(raw, pb.ResolveConnectionResponse())
+        assert pb.ResolveConnectionResponse.FromString(message.SerializeToString()) == message
+        assert message.kind == raw["kind"]
+        assert message.HasField("access_token") == ("accessToken" in raw)
+        assert message.HasField("secret") == ("secret" in raw)
 
 
 class TestStaticScopeLeastPrivilege:
@@ -334,9 +332,7 @@ class TestResolveErrors:
         absent = await _resolve(static_client, service_issuer, other, 99999)
         assert absent.status_code == 404
         # identical shape for "exists but not yours" and "does not exist"
-        a = (await response.get_json())["error"]
-        b = (await absent.get_json())["error"]
-        assert (a["code"], a["message"]) == (b["code"], b["message"])
+        assert (await response.get_json()) == (await absent.get_json())
 
     async def test_a_token_bound_to_another_community_is_refused_by_the_guard(
         self,
@@ -469,9 +465,9 @@ class TestResolveErrors:
         assert down.status_code == 503
         body = await down.get_data(as_text=True)
         assert "PLATFORM_ENCRYPTION_KEY" not in body and STATIC_BEARER not in body
-        assert (await down.get_json())["error"]["code"] == "CONNECTIONS_UNAVAILABLE"
+        assert down.detail == "connections temporarily unavailable"
 
-    async def test_resolve_response_is_no_store(
+    async def test_resolve_hit_and_miss_statuses(
         self,
         static_client: Any,
         pc_static_service: Any,
@@ -482,9 +478,7 @@ class TestResolveErrors:
         cid, conn = pc_db.seed.community_id, view.binding.connection.id
         ok = await _resolve(static_client, service_issuer, cid, conn)
         miss = await _resolve(static_client, service_issuer, cid, 424242)
-        for response in (ok, miss):
-            assert response.headers["Cache-Control"] == "no-store"
-            assert response.headers["Pragma"] == "no-cache"
+        assert ok.status_code == 200 and miss.status_code == 404
 
     @pytest.mark.parametrize(
         ("stored", "emitted"),

@@ -11,7 +11,7 @@
 //! `KeyService.GetTenantDek(tenant_id u32, purpose, dek_version, caller_
 //! ephemeral_public_key)` returning `enc(32)`, `ciphertext(48)`,
 //! `dek_version`, `ttl_seconds`; sealed with the HPKE-lite construction in
-//! [`crate::provider`], context `service_id|tenant_id|purpose_label|1`.
+//! [`crate::provider`], context `service_id|tenant_id|purpose_label|dek_version`.
 
 use std::sync::Arc;
 

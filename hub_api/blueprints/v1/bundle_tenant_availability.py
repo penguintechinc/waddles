@@ -27,6 +27,7 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import tenant_app_availability_service as svc
+from services.bundle_global_state_service import installed_version, version_by_id
 from services.current_user import get_current_user_id
 from services.errors import ApiError
 from services.tenant_service import require_matching_tenant
@@ -82,6 +83,7 @@ class AvailabilityDTO:
     tenantId: int
     available: bool
     pinnedVersionId: int | None
+    version: str | None
     updatedAt: str | None
 
 
@@ -93,12 +95,13 @@ class AvailabilityListResponse:
     bundles: list[AvailabilityDTO]
 
 
-def _availability_dto(row: Any) -> AvailabilityDTO:
+def _availability_dto(row: Any, version: str | None = None) -> AvailabilityDTO:
     return AvailabilityDTO(
         appId=row.app_id,
         tenantId=row.tenant_id,
         available=bool(row.available),
         pinnedVersionId=row.pinned_version_id,
+        version=version,
         updatedAt=_iso(row.updated_at),
     )
 
@@ -116,7 +119,13 @@ async def list_availability(
     except ApiError as exc:
         return _err(exc)
     rows = await svc.list_availability(install_dal, tenant_id=tenant_id)
-    return AvailabilityListResponse(success=True, bundles=[_availability_dto(r) for r in rows])
+    dtos = []
+    for r in rows:
+        version = await version_by_id(install_dal, r.pinned_version_id) or await installed_version(
+            install_dal, r.app_id
+        )
+        dtos.append(_availability_dto(r, version))
+    return AvailabilityListResponse(success=True, bundles=dtos)
 
 
 @bundle_tenant_availability_bp.route("/<tenant_slug>/availability", methods=["POST"])

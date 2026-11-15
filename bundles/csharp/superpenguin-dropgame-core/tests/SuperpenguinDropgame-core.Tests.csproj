@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    xUnit tests for the shared drop-game core library (`../DropGameCore.csproj`), on the normal host CLR. The library is a plain
+    net10.0 class library (no wasi-wasm RuntimeIdentifier), so it is a real ProjectReference here. The file is named
+    `SuperpenguinDropgame-core.Tests.csproj` on purpose: scripts/test-superpenguin-bundle.sh derives the project path from the
+    bundle name (`dropgame-core` -> `Dropgame-core`), so the existing script and `make test-superpenguin-dropgame-core` work unchanged.
+    `support/DropTestWorld.cs` (in-memory host ledger, kv, identity, flags, overlay) is shared test infrastructure: the per-game
+    bundle test projects link it instead of copying it.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>SuperPenguin.DropGameCore.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="coverlet.collector" Version="10.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../DropGameCore.csproj" />
+    <ProjectReference Include="../../../../sdk/waddle-sdk-cs/waddle-sdk-cs.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../../../../sdk/waddle-sdk-cs/tests/Fakes.cs" Link="SdkFakes.cs" />
+    <Compile Include="../../../../sdk/waddle-sdk-cs/tests/FakesNext.cs" Link="SdkFakesNext.cs" />
+  </ItemGroup>
+
+</Project>

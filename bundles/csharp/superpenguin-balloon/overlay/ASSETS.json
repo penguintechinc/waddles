@@ -1,0 +1,95 @@
+{
+  "upstream_repo": "https://github.com/Psychoboy/PenguinTwitchBot",
+  "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+  "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)",
+  "files": [
+    {
+      "path": "balloon.html",
+      "sha256": "aaa34be1853394ec7df0cf4fccadb60cc3b83aca6d3994b5cb8accd28df79a66",
+      "size": 2872,
+      "upstream_path": "PenguinTwitchBot/wwwroot/balloon.html",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "js/balloon.js",
+      "sha256": "acf874da5db2639efc47cc4f760d5f1fc3eb3d03bd856921e85f6c7093950a1a",
+      "size": 77573,
+      "upstream_path": "PenguinTwitchBot/wwwroot/js/balloon.js",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/balloon_anvil.wav",
+      "sha256": "57f56b06ab3865b73137a29f7f0dd482d415c41738a01a506f86bd839a5e9a77",
+      "size": 48554,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/balloon_anvil.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/balloon_launch.wav",
+      "sha256": "0ce4d40bf1992810c081b7153b18f7b8ca351060f6ed42ca947c1dd981fde60e",
+      "size": 37088,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/balloon_launch.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/balloon_nudge.wav",
+      "sha256": "74902ae3f555d36cd4be44edc505e0da18b108fa9de79600c8a8e691898fc56d",
+      "size": 21212,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/balloon_nudge.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/balloon_pop.wav",
+      "sha256": "94b705506d5b20a8db59257bbfab7052ad0b44d2dd5f54bfcf10d771af7f6a43",
+      "size": 15920,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/balloon_pop.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    },
+    {
+      "path": "media/balloon_win.wav",
+      "sha256": "3460411c546cb4cbb9f09ab9030fe1b0e7c28db6f93b8c444b65e7f844a65ace",
+      "size": 83834,
+      "upstream_path": "PenguinTwitchBot/wwwroot/media/balloon_win.wav",
+      "upstream_commit": "df27ab1aaeaff0c6297f0e1fb8c3188b3be8328f",
+      "license": "MIT (Psychoboy/PenguinTwitchBot LICENSE)"
+    }
+  ],
+  "third_party_or_unclear": [
+    {
+      "path": "js/ws-client.js",
+      "reason": "upstream host WebSocket plumbing (topic subscription), not game material; the Waddles overlay transport differs, so not vendored",
+      "vendored": false
+    },
+    {
+      "path": "js/ws-status.js",
+      "reason": "upstream host WebSocket status badge, not game material; not vendored",
+      "vendored": false
+    },
+    {
+      "path": "js/reconnecting-websocket/reconnectingWS.min.js",
+      "reason": "third-party library with its own LICENSE.txt in upstream; not vendored",
+      "vendored": false
+    },
+    {
+      "path": "fonts.googleapis.com Fredoka/Rubik",
+      "reason": "loaded remotely by balloon.html at runtime (Google Fonts, OFL); not vendored",
+      "vendored": false
+    },
+    {
+      "path": "themes and character/emote/balloon-canopy/cloud images",
+      "reason": "stored in the upstream settings database and resolved from Twitch emotes at runtime, not files in the repo; nothing to vendor",
+      "vendored": false
+    }
+  ],
+  "notes": [
+    "balloon.html is vendored unmodified and still references /js/drop-games-common.js, /js/drop-games-audio.js (vendored once in superpenguin-dropgame-core/overlay/common) and the upstream WebSocket scripts listed as unvendored; see README browser-source section.",
+    "balloon.js is vendored unmodified: it still decides outcomes in the browser (wall clock, Math.random) and reports completion to upstream over WebSocket; the bundle replays its own server-side keyframes instead (see overlay/SCHEMA.md), so a host-supported overlay runtime must drive the page from the pushed envelope.",
+    "The repo carries no per-asset attribution for the .wav files; they are treated as covered by the repo MIT LICENSE."
+  ]
+}

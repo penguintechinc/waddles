@@ -40,8 +40,6 @@ pub const RELAY_OPS: &[(&str, &[&str])] = &[
             "reaction.add",
             "message.embed",
             "webhook.create",
-            "commands.register",
-            "commands.register.guild",
             "interaction.callback",
             "interaction.followup",
         ],
@@ -57,8 +55,13 @@ pub const RELAY_OPS: &[(&str, &[&str])] = &[
             "mod.remove",
         ],
     ),
-    // Declared, no ops yet: every Kick op is an unknown-op refusal until the Kick bundle lands.
-    ("kick", &[]),
+    // Kick: chat.send + moderation. `chat.delete` is absent on purpose (fail closed): a message id
+    // is global and not bound to the community channel. `mod.*` bodies carry integer ids (host
+    // `SlotShape::Int` broadcaster slot, protected-target check).
+    (
+        "kick",
+        &["chat.send", "mod.ban", "mod.timeout", "mod.unban"],
+    ),
 ];
 
 /// Ops reachable ONLY through the host tool path (a manifest `host_op` declaration behind the
@@ -85,6 +88,9 @@ pub const HOST_TOOL_ONLY_OPS: &[(&str, &str)] = &[
     ("youtube", "mod.unban"),
     ("youtube", "mod.add"),
     ("youtube", "mod.remove"),
+    ("kick", "mod.ban"),
+    ("kick", "mod.timeout"),
+    ("kick", "mod.unban"),
     // EventSub create/delete mutate app-wide subscriptions bound to the host callback URL and
     // secret: only the host reconcile path may create or tear them down. `eventsub.list` is
     // read-only and stays relay-reachable.
@@ -197,7 +203,7 @@ mod tests {
                 n += 1;
             }
         }
-        assert_eq!(n, 10 + 15 + 6);
+        assert_eq!(n, 10 + 13 + 6 + 4);
     }
 
     #[test]
@@ -211,12 +217,6 @@ mod tests {
             ("discord", "mod.timeout", "moderation.discord"),
             ("discord", "message.edit", "message.edit:discord"),
             ("discord", "reaction.add", "message.reaction:discord"),
-            ("discord", "commands.register", "commands.register:discord"),
-            (
-                "discord",
-                "commands.register.guild",
-                "commands.register:discord",
-            ),
             (
                 "discord",
                 "interaction.followup",
@@ -224,6 +224,10 @@ mod tests {
             ),
             ("youtube", "mod.add", "moderation.youtube"),
             ("youtube", "chat.delete", "chat.delete:youtube"),
+            ("kick", "chat.send", "chat.send:kick"),
+            ("kick", "mod.ban", "moderation.kick"),
+            ("kick", "mod.timeout", "moderation.kick"),
+            ("kick", "mod.unban", "moderation.kick"),
         ] {
             assert_eq!(permission_for(p, op).unwrap().canonical_id(), want);
         }
@@ -263,9 +267,9 @@ mod tests {
                 }
             }
         }
-        assert_eq!(seen, 3 + 4 + 4, "denominator: moderation ops checked");
-        // Unregistered ops (kick has none) are not silently host-only: they stay unknown-op.
-        assert!(!host_tool_only("kick", "mod.ban"));
+        assert_eq!(seen, 3 + 4 + 4 + 3, "denominator: moderation ops checked");
+        // Unregistered ops are not silently host-only: they stay unknown-op.
+        assert!(!host_tool_only("kick", "mod.nonexistent"));
         // A host-tool-only op never shares a permission with a relay-reachable op.
         assert_ne!(
             permission_for("twitch", "chat.clear"),
@@ -281,11 +285,25 @@ mod tests {
     fn unknown_or_cross_platform_ops_are_refused_never_defaulted() {
         assert!(permission_for("twitch", "mod.kick").is_none());
         assert!(permission_for("youtube", "eventsub.list").is_none());
-        assert!(permission_for("kick", "chat.send").is_none());
+        assert!(permission_for("kick", "mod.kick").is_none());
+        assert!(permission_for("kick", "dm.send").is_none());
+        assert!(permission_for("kick", "chat.delete").is_none());
         assert!(permission_for("slack", "chat.send").is_none());
         assert!(permission_for("discord", "role.add").is_none());
         assert!(registered_on_any_platform("mod.kick").is_some());
         assert!(registered_on_any_platform("nope").is_none());
         assert!(registered("twitch", "").is_none());
+    }
+
+    /// Security: command registration is a bulk overwrite of the whole guild's shared command
+    /// set, so no bundle may name it through `relay.send`. Only the platform's own reconciler
+    /// (host-built, verified against the hub-api desired state) may run it.
+    #[test]
+    fn command_registration_is_not_bundle_callable() {
+        for op in ["commands.register", "commands.register.guild"] {
+            assert!(registered("discord", op).is_none(), "{op}");
+            assert!(registered_on_any_platform(op).is_none(), "{op}");
+            assert!(permission_for("discord", op).is_none(), "{op}");
+        }
     }
 }

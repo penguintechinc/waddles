@@ -1,0 +1,42 @@
+// DistributionService: internal gRPC contract replacing hub-api's
+// `GET /api/v1/distribution/bundles` for stage-runners (svc-ingest /
+// svc-process / svc-action). Auth: machine JWT in `authorization` metadata;
+// the tenant comes ONLY from the verified token, never the request.
+syntax = "proto3";
+
+package waddles.hub.internal.v1;
+
+option go_package = "github.com/penguintechinc/waddles/gen/go/waddles/hub/internal/v1;hubinternalv1";
+
+service DistributionService {
+  // Every enabled, activated bundle implementing `stage` for the caller's
+  // tenant. Required scope: "distribution:read".
+  rpc ListBundles(ListBundlesRequest) returns (ListBundlesResponse);
+}
+
+enum DistributionStage {
+  DISTRIBUTION_STAGE_UNSPECIFIED = 0;
+  DISTRIBUTION_STAGE_INGEST = 1;
+  DISTRIBUTION_STAGE_PROCESS = 2;
+  DISTRIBUTION_STAGE_ACTION = 3;
+}
+
+message ListBundlesRequest {
+  DistributionStage stage = 1;
+  // Unset resolves the tenant-wide availability fallback only.
+  optional int64 community_id = 2;
+}
+
+message ListBundlesResponse {
+  repeated DistributionBundle bundles = 1;
+}
+
+message DistributionBundle {
+  string app_id = 1;
+  optional int64 community_id = 2;
+  optional string entrypoint = 3;
+  // Free-form JSON documents (bundle spec / merged config), serialized
+  // UTF-8 JSON objects; opaque to the transport.
+  bytes spec_json = 4;
+  bytes config_json = 5;
+}

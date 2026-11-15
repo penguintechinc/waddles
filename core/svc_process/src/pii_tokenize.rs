@@ -39,7 +39,7 @@ use crate::identity::{MentionBinding, MentionRef};
 
 /// Every failure [`tokenize_event`] can raise -- all fail-closed (never a
 /// partial/best-effort tokenization reaches the caller).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum TokenizeError {
     #[error("identity resolution unavailable: {0}")]
     ResolutionUnavailable(String),
@@ -266,6 +266,9 @@ const METADATA_SAFE_FIELDS: &[&str] = &[
     "bits",
     "type",
     "started_at",
+    // Kick `channel.subscribe` (bundles/rust/kick): months purchased + renewal flag.
+    "duration",
+    "is_renewal",
 ];
 
 /// The set of payload field names [`ID_NAME_FIELD_PAIRS`] tokenizes --
@@ -378,7 +381,7 @@ pub(crate) fn scan_mentions(text: &str) -> Vec<ScannedMention> {
 /// The result of a tokenization pass: the bundle-safe event plus the
 /// HOST-SIDE mention bindings (opaque token the bundle was shown -> the raw
 /// reference it stands for). `Debug` is redacted via [`MentionBinding`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TokenizedEvent {
     /// The event handed to the bundle: every identity replaced by a
     /// `{user:<token>}` placeholder.
