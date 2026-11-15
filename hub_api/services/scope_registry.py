@@ -77,6 +77,17 @@ register_scopes(
         "resource:pin": "Pin resources",
         "resource:moderate": "Moderate resources",
         SCOPE_ROLES_MANAGE: "Create, edit and delete roles",
+        # Rooms (call rooms): every action has its own scope. The admin kind picks all of them up
+        # automatically; the moderator kind is seeded with the four moderation ones (migration
+        # 0118_room_scopes_moderator), never with the management ones.
+        "rooms:create": "Create call rooms",
+        "rooms:update": "Change a room's kind, schedule or closed state",
+        "rooms:close": "Close (delete) call rooms",
+        "rooms:guests": "Allow guests into a room",
+        "rooms:kick": "Remove participants from a room",
+        "rooms:mute": "Mute and unmute participants in a room",
+        "rooms:lock": "Lock and unlock a room",
+        "rooms:hands": "Moderate the raised-hand queue",
     }
 )
 
