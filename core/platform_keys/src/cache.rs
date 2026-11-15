@@ -175,11 +175,25 @@ impl KeyCache {
 
     /// `Some` when the key is cached (usable or not), `None` when absent. Records hit/reject.
     fn lookup_cached(&self, slot: &Slot) -> Option<Result<KeyRecord, KeyError>> {
+        self.lookup_cached_counting(slot, true)
+    }
+
+    /// Cache lookup; `count_hit` is false right after this call's own lazy load so a freshly
+    /// loaded key counts as one miss, never also a hit.
+    fn lookup_cached_counting(
+        &self,
+        slot: &Slot,
+        count_hit: bool,
+    ) -> Option<Result<KeyRecord, KeyError>> {
         let state = self.read();
         let rec = state.keys.get(slot)?;
         let res = self.check_usable(&state, rec).map(|()| rec.clone());
         match &res {
-            Ok(_) => self.metrics.hit(slot.0),
+            Ok(_) => {
+                if count_hit {
+                    self.metrics.hit(slot.0);
+                }
+            }
             Err(KeyError::Expired) => self.metrics.rejected(slot.0, Reason::Expired),
             Err(_) => self.metrics.rejected(slot.0, Reason::Stale),
         }
@@ -232,7 +246,7 @@ impl KeyCache {
                     st.last_success = Some(self.clock.now());
                     st.keys.extend(loaded);
                 }
-                if let Some(res) = self.lookup_cached(&slot) {
+                if let Some(res) = self.lookup_cached_counting(&slot, false) {
                     return res;
                 }
                 self.set_negative(slot);
