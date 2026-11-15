@@ -40,7 +40,6 @@ global:
     externalSecret: true
   imagePullSecrets:
     - name: ghcr-pull-secret
-  corsOrigin: "https://hub.waddlebot.io,https://waddlebot.io,https://waddles.penguintech.cloud,https://waddlebot.penguintech.cloud,http://localhost:3000,http://localhost:5173"
 
 # Infrastructure - Enable core services in beta
 infrastructure:
@@ -67,7 +66,6 @@ infrastructure:
   redis:
     enabled: true
     image: valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
-    replicas: 1
     persistence:
       size: 2Gi
       storageClass: "longhorn"
@@ -219,15 +217,6 @@ posthog:
     storage: 20Gi
   kafka:
     storage: 10Gi
-
-# Module image overrides - use registry image names
-# Shared Environment
-sharedEnv:
-  DB_HOST: "infra-postgres"
-  REDIS_HOST: "infra-redis"
-  MINIO_ENDPOINT: "infra-seaweedfs:8333"
-  QDRANT_HOST: "infra-qdrant"
-  OAUTH_CALLBACK_BASE_URL: "https://waddles.penguintech.cloud"
 
 # Ingress - disabled in favour of Cilium Gateway API HTTPRoute
 ingress:
