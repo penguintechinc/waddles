@@ -40,6 +40,7 @@ requires the primary (`pg_is_in_recovery()` guard) and refuses a DAL tagged by
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import functools
 import logging
@@ -78,6 +79,74 @@ _current_route: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+
+class ReplicaAsyncDAL:
+    """Read-only `AsyncDAL` look-alike whose every helper runs on the replica DAL.
+
+    Services take an `async_dal` and call `select_async` / `count_async` / `executesql_async`;
+    handing them the primary wrapper while the queries come from the replica would split one
+    request across both databases (raw SQL silently on primary). This view makes the whole call
+    chain consistent. It deliberately has NO write helpers (`insert_async`, `update_async`,
+    `delete_async`, `transaction_async` ...): a write attempted through a replica route raises
+    `AttributeError` instead of reaching a standby.
+    """
+
+    def __init__(self, parent: Any) -> None:
+        """Wrap `parent` (the real `AsyncDAL`); `dal` and `read_dal` both name the replica."""
+        self._parent = parent
+        self.dal = parent.read_dal
+        self.read_dal = parent.read_dal
+        self._executor = getattr(parent, "executor", None)
+
+    async def _run(self, fn: Callable[[], R]) -> R:
+        """Run `fn` on the parent's executor inside the caller's contextvars context."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor, functools.partial(contextvars.copy_context().run, fn)
+        )
+
+    async def select_async(self, query: Any, *args: Any, **kwargs: Any) -> Any:
+        """Select on the replica; ends its own transaction (commit, rollback on error)."""
+
+        def _select() -> Any:
+            try:
+                result = query.select(*args, **kwargs)
+                self.dal.commit()
+                return result
+            except Exception:
+                self.dal.rollback()
+                raise
+
+        return await self._run(_select)
+
+    async def count_async(self, query: Any) -> int:
+        """Count on the replica; ends its own transaction."""
+
+        def _count() -> int:
+            try:
+                result = int(self.dal(query).count())
+                self.dal.commit()
+                return result
+            except Exception:
+                self.dal.rollback()
+                raise
+
+        return await self._run(_count)
+
+    async def executesql_async(self, sql: str, params: list[Any] | None = None) -> Any:
+        """Run raw (read) SQL on the replica; a standby rejects writes server-side too."""
+
+        def _execute() -> Any:
+            try:
+                result = self.dal.executesql(sql, placeholders=params)
+                self.dal.commit()
+                return result
+            except Exception:
+                self.dal.rollback()
+                raise
+
+        return await self._run(_execute)
 
 
 class DbTarget(StrEnum):
@@ -158,7 +227,7 @@ def get_read_dal(route: str | None = None, *, binders: Iterable[Callable[[Any], 
         _bind_on(replica, binders)
         _record(DbTarget.REPLICA, label)
         return replica
-    primary = async_dal.dal if async_dal is not None else current_app.config["dal"]
+    primary = getattr(async_dal, "dal", None) or current_app.config["dal"]
     _bind_on(primary, binders)
     _warn_fallback_once(label)
     _record(DbTarget.PRIMARY_FALLBACK, label)
@@ -170,11 +239,21 @@ def get_read_dals(
 ) -> tuple[Any, Any]:
     """Drop-in for the `async_dal, dal = _dal()` idiom: `(async_dal, read_dal)`.
 
-    `async_dal` is still the primary wrapper (its `select_async` runs on the DAL the *query*
-    was built from, so queries built from the returned read DAL run on the replica).
+    With a replica both members are replica-bound (`ReplicaAsyncDAL` is read-only); without
+    one they are the primary pair, exactly the pre-routing behaviour.
     """
     dal = get_read_dal(route, binders=binders)
-    return current_app.config.get("async_dal"), dal
+    async_dal = current_app.config.get("async_dal")
+    if async_dal is not None and is_replica_dal(dal):
+        return ReplicaAsyncDAL(async_dal), dal
+    return async_dal, dal
+
+
+def get_read_async_dal(
+    route: str | None = None, *, binders: Iterable[Callable[[Any], None]] = ()
+) -> Any:
+    """Return only the `async_dal` half of `get_read_dals()` (replica view or primary wrapper)."""
+    return get_read_dals(route, binders=binders)[0]
 
 
 def record_primary_read(route: str) -> None:

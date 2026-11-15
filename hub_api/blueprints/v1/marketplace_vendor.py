@@ -38,6 +38,7 @@ from services import marketplace_analytics_service as analytics
 from services import marketplace_review_service as review
 from services import marketplace_vendor_service as vendor
 from services.current_user import get_current_user_id
+from services.db_routing import get_read_dal, reads_from_replica
 from services.errors import ApiError
 from services.schema import bind_marketplace_vendor_tables
 
@@ -434,9 +435,10 @@ async def get_submission_status(submission_id: str) -> tuple[dict[str, Any], int
 
 
 @vendor_public_bp.route("/modules", methods=["GET"])
+@reads_from_replica("marketplace_vendor.get_published_modules")
 async def get_published_modules() -> tuple[dict[str, Any], int]:
-    """`GET /api/v1/marketplace/public/vendor/modules` -- unauthenticated listing."""
-    dal = _dal()
+    """`GET /api/v1/marketplace/public/vendor/modules` -- unauthenticated listing (replica)."""
+    dal = get_read_dal(binders=(bind_marketplace_vendor_tables,))
     page = max(1, _int_query_arg("page", 1))
     limit = min(100, max(1, _int_query_arg("limit", 20)))
     featured = request.args.get("featured") == "true"

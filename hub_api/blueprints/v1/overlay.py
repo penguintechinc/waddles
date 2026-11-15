@@ -44,6 +44,7 @@ from quart_schema import validate_request
 from config import HubAPIConfig
 from services import community_access, overlay_service
 from services.current_user import get_current_user_id
+from services.db_routing import get_read_dals, reads_from_replica
 from services.dto_response import jsonify_dto
 from services.errors import ApiError, bad_request, not_found, payment_required
 from services.overlay_service import (
@@ -284,6 +285,7 @@ async def rotate_overlay_key(community_id: int) -> Any:
 @overlay_bp.route("/<int:community_id>/overlay/stats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+@reads_from_replica("overlay.get_overlay_stats")
 async def get_overlay_stats(community_id: int) -> Any:
     """Get daily + total overlay access statistics."""
     days_raw = request.args.get("days", "7")
@@ -292,8 +294,8 @@ async def get_overlay_stats(community_id: int) -> Any:
     except ValueError:
         days = 7
     try:
-        await _require_admin(community_id)
-        async_dal, dal = _dal()
+        await _require_admin(community_id)  # authz stays on the primary
+        async_dal, dal = get_read_dals()  # the aggregate data read tolerates replica lag
         stats = await overlay_service.get_overlay_stats(
             async_dal, dal, community_id=community_id, days=days
         )

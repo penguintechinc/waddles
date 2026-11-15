@@ -101,6 +101,7 @@ from services import analytics_service as svc
 from services.analytics_proxy import AnalyticsCoreProxyClient
 from services.community_common import api_error, community_in_tenant
 from services.current_user import get_current_user_id
+from services.db_routing import get_read_async_dal, reads_from_replica
 
 analytics_bp = Blueprint("v1_analytics", __name__, url_prefix="/api/v1/analytics")
 
@@ -231,17 +232,19 @@ async def get_member_reputation(community_id: int, user_id: int) -> Any:
 @analytics_bp.route("/platform/overview", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
+@reads_from_replica("analytics.get_platform_overview")
 async def get_platform_overview() -> Any:
     """`GET /api/v1/analytics/platform/overview`."""
-    return await svc.platform_overview(_proxy_client, current_app.config["async_dal"])
+    return await svc.platform_overview(_proxy_client, get_read_async_dal())
 
 
 @analytics_bp.route("/platform/reputation", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
+@reads_from_replica("analytics.get_platform_reputation")
 async def get_platform_reputation() -> Any:
     """`GET /api/v1/analytics/platform/reputation`."""
-    return await svc.reputation_distribution(current_app.config["async_dal"])
+    return await svc.reputation_distribution(get_read_async_dal())
 
 
 @analytics_bp.route("/platform/growth", methods=["GET"])

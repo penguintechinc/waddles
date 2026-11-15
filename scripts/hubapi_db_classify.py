@@ -59,53 +59,69 @@ AUTHZ_RE = re.compile(
 READ_ONLY_REASON = {
     "marketplace_catalog": "catalog browse: seconds of staleness tolerated",
     "public": "anonymous public page: lag tolerated",
-    "live_status": "overlay poll: lag delays a live flip by replication lag only",
+    "live_status": "overlay poll: lag only delays a live flip; community gate read stays primary",
+    "platform": "scope-gated aggregate/append-only dashboard; no DB authz in handler",
+    "analytics": "scope-gated aggregate over the bundle store; no DB authz in handler",
+    "community_loyalty": "aggregate/shop read on replica; authz/existence gate + lazy config INSERT stay primary",
+    "overlay": "aggregate stats on replica; `_require_admin` authz read stays primary",
+    "marketplace_billing": "public pricing config; lag tolerated",
+    "marketplace_vendor": "unauthenticated published-module listing",
+    "support": "aggregate counts; scope + tenant checked before the read",
 }
 
 
-#: Reads that are lag-tolerant in principle but were NOT migrated in this change: each shares one
-#: `dal` with an authz helper or with edit-then-refetch UI, so moving it needs a per-route split.
-ELIGIBLE_NOT_MOVED = {
+#: Per-route lag review: pure GETs that were examined and deliberately kept on the primary.
+KEPT_REVIEWED = {
     (
         "community_profile",
         "get_community_profile",
-    ): "public profile; needs tenant/visibility helper split",
+    ): "visibility gate and data are one row; a stale row would leak a just-privatised community",
     (
         "public_music_queue",
         "get_public_queue",
-    ): "public queue; reads Valkey playback + DB, review pending",
-    (
-        "analytics",
-        "get_platform_overview",
-    ): "aggregate dashboard; authz helper shares the dal",
-    (
-        "analytics",
-        "get_platform_reputation",
-    ): "aggregate dashboard; authz helper shares the dal",
-    (
-        "community_loyalty",
-        "get_leaderboard",
-    ): "leaderboard aggregate; authz helper shares the dal",
-    ("community_loyalty", "get_stats"): "stats aggregate; authz helper shares the dal",
-    ("overlay", "get_overlay_stats"): "stats aggregate; authz helper shares the dal",
-    ("platform", "get_stats"): "platform stats dashboard; authz helper shares the dal",
-    (
-        "platform",
-        "get_audit_log",
-    ): "append-only audit listing; authz helper shares the dal",
+    ): "joins live Redis playback with DB rows; lag can show an inconsistent now-playing",
     (
         "marketplace_vendor",
         "get_vendor_dashboard",
-    ): "vendor dashboard; edit-then-refetch risk",
-    ("marketplace_vendor", "get_sales_metrics"): "vendor analytics aggregate",
+    ): "seller just registered/submitted lands here; money + pending counts need freshness",
+    (
+        "marketplace_vendor",
+        "get_sales_metrics",
+    ): "seller ownership lookup in the service shares the DAL (new vendor would 404 under lag)",
     (
         "marketplace_admin_review",
         "get_vendor_requests",
-    ): "review queue: act-then-refetch risk",
+    ): "review queue: admin acts then refetches the same rows",
     (
         "marketplace_admin_review",
         "get_submissions",
-    ): "review queue: act-then-refetch risk",
+    ): "review queue: admin acts then refetches the same rows",
+    ("platform", "get_system_health"): "probes primary database liveness on purpose",
+    ("platform", "list_users"): "admin edits a role then refetches the list",
+    ("platform", "get_user"): "admin edits then refetches the row",
+    ("platform", "list_communities"): "admin edits then refetches the list",
+    ("platform", "get_community"): "admin edits then refetches the row",
+    (
+        "community_loyalty",
+        "internal_get_balance",
+    ): "currency balance: money-like, freshness",
+}
+
+#: Why each remaining non-auth GET module stays primary (edit-then-refetch or state-bearing).
+MODULE_REASON = {
+    "app_commands_internal": "reconciler reads desired state it just wrote; freshness",
+    "community_announcements": "announcement/broadcast status tracks a just-sent write",
+    "community_interaction": "admin role/permission config (authz-bearing) + edit-then-refetch",
+    "community_inventory": "checkout/return flows refetch; inventory state is authz-bearing",
+    "community_music_queue": "joins live Redis playback with DB rows",
+    "eventsub_reconcile": "secret material",
+    "github_sync": "connection state: connect then refetch",
+    "guild_pairing": "pairing state: pair then refetch",
+    "marketplace_billing": "admin edits discount codes then refetches",
+    "marketplace_lifecycle": "admin installs/toggles then refetches the same listing",
+    "marketplace_vendor": "seller ownership lookup in the service + register/submit then view",
+    "support": "tickets: mutate then refetch; per-user ticket state",
+    "tenant_reputation": "tenant config: edit then refetch",
 }
 
 
@@ -134,11 +150,11 @@ def classify(row: dict[str, object], src_cache: dict[str, str]) -> tuple[str, st
             "replica (pre-existing)",
             "already routed to `read_dal` before this change",
         )
-    if (mod, str(row["fn"])) in ELIGIBLE_NOT_MOVED:
+    if (mod, str(row["fn"])) in KEPT_REVIEWED:
         return (
-            "READ-ONLY (eligible, not moved)",
+            "READ-ONLY, kept primary (reviewed)",
             "primary",
-            ELIGIBLE_NOT_MOVED[(mod, str(row["fn"]))],
+            KEPT_REVIEWED[(mod, str(row["fn"]))],
         )
     if mod in AUTH_MODULES:
         return "AUTH/SESSION/SECURITY", "primary", AUTH_MODULES[mod]
@@ -148,46 +164,11 @@ def classify(row: dict[str, object], src_cache: dict[str, str]) -> tuple[str, st
             "primary",
             "in-handler tenant/membership authz check",
         )
-    if mod.startswith(
-        (
-            "community_",
-            "bundle_",
-            "marketplace_",
-            "platform",
-            "ai_routing",
-            "stream",
-            "music",
-            "overlay",
-            "support",
-            "workflow",
-            "workstream",
-            "github_sync",
-            "guild_pairing",
-            "ingest",
-            "event",
-            "bot",
-            "app_commands",
-            "calls",
-            "compliance",
-            "analytics",
-            "live_activity",
-            "flags",
-            "distribution",
-        )
-    ):
-        return (
-            "READ-AFTER-WRITE / UNREVIEWED",
-            "primary",
-            "authenticated console/dashboard GET: its UI edits then re-fetches the same rows",
-        )
     return (
-        "READ-AFTER-WRITE / UNREVIEWED",
+        "READ-AFTER-WRITE (reviewed)",
         "primary",
-        "unreviewed GET: kept primary until lag review",
+        MODULE_REASON.get(mod, "edit-then-refetch or state-bearing GET (reviewed)"),
     )
-
-
-_SEG_RE_CACHE: dict[str, list[str]] = {}
 
 
 def _segment(row: dict[str, object], cache: dict[str, str]) -> str:

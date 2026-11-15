@@ -145,35 +145,53 @@ class TestReadOnlyUsesReplica:
         app = _app(primary, replica)
         async with app.app_context():
             async_dal, dal = get_read_dals("pair")
-        assert async_dal is app.config["async_dal"] and dal is replica
+        assert isinstance(async_dal, db_routing.ReplicaAsyncDAL) and dal is replica
+        assert async_dal.dal is replica
 
-    async def test_live_status_route_reads_replica_not_primary(
+    async def test_live_status_gate_primary_data_replica(
         self, tmp_path: Path, counter: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Community only on primary: replica configured -> 404 proves the replica was read."""
+        """Community row only on primary (gate), live channel only on replica (data) -> live."""
+        from datetime import UTC, datetime
+
         monkeypatch.setenv("SERVICE_API_KEY", "k")
         primary, replica = _dal(tmp_path, "p.db"), _dal(tmp_path, "r.db")
-        for d in (primary, replica):
-            d.tenants.insert(slug=TENANT_SLUG, is_active=True)
-            d.commit()
+        primary.tenants.insert(slug=TENANT_SLUG, is_active=True)
+        primary.commit()
         tid = primary(primary.tenants.slug == TENANT_SLUG).select().first().id
         cid = primary.communities.insert(name="c", tenant_id=tid, is_active=True, is_public=True)
         primary.commit()
+        replica.community_servers.insert(
+            community_id=cid, platform="twitch", platform_server_id="srv-1", status="approved"
+        )
+        replica.coordination.insert(
+            entity_id="twitch:1",
+            platform="twitch",
+            server_id="srv-1",
+            channel_id="srv-1",
+            channel_name="Replica Channel",
+            is_live=True,
+            viewer_count=7,
+            live_since=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        replica.commit()
         app = _app(primary, replica)
         QuartSchema(app)
         app.register_blueprint(live_status_public_bp)
         app.register_blueprint(live_status_internal_bp)
         client = app.test_client()
 
-        miss = await client.get(f"/api/v1/public/communities/{cid}/live")
-        assert miss.status_code == 404
+        resp = await client.get(f"/api/v1/public/communities/{cid}/live")
+        assert resp.status_code == 200
+        data = (await resp.get_json())["data"]
+        assert data["live"] is True and data["channel"] == "Replica Channel"
+        assert set(_targets(counter)) == {"primary", "replica"}
 
-        rtid = replica(replica.tenants.slug == TENANT_SLUG).select().first().id
-        replica.communities.insert(id=cid, name="c", tenant_id=rtid, is_active=True, is_public=True)
-        replica.commit()
-        hit = await client.get(f"/api/v1/public/communities/{cid}/live")
-        assert hit.status_code == 200
-        assert set(_targets(counter)) == {"replica"}
+        # A private community must 404 from the PRIMARY gate even though the replica has data.
+        primary(primary.communities.id == cid).update(is_public=False)
+        primary.commit()
+        denied = await client.get(f"/api/v1/public/communities/{cid}/live")
+        assert denied.status_code == 404
 
     async def test_catalog_route_receives_replica_dal(self, tmp_path: Path, counter: Any) -> None:
         primary, replica = _dal(tmp_path, "p.db"), _dal(tmp_path, "r.db")
@@ -215,7 +233,7 @@ class TestPrimaryFallback:
         app.register_blueprint(live_status_public_bp)
         resp = await app.test_client().get(f"/api/v1/public/communities/{cid}/live")
         assert resp.status_code == 200
-        assert set(_targets(counter)) == {"primary_fallback"}
+        assert set(_targets(counter)) == {"primary", "primary_fallback"}
 
     async def test_missing_async_dal_config_uses_raw_dal(
         self, tmp_path: Path, counter: Any
@@ -264,7 +282,6 @@ class TestAuthAndFreshnessPathsNeverUseReplica:
         "blueprints/v1/user_management.py",
         "blueprints/v1/admin.py",
         "blueprints/v1/superadmin.py",
-        "blueprints/v1/platform.py",
         "blueprints/v1/tenant.py",
         "blueprints/v1/bundle_activation.py",
         "blueprints/v1/bundle_approvals.py",
@@ -304,7 +321,7 @@ class TestMarkedHandlersAreReadOnly:
             for rule in app.url_map.iter_rules()
             if getattr(app.view_functions[rule.endpoint], HANDLER_MARK, None)
         }
-        assert len(marked) >= 14, f"expected the migrated read set, found {len(marked)}"
+        assert len(marked) >= 26, f"expected the migrated read set, found {len(marked)}"
         for endpoint, methods in marked.items():
             assert set(methods or ()) <= {
                 "GET",

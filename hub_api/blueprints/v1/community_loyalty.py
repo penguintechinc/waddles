@@ -39,6 +39,7 @@ from quart import Blueprint, current_app, request
 from services import community_loyalty as loyalty_svc
 from services.community_common import community_in_tenant, is_valid_service_key
 from services.current_user import get_current_user_id
+from services.db_routing import get_read_dals, reads_from_replica
 from services.errors import ApiError, bad_request, not_found
 from services.pagination import parse_limit
 
@@ -174,15 +175,21 @@ async def update_config(community_id: int) -> tuple[dict[str, Any], int]:
 @loyalty_bp.route("/<int:community_id>/loyalty/leaderboard", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:read")  # type: ignore[misc]
+@reads_from_replica("community_loyalty.get_leaderboard")
 async def get_leaderboard(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/admin/<id>/loyalty/leaderboard?limit=`."""
     if not _tenant_ok(community_id):
         return _err(not_found("Community not found"))
 
     limit = parse_limit(request.args.get("limit"), default=10)
+    # `get_config` may lazily INSERT the default row, so it runs on the primary; the leaderboard
+    # itself is a pure aggregate read and tolerates replica lag.
     async_dal, dal = _dal()
     config = await loyalty_svc.get_config(async_dal, dal, community_id=community_id)
-    entries = await loyalty_svc.leaderboard(async_dal, dal, community_id=community_id, limit=limit)
+    read_async_dal, read_dal = get_read_dals()
+    entries = await loyalty_svc.leaderboard(
+        read_async_dal, read_dal, community_id=community_id, limit=limit
+    )
     return _envelope(
         {
             "entries": [asdict(entry) for entry in entries],
@@ -257,12 +264,13 @@ async def wipe_currency(community_id: int) -> tuple[dict[str, Any], int]:
 @loyalty_bp.route("/<int:community_id>/loyalty/stats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:read")  # type: ignore[misc]
+@reads_from_replica("community_loyalty.get_stats")
 async def get_stats(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/admin/<id>/loyalty/stats`."""
     if not _tenant_ok(community_id):
         return _err(not_found("Community not found"))
 
-    async_dal, dal = _dal()
+    async_dal, dal = get_read_dals()
     stats = await loyalty_svc.get_stats(async_dal, dal, community_id=community_id)
     return _envelope(asdict(stats))
 
@@ -297,6 +305,7 @@ async def internal_get_balance() -> tuple[dict[str, Any], int]:
 
 
 @loyalty_internal_bp.route("/loyalty/leaderboard", methods=["GET"])
+@reads_from_replica("community_loyalty.internal_leaderboard")
 async def internal_leaderboard() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/internal/loyalty/leaderboard?community_id=&limit=`."""
     if not is_valid_service_key(request):
@@ -311,8 +320,12 @@ async def internal_leaderboard() -> tuple[dict[str, Any], int]:
         return _err(not_found("Community not found"))
 
     limit = parse_limit(request.args.get("limit"), default=10)
+    # `get_config` may lazily INSERT the default row (primary); the leaderboard read is replica.
     config = await loyalty_svc.get_config(async_dal, dal, community_id=community_id)
-    entries = await loyalty_svc.leaderboard(async_dal, dal, community_id=community_id, limit=limit)
+    read_async_dal, read_dal = get_read_dals()
+    entries = await loyalty_svc.leaderboard(
+        read_async_dal, read_dal, community_id=community_id, limit=limit
+    )
     return _envelope(
         {
             "entries": [asdict(entry) for entry in entries],
@@ -323,6 +336,7 @@ async def internal_leaderboard() -> tuple[dict[str, Any], int]:
 
 
 @loyalty_internal_bp.route("/loyalty/items", methods=["GET"])
+@reads_from_replica("community_loyalty.internal_list_items")
 async def internal_list_items() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/internal/loyalty/items?community_id=` -- enabled items only (shop display)."""
     if not is_valid_service_key(request):
@@ -336,8 +350,9 @@ async def internal_list_items() -> tuple[dict[str, Any], int]:
     if not _community_exists(dal, community_id):
         return _err(not_found("Community not found"))
 
+    read_async_dal, read_dal = get_read_dals()  # existence gate above stays primary
     items = await loyalty_svc.list_items(
-        async_dal, dal, community_id=community_id, enabled_only=True
+        read_async_dal, read_dal, community_id=community_id, enabled_only=True
     )
     return _envelope({"items": [asdict(item) for item in items]})
 

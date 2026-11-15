@@ -34,16 +34,19 @@ yet: if the replica is down, replica reads error like any DB outage (follow-up: 
 | Class | Target | Rule |
 |---|---|---|
 | READ-ONLY | replica | pure GET, lag-tolerant, no authz/membership helper sharing its DAL |
-| READ-ONLY (eligible, not moved) | primary | lag-tolerant in principle; shares its DAL with an authz helper or edit-then-refetch UI, so it needs a per-route split first |
-| READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console GETs that edit-then-refetch, or not yet lag-reviewed |
+| READ-ONLY, kept primary (reviewed) | primary | pure GET examined individually and kept: the stale-row risk is a security leak, an inconsistent join with live state, or money/ownership freshness (reason per route) |
+| READ-AFTER-WRITE (reviewed) | primary | GETs whose UI edits then refetches the same rows, or that carry authz-bearing state (reason per module) |
 | WRITE | primary | any mutating route |
 | AUTH/SESSION/SECURITY | primary | auth, session, OAuth state, MFA/passkey, tokens, consent/DSAR, rate-limit, idempotency, secret material, in-handler tenant/membership authz |
 | NO-DB | n/a | handler touches no DAL (proxy, cache, flag, static) |
 | WATERMARK | primary | `bundle_active_set_watermark_job` (`pg_is_in_recovery()` guard); refuses a replica-tagged DAL and is built only from `install_dal` on `cfg.database_url` |
 
-The classification is a mechanical first pass (AST + module/authz heuristics), reviewed by hand
-for the moved set. "UNREVIEWED" rows are conservative: they stay primary until someone reviews lag
-and read-after-write for that route.
+The classification starts from an AST pass (module/authz heuristics) and every GET that is not
+auth/session was then reviewed by hand (second pass, 2026-11-15): authz/scope/tenant/existence
+gates were split from data reads where the handler allowed it (the gate stays on the primary,
+the aggregate/list read moves). `ReplicaAsyncDAL` is the read-only async wrapper handed to services
+on the replica path: it has no write helpers, so a write on a replica route raises instead of
+reaching a standby, and raw SQL (`executesql_async`) runs on the replica too.
 
 ## Non-route DB access
 
@@ -74,10 +77,10 @@ and read-after-write for that route.
 | WRITE | 317 | 0 |
 | NO-DB | 97 | 0 |
 | AUTH/SESSION/SECURITY | 76 | 0 |
-| READ-AFTER-WRITE / UNREVIEWED | 53 | 0 |
-| READ-ONLY | 15 | 14 |
-| READ-ONLY (eligible, not moved) | 13 | 0 |
-| **total examined** | **571** | **14** |
+| READ-AFTER-WRITE (reviewed) | 42 | 0 |
+| READ-ONLY | 27 | 26 |
+| READ-ONLY, kept primary (reviewed) | 12 | 0 |
+| **total examined** | **571** | **26** |
 
 | module | route/function | class | target | reason |
 |---|---|---|---|---|
@@ -90,8 +93,8 @@ and read-after-write for that route.
 | `v1/ai_routing.py` | 6: GET /<int:community_id>/ai/config (get_config); PUT /<int:community_id>/ai/config (set_config); GET /<int:community_id>/ai/byok-keys (list_byok_keys) (+3 more) | WRITE | primary | mutating route |
 | `v1/analytics.py` | 2: GET /community/<int:community_id>/members/<int:user_id>/stats (get_member_stats); GET /community/<int:community_id>/members/<int:user_id>/reputation (get_member_reputation) | AUTH/SESSION/SECURITY | primary | in-handler tenant/membership authz check |
 | `v1/analytics.py` | 7: GET /me/stats (get_my_stats); GET /me/reputation (get_my_reputation); GET /platform/growth (get_platform_growth) (+4 more) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
-| `v1/analytics.py` | 2: GET /platform/overview (get_platform_overview); GET /platform/reputation (get_platform_reputation) | READ-ONLY (eligible, not moved) | primary | aggregate dashboard; authz helper shares the dal |
-| `v1/app_commands_internal.py` | 2: GET /app-commands/sources (list_sources_route); GET /app-commands/desired (desired_route) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
+| `v1/analytics.py` | 2: GET /platform/overview (get_platform_overview); GET /platform/reputation (get_platform_reputation) | READ-ONLY | replica (moved) | scope-gated aggregate over the bundle store; no DB authz in handler |
+| `v1/app_commands_internal.py` | 2: GET /app-commands/sources (list_sources_route); GET /app-commands/desired (desired_route) | READ-AFTER-WRITE (reviewed) | primary | reconciler reads desired state it just wrote; freshness |
 | `v1/auth.py` | 1: GET /tenant/<slug> (tenant_login_info) | AUTH/SESSION/SECURITY | primary | login/session/OAuth-state/MFA: freshness + security |
 | `v1/auth.py` | 3: POST /link-oauth (link_oauth_legacy); GET /providers (list_auth_providers); POST /passkey/login/start (passkey_login_start) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
 | `v1/auth.py` | 18: POST /register (register); GET /verify-email (verify_email); POST /resend-verification (resend_verification) (+15 more) | WRITE | primary | mutating route |
@@ -112,7 +115,7 @@ and read-after-write for that route.
 | `v1/community_activity.py` | 3: GET /<int:community_id>/leaderboard/messages (message_leaderboard); GET /<int:community_id>/activity/my-stats (my_activity_stats); GET /<int:community_id>/leaderboard-config (leaderboard_config_get) | AUTH/SESSION/SECURITY | primary | in-handler tenant/membership authz check |
 | `v1/community_activity.py` | 6: GET /<int:community_id>/leaderboard/watch-time (watch_time_leaderboard); PUT /<int:community_id>/leaderboard-config (leaderboard_config_update); POST /watch-session (watch_session_ingest) (+3 more) | WRITE | primary | mutating route |
 | `v1/community_announcements.py` | 5: DELETE /<int:community_id>/announcements/<int:announcement_id> (delete_route); POST /<int:community_id>/announcements/<int:announcement_id>/publish (publish_route); PUT /<int:community_id>/announcements/<int:announcement_id>/pin (pin_route) (+2 more) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
-| `v1/community_announcements.py` | 2: GET /<int:community_id>/announcements/<int:announcement_id> (get_route); GET /<int:community_id>/announcements/<int:announcement_id>/broadcast-status (broadcast_status_route) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
+| `v1/community_announcements.py` | 2: GET /<int:community_id>/announcements/<int:announcement_id> (get_route); GET /<int:community_id>/announcements/<int:announcement_id>/broadcast-status (broadcast_status_route) | READ-AFTER-WRITE (reviewed) | primary | announcement/broadcast status tracks a just-sent write |
 | `v1/community_announcements.py` | 4: GET /<int:community_id>/announcements (list_route); POST /<int:community_id>/announcements (create_route); PUT /<int:community_id>/announcements/<int:announcement_id> (update_route) (+1 more) | WRITE | primary | mutating route |
 | `v1/community_chat.py` | 1: GET /<int:community_id>/chat/channels (chat_channels) | AUTH/SESSION/SECURITY | primary | in-handler tenant/membership authz check |
 | `v1/community_chat.py` | 1: GET /<int:community_id>/chat/history (chat_history) | WRITE | primary | mutating route |
@@ -120,21 +123,20 @@ and read-after-write for that route.
 | `v1/community_connections.py` | 4: GET /communities/<int:community_id>/connections (list_connections); GET /connections/callback/<provider> (oauth_callback); DELETE /communities/<int:community_id>/connections/<provider> (delete_connection) (+1 more) | WRITE | primary | mutating route |
 | `v1/community_forms.py` | 2: GET /<int:community_id>/forms/<int:form_id> (get_form); GET /<int:community_id>/forms/<int:form_id>/submissions (form_submissions) | AUTH/SESSION/SECURITY | primary | in-handler tenant/membership authz check |
 | `v1/community_forms.py` | 3: GET /<int:community_id>/forms (list_forms); POST /<int:community_id>/forms (create_form); DELETE /<int:community_id>/forms/<int:form_id> (delete_form) | WRITE | primary | mutating route |
-| `v1/community_interaction.py` | 3: GET /<int:community_id>/interaction/roles (admin_list_roles); GET /<int:community_id>/interaction/channels/<int:channel_id>/permissions (admin_get_overrides); GET /<int:community_id>/interact/forum/<int:channel_id>/posts/<int:post_id> (member_forum_post) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
+| `v1/community_interaction.py` | 3: GET /<int:community_id>/interaction/roles (admin_list_roles); GET /<int:community_id>/interaction/channels/<int:channel_id>/permissions (admin_get_overrides); GET /<int:community_id>/interact/forum/<int:channel_id>/posts/<int:post_id> (member_forum_post) | READ-AFTER-WRITE (reviewed) | primary | admin role/permission config (authz-bearing) + edit-then-refetch |
 | `v1/community_interaction.py` | 16: GET /<int:community_id>/interaction/channels (admin_list_channels); POST /<int:community_id>/interaction/channels (admin_create_channel); PUT /<int:community_id>/interaction/channels/<int:channel_id> (admin_update_channel) (+13 more) | WRITE | primary | mutating route |
-| `v1/community_inventory.py` | 5: GET /<int:community_id>/inventory/checkouts (list_checkouts_route); GET /<int:community_id>/inventory/summary (summary_route); GET /<int:community_id>/inventory/log (audit_log_route) (+2 more) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
+| `v1/community_inventory.py` | 5: GET /<int:community_id>/inventory/checkouts (list_checkouts_route); GET /<int:community_id>/inventory/summary (summary_route); GET /<int:community_id>/inventory/log (audit_log_route) (+2 more) | READ-AFTER-WRITE (reviewed) | primary | checkout/return flows refetch; inventory state is authz-bearing |
 | `v1/community_inventory.py` | 8: GET /<int:community_id>/inventory/items (list_items_route); POST /<int:community_id>/inventory/items (create_item_route); PUT /<int:community_id>/inventory/items/<int:item_id> (update_item_route) (+5 more) | WRITE | primary | mutating route |
 | `v1/community_join.py` | 1: POST /<int:community_id>/join (join_community) | WRITE | primary | mutating route |
-| `v1/community_loyalty.py` | 3: GET /loyalty/balance (internal_get_balance); GET /loyalty/leaderboard (internal_leaderboard); GET /loyalty/items (internal_list_items) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
-| `v1/community_loyalty.py` | 1: GET /<int:community_id>/loyalty/leaderboard (get_leaderboard) | READ-ONLY (eligible, not moved) | primary | leaderboard aggregate; authz helper shares the dal |
-| `v1/community_loyalty.py` | 1: GET /<int:community_id>/loyalty/stats (get_stats) | READ-ONLY (eligible, not moved) | primary | stats aggregate; authz helper shares the dal |
+| `v1/community_loyalty.py` | 4: GET /<int:community_id>/loyalty/leaderboard (get_leaderboard); GET /<int:community_id>/loyalty/stats (get_stats); GET /loyalty/leaderboard (internal_leaderboard) (+1 more) | READ-ONLY | replica (moved) | aggregate/shop read on replica; authz/existence gate + lazy config INSERT stay primary |
+| `v1/community_loyalty.py` | 1: GET /loyalty/balance (internal_get_balance) | READ-ONLY, kept primary (reviewed) | primary | currency balance: money-like, freshness |
 | `v1/community_loyalty.py` | 7: GET /<int:community_id>/loyalty/config (get_config); PUT /<int:community_id>/loyalty/config (update_config); PUT /<int:community_id>/loyalty/user/<platform_user_id>/balance (adjust_balance) (+4 more) | WRITE | primary | mutating route |
 | `v1/community_music_queue.py` | 2: GET /<int:community_id>/music-station/policy (get_policy); GET /<int:community_id>/music-station/queue (list_queue) | AUTH/SESSION/SECURITY | primary | in-handler tenant/membership authz check |
-| `v1/community_music_queue.py` | 2: GET /music/status (internal_music_status); GET /music/queue (internal_get_live_queue) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
+| `v1/community_music_queue.py` | 2: GET /music/status (internal_music_status); GET /music/queue (internal_get_live_queue) | READ-AFTER-WRITE (reviewed) | primary | joins live Redis playback with DB rows |
 | `v1/community_music_queue.py` | 11: PUT /<int:community_id>/music-station/policy (set_policy); POST /<int:community_id>/music-station/queue/requests (enqueue_song_request); POST /<int:community_id>/music-station/queue/playlists (enqueue_playlist_request) (+8 more) | WRITE | primary | mutating route |
 | `v1/community_polls.py` | 1: GET /<int:community_id>/polls/<int:poll_id> (get_poll) | AUTH/SESSION/SECURITY | primary | in-handler tenant/membership authz check |
 | `v1/community_polls.py` | 3: GET /<int:community_id>/polls (list_polls); POST /<int:community_id>/polls (create_poll); DELETE /<int:community_id>/polls/<int:poll_id> (delete_poll) | WRITE | primary | mutating route |
-| `v1/community_profile.py` | 1: GET /public/communities/<int:community_id>/profile (get_community_profile) | READ-ONLY (eligible, not moved) | primary | public profile; needs tenant/visibility helper split |
+| `v1/community_profile.py` | 1: GET /public/communities/<int:community_id>/profile (get_community_profile) | READ-ONLY, kept primary (reviewed) | primary | visibility gate and data are one row; a stale row would leak a just-privatised community |
 | `v1/community_profile.py` | 5: PUT /admin/<int:community_id>/profile (update_community_profile); POST /admin/<int:community_id>/logo (upload_community_logo); DELETE /admin/<int:community_id>/logo (delete_community_logo) (+2 more) | WRITE | primary | mutating route |
 | `v1/community_raffle.py` | 4: GET /<int:community_id>/raffle-customization (list_route); PUT /<int:community_id>/raffle-customization/<event_type> (upsert_route); DELETE /<int:community_id>/raffle-customization/<event_type> (delete_route) (+1 more) | WRITE | primary | mutating route |
 | `v1/community_reputation.py` | 2: GET /<int:community_id>/reputation/me (get_my_reputation); GET /<int:community_id>/reputation/leaderboard (get_reputation_leaderboard) | WRITE | primary | mutating route |
@@ -147,35 +149,37 @@ and read-after-write for that route.
 | `v1/distribution.py` | 1: GET /bundles (list_distribution_bundles) | READ-ONLY | replica (pre-existing) | already routed to `read_dal` before this change |
 | `v1/event_discord_sync.py` | 1: GET /communities/<int:community_id>/calendar/event-sync (get_event_sync) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
 | `v1/event_discord_sync.py` | 3: PUT /communities/<int:community_id>/calendar/event-sync (put_event_sync); POST /calendar/events/sync-discord (sync_discord_event); POST /calendar/guild-pairings/event-sync (set_event_sync_enabled) | WRITE | primary | mutating route |
-| `v1/eventsub_reconcile.py` | 1: GET /secret/<callback_key> (secret_route) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
+| `v1/eventsub_reconcile.py` | 1: GET /secret/<callback_key> (secret_route) | READ-AFTER-WRITE (reviewed) | primary | secret material |
 | `v1/eventsub_reconcile.py` | 2: POST /reconcile (reconcile_route); POST /results (results_route) | WRITE | primary | mutating route |
 | `v1/flags.py` | 1: GET /flags (get_resolved_flags) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
 | `v1/gameserver_connections.py` | 3: POST ? (create_gameserver); POST ? (test_gameserver); DELETE ? (delete_gameserver) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
-| `v1/github_sync.py` | 1: GET /<community_id>/github-sync/connections (list_connections) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
+| `v1/github_sync.py` | 1: GET /<community_id>/github-sync/connections (list_connections) | READ-AFTER-WRITE (reviewed) | primary | connection state: connect then refetch |
 | `v1/github_sync.py` | 5: POST /webhook (receive_webhook); POST /<community_id>/github-sync/connections (create_connection); DELETE /<community_id>/github-sync/connections/<connection_id> (delete_connection) (+2 more) | WRITE | primary | mutating route |
-| `v1/guild_pairing.py` | 3: GET /communities/<int:community_id>/guild-pairings (list_pairings); GET /communities/<int:community_id>/discord/roles (list_discord_roles); GET /communities/<int:community_id>/discord/role-mirrors (list_role_mirrors) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
+| `v1/guild_pairing.py` | 3: GET /communities/<int:community_id>/guild-pairings (list_pairings); GET /communities/<int:community_id>/discord/roles (list_discord_roles); GET /communities/<int:community_id>/discord/role-mirrors (list_role_mirrors) | READ-AFTER-WRITE (reviewed) | primary | pairing state: pair then refetch |
 | `v1/guild_pairing.py` | 9: POST /communities/<int:community_id>/guild-pairings (create_pairing); POST /communities/<int:community_id>/discord/server-install/authorize (start_server_install); PATCH /communities/<int:community_id>/guild-pairings/<int:pairing_id> (update_pairing) (+6 more) | WRITE | primary | mutating route |
 | `v1/identity.py` | 2: GET / (list_identities); GET /primary (get_primary_identity) | AUTH/SESSION/SECURITY | primary | identity linking/verification codes: security + read-after-write |
 | `v1/identity.py` | 4: PUT /primary (set_primary_identity); POST /link/<platform> (start_identity_link); GET /link/<platform>/callback (identity_link_callback) (+1 more) | WRITE | primary | mutating route |
 | `v1/ingest_sources.py` | 4: GET / (list_ingest_sources); POST / (create_ingest_source); PATCH /<int:ingest_source_id> (update_ingest_source) (+1 more) | WRITE | primary | mutating route |
 | `v1/join_request.py` | 5: POST /<int:community_id>/join-requests (submit_request); GET /<int:community_id>/join-requests/mine (get_my_request); GET /admin/<int:community_id>/join-requests (list_requests) (+2 more) | WRITE | primary | mutating route |
 | `v1/live_activity.py` | 2: GET /community/<int:community_id>/live-activity (list_live_activity); GET /community/<int:community_id>/live-activity/stream (stream_live_activity) | AUTH/SESSION/SECURITY | primary | in-handler tenant/membership authz check |
-| `v1/live_status.py` | 2: GET /communities/<int:community_id>/live (get_public_live_status); GET /live (get_internal_live_status) | READ-ONLY | replica (moved) | overlay poll: lag delays a live flip by replication lag only |
-| `v1/marketplace_admin_review.py` | 4: GET /settings (get_marketplace_settings); GET /vendor-submissions (get_vendor_submissions_for_review); GET /vendor-submissions/<int:submission_id> (get_vendor_submission_details) (+1 more) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
-| `v1/marketplace_admin_review.py` | 2: GET /vendor-requests (get_vendor_requests); GET /submissions (get_submissions) | READ-ONLY (eligible, not moved) | primary | review queue: act-then-refetch risk |
+| `v1/live_status.py` | 2: GET /communities/<int:community_id>/live (get_public_live_status); GET /live (get_internal_live_status) | READ-ONLY | replica (moved) | overlay poll: lag only delays a live flip; community gate read stays primary |
+| `v1/marketplace_admin_review.py` | 4: GET /settings (get_marketplace_settings); GET /vendor-submissions (get_vendor_submissions_for_review); GET /vendor-submissions/<int:submission_id> (get_vendor_submission_details) (+1 more) | READ-AFTER-WRITE (reviewed) | primary | edit-then-refetch or state-bearing GET (reviewed) |
+| `v1/marketplace_admin_review.py` | 2: GET /vendor-requests (get_vendor_requests); GET /submissions (get_submissions) | READ-ONLY, kept primary (reviewed) | primary | review queue: admin acts then refetches the same rows |
 | `v1/marketplace_admin_review.py` | 10: POST /vendor-requests/<request_id>/approve (approve_vendor_request); POST /vendor-requests/<request_id>/reject (reject_vendor_request); POST /submissions/<int:submission_id>/approve (approve_submission) (+7 more) | WRITE | primary | mutating route |
 | `v1/marketplace_billing.py` | 2: GET /status/<int:community_id> (get_premium_status); GET /<int:community_id>/subscriptions (list_subscriptions) | AUTH/SESSION/SECURITY | primary | in-handler tenant/membership authz check |
 | `v1/marketplace_billing.py` | 4: POST /checkout (create_checkout); POST /subscriptions/<provider>/<sub_id>/cancel (cancel_payment_subscription); POST /refunds (create_refund) (+1 more) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
-| `v1/marketplace_billing.py` | 2: GET /pricing (get_pricing); GET / (list_discount_codes) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
+| `v1/marketplace_billing.py` | 1: GET / (list_discount_codes) | READ-AFTER-WRITE (reviewed) | primary | admin edits discount codes then refetches |
+| `v1/marketplace_billing.py` | 1: GET /pricing (get_pricing) | READ-ONLY | replica (moved) | public pricing config; lag tolerated |
 | `v1/marketplace_billing.py` | 10: POST /subscribe (subscribe_premium); POST /cancel (cancel_premium); POST / (create_discount_code) (+7 more) | WRITE | primary | mutating route |
 | `v1/marketplace_catalog.py` | 6: GET / (browse_catalog); GET / (vendors); GET /categories (categories) (+3 more) | READ-ONLY | replica (moved) | catalog browse: seconds of staleness tolerated |
 | `v1/marketplace_lifecycle.py` | 2: GET /community/<int:community_id>/bundles (list_activated); GET /community/<int:community_id>/resolved (get_resolved_bundles) | AUTH/SESSION/SECURITY | primary | in-handler tenant/membership authz check |
-| `v1/marketplace_lifecycle.py` | 3: GET /bundles (list_bundles); GET /bundles/collections (list_bundle_collections); GET /tenant/<tenant_slug>/bundles (list_available) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
+| `v1/marketplace_lifecycle.py` | 3: GET /bundles (list_bundles); GET /bundles/collections (list_bundle_collections); GET /tenant/<tenant_slug>/bundles (list_available) | READ-AFTER-WRITE (reviewed) | primary | admin installs/toggles then refetches the same listing |
 | `v1/marketplace_lifecycle.py` | 6: POST /bundles (install_bundle); DELETE /bundles/<app_id> (uninstall_bundle); POST /tenant/<tenant_slug>/bundles (make_available) (+3 more) | WRITE | primary | mutating route |
 | `v1/marketplace_vendor.py` | 1: GET /analytics/api-usage (get_api_usage_metrics) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
-| `v1/marketplace_vendor.py` | 10: GET /profile (get_vendor_profile); GET /analytics/installs (get_install_time_series); GET /analytics/discount-codes (get_discount_code_performance) (+7 more) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
-| `v1/marketplace_vendor.py` | 1: GET /analytics/sales (get_sales_metrics) | READ-ONLY (eligible, not moved) | primary | vendor analytics aggregate |
-| `v1/marketplace_vendor.py` | 1: GET /dashboard (get_vendor_dashboard) | READ-ONLY (eligible, not moved) | primary | vendor dashboard; edit-then-refetch risk |
+| `v1/marketplace_vendor.py` | 9: GET /profile (get_vendor_profile); GET /analytics/installs (get_install_time_series); GET /analytics/discount-codes (get_discount_code_performance) (+6 more) | READ-AFTER-WRITE (reviewed) | primary | seller ownership lookup in the service + register/submit then view |
+| `v1/marketplace_vendor.py` | 1: GET /modules (get_published_modules) | READ-ONLY | replica (moved) | unauthenticated published-module listing |
+| `v1/marketplace_vendor.py` | 1: GET /dashboard (get_vendor_dashboard) | READ-ONLY, kept primary (reviewed) | primary | seller just registered/submitted lands here; money + pending counts need freshness |
+| `v1/marketplace_vendor.py` | 1: GET /analytics/sales (get_sales_metrics) | READ-ONLY, kept primary (reviewed) | primary | seller ownership lookup in the service shares the DAL (new vendor would 404 under lag) |
 | `v1/marketplace_vendor.py` | 7: POST /profile (create_vendor_profile); PUT /profile (update_vendor_profile); POST /modules (create_vendor_module) (+4 more) | WRITE | primary | mutating route |
 | `v1/marketplace_webhooks.py` | 2: POST /stripe (stripe_webhook); POST /paypal (paypal_webhook) | WRITE | primary | mutating route |
 | `v1/media_byok.py` | 1: GET /<int:community_id>/media/byok-keys (get_media_byok_status) | AUTH/SESSION/SECURITY | primary | BYOK key material: security |
@@ -183,13 +187,15 @@ and read-after-write for that route.
 | `v1/music.py` | 2: GET /<int:community_id>/music/providers (get_providers); GET /<int:community_id>/music/radio-stations (get_radio_stations) | AUTH/SESSION/SECURITY | primary | in-handler tenant/membership authz check |
 | `v1/music.py` | 6: GET /<int:community_id>/music/settings (get_music_settings); PUT /<int:community_id>/music/settings (update_music_settings); POST /<int:community_id>/music/providers/<provider>/oauth (start_oauth) (+3 more) | WRITE | primary | mutating route |
 | `v1/one_time_secrets.py` | 2: POST / (create_secret); POST /pull (pull_secret) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
-| `v1/overlay.py` | 1: GET /<int:community_id>/overlay/stats (get_overlay_stats) | READ-ONLY (eligible, not moved) | primary | stats aggregate; authz helper shares the dal |
+| `v1/overlay.py` | 1: GET /<int:community_id>/overlay/stats (get_overlay_stats) | READ-ONLY | replica (moved) | aggregate stats on replica; `_require_admin` authz read stays primary |
 | `v1/overlay.py` | 5: GET /<int:community_id>/browser-sources (get_browser_sources); POST /<int:community_id>/browser-sources/regenerate (regenerate_browser_sources); GET /<int:community_id>/overlay (get_overlay) (+2 more) | WRITE | primary | mutating route |
 | `v1/passkey.py` | 1: GET /credentials (list_credentials) | AUTH/SESSION/SECURITY | primary | WebAuthn challenge/credential: security |
 | `v1/passkey.py` | 3: POST /register/start (start_registration); POST /register/finish (finish_registration); DELETE /credentials/<int:credential_id> (remove_credential) | WRITE | primary | mutating route |
-| `v1/platform.py` | 5: GET /users (list_users); GET /users/<int:user_id> (get_user); GET /communities (list_communities) (+2 more) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
-| `v1/platform.py` | 1: GET /audit-log (get_audit_log) | READ-ONLY (eligible, not moved) | primary | append-only audit listing; authz helper shares the dal |
-| `v1/platform.py` | 1: GET /stats (get_stats) | READ-ONLY (eligible, not moved) | primary | platform stats dashboard; authz helper shares the dal |
+| `v1/platform.py` | 2: GET /audit-log (get_audit_log); GET /stats (get_stats) | READ-ONLY | replica (moved) | scope-gated aggregate/append-only dashboard; no DB authz in handler |
+| `v1/platform.py` | 1: GET /users (list_users) | READ-ONLY, kept primary (reviewed) | primary | admin edits a role then refetches the list |
+| `v1/platform.py` | 1: GET /communities (list_communities) | READ-ONLY, kept primary (reviewed) | primary | admin edits then refetches the list |
+| `v1/platform.py` | 2: GET /users/<int:user_id> (get_user); GET /communities/<int:community_id> (get_community) | READ-ONLY, kept primary (reviewed) | primary | admin edits then refetches the row |
+| `v1/platform.py` | 1: GET /health (get_system_health) | READ-ONLY, kept primary (reviewed) | primary | probes primary database liveness on purpose |
 | `v1/platform.py` | 4: PUT /users/<int:user_id>/role (update_user_role); DELETE /users/<int:user_id> (deactivate_user); PUT /communities/<int:community_id> (update_community) (+1 more) | WRITE | primary | mutating route |
 | `v1/platform_config.py` | 2: GET /platform-config (get_platform_configs); GET /settings (get_hub_settings) | AUTH/SESSION/SECURITY | primary | platform/OAuth client config: security-relevant |
 | `v1/platform_config.py` | 1: POST /platform-config/<platform>/test (test_platform_connection) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
@@ -199,7 +205,7 @@ and read-after-write for that route.
 | `v1/provider_connections.py` | 6: GET /connection-providers (list_connection_providers); GET ? (list_provider_connections); POST ? (create_provider_connection) (+3 more) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
 | `v1/public.py` | 3: GET /stats (get_stats); GET /signup-settings (get_signup_settings); GET /signup-settings (get_signup_settings_alias) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
 | `v1/public.py` | 6: GET /communities/spotlighted (get_spotlighted_communities); GET /communities (list_communities); GET /communities/<int:community_id> (get_community) (+3 more) | READ-ONLY | replica (moved) | anonymous public page: lag tolerated |
-| `v1/public_music_queue.py` | 1: GET /communities/<int:community_id>/music-station/queue (get_public_queue) | READ-ONLY (eligible, not moved) | primary | public queue; reads Valkey playback + DB, review pending |
+| `v1/public_music_queue.py` | 1: GET /communities/<int:community_id>/music-station/queue (get_public_queue) | READ-ONLY, kept primary (reviewed) | primary | joins live Redis playback with DB rows; lag can show an inconsistent now-playing |
 | `v1/sso.py` | 11: GET /options (sso_options); GET /<public_id>/start (sso_start); GET /<public_id>/login (sso_login) (+8 more) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
 | `v1/stream.py` | 2: GET /<int:community_id>/streams/featured (get_featured_streams); GET /<int:community_id>/streams/<entity_id> (get_stream_details) | AUTH/SESSION/SECURITY | primary | in-handler tenant/membership authz check |
 | `v1/stream.py` | 1: GET /<int:community_id>/streams (get_live_streams) | WRITE | primary | mutating route |
@@ -207,14 +213,15 @@ and read-after-write for that route.
 | `v1/streaming.py` | 5: POST /<int:community_id>/streams (create_stream_config); POST /<int:community_id>/streams/key/regenerate (regenerate_stream_key); POST /<int:community_id>/streams/destinations (add_destination) (+2 more) | WRITE | primary | mutating route |
 | `v1/superadmin.py` | 4: GET /dashboard (get_dashboard); GET /communities (list_communities); GET /communities/<int:community_id> (get_community) (+1 more) | AUTH/SESSION/SECURITY | primary | global admin: authz + read-after-write |
 | `v1/superadmin.py` | 7: POST /communities (create_community); PUT /communities/<int:community_id> (update_community); DELETE /communities/<int:community_id> (delete_community) (+4 more) | WRITE | primary | mutating route |
-| `v1/support.py` | 6: GET /<int:community_id>/support/categories (list_categories); GET /<int:community_id>/support/tickets (list_tickets); GET /<int:community_id>/support/tickets/<int:ticket_id> (get_ticket) (+3 more) | READ-AFTER-WRITE / UNREVIEWED | primary | authenticated console/dashboard GET: its UI edits then re-fetches the same rows |
+| `v1/support.py` | 5: GET /<int:community_id>/support/categories (list_categories); GET /<int:community_id>/support/tickets (list_tickets); GET /<int:community_id>/support/tickets/<int:ticket_id> (get_ticket) (+2 more) | READ-AFTER-WRITE (reviewed) | primary | tickets: mutate then refetch; per-user ticket state |
+| `v1/support.py` | 1: GET /<int:community_id>/support/stats (get_ticket_stats) | READ-ONLY | replica (moved) | aggregate counts; scope + tenant checked before the read |
 | `v1/support.py` | 9: POST /<int:community_id>/support/categories (create_category); PUT /<int:community_id>/support/categories/<int:category_id> (update_category); DELETE /<int:community_id>/support/categories/<int:category_id> (delete_category) (+6 more) | WRITE | primary | mutating route |
 | `v1/tenant.py` | 4: GET /<tenant_slug> (get_tenant); GET /<tenant_slug>/settings (get_tenant_settings); GET /<tenant_slug>/communities (get_tenant_communities) (+1 more) | AUTH/SESSION/SECURITY | primary | tenant/admin membership: authz |
 | `v1/tenant.py` | 4: PUT /<tenant_slug> (update_tenant); PUT /<tenant_slug>/settings (update_tenant_settings); POST /<tenant_slug>/admins (add_tenant_admin) (+1 more) | WRITE | primary | mutating route |
 | `v1/tenant_discord_install.py` | 1: POST /tenants/discord/install/authorize (start_install) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
 | `v1/tenant_discord_install.py` | 2: GET /discord/install/callback (install_callback); GET /tenants/discord/install/status (install_status) | WRITE | primary | mutating route |
 | `v1/tenant_kms.py` | 4: GET /<tenant_slug>/kms (get_kms_status); PUT /<tenant_slug>/kms (put_kms_config); POST /<tenant_slug>/kms/activate (activate_kms) (+1 more) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
-| `v1/tenant_reputation.py` | 1: GET /<tenant_slug>/reputation/config (get_tenant_reputation_config) | READ-AFTER-WRITE / UNREVIEWED | primary | unreviewed GET: kept primary until lag review |
+| `v1/tenant_reputation.py` | 1: GET /<tenant_slug>/reputation/config (get_tenant_reputation_config) | READ-AFTER-WRITE (reviewed) | primary | tenant config: edit then refetch |
 | `v1/tenant_reputation.py` | 1: PUT /<tenant_slug>/reputation/config (put_tenant_reputation_config) | WRITE | primary | mutating route |
 | `v1/tenant_twitch_install.py` | 2: POST /authorize (authorize); GET /callback (callback) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
 | `v1/token_billing.py` | 3: GET / (list_token_products); GET /<int:community_id>/tokens/balances (get_balances); GET /<int:community_id>/tokens/transactions (get_transactions) | AUTH/SESSION/SECURITY | primary | metered balance/ledger: money, freshness |
