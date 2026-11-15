@@ -1,0 +1,80 @@
+# executor-scale task 4 (security review M1/M2/L1) -- isolation for the AOT precompile pods
+# (executor-precompile-cronjob.yaml + executor-precompile-backfill-job.yaml; pod spec in
+# executor-precompile-pod.tpl). All three documents select the pods by the
+# `waddlebot.io/workload: executor-precompile` label both pod templates carry:
+#   1. a dedicated ServiceAccount with no API token (replaces the shared waddlebot SA),
+#   2. a default-deny CiliumNetworkPolicy: egress ONLY to kube-dns, Postgres, SeaweedFS S3 and
+#      (when deployed) the OTLP collector; nothing is allowed in,
+#   3. an ENFORCED Tetragon exec allowlist (same helper + runc-init handling as every other workload,
+#      values.yaml `tetragon.*`): only the hub-api python runtime and the bundle-executor binary may exec.
+{{- if .Values.pipeline.hubApi.executorPrecompile.enabled }}
+{{- $cfg := .Values.pipeline.hubApi.executorPrecompile }}
+{{- $ns := .Values.namespace }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "waddlebot.executorPrecompile.serviceAccountName" . }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor-precompile
+automountServiceAccountToken: false
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-executor-precompile
+  namespace: {{ $ns }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor-precompile
+spec:
+  endpointSelector:
+    matchLabels:
+      waddlebot.io/workload: executor-precompile
+  # Nothing dials these one-shot pods.
+  ingress: []
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: UDP
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: TCP
+    # Postgres: export (leases the queue) + ack (marks rows).
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: postgres
+            app.kubernetes.io/component: database
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.postgresReplicaPort | quote }}
+              protocol: TCP
+    # SeaweedFS S3: compile reads bundles, sign writes precompiled/ artifacts.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: seaweedfs
+            app.kubernetes.io/component: storage
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.seaweedfsPort | quote }}
+              protocol: TCP
+    {{- if .Values.otel.collector.enabled }}
+    # OTLP collector (telemetry is mandatory; a dead exporter never fails the job).
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: otel-collector
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.otelGrpcPort | quote }}
+              protocol: TCP
+    {{- end }}
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "executor-precompile" "selector" (dict "waddlebot.io/workload" "executor-precompile") "ports" (list) "runtime" "python" "binaries" (list "/app/bundle-executor") "cnp" false) }}
+{{- end }}

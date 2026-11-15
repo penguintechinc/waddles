@@ -24,12 +24,12 @@
 # acceptable per dependency-pinning policy because the image reference below pins the
 # immutable digest, never the tag.
 #
-# Same KEEP-vs-GENERATE policy as auto-provisioned-secrets.yaml, enforced in-script
-# (`lookup` isn't available to a plain Job pod, so this checks via `kubectl get`
-# instead): an existing Secret is left completely untouched; a miss is only generated
-# when global.deploymentTier is alpha/local; a miss anywhere else fails the Job (and
-# therefore the release) unless externalSecret: true. Deriving+publishing the PUBLIC
-# key ConfigMap, however, is NOT gated by tier -- it runs in every environment,
+# Same create-if-absent policy as provision-secrets.yaml, enforced in-script (`lookup` isn't
+# available to a plain Job pod, so this checks via `kubectl get`): an existing Secret is left
+# completely untouched; a miss is generated IN EVERY TIER (alpha, beta, gamma, production --
+# the former alpha/local-only `can_generate` gate is gone), unless externalSecret: true.
+# Deriving+publishing the PUBLIC
+# key ConfigMap is likewise not gated by tier -- it runs in every environment,
 # against whichever Secret is present (freshly generated here, pre-existing, or
 # populated moments earlier by an ExternalSecret controller), because publishing a
 # public key is never the sensitive step.
@@ -64,12 +64,14 @@
 # gRPC listener on 50204 was then skipped every time (`grpc_startup_skipped`) --
 # live on alpha, blocking the whole PII-tokenization data path (svc-process/
 # svc-action can never dial HubClient).
-{{- $tier := .Values.global.deploymentTier }}
 {{- $fullname := include "waddlebot.fullname" . }}
 {{- $bs := .Values.autoProvisionedKeys.bundleSigning }}
 {{- $bsSecretName := $bs.secretName | default (printf "%s-bundle-signing" $fullname) }}
 {{- $bsCmName := $bs.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" $fullname) }}
 {{- $sj := .Values.autoProvisionedKeys.serviceJwt }}
+{{- $ps := .Values.autoProvisionedKeys.precompileSigning }}
+{{- $psSecretName := $ps.secretName | default (printf "%s-executor-precompile-signing" $fullname) }}
+{{- $psCmName := $ps.publicKeyConfigMapName | default (printf "%s-executor-precompile-signing-public" $fullname) }}
 {{- $sjCmName := $sj.publicKeyConfigMapName | default (printf "%s-service-jwt-public" $fullname) }}
 apiVersion: batch/v1
 kind: Job
@@ -115,7 +117,7 @@ spec:
           # comment) to bundle bash, openssl AND kubectl (plus base64/mktemp/tr/shred),
           # pinned by digest. Not multi-arch-manifest-verified beyond amd64 in this
           # probe; re-verify before enabling on an arm64 node pool.
-          image: "bitnami/kubectl@sha256:ab90e1058e5a658cc94b4e7eb6d48e5758cfd6d77b5dd1869513aec3a3054673"
+          image: {{ .Values.autoProvisionedKeys.hookImage | quote }}
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsNonRoot: true
@@ -135,8 +137,6 @@ spec:
               value: "/dev/null"
             - name: NAMESPACE
               value: {{ .Values.namespace | quote }}
-            - name: DEPLOYMENT_TIER
-              value: {{ $tier | quote }}
             - name: BUNDLE_SIGNING_SECRET
               value: {{ $bsSecretName | quote }}
             - name: BUNDLE_SIGNING_CM
@@ -153,15 +153,18 @@ spec:
               value: {{ $sj.keyId | quote }}
             - name: SERVICE_JWT_EXTERNAL
               value: {{ $sj.externalSecret | quote }}
+            - name: PRECOMPILE_SIGNING_SECRET
+              value: {{ $psSecretName | quote }}
+            - name: PRECOMPILE_SIGNING_CM
+              value: {{ $psCmName | quote }}
+            - name: PRECOMPILE_SIGNING_KEY_ID
+              value: {{ $ps.keyId | quote }}
+            - name: PRECOMPILE_SIGNING_EXTERNAL
+              value: {{ $ps.externalSecret | quote }}
           command: ["/bin/bash", "-c"]
           args:
             - |
               set -euo pipefail
-
-              can_generate=false
-              case "${DEPLOYMENT_TIER}" in
-                alpha|local) can_generate=true ;;
-              esac
 
               # provision_ed25519 <secret> <cm> <key-id> <external-flag> <priv-key-name> <kid-key-name> <pub-key-name> [<pub-keys-json-key-name>] [<format: raw|pem>] [<algo: ed25519|ec-p256>]
               #
@@ -206,40 +209,50 @@ spec:
                   echo "keep: secret/${secret} already exists, leaving untouched"
                 elif [ "${external}" = "true" ]; then
                   echo "skip: secret/${secret} delegated to an external secret manager"
-                elif [ "${can_generate}" != "true" ]; then
-                  echo "FATAL: secret/${secret} missing, deploymentTier=${DEPLOYMENT_TIER} is outside alpha/local (auto-generation is alpha/local only), and externalSecret is not set. Pre-create this Secret, point an ExternalSecret/SealedSecret at it (and set the matching externalSecret: true value), or fix global.deploymentTier." >&2
-                  exit 1
                 else
-                  local wd
+                  local wd cerr
                   wd="$(mktemp -d)"
-                  trap 'shred -u -f "'"${wd}"'"/* 2>/dev/null || true; rm -rf "'"${wd}"'"' RETURN
+                  cerr="${wd}.err"
+                  trap 'rm -rf "'"${wd}"'" "'"${cerr}"'"' RETURN
                   umask 077
                   if [ "${algo}" = "ec-p256" ]; then
                     openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -out "${wd}/priv.pem"
                   else
                     openssl genpkey -algorithm ed25519 -out "${wd}/priv.pem"
                   fi
+                  # Values reach kubectl only via --from-file from the tmpfs working dir (never
+                  # --from-literal: that would put key material on argv).
+                  printf '%s' "${key_id}" > "${wd}/kid"
                   if [ "${format}" = "pem" ]; then
                     # PEM (PKCS8) straight into the Secret -- matches
                     # `scripts/generate-service-jwt-key.sh` and what
                     # `flask_core.service_jwt.load_issuer_from_env` feeds directly to
                     # `cryptography`'s `load_pem_private_key`.
-                    kubectl -n "${NAMESPACE}" create secret generic "${secret}" \
-                      --from-file="${gen_priv_key}=${wd}/priv.pem" \
-                      --from-literal="${kid_key}=${key_id}"
+                    cp "${wd}/priv.pem" "${wd}/priv.field"
                   else
                     openssl pkey -in "${wd}/priv.pem" -outform DER -out "${wd}/priv.der"
                     # PKCS8 DER for an Ed25519 key always ends in exactly the 32 raw seed
                     # bytes after a fixed-length ASN.1 prefix (RFC 8410).
-                    local priv_b64
-                    priv_b64="$(tail -c 32 "${wd}/priv.der" | base64 | tr -d '\n')"
-                    kubectl -n "${NAMESPACE}" create secret generic "${secret}" \
-                      --from-literal="${gen_priv_key}=${priv_b64}" \
-                      --from-literal="${kid_key}=${key_id}"
+                    tail -c 32 "${wd}/priv.der" | base64 | tr -d '\n' > "${wd}/priv.field"
                   fi
+                  # Create-if-absent, concurrency safe: AlreadyExists means another run won the
+                  # race -- adopt its Secret (the derive step below reads it), never overwrite.
+                  if kubectl -n "${NAMESPACE}" create secret generic "${secret}" \
+                      --from-file="${gen_priv_key}=${wd}/priv.field" \
+                      --from-file="${kid_key}=${wd}/kid" 2>"${cerr}"; then
+                    echo "generated: secret/${secret} (kid=${key_id}, format=${format})"
+                  elif grep -q AlreadyExists "${cerr}"; then
+                    echo "race: secret/${secret} was created concurrently, adopting it"
+                  else
+                    echo "FATAL: creating secret/${secret} failed: $(head -c 300 "${cerr}")" >&2
+                    exit 1
+                  fi
+                  # keep: survives `helm uninstall`/Helm pruning; ArgoCD must never prune a runtime-created Secret.
                   kubectl -n "${NAMESPACE}" annotate secret "${secret}" \
-                    helm.sh/resource-policy=keep --overwrite
-                  echo "generated: secret/${secret} (kid=${key_id}, format=${format})"
+                    helm.sh/resource-policy=keep \
+                    argocd.argoproj.io/compare-options=IgnoreExtraneous \
+                    argocd.argoproj.io/sync-options=Prune=false \
+                    --overwrite >/dev/null
                 fi
 
                 # Always (re)derive + publish the PUBLIC key from whatever private key is
@@ -342,6 +355,13 @@ spec:
               provision_ed25519 "${SERVICE_JWT_SECRET}" "${SERVICE_JWT_CM}" "${SERVICE_JWT_KEY_ID}" "${SERVICE_JWT_EXTERNAL}" \
                 "SERVICE_JWT_PRIVATE_KEY_" SERVICE_JWT_ACTIVE_KID SERVICE_JWT_PUBLIC_KEY "" pem ec-p256
 
+              # executor-scale task 4 -- DEDICATED Ed25519 key signing precompiled .cwasm
+              # artifacts (core/bundle_executor/src/precompile.rs). Distinct from bundle-signing
+              # so neither key can forge the other's artifacts. Private half is mounted ONLY
+              # into the executor-precompile Jobs; executors get the public ConfigMap.
+              provision_ed25519 "${PRECOMPILE_SIGNING_SECRET}" "${PRECOMPILE_SIGNING_CM}" "${PRECOMPILE_SIGNING_KEY_ID}" "${PRECOMPILE_SIGNING_EXTERNAL}" \
+                PRECOMPILE_SIGNING_PRIVATE_KEY PRECOMPILE_SIGNING_KEY_ID PRECOMPILE_SIGNING_PUBLIC_KEY PRECOMPILE_SIGNING_PUBLIC_KEYS raw
+
               echo "auto-provision-keys: done"
           resources:
             requests:
@@ -355,4 +375,7 @@ spec:
               mountPath: /tmp
       volumes:
         - name: tmp
-          emptyDir: {}
+          # tmpfs: private keys exist only in memory.
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

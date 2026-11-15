@@ -22,12 +22,12 @@ fn url() -> String {
         .expect("VALKEY_URL must be set: scheduler tests need a REAL Valkey (no silent skip)")
 }
 
-async fn conn() -> redis::aio::MultiplexedConnection {
+async fn conn() -> redis::aio::ConnectionManager {
     let client = redis::Client::open(url()).expect("client");
-    let cfg =
-        redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(2)));
+    let cfg = redis::aio::ConnectionManagerConfig::new()
+        .set_response_timeout(Some(Duration::from_secs(2)));
     client
-        .get_multiplexed_async_connection_with_config(&cfg)
+        .get_connection_manager_with_config(cfg)
         .await
         .expect("connect")
 }
@@ -49,7 +49,7 @@ impl EventAppender for Recorder {
 struct NoDek;
 
 impl DekProvider for NoDek {
-    async fn get_dek(&self, _t: &str) -> Result<(Dek, u32), DekUnavailableError> {
+    async fn get_dek(&self, _t: i64) -> Result<(Dek, u32), DekUnavailableError> {
         panic!("a bundle.reconcile event carries no identity field, so no DEK may be requested");
     }
 }
@@ -82,7 +82,7 @@ fn runner(
     ScheduleRunner::new(lease, sink)
 }
 
-fn futures_conn() -> redis::aio::MultiplexedConnection {
+fn futures_conn() -> redis::aio::ConnectionManager {
     // Connections are opened once per test via `block_in_place` so `runner` stays synchronous.
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(conn()))
 }

@@ -217,7 +217,9 @@ mod tests {
     /// is leaked on purpose (it must outlive the returned URL string) and ends with the runtime.
     async fn token_server() -> String {
         let mock = service_auth::test_support::MockHub::builder()
-            .mint(vec![service_auth::test_support::MintReply::token("jwt-abc", 900)])
+            .mint(vec![service_auth::test_support::MintReply::token(
+                "jwt-abc", 900,
+            )])
             .start()
             .await;
         let endpoint = mock.endpoint.clone();

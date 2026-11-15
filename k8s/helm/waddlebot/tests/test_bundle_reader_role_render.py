@@ -7,10 +7,10 @@ actually turns the DB-driven multi-app data-plane path on for) and asserts,
 against the real rendered manifest text -- not a hand-read of the templates
 -- that:
 
-1. The generated `waddlebot-secrets` Secret carries a non-empty
-   `DB_READER_PASSWORD` (auto-generated in alpha via
-   `waddlebot.autoSecretValue`'s lookup-KEEP-then-generate policy -- see
-   `templates/secrets.yaml`).
+1. The `waddlebot-secrets` Secret carries a non-empty `DB_READER_PASSWORD`
+   (generated at RUNTIME, every tier, by the provision-secrets hook -- the
+   real hook script is run against the rendered spec via
+   tests/provision_harness.py, since Helm no longer renders the Secret).
 2. Both `svc-process-rust` and `svc-action-rust` Deployments read
    `DB_READER_USER=waddles_bundle_reader` (the role
    `alembic/versions/0032_bundle_reader_role.py` actually provisions) and
@@ -38,6 +38,7 @@ from typing import Any
 
 import pytest
 import yaml
+from provision_harness import with_provisioned  # type: ignore[import-not-found]
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _ALPHA_VALUES = _CHART_DIR / "values-alpha.yaml"
@@ -66,7 +67,7 @@ def _helm_template() -> list[dict[str, Any]]:
 def rendered_docs() -> list[dict[str, Any]]:
     if not _shutil_which("helm"):
         pytest.skip("helm CLI not available in this environment")
-    return _helm_template()
+    return with_provisioned(_helm_template())
 
 
 def _shutil_which(cmd: str) -> str | None:
@@ -191,7 +192,7 @@ class TestDbMigrateJobReceivesReaderPassword:
     """fix/chart-fresh-install-hooks (#526) replaced the per-pod dbMigrateInitContainer
 
     with a dedicated post-install/pre-upgrade hook Job (templates/migrations-job.yaml)
-    fed by its own minimal hook Secret (templates/secrets.yaml's `-db-migrate-secret`),
+    fed by its own minimal Secret (`-db-migrate-secret`, now DERIVED at runtime by the provision-secrets hook),
     never `waddlebot-secrets` directly. `alembic/versions/0032_bundle_reader_role.py`
     still reads `DB_READER_PASSWORD` via `os.environ.get` inside that same Job, so the
     dedicated hook Secret must carry the key too -- asserting against `waddlebot-secrets`

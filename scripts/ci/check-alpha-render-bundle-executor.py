@@ -4,11 +4,11 @@
 Reads a `helm template waddlebot k8s/helm/waddlebot --values values-alpha.yaml
 --set global.imageTag=<SHA>` multi-document YAML stream on stdin and asserts:
 
-1. The ONE svc-bundles-executor Deployment (it serves every stage) renders with
-   the OOM-fix resources (request 1Gi/500m, limit 2560Mi/2000m
-   CPU) -- alpha was OOMKilled at the old 128Mi/64Mi tier compiling a 21MB
-   CPython component plus a .NET component via Cranelift.
-2. The svc-bundles-executor Deployment's startupProbe failureThreshold gives a
+1. The ONE svc-bundles-executor workload (a StatefulSet since executor phase 1; the default
+   single pool serves every stage) renders with the OOM-fix resources (request 500m/1Gi,
+   limit 4000m CPU / 2560Mi) -- alpha was OOMKilled at the old 128Mi/64Mi tier compiling a
+   21MB CPython component plus a .NET component via Cranelift.
+2. The svc-bundles-executor workload's startupProbe failureThreshold gives a
    cold compile up to ~5 minutes (>= 30 at periodSeconds=5), not the old 12
    (62s).
 3. Every container image referencing the svc-bundles-executor repository uses the
@@ -30,9 +30,11 @@ from typing import Any
 import yaml
 
 EXECUTOR_COMPONENTS = {"svc-bundles-executor"}
+# Executor phase 1: the executor is a StatefulSet (pod name = executor_id); other stages stay Deployments.
+WORKLOAD_KINDS = {"Deployment", "StatefulSet"}
 EXPECTED_RESOURCES = {
     "requests": {"cpu": "500m", "memory": "1Gi"},
-    "limits": {"cpu": "2000m", "memory": "2560Mi"},
+    "limits": {"cpu": "4000m", "memory": "2560Mi"},
 }
 MIN_STARTUP_FAILURE_THRESHOLD = 30  # periodSeconds=5 * 30 = 150s+initialDelay, generous floor
 LEGACY_ENV_NAMES = {
@@ -86,7 +88,7 @@ def main() -> int:
     env_names_examined = 0
 
     for doc in docs:
-        if doc.get("kind") != "Deployment":
+        if doc.get("kind") not in WORKLOAD_KINDS:
             continue
         comp = component_label(doc)
         name = doc.get("metadata", {}).get("name", "<unknown>")
@@ -135,19 +137,19 @@ def main() -> int:
             )
 
     print(
-        f"Examined {executor_deployments_found} svc-bundles-executor Deployment(s), "
+        f"Examined {executor_deployments_found} svc-bundles-executor workload(s), "
         f"{containers_examined} container(s), {env_names_examined} env var name(s)."
     )
     if executor_deployments_found == 0:
         print(
-            "FAIL: zero svc-bundles-executor Deployments found -- "
+            "FAIL: zero svc-bundles-executor workloads (Deployment/StatefulSet) found -- "
             "rustDataPlane.bundleExecutor.enabled off, or component label changed",
             file=sys.stderr,
         )
         return 1
     if executor_deployments_found != 1:
         print(
-            f"FAIL: expected exactly ONE svc-bundles-executor Deployment, found {executor_deployments_found}",
+            f"FAIL: expected exactly ONE svc-bundles-executor workload, found {executor_deployments_found}",
             file=sys.stderr,
         )
         return 1

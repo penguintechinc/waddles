@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-yomama"
-version = "1.0.1"
+version = "1.0.2"
 description = "Yo Mama Jokes Bundle (Python)"
 requires-python = ">=3.13"
 dependencies = []

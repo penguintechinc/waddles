@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
-import { FormModalBuilder } from '@penguintechinc/react-libs';
+import { FormModalBuilder } from '../../components/FormModal';
 import type { FormField } from '@penguintechinc/react-libs';
 import { WADDLES_GOLD_COLORS } from '../../theme/waddlebotTheme';
 import { superTenantApi } from '../../services/superTenantApi';

@@ -64,11 +64,13 @@ pub mod changelog;
 pub mod diff;
 pub mod entities;
 pub mod full_sync;
+pub mod load_tracker;
 pub mod multi_tenant;
 pub mod query;
 pub mod reader;
 pub mod scope;
 pub mod session_sync;
+pub mod sharding;
 pub mod snapshot;
 pub mod tools;
 
@@ -82,6 +84,7 @@ pub use full_sync::{
     any_session_diverged, digest_prefix, loaded_state_diverged, session_loaded_state_diverged,
     should_send_full_sync, FullSyncReason,
 };
+pub use load_tracker::{full_jitter_delay, jitter_unit, LoadAdmission, LoadBackoff, LoadTracker};
 pub use multi_tenant::{
     read_active_set_all, read_source_bindings_all, scoped_active_rows, tenant_active_app_counts,
     AppScope, ScopeKey,
@@ -94,10 +97,15 @@ pub use query::{
 pub use reader::ReaderConfig;
 pub use scope::{resolve_scope, ResolvedScope};
 pub use session_sync::{
-    pick_session_with_digest, plan_sessions, SessionId, SessionLoaded, SessionSyncPlan,
+    pick_session_with_digest, plan_sessions, plan_sessions_routed, SessionId, SessionLoaded,
+    SessionSyncPlan,
+};
+pub use sharding::{
+    count_owner_changes, owners, slot, slot_owner_table, stream_entry_age, RoutingMode,
+    RoutingObserver, SessionRouter, DEFAULT_REPLICAS, SLOT_COUNT,
 };
 pub use snapshot::{ActiveVersionSnapshot, ToolTargetEntry};
 pub use tools::{
-    ExportedToolInfo, HostOpDecl, HostOpOrigin, HostOpUserWire, RequestedToolInfo, ToolManifestInfo,
-    MCP_TOOLS_CAPABILITY,
+    ExportedToolInfo, HostOpDecl, HostOpOrigin, HostOpUserWire, RequestedToolInfo,
+    ToolManifestInfo, MCP_TOOLS_CAPABILITY,
 };
