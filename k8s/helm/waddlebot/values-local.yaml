@@ -12,13 +12,12 @@ global:
   # generation path for local/MicroK8s dev. "local" is the second tier (alongside
   # "alpha") that path treats as safe to auto-generate platform keys in.
   deploymentTier: "local"
-  jwtSecret: "local-dev-jwt-secret-change-in-production"
-  moduleSecretKey: "local-dev-module-secret-change-in-production"
-  serviceApiKey: "local-dev-api-key-change-in-production"
-  # First-run super-admin bootstrap (PR #256) -- local dev only, never reused beyond this file.
+  # jwtSecret / moduleSecretKey / serviceApiKey / initialAdmin.password are NOT set here: the
+  # provision-secrets hook generates them on first run (every tier) and refuses committed
+  # placeholder/default-looking literals. Read the admin password with
+  # `kubectl -n waddlebot get secret waddlebot-hub-admin-bootstrap -o jsonpath='{.data.INITIAL_ADMIN_PASSWORD}' | base64 -d`.
   initialAdmin:
     email: "admin@waddlebot.localhost.local"
-    password: "local-dev-admin-password-change-in-production"
 
 # Top-level infrastructure for template compatibility
 redis:

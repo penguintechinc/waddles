@@ -34,6 +34,7 @@ COPY svc_ingest/src ./svc_ingest/src
 COPY bundle_host_http ./bundle_host_http
 COPY egress_assertion ./egress_assertion
 COPY circuit_breaker ./circuit_breaker
+COPY command_latency ./command_latency
 COPY service_auth ./service_auth
 COPY discord_mentions ./discord_mentions
 COPY connection_resolver ./connection_resolver

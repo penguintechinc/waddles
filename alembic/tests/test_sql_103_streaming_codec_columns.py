@@ -2,12 +2,13 @@
 
 `streaming_configs` / `streaming_targets` are created by the legacy SQL migration system
 (`079_svc_streaming.sql`), NOT by Alembic, so the codec/protocol columns svc-streaming reads
-live in a numbered SQL migration next to them. An Alembic revision doing the same `ALTER TABLE`
-fails a fresh `alembic upgrade head` (the table does not exist in Alembic's schema); the
-regression guard below keeps it from coming back. Layers, cheapest first:
+live in a numbered SQL migration next to them. (The old "no Alembic revision may ALTER the
+streaming tables" guard was retired: 0061 / 0077 deliberately do, each skipping the DDL with a
+WARNING when the table is absent, and are covered by their own revision tests.) Layers,
+cheapest first:
 
 1. **Static** (no database): idempotent `ADD COLUMN IF NOT EXISTS` clauses, defaults, CHECK
-   vocabularies, column comments, and no Alembic revision touching the streaming tables.
+   vocabularies, column comments.
 2. **Drift guard** (static parse): every codec/protocol column the Rust SeaORM entities
    (`core/svc_streaming/src/db/entities/`) select is created by 079 or 103.
 3. **Real Postgres** (ephemeral container, skipped without docker): the real 079 is applied,
@@ -34,7 +35,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SQL_DIR = _REPO_ROOT / "config" / "postgres" / "migrations"
 _SQL_079 = _SQL_DIR / "079_svc_streaming.sql"
 _SQL_103 = _SQL_DIR / "103_streaming_codec_columns.sql"
-_ALEMBIC_VERSIONS = _REPO_ROOT / "alembic" / "versions"
 _ENTITY_DIR = _REPO_ROOT / "core" / "svc_streaming" / "src" / "db" / "entities"
 
 #: Columns migration 103 adds, per table -- the single source the tests below compare against.
@@ -104,27 +104,6 @@ class TestStaticSql:
         assert len(list(_SQL_DIR.glob("103_*.sql"))) == 1, "duplicate 103 prefix"
 
 
-class TestNoAlembicRevisionTouchesStreamingTables:
-    """Regression: gh-799 -- an Alembic `ALTER TABLE streaming_*` fails a fresh `alembic upgrade head`."""
-
-    def test_no_alembic_version_alters_the_streaming_tables(self) -> None:
-        versions = sorted(_ALEMBIC_VERSIONS.glob("*.py"))
-        assert versions, "no alembic revisions examined -- wrong path?"
-        offenders = [
-            path.name
-            for path in versions
-            if re.search(
-                r"ALTER\s+TABLE\s+streaming_(configs|targets|sessions)",
-                path.read_text(encoding="utf-8"),
-                re.IGNORECASE,
-            )
-        ]
-        assert not offenders, (
-            "streaming_* tables are owned by config/postgres/migrations/079_svc_streaming.sql, "
-            f"not Alembic -- move the ALTER to a numbered SQL migration: {offenders}"
-        )
-
-
 def _entity_columns(entity_file: str) -> set[str]:
     """Field names declared on a SeaORM `Model` struct (static parse of the Rust source)."""
     source = (_ENTITY_DIR / entity_file).read_text(encoding="utf-8")
@@ -132,6 +111,12 @@ def _entity_columns(entity_file: str) -> set[str]:
     assert body is not None, f"no `pub struct Model` in {entity_file}"
     return set(re.findall(r"^\s*pub (\w+):", body.group(1), re.MULTILINE))
 
+
+#: Columns the entity selects that Alembic 0077_stream_keys_destinations (not 079/103) creates.
+_ADDED_BY_ALEMBIC_0077 = {
+    "streaming_configs": {"stream_key_hash", "stream_key_fingerprint", "stream_key_rotated_at"},
+    "streaming_targets": set(),
+}
 
 _ENTITIES = [
     ("streaming_configs", "streaming_config.rs"),
@@ -152,7 +137,7 @@ class TestNoDriftAgainstRustEntities:
         )
 
     @pytest.mark.parametrize(("table", "entity_file"), _ENTITIES)
-    def test_entity_columns_are_all_in_079_or_103(
+    def test_entity_columns_are_all_in_079_103_or_0077(
         self, table: str, entity_file: str
     ) -> None:
         sql_079 = _SQL_079.read_text(encoding="utf-8")
@@ -161,7 +146,12 @@ class TestNoDriftAgainstRustEntities:
         )
         assert create is not None
         baseline = set(re.findall(r"^\s+(\w+)\s+[A-Z]", create.group(1), re.MULTILINE))
-        missing = _entity_columns(entity_file) - baseline - _ADDED_COLUMNS[table]
+        missing = (
+            _entity_columns(entity_file)
+            - baseline
+            - _ADDED_COLUMNS[table]
+            - _ADDED_BY_ALEMBIC_0077[table]
+        )
         assert not missing, (
             f"{entity_file} selects columns no migration creates: {sorted(missing)}"
         )
