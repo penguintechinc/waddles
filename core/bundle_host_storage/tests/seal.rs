@@ -11,8 +11,8 @@ use bundle_host_crypto::{Dek, DekProvider, DekUnavailableError, TenantCrypto, MA
 use bundle_host_storage::key::object_key;
 use bundle_host_storage::seal::BoxFuture;
 use bundle_host_storage::{
-    AuditEvent, AuditSink, GrantSet, MemoryBackend, MemoryPlainLedger, ObjectBackend,
-    ObjectSealing, SealGate, StorageError, StorageHost, StorageScope,
+    AuditEvent, AuditSink, GrantSet, LedgerEntry, MemoryBackend, MemoryPlainLedger, ObjectBackend,
+    ObjectSealing, PlainLedger, SealGate, StorageError, StorageHost, StorageScope,
 };
 use bytes::Bytes;
 use zeroize::Zeroizing;
@@ -79,6 +79,7 @@ struct Rig {
     broker_up: Arc<AtomicBool>,
     seal_on: Arc<AtomicBool>,
     active: Arc<AtomicU32>,
+    ledger: Arc<MemoryPlainLedger>,
 }
 
 fn rig(legacy_cutoff: Option<u64>) -> Rig {
@@ -86,11 +87,12 @@ fn rig(legacy_cutoff: Option<u64>) -> Rig {
     let broker_up = Arc::new(AtomicBool::new(true));
     let seal_on = Arc::new(AtomicBool::new(true));
     let active = Arc::new(AtomicU32::new(1));
+    let ledger = Arc::new(MemoryPlainLedger::default());
     let sealing = ObjectSealing::new(TenantCrypto::new(Keys {
         up: broker_up.clone(),
         active: active.clone(),
     }))
-    .with_plain_ledger(Arc::new(MemoryPlainLedger::default()))
+    .with_plain_ledger(ledger.clone())
     .with_gate(Arc::new(Gate(seal_on.clone())));
     let sealing = match legacy_cutoff {
         Some(cutoff) => sealing.with_legacy_plaintext_until(cutoff),
@@ -103,6 +105,7 @@ fn rig(legacy_cutoff: Option<u64>) -> Rig {
         broker_up,
         seal_on,
         active,
+        ledger,
     }
 }
 
@@ -589,4 +592,134 @@ async fn plaintext_writes_without_a_ledger_are_refused() {
         .await
         .unwrap_err();
     assert!(matches!(err, StorageError::Backend(m) if m.contains("rollback ledger")));
+}
+
+/// Restores a previously captured raw object wholesale (what a bucket-write attacker can do).
+async fn restore(r: &Rig, key: &str, old: &bundle_host_storage::StoredObject) {
+    r.backend
+        .put(
+            &object_key(APP, 1, 7, key),
+            old.body.clone(),
+            "text/plain",
+            &old.meta.tags,
+        )
+        .await
+        .expect("restore");
+}
+
+#[tokio::test]
+async fn old_plaintext_cannot_be_restored_after_a_sealed_overwrite() {
+    let r = rig(None);
+    let s = scope(1, 7);
+    r.seal_on.store(false, Ordering::SeqCst);
+    put(&r, &s, "k").await;
+    let old = raw(&r, &s, "k").await;
+    r.seal_on.store(true, Ordering::SeqCst);
+    put(&r, &s, "k").await; // sealed put advances the ledger
+    restore(&r, "k", &old).await;
+    assert!(
+        r.host.get(&s, None, "k").await.is_err(),
+        "sealed overwrite supersedes plaintext"
+    );
+}
+
+#[tokio::test]
+async fn old_plaintext_cannot_be_restored_after_delete() {
+    let r = rig(None);
+    let s = scope(1, 7);
+    r.seal_on.store(false, Ordering::SeqCst);
+    put(&r, &s, "k").await;
+    let old = raw(&r, &s, "k").await;
+    r.host.delete(&s, None, "k").await.expect("delete");
+    restore(&r, "k", &old).await;
+    assert!(
+        r.host.get(&s, None, "k").await.is_err(),
+        "tombstone refuses resurrection"
+    );
+}
+
+#[tokio::test]
+async fn plaintext_with_no_ledger_entry_is_refused_not_adopted() {
+    let r = rig(None);
+    let s = scope(1, 7);
+    r.seal_on.store(false, Ordering::SeqCst);
+    put(&r, &s, "k").await;
+    assert!(r.host.get(&s, None, "k").await.is_ok());
+    // Entry evicted / lost: the same valid body+tag must now fail closed.
+    r.ledger.forget(&object_key(APP, 1, 7, "k"));
+    assert!(r.host.get(&s, None, "k").await.is_err());
+}
+
+/// Ledger whose first `commit` fails, simulating a crash between the backend put and the commit.
+struct CrashOnce {
+    inner: Arc<MemoryPlainLedger>,
+    armed: AtomicBool,
+}
+impl PlainLedger for CrashOnce {
+    fn begin<'a>(&'a self, k: &'a str) -> BoxFuture<'a, Result<u64, StorageError>> {
+        self.inner.begin(k)
+    }
+    fn commit<'a>(
+        &'a self,
+        k: &'a str,
+        n: u64,
+        plain: bool,
+    ) -> BoxFuture<'a, Result<(), StorageError>> {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            return Box::pin(async { Err(StorageError::Backend("crash before commit".into())) });
+        }
+        self.inner.commit(k, n, plain)
+    }
+    fn entry<'a>(&'a self, k: &'a str) -> BoxFuture<'a, Result<Option<LedgerEntry>, StorageError>> {
+        self.inner.entry(k)
+    }
+}
+
+#[tokio::test]
+async fn crash_between_put_and_commit_adopts_only_the_recorded_pending_counter() {
+    let backend = Arc::new(MemoryBackend::new());
+    let inner = Arc::new(MemoryPlainLedger::default());
+    let crash = Arc::new(CrashOnce {
+        inner: inner.clone(),
+        armed: AtomicBool::new(false),
+    });
+    let host = StorageHost::with_rate_limit(backend.clone(), Arc::new(Sink::default()), 1000)
+        .with_sealing(
+            ObjectSealing::new(TenantCrypto::new(Keys {
+                up: Arc::new(AtomicBool::new(true)),
+                active: Arc::new(AtomicU32::new(1)),
+            }))
+            .with_gate(Arc::new(Gate(Arc::new(AtomicBool::new(false)))))
+            .with_plain_ledger(crash.clone()),
+        );
+    let s = scope(1, 7);
+    host.put(&s, None, "k", Bytes::from_static(b"one"), "text/plain", &[])
+        .await
+        .expect("first");
+    let first = backend
+        .get(&object_key(APP, 1, 7, "k"))
+        .await
+        .expect("get")
+        .expect("exists");
+    crash.armed.store(true, Ordering::SeqCst);
+    let err = host
+        .put(&s, None, "k", Bytes::from_static(b"two"), "text/plain", &[])
+        .await;
+    assert!(err.is_err(), "commit crashed");
+    // The stored object carries the pending counter: adopted on read.
+    assert_eq!(
+        &host.get(&s, None, "k").await.expect("adopted").1[..],
+        b"two"
+    );
+    // ...and that adoption superseded counter 1: the first body+tags can no longer be restored.
+    backend
+        .put(
+            &object_key(APP, 1, 7, "k"),
+            first.body,
+            "text/plain",
+            &first.meta.tags,
+        )
+        .await
+        .expect("restore");
+    assert!(host.get(&s, None, "k").await.is_err());
 }

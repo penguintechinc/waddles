@@ -26,4 +26,6 @@ pub use error::StorageError;
 pub use host::{StorageHost, StorageScope};
 pub use pg_audit::PgAuditSink;
 pub use policy::{GrantSet, Op};
-pub use seal::{AlwaysSeal, MemoryPlainLedger, ObjectSealing, PlainLedger, SealGate};
+#[cfg(any(test, feature = "dev-memory-ledger"))]
+pub use seal::MemoryPlainLedger;
+pub use seal::{AlwaysSeal, LedgerEntry, ObjectSealing, PlainLedger, SealGate};

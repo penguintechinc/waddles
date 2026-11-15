@@ -62,34 +62,83 @@ impl SealGate for AlwaysSeal {
     }
 }
 
-/// Host-side record of the newest authenticated-plaintext write counter per object key, so a
-/// stale (body, tag) pair replayed from the bucket is rejected as a rollback. Metadata alone
-/// cannot prevent that: an attacker who can write the bucket can restore a whole old object.
-/// Production wiring backs it with the durable store (Valkey/DB); `MemoryPlainLedger` is for
-/// tests and single-process dev.
+/// What the ledger knows about one object key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LedgerEntry {
+    /// Counter of the live object IF it is host-written authenticated plaintext; `0` when the
+    /// live object is sealed or was deleted (tombstone).
+    pub current: u64,
+    /// Counter allocated by an in-flight (write-ahead) mutation not yet committed; `0` = none.
+    pub pending: u64,
+}
+
+/// Durable, host-side per-object-key mutation record that makes authenticated plaintext
+/// rollback-proof. Metadata alone cannot do it: an attacker who can write the bucket can
+/// restore a whole old object, tags included.
+///
+/// EVERY mutation of a key (sealed put, plaintext put, delete) goes through `begin` (write
+/// ahead: allocate a fresh counter and record it as pending BEFORE the backend operation) and
+/// then `commit` (after it succeeded). A plaintext-tagged object is served only if its counter
+/// equals the entry's `current` (or the recorded `pending` one, adopted after a crash between
+/// the backend put and the commit). A missing entry means refuse -- never "counter 0".
+///
+/// Requirements for a production implementation: durable (DB table or Valkey with
+/// `noeviction` + persistence -- an evicted/lost entry makes plaintext-tagged objects
+/// unreadable, which fails closed), and `begin` must be atomic per key (INCR / row lock).
+/// `MemoryPlainLedger` exists only behind the `dev-memory-ledger` feature (and in tests).
 pub trait PlainLedger: Send + Sync {
-    /// Newest committed counter for `object_key` (0 = none).
-    fn latest<'a>(&'a self, object_key: &'a str) -> BoxFuture<'a, Result<u64, StorageError>>;
-    /// Records `counter` as committed (monotonic: never lowers the stored value).
+    /// Atomically allocates the next counter for `object_key` and records it as pending.
+    fn begin<'a>(&'a self, object_key: &'a str) -> BoxFuture<'a, Result<u64, StorageError>>;
+    /// Marks mutation `counter` done: `plain` = the live object is authenticated plaintext
+    /// with that counter, otherwise (sealed put / delete) `current` becomes 0.
     fn commit<'a>(
         &'a self,
         object_key: &'a str,
         counter: u64,
+        plain: bool,
     ) -> BoxFuture<'a, Result<(), StorageError>>;
+    /// The entry for `object_key`, `None` if the ledger has never seen it (or lost it).
+    fn entry<'a>(
+        &'a self,
+        object_key: &'a str,
+    ) -> BoxFuture<'a, Result<Option<LedgerEntry>, StorageError>>;
 }
 
-/// In-process [`PlainLedger`].
+/// In-process [`PlainLedger`] for tests and single-process dev ONLY.
+#[cfg(any(test, feature = "dev-memory-ledger"))]
 #[derive(Default)]
-pub struct MemoryPlainLedger(std::sync::Mutex<std::collections::HashMap<String, u64>>);
+pub struct MemoryPlainLedger(
+    std::sync::Mutex<std::collections::HashMap<String, (u64, LedgerEntry)>>,
+);
 
+#[cfg(any(test, feature = "dev-memory-ledger"))]
+impl MemoryPlainLedger {
+    /// Test seam: forgets `object_key` (simulates eviction / loss).
+    pub fn forget(&self, object_key: &str) {
+        if let Ok(mut m) = self.0.lock() {
+            m.remove(object_key);
+        }
+    }
+}
+
+#[cfg(any(test, feature = "dev-memory-ledger"))]
 impl PlainLedger for MemoryPlainLedger {
-    fn latest<'a>(&'a self, object_key: &'a str) -> BoxFuture<'a, Result<u64, StorageError>> {
+    fn begin<'a>(&'a self, object_key: &'a str) -> BoxFuture<'a, Result<u64, StorageError>> {
         Box::pin(async move {
-            let m = self
+            let mut m = self
                 .0
                 .lock()
                 .map_err(|_| StorageError::Backend("ledger poisoned".into()))?;
-            Ok(m.get(object_key).copied().unwrap_or(0))
+            let slot = m.entry(object_key.to_string()).or_insert((
+                0,
+                LedgerEntry {
+                    current: 0,
+                    pending: 0,
+                },
+            ));
+            slot.0 += 1;
+            slot.1.pending = slot.0;
+            Ok(slot.0)
         })
     }
 
@@ -97,15 +146,36 @@ impl PlainLedger for MemoryPlainLedger {
         &'a self,
         object_key: &'a str,
         counter: u64,
+        plain: bool,
     ) -> BoxFuture<'a, Result<(), StorageError>> {
         Box::pin(async move {
             let mut m = self
                 .0
                 .lock()
                 .map_err(|_| StorageError::Backend("ledger poisoned".into()))?;
-            let slot = m.entry(object_key.to_string()).or_insert(0);
-            *slot = (*slot).max(counter);
+            let slot = m.get_mut(object_key).ok_or_else(|| {
+                StorageError::Backend("ledger commit without a begun mutation".into())
+            })?;
+            if counter >= slot.1.current {
+                slot.1.current = if plain { counter } else { 0 };
+            }
+            if slot.1.pending == counter {
+                slot.1.pending = 0;
+            }
             Ok(())
+        })
+    }
+
+    fn entry<'a>(
+        &'a self,
+        object_key: &'a str,
+    ) -> BoxFuture<'a, Result<Option<LedgerEntry>, StorageError>> {
+        Box::pin(async move {
+            let m = self
+                .0
+                .lock()
+                .map_err(|_| StorageError::Backend("ledger poisoned".into()))?;
+            Ok(m.get(object_key).map(|(_, e)| *e))
         })
     }
 }
@@ -182,24 +252,45 @@ impl ObjectSealing {
             .map_err(map_err)
     }
 
-    /// Authenticates a plaintext body written while the kill-switch was on. Returns the tag
-    /// value `v<dek_version>:<counter>:<hex hmac>` and the counter to commit after the put.
-    /// The MAC binds scope, key, DEK version, a per-key monotonic counter and the body.
+    /// Write-ahead step of EVERY mutation (sealed put, plaintext put, delete): allocates and
+    /// records the pending counter before the backend operation. `None` without a ledger.
+    pub(crate) async fn begin_mutation(&self, full_key: &str) -> Result<Option<u64>, StorageError> {
+        match &self.ledger {
+            Some(l) => l.begin(full_key).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Completes a mutation after the backend operation succeeded.
+    pub(crate) async fn commit_mutation(
+        &self,
+        full_key: &str,
+        counter: Option<u64>,
+        plain: bool,
+    ) -> Result<(), StorageError> {
+        match (&self.ledger, counter) {
+            (Some(l), Some(n)) => l.commit(full_key, n, plain).await,
+            _ => Ok(()),
+        }
+    }
+
+    /// Authenticates a plaintext body written while the kill-switch was on, under the counter
+    /// `begin_mutation` allocated. Returns the tag value `v<dek_version>:<counter>:<hex hmac>`;
+    /// the MAC binds scope, key, DEK version, the counter and the body. Refused (fail closed)
+    /// when no ledger is configured, because the write could not be rollback-protected.
     pub(crate) async fn plain_tag(
         &self,
-        tenant: u64,
-        community: u64,
+        (tenant, community): (u64, u64),
         owner: &str,
         key: &str,
-        full_key: &str,
+        counter: Option<u64>,
         body: &[u8],
-    ) -> Result<(String, u64), StorageError> {
-        let ledger = self.ledger.as_ref().ok_or_else(|| {
+    ) -> Result<String, StorageError> {
+        let counter = counter.ok_or_else(|| {
             StorageError::Backend(
                 "plaintext writes need a rollback ledger; none configured (refusing)".into(),
             )
         })?;
-        let counter = ledger.latest(full_key).await?.saturating_add(1);
         let (t, c) = (tenant.to_string(), community.to_string());
         let ctr = counter.to_string();
         let (version, mac) = self
@@ -213,19 +304,7 @@ impl ObjectSealing {
             )
             .await
             .map_err(map_err)?;
-        Ok((format!("v{version}:{counter}:{}", hex(&mac)), counter))
-    }
-
-    /// Records a committed plaintext write counter (after the backend put succeeded).
-    pub(crate) async fn commit_plain(
-        &self,
-        full_key: &str,
-        counter: u64,
-    ) -> Result<(), StorageError> {
-        match &self.ledger {
-            Some(l) => l.commit(full_key, counter).await,
-            None => Ok(()),
-        }
+        Ok(format!("v{version}:{counter}:{}", hex(&mac)))
     }
 
     /// Verifies an authenticated-plaintext tag: version inside the rotation window, MAC valid
@@ -269,20 +348,31 @@ impl ObjectSealing {
         if !ct_eq(hex_mac.as_bytes(), hex(&mac).as_bytes()) {
             return Err(bad());
         }
-        let latest = ledger.latest(full_key).await?;
-        if counter < latest {
+        // The ledger decides whether THIS is still the live object. No entry (evicted / lost /
+        // never recorded) is an integrity failure, not "counter 0".
+        let Some(entry) = ledger.entry(full_key).await? else {
             tracing::error!(
                 tenant,
                 community,
-                "stale plaintext object replayed; refusing"
+                "no ledger entry for plaintext object; refusing"
             );
             return Err(bad());
+        };
+        if counter == entry.current {
+            return Ok(());
         }
-        if counter > latest {
-            // A write whose ledger commit was lost to a crash: adopt it.
-            ledger.commit(full_key, counter).await?;
+        if counter == entry.pending && counter > entry.current {
+            // Crash between the backend put and the commit: the write-ahead record names this
+            // exact counter, so adopt it.
+            ledger.commit(full_key, counter, true).await?;
+            return Ok(());
         }
-        Ok(())
+        tracing::error!(
+            tenant,
+            community,
+            "stale or superseded plaintext object (rollback); refusing"
+        );
+        Err(bad())
     }
 
     /// Opens (or, for authenticated/legacy plaintext, validates) a stored object body.

@@ -388,7 +388,11 @@ impl StorageHost {
         validate_request_id(&s.request_id)?;
         let mut tags = tags;
         let size = body.len() as u64;
-        let mut plain_counter: Option<u64> = None;
+        let mut wrote_plain = false;
+        let mutation = match &self.sealing {
+            Some(sealing) => sealing.begin_mutation(&r.full_key).await?,
+            None => None,
+        };
         let body = match &self.sealing {
             Some(sealing) if sealing.writes_sealed().await => {
                 tags.push(system_tag(TAG_SEALED, 1));
@@ -403,11 +407,11 @@ impl StorageHost {
                 );
                 // Authenticate the plaintext under the tenant key so it stays readable while a
                 // bucket-write attacker's plaintext replacement is refused.
-                let (tag, counter) = sealing
-                    .plain_tag(s.tenant, s.community, &r.owner, key, &r.full_key, &body)
+                let tag = sealing
+                    .plain_tag((s.tenant, s.community), &r.owner, key, mutation, &body)
                     .await?;
                 tags.push(system_tag(TAG_PLAIN_MAC, tag));
-                plain_counter = Some(counter);
+                wrote_plain = true;
                 body
             }
             None => body,
@@ -426,8 +430,10 @@ impl StorageHost {
         self.backend
             .put(&r.full_key, body, content_type, &tags)
             .await?;
-        if let (Some(sealing), Some(counter)) = (&self.sealing, plain_counter) {
-            sealing.commit_plain(&r.full_key, counter).await?;
+        if let Some(sealing) = &self.sealing {
+            sealing
+                .commit_mutation(&r.full_key, mutation, wrote_plain)
+                .await?;
         }
         metrics::bytes("in", size);
         metrics::op_duration("put", t0.elapsed());
@@ -617,7 +623,18 @@ impl StorageHost {
         let r = self.resolve(s, owner, Op::Delete, key).await?;
         self.require_visible(s, &r, "delete", key).await?;
         self.audit_allowed(s, &r, "delete", key).await?;
+        // Tombstone in the rollback ledger: a deleted key can never be resurrected from an old
+        // plaintext body + tag.
+        let mutation = match &self.sealing {
+            Some(sealing) => sealing.begin_mutation(&r.full_key).await?,
+            None => None,
+        };
         self.backend.delete(&r.full_key).await?;
+        if let Some(sealing) = &self.sealing {
+            sealing
+                .commit_mutation(&r.full_key, mutation, false)
+                .await?;
+        }
         Ok(())
     }
 
