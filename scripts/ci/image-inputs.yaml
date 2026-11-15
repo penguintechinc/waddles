@@ -119,6 +119,7 @@ images:
     groups: [ctx-root]
     inputs:
       - core/bundle_executor/**
+      - core/platform_keys/**
       - wit/**
 
   svc-ingest:
