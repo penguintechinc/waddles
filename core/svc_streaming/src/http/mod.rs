@@ -146,7 +146,7 @@ impl AppState {
             rtc_metrics.clone(),
         ));
         let room_keys = crate::rooms::token::TokenKeys::from_env()
-            .expect("WEBRTC_ROOM_TOKEN_SECRET, when set, must be at least 32 bytes");
+            .expect("the room token signing key (WEBRTC_ROOM_TOKEN_SIGNING_KEY[_FILE]), when configured, must be a valid ES256 P-256 PKCS#8 PEM key; the retired WEBRTC_ROOM_TOKEN_SECRET is refused");
         let mut whep = WhepState::new(pc_factory.clone(), rtc_metrics.clone(), DEFAULT_MAX_VIEWERS);
         if let Some(k) = room_keys.clone() {
             whep = whep.with_viewer_auth(k);
@@ -160,7 +160,11 @@ impl AppState {
                 config.cli.public_base_url.clone(),
             )
             .with_whep(whep_state.clone())
-            .with_moderation(moderation_flag_from_env()),
+            .with_moderation(moderation_flag_from_env())
+            .with_idle_policy(
+                crate::rooms::IdlePolicy::from_env()
+                    .expect("ROOMS_EMPTY_TIMEOUT_DEFAULT_SECS / ROOMS_EMPTY_TIMEOUT_MAX_SECS, when set, must be valid"),
+            ),
         );
         let engine: SharedEngine = Arc::new(crate::pipeline::StubSupervisor);
         let hls_router_state = HlsRouterState::new(

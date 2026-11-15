@@ -17,12 +17,9 @@ use uuid::Uuid;
 use webrtc::media_stream::track_local::TrackLocal;
 
 use rtc_common::*;
-use svc_streaming::rooms::token::TokenKeys;
 use svc_streaming::rooms::{host_api, media, RoomService};
 use svc_streaming::rtc::metrics::RtcMetrics;
 use svc_streaming::rtc::pc_factory::PeerConnectionFactory;
-
-const SECRET: &str = "0123456789abcdef0123456789abcdef";
 
 async fn host_call(router: &axum::Router, op: &str, body: Value) -> (StatusCode, Value) {
     let res = router
@@ -68,7 +65,7 @@ async fn room_publish_reaches_room_subscriber_with_scoped_tokens() {
     let svc = Arc::new(RoomService::new(
         server_factory,
         metrics,
-        Some(TokenKeys::new(SECRET).unwrap()),
+        Some(rtc_common::test_token_keys()),
         "http://svc.test".into(),
     ));
     let host = host_api::router(svc.clone());

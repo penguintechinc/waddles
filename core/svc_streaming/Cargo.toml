@@ -110,6 +110,11 @@ hyper-util = { version = "=0.1.20", features = ["server-auto", "tokio", "service
 # tonic/tonic-prost/prost are already resolved at these exact versions in Cargo.lock.
 tonic = { version = "=0.14.6", default-features = false, features = ["transport", "codegen", "router"] }
 tonic-prost = "=0.14.6"
+# `grpc.health.v1` on the rooms gRPC listener (in-mesh health checks over mTLS; kubelet gRPC
+# probes cannot present a client cert, so the chart keeps its HTTP probes). Same hyperium
+# release train as `tonic` above; its deps (tonic/tonic-prost/prost/tokio/tokio-stream) are
+# already resolved at compatible versions in Cargo.lock.
+tonic-health = "=0.14.6"
 prost = "=0.14.4"
 ffmpeg-sidecar = "=2.7.0"
 hls_m3u8 = "=0.7.0"

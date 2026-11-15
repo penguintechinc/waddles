@@ -16,7 +16,6 @@ use webrtc::media_stream::track_local::TrackLocal;
 
 use rtc_common::*;
 use svc_streaming::egress::whep::WhepState;
-use svc_streaming::rooms::token::TokenKeys;
 use svc_streaming::rooms::{host_api, media, RoomService, MAX_REVOKED_PER_COMMUNITY};
 use svc_streaming::rtc::fanout::MediaFanouts;
 use svc_streaming::rtc::metrics::RtcMetrics;
@@ -55,7 +54,7 @@ fn service(range: (u16, u16)) -> Arc<RoomService> {
     Arc::new(RoomService::new(
         factory,
         metrics,
-        Some(TokenKeys::new(VIEWER_SECRET).unwrap()),
+        Some(rtc_common::test_token_keys()),
         "http://svc.test".into(),
     ))
 }
@@ -157,25 +156,31 @@ async fn revocation_is_scoped_bounded_and_epoch_invalidates_everything() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     // Per-community quota on live revocations; another community is unaffected.
-    for _ in 0..MAX_REVOKED_PER_COMMUNITY {
-        let (_, t) = host_call(
+    let quota_pid = Uuid::new_v4();
+    for i in 0..MAX_REVOKED_PER_COMMUNITY {
+        let (st_i, t) = host_call(
             &host,
             "token.issue",
-            json!({"community_id":"7","room_id":a,"publish":false,"subscribe":true}),
+            json!({"community_id":"7","room_id":a,"participant_id":quota_pid,"publish":false,"subscribe":true}),
         )
         .await;
-        let (st, _) = host_call(
+        assert_eq!(st_i, StatusCode::OK, "issue failed at {i}: {t}");
+        let (st, b_rev) = host_call(
             &host,
             "token.revoke",
             json!({"community_id":"7","room_id":a,"token_id":t["token_id"]}),
         )
         .await;
-        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "revoke failed at {i}: {b_rev} (issued: {t})"
+        );
     }
     let (_, t) = host_call(
         &host,
         "token.issue",
-        json!({"community_id":"7","room_id":a,"publish":false,"subscribe":true}),
+        json!({"community_id":"7","room_id":a,"participant_id":quota_pid,"publish":false,"subscribe":true}),
     )
     .await;
     let (st, b_) = host_call(
@@ -214,7 +219,7 @@ async fn subscriber_sessions_are_replaced_per_participant_and_reaped() {
     let svc = Arc::new(RoomService::new(
         server,
         metrics,
-        Some(TokenKeys::new(VIEWER_SECRET).unwrap()),
+        Some(rtc_common::test_token_keys()),
         "http://svc.test".into(),
     ));
     let host = host_api::router(svc.clone());
@@ -226,7 +231,7 @@ async fn subscriber_sessions_are_replaced_per_participant_and_reaped() {
     let (_, pubep) = host_call(
         &host,
         "whip.endpoint",
-        json!({"community_id":"7","room_id":room_id}),
+        json!({"community_id":"7","room_id":room_id,"ttl_secs":300}),
     )
     .await;
     let (track, _ssrc) = opus_publisher_track();
@@ -252,7 +257,7 @@ async fn subscriber_sessions_are_replaced_per_participant_and_reaped() {
     let (_, sub) = host_call(
         &host,
         "whep.endpoint",
-        json!({"community_id":"7","room_id":room_id}),
+        json!({"community_id":"7","room_id":room_id,"ttl_secs":300}),
     )
     .await;
     let tok = sub["token"].as_str().unwrap().to_string();
@@ -335,7 +340,7 @@ async fn pipeline_viewer_tokens_only_for_streams_the_community_owns() {
     let factory =
         Arc::new(PeerConnectionFactory::new(loopback_rtc_config((42170, 42179))).unwrap());
     let metrics = RtcMetrics::register(&prometheus::Registry::new()).unwrap();
-    let keys = TokenKeys::new(VIEWER_SECRET).unwrap();
+    let keys = rtc_common::test_token_keys();
     let whep = Arc::new(
         WhepState::new(factory.clone(), metrics.clone(), 5).with_viewer_auth(keys.clone()),
     );

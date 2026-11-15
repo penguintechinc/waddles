@@ -166,9 +166,20 @@ impl ServiceJwtVerifier {
     /// Verifies `token` and requires its `scope` to equal `required_scope`.
     /// Emits the shared JWT verification metric/log for every call.
     pub fn verify(&self, token: &str, required_scope: &str) -> Result<ServiceClaims, JwtRejection> {
+        self.verify_any(token, &[required_scope])
+    }
+
+    /// Like [`Self::verify`] but accepts any ONE of `allowed_scopes` (the token still carries a
+    /// single `scope`; the caller reads it from the returned claims to tell which one). Used by
+    /// RPCs whose reach depends on the scope presented, e.g. `ListHands`.
+    pub fn verify_any(
+        &self,
+        token: &str,
+        allowed_scopes: &[&str],
+    ) -> Result<ServiceClaims, JwtRejection> {
         let started = Instant::now();
         let mut alg = ALG_LABEL_ABSENT;
-        let result = self.verify_checked(token, required_scope, &mut alg);
+        let result = self.verify_checked(token, allowed_scopes, &mut alg);
         let outcome = match &result {
             Ok(_) => OUTCOME_OK,
             Err(r) => r.reason,
@@ -186,7 +197,7 @@ impl ServiceJwtVerifier {
     fn verify_checked(
         &self,
         token: &str,
-        required_scope: &str,
+        allowed_scopes: &[&str],
         alg: &mut &'static str,
     ) -> Result<ServiceClaims, JwtRejection> {
         let header = inspect_header(token, &[SERVICE_JWT_ALGORITHM], KidPolicy::Require)
@@ -246,7 +257,7 @@ impl ServiceJwtVerifier {
         if !self.allowed_subjects.is_empty() && !self.allowed_subjects.contains(&sub) {
             return Err(JwtRejection::new(REASON_SCOPE_DENIED, "es256"));
         }
-        if scope != required_scope {
+        if !allowed_scopes.contains(&scope.as_str()) {
             return Err(JwtRejection::new(REASON_SCOPE_DENIED, "es256"));
         }
         let community = match claims.get("community") {
