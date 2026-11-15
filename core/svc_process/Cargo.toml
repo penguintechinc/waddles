@@ -107,7 +107,7 @@ penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git"
 # Frame/Message shapes shared verbatim with `bundle-executor` -- see
 # `src/host_api.rs`. Same pinned rev `core/svc_action`/`core/bundle_executor`
 # already use (PR penguintechinc/penguin-libs#93).
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "53e95619f1b3e49e1150b78a125981fcc5905d8a", package = "penguin-bundle-host", version = "=0.5.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "96a5065f1d379ea0cfc7c7716c6eab628138330a", package = "penguin-bundle-host", version = "=0.6.0" }
 # mTLS host-API server (spec SS6.6/SS7.1): the executor dials `:8301`; this
 # crate is the TLS *server* side, mirroring `core/bundle_executor/src/tls.rs`
 # (the client side) with the roles reversed -- same exact version pins
@@ -236,6 +236,9 @@ async-trait = "=0.1.89"
 # declares the identical dependency so the breaker logic is written and
 # tested exactly once. See `core/circuit_breaker/Cargo.toml`.
 circuit-breaker = { path = "../circuit_breaker", version = "=0.1.0" }
+# Command-latency SLA telemetry (owner SLA 2026-11-14): first-door stamp in the tracestate, per-hop and
+# end-to-end histograms, bounded label registries, kill switch `waddles.disable-command-latency-telemetry`.
+command-latency = { path = "../command_latency", version = "=0.1.0" }
 # `futures_util::StreamExt`/`join_all`: `grant_gate`'s pub/sub invalidation
 # subscriber (`PubSubStream::into_on_message()`) AND
 # `apply_active_set`'s concurrent per-(session,bundle) Load/Unload dispatch
@@ -252,6 +255,9 @@ regex = "=1.13.1"
 # `HubClientMinter` adapter. Same-repo path dependency (not penguin-libs):
 # this proto contract is owned by this repo, not penguin-libs.
 hub_client = { path = "../hub_client", version = "=0.1.0" }
+# Live per-community bundle config read straight from the read-only replica (issue #1306); kept
+# out of hub_client so crates that only need hub-api gRPC do not pull sea-orm into their graph.
+bundle-config-db = { path = "../bundle_config_db", version = "=0.1.0" }
 # `src/pii_tokenize.rs`'s `sanitize_mint_key` (sec review 2026-10-03): hashes
 # the raw handle out of a `handle:<raw username>` fallback mint key before
 # it can ever reach a `TokenizeError`/log line -- never the raw value.

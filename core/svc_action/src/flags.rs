@@ -183,6 +183,42 @@ pub fn db_bundle_config_flag(
     }
 }
 
+/// Opt-out kill switch for executor slot sharding
+/// (`bundle_active_set::sharding`, executor scale-out phase 1): unseen /
+/// OFF / license server unreachable = sharding ON (each app loads only on
+/// its 2 owner executors); ON = legacy broadcast to every executor. Same
+/// key `core/svc_process/src/license.rs` gates on.
+pub const DISABLE_EXECUTOR_SHARDING_FLAG: &str = "waddles.disable-executor-sharding";
+
+/// Production [`FeatureFlag`] for [`DISABLE_EXECUTOR_SHARDING_FLAG`]:
+/// `enabled()` answers "is sharding on?" (negated raw flag); a bypassed
+/// client reads as sharding ON (see [`DisableDbBundleConfigFlag`] for why
+/// bypass must be checked first).
+pub struct ExecutorShardingFlag(Arc<penguin_licensing::LicenseClient>);
+
+impl FeatureFlag for ExecutorShardingFlag {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            if self.0.bypass_active() {
+                return true;
+            }
+            !self.0.flag_enabled(DISABLE_EXECUTOR_SHARDING_FLAG).await
+        })
+    }
+}
+
+/// The sharding [`FeatureFlag`] for `crate::changelog_consumer::run`: the
+/// real kill switch over a license client, or "sharding ON" (= flag unseen)
+/// when no license client is available.
+pub fn executor_sharding_flag(
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+) -> Arc<dyn FeatureFlag> {
+    match license {
+        Some(client) => boxed(ExecutorShardingFlag(Arc::clone(client))),
+        None => boxed(StaticFlag(true)),
+    }
+}
+
 /// Opt-out kill-switch for the multi-tenant, change-log-driven active-set
 /// loader (`crate::changelog_consumer`) -- dataplane scale design rev 4,
 /// §8 step 2: "Multi-tenant watermark polling ...
@@ -519,6 +555,20 @@ pub async fn resolve_flag_with<F: FlagSource>(
 fn shared_flags_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
     static CLIENT: OnceLock<Option<Arc<penguin_licensing::LicenseClient>>> = OnceLock::new();
     CLIENT.get_or_init(crate::build_license_client).clone()
+}
+
+/// The command-latency kill-switch resolver (`waddles.disable-command-latency-telemetry`): `true`
+/// means telemetry is DISABLED. Opt-out convention: an unseen flag leaves the mechanism ON. Under the
+/// license bypass domain `flag_enabled` reads ON for every flag, which for an opt-OUT flag would
+/// switch the mechanism off, so the bypass answer is the ENV baseline only.
+pub async fn command_latency_kill_switch_wanted() -> bool {
+    let env = command_latency::switch::env_baseline_disabled();
+    match shared_flags_license_client() {
+        Some(c) if !c.bypass_active() => {
+            env || c.flag_enabled(command_latency::switch::FLAG_KEY).await
+        }
+        _ => env,
+    }
 }
 
 /// `crate::telemetry::register_flags_metrics`'s counter, wired in here --
@@ -903,6 +953,19 @@ mod flags_capability_tests {
 mod tests {
     use super::*;
 
+    /// `waddles.disable-db-bundle-config-reads`: no client and an unseen flag both leave the
+    /// direct database read path ON (opt-out kill switch, issue #1306).
+    #[tokio::test]
+    async fn db_config_reads_gate_defaults_to_the_database_path() {
+        use hub_client::bundle_config::ReadPathGate;
+        assert!(DbConfigReadsGate(None).db_reads_enabled().await);
+        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-db-reads-gate")
+            .expect("default LicenseConfig::new never fails");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        assert!(DbConfigReadsGate(Some(client)).db_reads_enabled().await);
+    }
+
     #[tokio::test]
     async fn static_flag_reports_its_fixed_value() {
         assert!(StaticFlag(true).enabled().await);
@@ -1070,7 +1133,6 @@ mod tests {
     }
 }
 
-
 /// Adapts the license/flag client to the hub_client cache's kill switch
 /// (`waddles.disable-bundle-community-config`): ON = live community config disabled, unseen/OFF/
 /// license-server-unreachable = enabled. Bypass-aware like [`DisableDbBundleConfigFlag`]: a
@@ -1082,7 +1144,29 @@ impl hub_client::bundle_config::LiveConfigGate for LiveBundleConfigGate {
         Box::pin(async move {
             match &self.0 {
                 Some(c) if !c.bypass_active() => {
-                    !c.flag_enabled(hub_client::bundle_config::DISABLE_FLAG).await
+                    !c.flag_enabled(hub_client::bundle_config::DISABLE_FLAG)
+                        .await
+                }
+                _ => true,
+            }
+        })
+    }
+}
+
+/// Adapts the license/flag client to the bundle-config read-path kill switch
+/// (`waddles.disable-db-bundle-config-reads`, issue #1306): ON = serve per-community config via
+/// the legacy hub-api gRPC path, unseen/OFF/license-server-unreachable = the direct read-only
+/// database path. Bypass-aware like [`LiveBundleConfigGate`]: a bypassed client reads `true` for
+/// every key, which must NOT read as "kill switch ON".
+pub struct DbConfigReadsGate(pub Option<Arc<penguin_licensing::LicenseClient>>);
+
+impl hub_client::bundle_config::ReadPathGate for DbConfigReadsGate {
+    fn db_reads_enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            match &self.0 {
+                Some(c) if !c.bypass_active() => {
+                    !c.flag_enabled(bundle_config_db::DISABLE_DB_READS_FLAG)
+                        .await
                 }
                 _ => true,
             }

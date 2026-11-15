@@ -220,5 +220,8 @@ async fn relay_queues_the_token_unchanged_and_never_a_name_on_real_valkey() {
             assert!(env["pin_sig"].as_str().is_some(), "{key}: signed");
         }
     }
-    assert_eq!(examined, 2, "both queues examined (zero would be a vacuous pass)");
+    assert_eq!(
+        examined, 2,
+        "both queues examined (zero would be a vacuous pass)"
+    );
 }

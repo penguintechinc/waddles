@@ -88,7 +88,7 @@ penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", re
 # `src/host_api.rs`. Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
 # (PR penguintechinc/penguin-libs#93, same commit `core/bundle_executor`
 # pins).
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "53e95619f1b3e49e1150b78a125981fcc5905d8a", package = "penguin-bundle-host", version = "=0.5.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "96a5065f1d379ea0cfc7c7716c6eab628138330a", package = "penguin-bundle-host", version = "=0.6.0" }
 # Spec SS13.5's two flags this crate gates on (`waddles.core.rust-data-plane`,
 # `waddles.core.bundle-egress`) -- see `src/flags.rs`. Pinned to the tip of
 # `release/rust-licensing/v0.1.x`.
@@ -156,6 +156,9 @@ bundle-tool-call = { path = "../bundle_tool_call", version = "=0.1.0" }
 # declares the identical dependency so the breaker logic is written and
 # tested exactly once. See `core/circuit_breaker/Cargo.toml`.
 circuit-breaker = { path = "../circuit_breaker", version = "=0.1.0" }
+# Command-latency SLA telemetry (owner SLA 2026-11-14): first-door stamp in the tracestate, per-hop and
+# end-to-end histograms, bounded label registries, kill switch `waddles.disable-command-latency-telemetry`.
+command-latency = { path = "../command_latency", version = "=0.1.0" }
 # `db` bundle host capability (`src/capabilities.rs::handle_db`) -- same
 # same-repo path dependency as `core/svc_process`'s identical line: this
 # crate's identifier-safety/tenant-isolation rules are owned by this
@@ -179,6 +182,9 @@ discord-mentions = { path = "../discord_mentions", version = "=0.1.0" }
 # `waddles.hub.internal.v1.IdentityService.ResolvePlatformUser` client
 # (`crate::platform_user`'s producer-side host-tool user resolver).
 hub_client = { path = "../hub_client", version = "=0.1.0" }
+# Live per-community bundle config read straight from the read-only replica (issue #1306); kept
+# out of hub_client so crates that only need hub-api gRPC do not pull sea-orm into their graph.
+bundle-config-db = { path = "../bundle_config_db", version = "=0.1.0" }
 # `crate::platform_user` classifies `hub_client`'s gRPC status codes (producer-side user
 # detokenization) -- same exact pin hub_client already resolves, no new version in the graph.
 tonic = { version = "=0.14.6", default-features = false }

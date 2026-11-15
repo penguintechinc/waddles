@@ -247,6 +247,7 @@ async def unlink_identity(platform: str) -> MessageResponse | tuple[dict[str, ob
             keep_session_id=get_current_session_id(request),
         )
     except ApiError as exc:
+        logger.warning("unlink_identity rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return MessageResponse(success=True, message="Identity unlinked successfully")
 

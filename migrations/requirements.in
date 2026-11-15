@@ -1,1 +1,10 @@
+# Migrations image dependencies -- everything is installed hash-locked (--require-hashes);
+# the Dockerfile has no other pip install. Exact versions are held to hub_api/requirements.txt's
+# pins (compiled with `-c` of those pins) so the migration runner and hub-api never diverge.
+alembic>=1.13
+sqlalchemy>=2.0
+psycopg2-binary
+flask-sqlalchemy
+PyYAML>=6.0.2,<7.0.0
+# alembic revisions 0062/0075 import cryptography (AESGCM).
 cryptography==50.0.1

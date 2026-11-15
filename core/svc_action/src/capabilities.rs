@@ -360,8 +360,12 @@ const DISCORD_OP_ACK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Poll interval while waiting for the drain's result. Polling (`GETDEL`)
 /// rather than a blocking pop: a blocking command would stall every other
 /// command multiplexed on this stage's shared Valkey connection (`kv`,
-/// usage metering, relay pushes).
-const DISCORD_OP_ACK_POLL: Duration = Duration::from_millis(50);
+/// usage metering, relay pushes) -- a dedicated connection per waiting op is
+/// not worth it, so the interval is tightened instead: 5 ms bounds the added
+/// ack latency to ~2.5 ms on average (was ~25 ms at 50 ms) for a cheap
+/// `GETDEL` per tick. The overall [`DISCORD_OP_ACK_TIMEOUT`] and the
+/// fail-loud `relay_unconfirmed` path are unchanged.
+const DISCORD_OP_ACK_POLL: Duration = Duration::from_millis(5);
 
 /// Discord's hard limit on a message's `content`. A `dm.send` longer than this
 /// can never be delivered, so it is refused up front rather than queued (the
@@ -1788,6 +1792,82 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     /// (down, wedged, dropped it) is `relay_unconfirmed`, never success -- a
     /// bundle must not treat "queued" as "done" (the `!secret` bundle would
     /// otherwise DM a link while the plaintext was still public).
+    /// Command-latency report at the outbound-confirm point: the e2e histogram (or the canary
+    /// histogram + result for the synthetic canary), the per-hop samples, the over-budget WARN and
+    /// the span error. Never fails the op: telemetry trouble is logged and dropped.
+    async fn report_outbound_latency(
+        &self,
+        scope: &InvokeScope,
+        ack: &Result<(), HostResultError>,
+        outbound_request_ms: u64,
+        send_span: &tracing::Span,
+    ) {
+        self.report_outbound_latency_with(
+            command_latency::canary::CanaryConfig::from_env_cached(),
+            scope,
+            ack,
+            outbound_request_ms,
+            send_span,
+        )
+        .await;
+    }
+
+    /// [`Self::report_outbound_latency`] over an explicit canary config (the test seam).
+    async fn report_outbound_latency_with(
+        &self,
+        canary_cfg: Option<&command_latency::canary::CanaryConfig>,
+        scope: &InvokeScope,
+        ack: &Result<(), HostResultError>,
+        outbound_request_ms: u64,
+        send_span: &tracing::Span,
+    ) {
+        use command_latency::stage::{report_confirmed, Kind};
+        use command_latency::Outcome;
+        let outcome = match ack {
+            Ok(()) => Outcome::Ok,
+            Err(e) => match e.code.as_str() {
+                "relay_unconfirmed" => Outcome::Timeout,
+                "relay_unavailable" | "relay_failed" => Outcome::Error,
+                _ => Outcome::Refused,
+            },
+        };
+        if let Err(e) = ack {
+            command_latency::span::record_error(send_span, &e.code, &e.message);
+        }
+        let is_canary = canary_cfg.is_some_and(|c| {
+            c.is_canary_origin(
+                scope.tenant_id,
+                scope.community_id,
+                scope.origin_channel_id.as_deref(),
+            )
+        });
+        let tracestate = scope.trace.as_ref().and_then(|t| t.tracestate.as_deref());
+        let reported = report_confirmed(
+            if is_canary { Kind::Canary } else { Kind::User },
+            tracestate,
+            &scope.app_id,
+            scope.tenant_id,
+            scope.community_id,
+            outcome,
+            outbound_request_ms,
+            command_latency::stamp::now_ms(),
+        );
+        if is_canary {
+            // The canary driver BRPOPs this list; no result == a loud timeout on its side.
+            let value = match reported {
+                Some(r) => command_latency::canary::render_result(outcome.label(), r.e2e_ms),
+                None => command_latency::canary::render_result("error", 0),
+            };
+            if let Err(e) = self
+                .relay_queue
+                .lpush(command_latency::canary::RESULT_KEY, value)
+                .await
+            {
+                tracing::error!(error = %e, "canary result could not be queued for the driver");
+            }
+        }
+    }
+
     async fn await_discord_ack(
         &self,
         scope: &InvokeScope,
@@ -2169,11 +2249,34 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         self.sign_envelope(&mut payload)?;
         let payload = payload.to_string();
         let outbound_bytes = payload.len() as u64;
-        self.relay_queue
-            .lpush(&outbound_relay_queue_key("discord"), payload)
+        // Command-latency: `outbound.send` covers the relay LPUSH through the platform ack (relay
+        // queue + svc-ingest drain + the platform REST call + the ack write). `outbound_request_ms`
+        // is the instant the outbound request is issued, splitting the executor leg from this one.
+        let send_span = tracing::info_span!(
+            "outbound.send",
+            provider = "discord",
+            op = op.as_str(),
+            app_id = %scope.app_id,
+            tenant_id = scope.tenant_id,
+            community_id = scope.community_id,
+            "otel.kind" = "client",
+        );
+        let outbound_request_ms = command_latency::stamp::now_ms();
+        let ack = {
+            use tracing::Instrument as _;
+            async {
+                self.relay_queue
+                    .lpush(&outbound_relay_queue_key("discord"), payload)
+                    .await
+                    .map_err(|e| denied("relay_unavailable", e))?;
+                self.await_discord_ack(scope, op, &op_id).await
+            }
+            .instrument(send_span.clone())
             .await
-            .map_err(|e| denied("relay_unavailable", e))?;
-        self.await_discord_ack(scope, op, &op_id).await?;
+        };
+        self.report_outbound_latency(scope, &ack, outbound_request_ms, &send_span)
+            .await;
+        ack?;
         tracing::info!(
             provider = "discord",
             op = op.as_str(),
@@ -2697,10 +2800,10 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         call: &HostCallBody,
     ) -> Result<serde_json::Value, HostResultError> {
         // Gate call FIRST (spec SS5) -- `storage.kv`, `AppScoped`. This
-        // supersedes `bundle_host_kv::authorize::authorize_kv`'s interim
-        // always-grant stand-in as the real security boundary; that inner
-        // seam remains harmlessly redundant until it is retired in a
-        // follow-on cleanup.
+        // is the real security boundary. NOTE `bundle_host_kv::authorize::authorize_kv`'s
+        // interim check inside `KvHost` still runs AFTER this and is NOT a no-op: it denies
+        // (`not_granted`) any app whose install summary lacks the `storage.kv` capability
+        // -- see `hub_api` `_derive_capabilities` and migration 0106.
         self.gate
             .authorize(
                 &scope.gate_scope(),
@@ -2720,13 +2823,21 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             scope.app_id.clone(),
         );
 
+        // Every failed kv call is reported from here (ERROR/WARN log with the underlying
+        // KvError kind + message, `waddles_bundle_kv_errors_total{stage,op,kind}`): the guest
+        // only sees the collapsed wire error, so this is the one place an operator can see why.
+        let observe = |e: KvError| {
+            bundle_host_kv::report_failure("action", &call.op, &kv_scope, &e);
+            e
+        };
+
         match call.op.as_str() {
             "get" => {
                 let args: KvKeyArgs = parse_kv_args(&call.args)?;
                 let value = kv
                     .get(&kv_scope, call.call_id, &args.key)
                     .await
-                    .map_err(kv_err_to_host)?;
+                    .map_err(|e| kv_err_to_host(observe(e)))?;
                 Ok(serde_json::json!({ "value": value }))
             }
             "set" => {
@@ -2739,14 +2850,14 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                     args.ttl_seconds,
                 )
                 .await
-                .map_err(kv_err_to_host)?;
+                .map_err(|e| kv_err_to_host(observe(e)))?;
                 Ok(serde_json::json!({}))
             }
             "delete" => {
                 let args: KvKeyArgs = parse_kv_args(&call.args)?;
                 kv.delete(&kv_scope, call.call_id, &args.key)
                     .await
-                    .map_err(kv_err_to_host)?;
+                    .map_err(|e| kv_err_to_host(observe(e)))?;
                 Ok(serde_json::json!({}))
             }
             "increment" => {
@@ -2760,7 +2871,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                         args.ttl_seconds,
                     )
                     .await
-                    .map_err(kv_err_to_host)?;
+                    .map_err(|e| kv_err_to_host(observe(e)))?;
                 Ok(serde_json::json!({ "value": value }))
             }
             "get_versioned" => {
@@ -2768,7 +2879,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 let found = kv
                     .get_versioned(&kv_scope, call.call_id, &args.key)
                     .await
-                    .map_err(kv_err_to_host_v2)?;
+                    .map_err(|e| kv_err_to_host_v2(observe(e)))?;
                 Ok(match found {
                     Some((value, version)) => {
                         serde_json::json!({ "value": value, "version": version })
@@ -2788,7 +2899,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                         args.ttl_seconds,
                     )
                     .await
-                    .map_err(kv_err_to_host_v2)?;
+                    .map_err(|e| kv_err_to_host_v2(observe(e)))?;
                 Ok(match r {
                     bundle_host_kv::KvCasResult::Swapped(v) => {
                         serde_json::json!({ "swapped": true, "version": v })
@@ -2803,7 +2914,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 let r = kv
                     .delete_if(&kv_scope, call.call_id, &args.key, args.expected_version)
                     .await
-                    .map_err(kv_err_to_host_v2)?;
+                    .map_err(|e| kv_err_to_host_v2(observe(e)))?;
                 Ok(match r {
                     bundle_host_kv::KvDeleteIfResult::Deleted => {
                         serde_json::json!({ "deleted": true, "version": 0 })
@@ -2824,7 +2935,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                         args.limit,
                     )
                     .await
-                    .map_err(kv_err_to_host_v2)?;
+                    .map_err(|e| kv_err_to_host_v2(observe(e)))?;
                 Ok(serde_json::json!({ "keys": page.keys, "next_cursor": page.next_cursor }))
             }
             other => Err(denied(
@@ -4021,8 +4132,18 @@ mod tests {
         use hub_client::bundle_config::{
             BundleConfigCache, CacheConfig, ConfigKey, StaticConfigSource, StaticLiveGate,
         };
+        // Seed the key the production path derives from the invoke scope (`attach_config_json`),
+        // never a hand-typed id pair: a seed that does not match `scope()` is never read, so the
+        // enabled state would "load" nothing and the test would fail for the wrong reason (or,
+        // worse, pass vacuously).
+        let s = scope();
+        let key = ConfigKey::new(
+            i64::from(s.tenant_id),
+            i64::from(s.community_id),
+            s.app_id.clone(),
+        );
         let src = Arc::new(StaticConfigSource::new());
-        src.set(ConfigKey::new(10, 7, "waddles.bot.commands.default"), 3, r#"{"x":1}"#);
+        src.set(key, 3, r#"{"x":1}"#);
         for (live, expect) in [(true, true), (false, false)] {
             let cache = Arc::new(BundleConfigCache::new(
                 Arc::clone(&src) as Arc<dyn hub_client::bundle_config::ConfigSource>,
@@ -4030,13 +4151,46 @@ mod tests {
                 CacheConfig::default(),
             ));
             cache.set_gate(Arc::new(StaticLiveGate(live)));
-            let h = caps(FakeRelayQueue::default())
-                .with_bundle_config(Some(Arc::clone(&cache)));
+            let h = caps(FakeRelayQueue::default()).with_bundle_config(Some(Arc::clone(&cache)));
             let mut ctx = h.handle_context(&scope()).expect("context");
             h.attach_config_json(&scope(), &mut ctx).await;
             assert_eq!(ctx.get("config_json").is_some(), expect);
+            if expect {
+                assert_eq!(
+                    ctx["config_json"], r#"{"x":1}"#,
+                    "an enabled switch serves the seeded config for this exact scope"
+                );
+            }
             assert_eq!(cache.len() == 1, expect, "disabled switch must not load");
         }
+    }
+
+    /// Regression: config seeded under any OTHER (tenant, community, app) key is never served to
+    /// this invoke -- the exact mismatch the kill-switch test's old hand-typed seed hit by accident.
+    #[tokio::test]
+    async fn get_context_never_serves_config_seeded_for_a_different_scope() {
+        use hub_client::bundle_config::{
+            BundleConfigCache, CacheConfig, ConfigKey, StaticConfigSource,
+        };
+        let s = scope();
+        let (tenant, community) = (i64::from(s.tenant_id), i64::from(s.community_id));
+        let src = Arc::new(StaticConfigSource::new());
+        for key in [
+            ConfigKey::new(tenant + 1, community, s.app_id.clone()),
+            ConfigKey::new(tenant, community + 1, s.app_id.clone()),
+            ConfigKey::new(tenant, community, "waddles.bot.other.default"),
+        ] {
+            src.set(key, 1, r#"{"leak":true}"#);
+        }
+        let cache = Arc::new(BundleConfigCache::new(src, None, CacheConfig::default()));
+        let h = caps(FakeRelayQueue::default()).with_bundle_config(Some(cache));
+        let mut ctx = h.handle_context(&s).expect("context");
+        h.attach_config_json(&s, &mut ctx).await;
+        assert_ne!(
+            ctx.get("config_json").and_then(|v| v.as_str()),
+            Some(r#"{"leak":true}"#),
+            "another scope's config must never reach this invoke"
+        );
     }
 
     /// Live community config rides `get-context` for the invoke's host-derived scope only.
@@ -4138,6 +4292,79 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "backend"); // KvError::wire_code() collapse
+    }
+
+    /// Records `(level, "field=value ...")` for every tracing event while it is the default
+    /// subscriber (tracing core API only -- no new dev-dependency).
+    #[derive(Default, Clone)]
+    struct CapturedEvents(Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>);
+
+    struct FieldText(String);
+
+    impl tracing::field::Visit for FieldText {
+        fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={:?} ", f.name(), v);
+        }
+    }
+
+    impl tracing::Subscriber for CapturedEvents {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, e: &tracing::Event<'_>) {
+            let mut f = FieldText(String::new());
+            e.record(&mut f);
+            self.0.lock().unwrap().push((*e.metadata().level(), f.0));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Regression (alpha kv outage): the guest only sees the collapsed `backend` wire error, so
+    /// the host MUST log the underlying kv error kind + message at ERROR. Before this, the only
+    /// trace was a bare INFO line and the real reason (`not_granted`) was invisible.
+    #[tokio::test]
+    async fn a_failed_kv_call_logs_the_underlying_error_kind_and_message_at_error() {
+        let captured = CapturedEvents::default();
+        let _guard = tracing::subscriber::set_default(captured.clone());
+        let caps = caps_with_kv_and_capabilities(FakeRelayQueue::default(), &[]);
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code, "backend",
+            "the guest-visible wire error is unchanged"
+        );
+
+        let events = captured.0.lock().unwrap().clone();
+        let line = events
+            .iter()
+            .find(|(level, line)| {
+                *level == tracing::Level::ERROR && line.contains("bundle kv call failed")
+            })
+            .map(|(_, line)| line.clone())
+            .unwrap_or_else(|| panic!("no ERROR 'bundle kv call failed' event in {events:?}"));
+        assert!(line.contains("error_kind=\"not_granted\""), "{line}");
+        assert!(
+            line.contains("storage.kv is not declared"),
+            "underlying message missing: {line}"
+        );
+        assert!(line.contains("stage=\"action\""), "{line}");
+        assert!(line.contains("op=\"get\""), "{line}");
+        assert!(
+            !line.contains("\"k\""),
+            "the guest key must never be logged: {line}"
+        );
     }
 
     #[tokio::test]
@@ -5140,6 +5367,14 @@ mod tests {
         assert_eq!(DISCORD_OP_ACK_KEY_PREFIX, "waddles:transport:discord:ack:");
     }
 
+    /// Latency-SLA pin: the ack poll stays at or under 5 ms and well inside
+    /// the overall ack deadline (the fail-loud timeout still bounds the wait).
+    #[test]
+    fn ack_poll_interval_is_tight_and_bounded_by_the_timeout() {
+        assert!(DISCORD_OP_ACK_POLL <= Duration::from_millis(5));
+        assert!(DISCORD_OP_ACK_POLL * 100 <= DISCORD_OP_ACK_TIMEOUT);
+    }
+
     fn discord_call(message: &serde_json::Value) -> HostCallBody {
         call(
             CapabilityKind::Relay,
@@ -5208,6 +5443,83 @@ mod tests {
             );
         }
         assert_ne!(d["op_id"], m["op_id"], "each op gets its own id");
+    }
+
+    /// Command-latency at the outbound-confirm point (real `StageCapabilities` relay path, fake
+    /// queue): a confirmed op reports against the stamped first door; the SYNTHETIC canary (exact
+    /// sentinel triple) additionally pushes its result for the driver; a real community's op never
+    /// does.
+    #[tokio::test]
+    async fn outbound_confirm_reports_latency_and_only_the_canary_pushes_a_result() {
+        use command_latency::canary::{CanaryConfig, RESULT_KEY};
+        use command_latency::stamp::{now_ms, Door, Stamps};
+        command_latency::switch::set_disabled(false);
+        let cfg = CanaryConfig::from_lookup(|k| {
+            Some(
+                match k {
+                    "CANARY_TENANT_ID" => "1",
+                    "CANARY_COMMUNITY_ID" => "1",
+                    "CANARY_GUILD_ID" => "1000000000000000001",
+                    "CANARY_CHANNEL_ID" => "123456789012345678",
+                    _ => return None,
+                }
+                .to_string(),
+            )
+        })
+        .unwrap();
+        let tracestate = Stamps {
+            t0_ms: Some(now_ms().saturating_sub(300)),
+            door: Some(Door::Gateway),
+            invoke_ms: Some(now_ms().saturating_sub(200)),
+            command: Some("ping".into()),
+            ..Stamps::default()
+        }
+        .merge_into_tracestate(None);
+        let mut scope = discord_scope();
+        scope.trace = Some(penguin_bundle_host::wire::TraceContext {
+            traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".to_string(),
+            tracestate: Some(tracestate),
+        });
+        let span = tracing::Span::none();
+        let caps = caps(FakeRelayQueue::with_live_drain());
+
+        // A real community (scope() ids differ from the canary triple): nothing pushed.
+        let mut real = scope.clone();
+        real.tenant_id = 77;
+        real.community_id = 88;
+        caps.report_outbound_latency_with(Some(&cfg), &real, &Ok(()), now_ms(), &span)
+            .await;
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+
+        // The canary triple: the result is pushed for the driver, `ok:<e2e ms>`.
+        let mut canary = scope.clone();
+        canary.tenant_id = 1;
+        canary.community_id = 1;
+        caps.report_outbound_latency_with(Some(&cfg), &canary, &Ok(()), now_ms(), &span)
+            .await;
+        {
+            let pushed = caps.relay_queue.pushed.lock().unwrap();
+            assert_eq!(pushed.len(), 1);
+            assert_eq!(pushed[0].0, RESULT_KEY);
+            let (outcome, e2e_ms) = command_latency::canary::parse_result(&pushed[0].1).unwrap();
+            assert_eq!(outcome, "ok");
+            assert!(
+                (290..5_000).contains(&e2e_ms),
+                "e2e {e2e_ms} ms covers the stamped 300 ms"
+            );
+        }
+
+        // A canary whose op was NOT confirmed reports the failure outcome, loudly.
+        let err: Result<(), HostResultError> = Err(denied("relay_unconfirmed", "no ack"));
+        caps.report_outbound_latency_with(Some(&cfg), &canary, &err, now_ms(), &span)
+            .await;
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        assert_eq!(
+            command_latency::canary::parse_result(&pushed[1].1)
+                .unwrap()
+                .0,
+            "timeout"
+        );
     }
 
     const UUID_A: &str = "3f2b8c1e-9d4a-4c55-8a10-0a1b2c3d4e5f";
