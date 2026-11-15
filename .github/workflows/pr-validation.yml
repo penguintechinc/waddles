@@ -941,6 +941,23 @@ jobs:
       - name: alpha render -- all-digit short SHA image tag regression test
         run: bash scripts/ci/tests/test_image_tag_all_digit_sha.sh
 
+      # Static chart-values audit: every values key must be consumed by a template and
+      # every template reference must resolve. Fails the job on any finding (no `|| true`);
+      # zero items examined is a failure inside the target itself.
+      - name: chart values audit (static)
+        run: |
+          set -euo pipefail
+          make audit-chart-values
+
+      # Deep chart-values audit (~3 min): renders each env var of our containers and runs a
+      # delete-and-render pass over every values key. Needs helm (azure/setup-helm above,
+      # on PATH) and pytest + pyyaml (installed by "Install check dependencies" above);
+      # no additional installs required.
+      - name: chart values audit (deep, delete-and-render)
+        run: |
+          set -euo pipefail
+          make audit-chart-values-deep HELM=helm
+
   dockerfile-rust-path-deps:
     name: Dockerfile.rust path-dependency coverage
     needs: changes
