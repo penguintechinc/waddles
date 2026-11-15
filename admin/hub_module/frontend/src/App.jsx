@@ -23,7 +23,6 @@ const CommunitiesPage = lazy(() => import('./pages/public/CommunitiesPage'));
 const CommunityPublicPage = lazy(() => import('./pages/public/CommunityPublicPage'));
 const LiveStreamsPage = lazy(() => import('./pages/public/LiveStreamsPage'));
 const UserPublicProfile = lazy(() => import('./pages/public/UserPublicProfile'));
-const MusicQueuePage = lazy(() => import('./pages/public/MusicQueuePage'));
 
 // Auth pages
 const LoginPage = lazy(() => import('./pages/auth/LoginPage'));
@@ -177,6 +176,13 @@ function ReputationRedirect() {
   return <Navigate to={`/admin/${communityId}/reputation/policy`} replace />;
 }
 
+// Legacy public song-queue URL (`/c/:id/music/queue`); the music-station REST API is gone, so
+// send bookmarks/links to the member music page instead of 404ing.
+export function MusicQueueRedirect() {
+  const { communityId } = useParams();
+  return <Navigate to={`/community/${communityId}/music`} replace />;
+}
+
 // Legacy "modules" URLs were superseded by app bundles; redirect so bookmarks do not 404.
 function CommunityBundlesRedirect() {
   const { communityId } = useParams();
@@ -256,7 +262,7 @@ function App() {
         <Route path="/book/:slug" element={<BookingPagePublic />} />
 
         {/* Public song-queue page (no auth required) -- linked from chat via !sq */}
-        <Route path="/c/:communityId/music/queue" element={<MusicQueuePage />} />
+        <Route path="/c/:communityId/music/queue" element={<MusicQueueRedirect />} />
 
         {/* Vendor submission routes (public) */}
         <Route path="/vendor/submit" element={<VendorSubmissionForm />} />

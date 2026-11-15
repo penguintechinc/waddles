@@ -332,7 +332,7 @@ function AdminMusicDashboard() {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {/* Public queue page link */}
           <Link
-            to={`/c/${communityId}/music/queue`}
+            to={`/community/${communityId}/music`}
             target="_blank"
             rel="noopener noreferrer"
             className="bg-navy-800 border border-navy-700 hover:border-gold-500/50 rounded-lg p-6 transition-colors group"
