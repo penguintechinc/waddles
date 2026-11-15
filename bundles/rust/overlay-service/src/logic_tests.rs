@@ -42,10 +42,21 @@ impl ConfigStore for FakeKv {
 #[derive(Default)]
 struct FakeSink {
     pushes: Mutex<Vec<String>>,
+    frames: Mutex<Vec<(String, String)>>,
 }
 
 impl PushSink for FakeSink {
-    fn push(&self, widget_id: &str, _k: WidgetOutputKind, _f: &str) -> Result<(), HostStoreError> {
+    fn push(
+        &self,
+        widget_id: &str,
+        surface: &str,
+        _k: WidgetOutputKind,
+        frame: &str,
+    ) -> Result<(), HostStoreError> {
+        self.frames
+            .lock()
+            .unwrap()
+            .push((surface.to_string(), frame.to_string()));
         self.pushes.lock().unwrap().push(widget_id.to_string());
         Ok(())
     }
@@ -178,7 +189,10 @@ fn push_by_non_owner_is_denied_owner_and_admin_allowed() {
     call_as(&reg, "register_widget", widget("dj.a"), Some(ADMIN_A), true).unwrap();
     let e = call_as(&reg, "push_widget", push_args("dj.a"), Some(MEMBER), false).unwrap_err();
     assert_eq!(e, ToolError::Forbidden);
-    call_as(&reg, "push_widget", push_args("dj.a"), Some(ADMIN_A), false).unwrap();
+    // Even the registering owner needs the CURRENT admin scope on every push.
+    let e = call_as(&reg, "push_widget", push_args("dj.a"), Some(ADMIN_A), false).unwrap_err();
+    assert_eq!(e, ToolError::Forbidden);
+    call_as(&reg, "push_widget", push_args("dj.a"), Some(ADMIN_A), true).unwrap();
     call_as(&reg, "push_widget", push_args("dj.a"), Some(ADMIN_B), true).unwrap();
     assert_eq!(sink.pushes.lock().unwrap().len(), 2);
 }
@@ -400,4 +414,133 @@ fn set_canvas_theme_resolution_configuration() {
     )
     .unwrap_err();
     assert_eq!(e, ToolError::Forbidden);
+}
+
+/// MEDIUM 3: a demoted ex-admin (still the registered owner) must lose push rights at once.
+#[test]
+fn demoted_owner_cannot_push() {
+    let (_kv, sink, reg) = fresh();
+    call_as(&reg, "register_widget", widget("dj.a"), Some(ADMIN_A), true).unwrap();
+    call_as(&reg, "push_widget", push_args("dj.a"), Some(ADMIN_A), true).unwrap();
+    let e = call_as(&reg, "push_widget", push_args("dj.a"), Some(ADMIN_A), false).unwrap_err();
+    assert_eq!(e, ToolError::Forbidden);
+    assert_eq!(sink.pushes.lock().unwrap().len(), 1);
+}
+
+/// MEDIUM 1: bundle HTML must be sanitized before the frame is built.
+#[test]
+fn pushed_html_is_sanitized() {
+    let (_kv, sink, reg) = fresh();
+    call_as(&reg, "register_widget", widget("dj.a"), Some(ADMIN_A), true).unwrap();
+    let mut args = push_args("dj.a");
+    args["html"] = json!(
+        "<b onclick=\"x()\">hi</b><script>alert(1)</script><a href=\"javascript:alert(1)\">l</a>\
+         <img src=\"data:text/html;base64,AAAA\"><a href=\"http://e.com\">h</a>"
+    );
+    call_as(&reg, "push_widget", args, Some(ADMIN_A), true).unwrap();
+    let frames = sink.frames.lock().unwrap();
+    let frame = &frames[0].1;
+    for bad in ["<script", "onclick", "javascript:", "data:", "http://"] {
+        assert!(!frame.contains(bad), "{bad} survived: {frame}");
+    }
+    assert!(frame.contains("hi"));
+}
+
+/// MEDIUM 2: image_url must be https with a host.
+#[test]
+fn image_url_must_be_https_with_host() {
+    let (_kv, _s, reg) = fresh();
+    let mut w = widget("img.a");
+    w["output_kind"] = json!("image");
+    call_as(&reg, "register_widget", w, Some(ADMIN_A), true).unwrap();
+    for bad in [
+        "http://e.com/a.png",
+        "javascript:alert(1)",
+        "data:image/png;base64,AAAA",
+        "https://user:pw@e.com/a.png",
+        "not a url",
+    ] {
+        let args = json!({"widget_id": "img.a", "output_kind": "image", "image_url": bad});
+        let e = call_as(&reg, "push_widget", args, Some(ADMIN_A), true).unwrap_err();
+        assert!(matches!(e, ToolError::InvalidArgs(_)), "{bad}");
+    }
+    let ok =
+        json!({"widget_id": "img.a", "output_kind": "image", "image_url": "https://e.com/a.png"});
+    call_as(&reg, "push_widget", ok, Some(ADMIN_A), true).unwrap();
+}
+
+/// Each widget publishes to its OWN surface, never a blanket full_screen.
+#[test]
+fn push_uses_the_widgets_own_surface() {
+    let (_kv, sink, reg) = fresh();
+    let mut w = widget("alerts.a");
+    w["surface_id"] = json!("alert_box");
+    call_as(&reg, "register_widget", w, Some(ADMIN_A), true).unwrap();
+    call_as(
+        &reg,
+        "register_widget",
+        widget("plain.a"),
+        Some(ADMIN_A),
+        true,
+    )
+    .unwrap();
+    call_as(
+        &reg,
+        "push_widget",
+        push_args("alerts.a"),
+        Some(ADMIN_A),
+        true,
+    )
+    .unwrap();
+    call_as(
+        &reg,
+        "push_widget",
+        push_args("plain.a"),
+        Some(ADMIN_A),
+        true,
+    )
+    .unwrap();
+    let frames = sink.frames.lock().unwrap();
+    assert_eq!(frames[0].0, "alert_box");
+    assert_eq!(frames[1].0, "full_screen");
+    drop(frames);
+    let mut bad = widget("bad.a");
+    bad["surface_id"] = json!("nonsense");
+    let e = call_as(&reg, "register_widget", bad, Some(ADMIN_A), true).unwrap_err();
+    assert!(matches!(e, ToolError::InvalidArgs(_)));
+}
+
+#[test]
+fn presets_render_escaped_and_need_admin_and_registration() {
+    let (_kv, sink, reg) = fresh();
+    call_as(
+        &reg,
+        "register_widget",
+        widget("alerts.a"),
+        Some(ADMIN_A),
+        true,
+    )
+    .unwrap();
+    let a =
+        json!({"widget_id": "alerts.a", "alert": "subscription", "tier": "<i>T</i>", "months": 3});
+    let e = call_as(&reg, "push_alert_preset", a.clone(), Some(MEMBER), false).unwrap_err();
+    assert_eq!(e, ToolError::Forbidden);
+    call_as(&reg, "push_alert_preset", a, Some(ADMIN_A), true).unwrap();
+    assert!(!sink.frames.lock().unwrap()[0].1.contains("<i>T"));
+    let unreg = json!({"widget_id": "nope", "alert": "follow"});
+    let e = call_as(&reg, "push_alert_preset", unreg, Some(ADMIN_A), true).unwrap_err();
+    assert_eq!(e, ToolError::Forbidden);
+
+    call_as(
+        &reg,
+        "register_widget",
+        widget("strip.a"),
+        Some(ADMIN_A),
+        true,
+    )
+    .unwrap();
+    let s = json!({"widget_id": "strip.a", "avatars": [{"name": "<img src=x>", "faction": "Jedi", "level": 1}]});
+    call_as(&reg, "push_stage_strip", s, Some(ADMIN_A), true).unwrap();
+    let frames = sink.frames.lock().unwrap();
+    assert!(!frames[1].1.contains("<img"));
 }

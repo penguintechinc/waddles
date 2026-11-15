@@ -51,6 +51,7 @@ mod component {
         fn push(
             &self,
             widget_id: &str,
+            surface: &str,
             output_kind: WidgetOutputKind,
             frame_json: &str,
         ) -> Result<(), HostStoreError> {
@@ -79,12 +80,29 @@ mod component {
             body.retain(|_, v| !v.is_null());
             overlay::push(
                 widget_id,
-                overlay::Surface::FullScreen,
+                wit_surface(surface)?,
                 &Value::Object(body).to_string(),
             )
             .map(|_| ())
             .map_err(|_| HostStoreError::Backend("overlay push failed".into()))
         }
+    }
+
+    /// Maps the widget's own surface name onto the WIT enum; unknown names fail closed.
+    fn wit_surface(name: &str) -> Result<overlay::Surface, HostStoreError> {
+        Ok(match name {
+            "full_screen" => overlay::Surface::FullScreen,
+            "media" => overlay::Surface::Media,
+            "crawler" => overlay::Surface::Crawler,
+            "music" => overlay::Surface::Music,
+            "alert_box" => overlay::Surface::AlertBox,
+            "chat" => overlay::Surface::Chat,
+            "goals" => overlay::Surface::Goals,
+            "ticker" => overlay::Surface::Ticker,
+            "image" => overlay::Surface::Image,
+            "caption" => overlay::Surface::Caption,
+            _ => return Err(HostStoreError::InvalidArgument("unknown surface".into())),
+        })
     }
 
     /// Maps the SDK tool error onto the WIT one.

@@ -121,18 +121,10 @@ RUN cargo component build --release --target wasm32-wasip2 --locked
 # overlay-service path-depends on core/overlay_schema (shared widget/scene DTOs).
 FROM rust-bundle-base AS bundle-overlay-service
 COPY core/overlay_schema /repo/core/overlay_schema
+COPY bundles/rust/stream-alerts /repo/bundles/rust/stream-alerts
+COPY bundles/rust/galactic-avatars /repo/bundles/rust/galactic-avatars
 COPY bundles/rust/overlay-service /repo/bundles/rust/overlay-service
 WORKDIR /repo/bundles/rust/overlay-service
-RUN cargo component build --release --target wasm32-wasip2 --locked
-
-FROM rust-bundle-base AS bundle-stream-alerts
-COPY bundles/rust/stream-alerts /repo/bundles/rust/stream-alerts
-WORKDIR /repo/bundles/rust/stream-alerts
-RUN cargo component build --release --target wasm32-wasip2 --locked
-
-FROM rust-bundle-base AS bundle-galactic-avatars
-COPY bundles/rust/galactic-avatars /repo/bundles/rust/galactic-avatars
-WORKDIR /repo/bundles/rust/galactic-avatars
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
 # --- dj
@@ -470,8 +462,6 @@ COPY bundles/rust/reputation/hub-manifest.yaml /core-bundles/reputation.manifest
 COPY bundles/rust/ai/hub-manifest.yaml /core-bundles/ai.manifest.yaml
 COPY bundles/rust/economy/hub-manifest.yaml /core-bundles/economy.manifest.yaml
 COPY bundles/rust/overlay-service/hub-manifest.yaml /core-bundles/overlay-service.manifest.yaml
-COPY bundles/rust/stream-alerts/hub-manifest.yaml /core-bundles/stream-alerts.manifest.yaml
-COPY bundles/rust/galactic-avatars/hub-manifest.yaml /core-bundles/galactic-avatars.manifest.yaml
 COPY bundles/rust/dj/hub-manifest.yaml /core-bundles/dj.manifest.yaml
 COPY bundles/rust/twitch/hub-manifest.yaml /core-bundles/twitch.manifest.yaml
 COPY bundles/rust/twitch-clips/hub-manifest.yaml /core-bundles/twitch-clips.manifest.yaml
@@ -498,8 +488,6 @@ COPY --from=bundle-ai /repo/bundles/rust/ai/target/wasm32-wasip2/release/waddle_
 COPY --from=csharp-bundle-builder /repo/bundles/csharp/csping/bin/Release/net10.0/wasi-wasm/publish/csping.wasm /core-bundles/csping.wasm
 COPY --from=bundle-economy /repo/bundles/rust/economy/target/wasm32-wasip2/release/waddle_bundle_economy_service.wasm /core-bundles/economy.wasm
 COPY --from=bundle-overlay-service /repo/bundles/rust/overlay-service/target/wasm32-wasip2/release/waddle_bundle_overlay_service.wasm /core-bundles/overlay-service.wasm
-COPY --from=bundle-stream-alerts /repo/bundles/rust/stream-alerts/target/wasm32-wasip2/release/waddle_bundle_stream_alerts.wasm /core-bundles/stream-alerts.wasm
-COPY --from=bundle-galactic-avatars /repo/bundles/rust/galactic-avatars/target/wasm32-wasip2/release/waddle_bundle_galactic_avatars.wasm /core-bundles/galactic-avatars.wasm
 COPY --from=bundle-dj /repo/bundles/rust/dj/target/wasm32-wasip2/release/waddle_bundle_dj_app.wasm /core-bundles/dj.wasm
 COPY --from=bundle-twitch /repo/bundles/rust/twitch/target/wasm32-wasip2/release/waddle_bundle_twitch_overlay.wasm /core-bundles/twitch.wasm
 COPY --from=bundle-twitch-clips /repo/bundles/rust/twitch-clips/target/wasm32-wasip2/release/waddle_bundle_twitch_clips.wasm /core-bundles/twitch-clips.wasm

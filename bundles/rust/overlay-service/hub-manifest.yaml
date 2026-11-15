@@ -83,6 +83,7 @@ exported_tools:
 - name: push_widget
   access: write
   risk: normal
+  required_scope: community:admin
   input_schema:
     type: object
     properties:
@@ -105,6 +106,73 @@ exported_tools:
     required:
     - widget_id
     - output_kind
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      status:
+        type: string
+      widget_id:
+        type: string
+
+- name: push_alert_preset
+  access: write
+  risk: normal
+  required_scope: community:admin
+  input_schema:
+    type: object
+    properties:
+      widget_id:
+        type: string
+      alert:
+        type: string
+        enum: [follow, subscription]
+      tier:
+        type: string
+      months:
+        type: integer
+    required:
+    - widget_id
+    - alert
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      status:
+        type: string
+      widget_id:
+        type: string
+
+- name: push_stage_strip
+  access: write
+  risk: normal
+  required_scope: community:admin
+  input_schema:
+    type: object
+    properties:
+      widget_id:
+        type: string
+      avatars:
+        type: array
+        items:
+          type: object
+          properties:
+            name:
+              type: string
+            faction:
+              type: string
+              enum: [Jedi, Sith, Mandalorian, Droid]
+            level:
+              type: integer
+            saber_color:
+              type: string
+          required:
+          - name
+          - faction
+          - level
+    required:
+    - widget_id
+    - avatars
     additionalProperties: false
   output_schema:
     type: object

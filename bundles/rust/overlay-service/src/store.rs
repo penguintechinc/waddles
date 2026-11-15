@@ -85,10 +85,11 @@ impl OverlayHostStore for KvHostStore {
     fn push_widget(
         &self,
         widget_id: &str,
+        surface: &str,
         output_kind: WidgetOutputKind,
         frame_json: &str,
     ) -> Result<(), HostStoreError> {
-        self.sink.push(widget_id, output_kind, frame_json)
+        self.sink.push(widget_id, surface, output_kind, frame_json)
     }
 
     fn get_layout(&self) -> Result<SceneLayoutDto, HostStoreError> {

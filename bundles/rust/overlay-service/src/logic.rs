@@ -58,6 +58,7 @@ pub trait OverlayHostStore: Send + Sync {
     fn push_widget(
         &self,
         widget_id: &str,
+        surface: &str,
         output_kind: WidgetOutputKind,
         frame_json: &str,
     ) -> Result<(), HostStoreError>;
@@ -88,9 +89,89 @@ pub trait PushSink: Send + Sync {
     fn push(
         &self,
         widget_id: &str,
+        surface: &str,
         output_kind: WidgetOutputKind,
         frame_json: &str,
     ) -> Result<(), HostStoreError>;
+}
+
+/// Surfaces a non-contract widget may target (`overlay_schema::Surface` wire forms).
+const PUSH_SURFACES: [&str; 10] = [
+    "full_screen",
+    "media",
+    "crawler",
+    "music",
+    "alert_box",
+    "chat",
+    "goals",
+    "ticker",
+    "image",
+    "caption",
+];
+
+/// Surface a widget publishes to: its own `surface_id`, defaulting to `full_screen`; an
+/// unknown name is refused (fail closed) rather than redirected elsewhere.
+fn widget_surface(widget: &WidgetDescriptorDto) -> Result<String, ToolError> {
+    let s = widget.surface_id.as_deref().unwrap_or("full_screen");
+    if PUSH_SURFACES.contains(&s) {
+        Ok(s.to_string())
+    } else {
+        Err(ToolError::InvalidArgs(format!(
+            "widget surface '{s}' is not a pushable overlay surface"
+        )))
+    }
+}
+
+/// Sanitizes bundle-supplied HTML with an allowlist: no scripts, no event handlers, no
+/// `style`/`class` attributes, only `https` URLs. Never trust bundle markup.
+fn sanitize_html(raw: &str) -> String {
+    let mut b = ammonia::Builder::default();
+    b.url_schemes(std::collections::HashSet::from(["https"]));
+    b.clean(raw).to_string()
+}
+
+/// Accepts only an `https://` URL with a host and no credentials.
+fn validate_image_url(raw: &str) -> Result<(), ToolError> {
+    let bad = || ToolError::InvalidArgs("image_url must be an https URL with a host".into());
+    let u = url::Url::parse(raw).map_err(|_| bad())?;
+    if u.scheme() != "https" || u.host_str().is_none() || !u.username().is_empty() {
+        return Err(bad());
+    }
+    Ok(())
+}
+
+/// Shared push path for `push_widget` and the preset renderers: the actor must hold the
+/// CURRENT `community:admin` scope (re-evaluated by the host on every call, so a demoted
+/// admin loses push rights immediately), the widget must be registered, and its output kind
+/// must match. `frame` carries the already-validated content fields.
+fn push_checked(
+    ctx: &ToolContext,
+    host: &dyn OverlayHostStore,
+    widget_id: &str,
+    output_kind: WidgetOutputKind,
+    frame: Value,
+) -> Result<Value, ToolError> {
+    if !ctx.has_scope(ADMIN_SCOPE) {
+        return Err(ToolError::Forbidden);
+    }
+    let widget = host
+        .get_widget(widget_id)
+        .map_err(store_err)?
+        .ok_or(ToolError::Forbidden)?;
+    if widget.output_kind != output_kind {
+        return Err(ToolError::InvalidArgs(
+            "output_kind does not match the registered widget".into(),
+        ));
+    }
+    let surface = widget_surface(&widget)?;
+    let mut frame = frame;
+    frame["widget_id"] = json!(widget_id);
+    frame["output_kind"] = json!(output_kind.as_str());
+    let frame_json =
+        serde_json::to_string(&frame).map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
+    host.push_widget(widget_id, &surface, output_kind, &frame_json)
+        .map_err(store_err)?;
+    Ok(json!({ "status": "ok", "widget_id": widget_id }))
 }
 
 /// Maps a storage failure to a tool error without leaking backend detail; a backend failure
@@ -163,6 +244,26 @@ pub struct PushWidgetArgs {
     pub surface_id: Option<String>,
     #[serde(default)]
     pub payload: Option<Value>,
+}
+
+/// Args for `push_alert_preset`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlertPresetArgs {
+    pub widget_id: String,
+    pub alert: String,
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub months: Option<u32>,
+}
+
+/// Args for `push_stage_strip`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageStripArgs {
+    pub widget_id: String,
+    pub avatars: Vec<galactic_avatars::GalacticAvatar>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -270,6 +371,17 @@ pub fn build_registry(host: Arc<dyn OverlayHostStore>) -> ToolRegistry {
             validate_coordinates(def_x, def_y, def_w, def_h, def_z)
                 .map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
 
+            let surface_id = if output_kind == WidgetOutputKind::Surface {
+                args.surface_id
+            } else {
+                let s = args.surface_id.unwrap_or_else(|| "full_screen".to_string());
+                if !PUSH_SURFACES.contains(&s.as_str()) {
+                    return Err(ToolError::InvalidArgs(format!(
+                        "surface_id '{s}' is not a pushable overlay surface"
+                    )));
+                }
+                Some(s)
+            };
             // Never overwrite a widget another principal registered (hijack); a lookup
             // failure fails closed.
             match host.get_widget(&args.widget_id) {
@@ -288,7 +400,7 @@ pub fn build_registry(host: Arc<dyn OverlayHostStore>) -> ToolRegistry {
                 description: args.description.unwrap_or_default(),
                 category: args.category.unwrap_or_else(|| "custom".to_string()),
                 output_kind,
-                surface_id: args.surface_id,
+                surface_id,
                 allow_standalone_output: args.allow_standalone_output.unwrap_or(true),
                 default_x: def_x,
                 default_y: def_y,
@@ -315,11 +427,9 @@ pub fn build_registry(host: Arc<dyn OverlayHostStore>) -> ToolRegistry {
         reg.register("push_widget", move |ctx: &ToolContext, val: Value| {
             let args: PushWidgetArgs = serde_json::from_value(val)
                 .map_err(|e| ToolError::InvalidArgs(format!("malformed args: {e}")))?;
-
             if args.widget_id.is_empty() {
                 return Err(ToolError::InvalidArgs("widget_id is required".into()));
             }
-
             let output_kind =
                 WidgetOutputKind::from_str_name(&args.output_kind).ok_or_else(|| {
                     ToolError::InvalidArgs(format!(
@@ -327,50 +437,80 @@ pub fn build_registry(host: Arc<dyn OverlayHostStore>) -> ToolRegistry {
                         args.output_kind
                     ))
                 })?;
-
-            if output_kind == WidgetOutputKind::SanitizedHtml
-                && args
-                    .html
-                    .as_ref()
-                    .is_some_and(|h| h.len() > MAX_WIDGET_HTML_BYTES)
+            if let Some(h) = args.html.as_ref()
+                && h.len() > MAX_WIDGET_HTML_BYTES
             {
                 return Err(ToolError::InvalidArgs(format!(
                     "html payload exceeds {MAX_WIDGET_HTML_BYTES} bytes"
                 )));
             }
-
-            // Deny by default: a verified actor, a registered widget (lookup errors fail
-            // closed) and either admin scope or ownership. No "system" exemption.
-            let actor = ctx.actor.as_deref().ok_or(ToolError::Forbidden)?;
-            let widget = host
-                .get_widget(&args.widget_id)
-                .map_err(store_err)?
-                .ok_or(ToolError::Forbidden)?;
-            if !ctx.has_scope(ADMIN_SCOPE) && actor != widget.bundle_app_id {
-                return Err(ToolError::Forbidden);
+            if let Some(u) = args.image_url.as_deref() {
+                validate_image_url(u)?;
             }
-            if widget.output_kind != output_kind {
-                return Err(ToolError::InvalidArgs(
-                    "output_kind does not match the registered widget".into(),
-                ));
-            }
-
-            let frame_json = serde_json::to_string(&json!({
-                "widget_id": args.widget_id,
-                "output_kind": output_kind.as_str(),
-                "html": args.html,
+            let html = args.html.as_deref().map(sanitize_html);
+            let frame = json!({
+                "html": html,
                 "image_url": args.image_url,
                 "title": args.title,
                 "text": args.text,
                 "surface_id": args.surface_id,
                 "payload": args.payload,
-            }))
-            .map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
+            });
+            push_checked(ctx, host.as_ref(), &args.widget_id, output_kind, frame)
+        });
+    }
 
-            host.push_widget(&args.widget_id, output_kind, &frame_json)
-                .map_err(store_err)?;
+    // 2b. push_alert_preset: renders a stock stream alert (escaped text only) and pushes it.
+    {
+        let host = Arc::clone(&host);
+        reg.register("push_alert_preset", move |ctx: &ToolContext, val: Value| {
+            let args: AlertPresetArgs = serde_json::from_value(val)
+                .map_err(|e| ToolError::InvalidArgs(format!("malformed args: {e}")))?;
+            let alert = match args.alert.as_str() {
+                "follow" => stream_alerts::AlertEvent::new_follow(),
+                "subscription" => {
+                    let tier = args.tier.unwrap_or_else(|| "Tier 1".to_string());
+                    if tier.len() > 32 || args.months.unwrap_or(1) > 1200 {
+                        return Err(ToolError::InvalidArgs("tier/months out of range".into()));
+                    }
+                    stream_alerts::AlertEvent::new_sub(&tier, args.months.unwrap_or(1))
+                }
+                other => {
+                    return Err(ToolError::InvalidArgs(format!(
+                        "unsupported alert '{other}'"
+                    )));
+                }
+            };
+            let frame = json!({ "html": alert.to_sanitized_html() });
+            push_checked(
+                ctx,
+                host.as_ref(),
+                &args.widget_id,
+                WidgetOutputKind::SanitizedHtml,
+                frame,
+            )
+        });
+    }
 
-            Ok(json!({ "status": "ok", "widget_id": args.widget_id }))
+    // 2c. push_stage_strip: renders the galactic avatar strip (escaped names) and pushes it.
+    {
+        let host = Arc::clone(&host);
+        reg.register("push_stage_strip", move |ctx: &ToolContext, val: Value| {
+            let args: StageStripArgs = serde_json::from_value(val)
+                .map_err(|e| ToolError::InvalidArgs(format!("malformed args: {e}")))?;
+            if args.avatars.len() > 50 || args.avatars.iter().any(|a| a.name.len() > 64) {
+                return Err(ToolError::InvalidArgs(
+                    "too many avatars or name too long".into(),
+                ));
+            }
+            let frame = json!({ "html": galactic_avatars::render_stage_strip(&args.avatars) });
+            push_checked(
+                ctx,
+                host.as_ref(),
+                &args.widget_id,
+                WidgetOutputKind::SanitizedHtml,
+                frame,
+            )
         });
     }
 

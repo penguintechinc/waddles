@@ -16,6 +16,10 @@ waddle-sdk-rs = { path = "../../../sdk/waddle-sdk-rs", version = "=0.1.0" }
 overlay-schema = { path = "../../../core/overlay_schema", version = "=0.1.0" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
+ammonia = "=4.2.5"
+url = "=2.5.8"
+stream-alerts = { version = "=0.1.0", path = "../stream-alerts", package = "waddle-bundle-stream-alerts" }
+galactic-avatars = { version = "=0.1.0", path = "../galactic-avatars", package = "waddle-bundle-galactic-avatars" }
 
 [package.metadata.component]
 package = "waddle:bundle-overlay-service"
