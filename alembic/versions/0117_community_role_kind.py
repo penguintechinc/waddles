@@ -23,7 +23,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0117_community_role_kind"
-down_revision = "0109_platform_vault"
+down_revision = "0110_merge_precompile_vault"
 branch_labels = None
 depends_on = None
 
