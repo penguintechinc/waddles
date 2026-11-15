@@ -1,0 +1,33 @@
+[package]
+name = "bundle-config-db"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Direct read-only Postgres source for live per-community bundle config (issue #1306): the data plane (svc_process + svc_action) reads bundle_community_config + the active manifest defaults from the read-only replica instead of calling hub-api on the hot path. A path dependency within this repo (same pattern as core/bundle_active_set) kept OUT of core/hub_client so the many crates that only need hub-api gRPC do not pull sea-orm/sqlx into their dependency graph. See src/lib.rs module doc."
+
+[lib]
+name = "bundle_config_db"
+path = "src/lib.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md Dependency Pinning. Every
+# pin mirrors core/hub_client's, core/svc_process's and core/svc_action's own, so a path dependency
+# on this crate introduces no second pin of the same package.
+[dependencies]
+hub_client = { path = "../hub_client", version = "=0.1.0" }
+# Same exact pin as core/svc_ingest's display-name reader and core/svc_process / core/svc_action
+# (`postgres-array` backs the batched `unnest($1::bigint[], ...)` warm-up statement).
+sea-orm = { version = "=2.0.2", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "postgres-array"] }
+async-trait = "=0.1.89"
+opentelemetry = "=0.32.0"
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# `tonic::Status` only (the ConfigSource error type); default features off adds no transport code.
+tonic = { version = "=0.14.6", default-features = false }
+tracing = "=0.1.44"
+# Only the `MultiplexedConnection` type of the stage's existing Valkey connection (version-key probe).
+redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp"] }
+
+[dev-dependencies]
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }

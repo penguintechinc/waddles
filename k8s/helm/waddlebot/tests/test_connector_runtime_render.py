@@ -50,7 +50,7 @@ def _docs(extra: list[str], values: str = "values-alpha.yaml") -> list[dict[str,
 
 
 def _dep(docs: list[dict[str, Any]], suffix: str) -> dict[str, Any]:
-    found = [d for d in docs if d.get("kind") == "Deployment" and d["metadata"]["name"].endswith(suffix)]
+    found = [d for d in docs if d.get("kind") in ("Deployment", "StatefulSet") and d["metadata"]["name"].endswith(suffix)]
     assert len(found) == 1, f"expected exactly one *{suffix} Deployment, got {len(found)}"
     return found[0]
 
@@ -77,7 +77,7 @@ _RUNTIME_ENV = (
 def test_all_off_renders_nothing_new(values: str) -> None:
     docs = _docs([], values)
     for d in docs:
-        if d.get("kind") != "Deployment":
+        if d.get("kind") not in ("Deployment", "StatefulSet"):
             continue
         for c in d["spec"]["template"]["spec"]["containers"]:
             names = {e["name"] for e in c.get("env", [])}
@@ -125,9 +125,9 @@ def test_executor_env_and_distinct_client_secret_mounted_only_there() -> None:
     assert len(cli) == 1
     # Existing stage secret stays; the connector client secret is a SECOND, separate volume.
     assert any(n.endswith("-host-api-tls") and "ingest" not in n for n in _secret_vols(ex))
-    owners = {d["metadata"]["name"] for d in docs if d.get("kind") == "Deployment" and cli[0] in _secret_vols(d)}
+    owners = {d["metadata"]["name"] for d in docs if d.get("kind") in ("Deployment", "StatefulSet") and cli[0] in _secret_vols(d)}
     assert owners == {ex["metadata"]["name"]}
-    ingest_secret = [d for d in docs if d.get("kind") == "Deployment" and
+    ingest_secret = [d for d in docs if d.get("kind") in ("Deployment", "StatefulSet") and
                      any(n.endswith("-svc-ingest-host-api-tls") for n in _secret_vols(d))]
     assert [d["metadata"]["name"] for d in ingest_secret] == [_dep(docs, "-svc-ingest-rust")["metadata"]["name"]]
     assert cli[0] not in _secret_vols(_dep(docs, "-svc-ingest-rust"))
@@ -135,7 +135,8 @@ def test_executor_env_and_distinct_client_secret_mounted_only_there() -> None:
 
 def test_executor_client_cert_san_is_executor_identity_only() -> None:
     crypto = pytest.importorskip("cryptography.x509")
-    docs = _docs(_yt())
+    from provision_harness import with_provisioned  # type: ignore[import-not-found]
+    docs = with_provisioned(_docs(_yt()))
     sec = next(d for d in docs if d.get("kind") == "Secret" and d["metadata"]["name"].endswith("-ingest-executor-tls"))
     cert = crypto.load_pem_x509_certificate(sec["stringData"]["tls.crt"].encode())
     sans = cert.extensions.get_extension_for_class(crypto.SubjectAlternativeName).value.get_values_for_type(crypto.DNSName)
@@ -154,7 +155,7 @@ def test_twitch_webhook_route_key_comes_from_existing_secret_only() -> None:
     assert "value" not in renv["CONNECTOR_ROUTE_KEY_SECRET"]
     assert renv["CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS"]["value"] == "twitch"
     assert "ops-route-key" not in "".join(
-        e.get("value", "") for dep in docs if dep.get("kind") == "Deployment"
+        e.get("value", "") for dep in docs if dep.get("kind") in ("Deployment", "StatefulSet")
         for c in dep["spec"]["template"]["spec"]["containers"] for e in c.get("env", []))
 
 
@@ -260,7 +261,7 @@ def test_security_context_unchanged_and_no_literal_secrets() -> None:
         assert c["securityContext"]["runAsNonRoot"] is True
         assert c["securityContext"]["allowPrivilegeEscalation"] is False
     for dep in docs:
-        if dep.get("kind") != "Deployment":
+        if dep.get("kind") not in ("Deployment", "StatefulSet"):
             continue
         for c in dep["spec"]["template"]["spec"]["containers"]:
             for e in c.get("env", []):
@@ -291,7 +292,8 @@ def test_alpha_connector_certs_use_a_separate_ca_and_executor_trusts_both() -> N
     The executor trusts stage CA + connector CA through a bundle mounted over HOST_API_CA_FILE."""
     crypto = pytest.importorskip("cryptography.x509")
     hashes = pytest.importorskip("cryptography.hazmat.primitives.hashes")
-    docs = _docs(_yt())
+    from provision_harness import with_provisioned  # type: ignore[import-not-found]
+    docs = with_provisioned(_docs(_yt()))
     stage, stage_sec = _ca_of(docs, "-host-api-tls")
     srv_ca, srv = _ca_of(docs, "-svc-ingest-host-api-tls")
     cli_ca, cli = _ca_of(docs, "-ingest-executor-tls")

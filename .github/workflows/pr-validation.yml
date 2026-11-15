@@ -308,8 +308,8 @@ jobs:
       # is a follow-up, tracked separately from this migration-chain gate.
       #
       # alembic/env.py imports `flask_core.models.db` (needed for
-      # `target_metadata`), which transitively needs flask-sqlalchemy +
-      # flask-security-too -- neither is in hub_api/requirements.txt (hub_api
+      # `target_metadata`), which transitively needs flask-sqlalchemy --
+      # not in hub_api/requirements.txt (hub_api
       # itself doesn't use flask_core). This is exactly the dependency set
       # migrations/Dockerfile already installs for the same reason; versions
       # pinned to match libs/flask_core/requirements.txt's own pins. First
@@ -325,7 +325,6 @@ jobs:
           pip install --disable-pip-version-check \
             "alembic==1.20.0" \
             "flask-sqlalchemy==3.1.1" \
-            "flask-security-too==5.8.2" \
             "PyYAML>=6.0.2,<7.0.0"
 
       # Legacy `config/postgres/migrations/NNN_*.sql` files reach an EXISTING database only
@@ -565,8 +564,9 @@ jobs:
             echo "::error::alembic_prior_base_revision.py failed (exit ${status}): ${rev}"
             exit "${status}"
           fi
-          if ! printf '%s' "${rev}" | grep -qE '^[0-9a-z_]+$'; then
-            echo "::error::computed prior_base_revision '${rev}' doesn't match the expected [0-9a-z_]+ shape -- refusing to use it."
+          # One id, or comma-joined parents when the PR adds a merge revision.
+          if ! printf '%s' "${rev}" | grep -qE '^[0-9a-z_]+(,[0-9a-z_]+)*$'; then
+            echo "::error::computed prior_base_revision '${rev}' doesn't match the expected [0-9a-z_]+(,[0-9a-z_]+)* shape -- refusing to use it."
             exit 1
           fi
           echo "has_new_revisions=true" >> "$GITHUB_OUTPUT"
@@ -600,15 +600,20 @@ jobs:
           PY
           )"
           export WADDLES_DB_SERVICE_ROLE_PASSWORDS
-          base_rev="${PRIOR_BASE_REVISION}"
+          base_revs="${PRIOR_BASE_REVISION}"
           # Redundant with the producing step's own check -- cheap, and this
-          # step is the one that actually splices base_rev into an `alembic`
+          # step is the one that actually splices the ids into an `alembic`
           # argv, so it validates independently rather than trusting the
           # upstream step forever.
-          if ! printf '%s' "${base_rev}" | grep -qE '^[0-9a-z_]+$'; then
-            echo "::error::prior_base_revision '${base_rev}' doesn't match the expected [0-9a-z_]+ shape -- refusing to use it."
+          if ! printf '%s' "${base_revs}" | grep -qE '^[0-9a-z_]+(,[0-9a-z_]+)*$'; then
+            echo "::error::prior_base_revision '${base_revs}' doesn't match the expected shape -- refusing to use it."
             exit 1
           fi
+          IFS=',' read -r -a base_rev_list <<< "${base_revs}"
+          # Several ids = the PR adds a merge revision joining a multi-head base.
+          # Downgrading to ONE parent undoes the merge and leaves the other parent
+          # as a head, so `current` must afterwards list every parent.
+          base_rev="${base_rev_list[0]}"
 
           history_lines=$(python3 -m alembic history -r "${base_rev}:head" | grep -c .)
           # `history -r X:head` always includes the edge *into* X as its last
@@ -616,19 +621,21 @@ jobs:
           # printing both `0025 -> 0026` and `0024 -> 0025`) -- subtract 1 to
           # get the count of revisions that actually apply going from X to head.
           revision_count=$((history_lines - 1))
-          echo "revisions to apply (base ${base_rev} -> head): ${revision_count}"
+          echo "revisions to apply (base ${base_revs} -> head): ${revision_count}"
           if [ "${revision_count}" -le 0 ]; then
-            echo "::error::0 revisions between base ${base_rev} and head -- nothing for this gate to verify."
+            echo "::error::0 revisions between base ${base_revs} and head -- nothing for this gate to verify."
             exit 1
           fi
 
-          echo "== downgrade to prior base revision ${base_rev} =="
+          echo "== downgrade to prior base revision ${base_rev} (parents: ${base_revs}) =="
           python3 -m alembic downgrade "${base_rev}"
           current_after_downgrade=$(python3 -m alembic current)
-          if ! printf '%s\n' "${current_after_downgrade}" | grep -q "${base_rev}"; then
-            echo "::error::downgrade to ${base_rev} completed without error, but \`alembic current\` reports '${current_after_downgrade}' -- the DB didn't actually roll back."
-            exit 1
-          fi
+          for parent in "${base_rev_list[@]}"; do
+            if ! printf '%s\n' "${current_after_downgrade}" | grep -q "${parent}"; then
+              echo "::error::downgrade to ${base_rev} completed without error, but \`alembic current\` reports '${current_after_downgrade}' (missing ${parent}) -- the DB didn't actually roll back."
+              exit 1
+            fi
+          done
 
           echo "== upgrade head (2nd pass) =="
           python3 -m alembic upgrade head
@@ -751,6 +758,12 @@ jobs:
       # exit code 5, never a silent pass -- critical-rules.md Verification Integrity.
       - name: Helm chart template tests (pytest)
         run: python3 -m pytest k8s/helm/waddlebot/tests/ -v
+
+      # changed-only alpha deploys pin each image via global.imageTags; this proves a pinned
+      # (unchanged) image keeps its pod template byte-identical, so it does NOT restart, and
+      # that a rebuilt image changes only its own workloads. Exits non-zero if helm renders 0.
+      - name: Alpha per-image pins restart only changed workloads
+        run: python3 scripts/ci/check-alpha-image-pins.py
 
       # fix/helm-hook-rbac-ordering -- helm.sh/hook-annotated Jobs run BEFORE any
       # regular (non-hook) chart resource. A pre-install/pre-upgrade Job whose
@@ -965,6 +978,13 @@ jobs:
       # transitive path dep is COPYed before Docker ever runs.
       - name: Check Dockerfile.rust path-dependency coverage
         run: python3 scripts/ci/check-dockerfile-rust-path-deps.py
+
+      # Standing rule: every dependency is hash-pinned. Any `pip install` in any Dockerfile must
+      # be `--require-hashes`, or a local-path `--no-deps --no-build-isolation` install after a
+      # hash-locked one in the same build stage (the old unhashed flask_core install is the
+      # failing fixture in scripts/ci/tests/test_check_dockerfile_pip_hashes.py).
+      - name: Check every Dockerfile pip install is hash-locked
+        run: python3 scripts/ci/check-dockerfile-pip-hashes.py
 
   alembic-single-head:
     name: Alembic single-head invariant (static, no DB)

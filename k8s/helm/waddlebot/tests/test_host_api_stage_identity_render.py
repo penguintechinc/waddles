@@ -31,6 +31,7 @@ from typing import Any
 import pytest
 import yaml
 from cryptography import x509
+from provision_harness import with_provisioned  # type: ignore[import-not-found]
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _ALPHA_VALUES = _CHART_DIR / "values-alpha.yaml"
@@ -59,7 +60,7 @@ def _helm_template() -> list[dict[str, Any]]:
 def rendered_docs() -> list[dict[str, Any]]:
     if not _shutil_which("helm"):
         pytest.skip("helm CLI not available in this environment")
-    return _helm_template()
+    return with_provisioned(_helm_template())
 
 
 def _shutil_which(cmd: str) -> str | None:
@@ -73,7 +74,7 @@ def _find_container_env(
 ) -> list[dict[str, Any]]:
     """Returns the named container's `env[]` list from the Deployment whose name ends with the suffix."""
     for doc in docs:
-        if doc.get("kind") != "Deployment":
+        if doc.get("kind") not in ("Deployment", "StatefulSet"):
             continue
         name = doc.get("metadata", {}).get("name", "")
         if not name.endswith(deployment_name_suffix):
@@ -156,7 +157,7 @@ class TestExecutorsGetHostApiStageIdentity:
         executors = [
             d
             for d in rendered_docs
-            if d.get("kind") == "Deployment" and "executor" in d.get("metadata", {}).get("name", "")
+            if d.get("kind") in ("Deployment", "StatefulSet") and "executor" in d.get("metadata", {}).get("name", "")
         ]
         assert [d["metadata"]["name"] for d in executors] == ["waddlebot-svc-bundles-executor"], (
             "exactly ONE executor Deployment must render, and no -action twin"

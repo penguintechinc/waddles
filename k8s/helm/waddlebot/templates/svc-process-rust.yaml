@@ -72,7 +72,7 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-process-rust
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcProcess.imageRepository | default "svc-process") "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcProcess.imageRepository | default "svc-process")) }}"
         # Values-driven (.Values.global.imagePullPolicy, default IfNotPresent). Deploys carry
         # a unique per-deploy global.imageTag, so a stale same-tag node cache can no longer
         # occur -- the old hardcoded Always was unnecessary and fatal for locally-loaded
@@ -116,11 +116,19 @@ spec:
             name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}
             optional: true
         env:
+        {{- include "waddlebot.otel.env" (dict "root" $ "service" "svc-process-rust") | nindent 8 }}
         # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_process;
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
+        # Live per-community bundle config is read straight from the read-only replica (issue
+        # #1306), column-scoped under the SAME role (alembic 0107); hub-api is not on this path.
+        # Rendered only with infrastructure.postgresql.readReplicas.host; unset -> the stage uses
+        # DATABASE_URL above (primary) and logs a WARN. Kill switch (PostHog, opt-out):
+        # waddles.disable-db-bundle-config-reads ON = legacy hub-api gRPC path.
+{{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
 {{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
+        {{- include "waddlebot.rustOtelEnv" (dict "root" $ "service" "svc-process") | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.port | quote }}
         - name: METRICS_PORT
@@ -157,7 +165,9 @@ spec:
         {{- include "waddlebot.hostApiTlsServerEnv" . | nindent 8 }}
         {{- end }}
         - name: HUB_API_URL
-          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+          value: {{ include "waddlebot.hubApiBaseUrl" . | quote }}
+        # F3 -- internal CA (secretKeyRef) + plaintext refusal for every internal HTTP client in this pod.
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
         # feature/hub-grpc-env-wiring (closes #569's startup seam) -- core/hub_client::
         # HubClient needs hub-api's internal gRPC endpoint (TLS mandatory, see
         # hub_api/grpc_internal/server.py) and its machine-JWT bootstrap endpoint
@@ -166,9 +176,9 @@ spec:
         # requiring a per-environment override (see values.yaml's own comment on this
         # key, incl. the KNOWN GAP note on hub-api's TLS wiring + hub_client's CA trust).
         - name: HUB_API_GRPC_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s:%v" (include "waddlebot.hubApiGrpcHost" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: SERVICE_JWT_TOKEN_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s:%v" (include "waddlebot.hubApiGrpcHost" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         # Matches the audience-scoped projected token this pod already mounts via
         # waddlebot.serviceJwtBootstrapVolume(Mount) below -- NOT the generic default
         # k8s SA token path (wrong audience, hub-api's TokenReview call would reject

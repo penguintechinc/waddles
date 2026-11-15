@@ -1175,4 +1175,35 @@ mod tests {
         .await;
         assert!(!kv_capabilities.declares("waddles.a", "kv"));
     }
+
+    /// The poll loop ticks with no executor connected, issues no DB work while the kill-switch
+    /// is on, and returns once its shutdown signal fires.
+    #[tokio::test]
+    async fn run_ticks_with_no_executor_and_stops_on_shutdown() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(run(
+            db,
+            1,
+            0,
+            std::time::Duration::from_millis(10),
+            1000,
+            Arc::new(FixedGate(false)),
+            Arc::new(crate::host_api::ConnectionRegistry::new()),
+            test_metric(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+            rx,
+            test_snapshot(),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert!(
+            !handle.is_finished(),
+            "the loop keeps polling until told to stop"
+        );
+        tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("loop must exit on shutdown")
+            .unwrap();
+    }
 }

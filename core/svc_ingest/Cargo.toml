@@ -90,6 +90,9 @@ uuid = { version = "=1.26.1", features = ["v4", "v5"] }
 chrono = "=0.4.45"
 # Used by the `--healthcheck` subcommand's loopback GET.
 circuit-breaker = { path = "../circuit_breaker", version = "=0.1.0" }
+# Command-latency SLA telemetry (owner SLA 2026-11-14): first-door stamp in the tracestate, per-hop and
+# end-to-end histograms, bounded label registries, kill switch `waddles.disable-command-latency-telemetry`.
+command-latency = { path = "../command_latency", version = "=0.1.0" }
 # Single SSRF-guarded egress implementation (denylist, resolve-then-pin,
 # redirect re-validation) shared with svc_action/svc_process -- connector
 # transports delegate to `bundle_host_http::guarded`, never re-mirror it.
@@ -115,7 +118,7 @@ penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", re
 # move in lockstep, since a peer on an older crate rejects an unknown export
 # kind as a malformed frame. Git `rev` pin (immutable), `version` for
 # `cargo deny`'s wildcard ban -- see the dependency-pattern note above.
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "53e95619f1b3e49e1150b78a125981fcc5905d8a", package = "penguin-bundle-host", version = "=0.5.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "96a5065f1d379ea0cfc7c7716c6eab628138330a", package = "penguin-bundle-host", version = "=0.6.0" }
 # Standard base64 for the binary-safe frame/handshake bytes in the connector
 # wire payloads (JSON carries them as base64). Already resolved transitively;
 # same exact version `core/bundle_executor` pins on the other end.
@@ -167,7 +170,7 @@ tokio-tungstenite = { version = "=0.30.0", default-features = false, features = 
 # Twitch outbound relay's raw BRPOP list" note). Same exact version
 # `penguin-spine`/`core/svc_action` already pin, so this never introduces a
 # second `redis` crate instance into the dependency graph.
-redis = { version = "=1.7.0", default-features = false, features = [
+redis = { version = "=1.7.0", default-features = false, features = ["connection-manager", 
     "tokio-comp",
     "tls-rustls",
     "tokio-rustls-comp",
@@ -227,7 +230,7 @@ x25519-dalek = { version = "=2.0.1", features = ["getrandom"] }
 # with the pod's projected SA token, caches/refreshes the hub-api-issued ES256
 # machine JWT. Same-repo path dependency, so the Docker build context is `core/`
 # (see Dockerfile.rust) exactly like core/svc_process.
-service_auth = { path = "../service_auth", version = "=0.1.0" }
+service_auth = { path = "../service_auth", version = "=0.1.0", features = ["rest-tls"] }
 
 # Per-community Twitch inbound (`src/twitch_sessions/`): pages hub-api's
 # data-plane binding list via `ConnectionResolve::list_bindings`. Same-repo

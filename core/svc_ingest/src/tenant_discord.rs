@@ -125,6 +125,43 @@ pub async fn env_gateway_event_allowed<S: crate::scope_resolver::ScopeSource>(
     }
 }
 
+/// Test-only serialization of the process-wide default-tenant id.
+///
+/// [`set_default_tenant_id`] writes a process global, and cargo runs tests in parallel threads,
+/// so two tests publishing different default ids would race each other's drain (an op for a
+/// non-default tenant is refused `tenant_discord_app_missing` before anything is sent). Hold a
+/// guard for as long as the test depends on the default id; the previous id is restored on drop.
+#[cfg(test)]
+pub(crate) mod test_default_tenant {
+    use std::sync::atomic::Ordering;
+
+    static HELD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Holds the default-tenant id at a fixed value until dropped.
+    pub(crate) struct DefaultTenantGuard {
+        previous: i64,
+        _held: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl DefaultTenantGuard {
+        /// Waits for any other holder, then publishes `id` as the default tenant.
+        pub(crate) async fn hold(id: i64) -> Self {
+            let held = HELD.lock().await;
+            let previous = super::DEFAULT_TENANT_ID.swap(id, Ordering::SeqCst);
+            Self {
+                previous,
+                _held: held,
+            }
+        }
+    }
+
+    impl Drop for DefaultTenantGuard {
+        fn drop(&mut self) {
+            super::DEFAULT_TENANT_ID.store(self.previous, Ordering::SeqCst);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

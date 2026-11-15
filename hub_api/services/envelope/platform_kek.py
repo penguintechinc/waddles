@@ -95,6 +95,21 @@ class PlatformKekAdapter:
         """Ids of every loaded KEK, current first (a previous KEK only during a rotation window)."""
         return (self._current_id, *(i for i in self._by_id if i != self._current_id))
 
+    def root_marker_mac(self, *, key_id: str | None = None) -> bytes:
+        """HMAC-SHA256 keyed with the raw KEK over ``waddles-root-check`` (the root marker MAC).
+
+        Byte-identical to the Helm hook's annotation on the root Secret, so the DB marker and the
+        Secret annotation can be compared. The one place a KEK keys a MAC directly; the KEK itself
+        never leaves the adapter.
+
+        Raises:
+            PlatformKekError: no loaded KEK has that id.
+        """
+        kek = self._by_id.get(self._current_id if key_id is None else key_id)
+        if kek is None:
+            raise PlatformKekError("no platform KEK with that id is loaded")
+        return hmac.new(kek, b"waddles-root-check", "sha256").digest()
+
     def derive_key(self, info: bytes, *, key_id: str | None = None) -> bytes:
         """HKDF a domain-separated 32-byte key from a loaded KEK (the current one by default).
 

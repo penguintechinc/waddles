@@ -24,6 +24,7 @@ already taken by the Bot module port (M5, per this PR's task brief).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -40,6 +41,8 @@ from services.current_user import get_optional_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.pagination import parse_limit
+
+logger = logging.getLogger(__name__)
 
 admin_bp = Blueprint("v1_admin", __name__, url_prefix="/api/v1/admin")
 
@@ -521,6 +524,7 @@ async def adjust_reputation(
             actor_user_id=get_optional_current_user_id(request),
         )
     except ApiError as exc:
+        logger.warning("adjust_reputation rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return jsonify_dto(
         ReputationResponse(success=True, reputation=_reputation_dto(new_score), change=change)
@@ -563,6 +567,9 @@ async def get_reputation_config(community_id: int) -> tuple[Any, int]:
         await _authorize_reputation_admin(community_id)
         cfg = await reputation_svc.get_community_config(async_dal, dal, community_id=community_id)
     except ApiError as exc:
+        logger.warning(
+            "get_reputation_config rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return jsonify_dto(_config_response(cfg))
 
@@ -590,6 +597,9 @@ async def put_reputation_config(
             at_risk_threshold=data.atRiskThreshold,
         )
     except ApiError as exc:
+        logger.warning(
+            "put_reputation_config rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return jsonify_dto(_config_response(cfg))
 
@@ -609,6 +619,9 @@ async def get_reputation_at_risk(community_id: int) -> tuple[Any, int]:
             limit=parse_limit(request.args.get("limit"), default=50),
         )
     except ApiError as exc:
+        logger.warning(
+            "get_reputation_at_risk rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return jsonify_dto(AtRiskResponse(success=True, members=members))
 
@@ -636,6 +649,9 @@ async def get_reputation_history(community_id: int) -> tuple[Any, int]:
             offset=int(raw_offset),
         )
     except ApiError as exc:
+        logger.warning(
+            "get_reputation_history rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return jsonify_dto(HistoryResponse(success=True, entries=entries))
 
@@ -655,6 +671,9 @@ async def list_reputation_soft_bans(community_id: int) -> tuple[Any, int]:
             limit=parse_limit(request.args.get("limit"), default=50),
         )
     except ApiError as exc:
+        logger.warning(
+            "list_reputation_soft_bans rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return jsonify_dto(SoftBansResponse(success=True, softBans=bans))
 
@@ -670,7 +689,8 @@ async def put_reputation_soft_ban(
     async_dal, dal = _dal()
     try:
         expires = datetime.fromisoformat(data.expiresAt) if data.expiresAt else None
-    except ValueError:
+    except ValueError as exc:
+        logger.warning("put_reputation_soft_ban invalid expiresAt: %s", type(exc).__name__)
         return _err(ApiError("Invalid expiresAt", 400, "BAD_REQUEST"))
     if expires is not None and expires.tzinfo is None:
         expires = expires.replace(tzinfo=UTC)
@@ -686,6 +706,9 @@ async def put_reputation_soft_ban(
             actor_user_id=get_optional_current_user_id(request),
         )
     except ApiError as exc:
+        logger.warning(
+            "put_reputation_soft_ban rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return jsonify_dto(MessageResponse(success=True, message="Soft ban set"))
 
@@ -707,6 +730,9 @@ async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[A
             actor_user_id=get_optional_current_user_id(request),
         )
     except ApiError as exc:
+        logger.warning(
+            "delete_reputation_soft_ban rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     if not cleared:
         return _err(ApiError("Member is not soft-banned", 404, "NOT_FOUND"))

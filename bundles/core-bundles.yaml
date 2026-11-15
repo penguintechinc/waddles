@@ -1344,7 +1344,7 @@ bundles:
   #
   # 8 bundles on the default `stage` world:
   - app_id: waddles.core.example.customcommand
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/customcommand
     manifest_path: customcommand.manifest.yaml
@@ -1501,7 +1501,7 @@ bundles:
   # bundle-MCP-tools P6b: discord platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-discord defaults OFF.
   - app_id: waddles.core.service.discord
-    version: "1.0.7"
+    version: "1.0.8"
     language: rust
     wit_world: connector-tools
     kind: service

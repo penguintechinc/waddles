@@ -46,7 +46,11 @@ def test_metadata_chain_and_id_length() -> None:
 
 
 def test_single_head() -> None:
-    """No other migration revises 0099 or 0104 on this branch (heads == 1)."""
+    """0103 -> 0104 is a straight line: no sibling forks off either parent.
+
+    Later revisions legitimately chain off 0104, so this does not assert it is the head
+    (that went stale as soon as 0105+ landed); it asserts 0104 has at most one child.
+    """
     downs: dict[str, list[str]] = {}
     for path in _VERSIONS.glob("*.py"):
         text = path.read_text()
@@ -56,7 +60,7 @@ def test_single_head() -> None:
                     path.stem
                 )
     assert downs.get(PREVIOUS_REVISION) == [REVISION]
-    assert REVISION not in downs
+    assert len(downs.get(REVISION, [])) <= 1, f"0104 forked: {downs.get(REVISION)}"
 
 
 @pytest.fixture(scope="module")

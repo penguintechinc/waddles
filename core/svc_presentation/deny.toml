@@ -33,6 +33,7 @@ allow = [
     "MPL-2.0",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
+    "BSL-1.0", # Boost Software License 1.0 -- permissive, owner-approved 2026-11-14
 ]
 exceptions = []
 

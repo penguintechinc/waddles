@@ -216,6 +216,65 @@ fn finish<T>(
     }
 }
 
+/// Longest error detail written to a log line (a backend error can embed a long server reply).
+const MAX_ERROR_DETAIL_CHARS: usize = 300;
+
+/// The operator-facing detail of a failed kv call: the [`KvError`] message with control
+/// characters stripped and length capped. Never contains the guest key or value (every
+/// `KvError` message is built without them) and never a connection URL or credential.
+pub fn error_detail(err: &KvError) -> String {
+    err.to_string()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(MAX_ERROR_DETAIL_CHARS)
+        .collect()
+}
+
+/// Reports a failed kv host call from the invoking stage: ERROR log with the underlying
+/// error kind + message and `waddles_bundle_kv_errors_total{stage,op,kind}`.
+///
+/// Called by `core/svc_process` and `core/svc_action` (`stage` = `"process"`/`"action"`)
+/// because the guest only ever sees the collapsed wire error, and a bundle's own log line
+/// ("`count.kv_failure`") carries none of the host-side reason -- before this, a kv outage
+/// was a single INFO line with a bare kind. Guest-caused rejections (`invalid_key`,
+/// `too_large`, `quota_exceeded`, `rate_limited`) log at WARN so a chatty bundle cannot
+/// flood ERROR; everything the operator must act on (`not_granted`, `backend`,
+/// `reconciling`) logs at ERROR. No key, value or secret is ever included.
+pub fn report_failure(stage: &'static str, op: &str, scope: &KvScope, err: &KvError) {
+    let kind = err.code();
+    metrics::record_stage_error(stage, op, kind);
+    let community = scope.community.as_deref().unwrap_or("");
+    let detail = error_detail(err);
+    let op = metrics::normalise_op(op);
+    match err {
+        KvError::InvalidKey(_)
+        | KvError::TooLarge(_)
+        | KvError::QuotaExceeded(_)
+        | KvError::RateLimited(_) => tracing::warn!(
+            stage,
+            tenant = %scope.tenant,
+            community,
+            app_id = %scope.app_id,
+            op,
+            error_kind = kind,
+            error = %detail,
+            "bundle kv call rejected"
+        ),
+        KvError::NotGranted(_) | KvError::Reconciling(_) | KvError::Backend(_) => {
+            tracing::error!(
+                stage,
+                tenant = %scope.tenant,
+                community,
+                app_id = %scope.app_id,
+                op,
+                error_kind = kind,
+                error = %detail,
+                "bundle kv call failed"
+            );
+        }
+    }
+}
+
 /// The `kv` host capability, generic over [`KvBackend`] so production
 /// (`redis::aio::MultiplexedConnection`) and unit tests (an in-memory
 /// fake) share every byte of orchestration logic below.
@@ -1684,5 +1743,114 @@ mod v2_tests {
             h.list(&s, 1, "", None, 5).await,
             Err(KvError::Backend(_))
         ));
+    }
+}
+
+/// Tests for [`report_failure`]/[`error_detail`]: a captured-event subscriber (tracing core API
+/// only, no new dev-dependency) proves the level, the error kind + message, and that nothing
+/// sensitive reaches the line.
+#[cfg(test)]
+mod report_failure_tests {
+    use super::*;
+    use std::fmt::Write as _;
+    use std::sync::Mutex;
+
+    /// Collects `(level, "field=value ...")` for every event emitted while it is the default.
+    #[derive(Default, Clone)]
+    struct Capture(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+
+    struct Fields(String);
+
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+            let _ = write!(self.0, "{}={:?} ", f.name(), v);
+        }
+    }
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, e: &tracing::Event<'_>) {
+            let mut f = Fields(String::new());
+            e.record(&mut f);
+            self.0.lock().unwrap().push((*e.metadata().level(), f.0));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    fn report(err: &KvError) -> Vec<(tracing::Level, String)> {
+        let capture = Capture::default();
+        let scope = KvScope::new("acme", Some("main".to_string()), "waddles.bot.a");
+        tracing::subscriber::with_default(capture.clone(), || {
+            report_failure("process", "get", &scope, err);
+        });
+        let events = capture.0.lock().unwrap().clone();
+        events
+    }
+
+    #[test]
+    fn operator_actionable_failures_log_at_error_with_kind_and_message() {
+        let cases = [
+            (
+                KvError::NotGranted("storage.kv is not declared for this app version".into()),
+                "not_granted",
+                "storage.kv is not declared",
+            ),
+            (
+                KvError::Backend("NOPERM User default has no permissions".into()),
+                "backend",
+                "NOPERM",
+            ),
+            (
+                KvError::Reconciling("lock held".into()),
+                "reconciling",
+                "lock held",
+            ),
+        ];
+        for (err, kind, needle) in cases {
+            let events = report(&err);
+            assert_eq!(events.len(), 1, "{kind}: exactly one event");
+            let (level, line) = &events[0];
+            assert_eq!(*level, tracing::Level::ERROR, "{kind}");
+            assert!(
+                line.contains(&format!("error_kind=\"{kind}\"")),
+                "{kind}: {line}"
+            );
+            assert!(line.contains(needle), "{kind}: message missing from {line}");
+            assert!(line.contains("stage=\"process\""), "{line}");
+            assert!(
+                line.contains("waddles.bot.a") && line.contains("acme"),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn guest_caused_rejections_log_at_warn_not_error() {
+        for err in [
+            KvError::InvalidKey("bad".into()),
+            KvError::TooLarge(10),
+            KvError::QuotaExceeded("full".into()),
+            KvError::RateLimited("slow down".into()),
+        ] {
+            let events = report(&err);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].0, tracing::Level::WARN, "{err}");
+        }
+    }
+
+    #[test]
+    fn error_detail_strips_control_characters_and_caps_length() {
+        let nasty = KvError::Backend(format!("line1\nline2\r\x1b[31m{}", "x".repeat(2000)));
+        let d = error_detail(&nasty);
+        assert!(!d.chars().any(char::is_control), "{d:?}");
+        assert_eq!(d.chars().count(), MAX_ERROR_DETAIL_CHARS);
     }
 }

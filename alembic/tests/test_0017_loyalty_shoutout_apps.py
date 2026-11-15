@@ -10,9 +10,8 @@ action-only upserts with the exact `stages` JSON the task spec calls for;
 `||`-joined literals are combined (the exact bug `0014_wave1a_bundle_seeds`'
 own test suite was authored to catch: a bare `... || '...'::jsonb` casts
 only the LAST literal unless the whole concatenation is wrapped in
-`(...)::jsonb`); (c) both action entrypoints resolve to a real,
-already-shipped module file under `core/svc_action/builtin_handlers/` (the
-"coded but not routable" guard `0014`'s own test establishes); (d) both
+`(...)::jsonb`); (c) [the on-disk module-file check was retired with
+the Python `builtin_handlers/` data plane, commit 08e67f47f]; (d) both
 `app_tenant_availability` rows are upserted with `config_defaults.
 bot_token_ref` set directly; (e) both upgrade()/downgrade() are
 idempotent (`ON CONFLICT ... DO UPDATE`) and downgrade() removes exactly
@@ -32,8 +31,6 @@ import pytest
 _MIGRATION_PATH = (
     Path(__file__).resolve().parent.parent / "versions" / "0017_loyalty_shoutout_apps.py"
 )
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_ACTION_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_action" / "builtin_handlers"
 
 LOYALTY_APP_ID = "waddles.community.loyalty.default"
 SHOUTOUT_APP_ID = "waddles.bot.shoutout.default"
@@ -210,23 +207,6 @@ class TestSeededStagesJsonIsValid:
             "found a ::jsonb cast applied directly to the last literal of a "
             "|| chain with no wrapping parens -- only that literal would be "
             "cast, not the full concatenated stages JSON"
-        )
-
-
-class TestActionEntrypointsResolveToRealModules:
-    """The 'coded but not routable' guard 0014_wave1a_bundle_seeds' own
-    test suite establishes: every seeded entrypoint must resolve to a
-    real, already-shipped module file, not a stale/typo'd path."""
-
-    @pytest.mark.parametrize(
-        "app_id,module_name",
-        [(app_id, mod) for app_id, (mod, _) in EXPECTED_STAGES.items()],
-    )
-    def test_action_module_file_exists(self, app_id, module_name) -> None:
-        module_path = _ACTION_BUNDLES_DIR / f"{module_name}.py"
-        assert module_path.is_file(), (
-            f"{app_id}'s action entrypoint references bundles.{module_name}, "
-            f"but no {module_path} file exists"
         )
 
 

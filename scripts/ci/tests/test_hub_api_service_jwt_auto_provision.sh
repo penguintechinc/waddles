@@ -53,13 +53,14 @@ with open(f"{workdir}/job_script.sh", "w") as fh:
     fh.write(script)
 
 env = {e["name"]: e.get("value", "") for e in container.get("env", [])}
-required = ["NAMESPACE", "DEPLOYMENT_TIER", "SERVICE_JWT_SECRET", "SERVICE_JWT_CM", "SERVICE_JWT_KEY_ID", "SERVICE_JWT_EXTERNAL"]
+required = ["NAMESPACE", "SERVICE_JWT_SECRET", "SERVICE_JWT_CM", "SERVICE_JWT_KEY_ID", "SERVICE_JWT_EXTERNAL"]
 missing = [k for k in required if not env.get(k)]
 if missing:
     print(f"FAIL: auto-provision-keys Job missing/empty required env var(s): {missing}", file=sys.stderr)
     sys.exit(1)
 with open(f"{workdir}/job.env", "w") as fh:
-    for k in required + ["BUNDLE_SIGNING_SECRET", "BUNDLE_SIGNING_CM", "BUNDLE_SIGNING_KEY_ID", "BUNDLE_SIGNING_EXTERNAL"]:
+    for k in required + ["BUNDLE_SIGNING_SECRET", "BUNDLE_SIGNING_CM", "BUNDLE_SIGNING_KEY_ID", "BUNDLE_SIGNING_EXTERNAL",
+              "PRECOMPILE_SIGNING_SECRET", "PRECOMPILE_SIGNING_CM", "PRECOMPILE_SIGNING_KEY_ID", "PRECOMPILE_SIGNING_EXTERNAL"]:
         fh.write(f"{k}={env.get(k, '')}\n")
 
 print(f"Extracted Job script ({len(script)} bytes) and {len(env)} env var(s); "

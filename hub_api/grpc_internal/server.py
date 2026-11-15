@@ -109,7 +109,7 @@ def _load_server_credentials() -> grpc.ServerCredentials:
 
 
 def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInterceptor]:
-    """The production interceptor chain: deadline -> auth -> rate limit -> OTel.
+    """The production interceptor chain: OTel (outermost) -> deadline -> auth -> rate limit.
 
     Auth runs before rate limiting so the limiter keys on the caller's verified
     identity, never an unauthenticated claim; the servicers rely on auth having
@@ -118,6 +118,9 @@ def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInt
     never a servicer reached around its interceptors.
     """
     return [
+        # Outermost: a rejected RPC (no deadline / bad token / rate limited) is still a span + a
+        # `grpc_server_handled` data point, which is what an operator needs to see auth failures.
+        OTelInterceptor(),
         DeadlineInterceptor(),
         AuthInterceptor(
             verifier=issuer.as_verifier(),
@@ -145,7 +148,6 @@ def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInt
                 },
             },
         ),
-        OTelInterceptor(),
     ]
 
 

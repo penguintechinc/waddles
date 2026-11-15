@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -13,6 +14,8 @@ from services import community_join_service as svc
 from services.current_user import get_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
+
+logger = logging.getLogger(__name__)
 
 community_join_bp = Blueprint("v1_community_join", __name__, url_prefix="/api/v1/communities")
 BLUEPRINTS = [community_join_bp]
@@ -43,6 +46,7 @@ async def join_community(community_id: int) -> tuple[Any, int]:
             tenant_id=ctx.tenant_id,
         )
     except ApiError as exc:
+        logger.warning("join_community rejected: code=%s status=%s", exc.code, exc.status_code)
         return cast(tuple[Any, int], error_response(exc.message, exc.status_code, exc.code))
     return jsonify_dto(
         JoinCommunityResponse(success=True, community_id=result.community_id, joined=result.joined),

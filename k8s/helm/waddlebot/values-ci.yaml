@@ -115,15 +115,7 @@ httproute:
 tetragon:
   enabled: false
 
-# svc-bundles-executor scales horizontally: every replica dials every stage + the connector
-# link and each listener round-robins work across the replicas (see values.yaml
-# pipeline.rustDataPlane.bundleExecutor). HPA on CPU + memory; the PDB (minAvailable 1) renders
-# automatically once the effective replica floor is >1.
+# svc-bundles-executor is a StatefulSet with its own PDB + optional KEDA/HPA-external
+# autoscaling (pipeline.rustDataPlane.bundleExecutor.autoscaling) -- not in this registry.
 autoscaling:
-  services:
-    bundleExecutor:
-      enabled: true
-      minReplicas: 1
-      maxReplicas: 3
-      targetCPUUtilizationPercentage: 70
-      targetMemoryUtilizationPercentage: 80
+  services: {}

@@ -13,10 +13,10 @@ fn url() -> String {
 
 async fn lease_with(id: &str) -> ValkeyLease {
     let client = redis::Client::open(url()).expect("client");
-    let cfg =
-        redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(2)));
+    let cfg = redis::aio::ConnectionManagerConfig::new()
+        .set_response_timeout(Some(Duration::from_secs(2)));
     let conn = client
-        .get_multiplexed_async_connection_with_config(&cfg)
+        .get_connection_manager_with_config(cfg)
         .await
         .expect("connect");
     ValkeyLease::with_replica_id(conn, id.to_string())
@@ -149,10 +149,7 @@ async fn valkey_error_is_lease_error_not_acquired() {
     let client = redis::Client::open(format!("redis://{addr}/")).expect("client");
     // Connection built with NO response timeout: only the lease's own
     // enforcement can bound the blackholed commands.
-    let conn = client
-        .get_multiplexed_async_connection()
-        .await
-        .expect("connect");
+    let conn = client.get_connection_manager().await.expect("connect");
     let l = ValkeyLease::with_replica_id(conn, "r".to_string());
     let k = fresh_key();
     // Sanity: the path works before the blackhole.
@@ -176,10 +173,7 @@ async fn new_gives_each_lease_a_distinct_random_replica_id() {
     let client = redis::Client::open(url()).expect("client");
     let mut leases = Vec::new();
     for _ in 0..2 {
-        let conn = client
-            .get_multiplexed_async_connection()
-            .await
-            .expect("connect");
+        let conn = client.get_connection_manager().await.expect("connect");
         leases.push(ValkeyLease::new(conn));
     }
     let k = fresh_key();

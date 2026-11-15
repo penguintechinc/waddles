@@ -63,7 +63,9 @@ impl Valkey {
 
 impl Drop for Valkey {
     fn drop(&mut self) {
-        let _ = Command::new("docker").args(["rm", "-f", &self.name]).output();
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &self.name])
+            .output();
     }
 }
 

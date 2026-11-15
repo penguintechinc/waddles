@@ -91,12 +91,15 @@ spec:
           # KEYS/MIGRATE). `+config|get` is granted AFTER `-@dangerous` (CONFIG GET is itself
           # @dangerous, so the order matters -- verified against the pinned image) so ONLY the
           # `CONFIG GET maxmemory-policy` probe works with no NOPERM; CONFIG SET/INFO/ACL/
-          # SHUTDOWN/REPLICAOF/DEBUG stay NOPERM. Password passed as a SHA-256 hash (`#hex`),
+          # SHUTDOWN/REPLICAOF/DEBUG stay NOPERM. `+time` is likewise granted AFTER
+          # `-@dangerous` (TIME is @dangerous): bundle_host_kv's Lua scripts call
+          # `redis.call('TIME')` for the server-side clock, so without it EVERY write/incr/cas/
+          # list is `ACL failure in script ... 'time' command` (the alpha kv outage). Password passed as a SHA-256 hash (`#hex`),
           # never cleartext in the ACL rules. No admin user, no replication.
           APP_HASH="$(printf %s "$VALKEY_PASSWORD" | sha256sum | cut -d' ' -f1)"
           set -- valkey-server \
             --dir /data/valkey \
-            --user default on "#$APP_HASH" '~*' '&*' -@all +@connection +@read +@write +@keyspace +@transaction +@scripting -@dangerous '+config|get' \
+            --user default on "#$APP_HASH" '~*' '&*' -@all +@connection +@read +@write +@keyspace +@transaction +@scripting -@dangerous '+time' '+config|get' \
             --appendonly yes \
             --appendfsync {{ $k.aof.appendfsync }} \
             --no-appendfsync-on-rewrite no \

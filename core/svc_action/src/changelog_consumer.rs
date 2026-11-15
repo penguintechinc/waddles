@@ -84,6 +84,31 @@ const SESSION_CALL_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(test)]
 const SESSION_CALL_TIMEOUT: Duration = Duration::from_millis(40);
 
+/// Backoff for a failed / timed-out `Load` before it is resent (contract:
+/// full jitter, base 5 s, cap 300 s). Tests shrink it so retry paths run in
+/// milliseconds.
+#[cfg(not(test))]
+const LOAD_BACKOFF: bundle_active_set::LoadBackoff = bundle_active_set::LoadBackoff {
+    base: Duration::from_secs(5),
+    cap: Duration::from_secs(300),
+};
+#[cfg(test)]
+const LOAD_BACKOFF: bundle_active_set::LoadBackoff = bundle_active_set::LoadBackoff {
+    base: Duration::from_millis(10),
+    cap: Duration::from_millis(40),
+};
+
+/// Full-jitter unit for [`LOAD_BACKOFF`]: random in production; pinned near
+/// the ceiling in tests so "held back during backoff" is deterministic.
+#[cfg(not(test))]
+fn load_jitter() -> f64 {
+    bundle_active_set::jitter_unit()
+}
+#[cfg(test)]
+fn load_jitter() -> f64 {
+    0.999
+}
+
 /// How long [`run`]'s loop coalesces repeated full-send triggers into a
 /// single forced full authoritative active-set read -- see
 /// `core/svc_process/src/changelog_consumer.rs`'s identical constant for the
@@ -212,9 +237,39 @@ pub struct ConsumerState {
     /// multi-tenant dispatch consumers; replies never sent after legacy env
     /// removal (alpha 2026-10-03).
     active_digests: Arc<ActiveDigests>,
+    /// Executor id each live session reported in its handshake (sessions
+    /// of executors predating the field are absent -> broadcast). Refreshed
+    /// by [`run`] every iteration from the host-API registry.
+    executor_of: HashMap<bundle_active_set::SessionId, String>,
+    /// Already-negated `waddles.disable-executor-sharding` (true = shard;
+    /// unseen flag = sharding ON). Refreshed by [`run`].
+    sharding_enabled: bool,
+    /// In-flight / backoff state per `(session, scope)` Load (T2).
+    load_tracker: bundle_active_set::LoadTracker<AppScope>,
+    /// Routing-change logging + slot-owner-move counting across ticks.
+    routing_observer: bundle_active_set::RoutingObserver,
+}
+
+/// Logs a routing-mode change once (WARN for the missing-executor-id
+/// broadcast fallback) and counts slot-owner moves on membership change.
+fn note_routing(state: &mut ConsumerState, router: &bundle_active_set::SessionRouter) {
+    let changed = state.routing_observer.observe(router);
+    crate::stage_metrics::stage_metrics().record_slot_owner_changes(changed);
 }
 
 impl ConsumerState {
+    /// Updates the executor membership + kill-switch view [`apply_active_set`]
+    /// routes against (called by [`run`] every iteration; tests call it to
+    /// simulate sharded executors).
+    pub fn set_routing(
+        &mut self,
+        executor_of: HashMap<bundle_active_set::SessionId, String>,
+        sharding_enabled: bool,
+    ) {
+        self.executor_of = executor_of;
+        self.sharding_enabled = sharding_enabled;
+    }
+
     /// Test/startup-only constructor for an empty state seeded with a
     /// given `initial_seq` -- production code only ever obtains a
     /// [`ConsumerState`] via [`initial_state`], which also performs the
@@ -234,6 +289,10 @@ impl ConsumerState {
             pending_full_sync: None,
             last_full_send: None,
             active_digests: Arc::new(ActiveDigests::new()),
+            executor_of: HashMap::new(),
+            sharding_enabled: true,
+            load_tracker: bundle_active_set::LoadTracker::new(LOAD_BACKOFF),
+            routing_observer: bundle_active_set::RoutingObserver::default(),
         }
     }
 
@@ -310,6 +369,10 @@ pub async fn initial_state(
         pending_full_sync: Some(FullSyncReason::Startup),
         last_full_send: None,
         active_digests: Arc::new(ActiveDigests::new()),
+        executor_of: HashMap::new(),
+        sharding_enabled: true,
+        load_tracker: bundle_active_set::LoadTracker::new(LOAD_BACKOFF),
+        routing_observer: bundle_active_set::RoutingObserver::default(),
     })
 }
 
@@ -493,8 +556,44 @@ async fn apply_active_set(
             "changelog consumer: per-session load status this tick"
         );
     }
-    let plan = bundle_active_set::plan_sessions(&loaded_snapshot, &active, live_sessions, |row| {
-        row.digest.as_str()
+    // Executor sharding (T6): each app goes only to its owner executors'
+    // sessions -- broadcast when the kill switch is on or any live executor
+    // predates the handshake's executor_id (WARN, see `note_routing`).
+    // Dispatch (`LoadedSessions::pick_session_with_digest`) only ever picks
+    // a session holding the digest, i.e. an owner.
+    let router = bundle_active_set::SessionRouter::new(
+        live_sessions,
+        &state.executor_of,
+        state.sharding_enabled,
+        bundle_active_set::DEFAULT_REPLICAS,
+    );
+    note_routing(state, &router);
+    let mut plan = bundle_active_set::plan_sessions_routed(
+        &loaded_snapshot,
+        &active,
+        live_sessions,
+        |scope, _| router.target_sessions(&scope.2),
+        |row| row.digest.as_str(),
+    );
+    // T2: never resend a Load still in flight; hold a failed/timed-out one
+    // back for its jittered backoff (2026-11-11 retry storm).
+    state
+        .load_tracker
+        .retain_keys(|scope| active.contains_key(scope));
+    let now = Instant::now();
+    plan.to_load.retain(|(session, scope, row)| {
+        match state.load_tracker.admit(*session, scope, &row.digest, now) {
+            bundle_active_set::LoadAdmission::Send => true,
+            held => {
+                tracing::debug!(
+                    session = *session,
+                    tenant_id = scope.0, community_id = scope.1, app_id = %scope.2,
+                    ?held,
+                    "changelog consumer: load held back (in flight or backing off); not resending"
+                );
+                false
+            }
+        }
     });
 
     if let Some(reason) = full_sync_reason {
@@ -522,8 +621,14 @@ async fn apply_active_set(
                 "changelog consumer: active set changed but no executor connection yet; deferring"
             );
         }
+        // Nothing was sent: release the in-flight marks `admit` just set.
+        for (session, scope, _) in &plan.to_load {
+            state.load_tracker.succeeded(*session, scope);
+        }
         return;
     };
+    let stage = crate::stage_metrics::stage_metrics();
+    stage.set_load_inflight(state.load_tracker.in_flight_count());
 
     // Every (session, bundle) Load this tick is independent -- run them
     // CONCURRENTLY (never sequentially) so one session's stuck/slow call can
@@ -534,8 +639,15 @@ async fn apply_active_set(
     // resolved against `state`/metrics AFTER every call has settled --
     // `SessionBundleSink::load` only needs `&self`/shared refs, so no
     // mutable borrow of `state` is live during the concurrent phase.
-    let load_outcomes =
-        futures_util::future::join_all(plan.to_load.iter().map(|(session, scope, row)| {
+    //
+    // Per-bundle readiness (T2): outcomes are applied AS EACH LOAD SETTLES
+    // (`FuturesUnordered`) -- a loaded bundle is published to
+    // `LoadedSessions` (and so becomes dispatchable) while slower bundles
+    // are still compiling.
+    let mut load_outcomes: futures_util::stream::FuturesUnordered<_> = plan
+        .to_load
+        .iter()
+        .map(|(session, scope, row)| {
             let load_start = Instant::now();
             async move {
                 let outcome = tokio::time::timeout(
@@ -545,10 +657,28 @@ async fn apply_active_set(
                 .await;
                 (session, scope, row, outcome, load_start.elapsed())
             }
-        }))
-        .await;
+        })
+        .collect();
 
-    for (session, scope, row, outcome, elapsed) in load_outcomes {
+    while let Some((session, scope, row, outcome, elapsed)) =
+        futures_util::StreamExt::next(&mut load_outcomes).await
+    {
+        if matches!(outcome, Ok(Ok(()))) {
+            state.load_tracker.succeeded(*session, scope);
+        } else {
+            let retry_in =
+                state
+                    .load_tracker
+                    .failed(*session, scope, Instant::now(), load_jitter());
+            tracing::warn!(
+                session = *session,
+                tenant_id = scope.0, community_id = scope.1, app_id = %row.app_id,
+                attempt = state.load_tracker.attempts(*session, scope),
+                retry_in_ms = retry_in.as_millis() as u64,
+                "changelog consumer: load not confirmed; backing off (full jitter) before resending"
+            );
+        }
+        stage.set_load_inflight(state.load_tracker.in_flight_count());
         match outcome {
             Ok(Ok(())) => {
                 tracing::info!(
@@ -587,7 +717,7 @@ async fn apply_active_set(
                     digest_prefix = %bundle_active_set::digest_prefix(&row.digest),
                     duration_ms = elapsed.as_millis() as u64,
                     error = %err,
-                    "changelog consumer: load failed for this session, will retry next tick"
+                    "changelog consumer: load failed for this session, will retry after backoff"
                 );
                 metrics
                     .bundle_loads_total
@@ -609,7 +739,7 @@ async fn apply_active_set(
                     duration_ms = elapsed.as_millis() as u64,
                     timeout_secs,
                     "changelog consumer: load timed out after {timeout_secs}s for this \
-                     session with no reply, will retry next tick"
+                     session with no reply, will retry after backoff"
                 );
                 metrics
                     .bundle_loads_total
@@ -1127,6 +1257,10 @@ pub async fn run(
     full_reconcile_interval: std::time::Duration,
     call_timeout_ms: u64,
     flag: Arc<dyn FeatureFlag>,
+    // `flags::ExecutorShardingFlag` in production: `enabled()` = "is
+    // executor sharding on" (kill switch `waddles.disable-executor-sharding`
+    // negated, unseen = ON). Re-read every loop iteration.
+    sharding_flag: Arc<dyn FeatureFlag>,
     connections: Arc<crate::host_api::ConnectionRegistry>,
     spawner: Option<Arc<dyn ConsumerSupervisor>>,
     excluded_metric: prometheus::IntCounterVec,
@@ -1239,6 +1373,10 @@ pub async fn run(
     {
         let live_sessions = connections.live_session_ids();
         known_sessions = live_sessions.iter().copied().collect();
+        state.set_routing(
+            connections.live_executor_ids(),
+            sharding_flag.enabled().await,
+        );
         let sink = (!live_sessions.is_empty()).then(|| crate::bundle_loader::RegistrySink {
             registry: Arc::clone(&connections),
             call_timeout_ms,
@@ -1273,7 +1411,13 @@ pub async fn run(
         // 2026-10-03: nothing used to react to a session disappearing at
         // all, so a dead session's now-meaningless entries suppressed a
         // resend onto the survivor forever).
+        // Executor membership + kill switch for this iteration's routing.
+        state.set_routing(
+            connections.live_executor_ids(),
+            sharding_flag.enabled().await,
+        );
         for session in &diff.removed {
+            state.load_tracker.on_session_removed(*session);
             let dropped = state.loaded.on_session_removed(*session);
             if !dropped.is_empty() {
                 tracing::warn!(
@@ -2123,6 +2267,77 @@ mod tests {
         );
     }
 
+    /// T6: sharding on + every executor identified -> the app loads only on
+    /// its 2 owners and dispatch (`pick_session_with_digest`) routes only to
+    /// them; kill switch ON or a missing executor id -> broadcast.
+    #[tokio::test]
+    async fn run_full_reconcile_routes_loads_to_owner_executors() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let ids: HashMap<u64, String> = (1..=4).map(|s| (s, format!("exec-{s}"))).collect();
+        let run = |executor_of: HashMap<u64, String>, sharding: bool| {
+            let digest = digest.clone();
+            async move {
+                let db = MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+                    .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+                    .append_query_results([vec![approval_row(1, "waddles.a")]])
+                    .into_connection();
+                let mut state = ConsumerState::new(0);
+                state.set_routing(executor_of, sharding);
+                let sink = FakeSink::default();
+                run_full_reconcile(
+                    &db,
+                    &mut state,
+                    Some(&sink as &dyn SessionBundleSink),
+                    &[1, 2, 3, 4],
+                    None,
+                    &test_excluded_metric(),
+                    &test_dispatch_supervisor_metrics(),
+                    &test_changelog_metrics(),
+                    &bundle_host_kv::CapabilitySnapshot::new(),
+                    FullSyncReason::Reconcile,
+                    &bundle_active_set::ActiveVersionSnapshot::new(),
+                )
+                .await;
+                let mut sessions: Vec<u64> = sink
+                    .calls()
+                    .iter()
+                    .filter_map(|c| c.strip_prefix("load:")?.split(':').next()?.parse().ok())
+                    .collect();
+                sessions.sort_unstable();
+                let picks: std::collections::BTreeSet<_> = (0..8)
+                    .filter_map(|_| {
+                        state
+                            .loaded
+                            .pick_session_with_digest(&(1, 0, "waddles.a".to_string()), &digest)
+                    })
+                    .collect();
+                (sessions, picks)
+            }
+        };
+        let owners = bundle_active_set::SessionRouter::new(
+            &[1, 2, 3, 4],
+            &ids,
+            true,
+            bundle_active_set::DEFAULT_REPLICAS,
+        )
+        .target_sessions("waddles.a");
+        let (sessions, picks) = run(ids.clone(), true).await;
+        assert_eq!(sessions, owners);
+        assert_eq!(picks.into_iter().collect::<Vec<_>>(), owners);
+
+        let (sessions, _) = run(ids.clone(), false).await;
+        assert_eq!(sessions, vec![1, 2, 3, 4], "kill switch ON -> broadcast");
+        let mut partial = ids;
+        partial.remove(&4);
+        let (sessions, _) = run(partial, true).await;
+        assert_eq!(
+            sessions,
+            vec![1, 2, 3, 4],
+            "missing executor id -> broadcast"
+        );
+    }
+
     /// **Fix requirement 1 (shared helper, `bundle_active_set::session_sync`
     /// wired end to end):** two live sessions, neither has anything loaded --
     /// a full reconcile must `Load` the one active bundle onto BOTH, never
@@ -2507,6 +2722,8 @@ mod tests {
             1
         );
 
+        // T2: the retry first waits out its (test-scale) jittered backoff.
+        tokio::time::sleep(LOAD_BACKOFF.cap + Duration::from_millis(10)).await;
         // Same scope is still active and still not loaded on session 1 --
         // the next reconcile must retry it, this time against a sink that
         // answers immediately.
@@ -2773,6 +2990,7 @@ mod tests {
                 Duration::from_millis(1),
                 2000,
                 flag,
+                Arc::new(crate::flags::StaticFlag(true)),
                 Arc::new(crate::host_api::ConnectionRegistry::new()),
                 None,
                 excluded_metric,
@@ -3117,6 +3335,8 @@ mod tests {
             1
         );
 
+        // The retry is held back for its (test-scale) backoff first.
+        tokio::time::sleep(LOAD_BACKOFF.cap + Duration::from_millis(10)).await;
         let sink = FakeSink::default();
         run_incremental_tick(
             &db,

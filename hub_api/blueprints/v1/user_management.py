@@ -365,6 +365,7 @@ async def update_user(data: UpdateUserRequest, user_id: int) -> tuple[Any, int]:
             caller_id=get_current_user_id(request),
         )
     except ApiError as exc:
+        logger.warning("update_user rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     admin_ids = await svc.global_admin_id_set(async_dal, dal)
     return jsonify_dto(

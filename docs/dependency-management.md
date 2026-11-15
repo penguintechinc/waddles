@@ -19,7 +19,6 @@ These packages directly handle sensitive operations and are pinned to specific v
 | `bcrypt` | Password hashing | `>= 4.1.2` | Protects user credentials | Immediate patch releases; minor reviewed quarterly |
 | `python-jose` | JWT/JWS/JWE handling | Latest within 2.8+ | Token security | Patch releases immediately; minor reviewed quarterly |
 | `authlib` | OAuth2, OpenID Connect | `>= 1.3.0` | Third-party authentication | Quarterly review before updates |
-| `flask-security-too` | Auth framework & RBAC | `>= 5.4.0` | Core security framework | Quarterly review before updates |
 | `psycopg2-binary` | PostgreSQL adapter | `>= 2.9.9` | Database security & integrity | Quarterly review for major releases |
 | `bleach` | HTML sanitization (XSS prevention) | `>= 6.0.0` | Prevents DOM-based XSS | Patch releases immediately |
 

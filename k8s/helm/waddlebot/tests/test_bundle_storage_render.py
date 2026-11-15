@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from provision_harness import with_provisioned  # type: ignore[import-not-found]
 
 _CHART = Path(__file__).resolve().parent.parent
 _ENVS = (
@@ -105,7 +106,9 @@ def test_bundled_is_default_in_every_env(values):
 
 
 def test_bundled_identity_not_in_any_non_secret_document():
-    docs = _docs("values-alpha.yaml")
+    # the identity is generated at runtime by the provision-secrets hook; run the real hook so the
+    # check covers every rendered document (incl. the hook spec ConfigMap) against REAL values.
+    docs = with_provisioned(_docs("values-alpha.yaml"))
     secret = [d for d in docs if d["kind"] == "Secret" and "BUNDLE_STORAGE_S3_ACCESS_KEY_ID" in (d.get("stringData") or d.get("data") or {})]
     assert len(secret) == 1
     s = secret[0].get("stringData") or {}

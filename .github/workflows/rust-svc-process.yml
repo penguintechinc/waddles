@@ -12,11 +12,13 @@ on:
       - 'core/bundle_capability_gate/**'
       - 'core/bundle_tool_call/**'
       - 'core/circuit_breaker/**'
+      - 'core/command_latency/**'
       - 'core/bundle_host_reputation/**'
       - 'core/bundle_host_economy/**'
       - 'core/bundle_host_media/**'
       - 'core/bundle_host_http/**'
       - 'core/hub_client/**'
+      - 'core/bundle_config_db/**'
       - 'scripts/db/bundle_identity_resolve.sql'
       - 'scripts/db/bundle_economy_store.sql'
       - 'scripts/db/bundle_economy_idempotency.sql'
@@ -68,10 +70,12 @@ jobs:
             core/bundle_capability_gate/**
             core/bundle_tool_call/**
             core/circuit_breaker/**
+            core/command_latency/**
             core/bundle_host_reputation/**
             core/bundle_host_economy/**
             core/bundle_host_media/**
             core/hub_client/**
+            core/bundle_config_db/**
             scripts/db/bundle_identity_resolve.sql
             scripts/db/bundle_economy_store.sql
             scripts/db/bundle_economy_idempotency.sql

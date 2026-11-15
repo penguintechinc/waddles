@@ -1,9 +1,9 @@
 """grpc.aio interceptors for hub-api's internal gRPC server.
 
-Chain order (see `server.py`): `DeadlineInterceptor` -> `AuthInterceptor`
--> `RateLimitInterceptor` -> `OTelInterceptor`. Auth must run before rate
-limiting so the limiter can key on the caller's verified `sub` (SPIFFE
-ID) rather than an unauthenticated, spoofable value.
+Chain order (see `server.py`): `OTelInterceptor` (outermost, so rejected RPCs are traced and
+counted too) -> `DeadlineInterceptor` -> `AuthInterceptor` -> `RateLimitInterceptor`. Auth must run
+before rate limiting so the limiter can key on the caller's verified `sub` (SPIFFE ID) rather than
+an unauthenticated, spoofable value.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from flask_core.service_jwt import (
     ServiceJwtVerifier,
     UnknownKeyId,
 )
-from opentelemetry import metrics, trace
+from opentelemetry import metrics, propagate, trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 #: Every RPC's required deadline ceiling (security.md: bounded, predictable
@@ -37,17 +37,48 @@ service_claims: ContextVar[dict[str, Any] | None] = ContextVar("service_claims",
 
 logger = logging.getLogger(__name__)
 
-_tracer = trace.get_tracer("hub_api.grpc_internal")
-_meter = metrics.get_meter("hub_api.grpc_internal")
-_tenantless_counter = _meter.create_counter(
+_tenantless_counter = metrics.get_meter("hub_api.grpc_internal").create_counter(
     name="grpc_server_tenantless_token_rejections",
     description="Valid machine JWTs rejected for carrying no tenant claim, by RPC method.",
 )
-_latency_histogram = _meter.create_histogram(
-    name="grpc_server_request_duration_seconds",
-    unit="s",
-    description="Internal gRPC request latency, by RPC method and status code.",
-)
+
+
+@dataclass(slots=True)
+class _RpcInstruments:
+    """The per-RPC histogram + handled counter, bound to one MeterProvider."""
+
+    latency: Any
+    handled: Any
+
+
+_instrument_cache: dict[int, _RpcInstruments] = {}
+
+
+def _rpc_instruments() -> _RpcInstruments:
+    """Instruments for the CURRENT global MeterProvider (created once per provider).
+
+    Resolved at call time rather than import time so the SDK provider `telemetry.start()`
+    installs in `before_serving` is what records them, regardless of import order.
+    """
+    provider = metrics.get_meter_provider()
+    cached = _instrument_cache.get(id(provider))
+    if cached is None:
+        meter = metrics.get_meter("hub_api.grpc_internal")
+        cached = _RpcInstruments(
+            latency=meter.create_histogram(
+                name="grpc_server_request_duration_seconds",
+                unit="s",
+                description="Internal gRPC request latency, by RPC method and status code.",
+            ),
+            handled=meter.create_counter(
+                name="grpc_server_handled",
+                unit="{call}",
+                description="Internal gRPC calls completed, by RPC method and status code.",
+            ),
+        )
+        _instrument_cache.clear()
+        _instrument_cache[id(provider)] = cached
+    return cached
 
 
 class DeadlineInterceptor(grpc.aio.ServerInterceptor):
@@ -270,12 +301,13 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
 
 
 class OTelInterceptor(grpc.aio.ServerInterceptor):
-    """Emits a trace span plus a latency histogram data point per RPC.
+    """Per-RPC server span (W3C ``traceparent`` parent), latency histogram and handled counter.
 
-    Together with `flask_core`'s HTTP-side tracing this satisfies
-    critical-rules.md Observability (OTel): "Traces: span the real work
-    -- inter-service calls" and "Metrics: histograms for load/latency
-    first".
+    Sits OUTERMOST in the chain so calls rejected by the deadline/auth/rate-limit interceptors
+    still produce a span and a ``grpc_server_handled{rpc.grpc.status_code=...}`` data point. The
+    parent context is extracted from the invocation metadata with the global propagator (W3C
+    tracecontext + baggage), so a client instrumented with `GrpcAioInstrumentorClient` continues
+    its trace here. Only the RPC method and status code are recorded, never request content.
     """
 
     async def intercept_service(
@@ -290,12 +322,29 @@ class OTelInterceptor(grpc.aio.ServerInterceptor):
         if handler is None or handler.unary_unary is None:
             return handler
         method = handler_call_details.method
+        service_name, _, short_method = method.lstrip("/").partition("/")
         inner = handler.unary_unary
 
         async def wrapped(request: Any, context: grpc.aio.ServicerContext[Any, Any]) -> Any:
             start = time.monotonic()
             status_code = "OK"
-            with _tracer.start_as_current_span(method, kind=SpanKind.SERVER) as span:
+            carrier = {
+                key.lower(): value
+                for key, value in (context.invocation_metadata() or ())
+                if isinstance(key, str) and isinstance(value, str)
+            }
+            parent = propagate.extract(carrier)
+            tracer = trace.get_tracer("hub_api.grpc_internal")
+            with tracer.start_as_current_span(
+                method,
+                context=parent,
+                kind=SpanKind.SERVER,
+                attributes={
+                    "rpc.system": "grpc",
+                    "rpc.service": service_name,
+                    "rpc.method": short_method,
+                },
+            ) as span:
                 try:
                     response = await inner(request, cast(grpc.ServicerContext, context))
                     return response
@@ -305,13 +354,14 @@ class OTelInterceptor(grpc.aio.ServerInterceptor):
                     raise
                 except Exception as exc:  # noqa: BLE001 - re-raised after recording span status
                     status_code = "INTERNAL"
-                    span.set_status(Status(StatusCode.ERROR, str(exc)))
+                    span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
                     raise
                 finally:
-                    _latency_histogram.record(
-                        time.monotonic() - start,
-                        attributes={"rpc.method": method, "rpc.grpc.status_code": status_code},
-                    )
+                    span.set_attribute("rpc.grpc.status_code", status_code)
+                    attributes = {"rpc.method": method, "rpc.grpc.status_code": status_code}
+                    instruments = _rpc_instruments()
+                    instruments.latency.record(time.monotonic() - start, attributes=attributes)
+                    instruments.handled.add(1, attributes=attributes)
 
         return grpc.unary_unary_rpc_method_handler(
             wrapped,

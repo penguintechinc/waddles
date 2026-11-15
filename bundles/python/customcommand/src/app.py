@@ -152,6 +152,21 @@ RESERVED_NAMES: frozenset[str] = frozenset(
     wordcount wouldyourather wyr yomama
     blackjack chatguard hit hypetrain level lottery stand
     kgiveaway permit vqueue
+    ai ai-teammates ban calendar community_feed dj economy feed game-servers
+    gameserver kick live live-now modlog music-soundcloud music-spotify
+    music-youtube purge rep reputation reputation-accrual rooms spectrum
+    superpenguin-alias superpenguin-audiocommand superpenguin-balloon
+    superpenguin-bonustickets superpenguin-channelpoints superpenguin-curling
+    superpenguin-dailycounter superpenguin-deathcounter superpenguin-defuse
+    superpenguin-duel superpenguin-ffa superpenguin-first superpenguin-fishing
+    superpenguin-gamble superpenguin-giveaway superpenguin-golf
+    superpenguin-heist superpenguin-lastseen superpenguin-parachute
+    superpenguin-plinko superpenguin-quotes superpenguin-racing
+    superpenguin-raidtracker superpenguin-roulette superpenguin-slots
+    superpenguin-steal superpenguin-timers superpenguin-top superpenguin-tts
+    superpenguin-ufoclaw superpenguin-viewers superpenguin-weather
+    superpenguin-wheel timeout twitch twitch-clips unban untimeout webrtc wix
+    youtube
     """.split()
 )
 

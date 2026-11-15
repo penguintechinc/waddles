@@ -433,6 +433,9 @@ fn record_executor_call(
                 if let Some(limit) = stage_metrics::sandbox_limit_for(e.code, e.detail.as_deref()) {
                     metrics.record_sandbox_trip(app_id, limit);
                 }
+                if e.detail.as_deref() == Some("pool_exhausted") {
+                    metrics.record_pool_exhausted(app_id);
+                }
                 "executor_error"
             }
             _ => "malformed",
@@ -819,7 +822,7 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `not_implemented` rather than this loop failing to start, the same
     /// graceful-degradation posture `core/svc_action::capabilities::
     /// StageCapabilities::with_kv`'s doc describes.
-    pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    pub kv_conn: Option<redis::aio::ConnectionManager>,
     /// The manifest-declared-capability snapshot
     /// `bundle_host_kv::authorize::authorize_kv` checks before granting
     /// `kv` (coordinator fix on PR #425: "undeclared means denied").
@@ -1096,8 +1099,8 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
     verified_scope: Option<(i32, i32)>,
     trace: Option<TraceContext>,
     invocation: Option<Arc<crate::identity::InvocationIdentity>>,
-) -> StageCapabilities<redis::aio::MultiplexedConnection> {
-    let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+) -> StageCapabilities<redis::aio::ConnectionManager> {
+    let caps = StageCapabilities::<redis::aio::ConnectionManager>::new(
         tenant,
         community,
         deps.app_id.clone(),
@@ -1168,18 +1171,75 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
     }
 }
 
+/// Records `queue_wait_seconds` for one delivered entry: how long it sat in
+/// the stream (its id's millisecond timestamp) before this stage picked it
+/// up -- the KEDA scale signal. A malformed id is logged, never fatal.
+fn record_queue_wait(app_id: &str, entry_id: &str) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    match bundle_active_set::stream_entry_age(entry_id, now_ms) {
+        Some(wait) => stage_metrics::stage_metrics().record_queue_wait(app_id, wait),
+        None => tracing::debug!(
+            app_id,
+            entry_id,
+            "stream entry id has no millisecond prefix; queue wait not recorded"
+        ),
+    }
+}
+
 async fn handle_delivered<S: SpineOps>(
     d: &Delivered,
     deps: &ProcessDeps<S>,
 ) -> Result<(), SpineError> {
+    use tracing::Instrument as _;
     let started = std::time::Instant::now();
-    let outcome = handle_delivered_inner(d, deps).await;
+    record_queue_wait(&deps.app_id, &d.entry_id);
+    // Command-latency: the consume instant, the publish -> consume queue-wait hop (XADD time from
+    // the entry id), and the `process.consume` span parented on the envelope's W3C trace context.
+    let consumed_ms = command_latency::stamp::now_ms();
+    let queue_wait_ms = command_latency::stage::record_queue_wait(
+        command_latency::Hop::QueueWait,
+        &d.entry_id,
+        consumed_ms,
+    );
+    let span = tracing::info_span!(
+        "process.consume",
+        app_id = %deps.app_id,
+        tenant_id = d.env.tenant_id,
+        community_id = d.env.community_id,
+        deliveries = d.deliveries,
+        queue_wait_ms = queue_wait_ms,
+        result = tracing::field::Empty,
+        "otel.kind" = "consumer",
+    );
+    if let Some(trace) = &d.env.trace {
+        command_latency::span::set_remote_parent(
+            &span,
+            &trace.traceparent,
+            trace.tracestate.as_deref(),
+        );
+    }
+    let outcome = handle_delivered_inner(d, deps, consumed_ms)
+        .instrument(span.clone())
+        .await;
     let result = match &outcome {
         Ok(result) => result.as_str(),
         // The ack/DLQ/append write itself failed: the entry stays pending
         // for redelivery, so it is neither delivered nor dead-lettered.
         Err(_) => "spine_error",
     };
+    span.record("result", result);
+    match &outcome {
+        Ok(StageResult::DeadLettered) => command_latency::span::record_error(
+            &span,
+            "DeadLettered",
+            "entry dead-lettered by the process stage",
+        ),
+        Err(err) => command_latency::span::record_error(&span, "SpineError", &err.to_string()),
+        Ok(_) => {}
+    }
     stage_metrics::stage_metrics().record_stage(&deps.app_id, result, started.elapsed());
     outcome.map(|_| ())
 }
@@ -1192,7 +1252,9 @@ async fn handle_delivered<S: SpineOps>(
 async fn handle_delivered_inner<S: SpineOps>(
     d: &Delivered,
     deps: &ProcessDeps<S>,
+    consumed_ms: u64,
 ) -> Result<StageResult, SpineError> {
+    use tracing::Instrument as _;
     // Spec §5.11: hop verification runs before any other processing.
     // Verified against THIS entry's own `d.stream` (not a single fixed
     // key, unlike `svc_action::dispatch`'s action-stream reader) --
@@ -1262,7 +1324,10 @@ async fn handle_delivered_inner<S: SpineOps>(
     // boundary): decrypt them here -- after hop verification, strictly before tokenization and
     // dispatch -- into an in-memory-only copy. A failure dead-letters the still-encrypted
     // original; it is never dropped and never forwarded.
-    let raw_event = match decrypt_inbound_event(d, deps).await {
+    let raw_event = match decrypt_inbound_event(d, deps)
+        .instrument(tracing::info_span!("process.decrypt"))
+        .await
+    {
         Ok(event) => event,
         Err(err) => {
             return deps
@@ -1296,6 +1361,7 @@ async fn handle_delivered_inner<S: SpineOps>(
                 match deps
                     .tokenize_memo
                     .tokenize_delivered(d, &raw_event, &d.env.tenant, minter.as_ref())
+                    .instrument(tracing::info_span!("process.tokenize"))
                     .await
                 {
                     Ok(tokenized) => (tokenized.event, Some(tokenized.mentions)),
@@ -1408,7 +1474,11 @@ async fn handle_delivered_inner<S: SpineOps>(
             0
         });
 
-    let Some(connection) = deps.connections.pick_dispatch() else {
+    // Executor sharding (T6): route to one of this app's owner executors
+    // (legacy round-robin when sharding is off or an executor has no id);
+    // a non-owner pick is still served via the on-demand `ensure_loaded`
+    // below.
+    let Some(connection) = deps.connections.pick_dispatch_for_app(&deps.app_id) else {
         // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
         // 2026-10-02 incident: svc-process/svc-action were rolled and each
         // bundle-executor stayed bound to its old, terminated pod; the new
@@ -1701,6 +1771,25 @@ async fn handle_delivered_inner<S: SpineOps>(
     let scope = Scope::new(d.env.tenant.clone(), d.env.community.clone());
     let dest_stream = scope.action_stream(&dest_app_id);
     let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    // Command-latency: carry the inbound trace onto the action envelope with this stage's stamps
+    // added -- the publish time (entry id), consume/hand-off instants and the REGISTERED command the
+    // message invokes (read in place from the decrypted text; the text itself is never kept). The
+    // trace id (the only part the binding MAC covers) is untouched.
+    let command = raw_event
+        .payload
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|text| command_latency::registry::global().detect(text));
+    let trace_out = d.env.trace.clone().map(|mut t| {
+        t.tracestate = command_latency::stage::process_handoff_tracestate(
+            t.tracestate.as_deref(),
+            &d.entry_id,
+            consumed_ms,
+            command_latency::stamp::now_ms(),
+            command,
+        );
+        t
+    });
     let envelope_out = StageEnvelope {
         // Scope + schema version are copied VERBATIM from the verified
         // inbound envelope (never re-derived): the copied `binding` covers
@@ -1719,7 +1808,7 @@ async fn handle_delivered_inner<S: SpineOps>(
         workstream_id: d.env.workstream_id.clone(),
         event_id: d.env.event_id.clone(),
         session_id: d.env.session_id.clone(),
-        trace: d.env.trace.clone(),
+        trace: trace_out,
         binding: d.env.binding.clone(),
     };
 
@@ -1789,8 +1878,23 @@ pub async fn run(
     deps: ProcessDeps<SpineClient>,
     shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), SpineError> {
-    let app_id = deps.app_id.clone();
     let dlq = SpineClient::connect(cfg.clone(), deps.metrics.clone()).await?;
+    run_with_client(cfg, grants, deps, dlq, shutdown).await
+}
+
+/// Same as [`run`] but reuses an already-connected, process-shared `dlq`
+/// [`SpineClient`] (cheap clone of one multiplexed connection) instead of
+/// opening and probing a fresh TLS connection per consumer -- the
+/// connection-storm fix (alpha incident 2026-11). Only the blocking
+/// [`GroupReader`] socket stays per-consumer (spec Sec5.7 rule 2).
+pub async fn run_with_client(
+    cfg: SpineConfig,
+    grants: Vec<Grant>,
+    deps: ProcessDeps<SpineClient>,
+    dlq: SpineClient,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(), SpineError> {
+    let app_id = deps.app_id.clone();
     let streams: Vec<String> = grants.iter().map(|g| g.stream.clone()).collect();
     let sampler_client = dlq.clone();
     let reader = GroupReader::connect(
@@ -1959,7 +2063,7 @@ pub(crate) async fn ensure_consumer_group(
     group: &str,
 ) -> Result<bool, SpineError> {
     let client = build_raw_client(cfg)?;
-    let mut conn = client.get_multiplexed_async_connection().await?;
+    let mut conn = client.get_connection_manager().await?;
     let result: Result<(), redis::RedisError> = redis::cmd("XGROUP")
         .arg("CREATE")
         .arg(stream)
@@ -3159,6 +3263,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3235,6 +3340,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3327,6 +3433,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3536,6 +3643,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3827,6 +3935,88 @@ mod tests {
         assert_eq!(source.platform, "discord");
         assert_eq!(source.account_id, "bot-123");
         assert_eq!(source.channel_id.as_deref(), Some("origin-channel"));
+    }
+
+    /// Command-latency propagation through the real `handle_delivered`: the inbound first-door stamp
+    /// survives onto the action envelope with this stage's stamps added (publish time from the entry
+    /// id, consume/hand-off instants, the REGISTERED command read from the text), the trace id the
+    /// binding MAC covers is untouched, and the action hop verification therefore still passes.
+    #[tokio::test]
+    async fn handle_delivered_carries_the_first_door_stamp_and_adds_process_stamps() {
+        use command_latency::stamp::{now_ms, Door, Stamps};
+        assert!(command_latency::registry::global().register("songrequest"));
+        command_latency::switch::set_disabled(false);
+        let ring = test_ring();
+        let mut d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let trace_id = "0af7651916cd43dd8448eb211c80319c";
+        let t0 = now_ms().saturating_sub(120);
+        d.entry_id = format!("{}-0", now_ms().saturating_sub(80));
+        d.env.trace = Some(penguin_spine::Trace {
+            traceparent: format!("00-{trace_id}-b7ad6b7169203331-01"),
+            tracestate: Some(
+                Stamps {
+                    t0_ms: Some(t0),
+                    door: Some(Door::Gateway),
+                    ..Stamps::default()
+                }
+                .merge_into_tracestate(Some("vendor=1")),
+            ),
+        });
+        d.env.binding.mac = penguin_spine::compute_binding_mac(
+            &ring,
+            "k1",
+            "acme",
+            Some("main"),
+            &d.env.workstream_id,
+            &d.env.event_id,
+            Some(trace_id),
+        )
+        .unwrap();
+        let reply = wire_platform_event(&PlatformEvent {
+            platform: "twitch".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("bot".to_string()),
+            payload: serde_json::from_value(serde_json::json!({"text": "pong"})).unwrap(),
+            occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
+            source: None,
+        })
+        .unwrap();
+        let connections = connected_registry_with_fake_executor(reply).await;
+        let deps = test_deps(FakeSpineOps::default(), connections);
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+        let appended = deps.spine.appended.lock().unwrap();
+        assert_eq!(appended.len(), 1);
+        let trace = appended[0].1.trace.as_ref().expect("trace carried");
+        assert!(
+            trace.traceparent.contains(trace_id),
+            "the MAC-covered trace id is untouched"
+        );
+        let ts = trace.tracestate.as_deref().expect("tracestate carried");
+        assert!(ts.ends_with(",vendor=1"), "foreign member preserved: {ts}");
+        let s = Stamps::from_tracestate(Some(ts));
+        assert_eq!(s.t0_ms, Some(t0), "first door survives the hop");
+        assert_eq!(s.door, Some(Door::Gateway));
+        assert_eq!(
+            s.publish_ms,
+            command_latency::stamp::entry_id_ms(&d.entry_id)
+        );
+        let (pc, pd) = (s.consume_ms.unwrap(), s.handoff_ms.unwrap());
+        assert!(
+            pc >= s.publish_ms.unwrap() && pd >= pc,
+            "stamps are ordered"
+        );
+        assert_eq!(
+            s.command.as_deref(),
+            Some("songrequest"),
+            "the registered command, read from the decrypted text"
+        );
+        assert!(
+            !ts.contains("foo"),
+            "no argument or user text ever reaches the tracestate"
+        );
     }
 
     #[tokio::test]
@@ -4158,6 +4348,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -4406,6 +4597,7 @@ mod tests {
                                 runtime: "runc".to_string(),
                                 verified: false,
                             },
+                            executor_id: None,
                         }),
                     ),
                 )
@@ -5200,10 +5392,7 @@ mod tests {
 
             // Three entries; read two without acking -> pending 2, lag 1.
             let raw = redis::Client::open(cfg.valkey_url.as_str()).expect("redis client");
-            let mut conn = raw
-                .get_multiplexed_async_connection()
-                .await
-                .expect("raw connection");
+            let mut conn = raw.get_connection_manager().await.expect("raw connection");
             for _ in 0..3 {
                 let _: String = redis::cmd("XADD")
                     .arg(&stream)
@@ -5418,6 +5607,7 @@ mod tests {
                                 runtime: "runc".to_string(),
                                 verified: false,
                             },
+                            executor_id: None,
                         }),
                     ),
                 )
@@ -5615,7 +5805,8 @@ mod tests {
         }
 
         /// Fail closed on a broker outage: dead-lettered (not acked-and-dropped), counted, and
-        /// recovers once the broker is back -- the failure is not cached.
+        /// recovers once the broker is back -- the failure is only negative-cached for one short
+        /// jittered backoff window (<= 312 ms by default), never beyond it.
         #[tokio::test]
         async fn a_key_broker_outage_dead_letters_visibly_and_recovers() {
             let ring = test_ring();
@@ -5636,6 +5827,9 @@ mod tests {
             assert_eq!(failures("dek_unavailable") - before, 1.0);
 
             fake.state.lock().unwrap().down = false;
+            // Inside the negative window the failure is replayed (no retry stampede); past its
+            // jittered upper bound (250 ms base * 1.25) the broker is asked again.
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             let mut deps2 = test_deps(
                 FakeSpineOps::default(),
                 registry_capturing_invoke(pong()).await.0,

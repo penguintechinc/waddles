@@ -47,7 +47,7 @@ use svc_ingest::connector_runtime::boot::{
 use svc_ingest::connector_runtime::feed::{DesiredConnection, DynFeed, FeedError, TransportPlan};
 use svc_ingest::connector_runtime::scoped::ScopeLookup;
 use svc_ingest::connector_runtime::Readiness;
-use svc_ingest::identity_crypto::LocalDevDekProvider;
+use svc_ingest::identity_crypto::{ConfiguredDekProvider, LocalDevDekProvider};
 use svc_ingest::scope_resolver::{ResolvedScope, Unresolved};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -346,7 +346,7 @@ async fn boot_wiring_publishes_scoped_events_and_refuses_the_mismatched_tenant()
     );
     let lease_conn = redis::Client::open(valkey.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let settings = RuntimeSettings {
@@ -383,7 +383,9 @@ async fn boot_wiring_publishes_scoped_events_and_refuses_the_mismatched_tenant()
                 vec![7u8; 32],
             )])),
             active_kid: "k1".into(),
-            dek: Arc::new(LocalDevDekProvider::new("local", "BOOT_WIRING_KEK").unwrap()),
+            dek: Arc::new(ConfiguredDekProvider::local_dev(
+                LocalDevDekProvider::new("local", "BOOT_WIRING_KEK").unwrap(),
+            )),
             identity_metrics: prometheus::IntCounterVec::new(
                 prometheus::Opts::new("boot_wiring_identity_total", "test"),
                 &["tenant", "status"],
@@ -435,7 +437,7 @@ async fn boot_wiring_publishes_scoped_events_and_refuses_the_mismatched_tenant()
     assert!(events >= 2.0, "published events: {events}");
     let mut kc = redis::Client::open(valkey.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let keys: Vec<String> = redis::cmd("KEYS")
