@@ -291,17 +291,22 @@ impl Engine<'_> {
             Ok(false) => "off",
             Err(_) => "unavailable",
         };
+        let safe = match requests::list(self.host, 1) {
+            Ok(s) if s.dmca_safe => "on (service)",
+            Ok(_) => "off (service)",
+            Err(_) => "unavailable",
+        };
         Ok(format!(
-            "providers {} | dj_min_queue {} | dj_requests_per_pick {} | max {} | replay {}s | explicit {} | dmca_safe {} | mode {} | ai {}",
+            "providers {} | dj_min_queue {} | dj_requests_per_pick {} | max {} | replay {}s | explicit {} | mode {} | ai {} | dmca_safe {}",
             c.providers.join(","),
             c.dj_min_queue,
             c.dj_requests_per_pick,
             fmt_dur(c.max_duration_s),
             c.replay_cooldown_s,
             c.explicit_allowed,
-            c.dmca_safe,
             u8::from(c.mode),
             ai,
+            safe,
         ))
     }
 

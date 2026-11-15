@@ -175,6 +175,11 @@ pub struct Svc {
     pub imported: bool,
     pub max_queue: usize,
     pub next_id: u64,
+    /// The service's single DMCA-safe flag; rows are safe only when the url starts `https://safe.`.
+    pub dmca_safe: bool,
+    /// `music.stats.top` data: (artist, plays) and (title, artist, plays).
+    pub stats_artists: Vec<(String, u64)>,
+    pub stats_songs: Vec<(String, String, u64)>,
 }
 
 impl Default for Svc {
@@ -187,6 +192,9 @@ impl Default for Svc {
             imported: false,
             max_queue: 100,
             next_id: 0,
+            dmca_safe: false,
+            stats_artists: vec![],
+            stats_songs: vec![],
         }
     }
 }
@@ -219,6 +227,8 @@ pub struct FakeHost {
     pub deny_service: Cell<bool>,
     /// The invoking actor holds `music:dj.manage` (host-enforced for `dj.set`).
     pub has_dj_manage: Cell<bool>,
+    /// The actor lacks `music:stats.read` (host answers Forbidden).
+    pub deny_stats: Cell<bool>,
     /// Every `requests.add` args seen (for asserting no requester/actor is ever sent).
     pub add_args: RefCell<Vec<Value>>,
     /// When > 0, `playlist.get` serves pages of this many tracks.
@@ -242,6 +252,7 @@ impl FakeHost {
             community: Cell::new(1),
             deny_service: Cell::new(false),
             has_dj_manage: Cell::new(true),
+            deny_stats: Cell::new(false),
             add_args: RefCell::default(),
             page_size: Cell::new(0),
             music: serde_json::from_str(MUSIC_CONTRACT).expect("music contract parses"),
@@ -410,7 +421,8 @@ impl FakeHost {
                 Ok(self.svc(|s| {
                     json!({"now_playing": s.now.as_ref().map(item_json),
                            "queue": s.queue.iter().take(lim as usize).map(item_json).collect::<Vec<_>>(),
-                           "total_queued": s.queue.len(), "ai_dj_on": s.ai_on})
+                           "total_queued": s.queue.len(), "ai_dj_on": s.ai_on,
+                           "dmca_safe": s.dmca_safe})
                 }))
             }
             "requests.add" => {
@@ -424,6 +436,11 @@ impl FakeHost {
                     return Err(ToolErr::InvalidArgs("invalid_url".into()));
                 }
                 self.svc(|s| {
+                    if s.dmca_safe && !url.starts_with("https://safe.") {
+                        return Err(ToolErr::InvalidArgs(
+                            "not_dmca_safe: source is not safe-listed".into(),
+                        ));
+                    }
                     if s.queue.len() >= s.max_queue {
                         return Err(ToolErr::InvalidArgs("queue_full".into()));
                     }
@@ -447,6 +464,21 @@ impl FakeHost {
                     s.queue.push(row.clone());
                     Ok(json!({"item": item_json(&row), "position": s.queue.len()}))
                 })
+            }
+            "music.stats.top" => {
+                unknown(&["kind", "limit"]);
+                if self.deny_stats.get() {
+                    return Err(ToolErr::Forbidden);
+                }
+                let lim = obj.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+                assert!((1..=25).contains(&lim), "limit bounds");
+                Ok(self.svc(|s| match args["kind"].as_str() {
+                    Some("artist") => json!({"items": s.stats_artists.iter().take(lim)
+                        .map(|(a, p)| json!({"artist": a, "plays": p})).collect::<Vec<_>>()}),
+                    Some("song") => json!({"items": s.stats_songs.iter().take(lim)
+                        .map(|(t, a, p)| json!({"title": t, "artist": a, "plays": p})).collect::<Vec<_>>()}),
+                    other => panic!("bad stats kind {other:?}"),
+                }))
             }
             "requests.import" => {
                 unknown(&["items"]);
@@ -520,13 +552,13 @@ impl Host for FakeHost {
         {
             return Err(ToolErr::TargetUnavailable);
         }
+        if target == "waddles.core.service.music-requests" {
+            return self.requests_call(tool, args, idem);
+        }
         if let Some(rest) = tool.strip_prefix("music.") {
             let (provider, op) = rest.split_once('.').expect("music.<provider>.<op>");
             assert_eq!(target, format!("waddles.core.service.music-{provider}"));
             return self.music_call(provider, op, args);
-        }
-        if target == "waddles.core.service.music-requests" {
-            return self.requests_call(tool, args, idem);
         }
         let result = match tool {
             "ai.complete" => {

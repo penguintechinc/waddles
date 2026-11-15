@@ -71,6 +71,9 @@ pub struct Snapshot {
     pub queue: Vec<QItem>,
     #[serde(default)]
     pub ai_dj_on: bool,
+    /// The service's single DMCA-safe flag (per community).
+    #[serde(default)]
+    pub dmca_safe: bool,
 }
 
 fn call(host: &dyn Host, tool: &str, args: Value, idem: Option<&str>) -> Result<Value, ReqError> {
@@ -135,6 +138,33 @@ pub fn add_dj(host: &dyn Host, t: &Track, idem: &str) -> Result<u64, ReqError> {
     v.get("position")
         .and_then(Value::as_u64)
         .ok_or(ReqError::BadResponse)
+}
+
+/// One `music.stats.top` row: aggregate play counts only, never a requester.
+#[derive(Clone, Debug, Deserialize)]
+pub struct StatRow {
+    #[serde(default)]
+    pub title: Option<String>,
+    pub artist: String,
+    #[serde(default)]
+    pub plays: u64,
+}
+
+/// `music.stats.top` (scope `music:stats.read`): most played `artist`s or `song`s.
+pub fn stats_top(host: &dyn Host, kind: &str, limit: u32) -> Result<Vec<StatRow>, ReqError> {
+    let v = call(
+        host,
+        "music.stats.top",
+        json!({"kind": kind, "limit": limit.clamp(1, 25)}),
+        None,
+    )?;
+    serde_json::from_value(v.get("items").cloned().unwrap_or(Value::Null))
+        .map_err(|_| ReqError::BadResponse)
+}
+
+/// True when an add was refused by the service's DMCA-safe mode.
+pub fn is_not_dmca_safe(e: &ReqError) -> bool {
+    matches!(e, ReqError::Rejected(c) if c.starts_with("not_dmca_safe"))
 }
 
 /// `requests.import`: one-shot legacy queue import (at most 100 items).

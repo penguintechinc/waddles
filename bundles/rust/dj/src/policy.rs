@@ -1,7 +1,7 @@
 //! Community config and the deterministic song policy.
 //!
-//! Everything in [`evaluate`] is pure and AI-free: provider allowlists
-//! (DMCA-safe mode), deny-lists, duration, explicit flag, replay cooldown,
+//! Everything in [`evaluate`] is pure and AI-free: source allowlists
+//! (DMCA-safe mode itself is the service's flag), deny-lists, duration, explicit flag, replay cooldown,
 //! live-queue duplicate guard and the ban list. The AI judge in `engine` only runs on
 //! tracks that survive this layer and only for rules that cannot be
 //! expressed deterministically.
@@ -180,7 +180,6 @@ pub struct Config {
     pub max_duration_s: u32,
     pub replay_cooldown_s: u32,
     pub explicit_allowed: bool,
-    pub dmca_safe: bool,
     /// DJ picks only while queued viewer requests are below this (1-50).
     pub dj_min_queue: u32,
     /// After this many queued viewer requests the DJ may add one more pick (1-20).
@@ -205,7 +204,6 @@ impl Default for Config {
             max_duration_s: 600,
             replay_cooldown_s: 3600,
             explicit_allowed: true,
-            dmca_safe: false,
             dj_min_queue: 3,
             dj_requests_per_pick: 2,
             sources_allow: Vec::new(),
@@ -250,7 +248,6 @@ impl Config {
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), ConfigError> {
         match key {
             "explicit" => self.explicit_allowed = parse_bool(value)?,
-            "dmca_safe" => self.dmca_safe = parse_bool(value)?,
             "dj_min_queue" => self.dj_min_queue = parse_num(value, 1, 50)? as u32,
             "dj_requests_per_pick" => self.dj_requests_per_pick = parse_num(value, 1, 20)? as u32,
             "max_duration_s" => self.max_duration_s = parse_num(value, 30, 7200)? as u32,
@@ -402,13 +399,7 @@ pub fn evaluate(
             .any(|a| norm(a) == norm(&t.artist))
     };
     let has_rule_allow = !rules.allow_channels.is_empty() || !rules.allow_artists.is_empty();
-    if cfg.dmca_safe && cfg.sources_allow.is_empty() && !has_rule_allow {
-        return v(
-            "dmca_no_allowlist",
-            "DMCA-safe mode is on but no allowed sources are configured",
-        );
-    }
-    if cfg.dmca_safe || !cfg.sources_allow.is_empty() || has_rule_allow {
+    if !cfg.sources_allow.is_empty() || has_rule_allow {
         let ok = cfg.sources_allow.iter().any(|e| e.matches(track)) || rule_allow(track);
         if !ok {
             return v(

@@ -25,9 +25,20 @@ Planning (every invocation re-reads the queue first; there is still **no periodi
 3. Interleave: the DJ may hold `max(1, viewer / dj_requests_per_pick)` queued picks (default 2 viewer
    requests per pick; one pick is always allowed so an idle queue is never silent). Picks are only
    ever appended, so viewer requests play first.
-4. Picks come from the active playlist (`!dj mode playlist`) then the AI (hourly cap, batch), resolved via a real
-   `music.<p>.search`, run through the policy, added with `requests.add {kind:"dj"}` (idempotency key
-   `dj.add.<message_id>.<n>`), and announced in chat. `queue_full` stops the run; `duplicate`/`invalid_url` skip.
+4. Picks come from the active playlist (`!dj mode playlist`), then the AI (hourly cap, batch), then the
+   community's own top songs as gap fill; resolved via a real `music.<p>.search`, run through the policy, added with
+   `requests.add {kind:"dj"}` (idempotency key `dj.add.<message_id>.<n>`), and announced in chat.
+   `queue_full` stops the run; `duplicate`/`invalid_url` skip.
+5. **History weighting:** `music.stats.top` (`artist` and `song`, aggregate counts, no requester; scope
+   `music:stats.read`) orders candidates: AI hints and playlist tracks by the community's top artists come first, and top
+   songs fill gaps. Stats are never sent to the model (viewer-influenced text); only the DJ's own queued titles go to
+   `ai.complete` as "avoid". Replays are blocked by the replay cooldown (the DJ's own recent picks) and by anything
+   already queued/playing. No grant or an outage just means no weighting.
+6. **DMCA-safe mode** is the service's single per-community flag (`requests.list.dmca_safe`, read on every plan; the
+   DJ's old local allowlist-only `dmca_safe` setting is gone and ignored). When on, the DJ skips candidates without a
+   source url and treats the service's `not_dmca_safe` refusal as skip-and-try-next (it never sends a provider; the
+   service derives it from the url host). At most 8 `requests.add` calls per plan, so it can never loop; the reply
+   says only how many were skipped.
 
 ## Commands (only `!dj`; moderator / broadcaster only)
 
@@ -39,13 +50,13 @@ Planning (every invocation re-reads the queue first; there is still **no periodi
 | `!dj fill` / `!dj next` | plan + add picks now (see Architecture) |
 | `!dj ai genre <g>\|instructions <text>` | AI taste; instructions compile once into a bounded policy |
 | `!dj policy show\|confirm\|discard\|clear` | confirm / drop the compiled policy |
-| `!dj set <explicit\|dmca_safe\|max_duration_s\|replay_cooldown_s\|dj_min_queue\|dj_requests_per_pick\|providers\|ai_hourly_cap\|ai_batch> <v>` | settings |
+| `!dj set <explicit\|max_duration_s\|replay_cooldown_s\|dj_min_queue\|dj_requests_per_pick\|providers\|ai_hourly_cap\|ai_batch> <v>` | settings |
 | `!dj list <allow-channel\|allow-artist\|deny-artist\|deny-term\|deny-track> add\|remove <v>` | allow/deny lists |
 | `!dj ban <provider/id>` / `!dj unban <provider/id>` | DJ ban list |
 | `!dj playlist list\|create\|delete\|show\|use\|add\|remove\|move\|import <name> ...`, `!dj mode requests\|playlist\|ai` | playlists + pick source |
 | `!dj audit [n]`, `!dj config` | audit / settings |
 
-Removed settings: `requests`, `max_per_user`, `cooldown_s`, `max_queue`, `approval`, `auto_remove`, `cost`
+Removed settings: `dmca_safe` (service flag now), `requests`, `max_per_user`, `cooldown_s`, `max_queue`, `approval`, `auto_remove`, `cost`
 (request-era; the service owns limits). The economy cost-per-request was dropped with `!sr` (it only
 served requests) and the `economy` grant is gone. The DJ no longer plays media (no `player.play`
 grant) and no longer publishes overlay surfaces: music is the single source for now-playing/queue.
@@ -83,7 +94,7 @@ Queue service (`waddles.core.service.music-requests`, scopes enforced by the hos
 sends an actor or community): `requests.list {limit}` -> `{now_playing, queue, total_queued, ai_dj_on}`,
 `requests.advance_due {}`, `requests.add {title, artist, source_url?, duration_ms, kind:"dj"}` -> `{item, position}`
 (errors `queue_full`, `duplicate`, `invalid_url`; needs `music:requests.manage`), `requests.import {items<=100}`,
-`dj.get {}` / `dj.set {enabled}` -> `{enabled}`. Items never carry a requester.
+`music.stats.top {kind:artist|song, limit<=25}` -> `{items:[{title?,artist,plays}]}`, `dj.get {}` / `dj.set {enabled}` -> `{enabled}`. Items never carry a requester.
 Without the grant every call is `NotGranted` and the DJ replies that it is not allowed to use the music queue.
 
 Providers (derived from `bundles/contracts/*.v1.json`; tests `include_str!` them, so drift fails the build):

@@ -97,7 +97,6 @@ fn settings_lists_modes_and_ai_toggles_round_trip() {
     let h = host();
     for (k, v) in [
         ("explicit", "off"),
-        ("dmca_safe", "on"),
         ("dj_min_queue", "5"),
         ("dj_requests_per_pick", "4"),
         ("max_duration_s", "300"),
@@ -110,7 +109,7 @@ fn settings_lists_modes_and_ai_toggles_round_trip() {
     }
     assert!(m(&h, "!dj set explicit maybe").contains("expected on|off"));
     let c = cfg(&h);
-    assert!(!c.explicit_allowed && c.dmca_safe);
+    assert!(!c.explicit_allowed);
     assert_eq!(
         (
             c.max_duration_s,
@@ -123,6 +122,7 @@ fn settings_lists_modes_and_ai_toggles_round_trip() {
     );
     // removed request-era settings are rejected, not silently accepted
     for gone in [
+        "dmca_safe",
         "requests",
         "approval",
         "auto_remove",

@@ -105,6 +105,10 @@ permissions:
   justification: One-shot migration of the pre-1.1.0 DJ kv queue into the shared queue
   params:
     write: true
+- id: tool.call:waddles.core.service.music-requests:music.stats.top
+  justification: Read aggregate community play history (top artists/songs, no requester) to weight and fill DJ picks
+  params:
+    write: false
 - id: tool.call:waddles.core.service.music-requests:dj.get
   justification: Read the single stored AI DJ on/off setting
   params:
@@ -159,6 +163,9 @@ requested_tools:
   target_app_id: waddles.core.service.music-requests
 - tool: requests.import
   access: write
+  target_app_id: waddles.core.service.music-requests
+- tool: music.stats.top
+  access: read
   target_app_id: waddles.core.service.music-requests
 - tool: dj.get
   access: read

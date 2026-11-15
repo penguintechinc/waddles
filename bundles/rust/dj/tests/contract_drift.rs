@@ -14,7 +14,8 @@ const BUNDLE_MANIFEST: &str = include_str!("../bundle.yaml");
 /// Tools of `waddles.core.service.music-requests` the DJ may request (from
 /// `docs/music-requests-service.md`): every one must be granted, and nothing else.
 const REQUESTS_TARGET: &str = "waddles.core.service.music-requests";
-const REQUESTS_TOOLS: [&str; 6] = [
+const REQUESTS_TOOLS: [&str; 7] = [
+    "music.stats.top",
     "requests.list",
     "requests.advance_due",
     "requests.add",
@@ -44,12 +45,17 @@ fn every_requested_tool_exists_in_its_producers_contract() {
     let ai_target = ai["target_app_id"].as_str().unwrap();
     let reqs = requested(HUB_MANIFEST);
     assert!(
-        reqs.len() >= 17,
+        reqs.len() >= 18,
         "examined too few tool grants: {}",
         reqs.len()
     );
     for (target, tool) in &reqs {
-        if let Some(rest) = tool.strip_prefix("music.") {
+        if target == REQUESTS_TARGET {
+            assert!(
+                REQUESTS_TOOLS.contains(&tool.as_str()),
+                "unexpected music-requests tool {tool}"
+            );
+        } else if let Some(rest) = tool.strip_prefix("music.") {
             let (provider, op) = rest.split_once('.').unwrap();
             assert_eq!(target, &format!("waddles.core.service.music-{provider}"));
             // The DJ never plays media: no player tools may be requested.
@@ -61,12 +67,6 @@ fn every_requested_tool_exists_in_its_producers_contract() {
         } else if tool.starts_with("ai.") {
             assert_eq!(target, ai_target);
             assert!(ai["tools"].get(tool).is_some(), "{tool} not in ai-tools.v1");
-        } else {
-            assert_eq!(target, REQUESTS_TARGET, "unexpected grant {target}:{tool}");
-            assert!(
-                REQUESTS_TOOLS.contains(&tool.as_str()),
-                "unexpected music-requests tool {tool}"
-            );
         }
     }
     for t in REQUESTS_TOOLS {
