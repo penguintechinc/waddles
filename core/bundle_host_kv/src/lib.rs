@@ -275,7 +275,7 @@ pub fn error_detail(err: &KvError) -> String {
 /// was a single INFO line with a bare kind. Guest-caused rejections (`invalid_key`,
 /// `too_large`, `quota_exceeded`, `rate_limited`) log at WARN so a chatty bundle cannot
 /// flood ERROR; everything the operator must act on (`not_granted`, `backend`,
-/// `reconciling`) logs at ERROR. No key, value or secret is ever included.
+/// `reconciling`, `key_unavailable`, `integrity`) logs at ERROR. No key, value or secret is ever included.
 pub fn report_failure(stage: &'static str, op: &str, scope: &KvScope, err: &KvError) {
     let kind = err.code();
     metrics::record_stage_error(stage, op, kind);
@@ -296,7 +296,11 @@ pub fn report_failure(stage: &'static str, op: &str, scope: &KvScope, err: &KvEr
             error = %detail,
             "bundle kv call rejected"
         ),
-        KvError::NotGranted(_) | KvError::Reconciling(_) | KvError::Backend(_) => {
+        KvError::NotGranted(_)
+        | KvError::Reconciling(_)
+        | KvError::Backend(_)
+        | KvError::KeyUnavailable(_)
+        | KvError::Integrity(_) => {
             tracing::error!(
                 stage,
                 tenant = %scope.tenant,
