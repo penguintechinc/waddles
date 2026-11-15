@@ -57,6 +57,10 @@ _mirror_skipped_counter = _meter.create_counter(
     "waddles_role_mirror_skipped_not_member_total",
     description="Source role holders skipped because they are not in the target guild",
 )
+_mirror_cycle_counter = _meter.create_counter(
+    "waddles_role_mirror_cycle_revocations_total",
+    description="Cyclic role-mirror mappings found at reconcile time (grants revoked, fail-closed)",
+)
 _mirror_errors_counter = _meter.create_counter(
     "waddles_role_mirror_errors_total", description="Role-mirror mapping failures, fail-closed"
 )
@@ -222,6 +226,72 @@ def _reject_target_used_by_other_mapping(
         raise pairing_svc.role_unavailable("target_already_mirrored", community_id, others[0])
 
 
+def _reject_mirror_cycle(
+    dal: Any,
+    community_id: int,
+    new_edge: tuple[tuple[str, str], tuple[str, str]],
+) -> None:
+    """409 if `new_edge` closes a cycle through mappings of ANY community (shared guilds).
+
+    Mirrors are reconciled per guild, so two communities sharing guilds can form a cycle that
+    neither community's own graph shows (revocation bypass). The graph is built from every
+    mapping. The rejection is ONE generic ROLE_UNAVAILABLE 409 whoever owns the edges, so the
+    response is not an oracle for other tenants' mappings; the owner scope (own / same-tenant
+    / cross-tenant) is only logged server-side, and each rejection is a per-community audit line.
+    """
+    t = dal.discord_role_mirror_mappings
+    rows = list(dal(t.id > 0).select())
+    edges = [
+        ((r.source_guild_id, r.source_role_id), (r.target_guild_id, r.target_role_id)) for r in rows
+    ]
+    if not would_create_cycle(edges, new_edge):
+        return
+    own_tenant = pairing_svc.community_tenant_id(dal, community_id)
+    foreign = [int(r.community_id) for r in rows if int(r.community_id) != community_id]
+    scope = "own"
+    if foreign:
+        scope = (
+            "same_tenant"
+            if all(pairing_svc.community_tenant_id(dal, c) == own_tenant for c in foreign)
+            else "cross_tenant"
+        )
+    logger.warning("role_mirror.cycle_rejected community_id=%s scope=%s", community_id, scope)
+    raise pairing_svc.role_unavailable(
+        f"mirror_cycle_{scope}", community_id, foreign[0] if foreign else community_id
+    )
+
+
+_GRAPH_LOCK_KEY = "role_mirror:graph"
+
+
+def _take_mirror_graph_lock(dal: Any) -> None:
+    """Serialize every mirror-mapping create on ONE global advisory lock for this transaction.
+
+    A cycle can span guilds the new edge never touches (G1->G2 racing G3->G1 via a third guild),
+    so per-guild locks are not enough; creates are rare, contention is fine. Postgres only --
+    other dialects (sqlite in tests) serialize writers at the connection level.
+    """
+    if str(getattr(dal, "_dbname", "")).startswith("postgres"):
+        dal.executesql("SELECT pg_advisory_xact_lock(hashtext(%s))", placeholders=[_GRAPH_LOCK_KEY])
+
+
+def _check_new_mapping(
+    dal: Any,
+    community_id: int,
+    src: tuple[str, str],
+    dst: tuple[str, str],
+) -> None:
+    """Every uniqueness / collision / cycle rule for a new `src -> dst` mapping (re-runnable)."""
+    _reject_roles_used_by_bindings(dal, community_id, [src, dst])
+    _reject_target_used_by_other_mapping(dal, community_id, dst[0], dst[1])
+    if any(
+        (m.source_guild_id, m.source_role_id, m.target_guild_id, m.target_role_id) == (*src, *dst)
+        for m in list_mappings(dal, community_id)
+    ):
+        raise conflict("That mirror mapping already exists")
+    _reject_mirror_cycle(dal, community_id, (src, dst))
+
+
 def list_mappings(dal: Any, community_id: int) -> list[RoleMirrorMapping]:
     """Every mirror mapping for `community_id`, oldest first."""
     _ensure_tables(dal)
@@ -269,25 +339,10 @@ async def create_mapping(
                 409,
                 "pairing_not_enabled",
             )
-    _reject_roles_used_by_bindings(
-        dal, community_id, [(src_guild, src_role), (dst_guild, dst_role)]
-    )
-
-    _reject_target_used_by_other_mapping(dal, community_id, dst_guild, dst_role)
+    src = (src_guild, src_role)
+    dst = (dst_guild, dst_role)
     t = dal.discord_role_mirror_mappings
-    existing = list_mappings(dal, community_id)
-    if any(
-        (m.source_guild_id, m.source_role_id, m.target_guild_id, m.target_role_id)
-        == (src_guild, src_role, dst_guild, dst_role)
-        for m in existing
-    ):
-        raise conflict("That mirror mapping already exists")
-    edges = [
-        ((m.source_guild_id, m.source_role_id), (m.target_guild_id, m.target_role_id))
-        for m in existing
-    ]
-    if would_create_cycle(edges, ((src_guild, src_role), (dst_guild, dst_role))):
-        raise conflict("That mapping would create a mirror cycle")
+    _check_new_mapping(dal, community_id, src, dst)  # fast-fail; re-run under lock below
 
     for guild, role in ((src_guild, src_role), (dst_guild, dst_role)):
         roles = await list_roles(dal, community_id, guild)
@@ -302,6 +357,8 @@ async def create_mapping(
             )
 
     try:
+        _take_mirror_graph_lock(dal)
+        _check_new_mapping(dal, community_id, src, dst)  # authoritative, same transaction
         row_id = t.insert(
             community_id=community_id,
             source_guild_id=src_guild,
@@ -534,6 +591,90 @@ async def _still_wanted_by_other_mapping(
     return False
 
 
+async def _revoke_cyclic_mapping(
+    dal: Any,
+    mapping: Any,
+    client: DiscordRoleTargetClient,
+    cache: dict[str, _GuildState],
+    summary: MirrorSummary,
+    paired_guilds: set[str],
+) -> None:
+    """Fail closed on a mapping that lies on a mirror cycle: grant nothing, revoke its ledger.
+
+    Every role this mapping granted is removed from the target (and its ledger row deleted), so a
+    cycle can never keep a role alive by re-granting what another leg revokes. A failed removal
+    keeps the ledger row for the next pass. Alerts via ERROR log + metric.
+    """
+    mapping_id = int(mapping.id)
+    dst_guild, dst_role = str(mapping.target_guild_id), str(mapping.target_role_id)
+    grants_t = dal.discord_role_mirror_grants
+    removed = 0
+    error = "MirrorCycle"
+    if dst_guild not in paired_guilds:
+        # Parity with NotPairedError in _reconcile_mapping: no Discord calls for unpaired guilds.
+        error = "MirrorCycle:not_paired"
+    else:
+        try:
+            target = await _snapshot(client, cache, dst_guild)
+            for row in dal(
+                (grants_t.mapping_id == mapping_id) & (grants_t.platform == "discord")
+            ).select():
+                uid = str(row.platform_user_id)
+                roles = target.roles.get(uid)
+                if roles is None or dst_role not in roles:
+                    present = False
+                else:
+                    present = True
+                if not present and not target.complete:
+                    # Absence is unproven on an incomplete snapshot: keep the row, retry next pass.
+                    error = "MirrorCycle:incomplete_snapshot"
+                    continue
+                if present and roles is not None:
+                    if not await client.remove_role(
+                        guild_id=dst_guild, user_id=uid, role_id=dst_role
+                    ):
+                        continue  # keep the ledger row; retry next pass
+                    removed += 1
+                    roles.discard(dst_role)
+                dal(
+                    (grants_t.mapping_id == mapping_id) & (grants_t.platform_user_id == uid)
+                ).delete()
+                dal.commit()
+        except (DiscordSyncError, TransportUnavailable) as exc:
+            error = f"MirrorCycle:{type(exc).__name__}"
+    _record_result(dal, mapping_id, added=0, removed=removed, skipped=0, error=error)
+    summary.roles_removed += removed
+    summary.mappings_failed += 1
+    _mirror_removed_counter.add(removed)
+    _mirror_errors_counter.add(1)
+    _mirror_cycle_counter.add(1)
+    logger.error(
+        "role_mirror.cycle_revoked community_id=%s mapping_id=%s roles_removed=%d error=%s",
+        int(mapping.community_id),
+        mapping_id,
+        removed,
+        error,
+    )
+
+
+def _cyclic_mapping_ids(rows: list[Any]) -> set[int]:
+    """Ids of every mapping that lies on a mirror cycle (across all communities)."""
+    edges = [
+        (
+            int(r.id),
+            (str(r.source_guild_id), str(r.source_role_id)),
+            (str(r.target_guild_id), str(r.target_role_id)),
+        )
+        for r in rows
+    ]
+    cyclic: set[int] = set()
+    for rid, src, dst in edges:
+        others = [(s_, d_) for i, s_, d_ in edges if i != rid]
+        if would_create_cycle(others, (src, dst)):
+            cyclic.add(rid)
+    return cyclic
+
+
 async def reconcile_role_mirrors(
     dal: Any,
     *,
@@ -549,7 +690,9 @@ async def reconcile_role_mirrors(
     summary = MirrorSummary()
     t = dal.discord_role_mirror_mappings
     by_community: dict[int, list[Any]] = {}
-    for row in dal(t.id > 0).select(orderby=t.id):
+    all_rows = list(dal(t.id > 0).select(orderby=t.id))
+    cyclic = _cyclic_mapping_ids(all_rows)
+    for row in all_rows:
         by_community.setdefault(int(row.community_id), []).append(row)
 
     for community_id, rows in by_community.items():
@@ -589,5 +732,8 @@ async def reconcile_role_mirrors(
         }
         for row in rows:
             async with bundle_span("role_sync.mirror", mapping_id=int(row.id)):
-                await _reconcile_mapping(dal, row, client, cache, summary, paired_guilds)
+                if int(row.id) in cyclic:
+                    await _revoke_cyclic_mapping(dal, row, client, cache, summary, paired_guilds)
+                else:
+                    await _reconcile_mapping(dal, row, client, cache, summary, paired_guilds)
     return summary
