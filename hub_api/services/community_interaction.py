@@ -790,22 +790,30 @@ def _validated_overrides(
             continue
         if isinstance(role_id, bool) or not isinstance(role_id, int):
             raise ApiError("communityRoleId must be an integer", 400, "BAD_REQUEST")
-        if (
+        role = (
             dal(
                 (dal.community_roles.id == role_id)
                 & (dal.community_roles.community_id == community_id)
             )
             .select()
             .first()
-            is None
-        ):
+        )
+        if role is None:
             raise ApiError("Role not found in this community", 400, "BAD_REQUEST")
+        if not _role_covered(role, editor_scopes):
+            raise ApiError(
+                "Cannot change overrides for a role holding scopes you do not hold",
+                403,
+                "SCOPE_ESCALATION",
+            )
         grant = normalize_scopes(override.get("grantScopes") or [])
         deny = normalize_scopes(override.get("denyScopes") or [])
         guard_grant(editor_scopes, set(grant) | set(deny))
         scope = override.get("scope", "both")
         if scope not in _OVERRIDE_SCOPES:
             raise ApiError("scope must be one of permanent, temporary, both", 400, "BAD_REQUEST")
+        if any(c["role_id"] == role_id and c["scope"] == scope for c in clean):
+            raise ApiError("duplicate override for the same role and scope", 400, "BAD_REQUEST")
         clean.append({"role_id": role_id, "grant": grant, "deny": deny, "scope": scope})
     return clean
 

@@ -921,9 +921,17 @@ class TestChannelOverrideEscalation:
             client,
             auth_headers,
             (community_id, channel_id, admin_role),
-            {"denyScopes": ["channels:read"]},
+            {"denyScopes": ["community.channels:manage"]},  # a scope the editor DOES hold
         )
         assert denied.status_code == 403
+        assert (
+            await self._put(
+                client,
+                auth_headers,
+                (community_id, channel_id, admin_role),
+                {"grantScopes": ["community.channels:manage"]},
+            )
+        ).status_code == 403
         # A PUT that omits the admin role's override (entries for a covered role only) keeps it.
         ok = await self._put(
             client, auth_headers, (community_id, channel_id, role_id), {"grantScopes": []}
