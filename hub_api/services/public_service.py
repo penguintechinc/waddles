@@ -49,21 +49,19 @@ from flask_core.tenancy import TenantContext, tenant_scoped
 
 from config import HubAPIConfig
 from services.auth_service import get_hub_settings_map
+from services.default_tenant import require_default_tenant
 from services.errors import not_found
 
 
 async def resolve_default_tenant(async_dal: Any, dal: Any, cfg: HubAPIConfig) -> TenantContext:
     """Resolve `HubAPIConfig.default_tenant_slug` into a `TenantContext` for pre-auth queries.
 
-    Raises `LookupError` if the default tenant row is missing/inactive --
-    a deployment-configuration error (the seed migration always creates
-    it), not a per-request 4xx; callers let this propagate to a 500
-    rather than inventing a fake tenant_id.
+    Raises `DefaultTenantMissingError` (a `LookupError`) -- after logging an ERROR naming the
+    slug and the reserved tenants that exist -- if the row is missing/inactive. That is a
+    deployment-configuration error, not a per-request 4xx; callers turn it into a structured
+    5xx rather than inventing a fake tenant_id or returning an empty result.
     """
-    rows = await async_dal.select_async(dal(dal.tenants.slug == cfg.default_tenant_slug))
-    row = rows.first() if rows else None
-    if row is None or not row.is_active:
-        raise LookupError(f"default tenant '{cfg.default_tenant_slug}' missing or inactive")
+    row = await require_default_tenant(async_dal, dal, cfg.default_tenant_slug)
     return TenantContext(
         tenant_id=row.id, tenant_slug=row.slug, is_default=(row.slug == cfg.default_tenant_slug)
     )

@@ -10,7 +10,7 @@
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
         test-data-plane-parity test-connector-parity gen-connector-parity-expected \
-        test-helm-matrix test-helm-matrix-quick
+        test-hub-api test-helm-matrix test-helm-matrix-quick
 
 dev:
 	$(error dev: docker-compose is deprecated -- deploy to Kubernetes via scripts/deploy-alpha.sh)
@@ -73,6 +73,14 @@ test-helm-matrix-quick:
 # Deployments). See scripts/check_alpha_deploy_no_wait.py's module docstring.
 check-alpha-deploy-no-wait:
 	@python3 scripts/check_alpha_deploy_no_wait.py
+
+# Live functional smoke of the deployed alpha (KUBE_CONTEXT=dal2alpha); see scripts/smoke/README.md.
+.PHONY: alpha-smoke test-alpha-smoke
+alpha-smoke:
+	@bash scripts/smoke/alpha-smoke.sh
+
+test-alpha-smoke:
+	@python3 -m pytest -q scripts/smoke/test_alpha_smoke.py
 
 # alpha-deploy.sh self-heals a release stuck in pending-* (interrupted upgrade);
 # stub-driven test of that recovery logic, no cluster touched.
@@ -165,6 +173,11 @@ release-merge:
 release-auto-merge:
 	@test -n "$(PRS)" || { echo 'usage: make release-auto-merge PRS="<n> <n> ..." [DRY=1]' >&2; exit 2; }
 	@bash scripts/release-auto-merge.sh $(if $(DRY),--dry-run) $(PRS)
+
+# hub_api pytest in a hash-pinned venv (built/refreshed automatically):
+#   make test-hub-api PYTEST_ARGS="tests/test_config.py -x"
+test-hub-api:
+	@bash scripts/test-hub-api.sh $(PYTEST_ARGS)
 
 test-unit:
 	@echo "Running unit tests..."

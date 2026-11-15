@@ -149,7 +149,7 @@ async fn rig() -> Rig {
     std::env::set_var("SECURITY_TRANSPORT_AUTH", "false");
     let conn = redis::Client::open(url)
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let store = InteractionStore::new(conn);

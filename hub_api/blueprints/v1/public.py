@@ -37,6 +37,7 @@ from config import HubAPIConfig
 from services import landing_stats_cache
 from services import public_service as svc
 from services.db_routing import get_read_dals, reads_from_replica, record_primary_read
+from services.default_tenant import DefaultTenantMissingError
 from services.errors import ApiError
 from services.pagination import parse_limit
 
@@ -89,8 +90,12 @@ async def _default_tenant_or_500(async_dal: Any, dal: Any) -> Any:
     """
     try:
         return await svc.resolve_default_tenant(async_dal, dal, _cfg())
-    except LookupError as exc:
-        raise ApiError(str(exc), 500, "INTERNAL_ERROR") from exc
+    except DefaultTenantMissingError as exc:
+        # The ERROR log (slug + existing reserved tenants) was written by `require_default_tenant`;
+        # the client gets a stable structured code, never the tenant inventory.
+        raise ApiError(
+            "The platform's default tenant is not configured", 500, "DEFAULT_TENANT_MISSING"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
