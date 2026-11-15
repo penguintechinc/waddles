@@ -50,6 +50,7 @@ images:
       - hub_api/requirements.txt
       - hub_api/build-tools/requirements.txt
       - hub_api/app.py
+      - hub_api/telemetry.py
       - hub_api/config.py
       - hub_api/bootstrap.py
       - hub_api/blueprints/**
@@ -137,6 +138,7 @@ images:
       - core/egress_assertion/**
       - core/egress_detokenizer/**
       - core/hub_client/**
+      - core/command_latency/**
       - core/service_auth/**
 
   svc-process:
@@ -167,6 +169,7 @@ images:
       - core/connection_resolver/**
       - core/egress_assertion/**
       - core/hub_client/**
+      - core/command_latency/**
       - core/bundle_host_surface/**
       - core/service_auth/**
 
@@ -193,6 +196,7 @@ images:
       - core/discord_mentions/**
       - core/egress_assertion/**
       - core/hub_client/**
+      - core/command_latency/**
       - core/bundle_host_surface/**
       - core/service_auth/**
 

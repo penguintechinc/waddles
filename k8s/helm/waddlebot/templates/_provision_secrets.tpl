@@ -66,7 +66,7 @@ the inputs Secret and wins over generation, but never over an existing real valu
 {{- end -}}
 
 {{- define "waddlebot.prov.tlsCa" -}}
-{{- $_ := set .acc "lines" (append .acc.lines (printf "tls_ca|%s|%s|%s|%s" .caTag .key .cn (printf "%v%s" (.days | default 365) (ternary ",anytier" "" (.anyTier | default false))))) -}}
+{{- $_ := set .acc "lines" (append .acc.lines (printf "tls_ca|%s|%s|%s|%s" .caTag .key .cn ((.days | default 365) | toString))) -}}
 {{- $explicit := (.explicit | default "") | toString -}}
 {{- if ne $explicit "" -}}
 {{- $_ := set .acc.inputs (printf "%s__%s" .secret .key) $explicit -}}
@@ -74,7 +74,7 @@ the inputs Secret and wins over generation, but never over an existing real valu
 {{- end -}}
 
 {{- define "waddlebot.prov.tlsLeaf" -}}
-{{- $_ := set .acc "lines" (append .acc.lines (printf "tls_leaf|%s|%s|%s|%s|%s|%s|%s" .caTag .certKey .keyKey .cn (.dnsCsv | default "") (.uriCsv | default "") (printf "%v%s" (.days | default 365) (ternary ",anytier" "" (.anyTier | default false))))) -}}
+{{- $_ := set .acc "lines" (append .acc.lines (printf "tls_leaf|%s|%s|%s|%s|%s|%s|%s" .caTag .certKey .keyKey .cn (.dnsCsv | default "") (.uriCsv | default "") ((.days | default 365) | toString))) -}}
 {{- $ec := (.explicitCert | default "") | toString -}}
 {{- $ek := (.explicitKey | default "") | toString -}}
 {{- if and (ne $ec "") (ne $ek "") -}}

@@ -34,10 +34,6 @@ global:
       enabled: true
       issuerKind: "ClusterIssuer"
       issuerName: "waddlebot-internal-ca"
-  valkeyTls:
-    externalSecret: true
-  hubApiGrpcTls:
-    externalSecret: true
   imagePullSecrets:
     - name: ghcr-pull-secret
   corsOrigin: "https://hub.waddlebot.io,https://waddlebot.io,https://waddles.penguintech.cloud,https://waddlebot.penguintech.cloud,http://localhost:3000,http://localhost:5173"

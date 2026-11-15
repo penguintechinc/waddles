@@ -33,10 +33,6 @@ global:
       enabled: true
       issuerKind: "ClusterIssuer"
       issuerName: "waddlebot-internal-ca"
-  valkeyTls:
-    externalSecret: true
-  hubApiGrpcTls:
-    externalSecret: true
 
 pipeline:
   hubApi:

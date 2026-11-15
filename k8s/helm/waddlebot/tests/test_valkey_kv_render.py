@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from provision_harness import hook_failure, with_provisioned  # type: ignore[import-not-found]
+from provision_harness import materialize, with_provisioned  # type: ignore[import-not-found]
 
 _CHART = Path(__file__).resolve().parent.parent
 _ENVS = (
@@ -332,9 +332,10 @@ def test_valkey_tls_cert_covers_kv_san():
     assert len(sec) == 1
 
 
-def test_beta_tier_without_certs_fails_closed():
+def test_beta_tier_without_certs_generates_them_at_runtime():
     """Real beta tier with the cert source removed (no cert-manager, not delegated, no material):
-    a missing Valkey TLS cert fails the provisioner closed (never silent plaintext).
+    owner policy -- internal identities are generated create-if-absent in EVERY tier -- so the
+    provisioner mints the Valkey TLS identity instead of failing (never silent plaintext).
     """
     r = subprocess.run(
         [
@@ -359,5 +360,7 @@ def test_beta_tier_without_certs_fails_closed():
     )
     assert r.returncode == 0, r.stderr
     docs = [d for d in yaml.safe_load_all(r.stdout) if d]
-    err = hook_failure(docs)
-    assert "valkey-tls" in err and "outside alpha/local" in err
+    secrets = materialize(docs)
+    valkey = [v for k, v in secrets.items() if k.endswith("valkey-tls")]
+    assert len(valkey) == 1, sorted(secrets)
+    assert {"ca.crt", "tls.crt", "tls.key"} <= set(valkey[0]["data"])
