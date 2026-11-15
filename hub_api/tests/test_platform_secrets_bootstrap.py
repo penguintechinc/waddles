@@ -49,6 +49,7 @@ from services.platform_secrets.importer import import_candidate
 from services.platform_secrets.refresher import CacheRefresher
 from services.platform_secrets.registry import REGISTRY, SecretType
 from services.platform_secrets.repository import (
+    AnchorRow,
     EventRow,
     MarkerRow,
     NewSecret,
@@ -79,6 +80,8 @@ class FakeRepo:
         self.secrets: list[SecretRow] = []
         self.event_rows: list[EventRow] = []
         self.notifies = 0
+        self.claimed: set[uuid.UUID] = set()
+        self.anchor: AnchorRow | None = None
         self.before_insert: Any = None
         self._lock = threading.RLock()
 
@@ -162,6 +165,30 @@ class FakeRepo:
                     )
                     return True
         return False
+
+    def read_anchor(self) -> AnchorRow | None:
+        """The escrow anchor (None until a manifest was written)."""
+        return self.anchor
+
+    def advance_anchor(
+        self, generation: int, manifest_digest: bytes, kek_id: str, mac: bytes
+    ) -> bool:
+        """Strictly-forward anchor move (mirrors the SQL WHERE and the trigger)."""
+        with self._lock:
+            if self.anchor is not None and self.anchor.generation >= generation:
+                return False
+            self.anchor = AnchorRow(generation, manifest_digest, kek_id, mac)
+            return True
+
+    def claim_request(
+        self, idempotency_key: uuid.UUID, *, secret_type: int, action: int, actor_uuid: uuid.UUID
+    ) -> bool:
+        """Unique-key semantics of the replay ledger."""
+        with self._lock:
+            if idempotency_key in self.claimed:
+                return False
+            self.claimed.add(idempotency_key)
+            return True
 
     def chain_tip(self) -> bytes | None:
         """Newest chain hash."""
@@ -711,8 +738,10 @@ def test_repository_never_updates_or_deletes() -> None:
     joined = "\n".join(sql_lines).upper()
     for forbidden in ("UPDATE PLATFORM_VAULT", "DELETE FROM", "TRUNCATE"):
         assert forbidden not in joined, forbidden
-    assert joined.count("UPDATE {SCHEMA}") == 1
+    # exactly two UPDATEs, both forward-only: secret `state`, and the escrow anchor generation
+    assert joined.count("UPDATE {SCHEMA}") == 2
     assert "STATE < :STATE" in joined
+    assert "ESCROW_GENERATION < :G" in joined
     assert "SEALED_VALUE =" not in joined
     assert "ON CONFLICT DO NOTHING" in source
 

@@ -24,12 +24,14 @@ from services.platform_secrets.bootstrap import (
     bootstrap_platform_secrets,
 )
 from services.platform_secrets.escrow import (
+    GENERATION_PREFIX,
     MANIFEST_KEY,
     EscrowMisconfiguredError,
     EscrowRefusedError,
     EscrowUnavailableError,
     S3EscrowStore,
     escrow_store_from_env,
+    generation_key,
     load_manifest,
     object_key,
     restore_from_escrow,
@@ -183,7 +185,12 @@ def test_bootstrap_escrows_every_secret_and_signs_a_manifest() -> None:
         assert entry.key.startswith("platform/secrets-escrow/")
         assert entry.key in store.objects
         assert entry.fingerprint != b"\x00" * 32
-    assert set(store.objects) == {MANIFEST_KEY} | {e.key for e in manifest.entries}
+    assert set(store.objects) == {MANIFEST_KEY, generation_key(1)} | {
+        e.key for e in manifest.entries
+    }
+    assert store.objects[generation_key(1)] == store.objects[MANIFEST_KEY]  # write-once copy
+    assert repo.anchor is not None and repo.anchor.generation == 1  # freshness anchor in the DB
+    assert repo.anchor.manifest_digest == manifest.digest
     # every escrow write extended the audit chain with an `escrowed` event
     assert sum(1 for e in repo.event_rows if e.event_type == 11) == 3
 
@@ -215,7 +222,7 @@ def test_nothing_in_the_escrow_is_plaintext() -> None:
             assert plain not in blob
             assert base64.b64encode(plain) not in blob
     for key, blob in store.objects.items():
-        if key != MANIFEST_KEY:
+        if key != MANIFEST_KEY and not key.startswith(GENERATION_PREFIX):
             assert blob[:3] == b"WPE"
 
 
@@ -615,3 +622,156 @@ def test_escrow_store_from_env() -> None:
 def test_object_keys_are_canonical() -> None:
     assert object_key(1, None, 3) == "platform/secrets-escrow/1/global/3.sealed"
     assert object_key(3, 0, 1) == "platform/secrets-escrow/3/0/1.sealed"
+
+
+# ------------------------------------------------------------------------ rollback anchor
+
+
+def _rotate_and_resync(repo: FakeRepo, store: MemStore, hours: int = 1) -> None:
+    """Rotate the bundle key by hand and publish the next manifest generation."""
+    _add_v2(repo, BUNDLE, NOW + timedelta(hours=hours))
+    assert sync_escrow(repo, KEK_A, store, now=NOW + timedelta(hours=hours)).status == "ok"
+
+
+def test_happy_path_anchor_advances_with_every_generation_and_restore_reanchors() -> None:
+    repo, store = _escrowed()
+    first = repo.anchor
+    assert first is not None and first.generation == 1
+    _rotate_and_resync(repo, store)
+    assert repo.anchor is not None and repo.anchor.generation == 2
+    assert repo.anchor.manifest_digest != first.manifest_digest
+    assert store.objects[generation_key(1)] != store.objects[generation_key(2)]  # write-once
+    # restore into a wiped store that kept the marker + anchor: latest manifest is >= the anchor
+    fresh = _wiped_with_marker(repo)
+    fresh.anchor = repo.anchor
+    report = _boot(fresh, store)
+    assert not report.first_run and len(fresh.secrets) == 4
+    assert fresh.anchor.generation == 2
+
+
+def test_older_signed_manifest_is_refused_as_a_rollback() -> None:
+    repo, store = _escrowed()
+    old_doc = store.objects[MANIFEST_KEY]  # generation 1, validly signed
+    _rotate_and_resync(repo, store)
+    store.objects[MANIFEST_KEY] = old_doc  # attacker with bucket write replays the older manifest
+    del store.objects[generation_key(2)]  # ... and removes the genuine write-once copy
+    victim = _wiped_with_marker(repo)
+    victim.anchor = repo.anchor
+    with pytest.raises(PlatformVaultRefusedError) as err:
+        _boot(victim, store)
+    assert err.value.reason == "escrow_rollback" and victim.secrets == []
+    with pytest.raises(EscrowRefusedError) as direct:
+        restore_from_escrow(victim, KEK_A, store, now=NOW)
+    assert direct.value.reason == "escrow_rollback"
+    assert victim.secrets == [] and victim.event_rows == []
+
+
+def test_stale_latest_pointer_heals_from_the_anchored_write_once_generation() -> None:
+    repo, store = _escrowed()
+    old_doc = store.objects[MANIFEST_KEY]
+    _rotate_and_resync(repo, store)
+    store.objects[MANIFEST_KEY] = old_doc  # replay; the generation-2 object is still there
+    victim = _wiped_with_marker(repo)
+    victim.anchor = repo.anchor
+    _boot(victim, store)  # control: restores the CURRENT keys, not the replayed ones
+    assert {(r.secret_type, r.version, r.state) for r in victim.secrets} == {
+        (1, 1, 3),
+        (1, 2, 2),
+        (2, 1, 2),
+        (3, 1, 2),
+    }
+
+
+def test_retired_version_in_an_entry_is_refused() -> None:
+    repo, store = FakeRepo(), MemStore()
+    _boot(repo, store)
+    _add_v2(repo, BUNDLE, NOW + timedelta(hours=1))
+    sync_escrow(repo, KEK_A, store, now=NOW)  # manifest lists v1 (verify-only) and v2
+    v1 = repo.rows_for(BUNDLE, None)[0]
+    from services.platform_secrets.event_chain import append_event
+
+    append_event(
+        repo,
+        KEK_A,
+        secret_id=v1.id,
+        secret_type=BUNDLE,
+        scope_id=None,
+        version=1,
+        event_type=6,  # retired
+        outcome=1,
+        reason=8,
+        now=NOW + timedelta(days=2),
+    )
+    victim = _wiped_with_marker(repo)
+    victim.event_rows = list(repo.event_rows)  # the audit chain survived the wipe
+    with pytest.raises(EscrowRefusedError) as err:
+        restore_from_escrow(victim, KEK_A, store, now=NOW)
+    assert err.value.reason == "escrow_rollback" and victim.secrets == []
+
+
+def test_equal_generation_with_a_different_digest_is_refused() -> None:
+    repo, store = _escrowed()
+    forged = MemStore()
+    forged.objects = dict(store.objects)
+    _resign(forged, lambda body: body.update(written_at="2030-01-01T00:00:00.000000+00:00"))
+    victim = _wiped_with_marker(repo)
+    victim.anchor = repo.anchor  # generation 1, digest of the genuine manifest
+    healer = _wiped_with_marker(repo)
+    healer.anchor = repo.anchor
+    healed = restore_from_escrow(healer, KEK_A, forged, now=NOW)
+    assert healed is not None  # the write-once copy of the anchored generation still serves
+    del forged.objects[generation_key(1)]
+    with pytest.raises(EscrowRefusedError) as err:
+        restore_from_escrow(victim, KEK_A, forged, now=NOW)
+    assert err.value.reason == "escrow_tampered" and victim.secrets == []
+    # control: the genuine manifest at the same generation restores
+    assert restore_from_escrow(victim, KEK_A, store, now=NOW) is not None
+
+
+def test_a_tampered_anchor_is_refused_never_trusted() -> None:
+    repo, store = _escrowed()
+    assert repo.anchor is not None
+    victim = _wiped_with_marker(repo)
+    victim.anchor = replace(repo.anchor, generation=1, mac=b"\x00" * 32)
+    with pytest.raises(EscrowRefusedError) as err:
+        restore_from_escrow(victim, KEK_A, store, now=NOW)
+    assert err.value.reason == "escrow_tampered"
+    assert sync_escrow(victim, KEK_A, store, now=NOW).status == "blocked_tampered"
+
+
+def test_sync_alerts_and_republishes_when_the_bucket_was_rolled_back(otel) -> None:  # noqa: F811
+    repo, store = _escrowed()
+    old_doc = store.objects[MANIFEST_KEY]
+    _rotate_and_resync(repo, store)
+    store.objects[MANIFEST_KEY] = old_doc  # rollback of the latest pointer
+    report = sync_escrow(repo, KEK_A, store, now=NOW + timedelta(hours=2))
+    assert report.status == "ok"
+    healed = load_manifest(store, KEK_A)
+    assert healed is not None and healed.generation == 3  # never reuses 1 or 2
+    assert repo.anchor is not None and repo.anchor.generation == 3
+    drift = _counter(otel["reader"], "waddles_platform_secrets_drift_detected_total")
+    assert sum(v for k, v in drift.items() if ("outcome", "escrow_rollback") in k) >= 1
+
+
+def test_generation_keys_are_never_overwritten() -> None:
+    repo, store = _escrowed()
+    store.objects[generation_key(2)] = b"planted"  # attacker pre-plants the next write-once key
+    _add_v2(repo, BUNDLE, NOW + timedelta(hours=1))
+    sync_escrow(repo, KEK_A, store, now=NOW)
+    assert store.objects[generation_key(2)] == b"planted"
+    assert repo.anchor is not None and repo.anchor.generation == 3
+    assert store.objects[generation_key(3)] == store.objects[MANIFEST_KEY]
+
+
+def test_anchor_cannot_move_backwards_in_the_repository() -> None:
+    repo, _ = _escrowed()
+    assert repo.anchor is not None
+    assert not repo.advance_anchor(1, b"\x01" * 32, KEK_A.kek_ids[0], b"\x02" * 32)
+    assert repo.anchor.generation == 1
+
+
+def test_an_unanchored_first_restore_accepts_and_sets_the_anchor() -> None:
+    _, store = _escrowed()
+    pristine = FakeRepo()
+    _boot(pristine, store)
+    assert pristine.anchor is not None and pristine.anchor.generation == 1

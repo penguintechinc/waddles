@@ -143,6 +143,7 @@ def _refuse(reason: str, type_name: str = "all") -> PlatformVaultRefusedError:
         "escrow_invalid": "escrow_invalid",
         "escrow_missing": "escrow_invalid",
         "escrow_tampered": "escrow_tampered",
+        "escrow_rollback": "escrow_rollback",
         "escrow_unavailable": "unavailable",
         "escrow_misconfigured": "error",
     }.get(reason, "error")

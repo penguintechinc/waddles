@@ -58,7 +58,8 @@ _TABLE_PRIVS = (
     "REFERENCES",
     "TRIGGER",
 )
-_TABLES = ("secrets", "secret_events", "root_marker")
+_TABLES = ("secrets", "secret_events", "root_marker", "rotation_requests")
+_HEAD = "0110_platform_vault_rotation"  # the 0110 merge revision adds the ledger + reason codes
 
 
 def _load() -> ModuleType:
@@ -84,12 +85,15 @@ def _statements(fn_name: str) -> list[str]:
 def test_metadata_and_single_head() -> None:
     """Revision id <= 32 chars, chained off 0107, and the graph has exactly one head."""
     m = _load()
-    assert (m.revision, m.down_revision) == ("0109_platform_vault", _PRIOR)
+    assert (m.revision, m.down_revision) == (
+        "0109_platform_vault",
+        "0108_revoke_cfg_communities",
+    )
     assert len(m.revision) <= 32
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == [m.revision], f"alembic heads: {heads}"
+    assert heads == [_HEAD], f"alembic heads: {heads}"
 
 
 def test_catalog_denies_the_vault_to_every_legacy_role_and_names_no_vault_grant() -> (
@@ -126,7 +130,7 @@ def test_catalog_denies_the_vault_to_every_legacy_role_and_names_no_vault_grant(
 def test_declared_grants_have_no_delete_truncate_or_all() -> None:
     """hub-api never holds DELETE/TRUNCATE; events are INSERT/SELECT only (append-only)."""
     grants = _load().HUB_API_GRANTS
-    assert set(grants) == set(_TABLES)
+    assert set(grants) == set(_TABLES) - {"rotation_requests"}  # the ledger is 0110's
     for table, privs in grants.items():
         assert not {"DELETE", "TRUNCATE", "ALL"} & set(privs), table
     assert grants["secret_events"] == ("SELECT", "INSERT")
@@ -313,6 +317,7 @@ def _expected(role: str) -> dict[str, set[str]]:
     if role == m.HUB_API_ROLE:
         for table, privs in m.HUB_API_GRANTS.items():
             expected[table] = set(privs)
+        expected["rotation_requests"] = {"SELECT", "INSERT"}  # migration 0110
     if role in m.PUBLIC_KEY_READERS:
         expected[m.VIEW] = {"SELECT"}
     return expected
@@ -586,7 +591,8 @@ def test_check_and_unique_constraints(real_chain: PgTestDatabase) -> None:
                 _insert_secret(
                     cur, secret_type=907, version=100 + i, state=1, sealed=sealed
                 )
-        with pytest.raises(psycopg2.errors.CheckViolation):  # state out of range
+        # state out of range: the BEFORE trigger (23000) fires ahead of the CHECK (23514)
+        with pytest.raises(psycopg2.errors.IntegrityConstraintViolation):
             cur.execute(
                 _INSERT,
                 (
@@ -898,3 +904,108 @@ def test_verify_only_only_follows_active(real_chain: PgTestDatabase) -> None:
             "WHERE secret_type = 915 AND version = 2"
         )  # control: active -> verify-only is legal
     owner.close()
+
+
+# --------------------------------------------------------------------------- 0110 (T8 + anchor)
+
+
+@requires_docker
+def test_0110_reason_codes_ledger_and_anchor(real_chain: PgTestDatabase) -> None:
+    """Operator reason codes 8..10 are accepted (11 is not); the replay ledger is append-only with
+    a unique key; the escrow anchor only moves forward and its digest is fixed per generation."""
+    owner = _owner(real_chain)
+    with owner.cursor() as cur:
+        for i, reason in enumerate((8, 9, 10)):
+            cur.execute(
+                "INSERT INTO platform_vault.secret_events (secret_type, event_type, outcome, "
+                "reason, prev_chain_hash, chain_hash) VALUES (910, 8, 2, %s, %s, %s)",
+                (
+                    reason,
+                    None if (head := _chain_head(cur)) is None else psycopg2.Binary(head),
+                    psycopg2.Binary(os.urandom(32)),
+                ),
+            )
+        with pytest.raises(psycopg2.errors.CheckViolation):
+            cur.execute(
+                "INSERT INTO platform_vault.secret_events (secret_type, event_type, outcome, "
+                "reason, prev_chain_hash, chain_hash) VALUES (910, 8, 2, 11, %s, %s)",
+                (psycopg2.Binary(_chain_head(cur) or b"\x00" * 32), psycopg2.Binary(os.urandom(32))),
+            )
+    owner.close()
+    owner = _owner(real_chain)
+    key = "00000000-0000-4000-8000-0000000000aa"
+    actor = "00000000-0000-4000-8000-0000000000bb"
+    with owner.cursor() as cur:
+        cur.execute(
+            "INSERT INTO platform_vault.rotation_requests (idempotency_key, secret_type, action, "
+            "actor_uuid) VALUES (%s, 3, 1, %s)",
+            (key, actor),
+        )
+        with pytest.raises(psycopg2.errors.UniqueViolation):  # the replay ledger refuses a reuse
+            cur.execute(
+                "INSERT INTO platform_vault.rotation_requests (idempotency_key, secret_type, "
+                "action, actor_uuid) VALUES (%s, 3, 1, %s)",
+                (key, actor),
+            )
+    owner.close()
+    owner = _owner(real_chain)
+    for stmt in (
+        "UPDATE platform_vault.rotation_requests SET action = 2",
+        "DELETE FROM platform_vault.rotation_requests",
+        "TRUNCATE platform_vault.rotation_requests",
+    ):
+        with owner.cursor() as cur, pytest.raises(psycopg2.errors.IntegrityConstraintViolation):
+            cur.execute(stmt)  # append-only for every role, the owner included
+        owner.rollback()
+    owner.close()
+    hub = _as(real_chain, "waddles_hub_api")
+    with hub.cursor() as cur:
+        cur.execute("SELECT count(*) FROM platform_vault.rotation_requests")
+        assert cur.fetchone()[0] == 1
+        cur.execute(
+            "INSERT INTO platform_vault.rotation_requests (idempotency_key, secret_type, action, "
+            "actor_uuid) VALUES (gen_random_uuid(), 3, 2, %s)",
+            (actor,),
+        )
+    for stmt in (
+        "UPDATE platform_vault.rotation_requests SET action = 1",
+        "DELETE FROM platform_vault.rotation_requests",
+    ):
+        with hub.cursor() as cur, pytest.raises(psycopg2.errors.InsufficientPrivilege):
+            cur.execute(stmt)
+        hub.rollback()
+    hub.close()
+    # the anchor: forward only, digest fixed once a generation is written
+    owner = _owner(real_chain)
+    digest, mac = psycopg2.Binary(b"\x07" * 32), psycopg2.Binary(b"\x08" * 32)
+    with owner.cursor() as cur:
+        cur.execute(
+            "INSERT INTO platform_vault.root_marker (kek_id, check_mac) VALUES (%s, %s) "
+            "ON CONFLICT DO NOTHING",
+            (_KEK, psycopg2.Binary(b"\x01" * 32)),
+        )
+        anchor = (
+            "UPDATE platform_vault.root_marker SET escrow_generation = %s, "
+            "escrow_manifest_hash = %s, escrow_anchor_kek_id = %s, escrow_anchor_mac = %s"
+        )
+        cur.execute(anchor, (2, digest, _KEK, mac))
+        with pytest.raises(psycopg2.errors.IntegrityConstraintViolation):  # backwards
+            cur.execute(anchor, (1, digest, _KEK, mac))
+    owner.rollback()
+    with owner.cursor() as cur:
+        cur.execute(anchor, (2, digest, _KEK, mac))
+        with pytest.raises(psycopg2.errors.IntegrityConstraintViolation):  # same gen, new digest
+            cur.execute(anchor, (2, psycopg2.Binary(b"\x09" * 32), _KEK, mac))
+    owner.rollback()
+    with owner.cursor() as cur, pytest.raises(psycopg2.errors.CheckViolation):  # half-set anchor
+        cur.execute("UPDATE platform_vault.root_marker SET escrow_generation = 3")
+    owner.close()
+    # hub-api can advance the anchor (UPDATE on the marker), nobody else can
+    hub = _as(real_chain, "waddles_hub_api")
+    with hub.cursor() as cur:
+        cur.execute(anchor + " WHERE escrow_generation < 5", (5, digest, _KEK, mac))
+    hub.close()
+    legacy = _as(real_chain, "waddles_svc_ingest")
+    with legacy.cursor() as cur, pytest.raises(psycopg2.errors.InsufficientPrivilege):
+        cur.execute("SELECT escrow_generation FROM platform_vault.root_marker")
+    legacy.close()

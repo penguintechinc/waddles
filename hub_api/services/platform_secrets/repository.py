@@ -35,7 +35,13 @@ STATE_PENDING, STATE_ACTIVE, STATE_VERIFY_ONLY, STATE_RETIRED, STATE_DESTROYED =
 REASON_GENERATED, REASON_IMPORTED, REASON_RESTORED, REASON_ROTATED, REASON_RETIRED = 1, 2, 3, 4, 5
 #: `secret_events.event_type` codes used here.
 EVENT_GENERATED, EVENT_IMPORTED, EVENT_RESTORED = 1, 2, 3
+EVENT_ACTIVATED, EVENT_VERIFY_ONLY, EVENT_RETIRED, EVENT_DESTROYED = 4, 5, 6, 7
+EVENT_ROTATION_REQUESTED = 8
 EVENT_DRIFT, EVENT_ESCROWED = 10, 11
+#: Operator reason codes (migration 0110): why a rotation / retirement was requested.
+REASON_OP_SCHEDULED, REASON_OP_COMPROMISE, REASON_OP_MAINTENANCE = 8, 9, 10
+#: `rotation_requests.action` codes.
+ACTION_ROTATE, ACTION_RETIRE = 1, 2
 #: `secret_events.outcome` codes.
 OUTCOME_SUCCESS, OUTCOME_FAILURE = 1, 2
 
@@ -46,6 +52,20 @@ class MarkerRow:
 
     kek_id: str
     check_mac: bytes = field(repr=False)
+
+
+@dataclass(slots=True, frozen=True)
+class AnchorRow:
+    """The escrow freshness anchor kept in `root_marker` (outside the bucket, KEK-MAC'd).
+
+    Highest manifest generation ever written + the digest of that manifest. A restore refuses any
+    manifest older than this, or the same generation with another digest (replay / tamper).
+    """
+
+    generation: int
+    manifest_digest: bytes = field(repr=False)
+    kek_id: str
+    mac: bytes = field(repr=False)
 
 
 @dataclass(slots=True, frozen=True)
@@ -137,6 +157,19 @@ class PlatformVaultRepository(Protocol):
         Stamps `rotated_at` (and `retired_at` for state 4) with `at`. The table's trigger refuses a
         backward move, so a False return means the row was already at or past `state`.
         """
+
+    def read_anchor(self) -> AnchorRow | None:
+        """The escrow freshness anchor, or None while no manifest has ever been written."""
+
+    def advance_anchor(
+        self, generation: int, manifest_digest: bytes, kek_id: str, mac: bytes
+    ) -> bool:
+        """Raise the anchor to `generation` (strictly higher only); True when it moved."""
+
+    def claim_request(
+        self, idempotency_key: uuid.UUID, *, secret_type: int, action: int, actor_uuid: uuid.UUID
+    ) -> bool:
+        """Claim an `Idempotency-Key`; True when new, False when it was already used (a replay)."""
 
     def chain_tip(self) -> bytes | None:
         """`chain_hash` of the newest event, or None for an empty chain."""
@@ -317,6 +350,46 @@ class SqlRepository:
                 "actor": None if actor_uuid is None else str(actor_uuid),
                 "id": secret_id,
             },
+        )
+        return bool(result.rowcount == 1)
+
+    def read_anchor(self) -> AnchorRow | None:
+        """The anchor columns of the singleton marker row; None while generation is 0."""
+        row = self._conn.execute(
+            text(
+                "SELECT escrow_generation, escrow_manifest_hash, escrow_anchor_kek_id, "  # nosec B608  # noqa: S608
+                f"escrow_anchor_mac FROM {SCHEMA}.root_marker WHERE id = 1"
+            )
+        ).first()
+        if row is None or not row[0]:
+            return None
+        return AnchorRow(int(row[0]), bytes(row[1]), str(row[2]), bytes(row[3]))
+
+    def advance_anchor(
+        self, generation: int, manifest_digest: bytes, kek_id: str, mac: bytes
+    ) -> bool:
+        """Forward-only: `WHERE escrow_generation < :g` (the trigger also forbids going back)."""
+        result = self._conn.execute(
+            text(
+                f"UPDATE {SCHEMA}.root_marker SET escrow_generation = :g, "  # nosec B608  # noqa: S608
+                "escrow_manifest_hash = :h, escrow_anchor_kek_id = :k, escrow_anchor_mac = :m, "
+                "updated_at = now() WHERE id = 1 AND escrow_generation < :g"
+            ),
+            {"g": generation, "h": manifest_digest, "k": kek_id, "m": mac},
+        )
+        return bool(result.rowcount == 1)
+
+    def claim_request(
+        self, idempotency_key: uuid.UUID, *, secret_type: int, action: int, actor_uuid: uuid.UUID
+    ) -> bool:
+        """`INSERT ... ON CONFLICT DO NOTHING` on the ledger's unique key; 1 row = first use."""
+        result = self._conn.execute(
+            text(
+                f"INSERT INTO {SCHEMA}.rotation_requests "  # nosec B608  # noqa: S608
+                "(idempotency_key, secret_type, action, actor_uuid) "
+                "VALUES (CAST(:k AS uuid), :t, :a, CAST(:actor AS uuid)) ON CONFLICT DO NOTHING"
+            ),
+            {"k": str(idempotency_key), "t": secret_type, "a": action, "actor": str(actor_uuid)},
         )
         return bool(result.rowcount == 1)
 

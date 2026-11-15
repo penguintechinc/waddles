@@ -33,6 +33,7 @@ only registry type names, ints and fixed outcome words.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -57,12 +58,15 @@ from services.platform_secrets.registry import (
     get_spec,
 )
 from services.platform_secrets.repository import (
+    EVENT_DESTROYED,
     EVENT_ESCROWED,
     EVENT_RESTORED,
+    EVENT_RETIRED,
     OUTCOME_SUCCESS,
     REASON_RESTORED,
     STATE_ACTIVE,
     STATE_VERIFY_ONLY,
+    AnchorRow,
     NewSecret,
     PlatformVaultRepository,
     SecretRow,
@@ -76,7 +80,9 @@ from services.provider_connections.vault import (
     platform_secret_fingerprint,
     seal_escrow_object,
     seal_platform_secret,
+    sign_escrow_anchor,
     sign_escrow_manifest,
+    verify_escrow_anchor,
     verify_escrow_manifest,
 )
 
@@ -85,9 +91,12 @@ logger = logging.getLogger(__name__)
 ESCROW_PREFIX: Final = "platform/secrets-escrow/"
 MANIFEST_KEY: Final = ESCROW_PREFIX + "manifest.json"
 MANIFEST_VERSION: Final = 1
+#: Write-once per-generation copies of every manifest (`manifest.json` is only the latest pointer).
+GENERATION_PREFIX: Final = ESCROW_PREFIX + "manifests/"
 #: Deployment tiers where a restore needs no operator flag (alpha is disposable by owner decision).
 AUTO_RESTORE_TIERS: Final = frozenset({"alpha", "local"})
 RESTORE_FLAG_ENV: Final = "WADDLES_PLATFORM_SECRETS_ESCROW_RESTORE"
+_MAX_GENERATION_PROBES: Final = 8
 _TRUTHY: Final = frozenset({"1", "true", "yes", "on"})
 
 
@@ -276,6 +285,7 @@ class EscrowManifest:
 
     generation: int
     entries: tuple[EscrowEntry, ...]
+    digest: bytes = field(repr=False)
 
 
 @dataclass(slots=True, frozen=True)
@@ -315,8 +325,8 @@ def _canonical(body: Mapping[str, Any]) -> bytes:
 
 def _build_document(
     entries: list[EscrowEntry], generation: int, kek: PlatformKekAdapter, now: datetime
-) -> bytes:
-    """Serialize + sign a manifest as ONE object: `{"manifest", "kek_id", "mac"}`."""
+) -> tuple[bytes, bytes]:
+    """Serialize + sign a manifest as ONE object `{"manifest","kek_id","mac"}`; with its digest."""
     kek_id = kek.kek_ids[0]
     body = {
         "v": MANIFEST_VERSION,
@@ -326,7 +336,8 @@ def _build_document(
         "entries": [e.to_json() for e in sorted(entries, key=lambda e: _sortable(e.identity()))],
     }
     mac = sign_escrow_manifest(_canonical(body), kek=kek, kek_id=kek_id)
-    return json.dumps({"manifest": body, "kek_id": kek_id, "mac": mac.hex()}).encode()
+    document = json.dumps({"manifest": body, "kek_id": kek_id, "mac": mac.hex()}).encode()
+    return document, hashlib.sha256(_canonical(body)).digest()
 
 
 def _sortable(identity: tuple[int, int | None, int]) -> tuple[int, int, int]:
@@ -367,7 +378,11 @@ def parse_manifest(document: bytes, kek: PlatformKekAdapter) -> EscrowManifest:
     entries = tuple(EscrowEntry.from_json(e) for e in raw_entries)
     if len({e.identity() for e in entries}) != len(entries):
         raise EscrowRefusedError("escrow_invalid")
-    return EscrowManifest(generation=generation, entries=entries)
+    return EscrowManifest(
+        generation=generation,
+        entries=entries,
+        digest=hashlib.sha256(_canonical(body)).digest(),
+    )
 
 
 def load_manifest(store: EscrowStore, kek: PlatformKekAdapter) -> EscrowManifest | None:
@@ -378,6 +393,96 @@ def load_manifest(store: EscrowStore, kek: PlatformKekAdapter) -> EscrowManifest
     """
     document = store.get(MANIFEST_KEY)
     return None if document is None else parse_manifest(document, kek)
+
+
+def generation_key(generation: int) -> str:
+    """Object key of the write-once copy of manifest `generation`."""
+    return f"{GENERATION_PREFIX}{int(generation)}.json"
+
+
+def verified_anchor(repo: PlatformVaultRepository, kek: PlatformKekAdapter) -> AnchorRow | None:
+    """The freshness anchor from `root_marker`, MAC-verified; None when none was ever written.
+
+    A MAC that does not verify (or a KEK that cannot check it) is `escrow_tampered`: the anchor is
+    the one thing that makes an old signed manifest detectable, so it is never trusted blindly.
+    """
+    anchor = repo.read_anchor()
+    if anchor is None:
+        return None
+    try:
+        ok = verify_escrow_anchor(
+            anchor.generation,
+            anchor.manifest_digest,
+            anchor.mac,
+            kek=kek,
+            kek_id=anchor.kek_id,
+        )
+    except PlatformSecretError:
+        raise EscrowRefusedError("escrow_tampered") from None
+    if not ok:
+        raise EscrowRefusedError("escrow_tampered")
+    return anchor
+
+
+def _fresh(manifest: EscrowManifest, anchor: AnchorRow | None) -> bool:
+    """True when `manifest` is at least as new as the anchor (equal generation: same digest)."""
+    if anchor is None or manifest.generation > anchor.generation:
+        return True
+    return manifest.generation == anchor.generation and constant_time_equal(
+        manifest.digest, anchor.manifest_digest
+    )
+
+
+def select_manifest(
+    store: EscrowStore, kek: PlatformKekAdapter, anchor: AnchorRow | None
+) -> EscrowManifest | None:
+    """Pick the manifest a restore may use: the latest one, if it is not older than the anchor.
+
+    None when the escrow holds no manifest at all. When the latest pointer is stale (an attacker
+    replayed an older signed manifest) the write-once object of the ANCHORED generation is used
+    instead, if it exists and matches the anchor digest; otherwise the restore is refused
+    (`escrow_rollback` for an older generation, `escrow_tampered` for the same generation with
+    another digest).
+    """
+    document = store.get(MANIFEST_KEY)
+    latest: EscrowManifest | None = None
+    parse_error: EscrowRefusedError | None = None
+    if document is not None:
+        try:
+            latest = parse_manifest(document, kek)
+        except EscrowRefusedError as exc:
+            parse_error = exc
+    if latest is not None and _fresh(latest, anchor):
+        return latest
+    if anchor is not None:
+        anchored = store.get(generation_key(anchor.generation))
+        if anchored is not None:
+            try:
+                candidate = parse_manifest(anchored, kek)
+            except EscrowRefusedError:
+                candidate = None
+            if candidate is not None and _fresh(candidate, anchor):
+                logger.warning("platform secret escrow: latest manifest is stale; using anchored")
+                return candidate
+    if document is None:
+        return None
+    if parse_error is not None:
+        raise parse_error
+    assert latest is not None and anchor is not None  # noqa: S101 -- narrowed by _fresh above
+    raise EscrowRefusedError(
+        "escrow_rollback" if latest.generation < anchor.generation else "escrow_tampered"
+    )
+
+
+def _retired_identities(repo: PlatformVaultRepository) -> set[tuple[int, int | None, int]]:
+    """Versions the audit chain records as retired or destroyed (never restorable)."""
+    return {
+        (e.secret_type, e.scope_id, e.version)
+        for e in repo.events()
+        if e.event_type in (EVENT_RETIRED, EVENT_DESTROYED)
+        and e.outcome == OUTCOME_SUCCESS
+        and e.version is not None
+    }
 
 
 def _type_name(secret_type: int) -> str:
@@ -447,6 +552,22 @@ def sync_escrow(
             _alert_all("unavailable", counter="escrow")
             logger.warning("platform secret escrow store unreachable; retry on next sync")
             return EscrowSyncReport("unavailable")
+        try:
+            anchor = verified_anchor(repo, kek)
+        except EscrowRefusedError:
+            _alert_all("escrow_tampered")
+            logger.error("platform secret escrow anchor does not verify; not writing")
+            return EscrowSyncReport("blocked_tampered", drift=1)
+        healing = False
+        if remote is not None and not _fresh(remote, anchor):
+            # The bucket's manifest is OLDER than what we last wrote (replay / rollback) or the
+            # same generation with another digest: alert, ignore it, and re-publish from the DB.
+            assert anchor is not None  # noqa: S101 -- _fresh is True whenever anchor is None
+            _alert_all(
+                "escrow_rollback" if remote.generation < anchor.generation else "escrow_tampered"
+            )
+            logger.error("platform secret escrow manifest is stale or altered; re-publishing")
+            remote, healing = None, True
         rows = [r for r in repo.openable_rows() if r.state in (STATE_ACTIVE, STATE_VERIFY_ONLY)]
         db_identities = {(r.secret_type, r.scope_id, r.version) for r in rows}
         known = {e.identity(): e for e in (remote.entries if remote else ())}
@@ -530,10 +651,27 @@ def sync_escrow(
                 now=moment,
             )
         previous = {e.identity(): e for e in (remote.entries if remote else ())}
-        if remote is None or written or {e.identity(): e for e in entries} != previous:
-            generation = (remote.generation if remote else 0) + 1
+        if healing or remote is None or written or {e.identity(): e for e in entries} != previous:
+            generation = max(remote.generation if remote else 0, anchor.generation if anchor else 0)
             try:
-                store.put(MANIFEST_KEY, _build_document(entries, generation, kek, moment))
+                generation += 1
+                for _ in range(_MAX_GENERATION_PROBES):  # write-once: never reuse a taken key
+                    if store.get(generation_key(generation)) is None:
+                        break
+                    generation += 1
+                document, digest = _build_document(entries, generation, kek, moment)
+                kek_id = kek.kek_ids[0]
+                # Anchor FIRST: if a later write fails the anchor is ahead of the bucket, which only
+                # ever refuses a stale restore loudly -- it can never let an old manifest through.
+                if not repo.advance_anchor(
+                    generation,
+                    digest,
+                    kek_id,
+                    sign_escrow_anchor(generation, digest, kek=kek, kek_id=kek_id),
+                ):
+                    raise EscrowUnavailableError("anchor did not advance")
+                store.put(generation_key(generation), document)
+                store.put(MANIFEST_KEY, document)
             except EscrowUnavailableError:
                 telemetry.count_escrow("all", "error")
                 logger.warning("platform secret escrow manifest write failed")
@@ -585,6 +723,7 @@ def _alert_all(outcome: str, *, counter: str = "drift") -> None:
 
 def _validate_manifest_for_restore(
     manifest: EscrowManifest,
+    retired: set[tuple[int, int | None, int]],
 ) -> dict[tuple[int, int | None], list[EscrowEntry]]:
     """Group by (type, scope) ascending; enforce the registry and 'highest version is the active'.
 
@@ -594,6 +733,8 @@ def _validate_manifest_for_restore(
     """
     groups: dict[tuple[int, int | None], list[EscrowEntry]] = {}
     for entry in manifest.entries:
+        if entry.identity() in retired:
+            raise EscrowRefusedError("escrow_rollback")
         try:
             spec = REGISTRY[SecretType(entry.secret_type)]
         except (ValueError, KeyError):
@@ -630,10 +771,11 @@ def restore_from_escrow(
     leaves the table empty) and :class:`EscrowUnavailableError` (store unreachable).
     """
     moment = (now or datetime.now(UTC)).astimezone(UTC)
-    manifest = load_manifest(store, kek)
+    anchor = verified_anchor(repo, kek)
+    manifest = select_manifest(store, kek, anchor)
     if manifest is None:
         return None
-    groups = _validate_manifest_for_restore(manifest)
+    groups = _validate_manifest_for_restore(manifest, _retired_identities(repo))
     opened: dict[tuple[int, int | None, int], bytes] = {}
     for entries in groups.values():
         for entry in entries:
@@ -668,6 +810,14 @@ def restore_from_escrow(
                 _demote(repo, kek, entry, moment)
             restored += 1
         names.append(_type_name(entries[0].secret_type))
+    if anchor is None or manifest.generation > anchor.generation:
+        kek_id = kek.kek_ids[0]
+        repo.advance_anchor(
+            manifest.generation,
+            manifest.digest,
+            kek_id,
+            sign_escrow_anchor(manifest.generation, manifest.digest, kek=kek, kek_id=kek_id),
+        )
     for name in names:
         telemetry.count_escrow(name, "restored")
     return EscrowRestoreReport(restored=restored, types=tuple(sorted(set(names))))

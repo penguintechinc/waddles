@@ -201,6 +201,7 @@ _FINGERPRINT_INFO: Final = PLATFORM_INFO_NAMESPACE + b"fp/v1"
 _CHAIN_INFO: Final = PLATFORM_INFO_NAMESPACE + b"chain/v1"
 _ESCROW_INFO: Final = PLATFORM_INFO_NAMESPACE + b"escrow/v1"
 _MANIFEST_INFO: Final = PLATFORM_INFO_NAMESPACE + b"escrow-manifest/v1"
+_ANCHOR_INFO: Final = PLATFORM_INFO_NAMESPACE + b"escrow-anchor/v1"
 
 _FINGERPRINT_BYTES: Final = 32
 _SMALLINT_MAX: Final = 32767
@@ -644,6 +645,37 @@ def sign_escrow_manifest(
 ) -> bytes:
     """Keyed MAC (HMAC-SHA256 under a KEK-derived key) over the canonical manifest bytes."""
     return _platform_mac(kek, _MANIFEST_INFO, _length_prefixed(manifest_body), kek_id)
+
+
+def sign_escrow_anchor(
+    generation: int, manifest_digest: bytes, *, kek: PlatformKekAdapter, kek_id: str | None = None
+) -> bytes:
+    """Keyed MAC over `(generation, manifest digest)`: the freshness anchor kept in the DB.
+
+    Distinct HKDF label from the manifest MAC, so an anchor MAC can never be replayed as a manifest
+    signature (or the reverse). The anchor lives in `root_marker`, outside the escrow bucket.
+    """
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        raise PlatformSecretInputError("generation must be a positive integer")
+    if not isinstance(manifest_digest, bytes | bytearray) or len(manifest_digest) != 32:
+        raise PlatformSecretInputError("manifest digest must be 32 bytes")
+    payload = _length_prefixed(str(generation).encode(), bytes(manifest_digest))
+    return _platform_mac(kek, _ANCHOR_INFO, payload, kek_id)
+
+
+def verify_escrow_anchor(
+    generation: int,
+    manifest_digest: bytes,
+    mac: bytes,
+    *,
+    kek: PlatformKekAdapter,
+    kek_id: str,
+) -> bool:
+    """Constant-time check of an anchor MAC under the named KEK (False = tampered)."""
+    expected = sign_escrow_anchor(
+        generation, manifest_digest, kek=kek, kek_id=_checked_kek_id(kek_id)
+    )
+    return hmac.compare_digest(expected, bytes(mac))
 
 
 def verify_escrow_manifest(
