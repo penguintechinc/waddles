@@ -1,11 +1,11 @@
 schema_version: 2
-app_id: waddles.core.overlay.galactic_avatars
+app_id: waddles.core.overlay.galactic-avatars
 name: Galactic Avatars Overlay Bundle (Rust)
 version: 1.0.0
 feature: waddles.core.overlay
 module: core
 provider: builtin
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: AGPL-3.0-or-later
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/galactic-avatars
 language: rust

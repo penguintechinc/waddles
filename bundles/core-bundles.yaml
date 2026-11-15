@@ -1512,7 +1512,7 @@ bundles:
         community_id: null
 
   # Galactic avatars overlay presentation bundle (Rust): provides Star Wars-inspired stage strip & duel arena.
-  - app_id: waddles.core.overlay.galactic_avatars
+  - app_id: waddles.core.overlay.galactic-avatars
     version: "1.0.0"
     language: rust
     wit_world: stage

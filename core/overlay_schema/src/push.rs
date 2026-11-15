@@ -71,6 +71,14 @@ pub struct OverlayPush {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub caption: Option<CaptionPayload>,
 
+    /// For custom presentation bundle widgets that output sanitized HTML.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sanitized_html: Option<String>,
+
+    /// For custom presentation bundle widgets, the target widget id.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub widget_id: Option<String>,
+
     /// Escape hatch for a bundle-registered widget's own declared
     /// data-binding fields (#458 "Data binding") -- never populated by any
     /// of the 9 built-in surfaces above. The host validates size (and, once
@@ -284,6 +292,8 @@ mod tests {
                 target_lang: Some("en".to_string()),
                 confidence: Some(0.93),
             }),
+            sanitized_html: Some("<div>safe</div>".to_string()),
+            widget_id: Some("custom.widget".to_string()),
             extra: Some(serde_json::json!({"custom": true})),
         };
         let json = serde_json::to_string(&push).unwrap();

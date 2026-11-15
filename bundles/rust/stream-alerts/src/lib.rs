@@ -5,6 +5,22 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Escapes `& < > " '` so untrusted text can only ever render as text inside the fragment.
+fn escape_html(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlertType {
     Subscription,
@@ -56,7 +72,8 @@ impl AlertEvent {
 <div style=\"font-size:32px;margin-right:16px;\">{icon}</div>\
 <div><div style=\"font-size:20px;font-weight:bold;color:{bg};\">{}</div><div style=\"font-size:15px;color:#e0e0e0;\">{}</div></div>\
 </div>",
-            self.title, self.message
+            escape_html(&self.title),
+            escape_html(&self.message)
         )
     }
 }
@@ -72,6 +89,18 @@ mod tests {
         assert!(html.contains("New Subscriber!"));
         assert!(html.contains("Subscribed at Tier 1 for 3 months!"));
         assert!(html.contains("#ffd700"));
+    }
+
+    /// Regression: title/message are interpolated into HTML and must never inject markup.
+    #[test]
+    fn untrusted_text_is_escaped() {
+        let mut alert = AlertEvent::new_follow();
+        alert.title = "<script>alert(1)</script>".to_string();
+        alert.message = "\"><img src=x onerror=alert(1)>".to_string();
+        let html = alert.to_sanitized_html();
+        assert!(!html.contains("<script>"));
+        assert!(!html.contains("<img"));
+        assert!(html.contains("&lt;script&gt;"));
     }
 
     #[test]

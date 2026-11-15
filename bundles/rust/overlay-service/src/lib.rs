@@ -3,142 +3,130 @@
 //! An always-on `kind: service` bundle on `world stage-tools` exporting `tool-provider`.
 //! Manages full-screen composite overlay layouts, placed components, themes (1080p, 2K, 4K),
 //! and presentation bundle widget registrations.
+//!
+//! All state lives in the host `kv` (scoped by the host to the verified tenant/community/app);
+//! the component keeps NO process-wide registry or store, so nothing can leak between
+//! communities sharing a guest instance. Identity comes only from the host-verified
+//! `ToolContext`, never from tool arguments.
 
+#[cfg(target_arch = "wasm32")]
+#[allow(warnings)]
+mod bindings;
 pub mod logic;
+pub mod store;
 
-use std::sync::{Arc, OnceLock};
+#[cfg(target_arch = "wasm32")]
+mod component {
+    use std::sync::Arc;
 
-use logic::{ConfigStore, HostStoreError, OverlayHostStore};
-use overlay_schema::{
-    CanvasThemeDto, SceneComponentDto, SceneLayoutDto, WidgetDescriptorDto, WidgetOutputKind,
-};
-use waddle_sdk::tool::ToolRegistry;
+    use super::bindings::exports::waddle::bundle::tool_provider::Guest;
+    use super::bindings::waddle::bundle::tool::ToolError as WitError;
+    use super::bindings::waddle::bundle::{kv, log, overlay};
+    use super::logic::{self, ConfigStore, HostStoreError, PushSink};
+    use super::store::KvHostStore;
+    use overlay_schema::WidgetOutputKind;
+    use serde_json::{json, Value};
+    use waddle_sdk::tool::{ToolError, ToolRegistry};
 
-/// In-memory host implementation for service execution within host process.
-pub struct MemoryHostStore {
-    inner: std::sync::Mutex<MemoryState>,
-}
+    pub struct Component;
 
-struct MemoryState {
-    widgets: Vec<WidgetDescriptorDto>,
-    layout: SceneLayoutDto,
-    pushes: Vec<(String, WidgetOutputKind, String)>,
-}
+    /// The bundle's own kv (host-scoped to this community + app); errors never carry detail.
+    struct WasmKv;
 
-impl Default for MemoryHostStore {
-    fn default() -> Self {
-        Self::new()
+    impl ConfigStore for WasmKv {
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+            kv::get(key).map_err(|_| "kv unavailable".to_string())
+        }
+        fn set(&self, key: &str, value: &[u8]) -> Result<(), String> {
+            kv::set(key, value, 0).map_err(|_| "kv unavailable".to_string())
+        }
     }
-}
 
-impl MemoryHostStore {
-    pub fn new() -> Self {
-        Self {
-            inner: std::sync::Mutex::new(MemoryState {
-                widgets: Vec::new(),
-                layout: SceneLayoutDto::default(),
-                pushes: Vec::new(),
-            }),
+    /// Live push through the host `overlay` import. Contract `surface` widgets need the
+    /// `publish-surface` import, which this world does not link: that is refused loudly
+    /// rather than dropped.
+    struct WasmPush;
+
+    impl PushSink for WasmPush {
+        fn push(
+            &self,
+            widget_id: &str,
+            output_kind: WidgetOutputKind,
+            frame_json: &str,
+        ) -> Result<(), HostStoreError> {
+            let frame: Value = serde_json::from_str(frame_json)
+                .map_err(|_| HostStoreError::InvalidArgument("malformed frame".into()))?;
+            let mut body = serde_json::Map::new();
+            body.insert("widget_id".into(), json!(widget_id));
+            match output_kind {
+                WidgetOutputKind::SanitizedHtml => {
+                    body.insert("sanitized_html".into(), frame["html"].clone());
+                }
+                WidgetOutputKind::Text => {
+                    body.insert("text".into(), frame["text"].clone());
+                    body.insert("title".into(), frame["title"].clone());
+                }
+                WidgetOutputKind::Image => {
+                    body.insert("image_url".into(), frame["image_url"].clone());
+                    body.insert("title".into(), frame["title"].clone());
+                }
+                WidgetOutputKind::Surface => {
+                    return Err(HostStoreError::Backend(
+                        "surface widgets require publish-surface".into(),
+                    ));
+                }
+            }
+            body.retain(|_, v| !v.is_null());
+            overlay::push(
+                widget_id,
+                overlay::Surface::FullScreen,
+                &Value::Object(body).to_string(),
+            )
+            .map(|_| ())
+            .map_err(|_| HostStoreError::Backend("overlay push failed".into()))
+        }
+    }
+
+    /// Maps the SDK tool error onto the WIT one.
+    fn to_wit(e: ToolError) -> WitError {
+        match e {
+            ToolError::NotGranted => WitError::NotGranted,
+            ToolError::Forbidden => WitError::Forbidden,
+            ToolError::Timeout => WitError::Timeout,
+            ToolError::DepthExceeded => WitError::DepthExceeded,
+            ToolError::PoolExhausted => WitError::PoolExhausted,
+            ToolError::TargetUnavailable => WitError::TargetUnavailable,
+            ToolError::InvalidArgs(m) => WitError::InvalidArgs(m),
+            ToolError::NoTransport => {
+                WitError::InvalidArgs("no tool transport installed".to_string())
+            }
+        }
+    }
+
+    /// Builds a fresh registry per call: stateless, so no cross-community guest state exists.
+    fn registry() -> ToolRegistry {
+        let host = KvHostStore::new(Arc::new(WasmKv), Arc::new(WasmPush));
+        logic::build_registry(Arc::new(host))
+    }
+
+    impl Guest for Component {
+        /// Routes `name` through the tool table; logs tool name and outcome code only.
+        fn call(name: String, args: Vec<u8>) -> Result<Vec<u8>, WitError> {
+            let result = registry().call(&name, &args);
+            let outcome = match &result {
+                Ok(_) => "ok",
+                Err(ToolError::InvalidArgs(_)) => "invalid_args",
+                Err(ToolError::Forbidden) => "forbidden",
+                Err(_) => "error",
+            };
+            let fields = json!({ "tool": name, "outcome": outcome }).to_string();
+            log::write(log::Level::Debug, "overlay tool call", &fields);
+            result.map_err(to_wit)
         }
     }
 }
 
-impl OverlayHostStore for MemoryHostStore {
-    fn register_widget(&self, descriptor: &WidgetDescriptorDto) -> Result<(), HostStoreError> {
-        let mut state = self.inner.lock().unwrap();
-        state.widgets.retain(|w| w.widget_id != descriptor.widget_id);
-        state.widgets.push(descriptor.clone());
-        Ok(())
-    }
-
-    fn get_widget(&self, widget_id: &str) -> Result<Option<WidgetDescriptorDto>, HostStoreError> {
-        let state = self.inner.lock().unwrap();
-        Ok(state.widgets.iter().find(|w| w.widget_id == widget_id).cloned())
-    }
-
-    fn list_widgets(&self) -> Result<Vec<WidgetDescriptorDto>, HostStoreError> {
-        Ok(self.inner.lock().unwrap().widgets.clone())
-    }
-
-    fn push_widget(
-        &self,
-        widget_id: &str,
-        output_kind: WidgetOutputKind,
-        frame_json: &str,
-    ) -> Result<(), HostStoreError> {
-        self.inner
-            .lock()
-            .unwrap()
-            .pushes
-            .push((widget_id.to_string(), output_kind, frame_json.to_string()));
-        Ok(())
-    }
-
-    fn get_layout(&self) -> Result<SceneLayoutDto, HostStoreError> {
-        Ok(self.inner.lock().unwrap().layout.clone())
-    }
-
-    fn save_theme(&self, theme: &CanvasThemeDto) -> Result<(), HostStoreError> {
-        self.inner.lock().unwrap().layout.canvas = theme.clone();
-        Ok(())
-    }
-
-    fn add_component(&self, component: &SceneComponentDto) -> Result<(), HostStoreError> {
-        let mut state = self.inner.lock().unwrap();
-        if state.layout.components.len() >= overlay_schema::MAX_SCENE_COMPONENTS {
-            return Err(HostStoreError::CapacityReached(
-                "scene component capacity reached".into(),
-            ));
-        }
-        state.layout.components.push(component.clone());
-        Ok(())
-    }
-
-    fn update_component(
-        &self,
-        instance_id: &str,
-        updater: Box<dyn FnOnce(&mut SceneComponentDto) + Send>,
-    ) -> Result<SceneComponentDto, HostStoreError> {
-        let mut state = self.inner.lock().unwrap();
-        let comp = state
-            .layout
-            .components
-            .iter_mut()
-            .find(|c| c.instance_id == instance_id)
-            .ok_or_else(|| HostStoreError::NotFound(instance_id.to_string()))?;
-        updater(comp);
-        Ok(comp.clone())
-    }
-
-    fn remove_component(&self, instance_id: &str) -> Result<bool, HostStoreError> {
-        let mut state = self.inner.lock().unwrap();
-        let len_before = state.layout.components.len();
-        state.layout.components.retain(|c| c.instance_id != instance_id);
-        Ok(state.layout.components.len() < len_before)
-    }
-
-    fn clear_components(&self) -> Result<u32, HostStoreError> {
-        let mut state = self.inner.lock().unwrap();
-        let count = state.layout.components.len() as u32;
-        state.layout.components.clear();
-        Ok(count)
-    }
-}
-
-pub struct MemoryKv;
-impl ConfigStore for MemoryKv {
-    fn get(&self, _key: &str) -> Result<Option<Vec<u8>>, String> {
-        Ok(None)
-    }
-    fn set(&self, _key: &str, _value: &[u8]) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-static REGISTRY: OnceLock<ToolRegistry> = OnceLock::new();
-
-pub fn default_registry() -> &'static ToolRegistry {
-    REGISTRY.get_or_init(|| {
-        logic::build_registry(Arc::new(MemoryHostStore::new()), Arc::new(MemoryKv))
-    })
-}
+#[cfg(target_arch = "wasm32")]
+use component::Component;
+#[cfg(target_arch = "wasm32")]
+bindings::export!(Component with_types_in bindings);

@@ -15,12 +15,11 @@ use std::fmt;
 use std::sync::Arc;
 
 use overlay_schema::{
-    validate_coordinates, CanvasResolution, CanvasThemeDto, ComponentStatusCode, SceneComponentDto,
-    SceneLayoutDto, WidgetDescriptorDto, WidgetOutputKind, MAX_SCENE_COMPONENTS,
-    MAX_WIDGET_HTML_BYTES,
+    CanvasResolution, CanvasThemeDto, ComponentStatusCode, MAX_WIDGET_HTML_BYTES,
+    SceneComponentDto, SceneLayoutDto, WidgetDescriptorDto, WidgetOutputKind, validate_coordinates,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use waddle_sdk::tool::{ToolContext, ToolError, ToolRegistry};
 
 /// Admin scope required for layout-mutating operations.
@@ -76,17 +75,52 @@ pub trait OverlayHostStore: Send + Sync {
     fn clear_components(&self) -> Result<u32, HostStoreError>;
 }
 
-/// Key-value storage seam.
+/// Key-value storage seam. In the component this is the host `kv` import, which the host
+/// scopes to the invocation's verified (tenant, community, app); a bundle never names either.
 pub trait ConfigStore: Send + Sync {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
     fn set(&self, key: &str, value: &[u8]) -> Result<(), String>;
+}
+
+/// Live-push seam (the host `overlay` import in the component). Must fail loudly when the
+/// transport is unavailable; a push is never silently dropped.
+pub trait PushSink: Send + Sync {
+    fn push(
+        &self,
+        widget_id: &str,
+        output_kind: WidgetOutputKind,
+        frame_json: &str,
+    ) -> Result<(), HostStoreError>;
+}
+
+/// Maps a storage failure to a tool error without leaking backend detail; a backend failure
+/// is `TargetUnavailable` (fail closed), never treated as "allowed".
+fn store_err(e: HostStoreError) -> ToolError {
+    match e {
+        HostStoreError::Backend(_) => ToolError::TargetUnavailable,
+        other => ToolError::InvalidArgs(other.to_string()),
+    }
+}
+
+/// `true` when `id` is a valid widget id (`[a-z0-9][a-z0-9_.-]{0,127}`); also keeps ids safe
+/// for use inside kv documents.
+fn valid_widget_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-'))
 }
 
 // ---------------------------------------------------------------------------
 // Tool Request Payloads
 // ---------------------------------------------------------------------------
 
+/// `deny_unknown_fields`: a caller-supplied `bundle_app_id` (or any identity field) is
+/// rejected, never honoured -- ownership comes only from the host-verified actor.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RegisterWidgetArgs {
     pub widget_id: String,
     pub display_name: String,
@@ -111,8 +145,6 @@ pub struct RegisterWidgetArgs {
     pub default_z_index: Option<i32>,
     #[serde(default)]
     pub props_schema: Option<Value>,
-    #[serde(default)]
-    pub bundle_app_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,29 +226,40 @@ pub struct SetCanvasThemeArgs {
 // Registry Builder
 // ---------------------------------------------------------------------------
 
-pub fn build_registry(
-    host: Arc<dyn OverlayHostStore>,
-    _kv: Arc<dyn ConfigStore>,
-) -> ToolRegistry {
+pub fn build_registry(host: Arc<dyn OverlayHostStore>) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
 
     // 1. register_widget
     {
         let host = Arc::clone(&host);
         reg.register("register_widget", move |ctx: &ToolContext, val: Value| {
+            // Deny by default: registering is an admin act by a host-verified actor.
+            if !ctx.has_scope(ADMIN_SCOPE) {
+                return Err(ToolError::Forbidden);
+            }
+            let owner = ctx.actor.clone().ok_or(ToolError::Forbidden)?;
+
             let args: RegisterWidgetArgs = serde_json::from_value(val)
                 .map_err(|e| ToolError::InvalidArgs(format!("malformed args: {e}")))?;
 
-            if args.widget_id.trim().is_empty() || args.widget_id.len() > 128 {
-                return Err(ToolError::InvalidArgs("widget_id must be 1-128 chars".into()));
+            if !valid_widget_id(&args.widget_id) {
+                return Err(ToolError::InvalidArgs(
+                    "widget_id must match [a-z0-9][a-z0-9_.-]{0,127}".into(),
+                ));
             }
             if args.display_name.trim().is_empty() || args.display_name.len() > 120 {
-                return Err(ToolError::InvalidArgs("display_name must be 1-120 chars".into()));
+                return Err(ToolError::InvalidArgs(
+                    "display_name must be 1-120 chars".into(),
+                ));
             }
 
-            let output_kind = WidgetOutputKind::from_str_name(&args.output_kind).ok_or_else(
-                || ToolError::InvalidArgs(format!("unsupported output_kind '{}'", args.output_kind)),
-            )?;
+            let output_kind =
+                WidgetOutputKind::from_str_name(&args.output_kind).ok_or_else(|| {
+                    ToolError::InvalidArgs(format!(
+                        "unsupported output_kind '{}'",
+                        args.output_kind
+                    ))
+                })?;
 
             let def_x = args.default_x.unwrap_or(48);
             let def_y = args.default_y.unwrap_or(48);
@@ -227,10 +270,16 @@ pub fn build_registry(
             validate_coordinates(def_x, def_y, def_w, def_h, def_z)
                 .map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
 
-            let bundle_app_id = args
-                .bundle_app_id
-                .or_else(|| ctx.actor.clone())
-                .unwrap_or_else(|| "system".to_string());
+            // Never overwrite a widget another principal registered (hijack); a lookup
+            // failure fails closed.
+            match host.get_widget(&args.widget_id) {
+                Ok(Some(existing)) if existing.bundle_app_id != owner => {
+                    return Err(ToolError::Forbidden);
+                }
+                Ok(_) => {}
+                Err(e) => return Err(store_err(e)),
+            }
+            let bundle_app_id = owner;
 
             let descriptor = WidgetDescriptorDto {
                 widget_id: args.widget_id.clone(),
@@ -249,8 +298,7 @@ pub fn build_registry(
                 props_schema: args.props_schema.unwrap_or_else(|| json!({})),
             };
 
-            host.register_widget(&descriptor)
-                .map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
+            host.register_widget(&descriptor).map_err(store_err)?;
 
             Ok(json!({
                 "registered": true,
@@ -272,27 +320,39 @@ pub fn build_registry(
                 return Err(ToolError::InvalidArgs("widget_id is required".into()));
             }
 
-            let output_kind = WidgetOutputKind::from_str_name(&args.output_kind).ok_or_else(
-                || ToolError::InvalidArgs(format!("unsupported output_kind '{}'", args.output_kind)),
-            )?;
+            let output_kind =
+                WidgetOutputKind::from_str_name(&args.output_kind).ok_or_else(|| {
+                    ToolError::InvalidArgs(format!(
+                        "unsupported output_kind '{}'",
+                        args.output_kind
+                    ))
+                })?;
 
-            if output_kind == WidgetOutputKind::SanitizedHtml {
-                if let Some(ref h) = args.html {
-                    if h.len() > MAX_WIDGET_HTML_BYTES {
-                        return Err(ToolError::InvalidArgs(format!(
-                            "html payload exceeds {} bytes",
-                            MAX_WIDGET_HTML_BYTES
-                        )));
-                    }
-                }
+            if output_kind == WidgetOutputKind::SanitizedHtml
+                && args
+                    .html
+                    .as_ref()
+                    .is_some_and(|h| h.len() > MAX_WIDGET_HTML_BYTES)
+            {
+                return Err(ToolError::InvalidArgs(format!(
+                    "html payload exceeds {MAX_WIDGET_HTML_BYTES} bytes"
+                )));
             }
 
-            if let Ok(Some(w)) = host.get_widget(&args.widget_id) {
-                if let Some(ref actor) = ctx.actor {
-                    if actor != "system" && !ctx.has_scope(ADMIN_SCOPE) && actor != &w.bundle_app_id {
-                        return Err(ToolError::Forbidden);
-                    }
-                }
+            // Deny by default: a verified actor, a registered widget (lookup errors fail
+            // closed) and either admin scope or ownership. No "system" exemption.
+            let actor = ctx.actor.as_deref().ok_or(ToolError::Forbidden)?;
+            let widget = host
+                .get_widget(&args.widget_id)
+                .map_err(store_err)?
+                .ok_or(ToolError::Forbidden)?;
+            if !ctx.has_scope(ADMIN_SCOPE) && actor != widget.bundle_app_id {
+                return Err(ToolError::Forbidden);
+            }
+            if widget.output_kind != output_kind {
+                return Err(ToolError::InvalidArgs(
+                    "output_kind does not match the registered widget".into(),
+                ));
             }
 
             let frame_json = serde_json::to_string(&json!({
@@ -308,7 +368,7 @@ pub fn build_registry(
             .map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
 
             host.push_widget(&args.widget_id, output_kind, &frame_json)
-                .map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
+                .map_err(store_err)?;
 
             Ok(json!({ "status": "ok", "widget_id": args.widget_id }))
         });
@@ -331,7 +391,7 @@ pub fn build_registry(
 
             let widget = host
                 .get_widget(&args.widget_id)
-                .map_err(|e| ToolError::InvalidArgs(e.to_string()))?
+                .map_err(store_err)?
                 .ok_or_else(|| {
                     ToolError::InvalidArgs(format!("widget '{}' is not registered", args.widget_id))
                 })?;
@@ -339,10 +399,14 @@ pub fn build_registry(
             let props = args.props.unwrap_or_else(|| json!({}));
             let props_str = props.to_string();
             if props_str.len() > 4096 {
-                return Err(ToolError::InvalidArgs("props payload exceeds 4096 bytes".into()));
+                return Err(ToolError::InvalidArgs(
+                    "props payload exceeds 4096 bytes".into(),
+                ));
             }
 
-            let seed = rand_seed(args.widget_id.as_bytes()) ^ (args.x as u64).wrapping_shl(16) ^ (args.y as u64);
+            let seed = rand_seed(args.widget_id.as_bytes())
+                ^ (args.x as u64).wrapping_shl(16)
+                ^ (args.y as u64);
             let instance_id = format!("0195f3a2-8c11-7000-8000-{:012x}", seed);
 
             let component = SceneComponentDto {
@@ -363,7 +427,7 @@ pub fn build_registry(
 
             host.add_component(&component).map_err(|e| match e {
                 HostStoreError::CapacityReached(m) => ToolError::InvalidArgs(m),
-                other => ToolError::InvalidArgs(other.to_string()),
+                other => store_err(other),
             })?;
 
             Ok(json!(component))
@@ -412,7 +476,7 @@ pub fn build_registry(
                         }
                     }),
                 )
-                .map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
+                .map_err(store_err)?;
 
             Ok(json!({
                 "instance_id": args.instance_id,
@@ -435,7 +499,7 @@ pub fn build_registry(
 
             let removed = host
                 .remove_component(&args.instance_id)
-                .map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
+                .map_err(store_err)?;
 
             Ok(json!({
                 "instance_id": args.instance_id,
@@ -450,7 +514,7 @@ pub fn build_registry(
         reg.register("list_components", move |_ctx: &ToolContext, val: Value| {
             let args: ListComponentsArgs = serde_json::from_value(val).unwrap_or_default();
 
-            let layout = host.get_layout().map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
+            let layout = host.get_layout().map_err(store_err)?;
             let include_hidden = args.include_hidden.unwrap_or(true);
 
             let filtered_components = if include_hidden {
@@ -473,10 +537,13 @@ pub fn build_registry(
     // 7. list_registered_widgets
     {
         let host = Arc::clone(&host);
-        reg.register("list_registered_widgets", move |_ctx: &ToolContext, _val: Value| {
-            let widgets = host.list_widgets().map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
-            Ok(json!({ "widgets": widgets }))
-        });
+        reg.register(
+            "list_registered_widgets",
+            move |_ctx: &ToolContext, _val: Value| {
+                let widgets = host.list_widgets().map_err(store_err)?;
+                Ok(json!({ "widgets": widgets }))
+            },
+        );
     }
 
     // 8. clear_layout (admin-only)
@@ -487,7 +554,7 @@ pub fn build_registry(
                 return Err(ToolError::Forbidden);
             }
 
-            let count = host.clear_components().map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
+            let count = host.clear_components().map_err(store_err)?;
             Ok(json!({ "removed_count": count }))
         });
     }
@@ -503,7 +570,7 @@ pub fn build_registry(
             let args: SetCanvasThemeArgs = serde_json::from_value(val)
                 .map_err(|e| ToolError::InvalidArgs(format!("malformed args: {e}")))?;
 
-            let mut current = host.get_layout().map_err(|e| ToolError::InvalidArgs(e.to_string()))?.canvas;
+            let mut current = host.get_layout().map_err(store_err)?.canvas;
 
             if let Some(t) = args.theme {
                 current.theme = t;
@@ -531,7 +598,7 @@ pub fn build_registry(
                 current.font_family = f;
             }
 
-            host.save_theme(&current).map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
+            host.save_theme(&current).map_err(store_err)?;
 
             Ok(json!({ "canvas": current }))
         });
@@ -550,334 +617,5 @@ fn rand_seed(bytes: &[u8]) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
-
-    struct FakeHost {
-        widgets: Mutex<Vec<WidgetDescriptorDto>>,
-        layout: Mutex<SceneLayoutDto>,
-        pushes: Mutex<Vec<(String, WidgetOutputKind, String)>>,
-    }
-
-    impl FakeHost {
-        fn new() -> Self {
-            Self {
-                widgets: Mutex::new(Vec::new()),
-                layout: Mutex::new(SceneLayoutDto::default()),
-                pushes: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl OverlayHostStore for FakeHost {
-        fn register_widget(&self, descriptor: &WidgetDescriptorDto) -> Result<(), HostStoreError> {
-            let mut list = self.widgets.lock().unwrap();
-            list.retain(|w| w.widget_id != descriptor.widget_id);
-            list.push(descriptor.clone());
-            Ok(())
-        }
-
-        fn get_widget(&self, widget_id: &str) -> Result<Option<WidgetDescriptorDto>, HostStoreError> {
-            let list = self.widgets.lock().unwrap();
-            Ok(list.iter().find(|w| w.widget_id == widget_id).cloned())
-        }
-
-        fn list_widgets(&self) -> Result<Vec<WidgetDescriptorDto>, HostStoreError> {
-            Ok(self.widgets.lock().unwrap().clone())
-        }
-
-        fn push_widget(
-            &self,
-            widget_id: &str,
-            output_kind: WidgetOutputKind,
-            frame_json: &str,
-        ) -> Result<(), HostStoreError> {
-            self.pushes
-                .lock()
-                .unwrap()
-                .push((widget_id.to_string(), output_kind, frame_json.to_string()));
-            Ok(())
-        }
-
-        fn get_layout(&self) -> Result<SceneLayoutDto, HostStoreError> {
-            Ok(self.layout.lock().unwrap().clone())
-        }
-
-        fn save_theme(&self, theme: &CanvasThemeDto) -> Result<(), HostStoreError> {
-            self.layout.lock().unwrap().canvas = theme.clone();
-            Ok(())
-        }
-
-        fn add_component(&self, component: &SceneComponentDto) -> Result<(), HostStoreError> {
-            let mut l = self.layout.lock().unwrap();
-            if l.components.len() >= MAX_SCENE_COMPONENTS {
-                return Err(HostStoreError::CapacityReached("max components reached".into()));
-            }
-            l.components.push(component.clone());
-            Ok(())
-        }
-
-        fn update_component(
-            &self,
-            instance_id: &str,
-            updater: Box<dyn FnOnce(&mut SceneComponentDto) + Send>,
-        ) -> Result<SceneComponentDto, HostStoreError> {
-            let mut l = self.layout.lock().unwrap();
-            let c = l
-                .components
-                .iter_mut()
-                .find(|c| c.instance_id == instance_id)
-                .ok_or_else(|| HostStoreError::NotFound(instance_id.to_string()))?;
-            updater(c);
-            Ok(c.clone())
-        }
-
-        fn remove_component(&self, instance_id: &str) -> Result<bool, HostStoreError> {
-            let mut l = self.layout.lock().unwrap();
-            let len_before = l.components.len();
-            l.components.retain(|c| c.instance_id != instance_id);
-            Ok(l.components.len() < len_before)
-        }
-
-        fn clear_components(&self) -> Result<u32, HostStoreError> {
-            let mut l = self.layout.lock().unwrap();
-            let count = l.components.len() as u32;
-            l.components.clear();
-            Ok(count)
-        }
-    }
-
-    struct FakeKv;
-    impl ConfigStore for FakeKv {
-        fn get(&self, _key: &str) -> Result<Option<Vec<u8>>, String> {
-            Ok(None)
-        }
-        fn set(&self, _key: &str, _value: &[u8]) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
-    fn call_tool(
-        reg: &ToolRegistry,
-        name: &str,
-        mut args: Value,
-        admin: bool,
-    ) -> Result<Vec<u8>, ToolError> {
-        if !args.is_object() {
-            args = json!({});
-        }
-        if let Some(obj) = args.as_object_mut() {
-            obj.insert(
-                waddle_sdk::tool::CTX_ARG.to_string(),
-                json!({
-                    "actor": "0195f3a2-8c11-7000-8000-000000000001",
-                    "scopes": if admin { vec![ADMIN_SCOPE] } else { vec![] }
-                }),
-            );
-        }
-        let bytes = serde_json::to_vec(&args).unwrap();
-        reg.call(name, &bytes)
-    }
-
-    #[test]
-    fn register_and_list_widgets() {
-        let host = Arc::new(FakeHost::new());
-        let reg = build_registry(host, Arc::new(FakeKv));
-
-        let args = json!({
-            "widget_id": "dj.music.album_now_playing",
-            "display_name": "Now Playing (Album Cover)",
-            "output_kind": "surface",
-            "surface_id": "music.now_playing",
-            "default_x": 48,
-            "default_y": 860,
-            "default_width": 460,
-            "default_height": 160,
-        });
-
-        let res = call_tool(&reg, "register_widget", args, false).unwrap();
-        let parsed: Value = serde_json::from_slice(&res).unwrap();
-        assert_eq!(parsed["registered"], true);
-        assert_eq!(parsed["output_kind"], "surface");
-
-        let list_res = call_tool(&reg, "list_registered_widgets", json!({}), false).unwrap();
-        let list_json: Value = serde_json::from_slice(&list_res).unwrap();
-        assert_eq!(list_json["widgets"].as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn push_widget_validates_size_and_records_frame() {
-        let host = Arc::new(FakeHost::new());
-        let reg = build_registry(Arc::clone(&host) as Arc<dyn OverlayHostStore>, Arc::new(FakeKv));
-
-        let push_args = json!({
-            "widget_id": "custom.avatars",
-            "output_kind": "sanitized_html",
-            "html": "<div class=\"avatar\">Hero</div>",
-        });
-
-        let res = call_tool(&reg, "push_widget", push_args, false).unwrap();
-        let parsed: Value = serde_json::from_slice(&res).unwrap();
-        assert_eq!(parsed["status"], "ok");
-
-        assert_eq!(host.pushes.lock().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn add_component_requires_admin_scope() {
-        let host = Arc::new(FakeHost::new());
-        let reg = build_registry(Arc::clone(&host) as Arc<dyn OverlayHostStore>, Arc::new(FakeKv));
-
-        // First register the widget
-        let reg_args = json!({
-            "widget_id": "dj.music.album_now_playing",
-            "display_name": "Now Playing",
-            "output_kind": "surface",
-        });
-        call_tool(&reg, "register_widget", reg_args, false).unwrap();
-
-        let add_args = json!({
-            "widget_id": "dj.music.album_now_playing",
-            "x": 48,
-            "y": 860,
-            "width": 460,
-            "height": 160,
-        });
-
-        // Non-admin call fails Forbidden
-        let err = call_tool(&reg, "add_component", add_args.clone(), false).unwrap_err();
-        assert_eq!(err, ToolError::Forbidden);
-
-        // Admin call succeeds
-        let ok_res = call_tool(&reg, "add_component", add_args, true).unwrap();
-        let comp: Value = serde_json::from_slice(&ok_res).unwrap();
-        assert_eq!(comp["widget_id"], "dj.music.album_now_playing");
-        assert_eq!(comp["x"], 48);
-        assert_eq!(comp["status"], "active");
-    }
-
-    #[test]
-    fn component_lifecycle_update_and_remove() {
-        let host = Arc::new(FakeHost::new());
-        let reg = build_registry(Arc::clone(&host) as Arc<dyn OverlayHostStore>, Arc::new(FakeKv));
-
-        // Register widget
-        let reg_args = json!({
-            "widget_id": "alerts.stream.event_box",
-            "display_name": "Alert Box",
-            "output_kind": "surface",
-        });
-        call_tool(&reg, "register_widget", reg_args, false).unwrap();
-
-        // Add
-        let add_res = call_tool(
-            &reg,
-            "add_component",
-            json!({
-                "widget_id": "alerts.stream.event_box",
-                "x": 660,
-                "y": 120,
-                "width": 600,
-                "height": 220,
-            }),
-            true,
-        )
-        .unwrap();
-        let comp: Value = serde_json::from_slice(&add_res).unwrap();
-        let instance_id = comp["instance_id"].as_str().unwrap();
-
-        // Update
-        let update_res = call_tool(
-            &reg,
-            "update_component",
-            json!({
-                "instance_id": instance_id,
-                "x": 700,
-                "visible": false,
-            }),
-            true,
-        )
-        .unwrap();
-        let updated: Value = serde_json::from_slice(&update_res).unwrap();
-        assert_eq!(updated["updated"], true);
-        assert_eq!(updated["component"]["x"], 700);
-        assert_eq!(updated["component"]["status"], "hidden");
-
-        // List components (include_hidden: false should filter it)
-        let list_visible = call_tool(
-            &reg,
-            "list_components",
-            json!({"include_hidden": false}),
-            true,
-        )
-        .unwrap();
-        let list_vis_json: Value = serde_json::from_slice(&list_visible).unwrap();
-        assert_eq!(list_vis_json["components"].as_array().unwrap().len(), 0);
-
-        // Remove
-        let remove_res = call_tool(
-            &reg,
-            "remove_component",
-            json!({ "instance_id": instance_id }),
-            true,
-        )
-        .unwrap();
-        let removed: Value = serde_json::from_slice(&remove_res).unwrap();
-        assert_eq!(removed["removed"], true);
-
-        // List should be empty
-        let list_all = call_tool(&reg, "list_components", json!({}), true).unwrap();
-        let list_all_json: Value = serde_json::from_slice(&list_all).unwrap();
-        assert_eq!(list_all_json["components"].as_array().unwrap().len(), 0);
-    }
-
-    #[test]
-    fn set_canvas_theme_resolution_configuration() {
-        let host = Arc::new(FakeHost::new());
-        let reg = build_registry(Arc::clone(&host) as Arc<dyn OverlayHostStore>, Arc::new(FakeKv));
-
-        // Configure 2k resolution
-        let res_2k = call_tool(
-            &reg,
-            "set_canvas_theme",
-            json!({
-                "resolution": "2k",
-                "theme": "cyberpunk"
-            }),
-            true,
-        )
-        .unwrap();
-        let val_2k: Value = serde_json::from_slice(&res_2k).unwrap();
-        assert_eq!(val_2k["canvas"]["resolution"], "2k");
-        assert_eq!(val_2k["canvas"]["width"], 2560);
-        assert_eq!(val_2k["canvas"]["height"], 1440);
-
-        // Configure 4k resolution
-        let res_4k = call_tool(
-            &reg,
-            "set_canvas_theme",
-            json!({
-                "resolution": "4k"
-            }),
-            true,
-        )
-        .unwrap();
-        let val_4k: Value = serde_json::from_slice(&res_4k).unwrap();
-        assert_eq!(val_4k["canvas"]["resolution"], "4k");
-        assert_eq!(val_4k["canvas"]["width"], 3840);
-        assert_eq!(val_4k["canvas"]["height"], 2160);
-
-        // Invalid resolution rejected
-        let res_bad = call_tool(
-            &reg,
-            "set_canvas_theme",
-            json!({
-                "resolution": "8k"
-            }),
-            true,
-        )
-        .unwrap_err();
-        assert!(matches!(res_bad, ToolError::InvalidArgs(_)));
-    }
-}
+#[path = "logic_tests.rs"]
+mod tests;

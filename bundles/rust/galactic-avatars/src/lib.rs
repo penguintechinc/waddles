@@ -5,6 +5,22 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Escapes `& < > " '` so untrusted text can only ever render as text inside the fragment.
+fn escape_html(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Faction {
     Jedi,
@@ -53,7 +69,7 @@ impl GalacticAvatar {
 <div style=\"font-size:28px;filter:drop-shadow(0 0 8px {color});\">{icon}</div>\
 <div style=\"font-size:12px;font-weight:bold;color:#fff;background:rgba(0,0,0,0.6);border-radius:4px;padding:2px 6px;margin-top:4px;\">{}</div>\
 </div>",
-            self.name
+            escape_html(&self.name)
         )
     }
 }
@@ -74,6 +90,15 @@ pub fn render_stage_strip(avatars: &[GalacticAvatar]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: avatar names are untrusted display text and must never inject markup.
+    #[test]
+    fn avatar_name_is_escaped() {
+        let evil = GalacticAvatar::new_jedi("<img src=x onerror=alert(1)>", 1);
+        let html = render_stage_strip(&[evil]);
+        assert!(!html.contains("<img"));
+        assert!(html.contains("&lt;img"));
+    }
 
     #[test]
     fn renders_jedi_and_sith_avatars() {
