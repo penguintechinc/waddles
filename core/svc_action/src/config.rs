@@ -315,6 +315,13 @@ pub struct CliConfig {
     /// grants this role needs.
     #[arg(long, env = "DB_READER_USER", default_value = "svc_action_ro")]
     pub db_reader_user: String,
+    /// Postgres host for EVERY changelog-consumer read (safe-seq watermark, change rows, active-set /
+    /// scope / source-binding reads). Helm points it at the PRIMARY while `DB_READER_HOST` targets the
+    /// read replicas (`-ro`): a lagging replica could miss a row below the primary's safe_seq and the
+    /// tracker would then skip it forever, so the consumer never reads from a replica. Unset falls back
+    /// to `DB_READER_HOST` (single-endpoint deployments).
+    #[arg(long, env = "DB_WATERMARK_HOST")]
+    pub db_watermark_host: Option<String>,
     /// Bundle `db` host capability connection (`crate::capabilities::DbWiring`):
     /// same env names/defaults as `core/svc_process::config::CliConfig` -- the
     /// shared `waddles` Postgres instance. The role is the DML-only
@@ -626,6 +633,30 @@ impl Config {
 
 fn env_required(name: &'static str) -> Result<String, ConfigError> {
     std::env::var(name).map_err(|_| ConfigError::MissingEnv(name))
+}
+
+impl CliConfig {
+    /// Connection settings for the changelog consumer: same port/name/role as the reader, but host
+    /// `DB_WATERMARK_HOST` (the primary) when set, else `DB_READER_HOST`.
+    #[must_use]
+    pub fn changelog_primary_config(&self) -> bundle_active_set::ReaderConfig {
+        bundle_active_set::ReaderConfig {
+            host: self
+                .db_watermark_host
+                .clone()
+                .filter(|h| !h.trim().is_empty())
+                .unwrap_or_else(|| self.db_reader_host.clone()),
+            port: self.db_reader_port,
+            name: self.db_reader_name.clone(),
+            user: self.db_reader_user.clone(),
+        }
+    }
+
+    /// Whether the changelog consumer's host differs from the reader (replica) host.
+    #[must_use]
+    pub fn changelog_uses_primary_host(&self) -> bool {
+        self.changelog_primary_config().host != self.db_reader_host
+    }
 }
 
 #[cfg(test)]
@@ -1090,5 +1121,39 @@ mod tests {
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("super-secret-db-pass"));
         clear_secret_env();
+    }
+
+    /// regression: the watermark read must never resolve to the replica host (-ro).
+    #[test]
+    fn changelog_consumer_host_never_resolves_to_the_reader_replica_host() {
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--db-reader-host",
+            "infra-postgres-ro.example.svc",
+            "--db-watermark-host",
+            "infra-postgres.example.svc",
+        ]);
+        let wm = cli.changelog_primary_config();
+        assert_eq!(wm.host, "infra-postgres.example.svc");
+        assert_ne!(wm.host, cli.db_reader_host);
+        assert!(cli.changelog_uses_primary_host());
+        assert_eq!(wm.user, cli.db_reader_user);
+        assert_eq!(wm.port, cli.db_reader_port);
+    }
+
+    /// Unset (or blank) `DB_WATERMARK_HOST` falls back to the reader host: single-endpoint deployments unchanged.
+    #[test]
+    fn changelog_consumer_host_falls_back_to_reader_host_when_unset_or_blank() {
+        let cli = CliConfig::parse_from(["svc-action", "--db-reader-host", "db.example.svc"]);
+        assert_eq!(cli.changelog_primary_config().host, "db.example.svc");
+        assert!(!cli.changelog_uses_primary_host());
+        let blank = CliConfig::parse_from([
+            "svc-action",
+            "--db-reader-host",
+            "db.example.svc",
+            "--db-watermark-host",
+            " ",
+        ]);
+        assert_eq!(blank.changelog_primary_config().host, "db.example.svc");
     }
 }

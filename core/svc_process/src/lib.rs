@@ -2117,12 +2117,10 @@ fn try_start_changelog_consumer(
         return;
     };
 
-    let reader_cfg = bundle_active_set::ReaderConfig {
-        host: config.cli.db_reader_host.clone(),
-        port: config.cli.db_reader_port,
-        name: config.cli.db_reader_name.clone(),
-        user: config.cli.db_reader_user.clone(),
-    };
+    // Every changelog-consumer read (watermark, change rows, active-set/scope/binding reads) goes to the PRIMARY
+    // (DB_WATERMARK_HOST): a lagging replica could miss a row below the primary's safe_seq and the tracker would
+    // skip it forever. The replica (DB_READER_HOST) is NOT used by this consumer.
+    let reader_cfg = config.cli.changelog_primary_config();
     let password = password.expose().to_string();
     let poll_interval = config.cli.bundle_config_poll_interval();
     let full_reconcile_interval = config.cli.full_reconcile_interval();

@@ -482,4 +482,29 @@ mod tests {
                 .is_some()
         );
     }
+
+    /// Display-name / detokenization lookups MUST read the PRIMARY: a lagging replica could still hold a
+    /// user's name after an erasure and release PII. Guards the wiring against a replica DSN creeping in.
+    #[test]
+    fn display_name_resolver_is_wired_to_the_primary_database_url_only() {
+        let egress_src = include_str!("egress.rs");
+        let production = egress_src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !production.to_ascii_uppercase().contains("REPLICA"),
+            "egress.rs must not reference a replica DSN"
+        );
+        let lib_src = include_str!("lib.rs");
+        let start = lib_src
+            .find("egress::Egress::from_cli(")
+            .expect("egress install call not found");
+        let call = &lib_src[start..start + 200];
+        assert!(
+            call.contains("\"DATABASE_URL\""),
+            "resolver must take DATABASE_URL"
+        );
+        assert!(
+            !call.contains("REPLICA"),
+            "resolver must not take a replica DSN"
+        );
+    }
 }

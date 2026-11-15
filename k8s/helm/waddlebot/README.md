@@ -238,7 +238,7 @@ No manual step is required: the `<release>-postgres-handover` pre-install/pre-up
 
 **Replication credential and TLS isolation.** Replicas authenticate with a `.pgpass` (0600, tmpfs emptyDir) built from the Secret at every start; `primary_conninfo` in `postgresql.auto.conf` carries only `passfile=` (the init script rewrites it on every start and fails if a `password=` survives, so replicas bootstrapped by an earlier revision are cleaned). Replicas serve with their own key/cert whose SANs are only `-ro`, the headless Service and the replica pod names; the primary key/cert never reaches a replica pod, so a compromised replica cannot impersonate the writer. In static mode both leaves live in the transit Secret (the provisioning CA key is per-run, so leaves are minted together with their CA) and each pod projects only its own keys; cert-manager mode uses a dedicated `<fullname>-postgres-replica-tls` Secret. libpq clients (psycopg2/psql/alembic) additionally set `PGCHANNELBINDING=require`; asyncpg 0.30 and sqlx 0.9 have no such option and are left as is.
 
-**Watermark.** svc-process/svc-action read the changelog SAFE-SEQ watermark over a separate connection to the PRIMARY (`DB_WATERMARK_HOST`, default the primary FQDN) while bundle loader reads use `DB_READER_HOST` (`-ro`).
+**Changelog consumer / read routing.** svc-process/svc-action run EVERY changelog-consumer read (watermark, change rows, active-set/scope/binding reads) on the PRIMARY (`DB_WATERMARK_HOST`); svc-ingest display-name/detokenization stays on the primary. Full per-path table: `docs/dataplane-db-routing.md`.
 
 #### Redis
 

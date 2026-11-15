@@ -2020,7 +2020,7 @@ pipeline:
       # infrastructure.postgresql.service.name/port/database, not hardcoded here so a
       # future replica is a values-only change.
       dbReaderHost: ""
-      # Safe-seq WATERMARK read host: ALWAYS the primary by default (never the -ro replica); override only for tests.
+      # Host for ALL changelog-consumer reads (watermark, change rows, active-set/scope/binding): ALWAYS the primary by default (never -ro).
       dbWatermarkHost: ""
       dbReaderPort: ""
       dbReaderName: ""
@@ -2100,7 +2100,7 @@ pipeline:
       # see its comments for the full rationale (hub-api sole writer, READ-ONLY Postgres,
       # gated OFF by default, safe defaults before the RO role exists).
       dbReaderHost: ""
-      # Safe-seq WATERMARK read host: ALWAYS the primary by default (never the -ro replica); override only for tests.
+      # Host for ALL changelog-consumer reads (watermark, change rows, active-set/scope/binding): ALWAYS the primary by default (never -ro).
       dbWatermarkHost: ""
       dbReaderPort: ""
       dbReaderName: ""

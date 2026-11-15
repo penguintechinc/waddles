@@ -366,8 +366,8 @@ def test_handover_script_noop_scales_waits_and_times_out(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize("case", _PG_CASES, ids=_ids)
-def test_watermark_stays_on_primary_and_ingest_reads_ro(case) -> None:
-    """DB_WATERMARK_HOST is the primary FQDN (never -ro) while loader reads use -ro; svc-ingest gets a -ro replica DSN."""
+def test_changelog_consumer_stays_on_primary_and_ingest_has_no_replica(case) -> None:
+    """DB_WATERMARK_HOST (all changelog-consumer reads) is the primary FQDN, never -ro; svc-ingest has no replica DSN."""
     helm, (values, extra) = case
     docs = _render(helm, values, extra + ("pipeline.rustDataPlane.enabled=true",))
     for suffix in ("svc-process-rust", "svc-action-rust"):
@@ -376,9 +376,11 @@ def test_watermark_stays_on_primary_and_ingest_reads_ro(case) -> None:
         assert wm == "infra-postgres.waddlebot.svc.cluster.local", (suffix, wm)
         assert "-ro" not in wm and wm != env["DB_READER_HOST"]["value"], suffix
         assert env["DB_READER_HOST"]["value"] == "infra-postgres-ro.waddlebot.svc.cluster.local"
+    # svc-ingest display-name/detokenization stays on the PRIMARY (erasure safety): no replica DSN at all.
     ing = _env(_by_suffix(docs, "svc-ingest-rust")["spec"]["template"]["spec"]["containers"][0])
-    assert "@infra-postgres-ro.waddlebot.svc.cluster.local:5432/" in ing["DATABASE_REPLICA_URL"]["value"]
+    assert "DATABASE_REPLICA_URL" not in ing and "DATABASE_READ_REPLICA_URL" not in ing
     assert "@infra-postgres.waddlebot.svc.cluster.local:5432/" in ing["DATABASE_URL"]["value"]
+    assert "-ro" not in ing["DATABASE_URL"]["value"]
 
 
 @pytest.mark.parametrize("case", _PG_CASES, ids=_ids)
