@@ -1,4 +1,4 @@
--- Automated hard ban (reputation floor) -- SQL half. Applied by alembic 0110_reputation_floor_ban
+-- Automated hard ban (reputation floor) -- SQL half. Applied by alembic 0114_reputation_floor_ban
 -- (and by the Rust crate's integration test, after bundle_reputation_unify.sql). Idempotent.
 --
 -- Delivery model (a one-way outbox across two stages):

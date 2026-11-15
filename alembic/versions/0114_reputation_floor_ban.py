@@ -6,12 +6,11 @@ its SECURITY DEFINER enqueue/claim/recheck/complete/reap outbox functions, `repu
 fan-out set) and the per-community `floor_ban_hourly_quota` policy column. DDL lives in
 `scripts/db/bundle_reputation_floor_ban.sql` (shared with the Rust crate's integration test).
 
-Revision ID: 0110_reputation_floor_ban
-Revises: 0108_bundle_precompile_requests, 0109_platform_vault
+Revision ID: 0114_reputation_floor_ban
+Revises: 0110_merge_precompile_vault
 
-Chain note: release/v3.0.X carried two heads (0108_bundle_precompile_requests and 0109_platform_vault);
-this revision is also the merge point, so the graph keeps a single head. If another migration lands first,
-re-chain `down_revision` onto the new head.
+Chain note: chained after 0110_merge_precompile_vault (PR #1354, which merges the 0108/0109 heads); 0111-0113 are
+claimed by other PRs. If another migration lands first, re-chain `down_revision` so the graph keeps a single head.
 Create Date: 2026-11-11
 """
 
@@ -21,8 +20,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0110_reputation_floor_ban"
-down_revision = ("0108_bundle_precompile_requests", "0109_platform_vault")
+revision = "0114_reputation_floor_ban"
+down_revision = "0110_merge_precompile_vault"
 branch_labels = None
 depends_on = None
 
