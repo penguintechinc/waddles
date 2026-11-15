@@ -173,6 +173,14 @@ impl PeerConnectionEventHandler for ViewerHandler {
     }
 }
 
+/// What a viewer forwarder reports back: an egress counter (viewer liveness timeout) and the
+/// session's `ended` flag, set when a write to the viewer fails.
+#[derive(Clone)]
+struct ForwardLiveness {
+    packets: Arc<std::sync::atomic::AtomicU64>,
+    ended: Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// Forwards one fanout to one viewer track, rewriting SSRC and payload type to
 /// what the viewer's own negotiation produced.
 fn spawn_forward(
@@ -182,6 +190,7 @@ fn spawn_forward(
     ssrc: u32,
     pt: Option<u8>,
     metrics: RtcMetrics,
+    liveness: ForwardLiveness,
 ) {
     runtime.spawn(Box::pin(async move {
         let mut sub = fanout.subscribe();
@@ -195,8 +204,15 @@ fn spawn_forward(
                 .with_label_values(&["egress"])
                 .inc();
             if track.write_rtp(p).await.is_err() {
+                // The viewer's transport is gone: flag it for the sweeper to reap.
+                liveness
+                    .ended
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 break;
             }
+            liveness
+                .packets
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }));
 }
@@ -323,6 +339,7 @@ async fn publish(
             SessionGrant {
                 expires_at: claims.exp,
                 jti,
+                epoch: claims.epoch,
             },
             SessionActivity {
                 packets: Some(packets),
@@ -447,6 +464,11 @@ async fn subscribe(
         }
     }
     let runtime = svc.factory.runtime();
+    let egress_packets = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let liveness = ForwardLiveness {
+        packets: egress_packets.clone(),
+        ended: reap.ended.clone(),
+    };
     spawn_forward(
         &*runtime,
         fanouts.video,
@@ -454,6 +476,7 @@ async fn subscribe(
         vssrc,
         video_pt,
         svc.metrics.clone(),
+        liveness.clone(),
     );
     spawn_forward(
         &*runtime,
@@ -462,6 +485,7 @@ async fn subscribe(
         assrc,
         audio_pt,
         svc.metrics.clone(),
+        liveness,
     );
 
     let session = match svc
@@ -473,6 +497,10 @@ async fn subscribe(
             SessionGrant {
                 expires_at: claims.exp,
                 jti,
+                epoch: claims.epoch,
+            },
+            SessionActivity {
+                packets: Some(egress_packets),
             },
         )
         .await

@@ -445,6 +445,8 @@ struct PublisherEntry {
     /// Counter value at the last sweep that saw it change, and when that was.
     seen_packets: u64,
     seen_at: i64,
+    /// Room epoch the session was admitted under; a revoke-all invalidates older ones.
+    epoch: u64,
 }
 
 struct SubscriberEntry {
@@ -453,6 +455,12 @@ struct SubscriberEntry {
     ended: Arc<AtomicBool>,
     expires_at: i64,
     jti: Uuid,
+    /// Egress RTP counter (written by the forwarders) for the liveness timeout.
+    packets: Option<Arc<AtomicU64>>,
+    seen_packets: u64,
+    seen_at: i64,
+    /// Room epoch the session was admitted under.
+    epoch: u64,
 }
 
 struct Room {
@@ -539,6 +547,17 @@ pub(crate) struct SessionGrant {
     #[allow(dead_code)]
     pub expires_at: i64,
     pub jti: Uuid,
+    /// The room epoch the admission token carried (checked against the live room at
+    /// registration; a later revoke-all closes sessions of older epochs).
+    pub epoch: u64,
+}
+
+/// What a session predicate sees about one live session.
+pub(crate) struct SessionMeta {
+    pub participant: Uuid,
+    pub jti: Uuid,
+    pub epoch: u64,
+    pub publisher: bool,
 }
 
 /// Liveness signals a session registers with, kept out of `Copy` [`SessionGrant`].
@@ -572,6 +591,9 @@ pub struct IssueRequest {
 pub struct Member {
     /// Staff may acknowledge/reset hands and lower or list everyone's.
     pub staff: bool,
+    /// Joined as an unauthenticated guest (recorded at issuance; re-checked on every media
+    /// registration and whenever the room's facts change).
+    pub guest: bool,
 }
 
 /// Which raised hands a [`RoomService::list_hands`] caller wants.
@@ -888,26 +910,31 @@ impl RoomService {
         facts: RoomFacts,
     ) -> Result<RoomInfo, RoomError> {
         facts.validate()?;
-        let (info, staff) = {
+        let (info, members) = {
             let mut rooms = self.rooms.write().await;
             match rooms.get_mut(&room_id) {
                 Some(r) if r.community_id == community_id => {
                     r.facts = facts;
-                    let staff: HashSet<Uuid> = r
-                        .members
-                        .iter()
-                        .filter(|(_, m)| m.staff)
-                        .map(|(p, _)| *p)
-                        .collect();
-                    (Self::info(room_id, r), staff)
+                    (Self::info(room_id, r), r.members.clone())
                 }
                 _ => return Err(RoomError::NotFound),
             }
         };
-        if facts.closed {
-            self.close_matching(room_id, |p, _| !staff.contains(&p))
-                .await;
-        }
+        // Every live session that would no longer be admitted under the new facts ends now
+        // (closed room, stage publishers, green room, schedule, guests turned off).
+        let at = now();
+        self.close_sessions(room_id, |m| {
+            let mem = members.get(&m.participant).copied();
+            facts
+                .admit(
+                    at,
+                    mem.is_some_and(|x| x.staff),
+                    mem.is_some_and(|x| x.guest),
+                    m.publisher,
+                )
+                .is_err()
+        })
+        .await;
         tracing::info!(%room_id, community_id, kind = ?facts.kind, closed = facts.closed, "rooms: facts updated");
         Ok(info)
     }
@@ -986,7 +1013,13 @@ impl RoomService {
                     // later ordinary issuance) and only a verified-authority caller sets it.
                     let staff =
                         req.staff || r.members.get(&req.participant).is_some_and(|m| m.staff);
-                    r.members.insert(req.participant, Member { staff });
+                    r.members.insert(
+                        req.participant,
+                        Member {
+                            staff,
+                            guest: req.guest && !staff,
+                        },
+                    );
                     // A join in flight counts as activity: an empty room must not expire
                     // between a participant receiving a token and opening their session.
                     if r.empty_since.is_some() {
@@ -1159,7 +1192,11 @@ impl RoomService {
         match rooms.get_mut(&room_id) {
             Some(r) if r.community_id == community_id => {
                 r.epoch += 1;
-                Ok(r.epoch)
+                let epoch = r.epoch;
+                drop(rooms);
+                // Live sessions admitted under an older epoch must not outlive the revoke.
+                self.close_sessions(room_id, |m| m.epoch < epoch).await;
+                Ok(epoch)
             }
             _ => Err(RoomError::NotFound),
         }
@@ -1232,7 +1269,7 @@ impl RoomService {
         let (session, stale) = {
             let mut rooms = self.rooms.write().await;
             let room = rooms.get_mut(&room_id).ok_or(RoomError::NotFound)?;
-            Self::join_allowed(room, participant, true)?;
+            Self::join_allowed(room, participant, true, grant.epoch)?;
             if room.muted.contains(&participant) {
                 fanouts.set_muted(true);
             }
@@ -1259,6 +1296,7 @@ impl RoomService {
                         .map_or(0, |c| c.load(Ordering::Relaxed)),
                     packets: activity.packets,
                     seen_at: now(),
+                    epoch: grant.epoch,
                 },
             );
             (session, stale)
@@ -1279,6 +1317,7 @@ impl RoomService {
         pc: Arc<dyn PeerConnection>,
         ended: Arc<AtomicBool>,
         grant: SessionGrant,
+        activity: SessionActivity,
     ) -> Result<Uuid, RoomError> {
         let (session, stale) = {
             let mut rooms = self.rooms.write().await;
@@ -1294,7 +1333,7 @@ impl RoomService {
                 .map(|r| r.subscribers.len())
                 .sum();
             let room = rooms.get_mut(&room_id).ok_or(RoomError::NotFound)?;
-            Self::join_allowed(room, participant, false)?;
+            Self::join_allowed(room, participant, false, grant.epoch)?;
             let old: Vec<Uuid> = room
                 .subscribers
                 .iter()
@@ -1326,6 +1365,13 @@ impl RoomService {
                     ended,
                     expires_at: now().saturating_add(DEFAULT_SESSION_LEASE_SECS),
                     jti: grant.jti,
+                    seen_packets: activity
+                        .packets
+                        .as_ref()
+                        .map_or(0, |c| c.load(Ordering::Relaxed)),
+                    packets: activity.packets,
+                    seen_at: now(),
+                    epoch: grant.epoch,
                 },
             );
             (session, stale)
@@ -1358,12 +1404,24 @@ impl RoomService {
             let idle = i64::from(self.session_idle_secs);
             let mut rooms = self.rooms.write().await;
             for (rid, room) in rooms.iter_mut() {
-                for (sid, s) in &room.subscribers {
-                    if s.ended.load(Ordering::SeqCst) || s.expires_at <= at {
-                        dead.push((*rid, *sid));
-                    }
-                }
-                for p in room.publishers.values_mut() {
+                let facts = room.facts;
+                let epoch = room.epoch;
+                let members = room.members.clone();
+                let admitted = |participant: Uuid, publish: bool| {
+                    let m = members.get(&participant).copied();
+                    facts
+                        .admit(
+                            at,
+                            m.is_some_and(|x| x.staff),
+                            m.is_some_and(|x| x.guest),
+                            publish,
+                        )
+                        .is_ok()
+                };
+                // Publishers first: the subscriber liveness check needs to know whether
+                // media was recently flowing in this room.
+                let mut media_flowing = false;
+                for (pid, p) in room.publishers.iter_mut() {
                     let mut idle_out = false;
                     if let Some(c) = &p.packets {
                         let n = c.load(Ordering::Relaxed);
@@ -1373,9 +1431,41 @@ impl RoomService {
                         } else {
                             idle_out = idle > 0 && at.saturating_sub(p.seen_at) >= idle;
                         }
+                        if p.seen_packets > 0 && (idle == 0 || at.saturating_sub(p.seen_at) < idle)
+                        {
+                            media_flowing = true;
+                        }
                     }
-                    if p.ended.load(Ordering::SeqCst) || p.expires_at <= at || idle_out {
+                    if p.ended.load(Ordering::SeqCst)
+                        || p.expires_at <= at
+                        || idle_out
+                        || p.epoch != epoch
+                        || !admitted(*pid, true)
+                    {
                         dead.push((*rid, p.session));
+                    }
+                }
+                for (sid, s) in room.subscribers.iter_mut() {
+                    let mut idle_out = false;
+                    if let Some(c) = &s.packets {
+                        let n = c.load(Ordering::Relaxed);
+                        if n != s.seen_packets {
+                            s.seen_packets = n;
+                            s.seen_at = at;
+                        } else {
+                            // A viewer that received nothing while media was flowing in the
+                            // room is dead; with no media flowing silence proves nothing.
+                            idle_out =
+                                idle > 0 && media_flowing && at.saturating_sub(s.seen_at) >= idle;
+                        }
+                    }
+                    if s.ended.load(Ordering::SeqCst)
+                        || s.expires_at <= at
+                        || idle_out
+                        || s.epoch != epoch
+                        || !admitted(s.participant, false)
+                    {
+                        dead.push((*rid, *sid));
                     }
                 }
             }
@@ -1617,11 +1707,21 @@ impl RoomService {
     }
 
     /// Refuses a join into a locked room or by a kicked participant.
-    fn join_allowed(room: &Room, participant: Uuid, publish: bool) -> Result<(), RoomError> {
-        // Staff = recorded in the server-side member table (set only from a verified
-        // moderate-scope join), so a token alone never carries the bypass.
-        let staff = room.members.get(&participant).is_some_and(|m| m.staff);
-        room.facts.admit(now(), staff, false, publish)?;
+    fn join_allowed(
+        room: &Room,
+        participant: Uuid,
+        publish: bool,
+        epoch: u64,
+    ) -> Result<(), RoomError> {
+        if epoch != room.epoch {
+            return Err(RoomError::Unauthorized);
+        }
+        // Staff/guest = recorded in the server-side member table (staff only from a verified
+        // moderate-scope join), so a token alone never carries either.
+        let m = room.members.get(&participant).copied();
+        let staff = m.is_some_and(|m| m.staff);
+        let guest = m.is_some_and(|m| m.guest);
+        room.facts.admit(now(), staff, guest, publish)?;
         if room.locked && !staff {
             return Err(RoomError::Forbidden("room is locked"));
         }
@@ -1636,6 +1736,13 @@ impl RoomService {
     /// Removes every live session in `room_id` for which `pred(participant, jti)`
     /// holds and closes its peer connection; returns how many were closed.
     async fn close_matching(&self, room_id: Uuid, pred: impl Fn(Uuid, Uuid) -> bool) -> usize {
+        self.close_sessions(room_id, |m| pred(m.participant, m.jti))
+            .await
+    }
+
+    /// Removes every live session in `room_id` matching `pred` and closes its peer
+    /// connection; returns how many were closed.
+    async fn close_sessions(&self, room_id: Uuid, pred: impl Fn(&SessionMeta) -> bool) -> usize {
         let doomed: Vec<(Arc<dyn PeerConnection>, &'static str)> = {
             let mut rooms = self.rooms.write().await;
             let Some(room) = rooms.get_mut(&room_id) else {
@@ -1644,13 +1751,27 @@ impl RoomService {
             let sub_keys: Vec<Uuid> = room
                 .subscribers
                 .iter()
-                .filter(|(_, s)| pred(s.participant, s.jti))
+                .filter(|(_, s)| {
+                    pred(&SessionMeta {
+                        participant: s.participant,
+                        jti: s.jti,
+                        epoch: s.epoch,
+                        publisher: false,
+                    })
+                })
                 .map(|(k, _)| *k)
                 .collect();
             let pub_keys: Vec<Uuid> = room
                 .publishers
                 .iter()
-                .filter(|(k, p)| pred(**k, p.jti))
+                .filter(|(k, p)| {
+                    pred(&SessionMeta {
+                        participant: **k,
+                        jti: p.jti,
+                        epoch: p.epoch,
+                        publisher: true,
+                    })
+                })
                 .map(|(k, _)| *k)
                 .collect();
             let mut v = Vec::new();
@@ -1970,7 +2091,13 @@ impl RoomService {
                     "{MAX_MEMBERS_PER_ROOM} participants per room"
                 )));
             }
-            room.members.insert(actor, Member { staff: true });
+            room.members.insert(
+                actor,
+                Member {
+                    staff: true,
+                    guest: false,
+                },
+            );
             Ok(())
         }
         .await;
@@ -3071,5 +3198,241 @@ mod tests {
             .await
             .unwrap();
         assert!(s.authorize_established(&t.token, r.room_id).await.is_err());
+    }
+
+    struct NoopHandler;
+    #[async_trait::async_trait]
+    impl webrtc::peer_connection::PeerConnectionEventHandler for NoopHandler {}
+
+    async fn pc_of(s: &RoomService) -> Arc<dyn PeerConnection> {
+        s.factory.build(Arc::new(NoopHandler)).await.unwrap()
+    }
+
+    /// Registers a live publisher session for `who` (epoch of the live room) with a counter.
+    async fn live_pub(s: &RoomService, room: Uuid, who: Uuid) -> Arc<AtomicU64> {
+        let c = Arc::new(AtomicU64::new(0));
+        let epoch = s.rooms.read().await.get(&room).unwrap().epoch;
+        s.add_publisher(
+            room,
+            who,
+            MediaFanouts::new(),
+            pc_of(s).await,
+            Arc::new(AtomicBool::new(false)),
+            SessionGrant {
+                expires_at: 0,
+                jti: Uuid::new_v4(),
+                epoch,
+            },
+            SessionActivity {
+                packets: Some(c.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        c
+    }
+
+    async fn live_sub(s: &RoomService, room: Uuid, who: Uuid) -> Arc<AtomicU64> {
+        let c = Arc::new(AtomicU64::new(0));
+        let epoch = s.rooms.read().await.get(&room).unwrap().epoch;
+        s.add_subscriber(
+            room,
+            who,
+            pc_of(s).await,
+            Arc::new(AtomicBool::new(false)),
+            SessionGrant {
+                expires_at: 0,
+                jti: Uuid::new_v4(),
+                epoch,
+            },
+            SessionActivity {
+                packets: Some(c.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        c
+    }
+
+    async fn counts(s: &RoomService, room: Uuid) -> (usize, usize) {
+        let i = s.get("7", room).await.unwrap();
+        (i.publisher_ids.len(), i.subscriber_count)
+    }
+
+    #[tokio::test]
+    async fn revoke_all_closes_live_sessions_of_the_old_epoch() {
+        let s = moderated();
+        let r = new_room(&s, "7").await;
+        live_pub(&s, r.room_id, Uuid::new_v4()).await;
+        live_sub(&s, r.room_id, Uuid::new_v4()).await;
+        assert_eq!(counts(&s, r.room_id).await, (1, 1));
+        s.revoke_all("7", r.room_id).await.unwrap();
+        assert_eq!(counts(&s, r.room_id).await, (0, 0), "old-epoch sessions end");
+        // Another community cannot revoke; the room keeps working on the new epoch.
+        assert!(matches!(
+            s.revoke_all("8", r.room_id).await,
+            Err(RoomError::NotFound)
+        ));
+        live_pub(&s, r.room_id, Uuid::new_v4()).await;
+        assert_eq!(counts(&s, r.room_id).await, (1, 0));
+    }
+
+    #[tokio::test]
+    async fn sweeper_reaps_epoch_mismatched_sessions_and_stale_registration_is_refused() {
+        let s = moderated();
+        let r = new_room(&s, "7").await;
+        live_pub(&s, r.room_id, Uuid::new_v4()).await;
+        live_sub(&s, r.room_id, Uuid::new_v4()).await;
+        // Bump the epoch behind the sessions' back (as if the close raced): the sweeper ends them.
+        s.rooms.write().await.get_mut(&r.room_id).unwrap().epoch += 1;
+        assert_eq!(s.sweep_at(now()).await, 2);
+        assert_eq!(counts(&s, r.room_id).await, (0, 0));
+        // A registration carrying a stale epoch is refused outright.
+        let rooms = s.rooms.read().await;
+        let room = rooms.get(&r.room_id).unwrap();
+        assert!(matches!(
+            RoomService::join_allowed(room, Uuid::new_v4(), false, 0),
+            Err(RoomError::Unauthorized)
+        ));
+    }
+
+    #[tokio::test]
+    async fn fact_changes_close_every_session_that_would_now_fail_admission() {
+        let s = moderated();
+        // Stage: the non-staff publisher goes, the non-staff viewer stays, staff stays.
+        let r = new_room(&s, "7").await;
+        let (member, viewer, host) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        join(&s, "7", r.room_id, member, false).await;
+        join(&s, "7", r.room_id, viewer, false).await;
+        join(&s, "7", r.room_id, host, true).await;
+        live_pub(&s, r.room_id, member).await;
+        live_sub(&s, r.room_id, viewer).await;
+        live_pub(&s, r.room_id, host).await;
+        s.update_facts("7", r.room_id, facts(RoomKind::Stage))
+            .await
+            .unwrap();
+        assert_eq!(counts(&s, r.room_id).await, (1, 1), "only the host publishes");
+        // Green room: every non-staff session goes, staff stays.
+        s.update_facts("7", r.room_id, facts(RoomKind::GreenRoom))
+            .await
+            .unwrap();
+        assert_eq!(counts(&s, r.room_id).await, (1, 0));
+        // Out-of-window: non-staff gone (staff exempt); closed: everyone gone.
+        let r2 = new_room(&s, "7").await;
+        join(&s, "7", r2.room_id, member, false).await;
+        live_sub(&s, r2.room_id, member).await;
+        let past = RoomFacts {
+            starts_at: Some(1),
+            ends_at: Some(2),
+            ..RoomFacts::default()
+        };
+        s.update_facts("7", r2.room_id, past).await.unwrap();
+        assert_eq!(counts(&s, r2.room_id).await, (0, 0));
+        let r3 = new_room(&s, "7").await;
+        join(&s, "7", r3.room_id, host, true).await;
+        live_pub(&s, r3.room_id, host).await;
+        s.update_facts(
+            "7",
+            r3.room_id,
+            RoomFacts {
+                closed: true,
+                ..RoomFacts::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(counts(&s, r3.room_id).await, (0, 0), "closed ends staff too");
+    }
+
+    #[tokio::test]
+    async fn guest_status_is_bound_to_the_member_and_enforced_at_media_time() {
+        let s = moderated();
+        let open = RoomFacts {
+            allow_guests: true,
+            ..RoomFacts::default()
+        };
+        let r = s
+            .create_with_facts("7", None, None, RouteMode::Sfu, None, open)
+            .await
+            .unwrap();
+        let (guest, member) = (Uuid::new_v4(), Uuid::new_v4());
+        let g = IssueRequest {
+            participant: guest,
+            guest: true,
+            ..issue(false, true)
+        };
+        s.issue_token("7", r.room_id, g).await.unwrap();
+        join(&s, "7", r.room_id, member, false).await;
+        {
+            let rooms = s.rooms.read().await;
+            let room = rooms.get(&r.room_id).unwrap();
+            assert!(room.members[&guest].guest && !room.members[&member].guest);
+            // Media registration: a guest may subscribe but never publish.
+            assert!(RoomService::join_allowed(room, guest, false, 0).is_ok());
+            assert!(RoomService::join_allowed(room, guest, true, 0).is_err());
+        }
+        live_sub(&s, r.room_id, guest).await;
+        live_sub(&s, r.room_id, member).await;
+        // Turning guests off closes the guest's session only, and blocks re-registration.
+        s.update_facts("7", r.room_id, RoomFacts::default())
+            .await
+            .unwrap();
+        assert_eq!(counts(&s, r.room_id).await, (0, 1));
+        let rooms = s.rooms.read().await;
+        let room = rooms.get(&r.room_id).unwrap();
+        assert!(RoomService::join_allowed(room, guest, false, 0).is_err());
+        assert!(RoomService::join_allowed(room, member, false, 0).is_ok());
+    }
+
+    #[tokio::test]
+    async fn sweeper_enforces_the_schedule_end() {
+        let s = moderated();
+        let t = now();
+        let r = s
+            .create_with_facts(
+                "7",
+                None,
+                None,
+                RouteMode::Sfu,
+                None,
+                RoomFacts {
+                    ends_at: Some(t + 60),
+                    ..RoomFacts::default()
+                },
+            )
+            .await
+            .unwrap();
+        live_pub(&s, r.room_id, Uuid::new_v4()).await;
+        assert_eq!(s.sweep_at(t + 30).await, 0);
+        assert_eq!(s.sweep_at(t + 61).await, 1, "session ends when the window does");
+        assert_eq!(counts(&s, r.room_id).await, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn viewer_liveness_times_out_only_while_media_is_flowing() {
+        let s = moderated().with_session_idle_secs(300);
+        let t = now();
+        let r = new_room(&s, "7").await;
+        let publisher = live_pub(&s, r.room_id, Uuid::new_v4()).await;
+        let viewer = live_sub(&s, r.room_id, Uuid::new_v4()).await;
+        // Nothing flowing anywhere: silence proves nothing, the viewer stays (and the silent
+        // publisher is the one the idle timeout takes, later).
+        assert_eq!(s.sweep_at(t + 100).await, 0);
+        // Media starts flowing in; the viewer receives nothing for 300 s -> reaped.
+        publisher.fetch_add(10, Ordering::Relaxed);
+        assert_eq!(s.sweep_at(t + 200).await, 0);
+        publisher.fetch_add(10, Ordering::Relaxed);
+        assert_eq!(s.sweep_at(t + 301).await, 1);
+        assert_eq!(counts(&s, r.room_id).await, (1, 0));
+        // A viewer that keeps receiving is never reaped.
+        let r2 = new_room(&s, "7").await;
+        let p2 = live_pub(&s, r2.room_id, Uuid::new_v4()).await;
+        let v2 = live_sub(&s, r2.room_id, Uuid::new_v4()).await;
+        for step in 1..=5 {
+            p2.fetch_add(5, Ordering::Relaxed);
+            v2.fetch_add(5, Ordering::Relaxed);
+            assert_eq!(s.sweep_at(t + step * 200).await, 0);
+        }
+        drop(viewer);
     }
 }

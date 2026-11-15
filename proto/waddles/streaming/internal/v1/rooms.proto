@@ -188,8 +188,8 @@ message UpdateRoomRequest {
   string api_version = 1;
   string community_id = 2;
   string room_id = 3;
-  // The full new fact set (replace, not merge). Closing a room also ends the media sessions
-  // of its non-staff participants.
+  // The full new fact set (replace, not merge). Every live media session that would no longer
+  // pass admission under the new facts (closed, stage, green room, schedule, guests) ends.
   RoomKind kind = 4;
   bool closed = 5;
   optional int64 starts_at = 6;
