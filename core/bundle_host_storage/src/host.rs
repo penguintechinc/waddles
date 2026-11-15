@@ -19,9 +19,10 @@ use crate::key::{object_key, scope_prefix, validate_key, validate_key_prefix, va
 use crate::limits::*;
 use crate::metrics;
 use crate::policy::{authorize, GrantSet, Op};
+use crate::seal::{sealed_len, ObjectSealing};
 use crate::tags::{
     bundle_tag, normalize_tags, system_tag, validate_request_id, validate_tag, MAX_TAGS,
-    TAG_COMMUNITY, TAG_REQUEST_ID, TAG_TENANT,
+    TAG_COMMUNITY, TAG_REQUEST_ID, TAG_SEALED, TAG_TENANT,
 };
 
 /// Host-derived invocation scope; NEVER built from guest args.
@@ -67,12 +68,19 @@ pub struct StorageHost {
     denials: DenialQueue,
     rate: Mutex<HashMap<RateKey, (Instant, u32)>>,
     rate_limit: u32,
+    sealing: Option<ObjectSealing>,
 }
 
+/// Guest-visible metadata; a sealed object's size is reported without the envelope overhead.
 fn info(rel: &str, m: &ObjectMeta) -> ObjectInfo {
+    let sealed = m.tags.contains(&system_tag(TAG_SEALED, 1));
     ObjectInfo {
         key: rel.to_string(),
-        size: m.size,
+        size: if sealed {
+            m.size.saturating_sub(sealed_len(0))
+        } else {
+            m.size
+        },
         content_type: m.content_type.clone(),
     }
 }
@@ -93,7 +101,16 @@ impl StorageHost {
             audit,
             rate: Mutex::new(HashMap::new()),
             rate_limit,
+            sealing: None,
         }
+    }
+
+    /// Seals object bodies per tenant (see [`crate::seal`]); without it bodies are stored as
+    /// given. Production wiring always calls this.
+    #[must_use]
+    pub fn with_sealing(mut self, sealing: ObjectSealing) -> Self {
+        self.sealing = Some(sealing);
+        self
     }
 
     /// Fail CLOSED for a principal whose denial records overflowed and are not yet
@@ -370,6 +387,23 @@ impl StorageHost {
         };
         validate_request_id(&s.request_id)?;
         let mut tags = tags;
+        let size = body.len() as u64;
+        let body = match &self.sealing {
+            Some(sealing) if sealing.writes_sealed().await => {
+                tags.push(system_tag(TAG_SEALED, 1));
+                sealing
+                    .seal(s.tenant, s.community, &r.owner, key, &body)
+                    .await?
+            }
+            Some(_) => {
+                tracing::warn!(
+                    tenant = s.tenant,
+                    "object stored PLAINTEXT: waddles.disable-tenant-at-rest-encryption is ON"
+                );
+                body
+            }
+            None => body,
+        };
         tags.push(system_tag(TAG_TENANT, s.tenant));
         tags.push(system_tag(TAG_COMMUNITY, s.community));
         tags.push(system_tag(TAG_REQUEST_ID, &s.request_id));
@@ -379,7 +413,6 @@ impl StorageHost {
             body.len() as u64,
         )
         .await?;
-        let size = body.len() as u64;
         // Audit-first: a cross-prefix write that cannot be recorded does not happen.
         self.audit_allowed(s, &r, "put", key).await?;
         self.backend
@@ -422,10 +455,33 @@ impl StorageHost {
             .await;
             return Err(StorageError::NotFound);
         }
-        metrics::bytes("out", obj.meta.size);
+        let tagged_sealed = obj.meta.tags.contains(&system_tag(TAG_SEALED, 1));
+        let body = match &self.sealing {
+            Some(sealing) => {
+                sealing
+                    .open(
+                        s.tenant,
+                        s.community,
+                        &r.owner,
+                        key,
+                        obj.body,
+                        tagged_sealed,
+                    )
+                    .await?
+            }
+            None if tagged_sealed || crate::seal::looks_sealed(&obj.body) => {
+                return Err(StorageError::Backend(
+                    "object is tenant-sealed but sealing is not configured".into(),
+                ));
+            }
+            None => obj.body,
+        };
+        let mut meta_info = info(key, &obj.meta);
+        meta_info.size = body.len() as u64;
+        metrics::bytes("out", meta_info.size);
         metrics::op_duration("get", t0.elapsed());
         self.audit_allowed(s, &r, "get", key).await?;
-        Ok((info(key, &obj.meta), obj.body))
+        Ok((meta_info, body))
     }
 
     /// Metadata of one object (tag-filtered). Needs `read`.
@@ -573,7 +629,14 @@ impl StorageHost {
             return Err(StorageError::Invalid("ttl must be >= 1".into()));
         }
         let r = self.resolve(s, owner, Op::Read, key).await?;
-        self.require_visible(s, &r, "presign_get", key).await?;
+        let meta = self.require_visible(s, &r, "presign_get", key).await?;
+        if meta.tags.contains(&system_tag(TAG_SEALED, 1)) {
+            // A presigned URL hands the guest the stored bytes directly: for a tenant-sealed
+            // object that is ciphertext. Refuse loudly; callers use `get`.
+            return Err(StorageError::Invalid(
+                "presigned URLs are unavailable for tenant-sealed objects; use get".into(),
+            ));
+        }
         let url = self
             .backend
             .presign_get(
