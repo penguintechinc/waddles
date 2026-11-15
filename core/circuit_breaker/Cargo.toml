@@ -13,3 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 tracing = "=0.1.44"
+tokio = { version = "=1.53.3", default-features = false, features = ["sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "time", "sync"] }
