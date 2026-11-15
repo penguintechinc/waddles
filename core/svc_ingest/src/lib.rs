@@ -63,6 +63,7 @@
 //! dependency, unlike `svc_process`/`svc_action`.
 
 pub mod active_context;
+pub mod canary;
 pub mod commands_reconcile;
 pub mod config;
 pub mod connector;
@@ -323,6 +324,11 @@ where
     crypto::ensure_installed();
 
     let (_telemetry_guard, prom_registry) = telemetry::init(SERVICE_NAME);
+    // Command-latency kill switch (`waddles.disable-command-latency-telemetry`): seeded from the ENV
+    // baseline here, kept live by the refresher once the license client exists below. The
+    // instruments are created now that the global meter provider is installed.
+    command_latency::switch::init_from_env();
+    let _ = command_latency::metrics::metrics();
 
     tracing::info!(
         http_port = config.cli.http_port,
@@ -373,6 +379,13 @@ where
     let mut connector_ready: Option<Arc<dyn connector_runtime::RuntimeReady>> = None;
     let license_client = license::build_license_client();
     license::set_shared_license_client(license_client.clone());
+    {
+        let client = license_client.clone();
+        command_latency::switch::spawn_refresher(move || {
+            let client = client.clone();
+            async move { canary::kill_switch_wanted(client.as_ref()).await }
+        });
+    }
     // Egress detokenizer: installed BEFORE any outbound drain starts. The drain is the only
     // platform egress; it substitutes `{user:<token>}` right before each send.
     egress::install(egress::Egress::from_cli(
@@ -404,6 +417,15 @@ where
             dek_provider.clone(),
         )
         .await?;
+
+        // Command-latency synthetic canary (flag `waddles.command-latency-canary`, default OFF):
+        // the machinery is built lazily on the first enabled tick.
+        canary::spawn(
+            config.clone(),
+            ingest_metrics.clone(),
+            dek_provider.clone(),
+            license_client.clone(),
+        );
 
         // Connector service bundle runtime (spec 2026-11-05 PR-E): only when an
         // `CONNECTOR_<P>_ENABLED` baseline is ON. It owns the single executor
@@ -1435,6 +1457,53 @@ mod tests {
     // `cargo test` threads don't race on the same variable.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Serialized, self-restoring edit of process environment variables.
+    ///
+    /// Holds [`ENV_LOCK`] and applies the edits (`None` removes a variable); on drop it puts
+    /// every touched variable back to the value it had -- INCLUDING the CI-provided
+    /// `VALKEY_URL`/`TEST_DATABASE_URL` that the real-Valkey tests in other modules read without
+    /// this lock. Removing them permanently (as these tests used to) made those tests fail
+    /// whenever the scheduler ran an env test first.
+    struct EnvScope {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvScope {
+        fn new(edits: &[(&'static str, Option<&str>)]) -> Self {
+            let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let mut saved = Vec::with_capacity(edits.len());
+            for (key, value) in edits {
+                saved.push((*key, std::env::var_os(key)));
+                // SAFETY: serialized by ENV_LOCK (held in `_guard`).
+                unsafe {
+                    match value {
+                        Some(v) => std::env::set_var(key, v),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+            Self {
+                saved,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for EnvScope {
+        fn drop(&mut self) {
+            for (key, previous) in self.saved.drain(..).rev() {
+                // SAFETY: still serialized by ENV_LOCK (`_guard` drops after this body).
+                unsafe {
+                    match previous {
+                        Some(v) => std::env::set_var(key, v),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn healthcheck_port_defaults_when_unset() {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -1742,12 +1811,7 @@ mod tests {
 
     #[tokio::test]
     async fn try_start_twitch_irc_noop_when_spine_config_unavailable() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialized by ENV_LOCK above.
-        unsafe {
-            std::env::remove_var("VALKEY_URL");
-            std::env::remove_var("REDIS_URL");
-        }
+        let _env = EnvScope::new(&[("VALKEY_URL", None), ("REDIS_URL", None)]);
         let mut config = base_config();
         config.cli.twitch_irc_nick = "waddlebot".to_string();
         config.cli.twitch_irc_channel = "somechannel".to_string();
@@ -1766,12 +1830,7 @@ mod tests {
 
     #[tokio::test]
     async fn try_start_twitch_outbound_noop_when_spine_config_unavailable() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialized by ENV_LOCK above.
-        unsafe {
-            std::env::remove_var("VALKEY_URL");
-            std::env::remove_var("REDIS_URL");
-        }
+        let _env = EnvScope::new(&[("VALKEY_URL", None), ("REDIS_URL", None)]);
         let mut config = base_config();
         config.cli.twitch_irc_nick = "waddlebot".to_string();
         config.twitch_irc_oauth_token = Some(crate::config::Secret::new("test-token"));
@@ -1797,12 +1856,10 @@ mod tests {
         // relative to the `license::tests` in the same `--lib` binary.
         crypto::ensure_installed();
         {
-            let _guard = ENV_LOCK.lock().unwrap();
-            // SAFETY: serialized by ENV_LOCK above.
-            unsafe {
-                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
-                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
-            }
+            let _env = EnvScope::new(&[
+                ("VALKEY_URL", Some("rediss://127.0.0.1:1/")),
+                ("VALKEY_PASSWORD", Some("test-valkey-pass")),
+            ]);
             let mut config = base_config();
             config.cli.twitch_irc_nick = "waddlebot".to_string();
             config.cli.twitch_irc_channel = "somechannel".to_string();
@@ -1817,10 +1874,6 @@ mod tests {
                 test_readiness(),
                 test_dek_provider(),
             );
-            unsafe {
-                std::env::remove_var("VALKEY_URL");
-                std::env::remove_var("VALKEY_PASSWORD");
-            }
         }
         // Real (not paused) sleep: lets the spawned tasks actually run on
         // this same current-thread test runtime and reach their
@@ -1832,12 +1885,10 @@ mod tests {
     async fn try_start_discord_spawns_when_everything_is_valid() {
         crypto::ensure_installed();
         {
-            let _guard = ENV_LOCK.lock().unwrap();
-            // SAFETY: serialized by ENV_LOCK above.
-            unsafe {
-                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
-                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
-            }
+            let _env = EnvScope::new(&[
+                ("VALKEY_URL", Some("rediss://127.0.0.1:1/")),
+                ("VALKEY_PASSWORD", Some("test-valkey-pass")),
+            ]);
             let mut config = base_config();
             config.discord_bot_token = Some(crate::config::Secret::new("test-token"));
             config.cli.binding_active_kid = "k1".to_string();
@@ -1850,10 +1901,6 @@ mod tests {
                 test_readiness(),
                 test_dek_provider(),
             );
-            unsafe {
-                std::env::remove_var("VALKEY_URL");
-                std::env::remove_var("VALKEY_PASSWORD");
-            }
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
@@ -1867,19 +1914,13 @@ mod tests {
     async fn try_start_discord_outbound_spawns_when_everything_is_valid() {
         crypto::ensure_installed();
         {
-            let _guard = ENV_LOCK.lock().unwrap();
-            // SAFETY: serialized by ENV_LOCK above.
-            unsafe {
-                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
-                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
-            }
+            let _env = EnvScope::new(&[
+                ("VALKEY_URL", Some("rediss://127.0.0.1:1/")),
+                ("VALKEY_PASSWORD", Some("test-valkey-pass")),
+            ]);
             let mut config = base_config();
             config.discord_bot_token = Some(crate::config::Secret::new("test-token"));
             try_start_discord_outbound(&config);
-            unsafe {
-                std::env::remove_var("VALKEY_URL");
-                std::env::remove_var("VALKEY_PASSWORD");
-            }
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
@@ -1888,20 +1929,14 @@ mod tests {
     async fn try_start_twitch_outbound_spawns_when_everything_is_valid() {
         crypto::ensure_installed();
         {
-            let _guard = ENV_LOCK.lock().unwrap();
-            // SAFETY: serialized by ENV_LOCK above.
-            unsafe {
-                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
-                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
-            }
+            let _env = EnvScope::new(&[
+                ("VALKEY_URL", Some("rediss://127.0.0.1:1/")),
+                ("VALKEY_PASSWORD", Some("test-valkey-pass")),
+            ]);
             let mut config = base_config();
             config.cli.twitch_irc_nick = "waddlebot".to_string();
             config.twitch_irc_oauth_token = Some(crate::config::Secret::new("test-token"));
             try_start_twitch_outbound(&config);
-            unsafe {
-                std::env::remove_var("VALKEY_URL");
-                std::env::remove_var("VALKEY_PASSWORD");
-            }
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }

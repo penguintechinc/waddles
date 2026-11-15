@@ -44,6 +44,12 @@ global:
   # POSTURE: dedicated-cluster (stricter than local alpha). The "alpha" tier string is kept ONLY because the
   # chart gates secret self-provisioning on it; every alpha-exempt transport/network shortcut is off here.
   deploymentTier: "alpha"
+  # Send logs/metrics/traces to the in-cluster SigNoz (namespace `signoz`) -- see
+  # docs/observability/sending-telemetry-to-signoz.md. Base defaults: gRPC :4317, parentbased ratio sampler.
+  otel:
+    enabled: true
+    environment: "alpha"
+    samplerRatio: "1.0"
   # Dedicated transit trust root for Postgres / SeaweedFS S3 / Valkey: a namespaced SelfSigned Issuer -> root CA -> CA Issuer
   # rendered by the chart (PREREQ: cert-manager with the NameConstraints feature gate). Clients trust only that root; the
   # hostApiTls/grpcTls identities below keep waddlebot-internal-ca. Overrides global.valkeyTls.externalSecret (cert-manager owns
@@ -436,18 +442,30 @@ pipeline:
     # values.yaml already lists both, so no stage override is needed here. Resources are the
     # larger of the two former Deployments (each replica holds a bundle registry per stage and
     # compiles the active set via Cranelift: the OOM finding that sized these still applies).
+    # executor Phase 1: StatefulSet x2 (pod name = executor_id; each slot owned by both),
+    # one pool serving every stage. dal2alpha has NO KEDA, NO metrics API and NO OTel
+    # collector (checked 2026-11-11) -> autoscaling.mode none, fixed 2 replicas.
     bundleExecutor:
-      replicas: 1
-      # 2-CPU limit on alpha: compile 2 at a time (connectors + apps share it).
+      replicas: 2
+      # 8-CPU limit per pod: compile 2 at a time (connectors + apps share it); AOT makes compiles rare.
       maxConcurrentCompiles: 2
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
-      # Alpha executor was OOMKilled at 16Gi and took ~1h to compile ~160 bundles at 2 CPU after
-      # restart. Raised for alpha only (gamma/beta/prod unchanged). Issue #1304 tracks lazy-load +
-      # compiled cache; horizontal sharding is the long-term direction.
+      # Per-POD sizing reconciled with release (#1305 alpha sizing, issue #1304): the alpha executor
+      # was OOMKilled at 16Gi and took ~1h to compile ~160 bundles at 2 CPU after a restart, so the
+      # 8 CPU / 24Gi limit applies to EACH of the 2 StatefulSet pods (not split across them).
+      # Requests are the bare minimum (500m / 1Gi, owner policy 2026-11-14; the old release
+      # request was 2 CPU / 8Gi): the limit is the headroom. Worst case 2 x 24Gi = 48Gi, placeable:
+      # dal2alpha workers have 46-61Gi allocatable and executors spread across nodes
+      # (spreadAcrossNodes). dal2alpha has no metrics API, so the idle footprint is not measured.
+      # LRU budget = 15360 MB (5/8 of the 24Gi limit, the same ratio the phase-1 budget used);
+      # the render check requires EXECUTOR_MEMORY_BUDGET_MB < the memory limit.
+      memoryBudgetMb: 15360
       resources:
-        requests: { cpu: "2000m", memory: "8Gi" }
+        requests: { cpu: "500m", memory: "1Gi" }
         limits: { cpu: "8000m", memory: "24Gi" }
+      autoscaling:
+        mode: none
 
 presentation:
   # Rust svc-presentation (overlay + image surface). Overlay view/SSE port reachable on-host at
@@ -479,19 +497,17 @@ bundleExecutor:
   image:
     repository: "ghcr.io/penguintechinc/waddles/svc-bundles-executor"
     tag: ""
+  # Kata isolation stays OFF until the admin Kata PR (RuntimeClass + node labels) is applied
+  # on dal2alpha. To enable afterwards:
+  # runtimeClass:
+  #   enabled: true
+  #   name: "kata"
+  # nodeSelector:
+  #   katacontainers.io/kata-runtime: "true"
 
-# svc-bundles-executor scales horizontally: every replica dials every stage + the connector
-# link and each listener round-robins work across the replicas (see values.yaml
-# pipeline.rustDataPlane.bundleExecutor). HPA on CPU + memory; the PDB (minAvailable 1) renders
-# automatically once the effective replica floor is >1.
-autoscaling:
-  services:
-    bundleExecutor:
-      enabled: true
-      minReplicas: 1
-      maxReplicas: 3
-      targetCPUUtilizationPercentage: 70
-      targetMemoryUtilizationPercentage: 80
+# svc-bundles-executor: the old CPU/memory HPA (targets <unknown>, no metrics API here) is
+# removed; the executor is a StatefulSet with its own PDB (maxUnavailable 1) and optional
+# KEDA autoscaling (pipeline.rustDataPlane.bundleExecutor.autoscaling) once KEDA lands.
 
 # Ingress via Gateway API: Waddles does NOT own a gateway. It attaches an HTTPRoute to the
 # cluster-wide Cilium Gateway `shared` (ns gateway-system, class cilium-shared). TLS terminates

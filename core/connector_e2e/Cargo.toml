@@ -26,7 +26,10 @@ sha2 = "=0.10.9"
 [dev-dependencies]
 prometheus = "=0.14.0"
 serde_json = "=1.0.151"
-connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
+# The resolver reads hub-api over internal gRPC now: `test-support` serves a REAL in-process
+# `ProviderConnectionService` (and `service_auth`'s serves the machine-token mint) on loopback.
+connection_resolver = { path = "../connection_resolver", version = "=0.1.0", features = ["test-support"] }
+service_auth = { path = "../service_auth", version = "=0.1.0", features = ["test-support"] }
 futures-util = "=0.3.34"
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake"] }
 penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "90060a93925c50668cc1c6dd47a4ae24a7b4e321", package = "penguin-spine", version = "=0.2.0" }

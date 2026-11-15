@@ -206,21 +206,77 @@ where
     K: Eq + Hash + Clone,
     Row: Clone,
 {
+    plan_sessions_routed(
+        loaded,
+        active,
+        live_sessions,
+        |_, _| live_sessions.to_vec(),
+        digest_of,
+    )
+}
+
+/// [`plan_sessions`] with per-bundle placement (executor sharding, T6):
+/// `targets_of(key, row)` returns the live sessions that bundle belongs on
+/// (`crate::sharding::SessionRouter::target_sessions` -- its owner
+/// executors' sessions when sharded, every live session in broadcast mode).
+///
+/// - `Load` goes only to target sessions lacking the active digest.
+/// - `Unload` goes to a live session holding a key that is no longer active
+///   (as before), AND to a live NON-target session holding an active key --
+///   but only **make-before-break**: once every target session already holds
+///   the active digest, so a reshard never leaves the app on zero sessions.
+pub fn plan_sessions_routed<K, Row>(
+    loaded: &SessionLoaded<K>,
+    active: &HashMap<K, Row>,
+    live_sessions: &[SessionId],
+    targets_of: impl Fn(&K, &Row) -> Vec<SessionId>,
+    digest_of: impl Fn(&Row) -> &str,
+) -> SessionSyncPlan<K, Row>
+where
+    K: Eq + Hash + Clone,
+    Row: Clone,
+{
     let mut plan = SessionSyncPlan::default();
+    let live: HashSet<SessionId> = live_sessions.iter().copied().collect();
+    let mut targets_by_key: HashMap<&K, HashSet<SessionId>> = HashMap::new();
 
     for (key, row) in active {
         let want_digest = digest_of(row);
-        for &session in live_sessions {
+        let targets: HashSet<SessionId> = targets_of(key, row)
+            .into_iter()
+            .filter(|s| live.contains(s))
+            .collect();
+        let mut ordered: Vec<SessionId> = targets.iter().copied().collect();
+        ordered.sort_unstable();
+        for session in ordered {
             match loaded.digest_for(session, key) {
                 Some(have) if have == want_digest => {}
                 _ => plan.to_load.push((session, key.clone(), row.clone())),
             }
         }
+        targets_by_key.insert(key, targets);
     }
 
-    let live: HashSet<SessionId> = live_sessions.iter().copied().collect();
     for (session, key, digest) in loaded.iter() {
-        if live.contains(&session) && !active.contains_key(key) {
+        if !live.contains(&session) {
+            continue;
+        }
+        let Some(row) = active.get(key) else {
+            plan.to_unload
+                .push((session, key.clone(), digest.to_string()));
+            continue;
+        };
+        let Some(targets) = targets_by_key.get(key) else {
+            continue;
+        };
+        if targets.contains(&session) || targets.is_empty() {
+            continue;
+        }
+        let want = digest_of(row);
+        let owners_ready = targets
+            .iter()
+            .all(|t| loaded.digest_for(*t, key) == Some(want));
+        if owners_ready {
             plan.to_unload
                 .push((session, key.clone(), digest.to_string()));
         }
@@ -428,6 +484,47 @@ mod tests {
             pick_session_with_digest(&loaded, &scope("ping"), "sha256:p", 7),
             None
         );
+    }
+
+    /// Routed plan: loads go only to target sessions; a non-target session
+    /// holding an active key is unloaded only once every target holds the
+    /// digest (make-before-break).
+    #[test]
+    fn plan_sessions_routed_loads_targets_and_unloads_non_owners_after_owners_ready() {
+        let mut loaded = SessionLoaded::new();
+        loaded.mark_loaded(9, scope("ping"), "sha256:p".to_string());
+        let mut active = HashMap::new();
+        active.insert(scope("ping"), row("sha256:p"));
+        let targets = |_: &Scope, _: &Row| vec![1, 2];
+
+        let plan = plan_sessions_routed(&loaded, &active, &[1, 2, 9], targets, digest_of);
+        assert_eq!(plan.to_load.len(), 2);
+        assert!(plan.to_load.iter().all(|(s, _, _)| *s == 1 || *s == 2));
+        assert!(
+            plan.to_unload.is_empty(),
+            "owners not ready yet: keep the old holder (make-before-break)"
+        );
+
+        loaded.mark_loaded(1, scope("ping"), "sha256:p".to_string());
+        loaded.mark_loaded(2, scope("ping"), "sha256:p".to_string());
+        let plan = plan_sessions_routed(&loaded, &active, &[1, 2, 9], targets, digest_of);
+        assert!(plan.to_load.is_empty());
+        assert_eq!(
+            plan.to_unload,
+            vec![(9, scope("ping"), "sha256:p".to_string())]
+        );
+    }
+
+    /// Target sessions that are not live are ignored; an empty target set
+    /// never triggers an unload.
+    #[test]
+    fn plan_sessions_routed_ignores_dead_targets() {
+        let mut loaded = SessionLoaded::new();
+        loaded.mark_loaded(1, scope("ping"), "sha256:p".to_string());
+        let mut active = HashMap::new();
+        active.insert(scope("ping"), row("sha256:p"));
+        let plan = plan_sessions_routed(&loaded, &active, &[1], |_, _| vec![7], digest_of);
+        assert!(plan.is_empty(), "{plan:?}");
     }
 
     /// **The exact alpha 2026-10-03 sequence:** the OLD (terminating) pod's
