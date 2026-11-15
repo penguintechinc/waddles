@@ -74,15 +74,18 @@ struct Rig {
     seal_on: Arc<AtomicBool>,
 }
 
-fn rig(legacy_reads: bool) -> Rig {
+fn rig(legacy_cutoff: Option<u64>) -> Rig {
     let backend = Arc::new(MemoryBackend::new());
     let broker_up = Arc::new(AtomicBool::new(true));
     let seal_on = Arc::new(AtomicBool::new(true));
     let sealing = ObjectSealing::new(TenantCrypto::new(Keys {
         up: broker_up.clone(),
     }))
-    .with_gate(Arc::new(Gate(seal_on.clone())))
-    .with_legacy_plaintext_reads_allowed(legacy_reads);
+    .with_gate(Arc::new(Gate(seal_on.clone())));
+    let sealing = match legacy_cutoff {
+        Some(cutoff) => sealing.with_legacy_plaintext_until(cutoff),
+        None => sealing,
+    };
     Rig {
         host: StorageHost::with_rate_limit(backend.clone(), Arc::new(Sink::default()), 1000)
             .with_sealing(sealing),
@@ -147,7 +150,7 @@ async fn transplant(r: &Rig, from: (&StorageScope, &str), to: (&StorageScope, &s
 
 #[tokio::test]
 async fn body_is_ciphertext_at_rest_and_round_trips_with_plaintext_sizes() {
-    let r = rig(true);
+    let r = rig(None);
     let s = scope(1, 7);
     put(&r, &s, "clip.txt").await;
     let stored = raw(&r, &s, "clip.txt").await;
@@ -169,7 +172,7 @@ async fn body_is_ciphertext_at_rest_and_round_trips_with_plaintext_sizes() {
 
 #[tokio::test]
 async fn another_tenants_copy_does_not_open() {
-    let r = rig(true);
+    let r = rig(None);
     let a = scope(1, 7);
     let b = scope(2, 7);
     put(&r, &a, "doc").await;
@@ -194,7 +197,7 @@ async fn another_tenants_copy_does_not_open() {
 
 #[tokio::test]
 async fn cross_community_and_cross_key_swaps_fail() {
-    let r = rig(true);
+    let r = rig(None);
     let c7 = scope(1, 7);
     let c8 = scope(1, 8);
     put(&r, &c7, "a").await;
@@ -213,7 +216,7 @@ async fn cross_community_and_cross_key_swaps_fail() {
 
 #[tokio::test]
 async fn key_trouble_fails_closed_on_put_and_get() {
-    let r = rig(true);
+    let r = rig(None);
     let s = scope(1, 7);
     put(&r, &s, "keep").await;
     r.broker_up.store(false, Ordering::SeqCst);
@@ -247,32 +250,79 @@ async fn key_trouble_fails_closed_on_put_and_get() {
     );
 }
 
+const CUTOFF: u64 = 2_000_000_000;
+
+fn legacy_tags() -> Vec<String> {
+    vec!["waddles-tenant=1".into(), "waddles-community=7".into()]
+}
+
+fn seed_legacy(r: &Rig, key: &str, modified: u64, tags: &[String]) {
+    r.backend
+        .put_with_modified(
+            &object_key(APP, 1, 7, key),
+            Bytes::from_static(PLAIN),
+            "text/plain",
+            tags,
+            modified,
+        )
+        .expect("seed");
+}
+
 #[tokio::test]
-async fn legacy_plaintext_follows_operator_policy() {
-    for allowed in [true, false] {
-        let r = rig(allowed);
+async fn legacy_plaintext_is_refused_by_default() {
+    let r = rig(None);
+    seed_legacy(&r, "old", 1, &legacy_tags());
+    assert!(r.host.get(&scope(1, 7), None, "old").await.is_err());
+}
+
+#[tokio::test]
+async fn legacy_plaintext_served_only_inside_the_opt_in_window() {
+    let r = rig(Some(CUTOFF));
+    let s = scope(1, 7);
+    seed_legacy(&r, "older", CUTOFF - 1, &legacy_tags());
+    seed_legacy(&r, "newer", CUTOFF, &legacy_tags());
+    assert_eq!(
+        &r.host.get(&s, None, "older").await.expect("in window").1[..],
+        PLAIN
+    );
+    assert!(
+        r.host.get(&s, None, "newer").await.is_err(),
+        "at/after the cutoff: refused"
+    );
+}
+
+#[tokio::test]
+async fn stripped_seal_is_refused_even_with_the_window_open() {
+    // An attacker with bucket write replaces a sealed object with plaintext and strips the
+    // tags. The server-assigned last-modified is NOW, past any cutoff recorded earlier, so the
+    // replacement is not "legacy" and is refused -- with or without an opt-in window.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    for cutoff in [None, Some(now - 3600)] {
+        let r = rig(cutoff);
         let s = scope(1, 7);
+        put(&r, &s, "victim").await;
         r.backend
             .put(
-                &object_key(APP, 1, 7, "old"),
-                Bytes::from_static(PLAIN),
+                &object_key(APP, 1, 7, "victim"),
+                Bytes::from_static(b"attacker chosen plaintext"),
                 "text/plain",
-                &["waddles-tenant=1".into(), "waddles-community=7".into()],
+                &legacy_tags(),
             )
             .await
-            .expect("seed legacy");
-        let got = r.host.get(&s, None, "old").await;
-        if allowed {
-            assert_eq!(&got.expect("legacy read").1[..], PLAIN);
-        } else {
-            assert!(got.is_err(), "plaintext refused when policy is off");
-        }
+            .expect("attacker overwrite");
+        assert!(
+            r.host.get(&s, None, "victim").await.is_err(),
+            "cutoff {cutoff:?}"
+        );
     }
 }
 
 #[tokio::test]
 async fn tagged_sealed_object_with_plaintext_body_is_an_integrity_failure() {
-    let r = rig(true);
+    let r = rig(None);
     let s = scope(1, 7);
     r.backend
         .put(
@@ -291,13 +341,20 @@ async fn tagged_sealed_object_with_plaintext_body_is_an_integrity_failure() {
 }
 
 #[tokio::test]
-async fn kill_switch_writes_plaintext_but_sealed_objects_still_open() {
-    let r = rig(true);
+async fn kill_switch_plaintext_is_mac_authenticated_and_forgery_is_refused() {
+    let r = rig(None);
     let s = scope(1, 7);
     put(&r, &s, "sealed").await;
     r.seal_on.store(false, Ordering::SeqCst);
     put(&r, &s, "plain").await;
-    assert_eq!(&raw(&r, &s, "plain").await.body[..], PLAIN);
+    let stored = raw(&r, &s, "plain").await;
+    assert_eq!(&stored.body[..], PLAIN);
+    assert!(stored
+        .meta
+        .tags
+        .iter()
+        .any(|t| t.starts_with("waddles-plain=")));
+    // Sealed objects still open, and the host-written plaintext reads back (MAC verifies).
     assert_eq!(
         &r.host.get(&s, None, "sealed").await.expect("get").1[..],
         PLAIN
@@ -306,11 +363,62 @@ async fn kill_switch_writes_plaintext_but_sealed_objects_still_open() {
         &r.host.get(&s, None, "plain").await.expect("get").1[..],
         PLAIN
     );
+
+    // Tampered body under the original MAC tag: refused.
+    r.backend
+        .put(
+            &object_key(APP, 1, 7, "plain"),
+            Bytes::from_static(b"tampered"),
+            "text/plain",
+            &stored.meta.tags,
+        )
+        .await
+        .expect("tamper");
+    assert!(r.host.get(&s, None, "plain").await.is_err());
+
+    // Forged MAC tag (attacker lacks the tenant key): refused.
+    let mut tags: Vec<String> = legacy_tags();
+    tags.push(format!("waddles-plain={}", "ab".repeat(32)));
+    r.backend
+        .put(
+            &object_key(APP, 1, 7, "plain"),
+            Bytes::from_static(b"forged"),
+            "text/plain",
+            &tags,
+        )
+        .await
+        .expect("forge");
+    assert!(r.host.get(&s, None, "plain").await.is_err());
+
+    // A MAC minted for another tenant's scope does not transplant.
+    let other = scope(2, 7);
+    r.seal_on.store(false, Ordering::SeqCst);
+    put(&r, &other, "plain").await;
+    let theirs = raw(&r, &other, "plain").await;
+    let mut moved = legacy_tags();
+    moved.extend(
+        theirs
+            .meta
+            .tags
+            .iter()
+            .filter(|t| t.starts_with("waddles-plain="))
+            .cloned(),
+    );
+    r.backend
+        .put(
+            &object_key(APP, 1, 7, "plain"),
+            theirs.body,
+            "text/plain",
+            &moved,
+        )
+        .await
+        .expect("transplant");
+    assert!(r.host.get(&s, None, "plain").await.is_err());
 }
 
 #[tokio::test]
 async fn sealed_objects_have_no_presigned_url_and_unsealed_host_refuses_them() {
-    let r = rig(true);
+    let r = rig(None);
     let s = scope(1, 7);
     put(&r, &s, "x").await;
     let err = r.host.presign_get(&s, None, "x", 60).await.unwrap_err();

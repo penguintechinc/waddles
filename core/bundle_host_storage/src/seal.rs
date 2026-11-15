@@ -11,9 +11,21 @@
 //! and the size (the sealed size is the plaintext size plus [`OVERHEAD`], which the host
 //! subtracts again for guest-visible sizes). Bodies are the confidential part.
 //!
-//! Fail-closed rules: no usable key -> the put/get fails (never a plaintext fallback); a
-//! sealed object with sealing unconfigured is refused; a plaintext (pre-encryption) object
-//! is served only while `legacy_plaintext_reads_allowed` (operator policy, WARN per read).
+//! Fail-closed rules (an attacker with bucket WRITE access must never be able to turn a
+//! sealed object into served plaintext):
+//! - no usable key -> the put/get fails (never a plaintext fallback);
+//! - an envelope is authoritative (opened even if the seal tag was stripped); a sealed-tagged
+//!   body that is not an envelope is an integrity failure;
+//! - plaintext is served ONLY if (a) the host itself wrote it while the kill-switch was on --
+//!   proved by a `waddles-plain` HMAC tag over (scope, key, body) under the tenant key, which
+//!   the attacker cannot forge -- or (b) it predates the operator-recorded legacy cutoff
+//!   (server-assigned last-modified < cutoff; re-writing an object can only make it newer, so
+//!   an attacker's replacement is always refused). The cutoff is opt-in and unset by default:
+//!   by default NO unauthenticated plaintext is ever served.
+//! - A host without sealing configured refuses sealed objects instead of returning ciphertext.
+//!
+//! Known edge: re-tagging a legacy object (`tag_add`) rewrites it server-side and moves its
+//! last-modified past the cutoff; migrate legacy objects (re-put) instead of tagging them.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -22,7 +34,9 @@ use std::sync::Arc;
 use bundle_host_crypto::{CryptoError, TenantCrypto, OVERHEAD};
 use bytes::Bytes;
 
+use crate::backend::ObjectMeta;
 use crate::error::StorageError;
+use crate::tags::{system_tag, TAG_PLAIN_MAC, TAG_SEALED};
 
 /// Metric/log surface label for [`TenantCrypto`].
 pub const SURFACE: &str = "object";
@@ -52,7 +66,9 @@ impl SealGate for AlwaysSeal {
 pub struct ObjectSealing {
     crypto: TenantCrypto,
     gate: Arc<dyn SealGate>,
-    legacy_plaintext_reads_allowed: bool,
+    /// Unix-seconds cutoff for serving legacy (pre-encryption, unauthenticated) plaintext;
+    /// `None` (default) = never.
+    legacy_plaintext_until: Option<u64>,
 }
 
 impl ObjectSealing {
@@ -62,7 +78,7 @@ impl ObjectSealing {
         Self {
             crypto,
             gate: Arc::new(AlwaysSeal),
-            legacy_plaintext_reads_allowed: true,
+            legacy_plaintext_until: None,
         }
     }
 
@@ -73,10 +89,12 @@ impl ObjectSealing {
         self
     }
 
-    /// Operator policy for pre-encryption plaintext objects (`false` = refuse them).
+    /// Opt-in, bounded migration window: unauthenticated plaintext objects whose server-side
+    /// last-modified is BEFORE `cutoff_unix` (record the instant sealing was first enabled)
+    /// are served with a WARN; anything newer is refused. Unset = no such reads.
     #[must_use]
-    pub fn with_legacy_plaintext_reads_allowed(mut self, allowed: bool) -> Self {
-        self.legacy_plaintext_reads_allowed = allowed;
+    pub fn with_legacy_plaintext_until(mut self, cutoff_unix: u64) -> Self {
+        self.legacy_plaintext_until = Some(cutoff_unix);
         self
     }
 
@@ -101,9 +119,25 @@ impl ObjectSealing {
             .map_err(map_err)
     }
 
-    /// Opens a stored body. `tagged_sealed` is the host's own sealed tag; an envelope
-    /// without the tag is still opened (the envelope is authoritative), and a tagged object
-    /// whose body is not an envelope is an integrity failure, never plaintext.
+    /// HMAC tag value authenticating a plaintext body written while the kill-switch was on.
+    pub(crate) async fn plain_mac(
+        &self,
+        tenant: u64,
+        community: u64,
+        owner: &str,
+        key: &str,
+        body: &[u8],
+    ) -> Result<String, StorageError> {
+        let (t, c) = (tenant.to_string(), community.to_string());
+        let mac = self
+            .crypto
+            .blind_index(SURFACE, &t, &[&t, &c, owner, "object-plain", key], body)
+            .await
+            .map_err(map_err)?;
+        Ok(mac.iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// Opens (or, for authenticated/legacy plaintext, validates) a stored object body.
     pub(crate) async fn open(
         &self,
         tenant: u64,
@@ -111,26 +145,51 @@ impl ObjectSealing {
         owner: &str,
         key: &str,
         stored: Bytes,
-        tagged_sealed: bool,
+        meta: &ObjectMeta,
     ) -> Result<Bytes, StorageError> {
+        let integrity = || StorageError::Backend("object integrity check failed".into());
         if !TenantCrypto::is_sealed(&stored) {
-            if tagged_sealed {
-                tracing::error!("tagged-sealed object body is not an envelope; refusing");
-                return Err(StorageError::Backend(
-                    "object integrity check failed".into(),
-                ));
-            }
-            if self.legacy_plaintext_reads_allowed {
-                tracing::warn!(
+            let tagged_sealed = meta.tags.contains(&system_tag(TAG_SEALED, 1));
+            let mac_prefix = format!("{TAG_PLAIN_MAC}=");
+            let plain_mac = meta.tags.iter().find_map(|t| t.strip_prefix(&mac_prefix));
+            if let Some(claimed) = plain_mac {
+                let expected = self
+                    .plain_mac(tenant, community, owner, key, &stored)
+                    .await?;
+                if !tagged_sealed && ct_eq(claimed.as_bytes(), expected.as_bytes()) {
+                    return Ok(stored);
+                }
+                tracing::error!(
                     tenant,
                     community,
-                    "serving a legacy plaintext bundle object (pre-encryption)"
+                    "plaintext object failed its MAC; refusing"
                 );
-                return Ok(stored);
+                return Err(integrity());
             }
-            return Err(StorageError::Backend(
-                "unsealed object refused by policy".into(),
-            ));
+            if tagged_sealed {
+                tracing::error!("tagged-sealed object body is not an envelope; refusing");
+                return Err(integrity());
+            }
+            return match (self.legacy_plaintext_until, meta.modified_unix) {
+                (Some(cutoff), Some(modified)) if modified < cutoff => {
+                    tracing::warn!(
+                        tenant,
+                        community,
+                        "serving a legacy plaintext bundle object (pre-encryption, inside the operator window)"
+                    );
+                    Ok(stored)
+                }
+                _ => {
+                    tracing::error!(
+                        tenant,
+                        community,
+                        "unauthenticated plaintext object refused (outside the legacy window)"
+                    );
+                    Err(StorageError::Backend(
+                        "unsealed object refused by policy".into(),
+                    ))
+                }
+            };
         }
         let (t, c) = (tenant.to_string(), community.to_string());
         self.crypto
@@ -139,6 +198,11 @@ impl ObjectSealing {
             .map(Bytes::from)
             .map_err(map_err)
     }
+}
+
+/// Constant-time equality of two byte strings.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Collapses crypto failures to the storage surface: always fail closed, no detail that

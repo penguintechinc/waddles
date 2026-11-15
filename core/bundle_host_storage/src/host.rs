@@ -22,7 +22,7 @@ use crate::policy::{authorize, GrantSet, Op};
 use crate::seal::{sealed_len, ObjectSealing};
 use crate::tags::{
     bundle_tag, normalize_tags, system_tag, validate_request_id, validate_tag, MAX_TAGS,
-    TAG_COMMUNITY, TAG_REQUEST_ID, TAG_SEALED, TAG_TENANT,
+    TAG_COMMUNITY, TAG_PLAIN_MAC, TAG_REQUEST_ID, TAG_SEALED, TAG_TENANT,
 };
 
 /// Host-derived invocation scope; NEVER built from guest args.
@@ -395,11 +395,17 @@ impl StorageHost {
                     .seal(s.tenant, s.community, &r.owner, key, &body)
                     .await?
             }
-            Some(_) => {
+            Some(sealing) => {
                 tracing::warn!(
                     tenant = s.tenant,
                     "object stored PLAINTEXT: waddles.disable-tenant-at-rest-encryption is ON"
                 );
+                // Authenticate the plaintext under the tenant key so it stays readable while a
+                // bucket-write attacker's plaintext replacement is refused.
+                let mac = sealing
+                    .plain_mac(s.tenant, s.community, &r.owner, key, &body)
+                    .await?;
+                tags.push(system_tag(TAG_PLAIN_MAC, mac));
                 body
             }
             None => body,
@@ -459,14 +465,7 @@ impl StorageHost {
         let body = match &self.sealing {
             Some(sealing) => {
                 sealing
-                    .open(
-                        s.tenant,
-                        s.community,
-                        &r.owner,
-                        key,
-                        obj.body,
-                        tagged_sealed,
-                    )
+                    .open(s.tenant, s.community, &r.owner, key, obj.body, &obj.meta)
                     .await?
             }
             None if tagged_sealed || crate::seal::looks_sealed(&obj.body) => {

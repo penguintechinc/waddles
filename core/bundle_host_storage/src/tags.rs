@@ -9,6 +9,9 @@ pub const TAG_TENANT: &str = "waddles-tenant";
 pub const TAG_COMMUNITY: &str = "waddles-community";
 /// `waddles-sealed=1`: the body is a per-tenant sealed envelope (host-written, `crate::seal`).
 pub const TAG_SEALED: &str = "waddles-sealed";
+/// `waddles-plain=<hex HMAC>`: a plaintext body the HOST wrote while the kill-switch was on,
+/// authenticated under the tenant key (`crate::seal`); unforgeable without the tenant DEK.
+pub const TAG_PLAIN_MAC: &str = "waddles-plain";
 /// Provenance only (audit/correlation) -- NOT an access input in v3.0.
 pub const TAG_REQUEST_ID: &str = "waddles-request-id";
 
