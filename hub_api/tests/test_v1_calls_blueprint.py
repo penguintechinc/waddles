@@ -47,6 +47,7 @@ from tests.conftest import (
     make_user_token,
     seed_community,
     seed_membership,
+    seed_scoped_member,
     seed_super_admin,
 )
 
@@ -154,7 +155,7 @@ class TestAdminRouteAuth:
         proxy_stub.assert_not_awaited()
 
     @pytest.mark.parametrize("method,path_fn,body", _ADMIN_ROUTES)
-    async def test_admin_route_moderator_scopes_are_not_community_admin(
+    async def test_admin_route_requires_calls_manage_scope(
         self,
         client: Any,
         overlay_db: Any,
@@ -163,9 +164,14 @@ class TestAdminRouteAuth:
         path_fn: Any,
         body: dict[str, Any] | None,
     ) -> None:
-        """Authorization is the `community:admin` scope: a moderator-kind member lacks it."""
+        """Admin routes need `calls:manage`; broad or other-action scopes do not satisfy it."""
         community_id = seed_community(overlay_db)
-        seed_membership(overlay_db, community_id=community_id, user_id=703, role="moderator")
+        seed_scoped_member(
+            overlay_db,
+            community_id=community_id,
+            user_id=703,
+            scopes=["community:manage_members", "community:manage_channels", "overlay:manage"],
+        )
         headers = {"Authorization": f"Bearer {make_user_token(user_id=703, scope=SCOPE_ADMIN)}"}
         response = await client.open(
             path_fn(community_id), method=method, headers=headers, json=body

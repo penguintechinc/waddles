@@ -139,7 +139,10 @@ class TestAiRoutingDedicatedScope:
         )
         headers = {"Authorization": f"Bearer {make_user_token(user_id=711)}"}
         response = await client.open(
-            f"/api/v1/admin/{community_id}/ai/config", method=method, headers=headers, json={}
+            f"/api/v1/admin/{community_id}/ai/config",
+            method=method,
+            headers=headers,
+            json={"preferred_tier": "premium", "on_insufficient_balance": "block"},
         )
         assert response.status_code == 403
 
