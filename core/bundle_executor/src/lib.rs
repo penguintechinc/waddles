@@ -35,6 +35,7 @@ pub mod connector;
 pub mod connector_boot;
 pub mod connector_wire;
 pub mod engine;
+pub mod engine_config;
 pub mod error;
 pub mod heartbeat;
 pub mod host;
@@ -42,6 +43,7 @@ pub mod invoke;
 pub mod manifest;
 pub mod metrics;
 pub mod parity_support;
+pub mod precompile;
 pub mod probe;
 pub mod signing;
 pub mod stage_bridge;
@@ -625,6 +627,12 @@ fn init_telemetry() {
         // other tracing call before a subscriber is installed.
         warn!(error = %e, "tracing subscriber already installed, skipping");
     }
+}
+
+/// JSON `tracing` setup for `bundle-executor --precompile` -- same
+/// subscriber as the runtime path, exposed for `main.rs`.
+pub fn telemetry_init_precompile_logging() {
+    init_telemetry();
 }
 
 /// Installs a permissive `tracing` subscriber exactly once per test
