@@ -563,6 +563,82 @@ class TestAllowlistAndCrossCommunity:
         self._assert_generic(exc.value, cid, "cycle")
         assert mirror.list_mappings(dal, cid2) == []
 
+    async def test_cycle_rejection_identical_same_vs_cross_tenant(
+        self, guild_pairing_db: Any
+    ) -> None:
+        """The rejection is not an oracle: same-tenant and cross-tenant cycles look identical."""
+        dal, cid, tenant_id, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        same = int(dal.communities.insert(name="same-tenant-other", tenant_id=tenant_id))
+        dal.commit()
+        _pair(dal, same, G_A, G_B)
+        cross = await self._foreign_community(dal, G_A, G_B)
+        seen = []
+        for other in (same, cross):
+            with pytest.raises(ApiError) as exc:
+                await _map(dal, other, G_B, R_DST, G_A, R_SRC)
+            seen.append((exc.value.status_code, exc.value.code, str(exc.value.message)))
+        assert seen[0] == seen[1]
+        self._assert_generic(
+            ApiError(seen[0][2], seen[0][0], seen[0][1]), cid, same, cross, "cycle"
+        )
+
+    async def test_concurrent_create_race_only_one_succeeds(self, guild_pairing_db: Any) -> None:
+        """A rival mapping committed during the awaited role check is caught on recheck."""
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        cid2 = await self._foreign_community(dal, G_A, G_B)
+        raced: list[bool] = []
+
+        def lister(dal_: Any, community_id: int, guild: str) -> Any:
+            async def _roles() -> Any:
+                if not raced:
+                    raced.append(True)  # the rival passes its checks and commits first
+                    dal.discord_role_mirror_mappings.insert(
+                        community_id=cid2,
+                        source_guild_id=G_B,
+                        source_role_id=R_DST,
+                        target_guild_id=G_A,
+                        target_role_id=R_SRC,
+                    )
+                    dal.commit()
+                return await _lister(_ALL_ROLES)(dal_, community_id, guild)
+
+            return _roles()
+
+        with pytest.raises(ApiError) as exc:
+            await mirror.create_mapping(
+                dal,
+                cid,
+                source_guild_id=G_A,
+                source_role_id=R_SRC,
+                target_guild_id=G_B,
+                target_role_id=R_DST,
+                list_roles=lister,
+            )
+        assert exc.value.status_code == 409
+        assert mirror.list_mappings(dal, cid) == []
+        assert len(mirror.list_mappings(dal, cid2)) == 1
+
+    async def test_reconcile_fails_closed_on_cyclic_mappings(self, guild_pairing_db: Any) -> None:
+        """Pre-existing cyclic rows are never reconciled (counted failed, nothing granted)."""
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        t = dal.discord_role_mirror_mappings
+        for sg, sr, tg, tr in ((G_A, R_SRC, G_B, R_DST), (G_B, R_DST, G_A, R_SRC)):
+            t.insert(
+                community_id=cid,
+                source_guild_id=sg,
+                source_role_id=sr,
+                target_guild_id=tg,
+                target_role_id=tr,
+            )
+        dal.commit()
+        summary = await _run(dal, _FakeGuilds({}))
+        assert summary.mappings_examined == 2
+        assert summary.mappings_failed == 2
+
     async def test_cross_tenant_binding_vs_mirror_is_generic(self, guild_pairing_db: Any) -> None:
         dal, cid, _t, _g = guild_pairing_db
         _pair(dal, cid, G_A, G_B)
