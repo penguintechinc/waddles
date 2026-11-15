@@ -239,6 +239,18 @@ export const adminApi = {
   updateOverlay: (communityId, data) => api.put(`/api/v1/admin/${communityId}/overlay`, data),
   rotateOverlayKey: (communityId) => api.post(`/api/v1/admin/${communityId}/overlay/rotate`),
   getOverlayStats: (communityId) => api.get(`/api/v1/admin/${communityId}/overlay/stats`),
+  // Overlay Builder: widget palette, composite scene layout, canvas resolution
+  getOverlayWidgets: (communityId) => api.get(`/api/v1/admin/${communityId}/overlay/widgets`),
+  getOverlayLayout: (communityId) => api.get(`/api/v1/admin/${communityId}/overlay/layout`),
+  addOverlayComponent: (communityId, data) =>
+    api.post(`/api/v1/admin/${communityId}/overlay/layout/components`, data),
+  updateOverlayComponent: (communityId, instanceId, data) =>
+    api.patch(`/api/v1/admin/${communityId}/overlay/layout/components/${instanceId}`, data),
+  removeOverlayComponent: (communityId, instanceId) =>
+    api.delete(`/api/v1/admin/${communityId}/overlay/layout/components/${instanceId}`),
+  clearOverlayLayout: (communityId) => api.delete(`/api/v1/admin/${communityId}/overlay/layout`),
+  setOverlayCanvas: (communityId, resolution) =>
+    api.put(`/api/v1/admin/${communityId}/overlay/layout/canvas`, { resolution }),
   // Loyalty configuration
   getLoyaltyConfig: (communityId) =>
     api.get(`/api/v1/admin/${communityId}/loyalty/config`),
