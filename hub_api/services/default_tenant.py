@@ -87,7 +87,8 @@ async def verify_default_tenant_at_startup(async_dal: Any, dal: Any, slug: str) 
     """
     try:
         await require_default_tenant(async_dal, dal, slug)
-    except DefaultTenantMissingError:
+    except DefaultTenantMissingError as exc:
+        logger.error("default tenant %r missing at startup: %s", slug, exc)
         return "missing"
     except Exception:  # noqa: BLE001 - schema not ready / DB unreachable at boot
         try:
