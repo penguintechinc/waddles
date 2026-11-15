@@ -222,6 +222,31 @@ def _reject_target_used_by_other_mapping(
         raise pairing_svc.role_unavailable("target_already_mirrored", community_id, others[0])
 
 
+def _reject_cross_community_cycle(
+    dal: Any,
+    community_id: int,
+    new_edge: tuple[tuple[str, str], tuple[str, str]],
+) -> None:
+    """409 if `new_edge` closes a cycle through mappings of ANY community (shared guilds).
+
+    Mirrors are reconciled per guild, so two communities sharing guilds can form a cycle that
+    neither community's own graph shows (revocation bypass). The graph is built from every
+    mapping; a cross-tenant cycle gets the generic, detail-free 409.
+    """
+    t = dal.discord_role_mirror_mappings
+    rows = list(dal(t.id > 0).select())
+    edges = [
+        ((r.source_guild_id, r.source_role_id), (r.target_guild_id, r.target_role_id)) for r in rows
+    ]
+    if not would_create_cycle(edges, new_edge):
+        return
+    own_tenant = pairing_svc.community_tenant_id(dal, community_id)
+    others = [int(r.community_id) for r in rows if int(r.community_id) != community_id]
+    if any(pairing_svc.community_tenant_id(dal, c) != own_tenant for c in others):
+        raise pairing_svc.role_unavailable("mirror_cycle", community_id, others[0])
+    raise conflict("That mapping would create a mirror cycle")
+
+
 def list_mappings(dal: Any, community_id: int) -> list[RoleMirrorMapping]:
     """Every mirror mapping for `community_id`, oldest first."""
     _ensure_tables(dal)
@@ -286,8 +311,10 @@ async def create_mapping(
         ((m.source_guild_id, m.source_role_id), (m.target_guild_id, m.target_role_id))
         for m in existing
     ]
-    if would_create_cycle(edges, ((src_guild, src_role), (dst_guild, dst_role))):
+    new_edge = ((src_guild, src_role), (dst_guild, dst_role))
+    if would_create_cycle(edges, new_edge):
         raise conflict("That mapping would create a mirror cycle")
+    _reject_cross_community_cycle(dal, community_id, new_edge)
 
     for guild, role in ((src_guild, src_role), (dst_guild, dst_role)):
         roles = await list_roles(dal, community_id, guild)

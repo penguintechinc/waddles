@@ -552,6 +552,17 @@ class TestAllowlistAndCrossCommunity:
         self._assert_generic(exc.value, cid, "mirror mapping")
         assert mirror.list_mappings(dal, cid2) == []
 
+    async def test_cross_community_cycle_is_generic_409(self, guild_pairing_db: Any) -> None:
+        """regression: a cycle spanning two communities' mappings is rejected, detail-free."""
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        cid2 = await self._foreign_community(dal, G_A, G_B)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid2, G_B, R_DST, G_A, R_SRC)
+        self._assert_generic(exc.value, cid, "cycle")
+        assert mirror.list_mappings(dal, cid2) == []
+
     async def test_cross_tenant_binding_vs_mirror_is_generic(self, guild_pairing_db: Any) -> None:
         dal, cid, _t, _g = guild_pairing_db
         _pair(dal, cid, G_A, G_B)
