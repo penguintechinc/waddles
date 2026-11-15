@@ -899,7 +899,7 @@ def test_overlay_widgets_valid_parse() -> None:
                     "description": "Current track",
                     "category": "music",
                     "output_kind": "surface",
-                    "surface_id": "music.now_playing",
+                    "surface_id": "waddles.socials.music.default.now_playing",
                     "default_x": 48,
                     "default_y": 860,
                     "default_width": 460,
@@ -907,14 +907,14 @@ def test_overlay_widgets_valid_parse() -> None:
                     "props_schema": {"theme": {"type": "string"}},
                 }
             ],
-            ["music.now_playing"],
+            ["waddles.socials.music.default.now_playing"],
         )
     )
     (w,) = manifest.overlay_widgets
     assert (w.widget_id, w.output_kind, w.surface_id, w.default_width) == (
         "dj.music.album_now_playing",
         "surface",
-        "music.now_playing",
+        "waddles.socials.music.default.now_playing",
         460,
     )
     assert w.allow_standalone_output is True
@@ -983,15 +983,25 @@ def test_overlay_widgets_invalid_rejected(widgets: object, reason: str) -> None:
 
 def test_surface_widget_requires_owned_surface() -> None:
     widget = [
-        {"widget_id": "w.a", "display_name": "A", "output_kind": "surface", "surface_id": "s.one"}
+        {
+            "widget_id": "w.a",
+            "display_name": "A",
+            "output_kind": "surface",
+            "surface_id": "waddles.socials.music.default.one",
+        }
     ]
     with pytest.raises(ManifestV2Error) as exc:
         _parse(_presentation(widget))
     assert exc.value.reason == "widget_surface_not_owned"
     with pytest.raises(ManifestV2Error) as exc:
-        _parse(_presentation(widget, ["s.two"]))
+        _parse(_presentation(widget, ["waddles.socials.music.default.two"]))
     assert exc.value.reason == "widget_surface_not_owned"
-    assert _parse(_presentation(widget, ["s.one"])).overlay_widgets[0].surface_id == "s.one"
+    assert (
+        _parse(_presentation(widget, ["waddles.socials.music.default.one"]))
+        .overlay_widgets[0]
+        .surface_id
+        == "waddles.socials.music.default.one"
+    )
 
 
 @pytest.mark.parametrize("owned", ["s.one", [1], ["BAD ID"]])
@@ -999,3 +1009,18 @@ def test_owned_surfaces_must_be_surface_id_list(owned: object) -> None:
     with pytest.raises(ManifestV2Error) as exc:
         _parse(_presentation([], owned))
     assert exc.value.reason == "invalid_owned_surfaces"
+
+
+@pytest.mark.parametrize(
+    "owned",
+    [["music.now"], ["waddles.socials.music.default2.x"], ["waddles.socials.music"], ["other"]],
+)
+def test_owned_surface_must_be_namespaced_under_app_id(owned: list[str]) -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(_presentation([], owned))
+    assert exc.value.reason == "owned_surface_not_namespaced"
+
+
+def test_owned_surface_equal_to_app_id_or_prefixed_is_accepted() -> None:
+    app = "waddles.socials.music.default"
+    assert _parse(_presentation([], [app, f"{app}.now"])).overlay_widgets == ()

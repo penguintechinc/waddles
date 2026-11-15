@@ -1045,9 +1045,13 @@ _SURFACE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 
 
 def parse_presentation_widgets(
-    presentation_stage: Any,
+    presentation_stage: Any, app_id: str
 ) -> tuple[OverlayWidgetDeclaration, ...]:
-    """Parse `stages.presentation.{owned_surfaces,overlay_widgets}` together (both optional)."""
+    """Parse `stages.presentation.{owned_surfaces,overlay_widgets}` together (both optional).
+
+    Surface names are global, so each owned surface must be namespaced under the declaring
+    bundle: equal to `app_id` or start with `<app_id>.` (no squatting another bundle's name).
+    """
     if not isinstance(presentation_stage, dict):
         return ()
     raw_owned = presentation_stage.get("owned_surfaces")
@@ -1058,6 +1062,12 @@ def parse_presentation_widgets(
             and all(isinstance(x, str) and bool(_SURFACE_ID_RE.fullmatch(x)) for x in raw_owned),
             "invalid_owned_surfaces",
             "owned_surfaces must be a list of surface ids matching [a-z0-9][a-z0-9_.-]{0,63}",
+        )
+        squatted = [x for x in raw_owned if x != app_id and not x.startswith(f"{app_id}.")]
+        _require(
+            not squatted,
+            "owned_surface_not_namespaced",
+            f"owned_surfaces must equal or start with '{app_id}.'; got {squatted[:3]}",
         )
         owned = frozenset(raw_owned)
     return parse_overlay_widgets(presentation_stage.get("overlay_widgets"), owned)
@@ -1746,7 +1756,7 @@ def parse_bundle_manifest_v2(
         "invalid_stage",
         "stages.presentation must be a mapping",
     )
-    overlay_widgets = parse_presentation_widgets(presentation_stage)
+    overlay_widgets = parse_presentation_widgets(presentation_stage, raw["app_id"])
     declared_ids = {d.id for d in permission_declarations}
     permission_declarations = permission_declarations + tuple(
         d for d in requested_tool_declarations(requested_tools) if d.id not in declared_ids

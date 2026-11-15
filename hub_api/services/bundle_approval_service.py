@@ -265,7 +265,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         schedule=parse_schedule(raw.get("schedule")),
         community_config_schema=parse_config_schema(raw.get("community_config_schema")),
         admin_tools=parse_admin_tools(raw.get("admin_tools"), own_app_id=raw["app_id"]),
-        overlay_widgets=parse_presentation_widgets(stages.get("presentation")),
+        overlay_widgets=parse_presentation_widgets(stages.get("presentation"), raw["app_id"]),
     )
 
 

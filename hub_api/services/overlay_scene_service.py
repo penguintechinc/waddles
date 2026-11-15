@@ -14,8 +14,10 @@ Invariants worth knowing before changing anything:
 * **Widgets are keyed by (bundle_app_id, widget_id).** Two bundles may declare the same
   `widget_id`; both are listed and neither shadows the other. A placement names both halves.
 * **Surfaces have one owner.** A `surface` widget may only point at a surface its own bundle lists
-  in `stages.presentation.owned_surfaces`; two enabled bundles claiming one surface is a loud 409,
-  and a widget aimed at another bundle's surface is withheld (never placeable).
+  in `stages.presentation.owned_surfaces` (names are namespaced under the app id at upload). A
+  surface claimed by two enabled bundles is contested: only that surface's widgets are withheld
+  (logged), so one bad claim never hides anything else. A widget aimed at another bundle's
+  surface is withheld too (never placeable).
 * **A component's origin is resolved, not trusted.** `bundle_app_id`, output kind and surface
   come from the widget the community is actually allowed to use (an enabled bundle's declared
   widget or a registry row), never from the request body.
@@ -242,12 +244,12 @@ def _widgets_sync(dal: Any, tenant_id: int, community_id: int) -> dict[WidgetKey
 
     Sources: enabled bundles' `stages.presentation.overlay_widgets` and the community's registry
     rows (registered at runtime by an *enabled* bundle; a registry row overrides a manifest
-    declaration with the same key). Everything is filtered to this tenant + community. Raises 409
-    when two enabled bundles claim the same surface; withholds any `surface` widget whose surface
-    is not owned by its own bundle.
+    declaration with the same key). Everything is filtered to this tenant + community. Withholds
+    any `surface` widget whose surface is contested or not owned by its own bundle.
     """
     found: dict[WidgetKey, WidgetRecord] = {}
     surface_owner: dict[str, str] = {}
+    contested: set[str] = set()
     enabled_apps: set[str] = set()
 
     query = (
@@ -265,12 +267,8 @@ def _widgets_sync(dal: Any, tenant_id: int, community_id: int) -> dict[WidgetKey
         if not isinstance(presentation, dict):
             continue
         for surface in presentation.get("owned_surfaces") or []:
-            other = surface_owner.setdefault(surface, app_id)
-            if other != app_id:
-                raise conflict(
-                    f"Surface {surface!r} is claimed by both {other!r} and {app_id!r}; "
-                    "disable one of the bundles"
-                )
+            if surface_owner.setdefault(surface, app_id) != app_id:
+                contested.add(surface)
         for entry in presentation.get("overlay_widgets") or []:
             if isinstance(entry, dict) and isinstance(entry.get("widget_id"), str):
                 widget = _widget_from_declaration(app_id, entry)
@@ -301,7 +299,10 @@ def _widgets_sync(dal: Any, tenant_id: int, community_id: int) -> dict[WidgetKey
 
     placeable: dict[WidgetKey, WidgetRecord] = {}
     for key, widget in found.items():
-        if widget.output_kind == "surface" and surface_owner.get(widget.surface_id or "") != key[0]:
+        surface = widget.surface_id or ""
+        if widget.output_kind == "surface" and (
+            surface in contested or surface_owner.get(surface) != key[0]
+        ):
             logger.warning(
                 "overlay_widget_surface_not_owned",
                 extra={"community_id": community_id, "app_id": key[0], "widget_id": key[1]},

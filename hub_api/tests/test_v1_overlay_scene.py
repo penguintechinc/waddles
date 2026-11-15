@@ -220,15 +220,17 @@ class TestBundleIsolation:
             **WIDGET,
             "widget_id": "music.card",
             "output_kind": "surface",
-            "surface_id": "music.now",
+            "surface_id": "owner.bundle.now",
         }
         thief = {
             **WIDGET,
             "widget_id": "evil.card",
             "output_kind": "surface",
-            "surface_id": "music.now",
+            "surface_id": "owner.bundle.now",
         }
-        _activate_bundle(overlay_db, cid, "owner.bundle", [owner], owned_surfaces=["music.now"])
+        _activate_bundle(
+            overlay_db, cid, "owner.bundle", [owner], owned_surfaces=["owner.bundle.now"]
+        )
         _activate_bundle(overlay_db, cid, "thief.bundle", [thief])
         listed = (await (await client.get(_url(cid, "/widgets"), headers=headers)).get_json())[
             "widgets"
@@ -249,16 +251,18 @@ class TestBundleIsolation:
             **WIDGET,
             "widget_id": "music.card",
             "output_kind": "surface",
-            "surface_id": "music.now",
+            "surface_id": "owner.bundle.now",
         }
-        _activate_bundle(overlay_db, cid, "owner.bundle", [owner], owned_surfaces=["music.now"])
+        _activate_bundle(
+            overlay_db, cid, "owner.bundle", [owner], owned_surfaces=["owner.bundle.now"]
+        )
         _activate_bundle(overlay_db, cid, "thief.bundle", [])
         _register_widget(
             overlay_db,
             cid,
             "evil.card",
             bundle_app_id="thief.bundle",
-            surface_id="music.now",
+            surface_id="owner.bundle.now",
             output_kind_code=4,
         )
         listed = (await (await client.get(_url(cid, "/widgets"), headers=headers)).get_json())[
@@ -266,14 +270,27 @@ class TestBundleIsolation:
         ]
         assert [w["widget_id"] for w in listed] == ["music.card"]
 
-    async def test_two_bundles_claiming_one_surface_is_409(
+    async def test_contested_surface_withholds_only_its_own_widgets(
         self, client: Any, overlay_db: Any
     ) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
-        _activate_bundle(overlay_db, cid, "a.bundle", [], owned_surfaces=["music.now"])
-        _activate_bundle(overlay_db, cid, "b.bundle", [], owned_surfaces=["music.now"])
+        shared = "a.bundle.shared"
+        card_a = {**WIDGET, "widget_id": "a.card", "output_kind": "surface", "surface_id": shared}
+        card_b = {**WIDGET, "widget_id": "b.card", "output_kind": "surface", "surface_id": shared}
+        _activate_bundle(overlay_db, cid, "a.bundle", [card_a, WIDGET], owned_surfaces=[shared])
+        _activate_bundle(overlay_db, cid, "b.bundle", [card_b], owned_surfaces=[shared])
+        _activate_bundle(
+            overlay_db,
+            cid,
+            "c.bundle",
+            [{**WIDGET, "widget_id": "c.text"}],
+        )
         res = await client.get(_url(cid, "/widgets"), headers=headers)
-        assert res.status_code == 409
+        assert res.status_code == 200
+        ids = sorted(
+            (w["bundle_app_id"], w["widget_id"]) for w in (await res.get_json())["widgets"]
+        )
+        assert ids == [("a.bundle", WIDGET["widget_id"]), ("c.bundle", "c.text")]
 
     async def test_registry_row_of_disabled_bundle_is_not_listed(
         self, client: Any, overlay_db: Any
