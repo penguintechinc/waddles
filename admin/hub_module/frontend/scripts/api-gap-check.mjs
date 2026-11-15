@@ -117,7 +117,7 @@ function pageCoverage(isServed) {
     }
     const unserved = [...used.values()].filter((w) => !isServed(w));
     // Gated when the route wraps the page in <ServedFeature>, or when the page itself names a
-    // registered feature (e.g. `isFeatureServed('reputation-config')`).
+    // registered feature (e.g. `isFeatureServed('some-feature')`).
     const keys = Object.keys(REGISTRY).filter((key) => r.gate === key || src.includes(`'${key}'`));
     const gatedSet = gatedEndpointSet(keys);
     // A route-level <ServedFeature> shields the whole page (none of its calls run), whatever

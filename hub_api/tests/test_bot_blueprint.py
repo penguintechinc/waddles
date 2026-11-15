@@ -343,6 +343,24 @@ class TestShoutoutHistory:
 
 
 class TestAIChatter:
+    @pytest.fixture(autouse=True)
+    def _upstream_configured(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("AI_INTERACTION_API_URL", "http://ai-interaction.test:8005")
+
+    async def test_unconfigured_upstream_is_typed_503(
+        self, client: Any, auth_headers: Any, community_id: int, monkeypatch: Any
+    ) -> None:
+        monkeypatch.delenv("AI_INTERACTION_API_URL", raising=False)
+        resp = await client.get(
+            f"/api/v1/admin/{community_id}/ai-chatter/config",
+            headers=auth_headers(scope="bot.ai_chatter:read"),
+        )
+        assert resp.status_code == 503
+        assert await resp.get_json() == {
+            "error": "service_unavailable",
+            "service": "ai-interaction",
+        }
+
     async def test_get_config_proxies_service_response(
         self, client: Any, auth_headers: Any, community_id: int, monkeypatch: Any
     ) -> None:
@@ -1137,3 +1155,15 @@ class TestRconCommandLogAndMemberInfo:
         servers = (await response.get_json())["servers"]
         assert [s["display_name"] for s in servers] == ["Visible"]
         assert "host" not in servers[0]
+
+
+@pytest.mark.asyncio
+async def test_ai_chatter_service_unavailable_is_typed_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    """regression: legacy ai-interaction deleted -- unset URL raises loudly."""
+    monkeypatch.delenv("AI_INTERACTION_API_URL", raising=False)
+    with pytest.raises(bot_ai_chatter.AIChatterServiceUnavailableError):
+        await bot_ai_chatter.get_chatter_config(1)
+    with pytest.raises(bot_ai_chatter.AIChatterServiceUnavailableError):
+        await bot_ai_chatter.update_chatter_config(
+            1, bot_ai_chatter.AIChatterConfigUpdate(enabled=True)
+        )

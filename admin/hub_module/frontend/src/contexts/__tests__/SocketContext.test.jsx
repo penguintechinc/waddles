@@ -11,13 +11,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, act } from '@testing-library/react';
 
+const managerHandlers = {};
 const mockSocket = {
+  io: { on: vi.fn((evt, cb) => { managerHandlers[evt] = cb; }) },
   on: vi.fn(),
   disconnect: vi.fn(),
   connected: false,
 };
 const ioMock = vi.fn(() => mockSocket);
 vi.mock('socket.io-client', () => ({ io: (...args) => ioMock(...args) }));
+
+let mockFlag = true;
+vi.mock('../../lib/useFeatureFlag', () => ({
+  useFeatureFlag: () => mockFlag,
+}));
 
 let mockAuth = { isAuthenticated: false };
 vi.mock('../AuthContext', () => ({
@@ -42,6 +49,7 @@ function harness() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockFlag = true;
   mockAuth = { isAuthenticated: false };
 });
 
@@ -78,5 +86,29 @@ describe('SocketProvider', () => {
     });
 
     expect(mockSocket.disconnect).toHaveBeenCalled();
+  });
+
+  it('flag OFF: never constructs a socket and reports degraded', () => {
+    mockFlag = false;
+    mockAuth = { isAuthenticated: true };
+    const { captured } = harness();
+
+    expect(ioMock).not.toHaveBeenCalled();
+    expect(captured.socket).toBeNull();
+    expect(captured.degraded).toBe(true);
+  });
+
+  it('flag ON: bounds reconnection and reports degraded after exhaustion', () => {
+    mockAuth = { isAuthenticated: true };
+    const { captured } = harness();
+
+    const [, options] = ioMock.mock.calls[0];
+    expect(options.reconnectionAttempts).toBe(5);
+    expect(captured.degraded).toBe(false);
+
+    act(() => {
+      managerHandlers.reconnect_failed();
+    });
+    expect(captured.degraded).toBe(true);
   });
 });

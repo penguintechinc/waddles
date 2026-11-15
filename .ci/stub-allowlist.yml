@@ -46,7 +46,7 @@
   pattern: "TODO\\(M[0-9]"
   issue: gh-598
 - path: core/svc_action/src/lib.rs
-  pattern: "TODO"
+  pattern: "TODO|not wired"
   issue: gh-598
 - path: core/svc_action/src/senders.rs
   pattern: "TODO\\(M[0-9]"
@@ -225,3 +225,50 @@
 - path: bundles/python/command/src/app.py
   pattern: "not wired yet"
   issue: gh-613
+
+# --- webui placeholders (<NotAvailableYet>/<ServedFeature>): UI whose hub-api route is not served.
+# Issue `TBD-file` = placeholder; the overseer files the real issue and replaces it here.
+# App.jsx: ServedFeature-gated routes (member-profile, vendor-*, marketplace, domains, servers, oauth, mirror-groups, ai-*, bot-detection, media-byok, analytics, security, translation, music, software/service discovery)
+- path: admin/hub_module/frontend/src/App.jsx
+  pattern: "<(NotAvailableYet|ServedFeature)"
+  issue: TBD-file
+# custom-domains card
+- path: admin/hub_module/frontend/src/pages/admin/AdminHome.jsx
+  pattern: "<(NotAvailableYet|ServedFeature)"
+  issue: TBD-file
+# music-provider-config
+- path: admin/hub_module/frontend/src/pages/admin/AdminMusicProviders.jsx
+  pattern: "<(NotAvailableYet|ServedFeature)"
+  issue: TBD-file
+# radio-station-actions
+- path: admin/hub_module/frontend/src/pages/admin/AdminRadioStations.jsx
+  pattern: "<(NotAvailableYet|ServedFeature)"
+  issue: TBD-file
+# reputation-config
+- path: admin/hub_module/frontend/src/pages/admin/ReputationSettings.jsx
+  pattern: "<(NotAvailableYet|ServedFeature)"
+  issue: TBD-file
+# user-oauth-credentials
+- path: admin/hub_module/frontend/src/pages/dashboard/AccountSettings.jsx
+  pattern: "<(NotAvailableYet|ServedFeature)"
+  issue: TBD-file
+# community-recent-activity, bot-score
+- path: admin/hub_module/frontend/src/pages/dashboard/CommunityDashboard.tsx
+  pattern: "<(NotAvailableYet|ServedFeature)"
+  issue: TBD-file
+# member-roster
+- path: admin/hub_module/frontend/src/pages/dashboard/CommunityMembers.tsx
+  pattern: "<(NotAvailableYet|ServedFeature)"
+  issue: TBD-file
+# community-self-create
+- path: admin/hub_module/frontend/src/pages/dashboard/CreateCommunity.tsx
+  pattern: "<(NotAvailableYet|ServedFeature)"
+  issue: TBD-file
+# member-server-link-requests
+- path: admin/hub_module/frontend/src/pages/dashboard/MyChannels.jsx
+  pattern: "<(NotAvailableYet|ServedFeature)"
+  issue: TBD-file
+# community-open-join -- implemented by the in-flight community-join PR (TBD-file until its issue/PR is linked); remove this entry when it lands
+- path: admin/hub_module/frontend/src/pages/public/CommunityPublicPage.jsx
+  pattern: "<(NotAvailableYet|ServedFeature)"
+  issue: TBD-file

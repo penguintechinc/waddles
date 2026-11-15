@@ -248,6 +248,10 @@ pub async fn ensure_loaded(
     let metrics = stage_metrics::stage_metrics();
     let result = if outcome.is_ok() { "ok" } else { "error" };
     metrics.record_bundle_load(app_id, "load", result, started.elapsed());
+    if outcome.is_ok() {
+        // Seed the live-config cache for this scope (lazy-load still covers a failed seed).
+        hub_client::bundle_config::seed_scope_in_background(tenant_id, community_id, app_id);
+    }
     if let Ok(loaded) = &outcome {
         // The executor's own account of the load (`precompile_ms`, covering
         // fetch + verify + compile on its side) -- the stage cannot see
@@ -457,6 +461,9 @@ fn record_executor_call(
                 if let Some(limit) = stage_metrics::sandbox_limit_for(e.code, e.detail.as_deref()) {
                     metrics.record_sandbox_trip(app_id, limit);
                 }
+                if e.detail.as_deref() == Some("pool_exhausted") {
+                    metrics.record_pool_exhausted(app_id);
+                }
                 "executor_error"
             }
             _ => "malformed",
@@ -485,9 +492,17 @@ pub async fn invoke_dispatch(
     community_id: i32,
     app_version: i64,
 ) -> Result<serde_json::Value, InvokeError> {
+    // Command-latency: stamp the invoke-sent instant (and the action-consume instant) into the
+    // tracestate that rides this invoke's scope, so the outbound-confirm point can split the
+    // executor leg from the outbound leg. Metadata only; the trace id is untouched.
+    let invoke_ms = command_latency::stamp::now_ms();
     let trace = env.trace.as_ref().map(|t| TraceContext {
         traceparent: t.traceparent.clone(),
-        tracestate: t.tracestate.clone(),
+        tracestate: command_latency::stage::action_invoke_tracestate(
+            t.tracestate.as_deref(),
+            command_latency::stage::action_consumed_ms().unwrap_or(invoke_ms),
+            invoke_ms,
+        ),
     });
     let payload = serde_json::json!({
         "envelope": envelope_to_wire_json(env)?,
@@ -886,19 +901,77 @@ pub struct DispatchDeps<A: AuditSink, T: TenantResolver, S: SpineOps> {
 /// dead-lettered) -- only a `SpineError` from the ack/DLQ write itself
 /// propagates, matching `core/svc_process/src/spine.rs`'s error-handling
 /// shape.
+/// Records `queue_wait_seconds` for one delivered entry: how long it sat in
+/// the stream (its id's millisecond timestamp) before this stage picked it
+/// up -- the KEDA scale signal. A malformed id is logged, never fatal.
+fn record_queue_wait(app_id: &str, entry_id: &str) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    match bundle_active_set::stream_entry_age(entry_id, now_ms) {
+        Some(wait) => stage_metrics::stage_metrics().record_queue_wait(app_id, wait),
+        None => tracing::debug!(
+            app_id,
+            entry_id,
+            "stream entry id has no millisecond prefix; queue wait not recorded"
+        ),
+    }
+}
+
 async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
     d: &Delivered,
     stream_key: &str,
     deps: &DispatchDeps<A, T, S>,
 ) -> Result<(), SpineError> {
+    use tracing::Instrument as _;
     let started = std::time::Instant::now();
-    let outcome = handle_delivered_inner(d, stream_key, deps).await;
+    record_queue_wait(&deps.app_id, &d.entry_id);
+    // Command-latency: the action consume instant, the action-stream queue-wait hop, and the
+    // `action.dispatch` span parented on the envelope's W3C trace context.
+    let consumed_ms = command_latency::stamp::now_ms();
+    let queue_wait_ms = command_latency::stage::record_queue_wait(
+        command_latency::Hop::ActionQueueWait,
+        &d.entry_id,
+        consumed_ms,
+    );
+    let span = tracing::info_span!(
+        "action.dispatch",
+        app_id = %deps.app_id,
+        tenant_id = d.env.tenant_id,
+        community_id = d.env.community_id,
+        deliveries = d.deliveries,
+        queue_wait_ms = queue_wait_ms,
+        result = tracing::field::Empty,
+        "otel.kind" = "consumer",
+    );
+    if let Some(trace) = &d.env.trace {
+        command_latency::span::set_remote_parent(
+            &span,
+            &trace.traceparent,
+            trace.tracestate.as_deref(),
+        );
+    }
+    let outcome = command_latency::stage::with_action_consumed(
+        consumed_ms,
+        handle_delivered_inner(d, stream_key, deps),
+    )
+    .instrument(span.clone())
+    .await;
     let result = match &outcome {
         Ok(result) => result.as_str(),
         // The ack/DLQ write itself failed: the entry stays pending for
         // redelivery, so it has no terminal dispatch outcome yet.
         Err(_) => "spine_error",
     };
+    span.record("result", result);
+    if result != "success" {
+        command_latency::span::record_error(
+            &span,
+            "DispatchNotSuccessful",
+            &format!("action dispatch ended {result}"),
+        );
+    }
     stage_metrics::stage_metrics().record_stage(&deps.app_id, result, started.elapsed());
     outcome.map(|_| ())
 }
@@ -1311,8 +1384,34 @@ pub async fn run<A: AuditSink, T: TenantResolver>(
     rust_data_plane: Arc<dyn crate::flags::FeatureFlag>,
     shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), SpineError> {
-    let app_id = deps.app_id.clone();
     let dlq = SpineClient::connect(cfg.clone(), deps.metrics.clone()).await?;
+    run_with_client(
+        cfg,
+        grants,
+        stream_key,
+        deps,
+        rust_data_plane,
+        dlq,
+        shutdown,
+    )
+    .await
+}
+
+/// Same as [`run`] but reuses an already-connected, process-shared `dlq`
+/// [`SpineClient`] (cheap clone of one multiplexed connection) instead of
+/// opening and probing a fresh TLS connection per consumer -- the
+/// connection-storm fix (alpha incident 2026-11). Only the blocking
+/// [`GroupReader`] socket stays per-consumer (spec Sec5.7 rule 2).
+pub async fn run_with_client<A: AuditSink, T: TenantResolver>(
+    cfg: SpineConfig,
+    grants: Vec<Grant>,
+    stream_key: String,
+    deps: DispatchDeps<A, T, SpineClient>,
+    rust_data_plane: Arc<dyn crate::flags::FeatureFlag>,
+    dlq: SpineClient,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(), SpineError> {
+    let app_id = deps.app_id.clone();
     let streams: Vec<String> = grants.iter().map(|g| g.stream.clone()).collect();
     let sampler_client = dlq.clone();
     let reader = GroupReader::connect(
@@ -1474,7 +1573,7 @@ pub(crate) async fn ensure_consumer_group(
     group: &str,
 ) -> Result<bool, SpineError> {
     let client = build_raw_client(cfg)?;
-    let mut conn = client.get_multiplexed_async_connection().await?;
+    let mut conn = client.get_connection_manager().await?;
     let result: Result<(), redis::RedisError> = redis::cmd("XGROUP")
         .arg("CREATE")
         .arg(stream)
@@ -1611,7 +1710,7 @@ mod tests {
         let err = SpineError::Redis(redis::make_extension_error(
             "NOGROUP".to_string(),
             Some(
-                "No such key 'waddles:t:global:c:_tenant:app:waddles.a:action' or consumer \
+                "No such key 'waddles:t:default:c:_tenant:app:waddles.a:action' or consumer \
                  group 'waddles.a' in XREADGROUP with GROUP option"
                     .to_string(),
             ),
@@ -2235,6 +2334,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -2311,6 +2411,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -2823,6 +2924,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -2915,6 +3017,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3006,6 +3109,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3100,6 +3204,7 @@ mod tests {
                                 runtime: "runc".to_string(),
                                 verified: false,
                             },
+                            executor_id: None,
                         }),
                     ),
                 )
@@ -3904,10 +4009,7 @@ mod tests {
 
             // Three entries; read two without acking -> pending 2, lag 1.
             let raw = redis::Client::open(cfg.valkey_url.as_str()).expect("redis client");
-            let mut conn = raw
-                .get_multiplexed_async_connection()
-                .await
-                .expect("raw connection");
+            let mut conn = raw.get_connection_manager().await.expect("raw connection");
             for _ in 0..3 {
                 let _: String = redis::cmd("XADD")
                     .arg(&stream)

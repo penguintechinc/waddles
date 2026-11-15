@@ -23,7 +23,28 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.public import public_bp, signup_settings_alias_bp
 from config import HubAPIConfig
+from services import landing_stats_cache
 from tests.conftest import TENANT_SLUG
+
+
+class FakeValkey:
+    """Minimal in-memory stand-in for the redis.asyncio client (get/set with TTL record)."""
+
+    def __init__(self, fail: bool = False) -> None:
+        """Start empty; `fail=True` makes every get raise."""
+        self.store: dict[str, str] = {}
+        self.ttls: dict[str, int] = {}
+        self.fail = fail
+
+    async def get(self, key: str) -> str | None:
+        if self.fail:
+            raise ConnectionError("valkey down")
+        return self.store.get(key)
+
+    async def set(self, key: str, value: str, ex: int | None = None) -> None:
+        self.store[key] = value
+        if ex is not None:
+            self.ttls[key] = ex
 
 
 def _test_config() -> HubAPIConfig:
@@ -91,43 +112,45 @@ def _seed_community(
 
 
 class TestStatsAndBanner:
-    async def test_get_stats_no_auth_required(self, client: Any, platform_db: Any) -> None:
-        _seed_community(platform_db, tenant_id=1)
+    async def test_get_stats_serves_cached_snapshot(self, app: Quart, client: Any) -> None:
+        fake = FakeValkey()
+        app.config[landing_stats_cache.CLIENT_CONFIG_KEY] = fake
+        stats = {
+            "communities": 2,
+            "discord": {"servers": 1, "channels": 1},
+            "twitch": {"channels": 1, "live": 1, "viewers": 10},
+            "slack": {"workspaces": 1, "channels": 1},
+        }
+        snap = await landing_stats_cache.write_snapshot(fake, stats)
         response = await client.get("/api/v1/public/stats")
         assert response.status_code == 200
         body = await response.get_json()
-        assert body["stats"]["communities"] == 1
+        assert body["stats"] == stats
+        assert body["computedAt"] == snap["computed_at"]
+        assert fake.ttls[landing_stats_cache.SNAPSHOT_KEY] == 1200
 
-    async def test_get_stats_coordination_breakdown(self, client: Any, platform_db: Any) -> None:
-        platform_db.dal.coordination.insert(
-            entity_id="d1", platform="discord", server_id="srv-1", is_live=False
-        )
-        platform_db.dal.coordination.insert(
-            entity_id="t1",
-            platform="twitch",
-            server_id="srv-2",
-            is_live=True,
-            viewer_count=10,
-        )
-        platform_db.dal.coordination.insert(
-            entity_id="s1", platform="slack", server_id="srv-3", is_live=False
-        )
-        platform_db.dal.commit()
-
-        response = await client.get("/api/v1/public/stats")
-        assert response.status_code == 200
-        body = await response.get_json()
-        assert body["stats"]["discord"] == {"servers": 1, "channels": 1}
-        assert body["stats"]["twitch"] == {"channels": 1, "live": 1, "viewers": 10}
-        assert body["stats"]["slack"] == {"workspaces": 1, "channels": 1}
-
-    async def test_get_stats_missing_default_tenant_is_500(
-        self, client: Any, platform_db: Any
+    async def test_get_stats_miss_is_warming_503_without_db(
+        self, app: Quart, client: Any, platform_db: Any, caplog: Any
     ) -> None:
+        app.config[landing_stats_cache.CLIENT_CONFIG_KEY] = FakeValkey()
+        # Default tenant inactive: an on-request DB fallback would 500; warming proves none runs.
         platform_db.dal(platform_db.dal.tenants.slug == TENANT_SLUG).update(is_active=False)
         platform_db.dal.commit()
         response = await client.get("/api/v1/public/stats")
-        assert response.status_code == 500
+        assert response.status_code == 503
+        assert await response.get_json() == {"status": "warming"}
+        assert "snapshot missing" in caplog.text
+
+    async def test_get_stats_valkey_error_is_warming_503(self, app: Quart, client: Any) -> None:
+        app.config[landing_stats_cache.CLIENT_CONFIG_KEY] = FakeValkey(fail=True)
+        response = await client.get("/api/v1/public/stats")
+        assert response.status_code == 503
+        assert await response.get_json() == {"status": "warming"}
+
+    async def test_corrupt_snapshot_is_miss(self) -> None:
+        fake = FakeValkey()
+        fake.store[landing_stats_cache.SNAPSHOT_KEY] = "not json"
+        assert await landing_stats_cache.read_snapshot(fake) is None
 
     async def test_get_banner_has_no_success_envelope(self, client: Any) -> None:
         response = await client.get("/api/v1/public/banner")
@@ -245,88 +268,3 @@ class TestSignupSettings:
         assert response.status_code == 200
         body = await response.get_json()
         assert body["success"] is True
-
-
-class TestMarketplace:
-    async def test_get_marketplace_modules_only_published(
-        self, client: Any, platform_db: Any
-    ) -> None:
-        platform_db.dal.hub_modules.insert(
-            name="published-mod", is_published=True, created_at=datetime.now(UTC)
-        )
-        platform_db.dal.hub_modules.insert(
-            name="draft-mod", is_published=False, created_at=datetime.now(UTC)
-        )
-        platform_db.dal.commit()
-
-        response = await client.get("/api/v1/public/marketplace/modules")
-        assert response.status_code == 200
-        body = await response.get_json()
-        names = [m["name"] for m in body["modules"]]
-        assert names == ["published-mod"]
-        assert body["modules"][0]["avgRating"] == "0.0"
-
-    async def test_get_marketplace_modules_search_and_category_filters(
-        self, client: Any, platform_db: Any
-    ) -> None:
-        platform_db.dal.hub_modules.insert(
-            name="chat-bot",
-            display_name="Chat Bot",
-            category="chat",
-            is_published=True,
-            created_at=datetime.now(UTC),
-        )
-        platform_db.dal.hub_modules.insert(
-            name="poll-tool",
-            display_name="Poll Tool",
-            category="games",
-            is_published=True,
-            created_at=datetime.now(UTC),
-        )
-        platform_db.dal.commit()
-
-        by_search = await client.get(
-            "/api/v1/public/marketplace/modules", query_string={"search": "chat"}
-        )
-        body = await by_search.get_json()
-        assert [m["name"] for m in body["modules"]] == ["chat-bot"]
-
-        by_category = await client.get(
-            "/api/v1/public/marketplace/modules", query_string={"category": "games"}
-        )
-        body2 = await by_category.get_json()
-        assert [m["name"] for m in body2["modules"]] == ["poll-tool"]
-
-    async def test_get_marketplace_module_not_found_is_404(self, client: Any) -> None:
-        response = await client.get("/api/v1/public/marketplace/modules/9999")
-        assert response.status_code == 404
-
-    async def test_get_marketplace_module_with_reviews(
-        self, client: Any, platform_db: Any
-    ) -> None:
-        module_id = platform_db.dal.hub_modules.insert(
-            name="reviewed-mod", is_published=True, created_at=datetime.now(UTC)
-        )
-        platform_db.dal.hub_module_reviews.insert(
-            module_id=module_id, rating=5, review_text="Great!", created_at=datetime.now(UTC)
-        )
-        platform_db.dal.commit()
-
-        response = await client.get(f"/api/v1/public/marketplace/modules/{module_id}")
-        assert response.status_code == 200
-        body = await response.get_json()
-        assert body["module"]["avgRating"] == "5.0"
-        assert body["module"]["reviews"][0]["author"] == "Anonymous"
-
-    async def test_get_marketplace_categories(self, client: Any, platform_db: Any) -> None:
-        platform_db.dal.hub_modules.insert(
-            name="mod-a", is_published=True, category="games", created_at=datetime.now(UTC)
-        )
-        platform_db.dal.hub_modules.insert(
-            name="mod-b", is_published=True, category="games", created_at=datetime.now(UTC)
-        )
-        platform_db.dal.commit()
-
-        response = await client.get("/api/v1/public/marketplace/categories")
-        body = await response.get_json()
-        assert body["categories"] == [{"name": "games", "moduleCount": 2}]

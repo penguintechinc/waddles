@@ -34,7 +34,7 @@ const auth = vi.mocked(useAuth);
 const api = vi.mocked(bundleActivationApi);
 
 const ROWS: BundleActivation[] = [
-  { appId: 'waddles.core.ping', communityId: 7, tenantId: 1, versionId: 3, activatedAt: '2026-03-04T10:30:00Z' },
+  { appId: 'waddles.core.ping', communityId: 7, tenantId: 1, versionId: 3, version: '3.0.1', activatedAt: '2026-03-04T10:30:00Z' },
   { appId: 'waddles.core.pong', communityId: 7, tenantId: 1, versionId: 4, activatedAt: null },
 ];
 
@@ -110,6 +110,7 @@ describe('AdminCommunityBundles listing', () => {
     mount();
     const ping = within(await screen.findByTestId('bundle-row-waddles.core.ping'));
     expect(ping.getByText('waddles.core.ping')).toBeInTheDocument();
+    expect(ping.getByTestId('bundle-version-waddles.core.ping')).toHaveTextContent('3.0.1');
     expect(ping.getByText(new Date('2026-03-04T10:30:00Z').toLocaleString(), { exact: false })).toBeInTheDocument();
     expect(within(screen.getByTestId('bundle-row-waddles.core.pong')).getByText(/unknown/)).toBeInTheDocument();
   });

@@ -78,6 +78,8 @@ convention = "google"
 # tenant_middleware postcondition asserts (`ctx is not None`) mirror
 # blueprints/v2/platform.py's own precedent.
 "blueprints/v1/admin.py" = ["S101", "N815"]
+"blueprints/v1/tenant_reputation.py" = ["S101", "N815"]  # wire DTOs are camelCase by API contract
+"services/community_reputation_service.py" = ["N815"]  # admin DTOs are camelCase by API contract
 "blueprints/v1/superadmin.py" = ["N815"]
 # M2 Core Tenant group -- same rationale as blueprints/v1/auth.py above:
 # S101 is a tenant_middleware postcondition assert (get_tenant_context

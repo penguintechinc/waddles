@@ -74,7 +74,6 @@ readonly SERVICE_ORDER=(
     "hub-api"
     "hub-webui"
     "svc-streaming"
-    "reputation-module"
     "migrations"
 )
 
@@ -87,7 +86,6 @@ declare -A SERVICE_CONTEXT=(
     ["hub-api"]="."
     ["hub-webui"]="."
     ["svc-streaming"]="core/svc_streaming"
-    ["reputation-module"]="."
     ["migrations"]="."
 )
 
@@ -98,7 +96,6 @@ declare -A SERVICE_DOCKERFILE=(
     ["hub-api"]="hub_api/Dockerfile"
     ["hub-webui"]="admin/hub_module/Dockerfile.webui"
     ["svc-streaming"]="core/svc_streaming/Dockerfile.rust"
-    ["reputation-module"]="core/reputation_module/Dockerfile"
     ["migrations"]="migrations/Dockerfile"
 )
 
@@ -484,7 +481,6 @@ SERVICES (built/pushed as ${REGISTRY}/<service>:<tag>):
     hub-api                (hub_api/Dockerfile)
     hub-webui              (admin/hub_module/Dockerfile.webui)
     svc-streaming           (core/svc_streaming/Dockerfile.rust)
-    reputation-module       (core/reputation_module/Dockerfile)
     migrations    (migrations/Dockerfile)
 
 EXAMPLES:

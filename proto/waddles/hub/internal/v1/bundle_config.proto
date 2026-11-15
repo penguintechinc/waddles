@@ -1,0 +1,52 @@
+// BundleConfigService: the live per-community config of an app bundle, served to the data-plane
+// stages (svc-process / svc-action) so a bundle's `get-context().config_json` carries the config a
+// community admin last saved (via the bundle-admin gateway), merged over the manifest
+// `community_config_schema` property defaults. Auth: machine JWT in `authorization` metadata, scope
+// "bundle-config:read". Ids are numeric; no PII; the config body is never logged.
+syntax = "proto3";
+
+package waddles.hub.internal.v1;
+
+option go_package = "github.com/penguintechinc/waddles/gen/go/waddles/hub/internal/v1;hubinternalv1";
+
+service BundleConfigService {
+  // The merged config (schema defaults <- latest saved version) of one (tenant, community, app).
+  // Required scope: "bundle-config:read". PERMISSION_DENIED when the community does not belong
+  // to the tenant; NOT_FOUND when the app is not active for the community.
+  rpc GetCommunityConfig(GetCommunityConfigRequest) returns (GetCommunityConfigResponse);
+
+  // Up to 200 scopes in one call (stage seeding at bundle load). Scopes that are refused or not
+  // active are omitted from the answer (never an error for the whole batch).
+  rpc BatchGetCommunityConfig(BatchGetCommunityConfigRequest) returns (BatchGetCommunityConfigResponse);
+}
+
+message GetCommunityConfigRequest {
+  // Required: "v1". Unknown or missing -> UNIMPLEMENTED.
+  string api_version = 4;
+  // Numeric `tenants.id`. A token of the operator-plane `system` tenant (the stages) MUST send
+  // it; a token of any other tenant may omit it or send its own id (any other id is refused).
+  int64 tenant_id = 1;
+  // Numeric `communities.id`; 0 = tenant-wide.
+  int64 community_id = 2;
+  string app_id = 3;
+}
+
+message GetCommunityConfigResponse {
+  int64 tenant_id = 1;
+  int64 community_id = 2;
+  string app_id = 3;
+  // Latest saved version (0 = never saved: `config_json` is the schema defaults only).
+  int64 version = 4;
+  // Serialized UTF-8 JSON object: schema defaults overlaid with the latest saved config.
+  bytes config_json = 5;
+}
+
+message BatchGetCommunityConfigRequest {
+  // Required: "v1". Unknown or missing -> UNIMPLEMENTED.
+  string api_version = 2;
+  repeated GetCommunityConfigRequest scopes = 1;
+}
+
+message BatchGetCommunityConfigResponse {
+  repeated GetCommunityConfigResponse configs = 1;
+}

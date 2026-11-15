@@ -500,13 +500,13 @@ pub async fn handle_one<B: AdminBackend, E: AdminExecutor>(
 
 /// Valkey [`AdminBackend`].
 pub struct ValkeyBackend {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
 }
 
 impl ValkeyBackend {
     /// Wraps a (non-blocking) connection.
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self { conn }
     }
 }
@@ -1004,5 +1004,44 @@ mod tests {
             reply_for(Err(ToolRefusal::Forbidden("x".into()))),
             json!({"ok": false, "code": "forbidden"})
         );
+    }
+
+    /// A scope this stage never resolved is refused fail-closed, never guessed.
+    #[test]
+    fn display_scope_refuses_an_unresolved_scope() {
+        let err = display_scope((2_000_000_001, 2_000_000_002)).unwrap_err();
+        assert!(matches!(err, ToolRefusal::TargetUnavailable(_)));
+    }
+
+    /// Backend errors carry only the redis error kind, never URL or password text.
+    #[test]
+    fn backend_error_exposes_only_the_redis_error_kind() {
+        let e = redis::RedisError::from((
+            redis::ErrorKind::Io,
+            "boom",
+            "redis://:hunter2@host:6379".to_string(),
+        ));
+        let b = be(&e);
+        assert_eq!(b.0, format!("{:?}", redis::ErrorKind::Io));
+        assert!(!b.0.contains("hunter2"));
+    }
+
+    /// With Valkey unreachable the consumer backs off and exits promptly on shutdown.
+    #[tokio::test]
+    async fn run_consumer_exits_on_shutdown_when_valkey_is_unreachable() {
+        let client = redis::Client::open("redis://127.0.0.1:1/").unwrap();
+        let done = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_consumer(
+                client,
+                Arc::new(ring()),
+                Arc::new(Mem::default()),
+                Arc::new(Exec::default()),
+                2,
+                tokio::time::sleep(Duration::from_millis(300)),
+            ),
+        )
+        .await;
+        assert!(done.is_ok(), "shutdown must end the consumer loop");
     }
 }

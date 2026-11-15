@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from provision_harness import hook_failure, with_provisioned  # type: ignore[import-not-found]
 
 _CHART = Path(__file__).resolve().parent.parent
 _ENVS = (
@@ -144,6 +145,18 @@ def test_kv_acl_allow_list_probe_works_no_dangerous():
     )
     assert not [r for r in rules if r.startswith("+config") and r != "+config|get"]
     assert "'+config|get'" in line[0], "pipe must be shell-quoted"
+    # Regression (alpha kv outage): bundle_host_kv's Lua scripts call `redis.call('TIME')`, which
+    # is @dangerous -- without a later `+time` every kv write/incr/cas/list dies with
+    # "ACL failure in script ... 'time' command". Nothing else single-command may be added.
+    assert "+time" in rules, "kv Lua scripts need TIME (see bundle_host_kv backend.rs)"
+    assert rules.index("+time") > rules.index("-@dangerous"), "+time must follow -@dangerous"
+    assert not [
+        r
+        for r in rules
+        if r.startswith("+")
+        and not r.startswith("+@")
+        and r not in ("+config|get", "+time")
+    ], rules
 
 
 def test_kv_tls_only_and_service():
@@ -178,7 +191,8 @@ def test_kv_has_cilium_policy():
 
 
 def test_kv_password_isolated_and_not_in_nonsecret_fields():
-    docs = _docs("values-alpha.yaml")
+    # -valkey-kv is created at RUNTIME by the provision-secrets hook; run the real hook.
+    docs = with_provisioned(_docs("values-alpha.yaml"))
     kv = [
         d
         for d in docs
@@ -309,7 +323,7 @@ def test_kv_disabled_falls_back_to_cache():
 
 
 def test_valkey_tls_cert_covers_kv_san():
-    docs = _docs("values-alpha.yaml")
+    docs = with_provisioned(_docs("values-alpha.yaml"))
     sec = [
         d
         for d in docs
@@ -319,8 +333,9 @@ def test_valkey_tls_cert_covers_kv_san():
 
 
 def test_beta_tier_without_certs_fails_closed():
-    """Real beta tier: TLS now defaults on, so a missing cert fails closed (never silent
-    plaintext)."""
+    """Real beta tier with the cert source removed (no cert-manager, not delegated, no material):
+    a missing Valkey TLS cert fails the provisioner closed (never silent plaintext).
+    """
     r = subprocess.run(
         [
             "helm",
@@ -331,9 +346,18 @@ def test_beta_tier_without_certs_fails_closed():
             "1.30.0",
             "--values",
             str(_CHART / "values-beta.yaml"),
+            "--set",
+            "global.transitTls.certManager.enabled=false",
+            "--set",
+            "global.transitTls.externalSecret=true",
+            "--set",
+            "global.valkeyTls.externalSecret=false",
         ],  # noqa: S603
         capture_output=True,
         text=True,
         check=False,
     )
-    assert r.returncode != 0
+    assert r.returncode == 0, r.stderr
+    docs = [d for d in yaml.safe_load_all(r.stdout) if d]
+    err = hook_failure(docs)
+    assert "valkey-tls" in err and "outside alpha/local" in err

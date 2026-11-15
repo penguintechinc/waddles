@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import PropTypes from 'prop-types';
 import { communityApi } from '../../services/api';
+import { PanelErrorState } from '../ui';
 
 /**
  * Presentation-only mirror of hub_api's shared `REPUTATION_TIERS`
@@ -108,6 +109,7 @@ function CommunityReputationPanel({ communityId }) {
   const [loading, setLoading] = useState(true);
   const [forbidden, setForbidden] = useState(false);
   const [error, setError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -129,11 +131,8 @@ function CommunityReputationPanel({ communityId }) {
         if (err.response?.status === 403) {
           setForbidden(true);
         } else {
-          setError('Failed to load reputation');
+          setError(err);
         }
-        console.error('[CommunityReputationPanel] Load failed', {
-          status: err.response?.status,
-        });
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -143,7 +142,7 @@ function CommunityReputationPanel({ communityId }) {
     return () => {
       cancelled = true;
     };
-  }, [communityId]);
+  }, [communityId, reloadKey]);
 
   return (
     <div
@@ -178,8 +177,8 @@ function CommunityReputationPanel({ communityId }) {
           You don&apos;t have access to reputation here.
         </div>
       ) : error ? (
-        <div className="text-center py-8 text-navy-400 text-sm" data-testid="reputation-error">
-          {error}
+        <div data-testid="reputation-error">
+          <PanelErrorState feature="Reputation" error={error} onRetry={() => setReloadKey((k) => k + 1)} className="py-6" />
         </div>
       ) : (
         <>

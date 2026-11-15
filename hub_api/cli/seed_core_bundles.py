@@ -35,7 +35,12 @@ the existing version_id is reused; per activation target, if `app_active_version
 points at that same `version_id`, activation is skipped too (a true no-op, logged, no new
 `app_install_approvals` row). A different digest under the SAME version string is a data
 integrity conflict (app_versions has its own `UNIQUE(app_id, version)`) -- refused, not
-overwritten; bump the catalog's `version` field alongside the artifact.
+overwritten; bump the catalog's `version` field alongside the artifact. **That byte check is
+enforced for COMPILED bundles only (`language: rust|csharp|go`).** Scripted bundles (python via
+`componentize-py`, which is not byte-reproducible; `javascript`/`nodejs` aliases; `typescript`;
+`ruby`) are not byte-checked: by policy a scripted digest mismatch is a logged, counted
+no-op (`digest_drift_not_enforced` in the summary) that keeps the existing row; signature +
+hash verification for all packages is deferred to v3.2.x.
 
 **Platform connections** (`bundles/core-bundles.yaml`'s own `platform_connections:` section,
 extended by the `CORE_BUNDLES_PLATFORM_CONNECTIONS` env var -- a JSON array, populated by
@@ -144,22 +149,41 @@ _PLATFORM_CONNECTIONS_ENV = "CORE_BUNDLES_PLATFORM_CONNECTIONS"
 #: used one). Deliberately ASCII-only -- see `_guard_core_namespace()`'s own docstring.
 _APP_ID_CHARSET_RE = re.compile(r"^[a-z0-9]+(\.[a-z0-9-]+)+$")
 
+#: Catalog `language` values whose artifact is a deterministic COMPILED build (cargo-component /
+#: .NET / Go). The byte-identical digest check (`app_versions` immutable per version string) is
+#: enforced for these ONLY -- a mismatch is a hard `digest_conflict` (see below).
+COMPILED_LANGUAGES = frozenset({"rust", "csharp", "go"})
+
+#: Catalog `language` values for SCRIPTED bundles: python (built by `componentize-py`, a
+#: wizened CPython snapshot -- NOT byte-reproducible, same source + pinned container -> a
+#: different sha256 every build; issue #521) and Node.js / TypeScript / Ruby bundles (owner decision
+#: 2026-11-13: scripted like python). `javascript` and `nodejs` are ALIASES of one class (Node.js
+#: bundles); `typescript` is its own entry. By policy the byte check is NOT enforced for them: a
+#: digest mismatch at the same `(app_id, version)` is a logged, counted no-op that keeps the
+#: existing row. Signature + hash verification for ALL packages is deferred to v3.2.x.
+#: Both sets are plain frozenset literals of string literals -- the Rust parity test
+#: (core/bundle_active_set executor_profile) parses them textually; keep that shape.
+SCRIPTED_LANGUAGES = frozenset({"python", "javascript", "nodejs", "typescript", "ruby"})
+
+
+def normalize_language(language: str) -> str:
+    """Canonical form of a catalog `language` for set membership: stripped + lower-cased.
+
+    `Rust`, ` rust ` and `rust` are the same language; aliases (`javascript`/`nodejs`) are
+    members of `SCRIPTED_LANGUAGES` themselves, so no alias table is needed. Unknown values are
+    returned unchanged (normalized) and rejected by the caller -- never guessed.
+    """
+    return language.strip().lower()
+
+
 #: `ApiError.code` values that must NOT abort the whole Helm hook (gh-576: "seeder fails
 #: whole hook on one conflict"). Today this is exactly `digest_conflict` --
-#: `_resolve_or_publish_version()`'s own immutable-version guard -- which recurs
-#: indefinitely for `language: python` bundles specifically: `componentize-py` is a KNOWN,
-#: pre-approved non-reproducible build (see this repo's own mem0 note
-#: "python-bundle-snapshot-fallback" / `scripts/verify-core-bundles-reproducible.sh`'s
-#: Rust-only repro gate) -- an unrelated image rebuild (e.g. a different bundle's Dockerfile
-#: stage changing) can legitimately produce new `pyping.wasm` bytes under an UNCHANGED
-#: `core-bundles.yaml` version string, 409-ing forever against the one row that already
-#: published successfully. The already-published row keeps serving correctly either way --
-#: there is nothing an operator can act on except "bump the version", which does not even
-#: fix the underlying non-reproducibility for the NEXT rebuild. Treating this one code as a
-#: WARNING + skip (never a hard failure) stops a cosmetic artifact-byte drift from blocking
-#: every subsequent `helm upgrade` indefinitely; every OTHER `ApiError` code (tenant_not_
-#: found, stalled_core_bundle_upload, ...) still fails the run -- those genuinely need a
-#: human to intervene before the row they describe can ever resolve itself.
+#: `_resolve_or_publish_version()`'s own immutable-version guard, which now only fires for
+#: COMPILED bundles (`COMPILED_LANGUAGES`): a compiled bundle whose source changed without a
+#: version bump. The already-published row keeps serving, so it is a WARNING + skip, never a
+#: hard failure, and is always surfaced in the run summary; every OTHER `ApiError` code
+#: (tenant_not_found, stalled_core_bundle_upload, ...) still fails the run -- those genuinely
+#: need a human to intervene before the row they describe can ever resolve itself.
 RECOVERABLE_API_ERROR_CODES = frozenset({"digest_conflict"})
 
 #: Env var: how old (seconds) an orphaned `waddles.core.*` `app_version_uploads` row's own
@@ -388,7 +412,7 @@ def load_catalog(catalog_path: Path) -> tuple[CatalogEntry, ...]:
                 language=item["language"],
                 manifest_path=item["manifest_path"],
                 artifact_path=item["artifact_path"],
-                activation_targets=targets or (ActivationTarget(tenant_slug="global"),),
+                activation_targets=targets or (ActivationTarget(tenant_slug="default"),),
                 source_dir=str(item.get("source_dir") or ""),
             )
         )
@@ -486,6 +510,70 @@ def _guard_core_namespace(app_id: str) -> None:
         )
 
 
+_GITHUB_SOURCE_RE = re.compile(r"^https://github\.com/[A-Za-z0-9-]+(?:/|$)")
+
+#: manifest attribute -> `app_catalog` column, persisted so the marketplace can attribute a vendor.
+_CATALOG_META_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("author", "author"),
+    ("source_url", "source_url"),
+    ("homepage_url", "homepage_url"),
+    ("category", "category"),
+    ("license", "license"),
+    ("collection", "collection"),
+)
+
+
+def _assert_vendor_derivable(manifest: BundleManifestV2) -> None:
+    """Fail loud unless the bundle names a GitHub org (author or source repo): its vendor.
+
+    A vendor marketplace is one GitHub org (`marketplace_catalog.vendor_key`); a core bundle
+    with neither a `github:<org>` author nor a `https://github.com/<org>/...` source_url would
+    be unlistable under any vendor, so the seeder refuses it instead of seeding an orphan.
+    """
+    author = manifest.author or ""
+    if author.startswith("github:") or _GITHUB_SOURCE_RE.match(manifest.source_url or ""):
+        return
+    raise CoreBundleSeederError(
+        f"{manifest.app_id}: manifest needs a `github:<org>` author or a github.com "
+        "`source_url` so the marketplace can attribute a vendor"
+    )
+
+
+async def _reconcile_catalog_meta(
+    install_dal: AsyncDB, manifest: BundleManifestV2, row: Any
+) -> None:
+    """Align pre-existing `app_catalog` attribution columns with the manifest (idempotent).
+
+    Rows seeded before the marketplace vendor listing carry NULL attribution; a re-seed of an
+    already-installed bundle never rewrote them. Updates only columns that differ, then
+    verifies the write landed (fail loud, same contract as `_reconcile_catalog_kind`).
+    """
+    changes = {
+        col: getattr(manifest, attr)
+        for attr, col in _CATALOG_META_COLUMNS
+        if getattr(manifest, attr) is not None
+        and getattr(row, col, None) != getattr(manifest, attr)
+    }
+    if not changes:
+        return
+    assignments = ", ".join(f"{col} = :{col}" for col in changes)
+    await raw_sql_write(
+        install_dal,
+        f"UPDATE app_catalog SET {assignments} WHERE app_id = :app_id",  # noqa: S608 -- fixed names
+        {**changes, "app_id": manifest.app_id},
+    )
+    check = (await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()).first()
+    stale = [col for col, val in changes.items() if getattr(check, col, None) != val]
+    if stale:
+        raise CoreBundleSeederError(
+            f"app_catalog attribution for {manifest.app_id} did not update: {sorted(stale)}"
+        )
+    logger.info(
+        "core-bundle-seeder: app_catalog attribution reconciled",
+        extra={"app_id": manifest.app_id, "columns": sorted(changes)},
+    )
+
+
 async def _reconcile_catalog_kind(
     install_dal: AsyncDB, manifest: BundleManifestV2, row: Any
 ) -> None:
@@ -534,17 +622,21 @@ async def _ensure_app_catalog_row(install_dal: AsyncDB, manifest: BundleManifest
     """
     existing = await install_dal(install_dal.app_catalog.app_id == manifest.app_id).select()
     if existing:
-        await _reconcile_catalog_kind(install_dal, manifest, existing.first())
+        row = existing.first()
+        await _reconcile_catalog_kind(install_dal, manifest, row)
+        await _reconcile_catalog_meta(install_dal, manifest, row)
         return
     await raw_sql_write(
         install_dal,
         """
         INSERT INTO app_catalog (
             app_id, name, manifest_version, module, feature, provider,
-            execution_model, is_default, platform_compatibility, status, kind
+            execution_model, is_default, platform_compatibility, status, kind,
+            author, source_url, homepage_url, category, license, collection
         ) VALUES (
             :app_id, :name, :manifest_version, :module, :feature, :provider,
-            :execution_model, :is_default, :platform_compatibility, :status, :kind
+            :execution_model, :is_default, :platform_compatibility, :status, :kind,
+            :author, :source_url, :homepage_url, :category, :license, :collection
         )
         """,
         {
@@ -561,6 +653,12 @@ async def _ensure_app_catalog_row(install_dal: AsyncDB, manifest: BundleManifest
             ),
             "status": "active",
             "kind": manifest.kind,
+            "author": manifest.author,
+            "source_url": manifest.source_url,
+            "homepage_url": manifest.homepage_url,
+            "category": manifest.category,
+            "license": manifest.license,
+            "collection": manifest.collection,
         },
     )
     logger.info(
@@ -642,14 +740,32 @@ async def _resolve_or_publish_version(
     publish_tenant_id: int,
     publish_tenant_slug: str,
     valkey_client: Any | None = None,
+    digest_drift: list[str] | None = None,
 ) -> int:
     """The `app_versions.id` for `(entry.app_id, entry.version)`, publishing it if not yet present.
 
-    Raises `ApiError` 409 `digest_conflict` if this exact `(app_id, version)` is already
-    published with a DIFFERENT digest (`app_versions` is immutable per version string, spec
-    Sec6.10) -- the catalog's `version` field must be bumped alongside the artifact, never
-    silently republished under the same version string.
+    For a COMPILED bundle (`COMPILED_LANGUAGES`), raises `ApiError` 409 `digest_conflict` if
+    this exact `(app_id, version)` is already published with a DIFFERENT digest
+    (`app_versions` is immutable per version string, spec Sec6.10) -- the catalog's `version`
+    must be bumped alongside the artifact, never silently republished under the same string.
+
+    For a SCRIPTED bundle (`SCRIPTED_LANGUAGES`: python, javascript/nodejs, typescript, ruby -- no
+    byte-reproducible build), the byte check is NOT enforced (policy): a mismatch is logged at
+    WARNING with both digest prefixes, appended to `digest_drift` (when given) so the run
+    summary counts it, and the existing row is kept. `entry.language` is matched
+    case-insensitively (`normalize_language`); an unknown value raises `CoreBundleSeederError`.
     """
+    language = normalize_language(entry.language)
+    if language in COMPILED_LANGUAGES:
+        enforce_digest = True
+    elif language in SCRIPTED_LANGUAGES:
+        enforce_digest = False
+    else:
+        raise CoreBundleSeederError(
+            f"{entry.app_id}@{entry.version}: unknown catalog language {entry.language!r}; "
+            "cannot decide whether the byte-identical digest check applies "
+            f"(compiled={sorted(COMPILED_LANGUAGES)}, scripted={sorted(SCRIPTED_LANGUAGES)})"
+        )
     existing = await install_dal(
         (install_dal.app_versions.app_id == entry.app_id)
         & (install_dal.app_versions.version == entry.version)
@@ -662,7 +778,26 @@ async def _resolve_or_publish_version(
     # happy_path's identical `expected_digest`.
     expected_digest = digest_hex
     if existing_row is not None:
-        if existing_row.artifact_digest != expected_digest:
+        if existing_row.artifact_digest != expected_digest and not enforce_digest:
+            detail = (
+                f"{entry.app_id}@{entry.version} existing={existing_row.artifact_digest[:12]} "
+                f"this_build={expected_digest[:12]}"
+            )
+            logger.warning(
+                f"core-bundle-seeder: digest differs at the same version ({detail}); "
+                f"{entry.language} bundle: byte-check not enforced (policy) -- keeping the "
+                "existing row",
+                extra={
+                    "app_id": entry.app_id,
+                    "version": entry.version,
+                    "language": entry.language,
+                    "existing_digest_prefix": existing_row.artifact_digest[:12],
+                    "this_build_digest_prefix": expected_digest[:12],
+                },
+            )
+            if digest_drift is not None:
+                digest_drift.append(detail)
+        elif existing_row.artifact_digest != expected_digest:
             raise ApiError(
                 f"core-bundle-seeder: refusing to seed {entry.app_id}@{entry.version} -- "
                 f"app_versions already has this exact (app_id, version) published with a "
@@ -947,6 +1082,7 @@ async def seed_one(
     *,
     valkey_client: Any | None = None,
     connection_scopes: Mapping[str, TenantConnectionScope] | None = None,
+    digest_drift: list[str] | None = None,
 ) -> list[SeedResult]:
     """Seed one catalog entry: publish (if new) + activate for every resolved target.
 
@@ -982,6 +1118,7 @@ async def seed_one(
             f"{manifest.version!r} for {entry.app_id}"
         )
 
+    _assert_vendor_derivable(manifest)
     await _ensure_app_catalog_row(install_dal, manifest)
 
     targets = _resolve_activation_targets(entry)
@@ -997,6 +1134,7 @@ async def seed_one(
         publish_tenant_id=publish_tenant_id,
         publish_tenant_slug=publish_target.tenant_slug,
         valkey_client=valkey_client,
+        digest_drift=digest_drift,
     )
 
     already_installed = await _already_installed_globally(
@@ -1213,7 +1351,7 @@ async def _ensure_sentinel_community(install_dal: AsyncDB, *, tenant_id: int) ->
     0041) but tenant-wide grants use the `TENANT_WIDE_COMMUNITY_SENTINEL` (0) scope, and
     `communities.id` is a SERIAL starting at 1 -- so without this row every tenant-wide
     grant insert raised an FK IntegrityError (36/40 core bundles failed to grant on a
-    fresh DB, #480 kind-e2e). The row is owned by the `global` tenant when it exists
+    fresh DB, #480 kind-e2e). The row is owned by the `default` tenant when it exists
     (so deleting an ordinary tenant never cascades away every tenant's grants), else by
     the granting tenant; inactive + non-public so it never surfaces in community listings.
     Inserting an explicit id leaves the SERIAL sequence untouched.
@@ -1221,7 +1359,7 @@ async def _ensure_sentinel_community(install_dal: AsyncDB, *, tenant_id: int) ->
     await raw_sql_write(
         install_dal,
         "INSERT INTO communities (id, tenant_id, name, is_active, is_public) "
-        "VALUES (:id, COALESCE((SELECT id FROM tenants WHERE slug = 'global'), :tenant_id), "
+        "VALUES (:id, COALESCE((SELECT id FROM tenants WHERE slug = 'default'), :tenant_id), "
         ":name, FALSE, FALSE) ON CONFLICT (id) DO NOTHING",
         {
             "id": TENANT_WIDE_COMMUNITY_SENTINEL,
@@ -1542,6 +1680,9 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
     #: never counted in `failures` (see that constant's own docstring), but always surfaced in
     #: the final summary log so an operator/dashboard sees it without the Job failing.
     skipped_conflicts: list[str] = []
+    #: Scripted (componentize-py) bundles whose digest differed at the same version -- a policy
+    #: no-op (`SCRIPTED_LANGUAGES`), counted + surfaced in the summary, never a conflict/failure.
+    digest_drift: list[str] = []
     try:
         entries = load_catalog(catalog_path)
         connections = load_platform_connections(catalog_path)
@@ -1652,9 +1793,16 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
 
         for entry in order_services_first(entries, bundles_dir):
             try:
+                drift_before = len(digest_drift)
                 results = await seed_one(
-                    install_dal, entry, bundles_dir, connection_scopes=connection_scopes
+                    install_dal,
+                    entry,
+                    bundles_dir,
+                    connection_scopes=connection_scopes,
+                    digest_drift=digest_drift,
                 )
+                if len(digest_drift) > drift_before:
+                    counter.add(1, {"app_id": entry.app_id, "outcome": "digest_drift_not_enforced"})
             except CoreBundleSeederError as exc:
                 logger.error(
                     f"core-bundle-seeder: refused ({entry.app_id}@{entry.version}): {exc}",
@@ -1816,6 +1964,7 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
             "core-bundle-seeder: summary "
             f"(examined={len(connections) + len(entries)}, results={seeded}, "
             f"failures={failures}, skipped_conflicts={skipped_conflicts}, "
+            f"digest_drift_not_enforced={digest_drift}, "
             f"reconcile_uninstalled={len(reconcile_results)})",
             extra={
                 "connections_examined": len(connections),
@@ -1823,6 +1972,7 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                 "results": seeded,
                 "failures": failures,
                 "skipped_conflicts": skipped_conflicts,
+                "digest_drift_not_enforced": digest_drift,
                 "reconcile_uninstalled": len(reconcile_results),
             },
         )

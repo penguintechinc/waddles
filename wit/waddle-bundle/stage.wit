@@ -522,6 +522,76 @@ interface reputation {
   /// The top `limit` (1..=100) active members by score, highest first (ties
   /// by user id). Members never adjusted (implicit 0) are not listed.
   leaderboard: func(limit: u32) -> result<list<score-entry>, error>;
+
+  /// Outcome of an [`apply`] / [`apply-moderation`] call.
+  record apply-outcome {
+    new-score: s64,
+    /// `false` = the host already applied this event+ordinal (idempotent replay).
+    applied: bool,
+  }
+
+  /// One audit-ledger row of a user's history (UUID/numeric only, no PII).
+  record history-entry {
+    id: s64,
+    delta: s32,
+    reason-code: string,
+    kind: string,
+    balance-after: option<s64>,
+    /// RFC 3339 UTC.
+    occurred-at: string,
+  }
+
+  /// A user's aggregate across the tenant's communities.
+  record tenant-score {
+    score: s64,
+    /// How many communities contributed a score row.
+    communities: u32,
+  }
+
+  /// The tenant's auto-ban policy (set by tenant admins via hub-api).
+  record tenant-policy {
+    auto-ban-enabled: bool,
+    auto-ban-floor: s64,
+    at-risk-threshold: s64,
+  }
+
+  /// ACTIVITY-class idempotent delta (`reputation.community.write`, per-call
+  /// bound +/-5): applied through the shared `reputation_apply()` SQL function
+  /// with the host-derived key `<event id>:reputation_apply:<ordinal>`. `reason`
+  /// is a machine code (`[a-z0-9._:-]`, <= 100). The class is fixed by the
+  /// import, never a guest argument.
+  apply: func(user: string, delta: s32, reason: string) -> result<apply-outcome, error>;
+
+  /// MODERATION-class idempotent delta (`reputation.moderation.write`, larger
+  /// per-call bound, core/approved bundles only; `denied("not_granted")`
+  /// without the grant).
+  apply-moderation: func(user: string, delta: s32, reason: string) -> result<apply-outcome, error>;
+
+  /// `reputation.tenant.read` (core only): `user`'s aggregate across this
+  /// tenant's communities. Never crosses tenants.
+  get-tenant: func(user: string) -> result<tenant-score, error>;
+
+  /// `reputation.tenant.read` (core only): this tenant's auto-ban policy, or
+  /// none when the tenant has not set one.
+  get-tenant-policy: func() -> result<option<tenant-policy>, error>;
+
+  /// `reputation.history.read` (core only): newest-first ledger page for `user`
+  /// in this community, 1..=100 rows with `id < before` when given.
+  history: func(user: string, limit: u32, before: option<s64>) -> result<list<history-entry>, error>;
+
+  /// Active members scored strictly below `threshold`, lowest first (1..=100).
+  below-threshold: func(threshold: s64, limit: u32) -> result<list<score-entry>, error>;
+
+  /// Whether `user` is soft-banned in this community (cannot WIN anything).
+  is-soft-banned: func(user: string) -> result<bool, error>;
+
+  /// `reputation.moderation.write`: records an active soft ban; `false` if one
+  /// was already active.
+  soft-ban: func(user: string, reason: string) -> result<bool, error>;
+
+  /// `reputation.moderation.write`: lifts the active soft ban only if it was
+  /// recorded with exactly `only-reason` (a manual ban is never lifted).
+  lift-soft-ban: func(user: string, only-reason: string) -> result<bool, error>;
 }
 
 /// The shared community currency (issue #714), cloned from `reputation`'s

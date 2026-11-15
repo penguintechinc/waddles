@@ -113,6 +113,7 @@ async def test_enable_happy_path(app: Quart, install_dal: Any) -> None:
     body = await listing.get_json()
     assert body["bundles"][0]["appId"] == "waddles.socials.music.default"
     assert body["bundles"][0]["available"] is True
+    assert body["bundles"][0]["version"] == "3.0.1"
 
 
 async def test_disable_requires_tenant_admin(app: Quart) -> None:

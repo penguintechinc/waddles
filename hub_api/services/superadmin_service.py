@@ -30,18 +30,20 @@ superadminController.js").
 
 from __future__ import annotations
 
-import contextlib
 import math
-import secrets
 from datetime import UTC, datetime
 from typing import Any
 
 from services.errors import bad_request, conflict, forbidden, not_found
 from services.free_tier_caps import create_community_capped, create_tenant_capped
+from services.global_identity import SYSTEM_TENANT_SLUG
 from services.schema import bind_admin_tables, bind_superadmin_tenant_fields
 
 VALID_COMMUNITY_TYPES = ("shared_interest_group", "gaming", "creator", "corporate", "other")
 VALID_JOIN_MODES = ("open", "approval", "invite")
+#: Reserved tenant slugs (security.md): `system` = operator plane (its admins ARE the global
+#: admins), `default` = catch-all. Never creatable, renamable-to, renamable or deactivatable here.
+RESERVED_TENANT_SLUGS = frozenset({SYSTEM_TENANT_SLUG, "default"})
 
 
 def _ensure_tables(dal: Any) -> None:
@@ -199,7 +201,6 @@ async def create_community(
             community_id=cid,
             user_id=str(caller_id),
             role="owner",
-            reputation=600,
             is_active=True,
             joined_at=datetime.now(UTC),
         ),
@@ -268,185 +269,6 @@ async def reassign_owner(
     )
 
 
-# ── Marketplace module registry ─────────────────────────────────────────
-
-
-async def get_all_modules(
-    async_dal: Any,
-    dal: Any,
-    *,
-    page: int,
-    limit: int,
-    search: str,
-    category: str | None,
-    is_published: bool | None,
-) -> tuple[list[Any], int, int]:
-    """List all modules (including unpublished) -- superadmin registry view."""
-    _ensure_tables(dal)
-    page = max(1, page)
-    limit = min(100, max(1, limit))
-    offset = (page - 1) * limit
-
-    query = dal.hub_modules.id > 0
-    if search:
-        query &= dal.hub_modules.name.like(f"%{search}%", case_sensitive=False) | (
-            dal.hub_modules.display_name.like(f"%{search}%", case_sensitive=False)
-        )
-    if category:
-        query &= dal.hub_modules.category == category
-    if is_published is not None:
-        query &= dal.hub_modules.is_published == is_published
-
-    total = await async_dal.count_async(query)
-    rows = await async_dal.select_async(
-        dal(query),
-        orderby=~dal.hub_modules.is_core | ~dal.hub_modules.created_at,
-        limitby=(offset, offset + limit),
-    )
-
-    modules = []
-    for m in rows:
-        reviews = await async_dal.select_async(dal(dal.hub_module_reviews.module_id == m.id))
-        installs = await async_dal.select_async(dal(dal.hub_module_installations.module_id == m.id))
-        ratings = [r.rating for r in reviews if r.rating is not None]
-        avg_rating = round(sum(ratings) / len(ratings), 1) if ratings else 0.0
-        modules.append((m, avg_rating, len(reviews), len(installs)))
-
-    total_pages = math.ceil(total / limit) if limit else 0
-    return modules, total, total_pages
-
-
-async def _provision_module_db_account(
-    async_dal: Any, *, name: str, category: str, caller_id: int
-) -> dict[str, Any]:
-    """Best-effort DB-account provisioning (Postgres-only stored function).
-
-    Mirrors Node's own non-fatal try/catch exactly: `provision_module_db_
-    account()` is a Postgres stored procedure (`config/postgres/migrations`)
-    -- unavailable against sqlite (tests) and any DB_TYPE other than
-    postgresql. Node already treats provisioning failure as non-fatal
-    ("Log but don't fail module creation - DB account can be provisioned
-    later"); this port preserves that exactly via a blanket except, which
-    doubles as graceful degradation on every non-Postgres backend
-    (backend-database.md "Support ALL databases") -- module creation
-    itself (the pydal insert above) is unaffected either way.
-    """
-    module_type_map = {
-        "general": ("interactive", "interactive_standard"),
-        "moderation": ("core", "core_broad"),
-        "entertainment": ("interactive", "interactive_standard"),
-        "music": ("interactive", "interactive_standard"),
-        "utility": ("core", "core_broad"),
-        "games": ("interactive", "interactive_standard"),
-        "ai": ("core", "core_broad"),
-    }
-    mod_type, template = module_type_map.get(category, module_type_map["general"])
-    db_password = secrets.token_urlsafe(32)
-    with contextlib.suppress(Exception):
-        rows = await async_dal.executesql_async(
-            "SELECT * FROM provision_module_db_account(%s, %s, %s, %s, %s, %s, %s, %s)",
-            [name, mod_type, template, db_password, None, None, None, caller_id],
-        )
-        if rows:
-            outcome = rows[0]
-            if outcome and outcome[0]:  # success column
-                return {"provisioned": True, "username": outcome[1] if len(outcome) > 1 else None}
-    return {"provisioned": False, "message": "Provisioning skipped"}
-
-
-async def create_module(
-    async_dal: Any,
-    dal: Any,
-    *,
-    name: str,
-    display_name: str | None,
-    description: str | None,
-    version: str | None,
-    author: str | None,
-    category: str | None,
-    icon_url: str | None,
-    is_core: bool | None,
-    config_schema: dict[str, Any] | None,
-    caller_id: int,
-) -> tuple[Any, dict[str, Any]]:
-    """Create a new marketplace module + best-effort DB-account provisioning."""
-    _ensure_tables(dal)
-    if not name:
-        raise bad_request("Module name is required")
-    existing = await async_dal.select_async(dal(dal.hub_modules.name == name))
-    if existing:
-        raise conflict("Module name already exists")
-
-    resolved_category = category or "general"
-    new_id = await async_dal.insert_async(
-        dal.hub_modules,
-        name=name,
-        display_name=display_name or name,
-        description=description or "",
-        version=version or "1.0.0",
-        author=author or "Waddles",
-        category=resolved_category,
-        icon_url=icon_url,
-        is_core=bool(is_core),
-        config_schema=config_schema or {},
-        created_at=datetime.now(UTC),
-        updated_at=datetime.now(UTC),
-    )
-    rows = await async_dal.select_async(dal(dal.hub_modules.id == new_id))
-    module = rows.first()
-    db_account = await _provision_module_db_account(
-        async_dal, name=name, category=resolved_category, caller_id=caller_id
-    )
-    return module, db_account
-
-
-async def update_module(
-    async_dal: Any, dal: Any, *, module_id: int, fields: dict[str, Any]
-) -> None:
-    """Update a marketplace module."""
-    _ensure_tables(dal)
-    existing = await async_dal.select_async(dal(dal.hub_modules.id == module_id))
-    if not existing:
-        raise not_found("Module not found")
-    if not fields:
-        raise bad_request("No updates provided")
-    fields["updated_at"] = datetime.now(UTC)
-    await async_dal.update_async(dal.hub_modules.id == module_id, **fields)
-
-
-async def publish_module(
-    async_dal: Any, dal: Any, *, module_id: int, is_published: bool | None
-) -> str:
-    """Publish/unpublish a module. Returns the module's name for the caller's message."""
-    _ensure_tables(dal)
-    if is_published is None:
-        raise bad_request("isPublished field is required")
-    rows = await async_dal.select_async(dal(dal.hub_modules.id == module_id))
-    row = rows.first()
-    if row is None:
-        raise not_found("Module not found")
-    await async_dal.update_async(
-        dal.hub_modules.id == module_id, is_published=is_published, updated_at=datetime.now(UTC)
-    )
-    return str(row.name)
-
-
-async def delete_module(async_dal: Any, dal: Any, *, module_id: int) -> None:
-    """Delete a module (blocked if any community has it installed)."""
-    _ensure_tables(dal)
-    installs = await async_dal.select_async(
-        dal(dal.hub_module_installations.module_id == module_id)
-    )
-    if installs:
-        raise bad_request(
-            f"Cannot delete module: {len(installs)} installations exist. Unpublish instead."
-        )
-    rows = await async_dal.select_async(dal(dal.hub_modules.id == module_id))
-    if not rows:
-        raise not_found("Module not found")
-    await async_dal.delete_async(dal.hub_modules.id == module_id)
-
-
 # ── Tenant management ────────────────────────────────────────────────────
 
 _SLUG_RE_MSG = "Slug must be lowercase alphanumeric with hyphens, no leading/trailing hyphens"
@@ -503,6 +325,8 @@ async def create_tenant(
     slug = slug.strip()
     if not _valid_slug(slug):
         raise bad_request(_SLUG_RE_MSG)
+    if slug.lower() in RESERVED_TENANT_SLUGS:
+        raise conflict("That tenant slug is reserved")
 
     existing = await async_dal.select_async(dal(dal.tenants.slug == slug))
     if existing:
@@ -538,6 +362,14 @@ async def update_tenant(
     rows = await async_dal.select_async(dal(dal.tenants.id == tenant_id))
     if not rows:
         raise not_found("Tenant not found")
+    current_slug = str(rows.first().slug or "")
+    new_slug = fields.get("slug")
+    if new_slug is not None and str(new_slug).strip().lower() in RESERVED_TENANT_SLUGS:
+        raise forbidden("That tenant slug is reserved")
+    if current_slug in RESERVED_TENANT_SLUGS and (
+        (new_slug is not None and new_slug != current_slug) or fields.get("is_active") is False
+    ):
+        raise forbidden("A reserved tenant cannot be renamed or deactivated")
     await async_dal.update_async(dal.tenants.id == tenant_id, **fields)
 
 
@@ -548,8 +380,8 @@ async def delete_tenant(async_dal: Any, dal: Any, *, tenant_id: int) -> None:
     row = rows.first()
     if row is None:
         raise not_found("Tenant not found")
-    if row.is_global:
-        raise forbidden("Cannot delete the global tenant")
+    if row.is_global or str(row.slug or "") in RESERVED_TENANT_SLUGS:
+        raise forbidden("Cannot delete a reserved tenant")
     await async_dal.update_async(
         dal.tenants.id == tenant_id, is_active=False, updated_at=datetime.now(UTC)
     )

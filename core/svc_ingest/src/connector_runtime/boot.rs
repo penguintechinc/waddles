@@ -372,7 +372,7 @@ const GATEWAY_BOT_MAX_BYTES: usize = 64 * 1024;
 /// `session_start_limit`.
 pub struct IdentifyBudgetBackend {
     /// Connected Valkey shared by every replica (the fleet-wide budget).
-    pub conn: redis::aio::MultiplexedConnection,
+    pub conn: redis::aio::ConnectionManager,
     /// Discord REST base for `GET /gateway/bot` (production:
     /// [`crate::connector::identify_budget::DISCORD_API_BASE`]).
     pub api_base: String,
@@ -488,7 +488,7 @@ where
     /// Identity-encryption counter vec.
     pub identity_metrics: prometheus::IntCounterVec,
     /// Connected Valkey for the per-connection lease.
-    pub lease_conn: redis::aio::MultiplexedConnection,
+    pub lease_conn: redis::aio::ConnectionManager,
     /// The shared executor link + active table.
     pub bridge: HostBridge,
     /// Webhook ingress + env when any webhook platform is listed.
@@ -513,6 +513,8 @@ pub type BootedRuntime<A, D> = ConnectorRuntime<
     RoutedSink<ConnectionSink<A, D>>,
     ConnectorValkeyLease,
 >;
+
+use super::unverified_gate::LicenseUnverifiedGate;
 
 /// Builds the profile-specific feed for `platform`.
 fn feed_for<R: ConnectionResolve + 'static>(
@@ -539,7 +541,8 @@ fn feed_for<R: ConnectionResolve + 'static>(
                 FEED_CALL_TIMEOUT,
             )
             .with_metrics(metrics.clone())
-            .with_self_echo(self_echo.clone()),
+            .with_self_echo(self_echo.clone())
+            .with_unverified_gate(Arc::new(LicenseUnverifiedGate)),
         )
     }
     match platform {
@@ -573,7 +576,8 @@ fn feed_for<R: ConnectionResolve + 'static>(
                 FEED_CALL_TIMEOUT,
             )
             .with_metrics(metrics.clone())
-            .with_self_echo(self_echo.clone());
+            .with_self_echo(self_echo.clone())
+            .with_unverified_gate(Arc::new(LicenseUnverifiedGate));
             if kick_route_keys.is_some() {
                 // The webhook lane's broadcaster comes from editable metadata: it is only
                 // planned once proven to be the owner of the community's own token.
@@ -907,9 +911,7 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
     redis_client: &redis::Client,
     spine_cfg: penguin_spine::SpineConfig,
     metrics: Arc<crate::telemetry::IngestMetrics>,
-    dek: crate::identity_crypto::ConfiguredDekProvider<
-        crate::identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek: crate::identity_crypto::ConfiguredDekProvider,
     registry: prometheus::Registry,
     tokenizer: Arc<dyn IdentityTokenizer>,
 ) -> anyhow::Result<Started> {
@@ -935,23 +937,22 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
     .ok_or_else(|| {
         anyhow::anyhow!("connector runtime: spine did not connect within the grace period")
     })?;
-    let lease_conn = redis_client
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!("connector runtime: valkey connect failed ({:?})", e.kind())
-        })?;
+    let lease_conn = redis_client.get_connection_manager().await.map_err(|e| {
+        anyhow::anyhow!("connector runtime: valkey connect failed ({:?})", e.kind())
+    })?;
     let budget_conn = lease_conn.clone();
     // Same gate as the interaction tap: routing exists exactly when Discord is ON, and a
     // missing dependency is a boot error here (never a ContextSink-less Discord runtime).
     let interaction_routing = if settings.platforms.contains(&"discord") {
-        Some(InteractionRouting::from_config(
-            cli,
-            crate::interaction_store::InteractionStore::new(lease_conn.clone()),
-            &registry,
-            tokenizer,
+        Some(
+            InteractionRouting::from_config(
+                cli,
+                crate::interaction_store::InteractionStore::new(lease_conn.clone()),
+                &registry,
+                tokenizer,
+            )
+            .await?,
         )
-        .await?)
     } else {
         None
     };
@@ -1006,9 +1007,7 @@ pub async fn start_connector(
     webhook_env: &Arc<WebhookEnv>,
     state: &mut crate::http::AppState,
     metrics: Arc<crate::telemetry::IngestMetrics>,
-    dek: crate::identity_crypto::ConfiguredDekProvider<
-        crate::identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek: crate::identity_crypto::ConfiguredDekProvider,
 ) -> anyhow::Result<Started> {
     let lookup = |k: &str| std::env::var(k).ok();
     let scope: Arc<dyn ScopeLookup> = crate::publish::installed_scope_resolver()
@@ -1056,9 +1055,7 @@ pub async fn start_connector_with<R: ConnectionResolve + 'static>(
     webhook_env: &Arc<WebhookEnv>,
     state: &mut crate::http::AppState,
     metrics: Arc<crate::telemetry::IngestMetrics>,
-    dek: crate::identity_crypto::ConfiguredDekProvider<
-        crate::identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek: crate::identity_crypto::ConfiguredDekProvider,
     deps: ConnectorDeps<'_, R>,
 ) -> anyhow::Result<Started> {
     let cli = &config.cli;
@@ -1087,12 +1084,9 @@ pub async fn start_connector_with<R: ConnectionResolve + 'static>(
     crate::interaction_tap::register_metrics(&registry)
         .map_err(|_| anyhow::anyhow!("interaction intake metrics could not be registered"))?;
     state.interactions = Some(crate::interaction_store::InteractionStore::new(
-        redis_client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("interaction store: valkey connect failed ({:?})", e.kind())
-            })?,
+        redis_client.get_connection_manager().await.map_err(|e| {
+            anyhow::anyhow!("interaction store: valkey connect failed ({:?})", e.kind())
+        })?,
     ));
     let (tls, addr) = crate::outbound_boot::host_api_from_lookup(cli, deps.lookup)?;
     let (bridge, _) = start_bridge_with(
@@ -1517,19 +1511,19 @@ mod tests {
     impl DekProvider for FixedDek {
         async fn get_dek(
             &self,
-            _t: &str,
+            _t: i64,
         ) -> Result<(crate::identity_crypto::Dek, u32), crate::identity_crypto::DekUnavailableError>
         {
             Ok((zeroize::Zeroizing::new([1u8; 32]), 1))
         }
     }
 
-    async fn lease_conn() -> redis::aio::MultiplexedConnection {
+    async fn lease_conn() -> redis::aio::ConnectionManager {
         let url = std::env::var("VALKEY_URL")
             .expect("VALKEY_URL must be set: this test needs a REAL Valkey (no silent skip)");
         redis::Client::open(url)
             .unwrap()
-            .get_multiplexed_async_connection()
+            .get_connection_manager()
             .await
             .unwrap()
     }
@@ -1687,7 +1681,10 @@ mod tests {
             .await
             .err()
             .expect("duplicate registration must fail");
-        assert!(e.to_string().contains("metrics"), "duplicate metric registration is a boot error: {e}");
+        assert!(
+            e.to_string().contains("metrics"),
+            "duplicate metric registration is a boot error: {e}"
+        );
     }
 
     /// `assemble` builds a runtime that reconciles every enabled platform's feed
@@ -1844,7 +1841,7 @@ mod tests {
             .await
             .is_err());
         assert!(NoScope.lookup("twitch", "x").await.is_err());
-        assert!(FixedDek.get_dek("t").await.is_ok());
+        assert!(FixedDek.get_dek(1).await.is_ok());
     }
 
     #[tokio::test]

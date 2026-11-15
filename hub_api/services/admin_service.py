@@ -39,6 +39,8 @@ from typing import Any
 import bcrypt
 from flask_core.tenancy import TenantContext
 
+from services import community_authz
+from services import community_reputation_service as reputation_svc
 from services.errors import bad_request, forbidden, not_found
 from services.schema import bind_admin_tables
 
@@ -242,14 +244,26 @@ async def get_members(
         query &= dal.community_members.role == role
 
     total = await async_dal.count_async(query)
+    reputation_svc._ensure_reputation_tables(dal)  # noqa: SLF001 - same-package binder
+    scores = dal.bundle_reputation_scores
     rows = await async_dal.select_async(
         dal(query),
-        orderby=~dal.community_members.reputation | dal.community_members.joined_at,
+        dal.community_members.ALL,
+        scores.balance,
+        left=scores.on(
+            (scores.community_id == dal.community_members.community_id)
+            & (scores.user_uuid == dal.community_members.user_uuid)
+        ),
+        orderby=~scores.balance.coalesce(reputation_svc.DEFAULT_SCORE)
+        | dal.community_members.joined_at,
         limitby=(offset, offset + limit),
     )
 
     members = []
-    for member in rows:
+    for joined in rows:
+        member = joined.community_members
+        balance = joined.bundle_reputation_scores.balance
+        member.reputation = int(balance) if balance is not None else reputation_svc.DEFAULT_SCORE
         user_rows = None
         if member.user_id and member.user_id.isdigit():
             user_rows = await async_dal.select_async(dal(dal.hub_users.id == int(member.user_id)))
@@ -333,6 +347,23 @@ async def update_member_role(
     )
 
 
+async def authorize_reputation_admin(
+    async_dal: Any, dal: Any, request: Any, *, community_id: int, ctx: TenantContext
+) -> None:
+    """404 unless the community is in the caller's tenant, then 403 unless they admin it.
+
+    The reputation-config routes are for COMMUNITY admins (a DB-backed per-community role, not
+    the flat `community:admin` JWT scope, which is never granted to them at login) -- so this
+    uses `community_authz.require_community_admin` (super-admin / tenant-admin-of-this-tenant /
+    a member whose role carries an admin scope in this exact community).
+    """
+    _ensure_tables(dal)
+    await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
+    await community_authz.require_community_admin(
+        async_dal, dal, request, community_id=community_id
+    )
+
+
 async def adjust_reputation(
     async_dal: Any,
     dal: Any,
@@ -342,39 +373,33 @@ async def adjust_reputation(
     ctx: TenantContext,
     amount: float | None,
     set_to: float | None,
+    actor_user_id: int | None = None,
 ) -> tuple[int, int | None]:
-    """Adjust (or set) a member's reputation. Returns (new_score, change_or_None)."""
+    """Adjust (or set) a member's reputation. Returns (new_score, change_or_None).
+
+    The write goes through the bundle store's atomic `reputation_apply()` (clamp, ledger row with
+    an `admin:` actor); see `community_reputation_service.override_member_reputation`.
+    """
     _ensure_tables(dal)
     await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
 
     query = (dal.community_members.community_id == community_id) & (
         dal.community_members.user_id == str(user_id)
     )
-    rows = await async_dal.select_async(dal(query))
-    current = rows.first()
-    if current is None:
+    rows = await async_dal.select_async(dal(query), dal.community_members.id)
+    if rows.first() is None:
         raise not_found("Member not found")
 
-    if set_to is not None:
-        new_score = _clamp_reputation(set_to)
-        await async_dal.update_async(query, reputation=new_score)
-        return new_score, None
-
-    if amount is None or amount == 0:
-        raise bad_request("Invalid amount - provide amount (relative) or setTo (absolute)")
-
-    current_rep = current.reputation or 600
-    new_score = _clamp_reputation(current_rep + amount)
-    await async_dal.update_async(query, reputation=new_score)
-    return new_score, new_score - current_rep
-
-
-REPUTATION_MIN = 300
-REPUTATION_MAX = 850
-
-
-def _clamp_reputation(score: float) -> int:
-    return int(max(REPUTATION_MIN, min(REPUTATION_MAX, score)))
+    return await reputation_svc.override_member_reputation(
+        async_dal,
+        dal,
+        tenant_id=ctx.tenant_id,
+        community_id=community_id,
+        user_id=user_id,
+        amount=amount,
+        set_to=set_to,
+        actor_user_id=actor_user_id,
+    )
 
 
 async def remove_member(

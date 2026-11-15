@@ -9,7 +9,7 @@ import pytest
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer
 
 from services.provider_connections.store import SealedSecrets  # noqa: F401 - import smoke
-from tests.conftest import make_user_token
+from tests.conftest import insert_global_admin, make_user_token
 from tests.provider_connections.conftest import (
     BOT,
     CHANNEL_ID,
@@ -20,7 +20,7 @@ from tests.provider_connections.conftest import (
     FakeClock,
     admin_headers,
 )
-from tests.provider_connections.fake_twitch import FakeTwitch
+from tests.provider_connections.fake_twitch import FakeAccount, FakeTwitch
 from tests.provider_connections.support import raw_rows, set_column
 from tests.sso.conftest import Entitlements
 
@@ -38,6 +38,7 @@ ADMIN_FIELDS = {
     "shared",
     "hasRefreshToken",
     "hasApiCredential",
+    "ownershipVerified",
     "expiresAt",
     "capabilities",
     "metadata",
@@ -133,7 +134,7 @@ class TestAuthChain:
         assert response.status_code == 403
 
     async def test_global_admin_wildcard_satisfies_the_scope(self, client: Any, pc_db: Any) -> None:
-        pc_db.dal.hub_users.insert(username="root", is_super_admin=True)
+        insert_global_admin(pc_db.dal, username="root")
         pc_db.dal.commit()
         root_id = pc_db.dal(pc_db.dal.hub_users.username == "root").select().first().id
         headers = admin_headers(pc_db, scope="*:read *:admin", user_id=root_id)
@@ -716,7 +717,8 @@ class TestInternalApi:
         for n in range(3):
             login = f"chan{n}x"
             fake_twitch.channels[login] = f"90{n}"
-            tokens = fake_twitch.mint(account=BOT)
+            # The broadcaster's own token proves ownership of each extra channel.
+            tokens = fake_twitch.mint(account=FakeAccount(user_id=f"90{n}", login=login))
             assert (
                 await _create(client, pc_db, tokens, metadata={"channel_login": login})
             ).status_code == 201

@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-tldr"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!tldr <text>` -> AI one-line TL;DR via the ai.generate host capability."
 requires-python = ">=3.13"
 dependencies = []

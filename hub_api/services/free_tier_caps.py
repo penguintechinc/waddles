@@ -5,8 +5,8 @@ Cap scope map -- the tier is ALWAYS resolved against the SAME scope the count us
 - community: count per caller tenant; tier = that tenant; lock ``community:<tenant_id>``.
 - tenant: count platform-wide (active, non-`system`); tier = platform (catch-all tenant);
   lock ``tenant:platform``.
-- super-admin grant (the GLOBAL admin cap): count platform-wide `is_super_admin` users only,
-  the explicitly-marked bootstrap admin (``hub_users.is_bootstrap``) excluded; tier =
+- super-admin grant (the GLOBAL admin cap): count platform-wide global admins (system-tenant
+  admins) only, the explicitly-marked bootstrap admin (``hub_users.is_bootstrap``) excluded; tier =
   platform; lock ``admin:platform``.
 - tenant-admin add: count ``tenant_admins`` rows of the TARGET tenant; tier = the TARGET
   tenant (never the caller's); lock ``tenant_admin:<tenant_id>``.
@@ -57,6 +57,7 @@ from flask_core.feature_flags import feature_enabled, get_tier
 from flask_core.tier_catalog import TIER_FREE, TIER_PROFESSIONAL, tier_level
 
 from services.errors import ApiError
+from services.global_identity import global_admin_ids, grant_global_admin_sync
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +134,10 @@ def super_admin_ids(dal: Any) -> set[int]:
     matched by marker, not position: removing/demoting it frees nothing.
     """
     h = dal.hub_users
-    query = (h.is_super_admin == True) & (  # noqa: E712
+    admins = global_admin_ids(dal)
+    if not admins:
+        return set()
+    query = h.id.belongs(sorted(admins)) & (
         (h.is_bootstrap == None) | (h.is_bootstrap == False)  # noqa: E711, E712
     )
     return {int(r.id) for r in dal(query).select(h.id)}
@@ -263,9 +267,8 @@ async def grant_super_admin_capped(
     *,
     caller_tenant_slug: str,
     user_id: int,
-    update_fields: dict[str, Any],
 ) -> None:
-    """Grant platform super admin unless the platform already holds its 1 free super admin.
+    """Grant global admin (system-tenant member + admin) unless the platform holds its 1 free one.
 
     Counts super admins only (never tenant admins). Re-granting an existing one is a no-op.
     """
@@ -283,7 +286,7 @@ async def grant_super_admin_capped(
         tier_slug=tier_slug,
         lock_key="admin:platform",
         is_full=_is_full,
-        write=lambda d: d(d.hub_users.id == user_id).update(**update_fields),
+        write=lambda d: grant_global_admin_sync(d, user_id),
     )
 
 

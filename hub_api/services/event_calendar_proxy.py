@@ -22,14 +22,18 @@ reverse-proxy body that was never hub-api's row to begin with. See
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
-#: Mirrors `calendarProxy.js`'s own `CALENDAR_API_URL` env var + default.
-_DEFAULT_BASE_URL = "http://calendar-interaction:8038"
+#: `CALENDAR_API_URL` env var. No default: the legacy calendar-interaction service was deleted, so
+#: an unset URL fails LOUD with a typed 503 (`service_unavailable`) instead of dialing a dead host.
+_DEFAULT_BASE_URL = ""
+SERVICE_NAME = "calendar-interaction"
+logger = logging.getLogger(__name__)
 #: Mirrors `calendarProxy.js`'s `CALENDAR_PROXY_TIMEOUT_MS` (milliseconds).
 _DEFAULT_TIMEOUT_MS = 5000
 #: Mirrors `config/index.js`'s `serviceApiKey` -> `SERVICE_API_KEY` env var.
@@ -114,6 +118,15 @@ class EventCalendarProxyClient:
         json_body: dict[str, Any] | None = None,
     ) -> ProxyResult:
         """Forward `method path` to `calendar-interaction`, query/body passed through as-is."""
+        if not self._config.base_url:
+            logger.error(
+                "event_calendar_proxy_service_unavailable service=%s path=%s", SERVICE_NAME, path
+            )
+            return ProxyResult(
+                ok=False,
+                status_code=503,
+                body={"error": "service_unavailable", "service": SERVICE_NAME},
+            )
         url = f"{self._config.base_url}{path}"
         headers = {
             "Content-Type": "application/json",

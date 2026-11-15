@@ -72,7 +72,7 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-process-rust
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcProcess.imageRepository | default "svc-process") "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcProcess.imageRepository | default "svc-process")) }}"
         # Values-driven (.Values.global.imagePullPolicy, default IfNotPresent). Deploys carry
         # a unique per-deploy global.imageTag, so a stale same-tag node cache can no longer
         # occur -- the old hardcoded Always was unnecessary and fatal for locally-loaded
@@ -116,11 +116,19 @@ spec:
             name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}
             optional: true
         env:
+        {{- include "waddlebot.otel.env" (dict "root" $ "service" "svc-process-rust") | nindent 8 }}
         # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_process;
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
+        # Live per-community bundle config is read straight from the read-only replica (issue
+        # #1306), column-scoped under the SAME role (alembic 0107); hub-api is not on this path.
+        # Rendered only with infrastructure.postgresql.readReplicas.host; unset -> the stage uses
+        # DATABASE_URL above (primary) and logs a WARN. Kill switch (PostHog, opt-out):
+        # waddles.disable-db-bundle-config-reads ON = legacy hub-api gRPC path.
+{{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
 {{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
+        {{- include "waddlebot.rustOtelEnv" (dict "root" $ "service" "svc-process") | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.port | quote }}
         - name: METRICS_PORT
@@ -331,6 +339,13 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DB_READER_PASSWORD
+        # `reputation` host capability (waddles_bundle_reputation): same generated value the
+        # db-migrate hook provisions the role with (secrets.yaml $reputationPassword).
+        - name: BUNDLE_REPUTATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: DB_REPUTATION_PASSWORD
         {{- /* Bundle platform-table capability (spec 2026-11-06-bundle-table-access-grants):
         EXPLICIT OPT-IN (infrastructure.postgresql.platformTable.enabled, default false -> no env
         at all, capability fail-closed). Its OWN least-privilege Postgres role

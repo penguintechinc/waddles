@@ -42,6 +42,7 @@ from blueprints.v1.marketplace_billing import (
     subscriptions_bp,
 )
 from config import HubAPIConfig
+from tests.conftest import insert_global_admin
 
 TENANT_SLUG = "acme-corp"
 
@@ -95,11 +96,10 @@ def client(app: Quart) -> Any:
 
 
 def _make_admin_user(dal: Any, *, super_admin: bool = True) -> int:
-    return int(
-        dal.hub_users.insert(
-            username="admin", email="admin@example.com", is_super_admin=super_admin
-        )
-    )
+    fields = {"username": "admin", "email": "admin@example.com"}
+    if super_admin:
+        return insert_global_admin(dal, **fields)
+    return int(dal.hub_users.insert(**fields))
 
 
 def _make_member(

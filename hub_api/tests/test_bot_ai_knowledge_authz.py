@@ -20,6 +20,7 @@ os.environ.setdefault("RCON_ENCRYPTION_KEY", "ab" * 32)
 from blueprints.v1 import bot as bot_blueprint  # noqa: E402
 from services import bot_ai_knowledge  # noqa: E402
 from services.github_sync_service import decrypt_token  # noqa: E402
+from tests.conftest import insert_global_admin  # noqa: E402
 from tests.test_bot_blueprint import (  # noqa: E402,F401 - fixtures
     app,
     client,
@@ -49,7 +50,11 @@ def users(dal: Any) -> dict[str, int]:
     """Real hub_users rows: a vendor, another vendor, and a super admin."""
     ids = {}
     for name, sa in (("vendor", False), ("other_vendor", False), ("root", True)):
-        ids[name] = dal.hub_users.insert(display_name=name, is_super_admin=sa)
+        ids[name] = (
+            insert_global_admin(dal, display_name=name)
+            if sa
+            else dal.hub_users.insert(display_name=name)
+        )
     dal.commit()
     return ids
 
