@@ -74,7 +74,9 @@ def test_env_renders_two_pools_with_own_pdb_and_sizing(values: str) -> None:
     sts = _by_kind(docs, "StatefulSet")
     assert set(sts) == {"native", "script"}, sorted(sts)
     pdbs = _by_kind(docs, "PodDisruptionBudget")
-    assert set(pdbs) == set(sts), sorted(pdbs)
+    # A PDB renders only for pools with more than one replica (a lone replica cannot be "one down").
+    replicated = {n for n, w in sts.items() if w["spec"]["replicas"] > 1}
+    assert set(pdbs) == replicated, (sorted(pdbs), sorted(replicated))
     for name, pdb in pdbs.items():
         assert pdb["spec"]["maxUnavailable"] == 1, name
         assert pdb["spec"]["selector"]["matchLabels"]["waddles.io/executor-pool"] == name
@@ -93,7 +95,7 @@ def test_env_renders_two_pools_with_own_pdb_and_sizing(values: str) -> None:
         assert env["EXECUTOR_REQUIRE_ID"]["value"] == "true"
         # Both stages are served by each pool (dial list covers process + action).
         assert env["STAGE_HOST_API_ADDR"]["value"] == "waddlebot-svc-process-rust:8301,waddlebot-svc-action-rust:8302"
-    assert len(sts) == 2 and len(pdbs) == 2
+    assert len(sts) == 2
 
 
 @pytest.mark.parametrize("values", _PARTITIONED_ENVS)
@@ -161,6 +163,17 @@ def test_envs_without_pools_keep_one_any_pool(values: str) -> None:
         assert env["EXECUTOR_LANGUAGE_CLASS"]["value"] == "any"
 
 
+def test_dal2alpha_requests_stay_small_one_replica_per_pool() -> None:
+    """dal2alpha workers are 78-82% requested: 1 replica per pool, requests 2Gi/4Gi, big limits."""
+    sts = _by_kind(_render("values-dal2alpha.yaml"), "StatefulSet")
+    want = {"native": ("2Gi", "12Gi"), "script": ("4Gi", "24Gi")}
+    assert set(sts) == set(want)
+    for pool, (req, lim) in want.items():
+        assert sts[pool]["spec"]["replicas"] == 1, pool
+        res = _main_container(sts[pool])["resources"]
+        assert (res["requests"]["memory"], res["limits"]["memory"]) == (req, lim), pool
+
+
 @pytest.mark.parametrize("values", _PARTITIONED_ENVS)
 def test_env_pools_enable_warm_pool_within_memory_headroom(values: str) -> None:
     """Warm pools are on in the partitioned envs; worst-case warm memory fits the limit - budget gap."""
@@ -194,7 +207,7 @@ def test_both_stages_get_drain_concurrency_env() -> None:
         if d["kind"] == "Deployment" and comp in ("svc-process-rust", "svc-action-rust"):
             env = _env(d, comp)
             assert env["APP_DRAIN_CONCURRENCY"]["value"] == "4"
-            assert env["APP_DRAIN_ORDERING"]["value"] == "actor"
+            assert env["APP_DRAIN_ORDERING"]["value"] == "scope"
             seen += 1
     assert seen == 2
 

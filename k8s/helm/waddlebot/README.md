@@ -1079,8 +1079,11 @@ pipeline:
   inside `limit - memoryBudgetMb` (a render test enforces this for the shipped envs). Kill switch:
   `FLAG_WADDLES_DISABLE_EXECUTOR_WARM_POOL=true`.
 - **Drain concurrency** (`pipeline.rustDataPlane.drainConcurrency`, `drainOrdering`): svc-process and
-  svc-action handle up to N ordering groups of a drained batch at once; entries sharing an ordering
-  key (default: stream + actor) stay strictly in arrival order. `1` = the old serial loop.
+  svc-action handle up to N ordering groups of a drained batch at once. Bundle kv/db/economy have no
+  atomic compare-and-set, so the default key is the app scope `(tenant, community, app)`: a stateful
+  app is strictly serial per scope and concurrency exists only across scopes. `drainOrdering: actor`
+  additionally lets a provably stateless bundle (manifest declares only context/flags/log/clock/http/
+  relay) overlap per actor; stateful or unknown bundles stay scope-serial. `1` = the old serial loop.
 - **Coverage rule:** every stage must be served by exactly one pool **per language class**; an
   `any` pool covers both classes. So the same stage may be listed by a compiled pool and a
   scripted pool, but not by two pools of the same class, and never by none. The rule lives in one

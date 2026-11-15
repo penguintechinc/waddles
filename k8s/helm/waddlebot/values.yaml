@@ -1748,10 +1748,13 @@ pipeline:
   #   pod -- the flag must also be ON in PostHog (or a domain bypass applies).
   rustDataPlane:
     # Per-app drain concurrency of svc-process / svc-action (latency suspect #4): how many ordering
-    # groups of one drained batch run at once (1 = serial). `drainOrdering`: `actor` (default: one user's
-    # commands in one channel stay ordered, other users overlap) or `stream` (a source never overlaps).
+    # groups of one drained batch run at once (1 = serial). Bundle kv/db/economy have no atomic
+    # compare-and-set, so the default key is the app scope (tenant, community, app): a stateful app is
+    # strictly serial per scope and concurrency only exists ACROSS scopes. `drainOrdering: actor` lets
+    # a PROVABLY stateless bundle (approved manifest declares only context/flags/log/clock/http/relay)
+    # also overlap per actor; stateful or unknown bundles stay scope-serial either way.
     drainConcurrency: 4
-    drainOrdering: actor
+    drainOrdering: scope
     enabled: false
 
     # Security review fix (PR #468, MEDIUM): bundle_host_http::egress::EgressGuard's

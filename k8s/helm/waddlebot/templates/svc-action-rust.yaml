@@ -153,7 +153,7 @@ spec:
         - name: APP_DRAIN_CONCURRENCY
           value: {{ .Values.pipeline.rustDataPlane.drainConcurrency | default 4 | quote }}
         - name: APP_DRAIN_ORDERING
-          value: {{ .Values.pipeline.rustDataPlane.drainOrdering | default "actor" | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.drainOrdering | default "scope" | quote }}
         - name: EXECUTOR_LANGUAGE_CLASSES
           value: {{ include "waddlebot.executorLanguageClassSpec" . | quote }}
         # Security review fix (PR #468, MEDIUM): the bundle `http` egress guard's

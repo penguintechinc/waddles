@@ -782,6 +782,10 @@ async fn apply_active_set(
                 state
                     .active_digests
                     .set_language(scope.clone(), row.language.clone());
+                state.active_digests.set_stateless(
+                    scope.clone(),
+                    bundle_active_set::concurrent::is_stateless(&row.declared_capabilities),
+                );
             }
             Ok(Err(err)) => {
                 // Per-session failure (e.g. a connection reset mid-load,

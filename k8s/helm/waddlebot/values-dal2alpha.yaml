@@ -472,30 +472,35 @@ pipeline:
       # PDB (maxUnavailable 1), replicas and sizing (autoscaling stays mode none: no KEDA here).
       # The scripted pool carries the interpreter-bearing bundles (largest working set, the
       # likelier Kata candidate later), so it keeps the 24Gi / 8 CPU ceiling; compiled bundles
-      # are small AOT components, so 12Gi is already generous. Worst case 2x12 + 2x24 = 72Gi
-      # spread across workers (spreadAcrossNodes); requests stay minimal (owner policy), limits
+      # are small AOT components, so 12Gi is already generous. Worst case 12 + 24 = 36Gi
+      # of limits (one replica each); requests stay minimal (owner policy), limits
       # are the headroom. Budgets are ~5/8 of each limit (the render check requires < limit).
+      # SCHEDULING (2026-11-14): the amd64 workers already have 78-82% memory REQUESTED (k8s-worker
+      # ~38/46Gi, k8s2 ~36/46Gi, k8s4 ~39/62Gi), so each pool runs ONE replica with a small request
+      # (compiled 2Gi, scripted 4Gi = 6Gi total) and the big limit as headroom. One replica means no
+      # second slot owner and no PDB (it renders only with >1 replica); raise `replicas` to 2 once the
+      # workers have room for 2x(2Gi+4Gi) of requests, or when dal2alpha capacity grows.
       pools:
         - name: native
           languageClass: compiled
           stages: [svc-process-rust, svc-action-rust]
-          replicas: 2
+          replicas: 1
           memoryBudgetMb: 7680
           # One-shot warm instances (headroom = limit - budget must cover maxTotal x 64Mi).
           warmPoolSize: 2
           warmPoolMaxTotal: 8
           resources:
-            requests: { cpu: "500m", memory: "1Gi" }
+            requests: { cpu: "500m", memory: "2Gi" }
             limits: { cpu: "8000m", memory: "12Gi" }
         - name: script
           languageClass: scripted
           stages: [svc-process-rust, svc-action-rust]
-          replicas: 2
+          replicas: 1
           memoryBudgetMb: 15360
           warmPoolSize: 2
           warmPoolMaxTotal: 16
           resources:
-            requests: { cpu: "500m", memory: "1Gi" }
+            requests: { cpu: "500m", memory: "4Gi" }
             limits: { cpu: "8000m", memory: "24Gi" }
 
 presentation:

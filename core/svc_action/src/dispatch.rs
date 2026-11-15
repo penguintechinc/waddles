@@ -1335,25 +1335,29 @@ async fn drain_batch<R: StreamReader, A: AuditSink, T: TenantResolver, S: SpineO
     bundle_active_set::concurrent::run_keyed(
         &batch,
         tuning.concurrency,
-        |d| drain_ordering_key(d, tuning.ordering),
+        |d| drain_ordering_key(d, deps, tuning.ordering),
         |d| async move { handle_delivered(d, stream_key, deps).await.map(|_| ()) },
     )
     .await?;
     Ok(batch.len())
 }
 
-/// See `core/svc_process/src/spine.rs::drain_ordering_key`: source stream, plus the event actor
-/// in the default `actor` mode.
-fn drain_ordering_key(
+/// Dispatch entries are keyed by app scope `(tenant, community, app)` only: an outbound action
+/// can read-modify-write bundle state through its capabilities, and there is no per-actor
+/// overlap here (see `core/svc_process/src/spine.rs::drain_ordering_key` for the rationale).
+fn drain_ordering_key<A: AuditSink, T: TenantResolver, S: SpineOps>(
     d: &Delivered,
-    ordering: bundle_active_set::concurrent::Ordering,
-) -> (String, Option<String>) {
-    match ordering {
-        bundle_active_set::concurrent::Ordering::Stream => (d.stream.clone(), None),
-        bundle_active_set::concurrent::Ordering::Actor => {
-            (d.stream.clone(), d.env.event.actor.clone())
-        }
-    }
+    deps: &DispatchDeps<A, T, S>,
+    _ordering: bundle_active_set::concurrent::Ordering,
+) -> bundle_active_set::concurrent::DrainKey {
+    bundle_active_set::concurrent::drain_key(
+        &format!("{:?}", d.env.tenant_id),
+        Some(&format!("{:?}", d.env.community_id)),
+        &deps.app_id,
+        None,
+        bundle_active_set::concurrent::Ordering::Scope,
+        false,
+    )
 }
 
 /// Runs [`drain_batch`] in a loop until `shutdown` resolves -- identical

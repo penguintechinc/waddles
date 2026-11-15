@@ -125,4 +125,16 @@ mod tests {
         assert!(!is_valid_fingerprint(&"a".repeat(63)));
         assert!(is_valid_fingerprint(&"0".repeat(64)));
     }
+
+    /// The fingerprint hasher feeds SHA-256, and `finish()` is the first 8 digest bytes, LE.
+    #[test]
+    fn sha256_hasher_finish_is_the_le_prefix_of_the_digest() {
+        let mut h = Sha256Hasher(Sha256::new());
+        h.write(b"abc");
+        // sha256("abc") = ba7816bf 8f01cfea ...
+        assert_eq!(
+            h.finish(),
+            u64::from_le_bytes([0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea])
+        );
+    }
 }

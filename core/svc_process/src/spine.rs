@@ -735,6 +735,16 @@ impl DigestSource {
         }
     }
 
+    /// Whether this source's bundle is provably stateless (see
+    /// `bundle_active_set::concurrent::is_stateless`). `Static` (the legacy single-bundle env
+    /// path) and any scope without a recorded capability set are NOT: they stay scope-serial.
+    fn is_stateless(&self) -> bool {
+        match self {
+            DigestSource::Static(_) => false,
+            DigestSource::Active { scope, digests } => digests.stateless(scope),
+        }
+    }
+
     /// Where this source's bundle may be placed on the executor partition: the legacy
     /// `Static` path is unpartitioned; `Active` classifies the scope's recorded language and
     /// fails closed (`UnknownLanguage`) when none is recorded or it is in no class.
@@ -1865,27 +1875,31 @@ async fn drain_batch<R: StreamReader, S: SpineOps>(
     bundle_active_set::concurrent::run_keyed(
         &batch,
         tuning.concurrency,
-        |d| drain_ordering_key(d, tuning.ordering),
+        |d| drain_ordering_key(d, deps, tuning.ordering),
         |d| async move { handle_delivered(d, deps).await.map(|_| ()) },
     )
     .await?;
     Ok(batch.len())
 }
 
-/// The key two entries must share to be handled strictly in arrival order: their source stream
-/// (which already encodes tenant/community/platform/channel), plus -- in the default `actor`
-/// mode -- the event's actor, so one user's commands in one channel stay ordered while other
-/// users are served concurrently.
-fn drain_ordering_key(
+/// The key two entries must share to be handled strictly in arrival order: their app scope
+/// `(tenant, community, app)`. Bundle kv/db/economy have no atomic compare-and-set, so a stateful
+/// app is serial per scope; the actor is only added for a bundle whose approved manifest is
+/// provably stateless AND when `APP_DRAIN_ORDERING=actor` opts in
+/// (`bundle_active_set::concurrent::drain_key`).
+fn drain_ordering_key<S: SpineOps>(
     d: &Delivered,
+    deps: &ProcessDeps<S>,
     ordering: bundle_active_set::concurrent::Ordering,
-) -> (String, Option<String>) {
-    match ordering {
-        bundle_active_set::concurrent::Ordering::Stream => (d.stream.clone(), None),
-        bundle_active_set::concurrent::Ordering::Actor => {
-            (d.stream.clone(), d.env.event.actor.clone())
-        }
-    }
+) -> bundle_active_set::concurrent::DrainKey {
+    bundle_active_set::concurrent::drain_key(
+        &d.env.tenant,
+        d.env.community.as_deref(),
+        &deps.app_id,
+        d.env.event.actor.as_deref(),
+        ordering,
+        deps.digest_source.is_stateless(),
+    )
 }
 
 /// Runs [`drain_batch`] in a loop until `shutdown` resolves.
@@ -3150,6 +3164,57 @@ mod tests {
         assert_eq!(load_body.digest, active_digest);
         assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
         assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+    }
+
+    /// Stateful-by-default drain ordering: two messages for the same app scope share a key even
+    /// from different actors (so they never overlap -- kv has no atomic compare-and-set); another
+    /// community is another key; only a recorded-stateless bundle under `actor` mode splits by
+    /// actor.
+    #[tokio::test]
+    async fn drain_ordering_key_is_per_scope_and_actor_overlap_needs_stateless_opt_in() {
+        use bundle_active_set::concurrent::Ordering as O;
+        let ring = test_ring();
+        let d1 = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let mut d2 = d1.clone();
+        d2.env.event.actor = Some("someone_else".to_string());
+        let mut d3 = d1.clone();
+        d3.env.community = Some("other".to_string());
+        let digests = Arc::new(ActiveDigests::new());
+        let scope = test_scope("waddles.bot.commands.default");
+        let mut deps = test_deps(FakeSpineOps::default(), Arc::new(ConnectionRegistry::new()));
+        deps.digest_source = DigestSource::Active {
+            scope: scope.clone(),
+            digests: Arc::clone(&digests),
+        };
+        for mode in [O::Scope, O::Actor] {
+            assert_eq!(
+                drain_ordering_key(&d1, &deps, mode),
+                drain_ordering_key(&d2, &deps, mode),
+                "{mode:?}: nothing recorded => assumed stateful => serial per scope"
+            );
+            assert_ne!(
+                drain_ordering_key(&d1, &deps, mode),
+                drain_ordering_key(&d3, &deps, mode),
+                "{mode:?}: a different community overlaps"
+            );
+        }
+        digests.set_stateless(scope.clone(), false);
+        assert_eq!(
+            drain_ordering_key(&d1, &deps, O::Actor),
+            drain_ordering_key(&d2, &deps, O::Actor),
+            "a declared-stateful bundle ignores the actor opt-in"
+        );
+        digests.set_stateless(scope, true);
+        assert_eq!(
+            drain_ordering_key(&d1, &deps, O::Scope),
+            drain_ordering_key(&d2, &deps, O::Scope),
+            "default mode never splits by actor"
+        );
+        assert_ne!(
+            drain_ordering_key(&d1, &deps, O::Actor),
+            drain_ordering_key(&d2, &deps, O::Actor),
+            "stateless + actor opt-in overlaps per actor"
+        );
     }
 
     /// Executor partition fail-closed: an `Active` scope whose language was never recorded (or is

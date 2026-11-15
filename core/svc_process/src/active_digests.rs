@@ -37,6 +37,9 @@ pub struct ActiveDigests {
     /// Bundle language per scope (`app_versions.language`), the executor language-partition
     /// key: the dispatch path must route an on-demand `load` to the right executor class.
     languages: RwLock<HashMap<AppScope, String>>,
+    /// Scopes whose approved manifest declares only stateless capabilities
+    /// (`bundle_active_set::concurrent::is_stateless`); absent = assume state.
+    stateless: RwLock<HashMap<AppScope, bool>>,
 }
 
 impl ActiveDigests {
@@ -104,6 +107,24 @@ impl ActiveDigests {
             .insert(scope, language);
     }
 
+    /// Records whether `scope`'s bundle is provably stateless (written with [`Self::set`]).
+    pub fn set_stateless(&self, scope: AppScope, stateless: bool) {
+        self.stateless
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(scope, stateless);
+    }
+
+    /// Whether `scope`'s bundle is provably stateless; `false` when nothing was recorded.
+    pub fn stateless(&self, scope: &AppScope) -> bool {
+        self.stateless
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(scope)
+            .copied()
+            .unwrap_or(false)
+    }
+
     /// The bundle language recorded for `scope`, if any.
     pub fn language(&self, scope: &AppScope) -> Option<String> {
         self.languages
@@ -124,6 +145,10 @@ impl ActiveDigests {
             .unwrap_or_else(|e| e.into_inner())
             .remove(scope);
         self.languages
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(scope);
+        self.stateless
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .remove(scope);
@@ -220,9 +245,15 @@ mod tests {
         let d = ActiveDigests::new();
         let scope: AppScope = (1, 0, "waddles.a".to_string());
         assert_eq!(d.language(&scope), None);
+        d.set_stateless(scope.clone(), true);
+        assert!(d.stateless(&scope));
         d.set_language(scope.clone(), "python".to_string());
         assert_eq!(d.language(&scope).as_deref(), Some("python"));
         d.remove(&scope);
         assert_eq!(d.language(&scope), None);
+        assert!(
+            !d.stateless(&scope),
+            "cleared with the scope; absent = assume state"
+        );
     }
 }

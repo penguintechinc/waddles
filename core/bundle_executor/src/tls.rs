@@ -723,4 +723,44 @@ mod tests {
         cfg.host_api_stage_identity = Some(String::new());
         assert!(cfg.validate_host_api_tls().is_err());
     }
+
+    #[test]
+    fn pem_loaders_name_the_path_on_unreadable_or_invalid_files() {
+        let missing = std::env::temp_dir().join("waddles-tls-does-not-exist.pem");
+        let e = load_certs(&missing)
+            .err()
+            .unwrap_or_else(|| panic!("missing cert file"));
+        assert!(e.to_string().contains("failed to read certs"), "{e}");
+        let e = load_private_key(&missing)
+            .err()
+            .unwrap_or_else(|| panic!("missing key file"));
+        assert!(e.to_string().contains("failed to read private key"), "{e}");
+
+        let junk =
+            std::env::temp_dir().join(format!("waddles-tls-junk-{}.pem", std::process::id()));
+        std::fs::write(
+            &junk,
+            "-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let e = load_certs(&junk)
+            .err()
+            .unwrap_or_else(|| panic!("invalid PEM"));
+        assert!(e.to_string().contains("invalid PEM certificate"), "{e}");
+        let _ = std::fs::remove_file(&junk);
+    }
+
+    #[tokio::test]
+    async fn dialing_the_connector_without_an_address_is_a_typed_error() {
+        let cfg = CliConfig::for_healthcheck();
+        let e = dial_connector(&cfg)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("no connector address"));
+        assert!(
+            e.to_string()
+                .contains("CONNECTOR_HOST_API_ADDR is not configured"),
+            "{e}"
+        );
+    }
 }
