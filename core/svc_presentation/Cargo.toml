@@ -167,6 +167,25 @@ egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
 # `Arc<hub_client::HubClient>`. Its build.rs compiles the repo-root
 # `proto/` tree (needs `protoc`; see Dockerfile.rust).
 hub_client = { path = "../hub_client", version = "=0.1.0" }
+# Server-side HTML/SVG sanitizer for sanitized-html widgets (`overlay::sanitize`), replacing the
+# hand-rolled tag scanner: html5ever-backed, so the sanitizer and the browser agree on what the
+# markup is. Supply-chain validated before adoption: maintained by a rust-lang member (notriddle),
+# MIT OR Apache-2.0, ~21M downloads, repo github.com/rust-ammonia/ammonia, no build script or
+# install-time execution. =4.2.4 (published 2026-10-17) rather than 4.2.5 (published 2026-11-13,
+# under the two-week age floor). Hash-locked by the committed Cargo.lock; `cargo deny check` clean.
+ammonia = "=4.2.4"
+# Bundle surface contract validation (`surfaces::contract`): compiled with remote `$ref`
+# resolution compiled out (no `resolve-http`/`resolve-file`), so a hostile schema can never make
+# the service fetch anything.
+jsonschema = { version = "=0.60.2", default-features = false }
+# The surface gRPC contract: generated stubs (server side used here) shared with the stage hosts'
+# client. Its build.rs compiles `proto/waddles/presentation/internal/v1` (needs `protoc` and the
+# repo-root `proto/` tree, same as `hub_client`; see Dockerfile.rust).
+bundle-host-surface = { path = "../bundle_host_surface", version = "=0.1.0" }
+# The in-cluster gRPC server (`surfaces::ingress`): TLS via rustls (`tls-ring`, the one rustls
+# line `hub_client`/`service_auth` already resolve). Same pin as the rest of the repo.
+tonic = { version = "=0.14.6", features = ["transport", "tls-ring"] }
+tokio-stream = { version = "=0.1.19", features = ["net"] }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"

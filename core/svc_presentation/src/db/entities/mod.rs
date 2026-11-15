@@ -33,10 +33,14 @@
 //!   [`crate::overlay::code::SeaOrmOverlayCodeResolver`], which maps the
 //!   unguessable overlay code in a URL to the real community id.
 
+pub mod app_activation;
 pub mod caption_event;
 pub mod community;
 pub mod community_overlay_code;
 pub mod overlay_image;
+pub mod overlay_scene_component;
 pub mod overlay_surface;
 pub mod overlay_view_credential;
+pub mod overlay_widget_registry;
+pub mod presentation_canvas;
 pub mod presentation_config;

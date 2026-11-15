@@ -33,6 +33,19 @@ pub enum ApiError {
     /// Caller input failed validation -- maps to 400.
     #[error("bad request: {0}")]
     BadRequest(String),
+    /// Request body exceeds the allowed size -- maps to 413.
+    #[error("payload too large: {0}")]
+    PayloadTooLarge(String),
+    /// Body parsed but violates the widget/surface contract -- maps to 422. The message lists
+    /// locations and rules only, never the offending values.
+    #[error("unprocessable: {0}")]
+    Unprocessable(String),
+    /// Rate limit hit -- maps to 429 with `Retry-After`.
+    #[error("rate limited: retry after {retry_after_secs}s")]
+    TooManyRequests {
+        /// Whole seconds the caller should wait (at least 1).
+        retry_after_secs: u64,
+    },
     /// Route/feature exists but a later chunk (P2-P4) owns the
     /// implementation -- maps to 501. See module doc: unused in P1.
     #[error("not yet implemented: {0}")]
@@ -56,6 +69,9 @@ impl ApiError {
             ApiError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             ApiError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+            ApiError::PayloadTooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
+            ApiError::Unprocessable(_) => (StatusCode::UNPROCESSABLE_ENTITY, "unprocessable_entity"),
+            ApiError::TooManyRequests { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             ApiError::Unimplemented(_) => (StatusCode::NOT_IMPLEMENTED, "not_implemented"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         }
@@ -72,14 +88,24 @@ impl IntoResponse for ApiError {
             }
             other => other.to_string(),
         };
-        (
+        let retry_after = match &self {
+            ApiError::TooManyRequests { retry_after_secs } => Some(*retry_after_secs),
+            _ => None,
+        };
+        let mut response = (
             status,
             Json(ErrorBody {
                 error: code,
                 message,
             }),
         )
-            .into_response()
+            .into_response();
+        if let Some(secs) = retry_after {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, secs.into());
+        }
+        response
     }
 }
 
@@ -111,6 +137,24 @@ mod tests {
     async fn unimplemented_maps_to_501() {
         let resp = ApiError::Unimplemented("overlay render".into()).into_response();
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn widget_errors_map_to_413_422_429_with_retry_after() {
+        assert_eq!(
+            ApiError::PayloadTooLarge("x".into()).into_response().status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            ApiError::Unprocessable("x".into()).into_response().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let limited = ApiError::TooManyRequests { retry_after_secs: 7 }.into_response();
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            limited.headers().get(axum::http::header::RETRY_AFTER).unwrap(),
+            "7"
+        );
     }
 
     #[tokio::test]

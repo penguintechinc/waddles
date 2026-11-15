@@ -37,6 +37,10 @@ pub const EGRESS_VIA_DISPATCHER_FLAG: &str = "waddles.core.egress-via-dispatcher
 /// OFF ⇒ every egress call is denied `feature_disabled`.
 pub const BUNDLE_EGRESS_FLAG: &str = "waddles.core.bundle-egress";
 
+/// Gates the bundle `overlay.publish-surface` host capability (`crate::surface`). Default OFF
+/// (unseen/absent denies `feature_disabled`), the standard opt-in shape.
+pub const OVERLAY_SURFACES_FLAG: &str = "waddles.overlay-surfaces";
+
 /// Gates the bundle `db` host capability (`crate::capabilities::
 /// StageCapabilities::handle_db`) -- same key and same plain opt-in shape
 /// (unseen/OFF denies `feature_disabled`) as `core/svc_process/src/

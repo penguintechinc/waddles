@@ -21,9 +21,14 @@
 mod envelope;
 mod push;
 mod surface;
+mod widget;
 
 pub use envelope::{ConnectedFrame, OverlayEnvelope};
 pub use push::{
     AlertPayload, CaptionPayload, ChatMessagePayload, GoalPayload, OverlayPush, PushKind,
 };
 pub use surface::Surface;
+pub use widget::{
+    CanvasDto, CanvasResolution, SceneComponentDto, SceneLayoutDto, WidgetOutputKind,
+    MAX_SCENE_COMPONENTS, MAX_WIDGET_HTML_BYTES, STATUS_HIDDEN, STATUS_VISIBLE,
+};

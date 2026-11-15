@@ -344,3 +344,14 @@ make test-security  # cargo deny check
 make coverage        # cargo llvm-cov --fail-under-lines 90
 make docker-build    # build Dockerfile.rust (context = core/), tag for localhost:32000
 ```
+
+## Bundle surfaces, composite scene and widgets
+
+Bundles publish structured state to contract-declared surfaces (`bundles/contracts/surfaces.v1.json`)
+over **gRPC only** (`waddles.presentation.internal.v1.SurfaceService/Publish`, port `SURFACE_GRPC_PORT`,
+JWT scoped to the community, TLS required off loopback via `SURFACE_GRPC_TLS_CERT_FILE`/`_KEY_FILE`).
+Browser routes (VIEW key): `GET /surfaces/{code}/live|view`, `GET /{code}/scene[/layout|/live]`,
+`GET /{code}/widget/{bundle_app_id}/{widget_id}`; widget push (PUSH JWT):
+`POST /{code}/widget/{bundle_app_id}/{widget_id}/push`. Canvas from `canvas_resolution_code` (1/2/3),
+HTML widgets sanitized by `ammonia`, pages under a tight hash CSP (`img-src 'self'` + explicit https
+allowlist `WIDGET_IMG_SRC_ALLOWLIST`). Design, security properties, env: `docs/bundle-surfaces.md`.

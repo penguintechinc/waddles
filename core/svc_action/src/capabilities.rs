@@ -1088,6 +1088,8 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// other unimplemented-seam capability's fail-closed default in
     /// [`Self::handle`]).
     db: Option<DbWiring>,
+    /// `overlay.publish-surface` wiring (`crate::surface`); `None` denies `not_implemented`.
+    surface: Option<crate::surface::SurfaceWiring>,
     /// The OTel instruments every `host-call` served by this value is timed
     /// into (`waddles_host_call_latency_seconds`). Always the process-wide
     /// set in production; tests swap it via `with_stage_metrics` so they can
@@ -1148,6 +1150,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             kv: None,
             gate,
             db: None,
+            surface: None,
             stage_metrics: stage_metrics::stage_metrics(),
             bundle_config: None,
             egress_dispatcher_flag: None,
@@ -1362,6 +1365,35 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     pub fn with_db(mut self, db: DbWiring) -> Self {
         self.db = Some(db);
         self
+    }
+
+    /// Attaches the `overlay.publish-surface` wiring (delivery host + default-OFF flag).
+    #[must_use]
+    pub fn with_surface(mut self, surface: crate::surface::SurfaceWiring) -> Self {
+        self.surface = Some(surface);
+        self
+    }
+
+    /// `surface.publish`: community and app id come from the host-verified scope, never args.
+    async fn handle_surface(
+        &self,
+        scope: &InvokeScope,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        if call.op != "surface.publish" {
+            return Err(denied(
+                "unknown_op",
+                format!("surface op {:?} not supported", call.op),
+            ));
+        }
+        let gate_scope = scope.gate_scope();
+        crate::surface::publish(
+            self.surface.as_ref(),
+            gate_scope.app_id(),
+            i64::from(gate_scope.community_id()),
+            &call.args,
+        )
+        .await
     }
 
     async fn handle_relay(
@@ -3438,6 +3470,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             // own handler, never the `storage.tables` path.
             CapabilityKind::Db if call.op.starts_with("tool.") => {
                 self.handle_tool(scope, &call).await
+            }
+            // `surface.publish`: own handler (namespace ownership + flag + gRPC delivery), never
+            // the `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("surface.") => {
+                self.handle_surface(scope, &call).await
             }
             // `platform_table.*` is hosted by the PROCESS stage only (like
             // `reputation`/`economy`/`identity`/`ai`: community-scoped, stage-next

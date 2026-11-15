@@ -1,0 +1,37 @@
+// SurfaceService: the in-cluster bundle -> presentation publish path (gRPC only; replaces the
+// REST route the stale overlay builder carried). Served by svc-presentation, called by the stage
+// hosts (`core/bundle_host_surface`). Every call carries a hub-api-minted machine JWT whose scope
+// is bound to exactly `community_id` (`presentation.overlay:push:<community_id>`); the server
+// verifies it before touching the payload. Numeric ids only, and no payload content is ever logged.
+syntax = "proto3";
+
+package waddles.presentation.internal.v1;
+
+option go_package = "github.com/penguintechinc/waddles/gen/go/waddles/presentation/internal/v1;presentationinternalv1";
+
+service SurfaceService {
+  // Publishes structured state to a contract-declared surface for one community.
+  //
+  // Errors: UNAUTHENTICATED (no/invalid bearer), PERMISSION_DENIED (token not scoped to the
+  // community), NOT_FOUND (unknown surface), INVALID_ARGUMENT (not JSON, control characters or
+  // schema violation -- message lists `path:rule` pairs only), OUT_OF_RANGE (payload over the
+  // surface cap), RESOURCE_EXHAUSTED (rate limit; `retry-after-ms` trailing metadata),
+  // UNIMPLEMENTED (unknown api_version), UNAVAILABLE (retryable).
+  rpc Publish(PublishRequest) returns (PublishResponse);
+}
+
+message PublishRequest {
+  // Must be "v1"; anything else is UNIMPLEMENTED.
+  string api_version = 1;
+  // Numeric community id the publish is for; the JWT scope must name the same id.
+  int64 community_id = 2;
+  // Surface id from bundles/contracts/surfaces.v1.json.
+  string surface_id = 3;
+  // JSON document matching the surface's schema.
+  string payload_json = 4;
+}
+
+message PublishResponse {
+  // Sequence number of the fanned-out frame.
+  uint64 seq = 1;
+}
