@@ -51,10 +51,11 @@ pub fn resolve_audit_password(
     if let Some(pw) = get(AUDIT_PASSWORD_ENV).filter(|s| !s.trim().is_empty()) {
         return Ok(Some(Secret::new(pw)));
     }
-    let tier = get("DEPLOYMENT_TIER").unwrap_or_default();
-    if tier.trim() == LOCAL_TIER {
+    let tier = get("DEPLOYMENT_TIER");
+    if tier.as_deref().map(str::trim) == Some(LOCAL_TIER) {
         return Ok(None);
     }
+    let tier = tier.unwrap_or_else(|| "<unset>".to_string());
     Err(StorageConfigError::Invalid(format!(
         "{AUDIT_PASSWORD_ENV} is required when object storage is provisioned (the durable \
          Postgres audit sink is mandatory outside DEPLOYMENT_TIER={LOCAL_TIER}; \
@@ -139,14 +140,20 @@ pub fn parse_settings(
     if !missing.is_empty() {
         return Err(StorageConfigError::Partial { missing });
     }
-    let mut it = vals.into_iter().flatten();
-    let mut next = || it.next().unwrap_or_default();
+    let mut it = vals.into_iter();
+    let mut next = || {
+        it.next().flatten().ok_or_else(|| {
+            StorageConfigError::Invalid(
+                "BUNDLE_STORAGE_* value vanished after presence check".to_string(),
+            )
+        })
+    };
     let settings = StorageSettings {
-        endpoint: next(),
-        bucket: next(),
-        region: next(),
-        access_key_id: Secret::new(next()),
-        secret_access_key: Secret::new(next()),
+        endpoint: next()?,
+        bucket: next()?,
+        region: next()?,
+        access_key_id: Secret::new(next()?),
+        secret_access_key: Secret::new(next()?),
     };
     // Bundle data is sensitive (security.md Encryption): TLS only, mirroring the chart's
     // own `https://` guard for external storage.
