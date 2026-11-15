@@ -898,6 +898,24 @@ infrastructure:
       bundleStorage:
         accessKey: "REPLACE_ME"
         secretKey: "REPLACE_ME"
+      # hub-api's platform-secret ESCROW identity (hub_api/services/platform_secrets/escrow.py): the
+      # DR copy of the platform's own keys. Read/Write/List on escrow.bucketName ONLY -- a bucket no
+      # other identity names, so no bundle / data-plane / general hub-api grant can reach it. Its
+      # credentials live in the dedicated `<release>-platform-escrow-s3` Secret (never the
+      # envFrom'd waddlebot-secrets), generated at runtime by the provision-secrets hook and
+      # mounted only by SeaweedFS (to render this identity) and hub-api.
+      escrow:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+    # Platform-secret escrow bucket (hub_api T7). The bucket-init Job creates it, applies the
+    # default SSE and turns versioning ON (history survives an overwrite or a poisoned PUT; a
+    # versioning failure is logged loudly, never silent). Object-lock is NOT enabled: SeaweedFS
+    # needs it at bucket creation and a retention lock would also block the manifest rewrite on
+    # every rotation -- versioning + the sealed/signed objects are the integrity layer (see
+    # docs/PLATFORM_VAULT.md Escrow).
+    escrow:
+      bucketName: "waddles-platform-escrow"
+      versioning: true
     service:
       name: "infra-seaweedfs"
       type: ClusterIP

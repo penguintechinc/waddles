@@ -7,12 +7,15 @@ marker). The decision table, in order:
 
   kill-switch flag ON ................ touch nothing (legacy sources stay authoritative)
   marker present, KEK cannot open it . REFUSE root_mismatch  (root KEK changed; generate nothing)
-  marker present, `secrets` empty .... REFUSE store_wiped    (wipe/old restore; generate nothing)
+  marker present, `secrets` empty .... restore from the S3 escrow when permitted + verified,
+                                       else REFUSE store_wiped / restore_blocked / escrow_*
   marker absent, `secrets` not empty . REFUSE marker_missing
   event chain does not verify ........ REFUSE chain_break
   active row won't open .............. REFUSE unopenable     (never regenerate on open failure)
   rows exist for a type, none active . REFUSE inconsistent
-  marker absent AND store empty ...... genuine first run: write the marker, then create
+  marker absent AND store empty ...... genuine first run: write the marker; if the escrow holds a
+                                       manifest, restore from it (permitted) or REFUSE
+                                       (restore_blocked / escrow_*); only with NO escrow: create
   type has no row .................... first run only: import an allowlisted value, else generate
 
 "First run" is therefore never inferred from "a row would not open". Creation is
@@ -32,11 +35,26 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from services.envelope.errors import PlatformKekError
 from services.envelope.platform_kek import PlatformKekAdapter
 from services.platform_secrets import telemetry
 from services.platform_secrets.cache import CachedSecret, PlatformSecretCache, verify_until_for
+from services.platform_secrets.escrow import (
+    MANIFEST_KEY as ESCROW_MANIFEST_KEY,
+)
+from services.platform_secrets.escrow import (
+    EscrowError,
+    EscrowMisconfiguredError,
+    EscrowRefusedError,
+    EscrowStore,
+    EscrowUnavailableError,
+    escrow_store_from_env,
+    restore_from_escrow,
+    restore_permitted,
+    sync_escrow,
+)
 from services.platform_secrets.event_chain import append_event, verify_chain
 from services.platform_secrets.importer import import_candidate
 from services.platform_secrets.refresher import CacheRefresher, PgNotifyWaiter, make_loader
@@ -66,6 +84,8 @@ from services.provider_connections.vault import (
 
 logger = logging.getLogger(__name__)
 
+_MANIFEST_KEY = ESCROW_MANIFEST_KEY
+
 #: Flag key of the opt-out kill-switch: unseen / OFF = the database is the source of platform
 #: keys (core mechanism, so default ON-path); ON = legacy sources stay authoritative.
 KILL_SWITCH_FLAG = "waddles.disable-db-platform-keys"
@@ -75,7 +95,8 @@ class PlatformVaultRefusedError(RuntimeError):
     """Boot refused: the store cannot be trusted or the root changed. Message is a fixed code word.
 
     `reason` is one of `kek_missing`, `root_mismatch`, `store_wiped`, `marker_missing`,
-    `chain_break`, `unopenable`, `inconsistent`.
+    `chain_break`, `unopenable`, `inconsistent`, `restore_blocked`, `escrow_invalid`,
+    `escrow_tampered`, `escrow_missing`, `escrow_unavailable`, `escrow_misconfigured`.
     """
 
     def __init__(self, reason: str) -> None:
@@ -118,6 +139,12 @@ def _refuse(reason: str, type_name: str = "all") -> PlatformVaultRefusedError:
         "chain_break": "chain_break",
         "unopenable": "unopenable",
         "inconsistent": "inconsistent",
+        "restore_blocked": "restore_blocked",
+        "escrow_invalid": "escrow_invalid",
+        "escrow_missing": "escrow_invalid",
+        "escrow_tampered": "escrow_tampered",
+        "escrow_unavailable": "unavailable",
+        "escrow_misconfigured": "error",
     }.get(reason, "error")
     telemetry.count_drift(type_name, outcome)
     logger.error("platform vault refused to start reason=%s", reason)
@@ -135,6 +162,46 @@ def _check_root(repo: PlatformVaultRepository, kek: PlatformKekAdapter) -> None:
         same_root = False
     if not same_root:
         raise _refuse("root_mismatch")
+
+
+def _restore_or_refuse(
+    repo: PlatformVaultRepository,
+    kek: PlatformKekAdapter,
+    escrow: EscrowStore,
+    *,
+    permitted: bool,
+    now: datetime,
+    refusal_if_empty: str | None,
+) -> bool:
+    """Try to rebuild the empty store from the escrow; True when rows were restored.
+
+    No manifest in the escrow -> False (`refusal_if_empty`, when given, is then raised: the marker
+    proves this is not a first run, so an empty store with no escrow is `store_wiped`). A manifest
+    that exists but may not be used (`restore_blocked`: not alpha/local and no operator flag) or
+    that fails verification (`escrow_tampered` / `escrow_invalid` / `escrow_missing`, including an
+    object or manifest sealed under another KEK) refuses the boot and generates nothing. The
+    restore itself is all-or-nothing inside the caller's transaction.
+    """
+    try:
+        manifest_present = escrow.get(_MANIFEST_KEY) is not None
+    except EscrowUnavailableError:
+        raise _refuse("escrow_unavailable") from None
+    if not manifest_present:
+        if refusal_if_empty is not None:
+            raise _refuse(refusal_if_empty)
+        return False
+    if not permitted:
+        raise _refuse("restore_blocked")
+    try:
+        report = restore_from_escrow(repo, kek, escrow, now=now)
+    except EscrowRefusedError as exc:
+        raise _refuse(exc.reason) from None
+    except EscrowUnavailableError:
+        raise _refuse("escrow_unavailable") from None
+    if report is None:  # pragma: no cover -- the manifest vanished between the two reads
+        raise _refuse("escrow_unavailable")
+    logger.warning("platform secrets restored from escrow count=%d", report.restored)
+    return report.restored > 0
 
 
 def _open_row(spec: SecretSpec, row: SecretRow, kek: PlatformKekAdapter) -> CachedSecret:
@@ -291,6 +358,8 @@ def bootstrap_platform_secrets(
     *,
     environ: Mapping[str, str] | None = None,
     now: datetime | None = None,
+    escrow: EscrowStore | None = None,
+    restore_allowed: bool = False,
 ) -> BootstrapReport:
     """Run the decision table against `repo`; the caller holds the lock and the transaction.
 
@@ -309,7 +378,15 @@ def bootstrap_platform_secrets(
         else:
             _check_root(repo, kek)
             if count == 0:
-                raise _refuse("store_wiped")
+                if escrow is None or not _restore_or_refuse(
+                    repo,
+                    kek,
+                    escrow,
+                    permitted=restore_allowed,
+                    now=moment,
+                    refusal_if_empty="store_wiped",
+                ):
+                    raise _refuse("store_wiped")
         chain = verify_chain(repo, kek)
         if not chain.intact:
             raise _refuse("chain_break")
@@ -317,6 +394,19 @@ def bootstrap_platform_secrets(
             # Lost the marker race: another bootstrap wrote it -- be a normal (non-first) boot.
             first_run = False
             _check_root(repo, kek)
+        if (
+            first_run
+            and escrow is not None
+            and _restore_or_refuse(
+                repo,
+                kek,
+                escrow,
+                permitted=restore_allowed,
+                now=moment,
+                refusal_if_empty=None,
+            )
+        ):
+            first_run = False  # restored keys are in use: never import over them
         generated: list[str] = []
         imported: list[str] = []
         rejected: list[str] = []
@@ -368,13 +458,17 @@ def run_platform_secrets_bootstrap(
     kill_switch: Callable[[], bool] = db_platform_keys_disabled,
     cache: PlatformSecretCache | None = None,
     kek: PlatformKekAdapter | None = None,
+    escrow: EscrowStore | None = None,
 ) -> BootstrapReport:
     """Entry point from hub-api's bootstrap, inside its advisory lock: one transaction, then seed.
 
     Kill-switch ON returns immediately without touching the database. A missing / malformed KEK
     refuses the boot (`kek_missing`) rather than skipping: an absent root must be loud. On success
     the process cache is seeded only AFTER the commit, so it never holds a value the database
-    does not.
+    does not. With the S3 escrow configured (`PLATFORM_ESCROW_S3_*`) an empty store is restored
+    from it when permitted (alpha/local, or `WADDLES_PLATFORM_SECRETS_ESCROW_RESTORE=1`), and after
+    the commit a second short transaction escrows any version the escrow lacks (best effort: an
+    unreachable store is a metric and a retry on the next boot, never a failed boot).
     """
     if kill_switch():
         logger.warning("platform vault bootstrap skipped: %s is ON", KILL_SWITCH_FLAG)
@@ -384,11 +478,45 @@ def run_platform_secrets_bootstrap(
         adapter = kek if kek is not None else PlatformKekAdapter.from_env(environ)
     except PlatformKekError:
         raise _refuse("kek_missing") from None
+    try:
+        store = escrow if escrow is not None else escrow_store_from_env(environ)
+    except EscrowMisconfiguredError:
+        raise _refuse("escrow_misconfigured") from None
     with engine.begin() as conn:
-        report = bootstrap_platform_secrets(SqlRepository(conn), adapter, environ=environ)
+        report = bootstrap_platform_secrets(
+            SqlRepository(conn),
+            adapter,
+            environ=environ,
+            escrow=store,
+            restore_allowed=restore_permitted(environ),
+        )
+    if store is not None:
+        _sync_escrow_best_effort(engine, adapter, store)
     (cache if cache is not None else _process_cache).seed(report.entries)
     telemetry.register_cache_gauges((cache or _process_cache).gauge_snapshot)
     return report
+
+
+def _sync_escrow_best_effort(engine: Engine, kek: PlatformKekAdapter, store: EscrowStore) -> None:
+    """Escrow new versions in their own transaction; any failure is counted and never fatal.
+
+    Holds the caller's advisory lock (an `escrowed` event extends the audit chain). Only the
+    exception CLASS is logged: driver / botocore messages can echo parameters.
+    """
+    try:
+        with engine.begin() as conn:
+            report = sync_escrow(SqlRepository(conn), kek, store)
+    except (EscrowError, PlatformSecretError, SQLAlchemyError) as exc:
+        telemetry.count_escrow("all", "error")
+        logger.error("platform secret escrow sync failed (%s)", type(exc).__name__)
+        return
+    logger.info(
+        "platform secret escrow sync status=%s examined=%d written=%d drift=%d",
+        report.status,
+        report.examined,
+        report.written,
+        report.drift,
+    )
 
 
 def start_cache_refresher(

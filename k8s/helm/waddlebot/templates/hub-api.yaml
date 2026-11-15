@@ -248,6 +248,23 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: HUB_API_S3_SECRET_ACCESS_KEY
+        # T7 platform-secret escrow: dedicated bucket + dedicated identity (own Secret, never the
+        # envFrom'd one) -- hub_api/services/platform_secrets/escrow.py. No bundle or data-plane
+        # identity names this bucket.
+        {{- if .Values.infrastructure.seaweedfs.enabled }}
+        - name: PLATFORM_ESCROW_S3_BUCKET
+          value: {{ .Values.infrastructure.seaweedfs.escrow.bucketName | quote }}
+        - name: PLATFORM_ESCROW_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-platform-escrow-s3
+              key: ESCROW_S3_ACCESS_KEY_ID
+        - name: PLATFORM_ESCROW_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-platform-escrow-s3
+              key: ESCROW_S3_SECRET_ACCESS_KEY
+        {{- end }}
         - name: CREDENTIAL_ENCRYPTION_KEY
           valueFrom:
             secretKeyRef:

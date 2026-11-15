@@ -315,3 +315,50 @@ def test_notify_fires_on_generation(hub, pg_db) -> None:
     listener.poll()
     assert ready and listener.notifies and listener.notifies[0].payload == ""
     listener.close()
+
+
+def test_escrow_roundtrip_on_real_postgres_restores_same_keys_after_a_wipe(hub, owner) -> None:
+    """Bootstrap escrows (hub role), a rotation is escrowed too, a wipe is restored from S3."""
+    from datetime import UTC, datetime
+
+    from services.platform_secrets.escrow import sync_escrow
+    from tests.test_platform_secrets_escrow import MemStore, _add_v2
+
+    store = MemStore()
+    alpha = {"DEPLOYMENT_TIER": "alpha"}
+    select = (
+        "SELECT secret_type, version, state, kid, public_id::text, fingerprint "
+        "FROM platform_vault.secrets ORDER BY secret_type, version"
+    )
+
+    def boot(environ: Any) -> Any:
+        return run_platform_secrets_bootstrap(
+            hub,
+            kill_switch=lambda: False,
+            kek=KEK_A,
+            environ=environ,
+            cache=PlatformSecretCache(),
+            escrow=store,
+        )
+
+    boot(alpha)
+    assert _count(owner, "secrets") == 3 and len(store.objects) == 4  # 3 objects + manifest
+    with hub.begin() as conn:  # update_state + insert_secret SQL as the real role
+        _add_v2(SqlRepository(conn), int(SecretType.BUNDLE_SIGNING), datetime.now(UTC))
+    with hub.begin() as conn:
+        assert sync_escrow(SqlRepository(conn), KEK_A, store).written == 1
+    with owner.connect() as conn:
+        before = [tuple(r) for r in conn.execute(text(select)).all()]
+    with owner.begin() as conn:  # a wipe that keeps the marker (triggers off, superuser only)
+        conn.execute(text("SET LOCAL session_replication_role = replica"))
+        for table in ("secret_events", "secrets"):
+            conn.execute(text(f"DELETE FROM platform_vault.{table}"))  # noqa: S608
+    with pytest.raises(PlatformVaultRefusedError) as exc:  # not permitted outside alpha
+        boot({"DEPLOYMENT_TIER": "beta"})
+    assert exc.value.reason == "restore_blocked" and _count(owner, "secrets") == 0
+    boot(alpha)
+    with owner.connect() as conn:
+        after = [tuple(r) for r in conn.execute(text(select)).all()]
+    assert after == before  # same keys, same states
+    with hub.connect() as conn:
+        assert verify_chain(SqlRepository(conn), KEK_A).intact

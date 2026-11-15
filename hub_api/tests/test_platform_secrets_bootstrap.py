@@ -145,6 +145,24 @@ class FakeRepo:
             self.secrets.append(row)
             return row
 
+    def update_state(
+        self, secret_id: int, state: int, *, at: datetime, reason: int, actor_uuid: uuid.UUID | None
+    ) -> bool:
+        """Forward-only move of an active / verify-only row (mirrors the SQL WHERE clause)."""
+        with self._lock:
+            for index, row in enumerate(self.secrets):
+                if row.id == secret_id:
+                    if not (row.state < state and row.state in (2, 3)):
+                        return False
+                    self.secrets[index] = replace(
+                        row,
+                        state=state,
+                        rotated_at=row.rotated_at or at,
+                        retired_at=at if state == 4 else row.retired_at,
+                    )
+                    return True
+        return False
+
     def chain_tip(self) -> bytes | None:
         """Newest chain hash."""
         return self.event_rows[-1].chain_hash if self.event_rows else None
@@ -683,12 +701,19 @@ def _boot_row_for(kek: PlatformKekAdapter, secret_type: SecretType) -> SecretRow
 
 
 def test_repository_never_updates_or_deletes() -> None:
-    """Static: the repository has no UPDATE / DELETE / TRUNCATE statement (insert-only)."""
+    """Static: no DELETE / TRUNCATE; the ONE UPDATE is the forward-only, state-guarded move.
+
+    Insert-only for bootstrap; `update_state` (escrow restore, rotation) is the single UPDATE and
+    only ever moves `state` forward (`WHERE ... state < :state`), never touches a value column.
+    """
     source = (REPO_ROOT / "hub_api/services/platform_secrets/repository.py").read_text()
     sql_lines = [ln for ln in source.splitlines() if '"' in ln]
     joined = "\n".join(sql_lines).upper()
-    for forbidden in ("UPDATE PLATFORM_VAULT", "UPDATE {SCHEMA}", "DELETE FROM", "TRUNCATE"):
+    for forbidden in ("UPDATE PLATFORM_VAULT", "DELETE FROM", "TRUNCATE"):
         assert forbidden not in joined, forbidden
+    assert joined.count("UPDATE {SCHEMA}") == 1
+    assert "STATE < :STATE" in joined
+    assert "SEALED_VALUE =" not in joined
     assert "ON CONFLICT DO NOTHING" in source
 
 

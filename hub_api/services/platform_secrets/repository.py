@@ -32,9 +32,10 @@ NOTIFY_CHANNEL: Final = "platform_secrets_changed"
 #: `secrets.state` codes.
 STATE_PENDING, STATE_ACTIVE, STATE_VERIFY_ONLY, STATE_RETIRED, STATE_DESTROYED = 1, 2, 3, 4, 5
 #: `secrets.reason` codes used here.
-REASON_GENERATED, REASON_IMPORTED = 1, 2
+REASON_GENERATED, REASON_IMPORTED, REASON_RESTORED, REASON_ROTATED, REASON_RETIRED = 1, 2, 3, 4, 5
 #: `secret_events.event_type` codes used here.
-EVENT_GENERATED, EVENT_IMPORTED = 1, 2
+EVENT_GENERATED, EVENT_IMPORTED, EVENT_RESTORED = 1, 2, 3
+EVENT_DRIFT, EVENT_ESCROWED = 10, 11
 #: `secret_events.outcome` codes.
 OUTCOME_SUCCESS, OUTCOME_FAILURE = 1, 2
 
@@ -86,6 +87,7 @@ class NewSecret:
     fingerprint: bytes = field(repr=False)
     reason: int
     activated_at: datetime
+    actor_uuid: uuid.UUID | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -126,6 +128,15 @@ class PlatformVaultRepository(Protocol):
 
     def insert_secret(self, new: NewSecret) -> SecretRow | None:
         """INSERT ... ON CONFLICT DO NOTHING; the new row, or None when something conflicted."""
+
+    def update_state(
+        self, secret_id: int, state: int, *, at: datetime, reason: int, actor_uuid: uuid.UUID | None
+    ) -> bool:
+        """Move a row FORWARD to `state` (3 verify-only / 4 retired); True when a row changed.
+
+        Stamps `rotated_at` (and `retired_at` for state 4) with `at`. The table's trigger refuses a
+        backward move, so a False return means the row was already at or past `state`.
+        """
 
     def chain_tip(self) -> bytes | None:
         """`chain_hash` of the newest event, or None for an empty chain."""
@@ -262,9 +273,9 @@ class SqlRepository:
             text(
                 f"INSERT INTO {SCHEMA}.secrets (public_id, secret_type, scope_id, version, state, "  # nosec B608  # noqa: S608
                 "algorithm, sealed_value, kek_id, seal_version, kid, public_material, "
-                "fingerprint, reason, activated_at) "
+                "fingerprint, reason, activated_at, actor_uuid) "
                 "VALUES (CAST(:public_id AS uuid), :t, :s, :v, 2, :alg, :sealed, :kek, :sv, "
-                ":kid, :pub, :fp, :reason, :at) "
+                ":kid, :pub, :fp, :reason, :at, CAST(:actor AS uuid)) "
                 f"ON CONFLICT DO NOTHING RETURNING {_VAULT_COLUMNS}"
             ),
             {
@@ -281,9 +292,33 @@ class SqlRepository:
                 "fp": new.fingerprint,
                 "reason": new.reason,
                 "at": new.activated_at,
+                "actor": None if new.actor_uuid is None else str(new.actor_uuid),
             },
         ).first()
         return None if row is None else _secret_row(row)
+
+    def update_state(
+        self, secret_id: int, state: int, *, at: datetime, reason: int, actor_uuid: uuid.UUID | None
+    ) -> bool:
+        """Forward-only state move; `WHERE state < :state` keeps it idempotent and race-safe."""
+        result = self._conn.execute(
+            text(
+                f"UPDATE {SCHEMA}.secrets SET state = :state, "  # nosec B608  # noqa: S608
+                "rotated_at = COALESCE(rotated_at, :at), "
+                "retired_at = CASE WHEN :state = 4 THEN COALESCE(retired_at, :at) "
+                "ELSE retired_at END, "
+                "reason = :reason, actor_uuid = CAST(:actor AS uuid) "
+                "WHERE id = :id AND state < :state AND state IN (2, 3)"
+            ),
+            {
+                "state": state,
+                "at": at,
+                "reason": reason,
+                "actor": None if actor_uuid is None else str(actor_uuid),
+                "id": secret_id,
+            },
+        )
+        return bool(result.rowcount == 1)
 
     def chain_tip(self) -> bytes | None:
         """Newest event's chain hash (events are linear, so highest id)."""

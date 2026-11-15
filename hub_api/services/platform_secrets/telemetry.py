@@ -37,6 +37,13 @@ OUTCOMES: Final = frozenset(
         "inconsistent",
         "error",
         "skipped",
+        "restored",
+        "escrow_invalid",
+        "escrow_tampered",
+        "escrow_drift",
+        "escrow_ahead",
+        "restore_blocked",
+        "unavailable",
         "other",
     }
 )
@@ -109,6 +116,15 @@ def count_drift(type_name: str, outcome: str) -> None:
     """`waddles_platform_secrets_drift_detected_total{type,outcome}`."""
     _safe(
         lambda: _counter("waddles_platform_secrets_drift_detected_total").add(
+            1, _labels(type_name, outcome)
+        )
+    )
+
+
+def count_escrow(type_name: str, outcome: str) -> None:
+    """`waddles_platform_secrets_escrow_total{type,outcome}` (ok / error / restored / refusals)."""
+    _safe(
+        lambda: _counter("waddles_platform_secrets_escrow_total").add(
             1, _labels(type_name, outcome)
         )
     )

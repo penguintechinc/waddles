@@ -57,3 +57,20 @@ KEK (`TENANT_KEK_HEX`, with `TENANT_KEK_HEX_PREVIOUS` during a rotation).
 The seal-callers guard (`hub_api/tests/test_seal_callers_guard.py`) pins that the AEAD, KEK subkey
 derivation and `hmac` run only inside these functions, that the namespace label appears only in the
 vault, and ratchets the set of modules allowed to import `cryptography` / `hmac`.
+
+## Escrow (S3 disaster-recovery copy)
+
+Postgres is the source of truth. After every commit that creates a version (bootstrap generate / import / restore, and rotation) hub-api writes a DR copy to the **dedicated escrow bucket** (`infrastructure.seaweedfs.escrow.bucketName`, default `waddles-platform-escrow`), through a **dedicated S3 identity** (`hub-api-escrow`, Read/Write/List on that bucket only). No bundle, data-plane, streaming or general hub-api identity names the bucket, and the escrow credentials live in their own Secret `<release>-platform-escrow-s3` (generated at runtime by the provision-secrets hook, never the envFrom'd `waddlebot-secrets`).
+
+| Object | Content |
+|---|---|
+| `platform/secrets-escrow/<type>/<scope or global>/<version>.sealed` | the value, AES-GCM sealed under a KEK-derived key (HKDF label `escrow/v1`), AAD = type, scope, version, kek_id, public_id, keyed fingerprint |
+| `platform/secrets-escrow/manifest.json` | one signed document: generation counter, and per version the identity, kek_id, keyed fingerprint, algorithm, state, kid, object key; MAC under a KEK-derived key (label `escrow-manifest/v1`) |
+
+**Restore** runs at hub-api bootstrap only, when the `secrets` table is empty and the root marker does not mismatch (a changed KEK refuses first: `root_mismatch`). It verifies, in order: the manifest signature; each entry against the registry (type, scope rule, algorithm, canonical object key, highest version = the single active one); each object under its manifest-bound AAD; the fingerprint recomputed from the opened value. Anything off refuses the boot and generates nothing (`escrow_tampered`, `escrow_invalid`, `escrow_missing`, `escrow_unavailable`). A restore is permitted automatically only in `alpha`/`local` (`DEPLOYMENT_TIER`); everywhere else set `WADDLES_PLATFORM_SECRETS_ESCROW_RESTORE=1` for that one boot (otherwise `restore_blocked`). Restored values are re-sealed under the current KEK; older versions come back verify-only.
+
+**Drift** (metric `waddles_platform_secrets_drift_detected_total{type,outcome}`, outcome `escrow_tampered`, `escrow_drift`, `escrow_ahead`): a remote manifest that does not verify, an entry whose fingerprint no longer matches the database, or a manifest listing a version the database lacks (the DB went backwards) is alerted and **never overwritten**; bucket versioning keeps history. Resolve by restoring the previous object version in the bucket (or deleting the manifest after confirming the database is right) and restarting hub-api. Other signals: `waddles_platform_secrets_escrow_total{type,outcome}` (`ok`, `error`, `restored`), span `platform_secrets.escrow`. Page on any drift outcome; never auto-remediate.
+
+**Alpha with a replaced root KEK**: the old escrow cannot be opened, so a pristine database plus a stale escrow refuses to boot (`escrow_tampered`). Wipe the escrow bucket together with the database when you deliberately start over.
+
+**Versioning / object lock**: the bucket-init Job enables bucket versioning (`escrow.versioning`, logged loudly if SeaweedFS rejects it). Object-lock is not enabled: it must be set at bucket creation and a retention lock would block the manifest rewrite on every rotation; versioning plus the sealed, signed objects is the integrity layer. Residual risk: an attacker with write access to the bucket AND old valid objects can replay an older, still validly-signed manifest; restore then yields an older but genuine key set. Restore is operator-gated outside alpha for that reason.

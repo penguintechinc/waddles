@@ -199,7 +199,10 @@ PLATFORM_INFO_NAMESPACE: Final = b"waddles/platform-secrets/"
 _SEAL_INFO: Final = PLATFORM_INFO_NAMESPACE + b"v1"
 _FINGERPRINT_INFO: Final = PLATFORM_INFO_NAMESPACE + b"fp/v1"
 _CHAIN_INFO: Final = PLATFORM_INFO_NAMESPACE + b"chain/v1"
+_ESCROW_INFO: Final = PLATFORM_INFO_NAMESPACE + b"escrow/v1"
+_MANIFEST_INFO: Final = PLATFORM_INFO_NAMESPACE + b"escrow-manifest/v1"
 
+_FINGERPRINT_BYTES: Final = 32
 _SMALLINT_MAX: Final = 32767
 _INT_MAX: Final = 2**31 - 1
 _BIGINT_MAX: Final = 2**63 - 1
@@ -510,6 +513,149 @@ def platform_event_hash(
         raise PlatformSecretInputError("prev_chain_hash must be 32 bytes or None")
     payload = _length_prefixed(prev_chain_hash or b"", canonical_event)
     return _platform_mac(kek, _CHAIN_INFO, payload, kek_id)
+
+
+#: S3 escrow envelope (DR copy of a platform secret). Same layout as the row envelope but its own
+#: magic, HKDF label and AAD, so an escrow object can never be opened as a row (or vice versa) and a
+#: row's ciphertext planted in the escrow prefix fails authentication.
+ESCROW_ENVELOPE_MAGIC: Final = b"WPE"
+ESCROW_SEAL_V1: Final = 1
+
+
+def escrow_aad(
+    *,
+    secret_type: int,
+    scope_id: int | None,
+    version: int,
+    kek_id: str,
+    public_id: uuid.UUID,
+    fingerprint: bytes,
+) -> bytes:
+    """Canonical AAD of an escrow object: ``pse1|type|scope|version|kek_id|public_id|fp``.
+
+    Binding the keyed fingerprint (H5) means an object cannot be re-labelled as another version, and
+    the manifest's expected fingerprint is authenticated by the object itself, not only by the
+    manifest MAC. Length-prefixed, so no two distinct tuples encode alike.
+    """
+    _checked_identity(secret_type, scope_id, version, public_id)
+    if not isinstance(fingerprint, bytes | bytearray) or len(fingerprint) != _FINGERPRINT_BYTES:
+        raise PlatformSecretInputError("fingerprint must be 32 bytes")
+    scope = b"-" if scope_id is None else str(scope_id).encode()
+    return _length_prefixed(
+        f"pse{ESCROW_SEAL_V1}".encode(),
+        str(secret_type).encode(),
+        scope,
+        str(version).encode(),
+        _checked_kek_id(kek_id).encode(),
+        str(public_id).encode(),
+        bytes(fingerprint).hex().encode(),
+    )
+
+
+def seal_escrow_object(
+    plaintext: bytes | bytearray,
+    *,
+    secret_type: int,
+    scope_id: int | None,
+    version: int,
+    public_id: uuid.UUID,
+    fingerprint: bytes,
+    kek: PlatformKekAdapter,
+) -> tuple[bytes, str]:
+    """Seal one secret for the S3 escrow under the CURRENT KEK; returns ``(object, kek_id)``.
+
+    Object: ``"WPE" || version(1) || kek_id(8) || iv(12) || AES-256-GCM(ct || tag)`` with
+    :func:`escrow_aad`. The caller records ``kek_id`` and ``fingerprint`` in the signed manifest.
+    """
+    if not isinstance(plaintext, bytes | bytearray) or len(plaintext) == 0:
+        raise PlatformSecretInputError("plaintext must be non-empty bytes")
+    kek_id = kek.kek_ids[0]
+    aad = escrow_aad(
+        secret_type=secret_type,
+        scope_id=scope_id,
+        version=version,
+        kek_id=kek_id,
+        public_id=public_id,
+        fingerprint=fingerprint,
+    )
+    iv = os.urandom(_IV_BYTES)
+    with _platform_key(kek, _ESCROW_INFO, kek_id) as key:
+        ciphertext = AESGCM(key).encrypt(iv, bytes(plaintext), aad)
+    blob = ESCROW_ENVELOPE_MAGIC + bytes([ESCROW_SEAL_V1]) + bytes.fromhex(kek_id) + iv + ciphertext
+    return blob, kek_id
+
+
+def open_escrow_object(
+    blob: bytes | bytearray | memoryview,
+    *,
+    secret_type: int,
+    scope_id: int | None,
+    version: int,
+    public_id: uuid.UUID,
+    fingerprint: bytes,
+    kek_id: str,
+    kek: PlatformKekAdapter,
+) -> bytes:
+    """Open an escrow object for the identity the (signed) manifest claims.
+
+    The header kek_id must equal the manifest's ``kek_id`` and picks the KEK; the AAD binds type,
+    scope, version, kek_id, public_id and fingerprint. A wrong KEK is
+    :class:`PlatformSecretKekUnavailableError` (not loaded) or :class:`PlatformSecretCorruptError`
+    (loaded but not the sealing one); every other defect is the same undifferentiated corrupt error.
+    """
+    _checked_identity(secret_type, scope_id, version, public_id)
+    data = bytes(blob)
+    magic_len = len(ESCROW_ENVELOPE_MAGIC)
+    if len(data) < _HEADER_BYTES + _TAG_BYTES + 1 or not hmac.compare_digest(
+        data[:magic_len], ESCROW_ENVELOPE_MAGIC
+    ):
+        raise _open_failure(secret_type, version)
+    header_kek_id = data[magic_len + 1 : magic_len + 1 + _KEK_ID_BYTES].hex()
+    if data[magic_len] != ESCROW_SEAL_V1 or not hmac.compare_digest(
+        _checked_kek_id(kek_id).encode(), header_kek_id.encode()
+    ):
+        raise _open_failure(secret_type, version)
+    aad = escrow_aad(
+        secret_type=secret_type,
+        scope_id=scope_id,
+        version=version,
+        kek_id=header_kek_id,
+        public_id=public_id,
+        fingerprint=fingerprint,
+    )
+    iv = data[magic_len + 1 + _KEK_ID_BYTES : _HEADER_BYTES]
+    try:
+        with _platform_key(kek, _ESCROW_INFO, header_kek_id) as key:
+            return AESGCM(key).decrypt(iv, data[_HEADER_BYTES:], aad)
+    except PlatformSecretKekUnavailableError:
+        _log_open_failure(secret_type, version)
+        raise
+    except (InvalidTag, ValueError):
+        raise _open_failure(secret_type, version) from None
+
+
+def constant_time_equal(left: bytes, right: bytes) -> bool:
+    """Constant-time bytes comparison (so callers outside the vault need no `hmac` import)."""
+    return hmac.compare_digest(left, right)
+
+
+def sign_escrow_manifest(
+    manifest_body: bytes, *, kek: PlatformKekAdapter, kek_id: str | None = None
+) -> bytes:
+    """Keyed MAC (HMAC-SHA256 under a KEK-derived key) over the canonical manifest bytes."""
+    return _platform_mac(kek, _MANIFEST_INFO, _length_prefixed(manifest_body), kek_id)
+
+
+def verify_escrow_manifest(
+    manifest_body: bytes, mac: bytes, *, kek: PlatformKekAdapter, kek_id: str
+) -> bool:
+    """Constant-time check of a manifest MAC under the named KEK.
+
+    False for a tampered body or a MAC from another key; raises
+    :class:`PlatformSecretKekUnavailableError` when no loaded KEK has `kek_id`.
+    """
+    expected = sign_escrow_manifest(manifest_body, kek=kek, kek_id=_checked_kek_id(kek_id))
+    return hmac.compare_digest(expected, bytes(mac))
 
 
 def _platform_mac(
