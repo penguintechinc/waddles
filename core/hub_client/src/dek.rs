@@ -1153,12 +1153,17 @@ pub mod testing {
             &self,
             request: Request<GetStreamDekRequest>,
         ) -> Result<Response<GetStreamDekResponse>, Status> {
-            let auth = request
+            // A missing or non-ASCII `authorization` header is an unauthenticated call, refused
+            // loudly -- never coerced into an empty string that merely fails the compare below.
+            let Some(auth) = request
                 .metadata()
                 .get("authorization")
                 .and_then(|v| v.to_str().ok())
-                .unwrap_or_default()
-                .to_string();
+            else {
+                return Err(Status::unauthenticated(
+                    "missing or unreadable authorization",
+                ));
+            };
             if auth != format!("Bearer {FAKE_TOKEN}") {
                 return Err(Status::unauthenticated("unauthorized"));
             }
