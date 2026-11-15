@@ -114,6 +114,8 @@ pub struct BucketConfig {
     pub ca_file: Option<PathBuf>,
     pub fetch_timeout: Duration,
     pub max_component_bytes: u64,
+    /// Cap for precompiled `.cwasm` objects (`BUNDLE_MAX_PRECOMPILED_BYTES`).
+    pub max_precompiled_bytes: u64,
 }
 
 impl BucketConfig {
@@ -165,6 +167,7 @@ impl BucketConfig {
             ca_file: cfg.bundle_bucket_ca_file.clone(),
             fetch_timeout: Duration::from_secs(cfg.bundle_fetch_timeout_s),
             max_component_bytes: cfg.bundle_max_component_bytes,
+            max_precompiled_bytes: cfg.bundle_max_precompiled_bytes,
         })
     }
 }
@@ -194,18 +197,34 @@ impl BucketComponentSource {
     }
 }
 
+/// Body-size cap for a precompiled artifact's detached `.sig` document (64 KiB).
+const MAX_SIGNATURE_DOC_BYTES: u64 = 64 * 1024;
+
 /// Issues one bucket GET under `config.fetch_timeout`, wrapping a bare
 /// `tokio::time::timeout` so both call sites in [`BucketComponentSource
 /// ::fetch`] report which key timed out.
 async fn timed_get_object(config: &BucketConfig, key: &str) -> Result<Vec<u8>, ExecutorError> {
-    tokio::time::timeout(config.fetch_timeout, get_object(config, key))
-        .await
-        .map_err(|_| {
-            ExecutorError::BucketFetch(format!(
-                "bucket GET for {key:?} timed out after {:?}",
-                config.fetch_timeout
-            ))
-        })?
+    timed_get_object_capped(config, key, config.max_component_bytes).await
+}
+
+/// [`timed_get_object`] with an explicit body-size cap (precompiled
+/// artifacts use `max_precompiled_bytes`).
+async fn timed_get_object_capped(
+    config: &BucketConfig,
+    key: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ExecutorError> {
+    tokio::time::timeout(
+        config.fetch_timeout,
+        get_object_capped(config, key, max_bytes),
+    )
+    .await
+    .map_err(|_| {
+        ExecutorError::BucketFetch(format!(
+            "bucket GET for {key:?} timed out after {:?}",
+            config.fetch_timeout
+        ))
+    })?
 }
 
 impl ComponentSource for BucketComponentSource {
@@ -217,6 +236,22 @@ impl ComponentSource for BucketComponentSource {
         let component = timed_get_object(&self.config, component_key).await?;
         let sidecar = timed_get_object(&self.config, sidecar_key).await?;
         Ok((component, sidecar))
+    }
+
+    async fn fetch_precompiled(&self, key: &str) -> Result<Vec<u8>, ExecutorError> {
+        // A detached signature document is a few hundred bytes; never let a
+        // hostile or misconfigured bucket make us buffer a `.cwasm`-sized body
+        // for it.
+        let cap = if key.ends_with(".sig") {
+            MAX_SIGNATURE_DOC_BYTES.min(self.config.max_precompiled_bytes)
+        } else {
+            self.config.max_precompiled_bytes
+        };
+        timed_get_object_capped(&self.config, key, cap).await
+    }
+
+    async fn fetch_object(&self, key: &str) -> Result<Vec<u8>, ExecutorError> {
+        timed_get_object(&self.config, key).await
     }
 }
 
@@ -423,9 +458,19 @@ fn build_bucket_tls_config(config: &BucketConfig) -> Result<ClientConfig, Execut
 }
 
 /// Issues the signed `GET` and returns the response body's bytes.
+#[cfg(test)]
 async fn get_object(config: &BucketConfig, key: &str) -> Result<Vec<u8>, ExecutorError> {
-    let (status, body) =
-        signed_request(config, "GET", key, None, config.max_component_bytes).await?;
+    get_object_capped(config, key, config.max_component_bytes).await
+}
+
+/// One SigV4-signed GET whose body may not exceed `max_bytes`; any non-200
+/// status is an error.
+async fn get_object_capped(
+    config: &BucketConfig,
+    key: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ExecutorError> {
+    let (status, body) = signed_request(config, "GET", key, None, max_bytes).await?;
     if status != 200 {
         return Err(ExecutorError::BucketFetch(format!(
             "bucket GET returned HTTP {status}"
@@ -658,6 +703,7 @@ mod tests {
             ca_file: None,
             fetch_timeout: Duration::from_secs(5),
             max_component_bytes: 33_554_432,
+            max_precompiled_bytes: 268_435_456,
         }
     }
 
@@ -829,6 +875,7 @@ mod tests {
             ca_file: None,
             fetch_timeout: Duration::from_secs(5),
             max_component_bytes: 33_554_432,
+            max_precompiled_bytes: 268_435_456,
         };
         let authorization = build_authorization(
             &config,

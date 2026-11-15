@@ -332,6 +332,8 @@ pub fn build_engine(_cfg: &CliConfig) -> Result<Engine, ExecutorError> {
     Ok(Engine::new(&crate::engine_config::engine_config())?)
 }
 
+pub use crate::engine_config::engine_fingerprint;
+
 /// Wires every WIT import the `stage` world declares -- `context`, `http`,
 /// `kv`, `db`, `relay`, `%flags`, `log`, `clock` (via the generated
 /// `Stage::add_to_linker`, backed by `crate::host`'s `Host` trait impls on
@@ -619,6 +621,31 @@ mod tests {
         let b = cache.get_or_build(&m)?;
         assert_eq!(cache.len(), 1, "a cache hit must not insert a second entry");
         assert!(Arc::ptr_eq(&a, &b));
+        Ok(())
+    }
+
+    /// The precompiler and the executor build separate `Engine`s from the
+    /// same builder; their fingerprints must match, or every `.cwasm` misses.
+    #[test]
+    fn engine_fingerprint_is_stable_across_engines_from_the_shared_builder(
+    ) -> Result<(), ExecutorError> {
+        let a = engine_fingerprint(&build_engine(&test_config())?);
+        let b = engine_fingerprint(&build_engine(&test_config())?);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
+        Ok(())
+    }
+
+    /// A differently-configured engine (here: no fuel metering) must NOT
+    /// share the fingerprint, so its artifacts can never be deserialized.
+    #[test]
+    fn engine_fingerprint_changes_with_engine_config() -> Result<(), ExecutorError> {
+        let ours = engine_fingerprint(&build_engine(&test_config())?);
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model(true);
+        let other = engine_fingerprint(&Engine::new(&config)?);
+        assert_ne!(ours, other);
         Ok(())
     }
 

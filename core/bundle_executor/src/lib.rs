@@ -42,6 +42,7 @@ pub mod host;
 pub mod invoke;
 pub mod manifest;
 pub mod metrics;
+pub mod module_cache;
 pub mod parity_support;
 pub mod precompile;
 pub mod probe;
@@ -264,6 +265,14 @@ pub async fn run() -> Result<(), ExecutorError> {
     // this function. See `crate::signing::PlatformPublicKeys::from_cli_required`.
     crate::signing::PlatformPublicKeys::from_cli_required(&cfg)?;
     cfg.validate_host_api_tls()?;
+    cfg.validate_executor_id()?;
+    match cfg.validate_memory_budget()? {
+        Some(warning) => tracing::warn!(%warning, "memory budget check"),
+        None => tracing::info!(
+            memory_budget_mb = cfg.executor_memory_budget_mb,
+            "memory budget fits inside the container limit"
+        ),
+    }
 
     init_telemetry();
     // Metrics pipeline (OTLP export only when `OTEL_EXPORTER_OTLP_ENDPOINT` is
@@ -294,11 +303,19 @@ pub async fn run() -> Result<(), ExecutorError> {
         .iter()
         .map(|t| cfg.for_stage(t))
         .collect();
+    // ONE shared runtime (engine + compiled-module cache + compile limiter)
+    // under every per-stage executor (executor-scale T1): a digest both
+    // stages load compiles -- or deserializes -- and stays resident ONCE.
+    let runtime = invoke::SharedRuntime::new(&cfg)?;
     let mut executors: Vec<Arc<Executor<BucketComponentSource>>> =
         Vec::with_capacity(stage_cfgs.len());
     for stage_cfg in &stage_cfgs {
         let source = BucketComponentSource::from_cli(stage_cfg)?;
-        executors.push(Arc::new(Executor::new(stage_cfg, source)?));
+        executors.push(Arc::new(Executor::with_runtime(
+            stage_cfg,
+            source,
+            Arc::clone(&runtime),
+        )?));
     }
     let Some(executor) = executors.first().cloned() else {
         return Err(ExecutorError::Config(
