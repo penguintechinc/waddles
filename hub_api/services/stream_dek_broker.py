@@ -75,7 +75,7 @@ STREAM_DEK_SCOPE: Final = "key:stream-dek:read"
 TENANT_DEK_SCOPE: Final = "keys:tenant-dek:read"
 #: The at-rest key lineage's `purpose` label (``keystore.tenant_encryption_keys.purpose``).
 PURPOSE_AT_REST: Final = "at-rest"
-#: The only key lineages a caller may request (DB CHECK on `purpose` agrees, alembic 0119).
+#: The only key lineages a caller may request (DB CHECK on `purpose` agrees, alembic 0120).
 ALLOWED_PURPOSES: Final = frozenset({PURPOSE_INGEST_STREAM, PURPOSE_AT_REST})
 #: Service names (last SPIFFE path segment) allowed to hold stream DEKs. ``svc-gateway`` is the
 #: v3.0 rename of ``svc-ingest`` (same role, same tenant semantics, same SPIFFE_ENV pin); both are

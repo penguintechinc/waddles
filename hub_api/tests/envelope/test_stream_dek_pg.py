@@ -286,7 +286,7 @@ async def dual_broker(pg_db: PgTestDatabase) -> AsyncIterator[StreamDekBroker]:
 async def test_at_rest_lineage_cross_tenant_isolation_and_audit(
     dual_broker: StreamDekBroker, sql: psycopg2.extensions.connection, tenant: int
 ) -> None:
-    """Real DDL (0119): at-rest keys are per-tenant, wrapped, audited; B cannot reach A's."""
+    """Real DDL (0120): at-rest keys are per-tenant, wrapped, audited; B cannot reach A's."""
     other = int(
         _one(
             sql,
