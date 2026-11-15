@@ -34,6 +34,7 @@ from webauthn.helpers.structs import (
 
 from config import HubAPIConfig
 from services import session_service
+from services.auth_amr import passkey_amr
 from services.errors import bad_request, not_found, unauthorized
 from services.global_identity import is_global_admin
 
@@ -204,8 +205,23 @@ async def finish_login(
         is_vendor=bool(is_vendor),
         is_analytics_consumer=bool(is_analytics_consumer),
     )
-    token = await create_session_token(async_dal, dal, cfg, user=user, auth_method="passkey")
+    token = await create_session_token(
+        async_dal,
+        dal,
+        cfg,
+        user=user,
+        auth_method="passkey",
+        amr=passkey_amr(
+            user_verified=bool(verification.user_verified),
+            single_device=_is_single_device(verification),
+        ),
+    )
     return token, user
+
+
+def _is_single_device(verification: Any) -> bool:
+    """True for a device-bound (hardware) credential, False for a synced / multi-device one."""
+    return str(getattr(verification.credential_device_type, "value", "")) == "single_device"
 
 
 async def list_credentials(async_dal: Any, dal: Any, *, user_id: int) -> list[Any]:

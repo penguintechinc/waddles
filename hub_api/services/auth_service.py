@@ -199,8 +199,14 @@ def _mint_access_token(
     tenant: str,
     session_id: int | None,
     issued_at: int | None = None,
+    amr: list[str] | None = None,
+    auth_time: int | None = None,
 ) -> str:
-    """Mint the short-lived (15 min) access JWT: `jti` always, `sid` when in a session."""
+    """Mint the short-lived (15 min) access JWT: `jti` always, `sid` when in a session.
+
+    `amr` / `auth_time` (OIDC) describe the authentication EVENT that opened this token; a
+    refresh re-mints without them, so a step-up never outlives its own 5-minute window.
+    """
     # flask_core is `follow_imports = "skip"` -- create_jwt_token() is typed Any from mypy's
     # perspective; cast to the real, stable return type.
     return cast(
@@ -215,6 +221,8 @@ def _mint_access_token(
             scope=" ".join(sorted(scopes)),
             session_id=str(session_id) if session_id is not None else None,
             issued_at=issued_at,
+            amr=amr,
+            auth_time=auth_time,
         ),
     )
 
@@ -230,6 +238,7 @@ async def create_session_token(
     tenant_slug: str | None = None,
     requires_oauth_link: bool = False,
     auth_method: str = "unspecified",
+    amr: list[str] | None = None,
 ) -> str:
     """Open a login session and mint its first access JWT (`flask_core.auth.create_jwt_token`).
 
@@ -289,6 +298,8 @@ async def create_session_token(
         tenant=resolved_tenant,
         session_id=session_id,
         issued_at=await _issued_at_after_revocations(user),
+        amr=amr,
+        auth_time=int(time.time()) if amr is not None else None,
     )
 
 
@@ -538,6 +549,7 @@ async def login(
         tenant_id=tenant_id,
         tenant_slug=tenant_slug,
         auth_method="password",
+        amr=["pwd"],
     )
     return LoginResult(
         token=token,

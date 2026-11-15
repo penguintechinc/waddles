@@ -6143,10 +6143,11 @@ components:
       title: VendorRequestDTO
       type: object
     VersionDTO:
-      description: 'Response DTO: one version. `state` is the int code (1 pending,
-        2 active, 3 verify-only,
+      description: 'Response DTO: one version (no key id, fingerprint or value).
 
-        4 retired, 5 destroyed). No key id, fingerprint or value.'
+
+        `state` is the int code: 1 pending, 2 active, 3 verify-only, 4 retired, 5
+        destroyed.'
       properties:
         activatedAt:
           anyOf:
@@ -15755,6 +15756,81 @@ paths:
             browser.'
       summary: '`GET /<id>/start` -- begin a login; sets the binder cookie, returns
         the IdP URL as JSON.'
+  /api/v1/auth/step-up/passkey/finish:
+    post:
+      description: ''
+      operationId: post_passkey_finish
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Request DTO: the authenticator''s assertion (`navigator.credentials.get`
+                result).'
+              properties:
+                credential:
+                  additionalProperties: true
+                  title: Credential
+                  type: object
+              required:
+              - credential
+              title: StepUpFinishRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO: the re-issued access token and the window
+                  it is good for.'
+                properties:
+                  mfaValidForSeconds:
+                    title: Mfavalidforseconds
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  token:
+                    title: Token
+                    type: string
+                required:
+                - success
+                - token
+                - mfaValidForSeconds
+                title: StepUpFinishResponse
+                type: object
+          description: 'Response DTO: the re-issued access token and the window it
+            is good for.'
+      summary: Verify the assertion and re-issue the caller's token with fresh step-up
+        claims.
+  /api/v1/auth/step-up/passkey/start:
+    post:
+      description: ''
+      operationId: post_passkey_start
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO: the WebAuthn `PublicKeyCredentialRequestOptions`
+                  for the browser.'
+                properties:
+                  options:
+                    additionalProperties: true
+                    title: Options
+                    type: object
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - options
+                title: StepUpOptionsResponse
+                type: object
+          description: 'Response DTO: the WebAuthn `PublicKeyCredentialRequestOptions`
+            for the browser.'
+      summary: Options for a user-verified assertion over the caller's own passkeys.
   /api/v1/auth/temp-password:
     post:
       description: ''

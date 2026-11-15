@@ -278,7 +278,9 @@ def test_escrow_failure_after_a_rotation_never_raises() -> None:
     ("claims", "expected"),
     [
         ({"amr": ["pwd", "otp"], "auth_time": 1000}, None),
-        ({"amr": ["hwk"], "auth_time": 1000}, None),
+        ({"amr": ["hwk", "user", "mfa"], "auth_time": 1000}, None),
+        ({"amr": ["hwk"], "auth_time": 1000}, "no_mfa"),
+        ({"amr": ["swk", "user"], "auth_time": 1000}, "no_mfa"),
         ({"amr": ["pwd"], "auth_time": 1000}, "no_mfa"),
         ({"auth_time": 1000}, "no_mfa"),
         ({"amr": "otp", "auth_time": 1000}, "no_mfa"),

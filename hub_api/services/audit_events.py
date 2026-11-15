@@ -751,6 +751,11 @@ INLINE_AUTHZ_UNAUDITED: Final[Mapping[tuple[str, str], str]] = {
     ("POST", "/api/v1/auth/passkey/login/finish"): _R_SESSION,
     ("POST", "/api/v1/auth/passkey/login/start"): _R_SESSION,
     ("POST", "/api/v1/auth/refresh"): _R_SESSION,
+    ("POST", "/api/v1/auth/step-up/passkey/finish"): (
+        "re-issues the caller's own session token after a verified passkey assertion (no scope "
+        "added); the sensitive action it unlocks is audited by its own route"
+    ),
+    ("POST", "/api/v1/auth/step-up/passkey/start"): "issues a challenge only; no state change",
     ("POST", "/api/v1/auth/register"): _R_SESSION,
     ("POST", "/api/v1/auth/resend-verification"): _R_SESSION,
     ("POST", "/api/v1/auth/sso/<public_id>/acs"): _R_SESSION,

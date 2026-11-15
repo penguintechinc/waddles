@@ -102,4 +102,11 @@ make platform-secrets-rotate ARGS="rotate jwt_signing --reason scheduled"   # WA
 
 State machine: rotate = ACTIVE vN becomes VERIFY-ONLY (still verifies until `verify_until`, never signs) and v(N+1) is ACTIVE; retire = VERIFY-ONLY -> RETIRED. Both are audited in `platform_vault.secret_events` (actor UUID, event code, reason code, outcome; refusals included as outcome 2; never a value, fingerprint or key id) inside the hash chain, under the bootstrap advisory lock. After a committed change the new state is escrowed. Metrics: `waddles_platform_secrets_rotations_total{type,outcome}`; spans `platform_secrets.rotate|retire`.
 
-**MFA claims**: this API trusts `amr`/`auth_time` only; `flask_core.auth.create_jwt_token(..., amr=, auth_time=)` can now carry them, but NO login flow issues them yet -- until a step-up login does, the endpoints fail closed (`MFA_REQUIRED`) for every caller.
+**MFA step-up (how an operator satisfies the gate).** Access tokens now carry `amr` + `auth_time`: password login = `["pwd"]` (never MFA); a passkey login = `["hwk"|"swk"]`, plus `"user","mfa"` ONLY when the authenticator reported user verification (the WebAuthn UV flag, checked server-side; `services/auth_amr.py`). Refresh re-mints without them. Right before a rotate/retire the operator calls:
+
+```
+POST /api/v1/auth/step-up/passkey/start    -> WebAuthn options over THEIR OWN passkeys, user verification required
+POST /api/v1/auth/step-up/passkey/finish   {"credential": <navigator.credentials.get result>} -> {"token": ..., "mfaValidForSeconds": 300}
+```
+
+`finish` verifies the assertion (challenge bound to the user and single-use, credential owned by the user, signature, counter, UV flag) and re-issues the caller's own token (same session, tenant, scopes, roles; nothing added) with `amr=[hwk|swk,user,mfa]`, `auth_time=now`; the session cookie is refreshed too. The rotate/retire gate accepts only `mfa`/`otp` in `amr` (a bare `hwk`/`swk`/`pwd` is not enough) and `auth_time` <= 5 min. Prerequisite: the operator has registered a passkey (`/api/v1/user/passkey/register/*`); there is no TOTP in hub-api. Caveat: challenges are in-process (same as passkey login), so start and finish must hit the same replica; otherwise `finish` answers 400 and the operator retries. The CLI takes the token from `WADDLES_ADMIN_TOKEN` / `--token-stdin` (the browser performs the step-up, the CLI never holds a passkey).

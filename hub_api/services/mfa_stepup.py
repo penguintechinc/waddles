@@ -25,8 +25,10 @@ from quart import Request
 MFA_MAX_AGE_SECONDS: Final = 300
 #: Clock skew tolerated for an `auth_time` slightly in the future.
 MFA_SKEW_SECONDS: Final = 60
-#: `amr` values (RFC 8176) that denote a second factor: multi-factor, OTP, hardware / software key.
-MFA_METHODS: Final = frozenset({"mfa", "otp", "hwk", "swk"})
+#: `amr` values (RFC 8176) that ASSERT a second factor: `mfa` (minted only for a user-verified
+#: passkey, `services/auth_amr.py`) or `otp`. A bare `hwk` / `swk` (a passkey without user
+#: verification) and `pwd` are deliberately NOT enough.
+MFA_METHODS: Final = frozenset({"mfa", "otp"})
 
 #: Result words of :func:`step_up_failure` (None = satisfied).
 NO_MFA: Final = "no_mfa"
