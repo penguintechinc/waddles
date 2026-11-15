@@ -90,6 +90,13 @@ function ScopesGrid({ selected, onChange, disabled }) {
   );
 }
 
+/** Pulls the most specific message out of a hub-api error response. */
+function apiErrorMessage(err, fallback) {
+  const data = err?.response?.data;
+  const nested = typeof data?.error === 'string' ? data.error : data?.error?.message;
+  return data?.message ?? nested ?? fallback;
+}
+
 function RoleForm({ initial, onSave, onCancel, saving }) {
   const [form, setForm] = useState(
     initial
@@ -242,6 +249,9 @@ function RoleRow({ role, onEdit, onDelete }) {
   const displayName = role.displayName ?? role.display_name ?? role.name;
   const scopeCount = role.scopes?.length ?? 0;
   const isSystem = role.is_system ?? false;
+  // hub-api sends these per role (admin: neither; moderator: edit only; custom: both).
+  const canEdit = role.scopes_editable ?? !isSystem;
+  const canDelete = role.deletable ?? !isSystem;
 
   return (
     <div className="bg-navy-800 border border-navy-700 rounded-xl px-4 py-3 flex items-center justify-between gap-4">
@@ -268,8 +278,13 @@ function RoleRow({ role, onEdit, onDelete }) {
           )}
         </div>
       </div>
-      {!isSystem && (
-        <div className="flex items-center gap-1 flex-shrink-0">
+      <div className="flex items-center gap-1 flex-shrink-0">
+        {!canEdit && !canDelete && (
+          <span className="text-xs text-navy-400" title="Predefined role; its scopes are fixed">
+            Locked
+          </span>
+        )}
+        {canEdit && (
           <button
             onClick={() => onEdit(role)}
             className="p-1.5 text-navy-400 hover:text-sky-300 rounded transition-colors"
@@ -277,6 +292,8 @@ function RoleRow({ role, onEdit, onDelete }) {
           >
             <PencilIcon className="h-4 w-4" />
           </button>
+        )}
+        {canDelete && (
           <button
             onClick={() => onDelete(role)}
             className="p-1.5 text-navy-400 hover:text-red-400 rounded transition-colors"
@@ -284,8 +301,8 @@ function RoleRow({ role, onEdit, onDelete }) {
           >
             <TrashIcon className="h-4 w-4" />
           </button>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
@@ -313,7 +330,7 @@ export default function AdminCommunityRoles() {
       raw.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
       setRoles(raw);
     } catch (err) {
-      setError(err?.response?.data?.message ?? 'Failed to load roles.');
+      setError(apiErrorMessage(err, 'Failed to load roles.'));
     } finally {
       setLoading(false);
     }
@@ -332,7 +349,7 @@ export default function AdminCommunityRoles() {
       setShowCreate(false);
       await loadRoles();
     } catch (err) {
-      setError(err?.response?.data?.message ?? 'Failed to create role.');
+      setError(apiErrorMessage(err, 'Failed to create role.'));
     } finally {
       setSaving(false);
     }
@@ -346,7 +363,7 @@ export default function AdminCommunityRoles() {
       setEditRole(null);
       await loadRoles();
     } catch (err) {
-      setError(err?.response?.data?.message ?? 'Failed to update role.');
+      setError(apiErrorMessage(err, 'Failed to update role.'));
     } finally {
       setSaving(false);
     }
@@ -360,7 +377,7 @@ export default function AdminCommunityRoles() {
       setDeleteRole(null);
       await loadRoles();
     } catch (err) {
-      setError(err?.response?.data?.message ?? 'Failed to delete role.');
+      setError(apiErrorMessage(err, 'Failed to delete role.'));
     } finally {
       setDeleting(false);
     }

@@ -222,8 +222,8 @@ async def env(bundle_install_db: Any, install_dal: Any) -> dict[str, Any]:
     await _publish(install_dal, _SVC_MANIFEST, community_id)
     await _publish(install_dal, _APP_MANIFEST, community_id)
     for user, scopes in {
-        10: ["community:manage_channels"],  # moderator
-        11: ["community:manage_channels", "community:manage_members"],  # admin
+        10: ["bundles.admin:moderate"],  # moderator
+        11: ["bundles.admin:moderate", "bundles.admin:admin"],  # admin
         12: ["community:read"],  # plain member
     }.items():
         dal.community_members.insert(
@@ -803,7 +803,7 @@ def test_scope_helpers() -> None:
     from services.community_authz import CommunityMembership
 
     mem = CommunityMembership(
-        role="r", scopes=frozenset({"community:manage_channels"}), is_admin=False, bypass=False
+        role="r", scopes=frozenset({"bundles.admin:moderate"}), is_admin=False, bypass=False
     )
     assert caller_holds(mem, "community:moderate") and not caller_holds(mem, "community:admin")
     assert caller_scope(mem) == "community:moderate"

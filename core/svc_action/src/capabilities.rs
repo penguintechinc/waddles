@@ -3447,6 +3447,13 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 "not_implemented",
                 "platform-table is hosted by the process stage only (not the action stage)",
             )),
+            // `object_storage.*` is likewise hosted by the PROCESS stage only (its S3
+            // wiring + audit sink live in `svc_process::bundle_storage`). Fail LOUD
+            // instead of falling into `handle_db`'s unrelated `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("object_storage.") => Err(denied(
+                "not_implemented",
+                "object-storage is hosted by the process stage only (not the action stage)",
+            )),
             CapabilityKind::Db if bundle_host_db::v2::wire::is_v2_op(&call.op) => {
                 self.handle_db_v2(scope, &call).await
             }
@@ -5059,6 +5066,27 @@ mod tests {
                 .await
                 .unwrap_err();
             assert_eq!(err.code, "not_implemented", "{op}");
+        }
+    }
+
+    /// regression: object_storage.* used to fall into `handle_db` on the action stage.
+    #[tokio::test]
+    async fn object_storage_is_refused_loudly_on_the_action_stage() {
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
+        for op in [
+            "object_storage.put",
+            "object_storage.get",
+            "object_storage.list",
+        ] {
+            let err = capabilities
+                .handle(
+                    &scope(),
+                    call(CapabilityKind::Db, op, serde_json::json!({})),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_implemented", "{op}");
+            assert!(err.message.contains("process stage only"), "{op}");
         }
     }
 

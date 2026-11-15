@@ -10,6 +10,7 @@ leaks between parametrize cases.
 from __future__ import annotations
 
 import pytest
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 
 from config import HubAPIConfig
 
@@ -39,7 +40,7 @@ def test_constructed_directly_also_defaults_to_enabled() -> None:
         db_retry_delay=1,
         secret_key="s",
         jwt_algorithm="HS256",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -62,3 +63,14 @@ def test_truthy_values_stay_enabled(monkeypatch: pytest.MonkeyPatch, value: str)
     monkeypatch.setenv("WADDLES_AI_ENABLED", value)
     cfg = HubAPIConfig.from_env()
     assert cfg.ai_enabled is True
+
+
+def test_unset_default_tenant_slug_matches_tenancy_constant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`from_env()` defaults to flask_core's DEFAULT_TENANT_SLUG, the slug migration 0098 seeds.
+
+    regression: tests hardcoded the pre-0098 `"global"` slug, so nothing pinned the real default.
+    """
+    monkeypatch.delenv("DEFAULT_TENANT_SLUG", raising=False)
+    assert HubAPIConfig.from_env().default_tenant_slug == DEFAULT_TENANT_SLUG == "default"
