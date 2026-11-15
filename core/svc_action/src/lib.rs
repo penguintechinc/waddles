@@ -1396,6 +1396,8 @@ fn try_start_changelog_consumer(
         }
     };
     let rust_data_plane = flag_or_closed(&license, flags::RUST_DATA_PLANE_FLAG);
+    // Executor slot sharding kill switch (unseen = sharding ON).
+    let sharding_flag = flags::executor_sharding_flag(&license);
     let dispatch_retry_policy = dispatch::RetryPolicy {
         max_retries: config.cli.action_max_retries,
         base_backoff_ms: config.cli.action_base_backoff_ms,
@@ -1528,6 +1530,7 @@ fn try_start_changelog_consumer(
             full_reconcile_interval,
             call_timeout_ms,
             flag,
+            sharding_flag,
             connections,
             dispatch_spawner,
             excluded_metric,
