@@ -137,21 +137,47 @@ _TEST_SIGNING_KEY_ID = "test-key-1"
 
 
 @pytest.fixture(autouse=True)
-def bundle_signing_test_env(monkeypatch: Any) -> None:
+def bundle_signing_test_env(monkeypatch: Any) -> Any:
     """Every test gets a valid (test-only) Ed25519 artifact-signing key configured.
 
     `bundle_approval_service.approve_version()` (spec SS5.6, artifact
-    signing) fails closed without `BUNDLE_SIGNING_PRIVATE_KEY`/
-    `BUNDLE_SIGNING_KEY_ID` set -- rather than mock signing away across
-    the ~30 existing `approve_version()`/`seed_one()` call sites in this
-    suite, this autouse fixture makes REAL Ed25519 signing happen on every
-    approval, matching this codebase's own "prove the wiring, don't fake
-    it" standard for security-sensitive code. A test specifically
-    exercising the "no key configured" failure path removes these with
-    `monkeypatch.delenv(...)` itself.
+    signing) fails closed without a key configured -- rather than mock
+    signing away across the ~30 existing `approve_version()`/`seed_one()`
+    call sites in this suite, this autouse fixture makes REAL Ed25519
+    signing happen on every approval, seeding both the `platform_vault`
+    process cache (`SecretType.BUNDLE_SIGNING`) and the legacy env vars.
+    A test specifically exercising the "no key configured" failure path
+    clears the process cache (`get_process_cache().seed(())`) and/or
+    removes env vars itself.
     """
+    import uuid
+
+    from services.platform_secrets.bootstrap import get_process_cache
+    from services.platform_secrets.cache import CachedSecret
+    from services.platform_secrets.registry import SecretType
+    from services.platform_secrets.repository import STATE_ACTIVE
+
     monkeypatch.setenv("BUNDLE_SIGNING_PRIVATE_KEY", _TEST_SIGNING_PRIVATE_KEY_B64)
     monkeypatch.setenv("BUNDLE_SIGNING_KEY_ID", _TEST_SIGNING_KEY_ID)
+    cache = get_process_cache()
+    cache.seed(
+        [
+            CachedSecret(
+                secret_type=int(SecretType.BUNDLE_SIGNING),
+                scope_id=None,
+                version=1,
+                state=STATE_ACTIVE,
+                kid=_TEST_SIGNING_KEY_ID,
+                public_id=uuid.UUID(int=1),
+                public_material=None,
+                activated_at=None,
+                verify_until=None,
+                plaintext=b"t" * 32,
+            )
+        ]
+    )
+    yield
+    cache.seed(())
 
 
 @pytest.fixture(autouse=True)
