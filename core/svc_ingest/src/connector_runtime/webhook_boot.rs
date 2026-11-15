@@ -191,10 +191,10 @@ pub async fn build_ingress<R: ConnectionResolve + 'static>(
         return Ok(None);
     }
     let client = deps.valkey.ok_or(BootError::ValkeyMissing)?;
-    let cfg =
-        redis::AsyncConnectionConfig::new().set_response_timeout(Some(VALKEY_RESPONSE_TIMEOUT));
+    let cfg = redis::aio::ConnectionManagerConfig::new()
+        .set_response_timeout(Some(VALKEY_RESPONSE_TIMEOUT));
     let conn = client
-        .get_multiplexed_async_connection_with_config(&cfg)
+        .get_connection_manager_with_config(cfg)
         .await
         .map_err(|e| BootError::ValkeyConnect(format!("{:?}", e.kind())))?;
     // Kick's verification key is Kick's own published key (fetched, TTL-cached, rotation-aware),

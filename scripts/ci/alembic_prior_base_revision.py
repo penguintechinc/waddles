@@ -11,6 +11,10 @@ point is exactly the revision `alembic downgrade` must target to fully
 reverse everything this PR adds, which is what the CI gate needs to prove
 the new migration(s) both apply and roll back cleanly.
 
+A PR that adds a merge revision (base already has two heads, the PR joins them)
+enters history at several parents: stdout is then those parents, sorted and
+comma-joined. Several independent new heads stay a real error.
+
 Exit codes (the CI step branches on these -- see pr-validation.yml): `0`
 with the revision on stdout (success); `1` with a diagnostic on stderr (a
 real error -- the new revisions don't form a single linear stack, still
@@ -29,18 +33,46 @@ import sys
 
 REVISION_RE = re.compile(r'^revision\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 DOWN_REVISION_RE = re.compile(r'^down_revision\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
+MERGE_DOWN_REVISION_RE = re.compile(
+    r"^down_revision\s*=\s*[(\[]([^)\]]*)[)\]]", re.MULTILINE
+)
+QUOTED_ID_RE = re.compile(r'["\']([^"\']+)["\']')
+
+# A revision's parent(s): None (root), one id, or a tuple of ids (a merge revision).
+Down = str | tuple[str, ...] | None
 
 
-def parse_revision(source: str) -> tuple[str, str | None]:
-    """Extract `(revision, down_revision)` from one migration file's source text."""
+def parse_revision(source: str) -> tuple[str, Down]:
+    """Extract `(revision, down_revision)` from one migration file's source text.
+
+    `down_revision` is a single id for a normal revision, a tuple of ids for a
+    merge revision (`down_revision = ("a", "b")`), or None for a root.
+    """
     rev_match = REVISION_RE.search(source)
     if not rev_match:
         raise ValueError("no `revision = ...` assignment found")
     down_match = DOWN_REVISION_RE.search(source)
-    return rev_match.group(1), (down_match.group(1) if down_match else None)
+    if down_match:
+        return rev_match.group(1), down_match.group(1)
+    merge_match = MERGE_DOWN_REVISION_RE.search(source)
+    if merge_match:
+        parents = tuple(QUOTED_ID_RE.findall(merge_match.group(1)))
+        if not parents:
+            raise ValueError("`down_revision` tuple holds no quoted revision ids")
+        return rev_match.group(1), parents if len(parents) > 1 else parents[0]
+    return rev_match.group(1), None
 
 
-def revisions_at(ref: str) -> dict[str, str | None]:
+def _parents(down: Down) -> tuple[str, ...]:
+    """Normalise a `down_revision` value to a (possibly empty) tuple of parent ids."""
+    if down is None:
+        return ()
+    if isinstance(down, str):
+        return (down,)
+    return tuple(down)
+
+
+def revisions_at(ref: str) -> dict[str, Down]:
     """`revision_id -> down_revision_id` for every `alembic/versions/*.py` file at `ref`."""
     listing = subprocess.run(  # noqa: S603 -- fixed argv, no shell, CI-only
         ["git", "ls-tree", "-r", "--name-only", ref, "--", "alembic/versions"],
@@ -48,7 +80,7 @@ def revisions_at(ref: str) -> dict[str, str | None]:
         text=True,
         check=True,
     ).stdout.splitlines()
-    result: dict[str, str | None] = {}
+    result: dict[str, Down] = {}
     for path in listing:
         if not path.endswith(".py"):
             continue
@@ -64,14 +96,21 @@ def revisions_at(ref: str) -> dict[str, str | None]:
 
 
 def resolve_prior_base_revision(
-    base_revisions: dict[str, str | None], head_revisions: dict[str, str | None]
+    base_revisions: dict[str, Down], head_revisions: dict[str, Down]
 ) -> tuple[int, str]:
-    """Compute the prior-base revision from two `revision -> down_revision` maps.
+    """Compute the prior-base revision(s) from two `revision -> down_revision` maps.
 
     Pure (no subprocess/git) so it can be unit tested directly against
     constructed revision maps. Returns `(exit_code, output)` per the module
     docstring's exit-code contract: `(0, <revision>)`, `(2, <diagnostic>)` for
     "no new revisions" (benign), or `(1, <diagnostic>)` for a real error.
+
+    Normally the new revisions stack linearly on ONE existing revision. When a
+    PR adds a merge revision (e.g. joining a base that already has two heads),
+    the new revisions enter pre-existing history at several parents: the
+    output is then the sorted, comma-joined parents, accepted only if the new
+    revisions still converge on exactly one new head (anything else is a real,
+    still-fatal branching error).
     """
     new_ids = set(head_revisions) - set(base_revisions)
     if not new_ids:
@@ -81,18 +120,24 @@ def resolve_prior_base_revision(
         )
 
     entry_points = {
-        head_revisions[rid]
+        parent
         for rid in new_ids
-        if head_revisions[rid] is not None and head_revisions[rid] not in new_ids
+        for parent in _parents(head_revisions[rid])
+        if parent not in new_ids
     }
-    if len(entry_points) != 1:
+    new_heads = new_ids - {p for rid in new_ids for p in _parents(head_revisions[rid])}
+    has_merge = any(len(_parents(head_revisions[rid])) > 1 for rid in new_ids)
+    ok_multi = has_merge and len(new_heads) == 1
+    if not entry_points or (len(entry_points) != 1 and not ok_multi) or len(new_heads) != 1:
         return 1, (
-            f"expected exactly one entry point into pre-existing history, found "
-            f"{len(entry_points)}: {sorted(entry_points)} -- new revisions "
-            f"{sorted(new_ids)} do not form a single linear stack"
+            f"expected a single linear stack (or one merge) entering pre-existing "
+            f"history, found {len(entry_points)} entry point(s) "
+            f"{sorted(entry_points)} and {len(new_heads)} new head(s) "
+            f"{sorted(new_heads)} -- new revisions {sorted(new_ids)} do not form "
+            f"a single linear stack"
         )
 
-    return 0, next(iter(entry_points))
+    return 0, ",".join(sorted(entry_points))
 
 
 def main() -> int:
