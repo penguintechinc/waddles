@@ -166,23 +166,94 @@ def test_old_key_rows_are_rewritten_to_both_new_keys_and_downgrade_never_widens(
 
 
 @requires_docker
-def test_downgrade_does_not_widen_a_half_granted_permission() -> None:
-    with migrated_postgres("0119-halfgrant") as db:
+def test_downgrade_restores_a_grant_active_only_when_both_halves_are_active() -> None:
+    with migrated_postgres("0119-grants") as db:
         conn = psycopg2.connect(db.dsn)
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
                 _skip_fk_enforcement(cur)
-                cur.execute(
+                ins = (
                     "INSERT INTO community_permission_grants "
-                    "(community_id, tenant_id, app_id, permission_id) VALUES (1, 1, 'a.b.c', %s)",
-                    (_READ,),
+                    "(community_id, tenant_id, app_id, permission_id, revoked_by, revoked_at) "
+                    "VALUES (%s, 1, %s, %s, %s, %s)"
+                )
+                # (1) both active; (2) active read + REVOKED write; (3) read only
+                cur.execute(ins, (1, "app.both", _READ, None, None))
+                cur.execute(ins, (1, "app.both", _WRITE, None, None))
+                cur.execute(ins, (2, "app.mixed", _READ, None, None))
+                cur.execute(ins, (2, "app.mixed", _WRITE, 7, "2026-01-01T00:00:00Z"))
+                cur.execute(ins, (3, "app.half", _READ, None, None))
+            alembic_cli("downgrade", _PREV, dsn=db.dsn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT app_id, revoked_at IS NOT NULL, revoked_by FROM community_permission_grants "
+                    "WHERE permission_id = %s ORDER BY app_id",
+                    (_OLD,),
+                )
+                rows = cur.fetchall()
+                assert rows == [
+                    ("app.both", False, None),
+                    ("app.half", True, None),  # a missing half is restored revoked
+                    ("app.mixed", True, 7),  # revoked_by comes from the revoked half
+                ], rows
+                cur.execute(
+                    "SELECT count(*) FROM community_permission_grants "
+                    "WHERE permission_id IN (%s, %s)",
+                    (_READ, _WRITE),
+                )
+                assert cur.fetchone()[0] == 0  # type: ignore[index]
+        finally:
+            conn.close()
+
+
+@requires_docker
+def test_downgrade_restores_an_approval_only_when_both_halves_are_approved() -> None:
+    with migrated_postgres("0119-approvals") as db:
+        conn = psycopg2.connect(db.dsn)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                _skip_fk_enforcement(cur)
+                ins = (
+                    "INSERT INTO app_permission_requests "
+                    "(app_id, version, permission_id, risk, justification, approval_source, approved_at) "
+                    "VALUES (%s, '1.0.0', %s, %s, 'j', %s, %s)"
+                )
+                # both approved: stricter risk + human source + earlier approval win
+                cur.execute(
+                    ins,
+                    (
+                        "app.both",
+                        _READ,
+                        "normal",
+                        "system:core-seeder",
+                        "2026-02-01T00:00:00Z",
+                    ),
+                )
+                cur.execute(
+                    ins,
+                    ("app.both", _WRITE, "dangerous", "human", "2026-01-01T00:00:00Z"),
+                )
+                # approved read, unapproved (absent) write: must stay unapproved
+                cur.execute(
+                    ins, ("app.half", _READ, "normal", "human", "2026-01-01T00:00:00Z")
                 )
             alembic_cli("downgrade", _PREV, dsn=db.dsn)
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT count(*) FROM community_permission_grants "
-                    "WHERE permission_id LIKE 'storage.objects%'"
+                    "SELECT app_id, risk, approval_source, approved_at "
+                    "FROM app_permission_requests WHERE permission_id = %s ORDER BY app_id",
+                    (_OLD,),
+                )
+                rows = cur.fetchall()
+                assert [(r[0], r[1], r[2]) for r in rows] == [
+                    ("app.both", "dangerous", "human")
+                ], rows
+                assert rows[0][3].isoformat().startswith("2026-01-01"), rows
+                cur.execute(
+                    "SELECT count(*) FROM app_permission_requests WHERE permission_id IN (%s, %s)",
+                    (_READ, _WRITE),
                 )
                 assert cur.fetchone()[0] == 0  # type: ignore[index]
         finally:

@@ -15,8 +15,12 @@ to `deny` when the old row denied) and then removes the old key:
   `app_tenant_permission_restrictions`.
 
 Explicit downgrade (lossy only where the two halves diverge, always toward LESS access):
-policies collapse to `deny` if either half denies; grants/requests are restored only when
-BOTH halves exist; a tenant restriction is restored if EITHER half is restricted.
+policies collapse to `deny` if either half denies; a grant is restored ACTIVE only when both
+halves exist and are active (otherwise restored REVOKED, revoked_at/by from the revoked half);
+the approval ceiling is restored only when BOTH halves are approved (the old row has the
+stricter risk, earlier approved_at, merged params; a row's existence IS the approval, so a
+half-approved permission is simply left unapproved); a tenant restriction is restored if
+EITHER half is restricted.
 
 Note: `app_permission_grant_versions.permission_snapshot_hash` is computed application-side
 and is NOT recomputed here; a hub-api/data-plane restart (or any grant change) refreshes it.
@@ -142,19 +146,30 @@ def downgrade() -> None:
     op.execute(
         f"DELETE FROM instance_permission_policies WHERE permission_key IN ('{read}', '{write}')"
     )
-    # grants / requests: restored only when BOTH halves exist (never widen access)
+    # grants: the old grant is ACTIVE only when BOTH halves exist and are active; any other
+    # combination (a revoked half, or a missing half) is restored as REVOKED -- never widen access.
     op.execute(
         f"""
         INSERT INTO community_permission_grants
             (community_id, tenant_id, app_id, permission_id, params_json,
              granted_by, granted_at, revoked_by, revoked_at)
-        SELECT r.community_id, r.tenant_id, r.app_id, '{_OLD}', r.params_json,
-               r.granted_by, r.granted_at, r.revoked_by, r.revoked_at
-          FROM community_permission_grants r
-          JOIN community_permission_grants w
+        SELECT COALESCE(r.community_id, w.community_id),
+               COALESCE(r.tenant_id, w.tenant_id),
+               COALESCE(r.app_id, w.app_id),
+               '{_OLD}',
+               COALESCE(r.params_json, '{{}}'::jsonb) || COALESCE(w.params_json, '{{}}'::jsonb),
+               COALESCE(r.granted_by, w.granted_by),
+               LEAST(r.granted_at, w.granted_at),
+               CASE WHEN r.community_id IS NULL OR w.community_id IS NULL THEN NULL
+                    WHEN r.revoked_at IS NOT NULL THEN r.revoked_by
+                    ELSE w.revoked_by END,
+               CASE WHEN r.community_id IS NULL OR w.community_id IS NULL THEN NOW()
+                    WHEN r.revoked_at IS NULL AND w.revoked_at IS NULL THEN NULL
+                    ELSE LEAST(r.revoked_at, w.revoked_at) END
+          FROM (SELECT * FROM community_permission_grants WHERE permission_id = '{read}') r
+          FULL OUTER JOIN
+               (SELECT * FROM community_permission_grants WHERE permission_id = '{write}') w
             ON w.community_id = r.community_id AND w.app_id = r.app_id
-           AND w.permission_id = '{write}'
-         WHERE r.permission_id = '{read}'
         ON CONFLICT (community_id, app_id, permission_id) DO NOTHING
         """
     )
@@ -166,8 +181,14 @@ def downgrade() -> None:
         INSERT INTO app_permission_requests
             (app_id, version, permission_id, risk, params_json, justification,
              approved_by, approval_source, approved_at)
-        SELECT r.app_id, r.version, '{_OLD}', r.risk, r.params_json, r.justification,
-               r.approved_by, r.approval_source, r.approved_at
+        SELECT r.app_id, r.version, '{_OLD}',
+               CASE WHEN 'dangerous' IN (r.risk, w.risk) THEN 'dangerous' ELSE 'normal' END,
+               r.params_json || w.params_json,
+               r.justification,
+               CASE WHEN r.approved_at <= w.approved_at THEN r.approved_by ELSE w.approved_by END,
+               CASE WHEN 'human' IN (r.approval_source, w.approval_source) THEN 'human'
+                    ELSE r.approval_source END,
+               LEAST(r.approved_at, w.approved_at)
           FROM app_permission_requests r
           JOIN app_permission_requests w
             ON w.app_id = r.app_id AND w.version = r.version AND w.permission_id = '{write}'
