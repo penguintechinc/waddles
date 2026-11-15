@@ -184,6 +184,16 @@ components:
       - isSuperAdmin
       title: AdminLoginUserDTO
       type: object
+    AiDjDTO:
+      description: Whether the optional AI DJ layer is currently running for the community.
+      properties:
+        enabled:
+          title: Enabled
+          type: boolean
+      required:
+      - enabled
+      title: AiDjDTO
+      type: object
     Announcement:
       description: One `announcements` row, camelCase-in-Node fields kept snake_case
         here (ruff N815).
@@ -2276,6 +2286,35 @@ components:
       - sourceEvent
       - occurredAt
       title: HistoryEntryDTO
+      type: object
+    HistoryItemDTO:
+      description: One recently played track -- deliberately carries no requester
+        field.
+      properties:
+        artist:
+          title: Artist
+          type: string
+        duration_ms:
+          title: Duration Ms
+          type: integer
+        played_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Played At
+        source_url:
+          title: Source Url
+          type: string
+        title:
+          title: Title
+          type: string
+      required:
+      - title
+      - artist
+      - source_url
+      - duration_ms
+      - played_at
+      title: HistoryItemDTO
       type: object
     IdentityDTO:
       description: Identity DTO.
@@ -5834,6 +5873,38 @@ components:
       - permitted
       - targetAppId
       title: ToolDTO
+      type: object
+    TopArtistDTO:
+      description: One most-played artist for the community (aggregate counts only).
+      properties:
+        artist:
+          title: Artist
+          type: string
+        plays:
+          title: Plays
+          type: integer
+      required:
+      - artist
+      - plays
+      title: TopArtistDTO
+      type: object
+    TopSongDTO:
+      description: One most-played song for the community (aggregate counts only).
+      properties:
+        artist:
+          title: Artist
+          type: string
+        plays:
+          title: Plays
+          type: integer
+        title:
+          title: Title
+          type: string
+      required:
+      - title
+      - artist
+      - plays
+      title: TopSongDTO
       type: object
     TrackDTO:
       description: Wire shape of a resolved `Track` -- mirrors `services.music_providers.track.Track`.
@@ -10202,6 +10273,242 @@ paths:
         default:
           description: Undocumented response
       summary: Update overlay settings (active flag, theme, enabled sources).
+  /api/v1/admin/{community_id}/overlay/layout:
+    delete:
+      description: ''
+      operationId: delete_clear_scene_layout
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        default:
+          description: Undocumented response
+      summary: Remove every placed component from the scene.
+    get:
+      description: ''
+      operationId: get_get_scene_layout
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        default:
+          description: Undocumented response
+      summary: 'Get the composite scene: canvas plus placed components.'
+  /api/v1/admin/{community_id}/overlay/layout/canvas:
+    put:
+      description: ''
+      operationId: put_set_scene_canvas
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for the scene canvas resolution (`1080p` |
+                `2k` | `4k`).
+              properties:
+                resolution:
+                  pattern: ^(1080p|2k|4k)$
+                  title: Resolution
+                  type: string
+              required:
+              - resolution
+              title: SetCanvasRequest
+              type: object
+      responses:
+        default:
+          description: Undocumented response
+      summary: Set the scene canvas resolution (1080p, 2k, 4k).
+  /api/v1/admin/{community_id}/overlay/layout/components:
+    post:
+      description: ''
+      operationId: post_add_scene_component
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for placing a widget; omitted geometry falls
+                back to the widget defaults.
+              properties:
+                bundle_app_id:
+                  maxLength: 128
+                  minLength: 1
+                  title: Bundle App Id
+                  type: string
+                height:
+                  anyOf:
+                  - maximum: 2160
+                    minimum: 32
+                    type: integer
+                  - type: 'null'
+                  default: null
+                  title: Height
+                props:
+                  anyOf:
+                  - additionalProperties: true
+                    type: object
+                  - type: 'null'
+                  default: null
+                  title: Props
+                widget_id:
+                  pattern: ^[a-z0-9][a-z0-9_.-]{0,127}$
+                  title: Widget Id
+                  type: string
+                width:
+                  anyOf:
+                  - maximum: 3840
+                    minimum: 32
+                    type: integer
+                  - type: 'null'
+                  default: null
+                  title: Width
+                x:
+                  anyOf:
+                  - maximum: 3840
+                    minimum: 0
+                    type: integer
+                  - type: 'null'
+                  default: null
+                  title: X
+                y:
+                  anyOf:
+                  - maximum: 2160
+                    minimum: 0
+                    type: integer
+                  - type: 'null'
+                  default: null
+                  title: Y
+                z_index:
+                  anyOf:
+                  - maximum: 1000
+                    minimum: -1000
+                    type: integer
+                  - type: 'null'
+                  default: null
+                  title: Z Index
+              required:
+              - bundle_app_id
+              - widget_id
+              title: AddComponentRequest
+              type: object
+      responses:
+        default:
+          description: Undocumented response
+      summary: Place a widget on the composite scene.
+  /api/v1/admin/{community_id}/overlay/layout/components/{instance_id}:
+    delete:
+      description: ''
+      operationId: delete_remove_scene_component
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: instance_id
+        required: true
+        schema:
+          type: string
+      responses:
+        default:
+          description: Undocumented response
+      summary: Remove a component from the scene (404 when it is not this community's).
+    patch:
+      description: ''
+      operationId: patch_update_scene_component
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: instance_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for a partial component update.
+              properties:
+                height:
+                  anyOf:
+                  - maximum: 2160
+                    minimum: 32
+                    type: integer
+                  - type: 'null'
+                  default: null
+                  title: Height
+                props:
+                  anyOf:
+                  - additionalProperties: true
+                    type: object
+                  - type: 'null'
+                  default: null
+                  title: Props
+                visible:
+                  anyOf:
+                  - type: boolean
+                  - type: 'null'
+                  default: null
+                  title: Visible
+                width:
+                  anyOf:
+                  - maximum: 3840
+                    minimum: 32
+                    type: integer
+                  - type: 'null'
+                  default: null
+                  title: Width
+                x:
+                  anyOf:
+                  - maximum: 3840
+                    minimum: 0
+                    type: integer
+                  - type: 'null'
+                  default: null
+                  title: X
+                y:
+                  anyOf:
+                  - maximum: 2160
+                    minimum: 0
+                    type: integer
+                  - type: 'null'
+                  default: null
+                  title: Y
+                z_index:
+                  anyOf:
+                  - maximum: 1000
+                    minimum: -1000
+                    type: integer
+                  - type: 'null'
+                  default: null
+                  title: Z Index
+              title: UpdateComponentRequest
+              type: object
+      responses:
+        default:
+          description: Undocumented response
+      summary: Move, resize, show/hide or re-prop a placed component.
   /api/v1/admin/{community_id}/overlay/rotate:
     post:
       description: ''
@@ -10231,6 +10538,21 @@ paths:
         default:
           description: Undocumented response
       summary: Get daily + total overlay access statistics.
+  /api/v1/admin/{community_id}/overlay/widgets:
+    get:
+      description: ''
+      operationId: get_get_available_widgets
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        default:
+          description: Undocumented response
+      summary: List widgets the community may place (enabled bundles + registered
+        widgets).
   /api/v1/admin/{community_id}/polls:
     get:
       description: ''
@@ -16720,6 +17042,64 @@ paths:
         default:
           description: Undocumented response
       summary: Join an open community (idempotent); tenant comes from the token only.
+  /api/v1/communities/{community_id}/music:
+    get:
+      description: ''
+      operationId: get_get_music
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Full response of `GET /api/v1/communities/<id>/music`.
+                properties:
+                  ai_dj:
+                    $ref: '#/components/schemas/AiDjDTO'
+                  dmca_safe:
+                    title: Dmca Safe
+                    type: boolean
+                  history:
+                    items:
+                      $ref: '#/components/schemas/HistoryItemDTO'
+                    title: History
+                    type: array
+                  now_playing:
+                    anyOf:
+                    - $ref: '#/components/schemas/QueueItemDTO'
+                    - type: 'null'
+                  queue:
+                    items:
+                      $ref: '#/components/schemas/QueueItemDTO'
+                    title: Queue
+                    type: array
+                  top_artists:
+                    items:
+                      $ref: '#/components/schemas/TopArtistDTO'
+                    title: Top Artists
+                    type: array
+                  top_songs:
+                    items:
+                      $ref: '#/components/schemas/TopSongDTO'
+                    title: Top Songs
+                    type: array
+                required:
+                - now_playing
+                - queue
+                - history
+                - ai_dj
+                - dmca_safe
+                - top_artists
+                - top_songs
+                title: MusicPageDTO
+                type: object
+          description: Full response of `GET /api/v1/communities/<id>/music`.
+      summary: Return the community's music page (members only, replica read, flag-gated).
   /api/v1/communities/{community_id}/provider-connections:
     get:
       description: ''
