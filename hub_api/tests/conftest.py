@@ -111,6 +111,7 @@ from services.schema import (
     bind_tenant_tables,
     bind_token_billing_tables,
 )
+from services.scope_registry import MODERATOR_SEED_SCOPES
 
 # Env-gated real-Ollama fixtures (skip unless WADDLE_TEST_OLLAMA_URL is set) -- shared support
 # in <repo>/tests/support; see docs/testing/ollama-realpath.md. Additive re-export only.
@@ -481,13 +482,82 @@ def seed_community(
     return community_id
 
 
+_ROLE_KINDS = {"community-admin": 1, "community-owner": 1, "admin": 1, "moderator": 2}
+
+
+def role_kind_fields(name: str) -> dict[str, Any]:
+    """`is_system`/`role_kind` for a seeded role NAME, as the 0117 insert trigger sets them."""
+    kind = _ROLE_KINDS.get(name, 0)
+    return {"is_system": kind != 0, "role_kind": kind}
+
+
+def _seed_kind_role(dal: Any, community_id: int, name: str) -> int | None:
+    """Create (once) the predefined role row for `name`, as the 0117 trigger does for real seeding.
+
+    Authorization reads scopes from `community_roles`, so a member seeded by NAME alone holds
+    nothing; admin/owner get the admin kind (computed full scope set), moderator the moderator kind.
+    Names with no predefined kind return None (a bare member row, no scopes).
+    """
+    kind = _ROLE_KINDS.get(name)
+    if kind is None or "community_roles" not in dal.tables:
+        return None
+    existing = (
+        dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == name))
+        .select()
+        .first()
+    )
+    if existing is not None:
+        return int(existing.id)
+    scopes = (
+        ["community:manage_channels", "channels:moderate", *MODERATOR_SEED_SCOPES]
+        if kind == 2
+        else []
+    )
+    return int(
+        dal.community_roles.insert(
+            community_id=community_id,
+            name=name,
+            is_system=True,
+            role_kind=kind,
+            base_claims={"scopes": scopes},
+        )
+    )
+
+
 def seed_membership(
     overlay_db: Any, *, community_id: int, user_id: int, role: str = "community-owner"
 ) -> None:
     """Insert one active `community_members` row for `user_id` in `community_id`."""
     dal = overlay_db.dal
+    role_id = _seed_kind_role(dal, community_id, role)
     dal.community_members.insert(
-        community_id=community_id, user_id=str(user_id), role=role, is_active=True
+        community_id=community_id,
+        user_id=str(user_id),
+        role=role,
+        is_active=True,
+        community_role_id=role_id,
+    )
+    dal.commit()
+
+
+def seed_scoped_member(
+    overlay_db: Any, *, community_id: int, user_id: int, scopes: list[str], name: str = "custom"
+) -> None:
+    """Active member holding a CUSTOM role with exactly `scopes` (no predefined kind, no extras)."""
+    dal = overlay_db.dal
+    role_id = dal.community_roles.insert(
+        community_id=community_id,
+        name=f"{name}{user_id}",
+        is_system=False,
+        role_kind=0,
+        base_claims={"scopes": scopes},
+    )
+    dal.community_members.insert(
+        community_id=community_id,
+        user_id=str(user_id),
+        role=name,
+        is_active=True,
+        community_role_id=role_id,
     )
     dal.commit()
 
@@ -730,6 +800,8 @@ def lifecycle_db(tmp_path: Any) -> Any:
     role_id = dal.community_roles.insert(
         community_id=community_id,
         name="admin",
+        is_system=True,
+        role_kind=1,
         base_claims={"scopes": ["community:manage_members"]},
     )
     dal.community_members.insert(
@@ -818,6 +890,14 @@ def make_user_token(*, user_id: int, scope: str = "", tenant: str = TENANT_SLUG)
     )
 
 
+_LEGACY_ADMIN_ROLES = {"super_admin", "platform-admin"}
+
+
+def _with_global_admin_scope(scope: str) -> str:
+    """Add the `users:admin` global-admin scope (the real token bypass authority, not `roles`)."""
+    return " ".join(sorted({*scope.split(), "users:admin"}))
+
+
 def make_super_admin_token(*, user_id: int, scope: str = "", tenant: str = TENANT_SLUG) -> str:
     """Mint a JWT with `roles=["super_admin"]` -- `sub` matches a `seed_super_admin()` row.
 
@@ -837,7 +917,7 @@ def make_super_admin_token(*, user_id: int, scope: str = "", tenant: str = TENAN
         roles=["super_admin"],
         secret_key=SECRET_KEY,
         tenant=tenant,
-        scope=scope,
+        scope=_with_global_admin_scope(scope),
     )
 
 
@@ -858,7 +938,7 @@ def make_user_token_with_roles(
         roles=roles,
         secret_key=SECRET_KEY,
         tenant=tenant,
-        scope=scope,
+        scope=_with_global_admin_scope(scope) if set(roles) & _LEGACY_ADMIN_ROLES else scope,
     )
 
 

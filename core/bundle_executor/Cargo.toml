@@ -154,6 +154,12 @@ opentelemetry = { version = "=0.32.0", default-features = false, features = ["me
 opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["metrics"] }
 opentelemetry-otlp = { version = "=0.32.0", default-features = false, features = ["grpc-tonic", "metrics"] }
 
+# Data-plane verifying-key cache (design T5). Core only -- the `postgres` feature (sea-orm/sqlx)
+# is deliberately NOT enabled: this binary is credential-less and `tests/dependency_policy.rs`
+# bans sqlx/sea-orm, so a database-backed `KeyLoader` is supplied by an embedder through
+# `Executor::with_key_cache`, never linked here.
+platform-keys = { path = "../platform_keys", version = "=0.1.0", default-features = false }
+
 [dev-dependencies]
 # `InMemoryMetricExporter` (the SDK's `testing` feature) so tests read back
 # the metric data points a collector would actually receive -- proving the

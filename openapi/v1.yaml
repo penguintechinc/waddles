@@ -8590,10 +8590,12 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: '`POST /api/v1/admin/<id>/interaction/roles`.'
+      summary: '`POST /api/v1/admin/<id>/interaction/roles` (requires `roles:manage`).'
   /api/v1/admin/{community_id}/interaction/roles/{role_id}:
     delete:
-      description: ''
+      description: '
+
+        Predefined roles (admin, moderator, ...) are refused with 409 `ROLE_PROTECTED`.'
       operationId: delete_admin_delete_role
       parameters:
       - in: path
@@ -8609,7 +8611,7 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: '`DELETE /api/v1/admin/<id>/interaction/roles/<roleId>`.'
+      summary: '`DELETE /api/v1/admin/<id>/interaction/roles/<roleId>` (requires `roles:manage`).'
     put:
       description: ''
       operationId: put_admin_update_role
@@ -8627,7 +8629,22 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: '`PUT /api/v1/admin/<id>/interaction/roles/<roleId>`.'
+      summary: '`PUT /api/v1/admin/<id>/interaction/roles/<roleId>` (requires `roles:manage`).'
+  /api/v1/admin/{community_id}/interaction/scopes:
+    get:
+      description: ''
+      operationId: get_admin_list_scopes
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        default:
+          description: Undocumented response
+      summary: '`GET /api/v1/admin/<id>/interaction/scopes` -- the scope registry
+        for the role editor.'
   /api/v1/admin/{community_id}/inventory/available:
     get:
       description: ''
