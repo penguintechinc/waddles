@@ -1,64 +1,61 @@
-"""v1 `calls` group -- ported from `callsController.js` + `routes/calls.js` (Streaming module, M7).
+"""v1 `calls` group -- RTC voice/video call-room management (Streaming module, M7).
 
-RTC voice/video call-room management, fronting LiveKit via the downstream
-RTC control plane (Node: Go `module_rtc`; folded into Rust `svc-streaming`
-per `docs/plans/2026-08-31-svc-streaming-design.md` §6/§8.1 -- see
-`services/calls_proxy.py`'s module docstring for the env-var/contract
-caveat). Every handler is a thin proxy: forward to the downstream
-service, reshape its JSON body into hub-api's own `{success, ...}`
-envelope -- Node's controller functions do the same reshaping (NOT a
-pure passthrough like `services/event_calendar_proxy.py`'s `calendar-
-interaction` integration), so this blueprint keeps that reshaping
-in-line per handler rather than a generic `ProxyRoute` table
-(`blueprints/v1/event.py`'s pattern doesn't fit here for the same reason
-it wouldn't fit `overlay.py`: each response shape differs).
+Fronts svc-streaming's `RoomsService` over gRPC (HTTP/2 + mTLS, ES256 machine JWT per call;
+see `services/calls_proxy.py`). Ported from `callsController.js` + `routes/calls.js`; the
+Go RTC service it once proxied was folded into Rust `svc-streaming`
+(`docs/plans/2026-08-31-svc-streaming-design.md` §6/§8.1). Each handler authorises the
+caller, calls one RPC, and reshapes the result into hub-api's own `{success, ...}` envelope.
 
-Two route groups, TWO DIFFERENT authz levels ported from two different
-Node routers mounting the SAME controller functions:
+Room identity: the `<room_name>` path segment is the room's UUID `room_id` (returned by
+create/list); the caller-supplied name on create is stored as the room's `label`.
+Participants are UUIDs derived (uuid5) from tenant + community + user id -- no usernames or
+raw user ids cross to svc-streaming. Tenant and community come from the verified JWT /
+membership checks, never from a request body.
 
-  `calls_admin_bp` (`/api/v1/admin/:communityId/calls/*`, `routes/
-  calls.js`'s default export) -- Node's `requireCommunityAdmin` on every
-  route. Ported as `community_access.require_community_admin()` (see
-  that module's docstring) -- `hub_api/PORTING.md`'s tenant+scope pattern
-  alone does not verify the caller administers `community_id`.
+Raised-hand queues (`raised-hands`, `acknowledge-hand`) have no svc-streaming equivalent
+(that state lives in the `rooms` app bundle's kv) and answer an explicit 501 -- never an
+empty success.
 
-  `member_voice_bp` (`/api/v1/community/:id/interact/voice/*`, `routes/
-  calls.js`'s `memberVoiceRouter`) -- Node applies `requireAuth` ONLY, no
-  community-membership check of any kind. THIS IS THE SECURITY FIX, not a
-  faithful reproduction (security.md Service-to-Service Auth /
-  `community_access.py`'s own docstring "Worse gap" paragraph): as
-  shipped, ANY authenticated caller could POST `.../voice/rooms/
-  :roomName/join` for ANY `community_id` and receive a live LiveKit join
-  token for a room they have no membership in -- token-minted-for-the-
-  wrong-user takeover, exactly what security.md's Service-to-Service Auth
-  section warns against. Every member route below additionally requires
-  `community_access.require_community_member()` (active membership,
-  tenant-scoped), which Node never checked.
+Two route groups, TWO DIFFERENT authz levels ported from two different Node routers mounting
+the SAME controller functions:
 
-Response bodies are opaque proxy relays (whatever the downstream RTC
-service returns, reshaped into `{success, rooms/participants/...}`) --
-`@validate_response`/`jsonify_dto()` are NOT used for the same reason
-`event.py`/`event_calendar_proxy.py` skip them: security.md's Output
-Validation over-serialization concern guards an OWNED row, not a body
-that was never hub-api's row to begin with.
+  `calls_admin_bp` (`/api/v1/admin/:communityId/calls/*`) -- `community_access.
+  require_community_admin()`; the downstream actor role is ADMIN.
+
+  `member_voice_bp` (`/api/v1/community/:id/interact/voice/*`) -- Node applied `requireAuth`
+  ONLY. THIS IS THE SECURITY FIX, not a faithful reproduction: every member route also
+  requires `community_access.require_community_member()` (active membership, tenant-scoped);
+  otherwise any authenticated caller could mint a join token for any community's room. The
+  downstream actor role is MEMBER.
+
+Response bodies are not hub-api-owned rows: `@validate_response`/`jsonify_dto()` are NOT used
+for the same reason `event.py` skips them (Output Validation guards an OWNED row); the client
+(`RoomsClient`) maps protobuf messages to explicit field sets, so nothing extra can leak.
 """
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
-from flask_core.tenancy import get_tenant_context, tenant_middleware
+from flask_core.tenancy import TenantContext, get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request
 
+# isort: split
+import grpc_internal  # noqa: F401  (puts the generated pb/ tree on sys.path)
+
+# isort: split
+from waddles.streaming.internal.v1 import rooms_pb2
+
 from services import community_access
-from services.calls_proxy import CallsProxyClient
+from services.calls_proxy import RoomsClient, RoomsRpcError
 from services.current_user import get_current_user_id
 from services.errors import ApiError, payment_required
-from services.event_calendar_proxy import ProxyResult
 
 calls_admin_bp = Blueprint("v1_calls_admin", __name__, url_prefix="/api/v1/admin")
 member_voice_bp = Blueprint("v1_member_voice", __name__, url_prefix="/api/v1/community")
@@ -71,7 +68,24 @@ SCOPE_ADMIN = "streaming.calls:admin"
 #: `streaming.rtc` Feature contract, free tier.
 FEATURE_STREAMING_RTC = "waddles.streaming.rtc"
 
-_proxy_client = CallsProxyClient()
+#: Namespace for the participant/actor UUIDs sent downstream (uuid5 of tenant+community+user).
+_PARTICIPANT_NS = uuid.UUID("6f3c1c1e-5b8e-4a67-9d3b-2f0c8f3f6a11")
+
+HAND_RAISE_UNSUPPORTED = (
+    "Raised-hand queues are not available: that state lives in the rooms app bundle, "
+    "not the call-room service"
+)
+
+
+def _issuer() -> Any:
+    """The app's machine-JWT issuer (`SERVICE_JWT_ISSUER` app config), or None when unconfigured."""
+    return current_app.config.get("SERVICE_JWT_ISSUER")
+
+
+_client = RoomsClient(
+    issuer_provider=_issuer,
+    deployment_env=lambda: str(current_app.config.get("DEPLOYMENT_ENV", "alpha")),
+)
 
 
 def _dal() -> tuple[Any, Any]:
@@ -86,15 +100,36 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     )
 
 
-def _relay_error(result: ProxyResult, default_message: str) -> tuple[dict[str, Any], int]:
-    """Port of Node's `catch` block: `{success:false, error: <downstream error or default>}`."""
-    error_message = default_message
-    if isinstance(result.body, dict) and isinstance(result.body.get("error"), str):
-        error_message = result.body["error"]
-    return {"success": False, "error": error_message}, result.status_code or 500
+def _rpc_error(exc: RoomsRpcError) -> tuple[dict[str, Any], int]:
+    """`{success:false, error}` carrying the downstream status (404/400/403/429/501/502...)."""
+    return {"success": False, "error": exc.message}, exc.status_code
 
 
-async def _require_admin(community_id: int) -> None:
+async def _guarded(op: Callable[[], Awaitable[tuple[dict[str, Any], int]]]) -> Any:
+    """Run one RPC-backed operation, mapping `RoomsRpcError` to the error envelope."""
+    try:
+        return await op()
+    except RoomsRpcError as exc:
+        return _rpc_error(exc)
+
+
+def _room_id(room_name: str) -> str:
+    """The `<room_name>` path segment must be the room's UUID (canonicalised)."""
+    try:
+        return str(uuid.UUID(room_name))
+    except ValueError as exc:
+        raise ApiError(
+            message="Room id must be a UUID", status_code=400, code="INVALID_ROOM_ID"
+        ) from exc
+
+
+def _person_uuid(ctx: TenantContext, community_id: int, user_id: int) -> str:
+    """Stable pseudonymous UUID for (tenant, community, user) -- never a name or raw id."""
+    return str(uuid.uuid5(_PARTICIPANT_NS, f"{ctx.tenant_slug}:{community_id}:{user_id}"))
+
+
+async def _require_admin(community_id: int) -> str:
+    """Enforce `require_community_admin`; returns the admin's pseudonymous actor UUID."""
     async_dal, dal = _dal()
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101 - tenant_middleware already ran (outermost decorator)
@@ -102,10 +137,11 @@ async def _require_admin(community_id: int) -> None:
     await community_access.require_community_admin(
         async_dal, dal, request, ctx, community_id=community_id, user_id=user_id
     )
+    return _person_uuid(ctx, community_id, user_id)
 
 
-async def _require_member(community_id: int) -> int:
-    """Enforce `require_community_member`; returns the caller's user id (join/leave need it)."""
+async def _require_member(community_id: int) -> str:
+    """Enforce `require_community_member`; returns the caller's pseudonymous participant UUID."""
     async_dal, dal = _dal()
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101 - tenant_middleware already ran (outermost decorator)
@@ -113,53 +149,26 @@ async def _require_member(community_id: int) -> int:
     await community_access.require_community_member(
         async_dal, dal, request, ctx, community_id=community_id, user_id=user_id
     )
-    return user_id
-
-
-def _auth_header() -> str | None:
-    """Forward the caller's own bearer token downstream -- see `calls_proxy.py` docstring."""
-    return request.headers.get("Authorization")
+    return _person_uuid(ctx, community_id, user_id)
 
 
 # ---------------------------------------------------------------------------
-# Shared proxy operations -- one per `callsController.js` export, called from
-# both `calls_admin_bp` (after `_require_admin`) and `member_voice_bp` (after
+# Shared operations -- one per `callsController.js` export, called from both
+# `calls_admin_bp` (after `_require_admin`) and `member_voice_bp` (after
 # `_require_member`) where Node reuses the same controller function.
 # ---------------------------------------------------------------------------
 
 
 async def _list_rooms(community_id: int) -> tuple[dict[str, Any], int]:
-    result = await _proxy_client.request(
-        "GET",
-        "/api/v1/rooms",
-        authorization=_auth_header(),
-        params={"community_id": str(community_id)},
-    )
-    if not result.ok:
-        if result.status_code == 404:
-            return {"success": True, "rooms": []}, 200
-        return _relay_error(result, "Failed to get call rooms")
-    rooms = result.body.get("rooms") if isinstance(result.body, dict) else None
-    return {"success": True, "rooms": rooms or []}, 200
+    rooms = await _client.list_rooms(community_id)
+    return {"success": True, "rooms": rooms}, 200
 
 
 async def _create_room(
     community_id: int, *, room_name: str, max_participants: int | None
 ) -> tuple[dict[str, Any], int]:
-    result = await _proxy_client.request(
-        "POST",
-        "/api/v1/rooms",
-        authorization=_auth_header(),
-        json_body={
-            "community_id": community_id,
-            "room_name": room_name,
-            "max_participants": max_participants or 100,
-        },
-    )
-    if not result.ok:
-        return _relay_error(result, "Failed to create call room")
-    body = result.body if isinstance(result.body, dict) else {}
-    return {"success": True, **body}, 201
+    room = await _client.create_room(community_id, label=room_name, max_publishers=max_participants)
+    return {"success": True, **room}, 201
 
 
 @dataclass(slots=True, frozen=True)
@@ -183,7 +192,7 @@ async def get_call_rooms(community_id: int) -> Any:
             raise payment_required("Calls / RTC is not enabled for this plan")
     except ApiError as exc:
         return _err(exc)
-    return await _list_rooms(community_id)
+    return await _guarded(lambda: _list_rooms(community_id))
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms", methods=["POST"])
@@ -196,8 +205,10 @@ async def create_call_room(community_id: int, data: CreateCallRoomRequest) -> An
         await _require_admin(community_id)
     except ApiError as exc:
         return _err(exc)
-    return await _create_room(
-        community_id, room_name=data.room_name, max_participants=data.max_participants
+    return await _guarded(
+        lambda: _create_room(
+            community_id, room_name=data.room_name, max_participants=data.max_participants
+        )
     )
 
 
@@ -208,18 +219,14 @@ async def get_call_room(community_id: int, room_name: str) -> Any:
     """Get a specific call room (admin)."""
     try:
         await _require_admin(community_id)
+        room_id = _room_id(room_name)
     except ApiError as exc:
         return _err(exc)
-    result = await _proxy_client.request(
-        "GET",
-        f"/api/v1/rooms/{room_name}",
-        authorization=_auth_header(),
-        params={"community_id": str(community_id)},
-    )
-    if not result.ok:
-        return _relay_error(result, "Failed to get call room")
-    body = result.body if isinstance(result.body, dict) else {}
-    return {"success": True, **body}, 200
+
+    async def op() -> tuple[dict[str, Any], int]:
+        return {"success": True, **await _client.get_room(community_id, room_id)}, 200
+
+    return await _guarded(op)
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>", methods=["DELETE"])
@@ -229,17 +236,35 @@ async def delete_call_room(community_id: int, room_name: str) -> Any:
     """Delete a call room (admin)."""
     try:
         await _require_admin(community_id)
+        room_id = _room_id(room_name)
     except ApiError as exc:
         return _err(exc)
-    result = await _proxy_client.request(
-        "DELETE",
-        f"/api/v1/rooms/{room_name}",
-        authorization=_auth_header(),
-        params={"community_id": str(community_id)},
-    )
-    if not result.ok:
-        return _relay_error(result, "Failed to delete call room")
-    return {"success": True, "message": "Room deleted"}, 200
+
+    async def op() -> tuple[dict[str, Any], int]:
+        await _client.delete_room(community_id, room_id)
+        return {"success": True, "message": "Room deleted"}, 200
+
+    return await _guarded(op)
+
+
+async def _set_locked(community_id: int, room_name: str, locked: bool) -> Any:
+    try:
+        actor = await _require_admin(community_id)
+        room_id = _room_id(room_name)
+    except ApiError as exc:
+        return _err(exc)
+
+    async def op() -> tuple[dict[str, Any], int]:
+        await _client.set_locked(
+            community_id,
+            room_id,
+            locked,
+            actor_id=actor,
+            actor_role=rooms_pb2.ROOM_ROLE_ADMIN,
+        )
+        return {"success": True, "message": "Room locked" if locked else "Room unlocked"}, 200
+
+    return await _guarded(op)
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/lock", methods=["POST"])
@@ -247,19 +272,7 @@ async def delete_call_room(community_id: int, room_name: str) -> Any:
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def lock_call_room(community_id: int, room_name: str) -> Any:
     """Lock a call room (admin)."""
-    try:
-        await _require_admin(community_id)
-    except ApiError as exc:
-        return _err(exc)
-    result = await _proxy_client.request(
-        "POST",
-        f"/api/v1/rooms/{room_name}/lock",
-        authorization=_auth_header(),
-        json_body={"community_id": community_id},
-    )
-    if not result.ok:
-        return _relay_error(result, "Failed to lock room")
-    return {"success": True, "message": "Room locked"}, 200
+    return await _set_locked(community_id, room_name, True)
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/unlock", methods=["POST"])
@@ -267,19 +280,7 @@ async def lock_call_room(community_id: int, room_name: str) -> Any:
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def unlock_call_room(community_id: int, room_name: str) -> Any:
     """Unlock a call room (admin)."""
-    try:
-        await _require_admin(community_id)
-    except ApiError as exc:
-        return _err(exc)
-    result = await _proxy_client.request(
-        "POST",
-        f"/api/v1/rooms/{room_name}/unlock",
-        authorization=_auth_header(),
-        json_body={"community_id": community_id},
-    )
-    if not result.ok:
-        return _relay_error(result, "Failed to unlock room")
-    return {"success": True, "message": "Room unlocked"}, 200
+    return await _set_locked(community_id, room_name, False)
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/participants", methods=["GET"])
@@ -289,25 +290,24 @@ async def get_call_participants(community_id: int, room_name: str) -> Any:
     """Get participants in a room (admin)."""
     try:
         await _require_admin(community_id)
+        room_id = _room_id(room_name)
     except ApiError as exc:
         return _err(exc)
-    result = await _proxy_client.request(
-        "GET",
-        f"/api/v1/rooms/{room_name}/participants",
-        authorization=_auth_header(),
-        params={"community_id": str(community_id)},
-    )
-    if not result.ok:
-        if result.status_code == 404:
-            return {"success": True, "participants": []}, 200
-        return _relay_error(result, "Failed to get participants")
-    participants = result.body.get("participants") if isinstance(result.body, dict) else None
-    return {"success": True, "participants": participants or []}, 200
+
+    async def op() -> tuple[dict[str, Any], int]:
+        body = await _client.list_participants(community_id, room_id)
+        return {
+            "success": True,
+            "participants": body["participants"],
+            "locked": body["locked"],
+        }, 200
+
+    return await _guarded(op)
 
 
 @dataclass(slots=True, frozen=True)
 class KickParticipantRequest:
-    """Request DTO for `POST .../kick`."""
+    """Request DTO for `POST .../kick` -- `identity` is the participant's UUID."""
 
     identity: str
 
@@ -321,18 +321,30 @@ async def kick_call_participant(
 ) -> Any:
     """Kick a participant from a room (admin)."""
     try:
-        await _require_admin(community_id)
+        actor = await _require_admin(community_id)
+        room_id = _room_id(room_name)
+        try:
+            participant = str(uuid.UUID(data.identity))
+        except ValueError as exc:
+            raise ApiError(
+                message="identity must be a participant UUID",
+                status_code=400,
+                code="INVALID_IDENTITY",
+            ) from exc
     except ApiError as exc:
         return _err(exc)
-    result = await _proxy_client.request(
-        "POST",
-        f"/api/v1/rooms/{room_name}/kick",
-        authorization=_auth_header(),
-        json_body={"community_id": community_id, "identity": data.identity},
-    )
-    if not result.ok:
-        return _relay_error(result, "Failed to kick participant")
-    return {"success": True, "message": "Participant removed"}, 200
+
+    async def op() -> tuple[dict[str, Any], int]:
+        await _client.kick_participant(
+            community_id,
+            room_id,
+            participant,
+            actor_id=actor,
+            actor_role=rooms_pb2.ROOM_ROLE_ADMIN,
+        )
+        return {"success": True, "message": "Participant removed"}, 200
+
+    return await _guarded(op)
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/mute-all", methods=["POST"])
@@ -341,41 +353,30 @@ async def kick_call_participant(
 async def mute_all_call_participants(community_id: int, room_name: str) -> Any:
     """Mute all participants in a room (admin)."""
     try:
-        await _require_admin(community_id)
+        actor = await _require_admin(community_id)
+        room_id = _room_id(room_name)
     except ApiError as exc:
         return _err(exc)
-    result = await _proxy_client.request(
-        "POST",
-        f"/api/v1/rooms/{room_name}/mute-all",
-        authorization=_auth_header(),
-        json_body={"community_id": community_id},
-    )
-    if not result.ok:
-        return _relay_error(result, "Failed to mute all")
-    return {"success": True, "message": "All participants muted"}, 200
+
+    async def op() -> tuple[dict[str, Any], int]:
+        await _client.mute_all(
+            community_id, room_id, actor_id=actor, actor_role=rooms_pb2.ROOM_ROLE_ADMIN
+        )
+        return {"success": True, "message": "All participants muted"}, 200
+
+    return await _guarded(op)
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/raised-hands", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def get_raised_hands(community_id: int, room_name: str) -> Any:
-    """Get raised hands queue (admin)."""
+    """Raised-hands queue (admin) -- 501: not a svc-streaming concern, see module docstring."""
     try:
         await _require_admin(community_id)
     except ApiError as exc:
         return _err(exc)
-    result = await _proxy_client.request(
-        "GET",
-        f"/api/v1/rooms/{room_name}/raised-hands",
-        authorization=_auth_header(),
-        params={"community_id": str(community_id)},
-    )
-    if not result.ok:
-        if result.status_code == 404:
-            return {"success": True, "raised_hands": []}, 200
-        return _relay_error(result, "Failed to get raised hands")
-    raised_hands = result.body.get("raised_hands") if isinstance(result.body, dict) else None
-    return {"success": True, "raised_hands": raised_hands or []}, 200
+    return {"success": False, "error": HAND_RAISE_UNSUPPORTED}, 501
 
 
 @dataclass(slots=True, frozen=True)
@@ -392,20 +393,12 @@ class AcknowledgeHandRequest:
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(AcknowledgeHandRequest)
 async def acknowledge_hand(community_id: int, room_name: str, data: AcknowledgeHandRequest) -> Any:
-    """Acknowledge a raised hand (admin)."""
+    """Acknowledge a raised hand (admin) -- 501: not a svc-streaming concern."""
     try:
         await _require_admin(community_id)
     except ApiError as exc:
         return _err(exc)
-    result = await _proxy_client.request(
-        "POST",
-        f"/api/v1/rooms/{room_name}/acknowledge-hand",
-        authorization=_auth_header(),
-        json_body={"community_id": community_id, "user_id": data.user_id},
-    )
-    if not result.ok:
-        return _relay_error(result, "Failed to acknowledge hand")
-    return {"success": True, "message": "Hand acknowledged"}, 200
+    return {"success": False, "error": HAND_RAISE_UNSUPPORTED}, 501
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +416,7 @@ async def list_voice_rooms(community_id: int) -> Any:
         await _require_member(community_id)
     except ApiError as exc:
         return _err(exc)
-    return await _list_rooms(community_id)
+    return await _guarded(lambda: _list_rooms(community_id))
 
 
 @member_voice_bp.route("/<int:community_id>/interact/voice/rooms", methods=["POST"])
@@ -436,8 +429,10 @@ async def create_ad_hoc_voice_room(community_id: int, data: CreateCallRoomReques
         await _require_member(community_id)
     except ApiError as exc:
         return _err(exc)
-    return await _create_room(
-        community_id, room_name=data.room_name, max_participants=data.max_participants
+    return await _guarded(
+        lambda: _create_room(
+            community_id, room_name=data.room_name, max_participants=data.max_participants
+        )
     )
 
 
@@ -447,25 +442,28 @@ async def create_ad_hoc_voice_room(community_id: int, data: CreateCallRoomReques
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_WRITE)  # type: ignore[misc]
 async def join_voice_room(community_id: int, room_name: str) -> Any:
-    """Join a voice room -- mints a LiveKit token for THIS caller, THIS room, only if a member."""
+    """Join a voice room -- mints a room token for THIS caller, THIS room, only if a member."""
     try:
-        user_id = await _require_member(community_id)
+        # The participant UUID comes from the verified JWT (`_require_member`), never the body.
+        participant = await _require_member(community_id)
+        room_id = _room_id(room_name)
     except ApiError as exc:
         return _err(exc)
-    result = await _proxy_client.request(
-        "POST",
-        f"/api/v1/rooms/{room_name}/join",
-        authorization=_auth_header(),
-        # user_id/username come from the verified JWT (`_require_member`),
-        # never from the request body -- matches Node's own
-        # `String(req.user?.id)` (never `req.body.user_id`), the one part
-        # of Node's join flow that was already correct.
-        json_body={"community_id": community_id, "user_id": str(user_id)},
-    )
-    if not result.ok:
-        return _relay_error(result, "Failed to join room")
-    body = result.body if isinstance(result.body, dict) else {}
-    return {"success": True, "token": body.get("token"), "url": body.get("url")}, 200
+
+    async def op() -> tuple[dict[str, Any], int]:
+        joined = await _client.join_room(community_id, room_id, participant)
+        return {
+            "success": True,
+            "token": joined["token"],
+            "url": joined["whip_url"].rsplit("/", 1)[0],
+            "whip_url": joined["whip_url"],
+            "whep_url": joined["whep_url"],
+            "token_id": joined["token_id"],
+            "participant_id": joined["participant_id"],
+            "expires_at": joined["expires_at"],
+        }, 200
+
+    return await _guarded(op)
 
 
 @member_voice_bp.route(
@@ -474,20 +472,24 @@ async def join_voice_room(community_id: int, room_name: str) -> Any:
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_WRITE)  # type: ignore[misc]
 async def leave_voice_room(community_id: int, room_name: str) -> Any:
-    """Leave a voice room (member)."""
+    """Leave a voice room (member) -- always acts as oneself (actor == participant)."""
     try:
-        user_id = await _require_member(community_id)
+        participant = await _require_member(community_id)
+        room_id = _room_id(room_name)
     except ApiError as exc:
         return _err(exc)
-    result = await _proxy_client.request(
-        "POST",
-        f"/api/v1/rooms/{room_name}/leave",
-        authorization=_auth_header(),
-        json_body={"community_id": community_id, "user_id": str(user_id)},
-    )
-    if not result.ok:
-        return _relay_error(result, "Failed to leave room")
-    return {"success": True, "message": "Left room"}, 200
+
+    async def op() -> tuple[dict[str, Any], int]:
+        await _client.leave_room(
+            community_id,
+            room_id,
+            participant,
+            actor_id=participant,
+            actor_role=rooms_pb2.ROOM_ROLE_MEMBER,
+        )
+        return {"success": True, "message": "Left room"}, 200
+
+    return await _guarded(op)
 
 
 BLUEPRINTS: list[Blueprint] = [calls_admin_bp, member_voice_bp]

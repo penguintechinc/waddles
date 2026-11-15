@@ -17,7 +17,7 @@ use serde_json::{Map, Value, json};
 use waddle_sdk::tool::{ToolContext, ToolError, ToolRegistry};
 
 /// Every tool name this bundle exposes (also the only labels ever logged).
-pub const TOOL_NAMES: [&str; 12] = [
+pub const TOOL_NAMES: [&str; 21] = [
     "room.create",
     "room.get",
     "room.close",
@@ -30,6 +30,15 @@ pub const TOOL_NAMES: [&str; 12] = [
     "recording.stop",
     "token.revoke_all",
     "admin.verify",
+    "room.list",
+    "room.participants",
+    "room.leave",
+    "room.kick",
+    "room.mute",
+    "room.unmute",
+    "room.mute_all",
+    "room.lock",
+    "room.unlock",
 ];
 
 /// Largest room label (display text, never a key).
@@ -331,6 +340,112 @@ fn recording(
     }
 }
 
+/// Roles the rooms app may assert for the acting participant (host re-checks).
+const ACTOR_ROLES: [&str; 4] = ["guest", "member", "moderator", "admin"];
+
+/// Parses the `actor_id` / `actor_role` pair every moderation tool carries.
+/// The rooms app resolved the role from its per-room ACL; svc-streaming
+/// enforces it again as defense in depth (interim until the SDK `caller_can`
+/// check replaces `actor_role`).
+fn actor_args(o: &Map<String, Value>) -> Result<(String, String), ToolError> {
+    let id = uuid_arg(o, "actor_id", true)?.ok_or_else(|| bad("actor_id required"))?;
+    match o.get("actor_role") {
+        Some(Value::String(r)) if ACTOR_ROLES.contains(&r.as_str()) => Ok((id, r.clone())),
+        _ => Err(bad("actor_role must be guest|member|moderator|admin")),
+    }
+}
+
+/// Read-only `room.list`: live rooms of the invoking community, whitelisted.
+fn rooms_list(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    object(&args, &[])?;
+    let out = m.call("room.list", &json!({})).map_err(tool_err)?;
+    let rooms = out
+        .get("rooms")
+        .and_then(Value::as_array)
+        .ok_or(ToolError::TargetUnavailable)?;
+    let mut view = Vec::with_capacity(rooms.len());
+    for r in rooms {
+        let mut v = pick(
+            r,
+            &[
+                "room_id",
+                "label",
+                "created_at",
+                "publisher_ids",
+                "subscriber_count",
+                "locked",
+            ],
+        )?;
+        if v.get("room_id").is_none() {
+            return Err(ToolError::TargetUnavailable);
+        }
+        if let Some(o) = v.as_object_mut() {
+            o.entry("publisher_ids").or_insert(json!([]));
+        }
+        view.push(v);
+    }
+    Ok(json!({ "rooms": view }))
+}
+
+/// Read-only `room.participants`: participant UUIDs and media flags only.
+fn participants(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    let o = object(&args, &["room_id"])?;
+    let req = json!({"room_id": uuid_arg(o, "room_id", true)?});
+    let out = m.call("room.participants", &req).map_err(tool_err)?;
+    let list = out
+        .get("participants")
+        .and_then(Value::as_array)
+        .ok_or(ToolError::TargetUnavailable)?;
+    let mut view = Vec::with_capacity(list.len());
+    for p in list {
+        let v = pick(p, &["participant_id", "publisher", "subscriber", "muted"])?;
+        if v.get("participant_id").is_none() {
+            return Err(ToolError::TargetUnavailable);
+        }
+        view.push(v);
+    }
+    let mut head = pick(&out, &["room_id", "locked", "count"])?;
+    head["participants"] = Value::Array(view);
+    Ok(head)
+}
+
+/// Moderation on one participant (`leave|kick|mute|unmute`): validated args in,
+/// whitelisted result out.
+fn participant_op(
+    op: &'static str,
+    fields: &'static [&'static str],
+) -> impl Fn(&dyn Media, &ToolContext, Value) -> Result<Value, ToolError> {
+    move |m, _, args| {
+        let o = object(
+            &args,
+            &["room_id", "participant_id", "actor_id", "actor_role"],
+        )?;
+        let (actor_id, actor_role) = actor_args(o)?;
+        let req = json!({
+            "room_id": uuid_arg(o, "room_id", true)?,
+            "participant_id": uuid_arg(o, "participant_id", true)?,
+            "actor_id": actor_id, "actor_role": actor_role,
+        });
+        pick(&m.call(op, &req).map_err(tool_err)?, fields)
+    }
+}
+
+/// Moderation on a whole room (`mute_all|lock|unlock`).
+fn room_mod_op(
+    op: &'static str,
+    fields: &'static [&'static str],
+) -> impl Fn(&dyn Media, &ToolContext, Value) -> Result<Value, ToolError> {
+    move |m, _, args| {
+        let o = object(&args, &["room_id", "actor_id", "actor_role"])?;
+        let (actor_id, actor_role) = actor_args(o)?;
+        let req = json!({
+            "room_id": uuid_arg(o, "room_id", true)?,
+            "actor_id": actor_id, "actor_role": actor_role,
+        });
+        pick(&m.call(op, &req).map_err(tool_err)?, fields)
+    }
+}
+
 fn strip_nulls(v: &mut Value) {
     if let Some(o) = v.as_object_mut() {
         o.retain(|_, x| !x.is_null());
@@ -379,6 +494,45 @@ pub fn build_registry(media: Arc<dyn Media>) -> ToolRegistry {
     );
     reg(&mut r, "token.revoke_all", Box::new(token_revoke_all));
     reg(&mut r, "admin.verify", Box::new(admin_verify));
+    reg(&mut r, "room.list", Box::new(rooms_list));
+    reg(&mut r, "room.participants", Box::new(participants));
+    let gone: &[&str] = &["room_id", "participant_id", "sessions_closed"];
+    let muted: &[&str] = &["room_id", "participant_id", "muted"];
+    reg(
+        &mut r,
+        "room.leave",
+        Box::new(participant_op("room.leave", gone)),
+    );
+    reg(
+        &mut r,
+        "room.kick",
+        Box::new(participant_op("room.kick", gone)),
+    );
+    reg(
+        &mut r,
+        "room.mute",
+        Box::new(participant_op("room.mute", muted)),
+    );
+    reg(
+        &mut r,
+        "room.unmute",
+        Box::new(participant_op("room.unmute", muted)),
+    );
+    reg(
+        &mut r,
+        "room.mute_all",
+        Box::new(room_mod_op("room.mute_all", &["room_id", "muted"])),
+    );
+    reg(
+        &mut r,
+        "room.lock",
+        Box::new(room_mod_op("room.lock", &["room_id", "locked"])),
+    );
+    reg(
+        &mut r,
+        "room.unlock",
+        Box::new(room_mod_op("room.unlock", &["room_id", "locked"])),
+    );
     r
 }
 
@@ -637,5 +791,123 @@ mod tests {
             call(&f, "token.revoke_all", json!({"room_id": "x"})),
             Err(ToolError::InvalidArgs(_))
         ));
+    }
+
+    const MOD: &str = "33333333-3333-3333-3333-333333333333";
+
+    #[test]
+    fn moderation_tools_forward_actor_and_whitelist_results() {
+        let f = Fake::ok(
+            json!({"room_id": ROOM, "participant_id": USER, "sessions_closed": 2, "leak": 1}),
+        );
+        let out = call(
+            &f,
+            "room.kick",
+            json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD, "actor_role": "moderator"}),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            json!({"room_id": ROOM, "participant_id": USER, "sessions_closed": 2})
+        );
+        assert_eq!(
+            f.calls()[0],
+            (
+                "room.kick".to_string(),
+                json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD, "actor_role": "moderator"})
+            )
+        );
+        let f = Fake::ok(json!({"room_id": ROOM, "muted": 3, "x": 1}));
+        let out = call(
+            &f,
+            "room.mute_all",
+            json!({"room_id": ROOM, "actor_id": MOD, "actor_role": "admin"}),
+        )
+        .unwrap();
+        assert_eq!(out, json!({"room_id": ROOM, "muted": 3}));
+        let f = Fake::ok(json!({"room_id": ROOM, "locked": true}));
+        for t in ["room.lock", "room.unlock"] {
+            call(
+                &f,
+                t,
+                json!({"room_id": ROOM, "actor_id": MOD, "actor_role": "moderator"}),
+            )
+            .unwrap();
+        }
+        assert_eq!(f.calls().len(), 2);
+    }
+
+    #[test]
+    fn moderation_tools_reject_bad_actor_or_extra_args_before_the_host() {
+        let f = Fake::ok(json!({}));
+        for args in [
+            json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD}),
+            json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD, "actor_role": "root"}),
+            json!({"room_id": ROOM, "participant_id": USER, "actor_id": "bob", "actor_role": "admin"}),
+            json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD, "actor_role": "admin", "community_id": "7"}),
+            json!({"room_id": ROOM, "participant_id": "alice", "actor_id": MOD, "actor_role": "admin"}),
+        ] {
+            for t in ["room.kick", "room.mute", "room.unmute", "room.leave"] {
+                assert!(
+                    matches!(call(&f, t, args.clone()), Err(ToolError::InvalidArgs(_))),
+                    "{t} {args}"
+                );
+            }
+        }
+        assert!(matches!(
+            call(&f, "room.lock", json!({"room_id": ROOM, "actor_id": MOD})),
+            Err(ToolError::InvalidArgs(_))
+        ));
+        assert!(f.calls().is_empty(), "invalid args never reach the host");
+    }
+
+    #[test]
+    fn list_and_participants_whitelist_and_fail_loud_on_malformed_hosts() {
+        let f = Fake::ok(
+            json!({"rooms": [{"room_id": ROOM, "label": "x", "locked": false, "subscriber_count": 1, "community_id": "7"}]}),
+        );
+        let out = call(&f, "room.list", json!({})).unwrap();
+        assert_eq!(out["rooms"][0].get("community_id"), None);
+        assert_eq!(out["rooms"][0]["publisher_ids"], json!([]));
+        let f = Fake::ok(json!({"room_id": ROOM, "locked": true, "count": 1,
+            "participants": [{"participant_id": USER, "publisher": true, "subscriber": false, "muted": true, "name": "leak"}]}));
+        let out = call(&f, "room.participants", json!({"room_id": ROOM})).unwrap();
+        assert_eq!(
+            out["participants"][0],
+            json!({"participant_id": USER, "publisher": true, "subscriber": false, "muted": true})
+        );
+        assert_eq!(out["count"], 1);
+        let f = Fake::ok(json!({"rooms": "nope"}));
+        assert!(matches!(
+            call(&f, "room.list", json!({})),
+            Err(ToolError::TargetUnavailable)
+        ));
+        let f = Fake::ok(json!({"participants": [{"muted": true}]}));
+        assert!(matches!(
+            call(&f, "room.participants", json!({"room_id": ROOM})),
+            Err(ToolError::TargetUnavailable)
+        ));
+    }
+
+    #[test]
+    fn moderation_host_refusals_are_typed_errors() {
+        let f = Fake::err(HostError::Denied("forbidden".into()));
+        let e = call(
+            &f,
+            "room.kick",
+            json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD, "actor_role": "member"}),
+        )
+        .unwrap_err();
+        assert!(matches!(e, ToolError::NotGranted));
+        let f = Fake::err(HostError::NotImplemented(
+            "feature rooms.moderation is disabled".into(),
+        ));
+        let e = call(
+            &f,
+            "room.lock",
+            json!({"room_id": ROOM, "actor_id": MOD, "actor_role": "admin"}),
+        )
+        .unwrap_err();
+        assert!(matches!(e, ToolError::InvalidArgs(m) if m.contains("disabled")));
     }
 }

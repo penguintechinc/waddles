@@ -1,5 +1,5 @@
 #!/bin/bash
-# Regenerates Python stubs for proto/waddles/hub/internal/v1/*.proto.
+# Regenerates Python stubs for proto/waddles/{hub,streaming}/internal/v1/*.proto.
 #
 # Rust does NOT use this script -- core/hub_client/build.rs runs
 # tonic-build directly against the same .proto files at `cargo build`
@@ -26,7 +26,7 @@ ACTUAL_TOOLS="$(python3 -c 'from importlib.metadata import version; print(versio
 [ -n "$PINNED_TOOLS" ] && [ "$ACTUAL_TOOLS" = "$PINNED_TOOLS" ] || {
   echo "grpcio-tools '$ACTUAL_TOOLS' != pinned '$PINNED_TOOLS' (scripts/requirements-protoc.txt)" >&2; exit 1; }
 
-buf lint --path "$PROTO_DIR" 2>/dev/null || (cd "$PROTO_DIR" && buf lint)
+(cd "$PROTO_DIR" && buf lint)
 
 mkdir -p "$OUT_DIR"
 python3 -m grpc_tools.protoc \
@@ -34,7 +34,17 @@ python3 -m grpc_tools.protoc \
   --python_out="$OUT_DIR" \
   --pyi_out="$OUT_DIR" \
   --grpc_python_out="$OUT_DIR" \
-  "$PROTO_DIR"/waddles/hub/internal/v1/*.proto
+  "$PROTO_DIR"/waddles/hub/internal/v1/*.proto \
+  "$PROTO_DIR"/waddles/streaming/internal/v1/*.proto
+
+# Match the committed stubs: the repo's ruff hook strips unused imports (protoc's grpc plugin emits
+# `import warnings` unconditionally) and formats hub_api/**. Skipped only when ruff is absent; the
+# stub-drift gate (scripts/ci/check_proto_stub_drift.py) compares descriptors, not text, so a
+# formatting difference can never mask or fake drift.
+if command -v ruff >/dev/null 2>&1; then
+  ruff check --fix --quiet --select F401 --config "$REPO_ROOT/hub_api/pyproject.toml" "$OUT_DIR/waddles" || true
+  ruff format --quiet --config "$REPO_ROOT/hub_api/pyproject.toml" "$OUT_DIR/waddles"
+fi
 
 # Ensure every generated package directory is importable.
 find "$OUT_DIR/waddles" -type d -exec sh -c 'touch "$1/__init__.py"' _ {} \;

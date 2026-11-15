@@ -4,7 +4,7 @@
 schema_version: 2
 app_id: waddles.core.service.webrtc
 name: WebRTC Service Bundle (Rust)
-version: 1.0.0
+version: 1.1.0
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -392,6 +392,321 @@ exported_tools:
         type: string
       state:
         type: string
+- name: room.list
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      rooms:
+        type: array
+        items:
+          type: object
+          properties:
+            room_id:
+              type: string
+              format: uuid
+            label:
+              type:
+              - string
+              - 'null'
+            created_at:
+              type: integer
+            publisher_ids:
+              type: array
+              items:
+                type: string
+                format: uuid
+            subscriber_count:
+              type: integer
+            locked:
+              type: boolean
+- name: room.participants
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+    required:
+    - room_id
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      locked:
+        type: boolean
+      count:
+        type: integer
+      participants:
+        type: array
+        items:
+          type: object
+          properties:
+            participant_id:
+              type: string
+              format: uuid
+            publisher:
+              type: boolean
+            subscriber:
+              type: boolean
+            muted:
+              type: boolean
+- name: room.leave
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      participant_id:
+        type: string
+        format: uuid
+      actor_id:
+        type: string
+        format: uuid
+      actor_role:
+        enum:
+        - guest
+        - member
+        - moderator
+        - admin
+    required:
+    - room_id
+    - participant_id
+    - actor_id
+    - actor_role
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      participant_id:
+        type: string
+        format: uuid
+      sessions_closed:
+        type: integer
+- name: room.kick
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      participant_id:
+        type: string
+        format: uuid
+      actor_id:
+        type: string
+        format: uuid
+      actor_role:
+        enum:
+        - guest
+        - member
+        - moderator
+        - admin
+    required:
+    - room_id
+    - participant_id
+    - actor_id
+    - actor_role
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      participant_id:
+        type: string
+        format: uuid
+      sessions_closed:
+        type: integer
+- name: room.mute
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      participant_id:
+        type: string
+        format: uuid
+      actor_id:
+        type: string
+        format: uuid
+      actor_role:
+        enum:
+        - guest
+        - member
+        - moderator
+        - admin
+    required:
+    - room_id
+    - participant_id
+    - actor_id
+    - actor_role
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      participant_id:
+        type: string
+        format: uuid
+      muted:
+        type: boolean
+- name: room.unmute
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      participant_id:
+        type: string
+        format: uuid
+      actor_id:
+        type: string
+        format: uuid
+      actor_role:
+        enum:
+        - guest
+        - member
+        - moderator
+        - admin
+    required:
+    - room_id
+    - participant_id
+    - actor_id
+    - actor_role
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      participant_id:
+        type: string
+        format: uuid
+      muted:
+        type: boolean
+- name: room.mute_all
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      actor_id:
+        type: string
+        format: uuid
+      actor_role:
+        enum:
+        - guest
+        - member
+        - moderator
+        - admin
+    required:
+    - room_id
+    - actor_id
+    - actor_role
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      muted:
+        type: integer
+- name: room.lock
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      actor_id:
+        type: string
+        format: uuid
+      actor_role:
+        enum:
+        - guest
+        - member
+        - moderator
+        - admin
+    required:
+    - room_id
+    - actor_id
+    - actor_role
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      locked:
+        type: boolean
+- name: room.unlock
+  access: write
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      actor_id:
+        type: string
+        format: uuid
+      actor_role:
+        enum:
+        - guest
+        - member
+        - moderator
+        - admin
+    required:
+    - room_id
+    - actor_id
+    - actor_role
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      locked:
+        type: boolean
 config_schema: {}
 compatible_with: []
 incompatible_with: []

@@ -13,7 +13,7 @@
 //! ([`webrtc::runtime::BroadcastRecvError::Lagged`]), which is the
 //! per-subscriber drop count this module needs.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -55,6 +55,10 @@ const FANOUT_CAPACITY: usize = 512;
 pub struct TrackFanout {
     tx: BroadcastSender<Stamped>,
     subscriber_count: AtomicUsize,
+    /// Server-side mute: while set, [`Self::publish`] discards every packet.
+    muted: AtomicBool,
+    /// Packets discarded because the publisher is muted (observability/tests).
+    muted_dropped: AtomicU64,
     /// Media kind for the latency histogram's `kind` attribute; `None`
     /// (labeled `unknown`) for a fanout created without one.
     kind: Option<MediaKind>,
@@ -84,6 +88,8 @@ impl TrackFanout {
         Self {
             tx: broadcast_channel(FANOUT_CAPACITY),
             subscriber_count: AtomicUsize::new(0),
+            muted: AtomicBool::new(false),
+            muted_dropped: AtomicU64::new(0),
             kind,
             metrics,
         }
@@ -96,10 +102,30 @@ impl TrackFanout {
     /// `recv`), so one stuck viewer can never stall the publisher or any
     /// other viewer. A publish with zero subscribers is a no-op.
     pub fn publish(&self, packet: Packet) {
+        if self.muted.load(Ordering::Acquire) {
+            self.muted_dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         let _ = self.tx.send(Stamped {
             published_at: Instant::now(),
             packet,
         });
+    }
+
+    /// Mutes or unmutes this track server-side: a muted fanout forwards nothing
+    /// to any subscriber, regardless of what the publisher's client does.
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Release);
+    }
+
+    /// True while the track is server-side muted.
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Acquire)
+    }
+
+    /// Packets discarded so far because the track was muted.
+    pub fn muted_dropped(&self) -> u64 {
+        self.muted_dropped.load(Ordering::Relaxed)
     }
 
     /// Subscribes a new WHEP viewer, returning a handle whose `recv` drives
@@ -202,6 +228,19 @@ impl MediaFanouts {
     }
 }
 
+impl MediaFanouts {
+    /// Mutes or unmutes both the audio and video track of this publisher.
+    pub fn set_muted(&self, muted: bool) {
+        self.video.set_muted(muted);
+        self.audio.set_muted(muted);
+    }
+
+    /// True when the publisher is server-side muted.
+    pub fn is_muted(&self) -> bool {
+        self.audio.is_muted() && self.video.is_muted()
+    }
+}
+
 impl Default for MediaFanouts {
     fn default() -> Self {
         Self::new()
@@ -278,6 +317,25 @@ mod tests {
         let metrics = RtcMetrics::register(&registry).unwrap();
         let _ = sub.recv(&metrics).await.expect("catches up past the gap");
         assert!(metrics.packets_dropped_total.get() > 0);
+    }
+
+    #[tokio::test]
+    async fn muted_fanout_forwards_nothing_until_unmuted() {
+        let fanouts = MediaFanouts::new();
+        let mut sub = fanouts.audio.subscribe();
+        let metrics = RtcMetrics::register(&prometheus::Registry::new()).unwrap();
+        fanouts.set_muted(true);
+        assert!(fanouts.is_muted());
+        fanouts.audio.publish(sample_packet(1));
+        fanouts.audio.publish(sample_packet(2));
+        assert_eq!(fanouts.audio.muted_dropped(), 2);
+        fanouts.set_muted(false);
+        fanouts.audio.publish(sample_packet(3));
+        let got = sub.recv(&metrics).await.expect("delivered after unmute");
+        assert_eq!(
+            got.header.sequence_number, 3,
+            "muted packets never reach the subscriber"
+        );
     }
 
     #[tokio::test]

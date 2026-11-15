@@ -12,8 +12,7 @@ core/svc_streaming/src/http/auth.rs|tests: HS* tokens (incl. keyed with the publ
 core/svc_streaming/src/http/auth/hardening.rs|rejection-label vocabulary + tests
 core/svc_streaming/tests/config.rs|test: a stale JWT_HMAC_SECRET env var is ignored
 core/svc_streaming/tests/jwt_metrics.rs|test: HS512 rejected, counted as alg_mismatch
-core/svc_streaming/src/rooms/token.rs|DOCUMENTED EXCEPTION (owner decision pending): service-local room join token MAC with its own WEBRTC_ROOM_TOKEN_SECRET, not the platform identity key; follow-up: migrate to asymmetric
-bundles/rust/webrtc/README.md|documents the room-token exception above
+core/svc_streaming/src/rooms/token.rs|tests: room tokens are ES256 (#1324); HS256 / retired-secret tokens are rejected
 hub_api/tests/sso/test_sso_login_oidc.py|test: HS256 OIDC id_token rejected
 hub_api/tests/sso/test_sso_oidc.py|test: HS256 OIDC id_token rejected
 hub_api/tests/test_media_byok.py|test comment: HS user token rejected
@@ -26,3 +25,7 @@ libs/flask_core/tests/test_secrets.py|test: legacy placeholder-secret name list
 libs/flask_core/tests/test_service_jwt_migration.py|tests: legacy HS256 service token rejected
 libs/flask_core/tests/test_service_jwt.py|tests: HS* service JWT rejected
 hub_api/tests/test_jwt_keyring_vault.py|tests: HS* / forged shared-secret tokens refused
+
+core/svc_streaming/tests/rooms_grpc.rs|test: HS256 alg confusion refused
+core/svc_streaming/tests/rooms_grpc_auth.rs|test: HS256 alg confusion refused
+core/svc_streaming/tests/rooms_token_es256.rs|test: HS256 room token refused

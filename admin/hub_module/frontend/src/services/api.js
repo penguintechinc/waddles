@@ -940,7 +940,7 @@ export const interactionApi = {
   deleteReply: (communityId, replyId) =>
     api.delete(`/api/v1/admin/${communityId}/interaction/forum/replies/${replyId}`),
 
-  // Voice rooms (proxied to module_rtc via calls controller)
+  // Voice rooms (hub-api calls controller -> svc-streaming RoomsService over gRPC)
   getVoiceRooms: (communityId) =>
     api.get(`/api/v1/community/${communityId}/interact/voice/rooms`),
   joinVoiceRoom: (communityId, roomName) =>

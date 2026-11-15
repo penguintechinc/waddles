@@ -17,11 +17,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::{MatchedPath, Request, State};
+use axum::http::{header, HeaderValue, Method};
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
 use tokio::sync::mpsc;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::api::SharedEngine;
@@ -146,7 +148,7 @@ impl AppState {
             rtc_metrics.clone(),
         ));
         let room_keys = crate::rooms::token::TokenKeys::from_env()
-            .expect("WEBRTC_ROOM_TOKEN_SECRET, when set, must be at least 32 bytes");
+            .expect("the room token signing key (WEBRTC_ROOM_TOKEN_SIGNING_KEY[_FILE]), when configured, must be a valid ES256 P-256 PKCS#8 PEM key; the retired WEBRTC_ROOM_TOKEN_SECRET is refused");
         let mut whep = WhepState::new(pc_factory.clone(), rtc_metrics.clone(), DEFAULT_MAX_VIEWERS);
         if let Some(k) = room_keys.clone() {
             whep = whep.with_viewer_auth(k);
@@ -159,7 +161,12 @@ impl AppState {
                 room_keys,
                 config.cli.public_base_url.clone(),
             )
-            .with_whep(whep_state.clone()),
+            .with_whep(whep_state.clone())
+            .with_moderation(moderation_flag_from_env())
+            .with_idle_policy(
+                crate::rooms::IdlePolicy::from_env()
+                    .expect("ROOMS_EMPTY_TIMEOUT_DEFAULT_SECS / ROOMS_EMPTY_TIMEOUT_MAX_SECS, when set, must be valid"),
+            ),
         );
         let engine: SharedEngine = Arc::new(crate::pipeline::StubSupervisor);
         let hls_router_state = HlsRouterState::new(
@@ -259,6 +266,7 @@ pub fn router(state: AppState) -> Router {
 
     let internal = Router::new().nest("/api/v1", crate::api::internal_router(state.engine.clone()));
 
+    let media_cors = media_cors_layer(&state.config.cli.cors_allowed_origins);
     public
         .merge(authenticated)
         .merge(internal)
@@ -266,9 +274,9 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::egress::hls::hls_router(
             state.hls_router_state.clone(),
         ))
-        .merge(crate::ingest::whip::router(state.whip_state.clone()))
-        .merge(crate::egress::whep::router(state.whep_state.clone()))
-        .merge(crate::rooms::media::router(state.rooms.clone()))
+        .merge(crate::ingest::whip::router(state.whip_state.clone()).layer(media_cors.clone()))
+        .merge(crate::egress::whep::router(state.whep_state.clone()).layer(media_cors.clone()))
+        .merge(crate::rooms::media::router(state.rooms.clone()).layer(media_cors))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             record_http_metrics,
@@ -290,4 +298,101 @@ pub fn metrics_router(state: AppState) -> Router {
     Router::new()
         .route("/metrics", get(health::metrics))
         .with_state(state)
+}
+
+/// Resolves the `rooms.moderation` feature flag from its env baseline
+/// (`FEATURE_ROOMS_MODERATION`); unset or anything but true/1 means OFF.
+pub fn moderation_flag_from_env() -> bool {
+    std::env::var("FEATURE_ROOMS_MODERATION")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on"))
+        .unwrap_or(false)
+}
+
+fn media_cors_layer(origins: &[String]) -> CorsLayer {
+    let base = CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .expose_headers([header::LOCATION]);
+
+    if origins.iter().any(|o| o == "*") {
+        return base.allow_origin(AllowOrigin::any());
+    }
+    let parsed: Vec<HeaderValue> = origins
+        .iter()
+        .filter_map(|o| {
+            let trimmed = o.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                HeaderValue::from_str(trimmed).ok()
+            }
+        })
+        .collect();
+    if parsed.is_empty() {
+        base
+    } else {
+        base.allow_origin(AllowOrigin::list(parsed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use clap::Parser;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn media_cors_preflight_exposes_location_and_allows_configured_origin() {
+        let mut cli = crate::config::CliConfig::parse_from(["svc-streaming"]);
+        cli.cors_allowed_origins = vec!["https://app.waddles.gg".to_string()];
+        let cfg = Config {
+            cli,
+            db_password: crate::config::Secret::new("db-pass"),
+            cache_password: None,
+            service_api_key: crate::config::Secret::new("svc-key"),
+            jwt_hmac_secret: Some(crate::config::Secret::new("jwt-secret")),
+        };
+        let state = AppState::new(cfg, prometheus::Registry::new());
+        let app = router(state);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/rtc/rooms/00000000-0000-0000-0000-000000000001/whip")
+                    .header(header::ORIGIN, "https://app.waddles.gg")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "authorization,content-type",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("https://app.waddles.gg")
+        );
+        let allow_methods = res
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(allow_methods.contains("POST") && allow_methods.contains("DELETE"));
+    }
 }

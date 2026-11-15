@@ -23,8 +23,8 @@ whitelist; join tokens are bearer credentials and are never logged; logs carry t
 outcome only.
 
 Host side: `core/svc_streaming/src/rooms/` -- `host_api.rs` (mTLS `POST /host/v1/webrtc/{op}`),
-`media.rs` (token-authenticated `POST /rtc/rooms/{room}/whip|whep`), `token.rs` (HS256, secret
-`WEBRTC_ROOM_TOKEN_SECRET`, >=32 bytes). The stage-side forwarder and gate permission
+`media.rs` (token-authenticated `POST /rtc/rooms/{room}/whip|whep`), `token.rs` (ES256, signing key
+`WEBRTC_ROOM_TOKEN_SIGNING_KEY`, P-256 PKCS#8 PEM). The stage-side forwarder and gate permission
 (`webrtc.control`) are host seams listed in the PR.
 
 Build: `cargo component build --release --target wasm32-wasip2 --locked`; tests: `cargo test`

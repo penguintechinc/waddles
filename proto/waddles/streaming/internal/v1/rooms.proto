@@ -1,0 +1,372 @@
+// RoomsService: hub-api -> svc-streaming control plane for A/V call rooms
+// (create/get/list/delete, join, leave, participants and moderation). Replaces
+// the retired REST proxy (`/api/v1/rooms*`, ex `core/module_rtc`): in-cluster
+// service-to-service is gRPC over HTTP/2 + mTLS, never REST. The semantics are
+// those of the svc-streaming host-API ops (docs/rooms-moderation-host-api.md);
+// the server delegates to the same `RoomService` they use.
+//
+// Auth: every call carries a hub-api-issued ES256 machine JWT
+// (`authorization: Bearer ...`). Required scope per RPC is noted below.
+// `community_id` is derived by hub-api from the CALLER'S verified JWT, never
+// from a request body. Identities are UUIDs only (no usernames, no PII).
+syntax = "proto3";
+
+package waddles.streaming.internal.v1;
+
+option go_package = "github.com/penguintechinc/waddles/gen/go/waddles/streaming/internal/v1;streaminginternalv1";
+
+service RoomsService {
+  // Scope "streaming.rooms:read".
+  rpc ListRooms(ListRoomsRequest) returns (ListRoomsResponse);
+  rpc GetRoom(GetRoomRequest) returns (GetRoomResponse);
+  rpc ListParticipants(ListParticipantsRequest) returns (ListParticipantsResponse);
+  // Scope "streaming.rooms:read" (the actor's own entry + queue length/position) or
+  // "streaming.rooms:moderate" (the whole queue, actor must be room staff). `actor_id` must
+  // be a participant who joined the room.
+  rpc ListHands(ListHandsRequest) returns (ListHandsResponse);
+
+  // Scope "streaming.rooms:write" (member-level actions).
+  rpc CreateRoom(CreateRoomRequest) returns (CreateRoomResponse);
+  rpc DeleteRoom(DeleteRoomRequest) returns (DeleteRoomResponse);
+  // Scope "streaming.rooms:write". A call carrying the "streaming.rooms:moderate" service
+  // JWT instead additionally registers the participant as room STAFF in the server-side
+  // member table (the only way staff is established; no request field can claim it).
+  rpc JoinRoom(JoinRoomRequest) returns (JoinRoomResponse);
+  rpc LeaveRoom(LeaveRoomRequest) returns (LeaveRoomResponse);
+  // Raised-hand queue, authoritative in svc-streaming (same lifecycle as rooms
+  // and locks: in memory, cleared on kick/leave/delete). Authorization is checked against
+  // the server-side member table and the VERIFIED service JWT, never a caller-stated role
+  // (`actor_role` is ignored by every hand RPC): RaiseHand needs `actor_id == participant_id`
+  // who joined the room; it is idempotent (raising twice keeps the original position).
+  // LowerHand: own hand needs a joined actor (scope write); someone else's needs scope
+  // "streaming.rooms:moderate" AND the actor recorded as room staff.
+  rpc RaiseHand(RaiseHandRequest) returns (RaiseHandResponse);
+  rpc LowerHand(LowerHandRequest) returns (LowerHandResponse);
+
+  // Scope "streaming.rooms:moderate" (also gated by flag rooms.moderation and the actor's
+  // server-recorded role; the kick/mute/lock family still reads `actor_role`, the hand RPCs
+  // below use the member table instead).
+  rpc KickParticipant(KickParticipantRequest) returns (KickParticipantResponse);
+  rpc MuteParticipant(MuteParticipantRequest) returns (MuteParticipantResponse);
+  rpc UnmuteParticipant(UnmuteParticipantRequest) returns (UnmuteParticipantResponse);
+  rpc MuteAll(MuteAllRequest) returns (MuteAllResponse);
+  rpc LockRoom(LockRoomRequest) returns (LockRoomResponse);
+  rpc UnlockRoom(UnlockRoomRequest) returns (UnlockRoomResponse);
+  rpc AcknowledgeHand(AcknowledgeHandRequest) returns (AcknowledgeHandResponse);
+  // Clears the whole raised-hand queue of a room (moderator/admin actor role).
+  rpc ResetHands(ResetHandsRequest) returns (ResetHandsResponse);
+}
+
+// The acting participant's room role, resolved by the caller (hub-api: admin
+// routes act as ROOM_ROLE_ADMIN, member routes as ROOM_ROLE_MEMBER).
+enum RoomRole {
+  ROOM_ROLE_UNSPECIFIED = 0;
+  ROOM_ROLE_GUEST = 1;
+  ROOM_ROLE_MEMBER = 2;
+  ROOM_ROLE_MODERATOR = 3;
+  ROOM_ROLE_ADMIN = 4;
+}
+
+message Room {
+  string room_id = 1;
+  string community_id = 2;
+  optional string label = 3;
+  uint32 max_publishers = 4;
+  int64 created_at = 5;
+  repeated string publisher_ids = 6;
+  uint32 subscriber_count = 7;
+  bool locked = 8;
+  // Seconds a room may stay empty before the server deletes it (the effective
+  // value after server clamping). 0 means expiry is disabled for this room.
+  uint32 empty_timeout_secs = 9;
+  uint32 participant_count = 10;
+  uint32 hand_count = 11;
+}
+
+message Participant {
+  string participant_id = 1;
+  bool publisher = 2;
+  bool subscriber = 3;
+  bool muted = 4;
+  // Unix seconds the participant first joined. Unset when the server has no
+  // join time for them (never a made-up 0).
+  optional int64 joined_at = 5;
+}
+
+// One entry of a room's raised-hand queue (FIFO). Participant ids are UUIDs.
+message RaisedHand {
+  string participant_id = 1;
+  int64 raised_at = 2;
+  optional int64 acknowledged_at = 3;
+  optional string acknowledged_by = 4;
+}
+
+message ListRoomsRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+}
+
+message ListRoomsResponse {
+  repeated Room rooms = 1;
+}
+
+message GetRoomRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+}
+
+message GetRoomResponse {
+  Room room = 1;
+}
+
+message ListParticipantsRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+}
+
+message ListParticipantsResponse {
+  string room_id = 1;
+  bool locked = 2;
+  repeated Participant participants = 3;
+}
+
+message CreateRoomRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  optional string label = 3;
+  optional uint32 max_publishers = 4;
+  // Empty-room expiry in seconds. Unset = server default (300, the Go-era
+  // EmptyTimeout); 0 = never expire; the server clamps to its configured maximum.
+  optional uint32 empty_timeout_secs = 5;
+}
+
+message CreateRoomResponse {
+  Room room = 1;
+}
+
+message DeleteRoomRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+}
+
+message DeleteRoomResponse {
+  Room room = 1;
+}
+
+message JoinRoomRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  // The joining participant's UUID (hub-api derives it from the verified user).
+  string participant_id = 4;
+  bool publish = 5;
+  bool subscribe = 6;
+  optional int64 ttl_secs = 7;
+}
+
+message JoinRoomResponse {
+  string token = 1;
+  string token_id = 2;
+  string participant_id = 3;
+  int64 expires_at = 4;
+  // WHIP/WHEP endpoints for this room (the token is the bearer credential).
+  string whip_url = 5;
+  string whep_url = 6;
+  // Echo of the contract version the server answered with ("v1").
+  string api_version = 7;
+}
+
+message LeaveRoomRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  string participant_id = 4;
+  string actor_id = 5;
+  RoomRole actor_role = 6;
+}
+
+message LeaveRoomResponse {
+  string room_id = 1;
+  string participant_id = 2;
+  uint32 sessions_closed = 3;
+}
+
+message KickParticipantRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  string participant_id = 4;
+  string actor_id = 5;
+  RoomRole actor_role = 6;
+}
+
+message KickParticipantResponse {
+  string room_id = 1;
+  string participant_id = 2;
+  uint32 sessions_closed = 3;
+}
+
+message MuteParticipantRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  string participant_id = 4;
+  string actor_id = 5;
+  RoomRole actor_role = 6;
+}
+
+message MuteParticipantResponse {
+  string room_id = 1;
+  string participant_id = 2;
+  bool muted = 3;
+}
+
+message UnmuteParticipantRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  string participant_id = 4;
+  string actor_id = 5;
+  RoomRole actor_role = 6;
+}
+
+message UnmuteParticipantResponse {
+  string room_id = 1;
+  string participant_id = 2;
+  bool muted = 3;
+}
+
+message MuteAllRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  string actor_id = 4;
+  RoomRole actor_role = 5;
+}
+
+message MuteAllResponse {
+  string room_id = 1;
+  uint32 muted = 2;
+}
+
+message LockRoomRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  string actor_id = 4;
+  RoomRole actor_role = 5;
+}
+
+message LockRoomResponse {
+  string room_id = 1;
+  bool locked = 2;
+}
+
+message UnlockRoomRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  string actor_id = 4;
+  RoomRole actor_role = 5;
+}
+
+message UnlockRoomResponse {
+  string room_id = 1;
+  bool locked = 2;
+}
+
+message ListHandsRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  // The end user listing (UUID); must have joined the room.
+  string actor_id = 4;
+}
+
+message ListHandsResponse {
+  string room_id = 1;
+  // Oldest first. With the moderate scope (staff actor): the whole queue; otherwise only the
+  // actor's own entry (empty when their hand is not raised).
+  repeated RaisedHand hands = 2;
+  // Total hands in the queue (always the full count, never who).
+  uint32 count = 3;
+  // The actor's 1-based position in the queue when their hand is raised.
+  optional uint32 position = 4;
+}
+
+message RaiseHandRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  string participant_id = 4;
+  // The end user acting (UUID); must equal participant_id and have joined the room.
+  string actor_id = 5;
+}
+
+message RaiseHandResponse {
+  RaisedHand hand = 1;
+}
+
+message LowerHandRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  string participant_id = 4;
+  string actor_id = 5;
+  RoomRole actor_role = 6;
+}
+
+message LowerHandResponse {
+  string room_id = 1;
+  string participant_id = 2;
+  // False when the participant had no raised hand (a no-op, not an error).
+  bool lowered = 3;
+}
+
+message AcknowledgeHandRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  string participant_id = 4;
+  string actor_id = 5;
+  RoomRole actor_role = 6;
+}
+
+message AcknowledgeHandResponse {
+  RaisedHand hand = 1;
+}
+
+message ResetHandsRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  string actor_id = 4;
+  RoomRole actor_role = 5;
+}
+
+message ResetHandsResponse {
+  string room_id = 1;
+  // Number of raised hands that were cleared (0 for an already-empty queue).
+  uint32 cleared = 2;
+}

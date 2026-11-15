@@ -159,14 +159,6 @@ def _declared_ports(doc: dict[str, Any]) -> set[tuple[int, str]]:
         ports = {p["name"]: p for p in c.get("ports", []) or []}
         for p in ports.values():
             out.add((int(p["containerPort"]), p.get("protocol", "TCP")))
-        # svc-streaming declares only the two boundary ports of its WebRTC media range
-        # (`webrtc-lo` / `webrtc-hi`); the whole range is the serving surface.
-        if "webrtc-lo" in ports and "webrtc-hi" in ports:
-            lo, hi = (
-                int(ports["webrtc-lo"]["containerPort"]),
-                int(ports["webrtc-hi"]["containerPort"]),
-            )
-            out.update((p, "UDP") for p in range(lo, hi + 1))
     return out
 
 
@@ -626,6 +618,17 @@ class TestPortScopedIngress:
                 assert (50204, "TCP") not in admitted, (
                     "hub-api gRPC must not be open to the whole namespace"
                 )
+            if comp == "svc-streaming":
+                # gRPC (50208) and the single RTC media port are admitted ONLY by the dedicated
+                # `-svc-streaming-grpc` / `-svc-streaming-media` CNPs (excluded from the generic
+                # per-workload policy; pinned exactly in test_svc_streaming_rtc_render.py).
+                carved = {(50208, "TCP")} | {
+                    p for p in declared if p[1] == "UDP" and p[0] not in (9000,)
+                }
+                assert not (carved & admitted), (
+                    f"svc-streaming generic CNP must not admit {carved & admitted}"
+                )
+                declared = declared - carved
             assert declared <= admitted, (
                 f"{w['metadata']['name']}: declared {declared - admitted} not admitted"
             )

@@ -1,8 +1,9 @@
-"""hub-api gets its svc-streaming address from Helm, matching the Service it actually talks to.
+"""hub-api gets its svc-streaming gRPC target from Helm, matching the Service it actually talks to.
 
-Regression: `hub_api/services/calls_proxy.py` defaulted to `http://svc-streaming:8093` while the
-chart serves svc-streaming on `pipeline.svcStreaming.port` (8208) under `<release>-svc-streaming`.
-Zero matching Deployments/containers is a hard failure, never a silent pass.
+Regression: `hub_api/services/calls_proxy.py` once defaulted to `http://svc-streaming:8093` while the
+chart serves svc-streaming under `<release>-svc-streaming`. Since the RoomsService port
+(`STREAMING_RTC_GRPC_TARGET`, gRPC over mTLS) replaced the REST proxy, the target must be the
+Service's `grpc` port. Zero matching Deployments/containers is a hard failure, never a silent pass.
 """
 
 from __future__ import annotations
@@ -50,23 +51,25 @@ def _svc_streaming_service_port(docs: list[dict[str, Any]]) -> tuple[str, int]:
         and d["spec"].get("type") == "ClusterIP"
     ]
     assert len(services) == 1, f"expected one ClusterIP svc-streaming Service, got {len(services)}"
-    http = [p for p in services[0]["spec"]["ports"] if p["name"] == "http"]
-    assert len(http) == 1
-    return services[0]["metadata"]["name"], http[0]["port"]
+    grpc_ports = [p for p in services[0]["spec"]["ports"] if p["name"] == "grpc"]
+    assert len(grpc_ports) == 1
+    return services[0]["metadata"]["name"], grpc_ports[0]["port"]
 
 
-def test_hub_api_streaming_url_matches_the_rendered_service() -> None:
+def test_hub_api_streaming_target_matches_the_rendered_service() -> None:
     docs = _render([])
     name, port = _svc_streaming_service_port(docs)
-    assert _hub_api_env(docs)["STREAMING_RTC_URL"] == f"http://{name}:{port}"
-    assert port == 8208
+    env = _hub_api_env(docs)
+    assert env["STREAMING_RTC_GRPC_TARGET"] == f"{name}:{port}"
+    assert port == 50208
+    assert "STREAMING_RTC_URL" not in env, "the REST proxy env is retired"
 
 
-def test_url_follows_a_port_override() -> None:
-    docs = _render(["pipeline.svcStreaming.port=9123"])
-    assert _hub_api_env(docs)["STREAMING_RTC_URL"].endswith(":9123")
+def test_target_follows_a_grpc_port_override() -> None:
+    docs = _render(["pipeline.svcStreaming.grpcPort=51234"])
+    assert _hub_api_env(docs)["STREAMING_RTC_GRPC_TARGET"].endswith(":51234")
 
 
 def test_env_absent_when_svc_streaming_disabled() -> None:
     docs = _render(["pipeline.svcStreaming.enabled=false"])
-    assert "STREAMING_RTC_URL" not in _hub_api_env(docs)
+    assert "STREAMING_RTC_GRPC_TARGET" not in _hub_api_env(docs)

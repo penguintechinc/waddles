@@ -164,6 +164,11 @@ pub struct CliConfig {
         default_value = "transcoding_minutes"
     )]
     pub transcode_product_key: String,
+
+    /// Allowed CORS origins for WebRTC media signaling routes (`/whip/*`, `/whep/*`,
+    /// `/rtc/rooms/*`). Empty = no cross-origin headers emitted.
+    #[arg(long, env = "SVC_STREAMING_CORS_ORIGINS", value_delimiter = ',')]
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl CliConfig {

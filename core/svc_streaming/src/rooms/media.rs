@@ -29,7 +29,7 @@ use webrtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit}
 use webrtc::runtime::Runtime;
 
 use super::token::RoomClaims;
-use super::{RoomError, RoomService};
+use super::{RoomError, RoomService, SessionGrant};
 use crate::egress::whep::{h264_codec, opus_codec, viewer_track};
 use crate::error::ApiError;
 use crate::rtc::fanout::{MediaFanouts, TrackFanout};
@@ -220,6 +220,11 @@ fn claims_participant(c: &RoomClaims) -> Result<Uuid, ApiError> {
     Uuid::parse_str(&c.sub).map_err(|_| ApiError::Unauthorized("invalid room token".into()))
 }
 
+/// Parses the token id (`jti`) a session is opened with.
+fn claim_jti(c: &RoomClaims) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(&c.jti).map_err(|_| ApiError::Unauthorized("invalid room token".into()))
+}
+
 fn created(location: String, sdp: String) -> Response {
     (
         StatusCode::CREATED,
@@ -247,6 +252,7 @@ async fn publish(
     }
     require_sdp(&headers)?;
     let participant = claims_participant(&claims)?;
+    let jti = claim_jti(&claims)?;
     let sdp = String::from_utf8(body.to_vec())
         .map_err(|_| ApiError::BadRequest("offer is not UTF-8".into()))?;
     let (has_video, has_audio) = (sdp.contains("m=video"), sdp.contains("m=audio"));
@@ -308,7 +314,10 @@ async fn publish(
             fanouts,
             pc.clone(),
             reap.ended.clone(),
-            claims.exp,
+            SessionGrant {
+                expires_at: claims.exp,
+                jti,
+            },
         )
         .await
     {
@@ -353,6 +362,7 @@ async fn subscribe(
     }
     require_sdp(&headers)?;
     let participant = claims_participant(&claims)?;
+    let jti = claim_jti(&claims)?;
     let restricted = match claims.source.as_deref() {
         Some(s) => Some(
             Uuid::parse_str(s).map_err(|_| ApiError::Unauthorized("invalid room token".into()))?,
@@ -451,7 +461,10 @@ async fn subscribe(
             participant,
             pc.clone(),
             reap.ended.clone(),
-            claims.exp,
+            SessionGrant {
+                expires_at: claims.exp,
+                jti,
+            },
         )
         .await
     {
