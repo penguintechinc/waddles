@@ -1,0 +1,47 @@
+{
+  "audience": "waddlebot-internal",
+  "claims": {
+    "streaming.rooms:moderate": {
+      "aud": "waddlebot-internal",
+      "exp": 1794689692,
+      "iat": 1794686092,
+      "iss": "hub-api",
+      "jti": "95280c9a-938d-4241-980b-4e2e7e7b7ce4",
+      "nbf": 1794686092,
+      "scope": "streaming.rooms:moderate",
+      "sub": "spiffe://penguintech.io/test/hub-api",
+      "tenant": "system"
+    },
+    "streaming.rooms:read": {
+      "aud": "waddlebot-internal",
+      "exp": 1794689692,
+      "iat": 1794686092,
+      "iss": "hub-api",
+      "jti": "fbf5f0d1-8115-43aa-afd9-10a9af38d7e7",
+      "nbf": 1794686092,
+      "scope": "streaming.rooms:read",
+      "sub": "spiffe://penguintech.io/test/hub-api",
+      "tenant": "system"
+    },
+    "streaming.rooms:write": {
+      "aud": "waddlebot-internal",
+      "exp": 1794689692,
+      "iat": 1794686092,
+      "iss": "hub-api",
+      "jti": "dca0396f-7669-4b27-bb38-ff585065a64e",
+      "nbf": 1794686092,
+      "scope": "streaming.rooms:write",
+      "sub": "spiffe://penguintech.io/test/hub-api",
+      "tenant": "system"
+    }
+  },
+  "issuer": "hub-api",
+  "kid": "fixture-1",
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAECHKYUFTkMmrnPHimUyPVvRfE6vPv\n/y5HskARgmjzatQ1uuL2jCJ9HKL/2ZNb9i+6qKWQIVqXa3wrkB2oPQarkw==\n-----END PUBLIC KEY-----\n",
+  "sub": "spiffe://penguintech.io/test/hub-api",
+  "tokens": {
+    "streaming.rooms:moderate": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImZpeHR1cmUtMSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodWItYXBpIiwiYXVkIjoid2FkZGxlYm90LWludGVybmFsIiwic3ViIjoic3BpZmZlOi8vcGVuZ3VpbnRlY2guaW8vdGVzdC9odWItYXBpIiwic2NvcGUiOiJzdHJlYW1pbmcucm9vbXM6bW9kZXJhdGUiLCJpYXQiOjE3OTQ2ODYwOTIsIm5iZiI6MTc5NDY4NjA5MiwiZXhwIjoxNzk0Njg5NjkyLCJqdGkiOiI5NTI4MGM5YS05MzhkLTQyNDEtOTgwYi00ZTJlN2U3YjdjZTQiLCJ0ZW5hbnQiOiJzeXN0ZW0ifQ.eyHjEnHgUijOFIco-eyPY34MzeSjLKa1KALfOKrCN-qhJ3sod1OyL3SA2AgbvLcND3ReYNvJFoB2yQxcyN_u-A",
+    "streaming.rooms:read": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImZpeHR1cmUtMSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodWItYXBpIiwiYXVkIjoid2FkZGxlYm90LWludGVybmFsIiwic3ViIjoic3BpZmZlOi8vcGVuZ3VpbnRlY2guaW8vdGVzdC9odWItYXBpIiwic2NvcGUiOiJzdHJlYW1pbmcucm9vbXM6cmVhZCIsImlhdCI6MTc5NDY4NjA5MiwibmJmIjoxNzk0Njg2MDkyLCJleHAiOjE3OTQ2ODk2OTIsImp0aSI6ImZiZjVmMGQxLTgxMTUtNDNhYS1hZmQ5LTEwYTlhZjM4ZDdlNyIsInRlbmFudCI6InN5c3RlbSJ9.YrgQFoVuRsku97gCOTRn7hjIUkelscwH_DtAGgZQl7VuV26ZzMM0SiilhjdW9gsHoWw-sxsLIezWYLWAuQ-fuw",
+    "streaming.rooms:write": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImZpeHR1cmUtMSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodWItYXBpIiwiYXVkIjoid2FkZGxlYm90LWludGVybmFsIiwic3ViIjoic3BpZmZlOi8vcGVuZ3VpbnRlY2guaW8vdGVzdC9odWItYXBpIiwic2NvcGUiOiJzdHJlYW1pbmcucm9vbXM6d3JpdGUiLCJpYXQiOjE3OTQ2ODYwOTIsIm5iZiI6MTc5NDY4NjA5MiwiZXhwIjoxNzk0Njg5NjkyLCJqdGkiOiJkY2EwMzk2Zi03NjY5LTRiMjctYmIzOC1mZjU4NTA2NWE2NGUiLCJ0ZW5hbnQiOiJzeXN0ZW0ifQ.1wKZPg80InE46fcS8niWDCw0s24q3SZMjQwJ5occbgdcfsYXHwPp9uGnHfJInJmqZZ8KoGMLoy6lHgGhd9JQkA"
+  }
+}

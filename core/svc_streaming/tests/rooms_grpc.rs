@@ -5,172 +5,19 @@
 //! served (the generated trait makes a missing impl a compile error; the routing
 //! test below proves each one is wired and auth-gated at runtime).
 
+mod rooms_common;
+
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde_json::json;
-use svc_streaming::rooms::grpc::pb::rooms_service_client::RoomsServiceClient;
 use svc_streaming::rooms::grpc::pb::*;
-use svc_streaming::rooms::grpc::{build_grpc_server_config, serve, RPC_NAMES};
-use svc_streaming::rooms::grpc_auth::{
-    ServiceJwtVerifier, SCOPE_MODERATE, SCOPE_READ, SCOPE_WRITE,
-};
+use svc_streaming::rooms::grpc::{build_grpc_server_config, RPC_NAMES};
+use svc_streaming::rooms::grpc_auth::{SCOPE_MODERATE, SCOPE_READ, SCOPE_WRITE};
 use svc_streaming::rooms::host_api::HostApiTls;
-use svc_streaming::rooms::token::TokenKeys;
-use svc_streaming::rooms::RoomService;
-use svc_streaming::rtc::config::RtcConfig;
-use svc_streaming::rtc::metrics::RtcMetrics;
-use svc_streaming::rtc::pc_factory::PeerConnectionFactory;
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tonic::{Code, Request};
 
-const SUBJECT: &str = "spiffe://penguintech.io/test/hub-api";
-const KID: &str = "k1";
-
-struct Harness {
-    client: RoomsServiceClient<Channel>,
-    signing_pem: String,
-    registry: prometheus::Registry,
-    port: u16,
-    ca_pem: String,
-    _dir: std::path::PathBuf,
-}
-
-fn ca() -> (rcgen::CertificateParams, rcgen::KeyPair, rcgen::Certificate) {
-    let key = rcgen::KeyPair::generate().unwrap();
-    let mut params = rcgen::CertificateParams::new(vec!["test-ca".to_string()]).unwrap();
-    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    let cert = params.self_signed(&key).unwrap();
-    (params, key, cert)
-}
-
-/// Starts the gRPC server (mTLS + JWT) and returns a connected client.
-async fn harness(udp_base: u16, moderation: bool) -> Harness {
-    let dir = std::env::temp_dir().join(format!("svc-streaming-grpc-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let w = |name: &str, body: &str| {
-        let p = dir.join(name);
-        std::fs::write(&p, body).unwrap();
-        p
-    };
-
-    let (ca_params, ca_key, ca_cert) = ca();
-    let issuer = rcgen::Issuer::from_params(&ca_params, ca_key);
-    let server_key = rcgen::KeyPair::generate().unwrap();
-    let server_cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-        .unwrap()
-        .signed_by(&server_key, &issuer)
-        .unwrap();
-    let client_key = rcgen::KeyPair::generate().unwrap();
-    let client_cert = rcgen::CertificateParams::new(vec!["hub-api".to_string()])
-        .unwrap()
-        .signed_by(&client_key, &issuer)
-        .unwrap();
-    let tls = HostApiTls {
-        server_cert: w("server.pem", &server_cert.pem()),
-        server_key: w("server.key", &server_key.serialize_pem()),
-        client_ca: w("ca.pem", &ca_cert.pem()),
-        port: 0,
-    };
-    let server_config = build_grpc_server_config(&tls).expect("server config");
-
-    // ES256 signing key for hub-api; the server only ever sees the public half.
-    let signing = rcgen::KeyPair::generate().unwrap();
-    let keys = ServiceJwtVerifier::keys_from_pem([(KID, signing.public_key_pem().as_str())]).unwrap();
-    let auth = Arc::new(ServiceJwtVerifier::new(
-        keys,
-        "waddlebot-internal",
-        vec!["hub-api".to_string()],
-        vec![SUBJECT.to_string()],
-    ));
-
-    let registry = prometheus::Registry::new();
-    let factory = Arc::new(
-        PeerConnectionFactory::new(RtcConfig {
-            bind_ip: "127.0.0.1".parse().unwrap(),
-            udp_port_range: (udp_base, udp_base + 10),
-            nat_1to1_ip: None,
-        })
-        .unwrap(),
-    );
-    let metrics = RtcMetrics::register(&registry).unwrap();
-    let rooms = Arc::new(
-        RoomService::new(
-            factory,
-            metrics,
-            Some(TokenKeys::new("0123456789abcdef0123456789abcdef").unwrap()),
-            "http://svc.test".into(),
-        )
-        .with_moderation(moderation),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(serve(listener, server_config, rooms, auth));
-
-    let client = connect(
-        port,
-        &ca_cert.pem(),
-        Some((client_cert.pem(), client_key.serialize_pem())),
-    )
-    .await
-    .expect("mTLS client connects");
-    Harness {
-        client,
-        signing_pem: signing.serialize_pem(),
-        registry,
-        port,
-        ca_pem: ca_cert.pem(),
-        _dir: dir,
-    }
-}
-
-async fn connect(
-    port: u16,
-    ca_pem: &str,
-    identity: Option<(String, String)>,
-) -> Result<RoomsServiceClient<Channel>, tonic::transport::Error> {
-    let mut tls = ClientTlsConfig::new()
-        .ca_certificate(Certificate::from_pem(ca_pem))
-        .domain_name("localhost");
-    if let Some((cert, key)) = identity {
-        tls = tls.identity(Identity::from_pem(cert, key));
-    }
-    let channel = Channel::from_shared(format!("https://127.0.0.1:{port}"))
-        .unwrap()
-        .tls_config(tls)?
-        .connect()
-        .await?;
-    Ok(RoomsServiceClient::new(channel))
-}
-
-fn now() -> i64 {
-    chrono::Utc::now().timestamp()
-}
-
-/// Mints a machine JWT like hub-api's issuer would.
-fn jwt(pem: &str, scope: &str, mutate: impl FnOnce(&mut serde_json::Value)) -> String {
-    let t = now();
-    let mut claims = json!({
-        "iss": "hub-api", "aud": "waddlebot-internal", "sub": SUBJECT, "scope": scope,
-        "iat": t, "nbf": t, "exp": t + 60, "jti": uuid::Uuid::new_v4().to_string(),
-    });
-    mutate(&mut claims);
-    let mut header = Header::new(Algorithm::ES256);
-    header.kid = Some(KID.into());
-    encode(&header, &claims, &EncodingKey::from_ec_pem(pem.as_bytes()).unwrap()).unwrap()
-}
-
-fn req<T>(msg: T, token: &str) -> Request<T> {
-    let mut r = Request::new(msg);
-    r.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-    r
-}
-
-fn admin() -> (String, i32) {
-    (uuid::Uuid::new_v4().to_string(), RoomRole::Admin as i32)
-}
+use rooms_common::*;
 
 #[tokio::test]
 async fn every_proto_rpc_is_declared_served_and_auth_gated() {
@@ -187,7 +34,7 @@ async fn every_proto_rpc_is_declared_served_and_auth_gated() {
         .map(|l| l.split('(').next().unwrap().trim().to_string())
         .collect();
     let constant: BTreeSet<String> = RPC_NAMES.iter().map(|s| s.to_string()).collect();
-    assert_eq!(declared.len(), 17, "denominator: {declared:?}");
+    assert_eq!(declared.len(), 18, "denominator: {declared:?}");
     assert_eq!(declared, constant, "RPC_NAMES drifted from rooms.proto");
 
     // 2. Each one is routed and demands a token: no token -> Unauthenticated, never
@@ -197,28 +44,58 @@ async fn every_proto_rpc_is_declared_served_and_auth_gated() {
     macro_rules! gate {
         ($method:ident, $msg:expr, $name:literal) => {{
             let e = h.client.$method(Request::new($msg)).await.unwrap_err();
-            assert_eq!(e.code(), Code::Unauthenticated, "{}: {}", $name, e.message());
+            assert_eq!(
+                e.code(),
+                Code::Unauthenticated,
+                "{}: {}",
+                $name,
+                e.message()
+            );
             seen.insert($name.to_string());
         }};
     }
     gate!(list_rooms, ListRoomsRequest::default(), "ListRooms");
     gate!(get_room, GetRoomRequest::default(), "GetRoom");
-    gate!(list_participants, ListParticipantsRequest::default(), "ListParticipants");
+    gate!(
+        list_participants,
+        ListParticipantsRequest::default(),
+        "ListParticipants"
+    );
     gate!(create_room, CreateRoomRequest::default(), "CreateRoom");
     gate!(delete_room, DeleteRoomRequest::default(), "DeleteRoom");
     gate!(join_room, JoinRoomRequest::default(), "JoinRoom");
     gate!(leave_room, LeaveRoomRequest::default(), "LeaveRoom");
-    gate!(kick_participant, KickParticipantRequest::default(), "KickParticipant");
-    gate!(mute_participant, MuteParticipantRequest::default(), "MuteParticipant");
-    gate!(unmute_participant, UnmuteParticipantRequest::default(), "UnmuteParticipant");
+    gate!(
+        kick_participant,
+        KickParticipantRequest::default(),
+        "KickParticipant"
+    );
+    gate!(
+        mute_participant,
+        MuteParticipantRequest::default(),
+        "MuteParticipant"
+    );
+    gate!(
+        unmute_participant,
+        UnmuteParticipantRequest::default(),
+        "UnmuteParticipant"
+    );
     gate!(mute_all, MuteAllRequest::default(), "MuteAll");
     gate!(lock_room, LockRoomRequest::default(), "LockRoom");
     gate!(unlock_room, UnlockRoomRequest::default(), "UnlockRoom");
     gate!(list_hands, ListHandsRequest::default(), "ListHands");
     gate!(raise_hand, RaiseHandRequest::default(), "RaiseHand");
     gate!(lower_hand, LowerHandRequest::default(), "LowerHand");
-    gate!(acknowledge_hand, AcknowledgeHandRequest::default(), "AcknowledgeHand");
-    assert_eq!(seen, declared, "an RPC in the proto is not exercised/served");
+    gate!(
+        acknowledge_hand,
+        AcknowledgeHandRequest::default(),
+        "AcknowledgeHand"
+    );
+    gate!(reset_hands, ResetHandsRequest::default(), "ResetHands");
+    assert_eq!(
+        seen, declared,
+        "an RPC in the proto is not exercised/served"
+    );
 }
 
 #[tokio::test]
@@ -251,7 +128,13 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
 
     let listed = h
         .client
-        .list_rooms(req(ListRoomsRequest { api_version: "v1".into(), community_id: "7".into() }, &read))
+        .list_rooms(req(
+            ListRoomsRequest {
+                api_version: "v1".into(),
+                community_id: "7".into(),
+            },
+            &read,
+        ))
         .await
         .unwrap()
         .into_inner();
@@ -259,14 +142,27 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
     // Community scoping: another community sees nothing and cannot read the room.
     let other = h
         .client
-        .list_rooms(req(ListRoomsRequest { api_version: "v1".into(), community_id: "8".into() }, &read))
+        .list_rooms(req(
+            ListRoomsRequest {
+                api_version: "v1".into(),
+                community_id: "8".into(),
+            },
+            &read,
+        ))
         .await
         .unwrap()
         .into_inner();
     assert!(other.rooms.is_empty());
     let e = h
         .client
-        .get_room(req(GetRoomRequest { api_version: "v1".into(), community_id: "8".into(), room_id: room.room_id.clone() }, &read))
+        .get_room(req(
+            GetRoomRequest {
+                api_version: "v1".into(),
+                community_id: "8".into(),
+                room_id: room.room_id.clone(),
+            },
+            &read,
+        ))
         .await
         .unwrap_err();
     assert_eq!(e.code(), Code::NotFound);
@@ -275,7 +171,8 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
     let joined = h
         .client
         .join_room(req(
-            JoinRoomRequest { api_version: "v1".into(),
+            JoinRoomRequest {
+                api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 participant_id: participant.clone(),
@@ -290,12 +187,16 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
         .into_inner();
     assert!(!joined.token.is_empty());
     assert_eq!(joined.participant_id, participant);
-    assert_eq!(joined.whip_url, format!("http://svc.test/rtc/rooms/{}/whip", room.room_id));
+    assert_eq!(
+        joined.whip_url,
+        format!("http://svc.test/rtc/rooms/{}/whip", room.room_id)
+    );
 
     // Moderation: lock refuses further joins, unlock restores them.
     h.client
         .lock_room(req(
-            LockRoomRequest { api_version: "v1".into(),
+            LockRoomRequest {
+                api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 actor_id: actor.clone(),
@@ -305,7 +206,8 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
         ))
         .await
         .unwrap();
-    let join_req = || JoinRoomRequest { api_version: "v1".into(),
+    let join_req = || JoinRoomRequest {
+        api_version: "v1".into(),
         community_id: "7".into(),
         room_id: room.room_id.clone(),
         participant_id: uuid::Uuid::new_v4().to_string(),
@@ -313,12 +215,20 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
         subscribe: true,
         ttl_secs: None,
     };
-    let e = h.client.join_room(req(join_req(), &write)).await.unwrap_err();
+    let e = h
+        .client
+        .join_room(req(join_req(), &write))
+        .await
+        .unwrap_err();
     assert_eq!(e.code(), Code::PermissionDenied, "{}", e.message());
     let participants = h
         .client
         .list_participants(req(
-            ListParticipantsRequest { api_version: "v1".into(), community_id: "7".into(), room_id: room.room_id.clone() },
+            ListParticipantsRequest {
+                api_version: "v1".into(),
+                community_id: "7".into(),
+                room_id: room.room_id.clone(),
+            },
             &read,
         ))
         .await
@@ -327,7 +237,8 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
     assert!(participants.locked);
     h.client
         .unlock_room(req(
-            UnlockRoomRequest { api_version: "v1".into(),
+            UnlockRoomRequest {
+                api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 actor_id: actor.clone(),
@@ -345,7 +256,8 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
     let muted = h
         .client
         .mute_participant(req(
-            MuteParticipantRequest { api_version: "v1".into(),
+            MuteParticipantRequest {
+                api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 participant_id: target.clone(),
@@ -360,7 +272,8 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
     assert!(muted.muted);
     h.client
         .unmute_participant(req(
-            UnmuteParticipantRequest { api_version: "v1".into(),
+            UnmuteParticipantRequest {
+                api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 participant_id: target.clone(),
@@ -373,7 +286,8 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
         .unwrap();
     h.client
         .mute_all(req(
-            MuteAllRequest { api_version: "v1".into(),
+            MuteAllRequest {
+                api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 actor_id: actor_id.clone(),
@@ -385,7 +299,8 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
         .unwrap();
     h.client
         .kick_participant(req(
-            KickParticipantRequest { api_version: "v1".into(),
+            KickParticipantRequest {
+                api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 participant_id: target.clone(),
@@ -398,7 +313,8 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
         .unwrap();
     h.client
         .leave_room(req(
-            LeaveRoomRequest { api_version: "v1".into(),
+            LeaveRoomRequest {
+                api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id.clone(),
                 participant_id: participant.clone(),
@@ -412,14 +328,25 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
 
     h.client
         .delete_room(req(
-            DeleteRoomRequest { api_version: "v1".into(), community_id: "7".into(), room_id: room.room_id.clone() },
+            DeleteRoomRequest {
+                api_version: "v1".into(),
+                community_id: "7".into(),
+                room_id: room.room_id.clone(),
+            },
             &write,
         ))
         .await
         .unwrap();
     let e = h
         .client
-        .get_room(req(GetRoomRequest { api_version: "v1".into(), community_id: "7".into(), room_id: room.room_id }, &read))
+        .get_room(req(
+            GetRoomRequest {
+                api_version: "v1".into(),
+                community_id: "7".into(),
+                room_id: room.room_id,
+            },
+            &read,
+        ))
         .await
         .unwrap_err();
     assert_eq!(e.code(), Code::NotFound);
@@ -430,16 +357,23 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
         .iter()
         .find(|f| f.name() == "rooms_grpc_requests_total")
         .expect("rooms_grpc_requests_total registered");
-    let total: f64 = counter.get_metric().iter().map(|m| m.get_counter().value()).sum();
+    let total: f64 = counter
+        .get_metric()
+        .iter()
+        .map(|m| m.get_counter().value())
+        .sum();
     assert!(total >= 15.0, "counted {total} grpc calls");
     let has = |code: &str| {
-        counter
-            .get_metric()
-            .iter()
-            .any(|m| m.get_label().iter().any(|l| l.name() == "code" && l.value() == code))
+        counter.get_metric().iter().any(|m| {
+            m.get_label()
+                .iter()
+                .any(|l| l.name() == "code" && l.value() == code)
+        })
     };
     assert!(has("ok") && has("notfound") && has("permissiondenied"));
-    assert!(families.iter().any(|f| f.name() == "rooms_grpc_request_seconds"));
+    assert!(families
+        .iter()
+        .any(|f| f.name() == "rooms_grpc_request_seconds"));
 }
 
 #[tokio::test]
@@ -449,13 +383,21 @@ async fn moderation_enforces_actor_role_and_feature_flag() {
     let moderate = jwt(&h.signing_pem, SCOPE_MODERATE, |_| {});
     let room = h
         .client
-        .create_room(req(CreateRoomRequest { api_version: "v1".into(), community_id: "7".into(), ..Default::default() }, &write))
+        .create_room(req(
+            CreateRoomRequest {
+                api_version: "v1".into(),
+                community_id: "7".into(),
+                ..Default::default()
+            },
+            &write,
+        ))
         .await
         .unwrap()
         .into_inner()
         .room
         .unwrap();
-    let kick = |role: RoomRole| KickParticipantRequest { api_version: "v1".into(),
+    let kick = |role: RoomRole| KickParticipantRequest {
+        api_version: "v1".into(),
         community_id: "7".into(),
         room_id: room.room_id.clone(),
         participant_id: uuid::Uuid::new_v4().to_string(),
@@ -463,10 +405,17 @@ async fn moderation_enforces_actor_role_and_feature_flag() {
         actor_role: role as i32,
     };
     for role in [RoomRole::Member, RoomRole::Guest, RoomRole::Unspecified] {
-        let e = h.client.kick_participant(req(kick(role), &moderate)).await.unwrap_err();
+        let e = h
+            .client
+            .kick_participant(req(kick(role), &moderate))
+            .await
+            .unwrap_err();
         assert_eq!(e.code(), Code::PermissionDenied, "{role:?}");
     }
-    h.client.kick_participant(req(kick(RoomRole::Moderator), &moderate)).await.unwrap();
+    h.client
+        .kick_participant(req(kick(RoomRole::Moderator), &moderate))
+        .await
+        .unwrap();
 
     // Flag OFF: moderation refused loudly (Unimplemented), not silently ignored.
     let mut off = harness(42160, false).await;
@@ -474,7 +423,14 @@ async fn moderation_enforces_actor_role_and_feature_flag() {
     let moderate = jwt(&off.signing_pem, SCOPE_MODERATE, |_| {});
     let room = off
         .client
-        .create_room(req(CreateRoomRequest { api_version: "v1".into(), community_id: "7".into(), ..Default::default() }, &write))
+        .create_room(req(
+            CreateRoomRequest {
+                api_version: "v1".into(),
+                community_id: "7".into(),
+                ..Default::default()
+            },
+            &write,
+        ))
         .await
         .unwrap()
         .into_inner()
@@ -483,7 +439,8 @@ async fn moderation_enforces_actor_role_and_feature_flag() {
     let e = off
         .client
         .lock_room(req(
-            LockRoomRequest { api_version: "v1".into(),
+            LockRoomRequest {
+                api_version: "v1".into(),
                 community_id: "7".into(),
                 room_id: room.room_id,
                 actor_id: uuid::Uuid::new_v4().to_string(),
@@ -503,7 +460,14 @@ async fn invalid_ids_are_invalid_argument() {
     let read = jwt(&h.signing_pem, SCOPE_READ, |_| {});
     let e = h
         .client
-        .get_room(req(GetRoomRequest { api_version: "v1".into(), community_id: "7".into(), room_id: "not-a-uuid".into() }, &read))
+        .get_room(req(
+            GetRoomRequest {
+                api_version: "v1".into(),
+                community_id: "7".into(),
+                room_id: "not-a-uuid".into(),
+            },
+            &read,
+        ))
         .await
         .unwrap_err();
     assert_eq!(e.code(), Code::InvalidArgument);
@@ -516,24 +480,60 @@ async fn bad_tokens_are_refused_before_any_work() {
     let base_client = h.client.clone();
     let list = |t: String| {
         let mut c = base_client.clone();
-        async move { c.list_rooms(req(ListRoomsRequest { api_version: "v1".into(), community_id: "7".into() }, &t)).await }
+        async move {
+            c.list_rooms(req(
+                ListRoomsRequest {
+                    api_version: "v1".into(),
+                    community_id: "7".into(),
+                },
+                &t,
+            ))
+            .await
+        }
     };
     // Sanity: a good token works.
     assert!(list(jwt(&k, SCOPE_READ, |_| {})).await.is_ok());
 
     let wrong_scope = list(jwt(&k, SCOPE_WRITE, |_| {})).await.unwrap_err();
     assert_eq!(wrong_scope.code(), Code::PermissionDenied);
-    let wrong_sub = list(jwt(&k, SCOPE_READ, |c| c["sub"] = json!("spiffe://penguintech.io/x/other")))
-        .await
-        .unwrap_err();
+    let wrong_sub = list(jwt(&k, SCOPE_READ, |c| {
+        c["sub"] = json!("spiffe://penguintech.io/x/other")
+    }))
+    .await
+    .unwrap_err();
     assert_eq!(wrong_sub.code(), Code::PermissionDenied);
 
     let cases: Vec<(&str, String)> = vec![
-        ("expired", jwt(&k, SCOPE_READ, |c| { c["exp"] = json!(now() - 3600); c["iat"] = json!(now() - 7200); c["nbf"] = json!(now() - 7200); })),
-        ("wrong audience", jwt(&k, SCOPE_READ, |c| c["aud"] = json!("someone-else"))),
-        ("wrong issuer", jwt(&k, SCOPE_READ, |c| c["iss"] = json!("evil"))),
-        ("no jti", jwt(&k, SCOPE_READ, |c| { c.as_object_mut().unwrap().remove("jti"); })),
-        ("foreign key", jwt(&rcgen::KeyPair::generate().unwrap().serialize_pem(), SCOPE_READ, |_| {})),
+        (
+            "expired",
+            jwt(&k, SCOPE_READ, |c| {
+                c["exp"] = json!(now() - 3600);
+                c["iat"] = json!(now() - 7200);
+                c["nbf"] = json!(now() - 7200);
+            }),
+        ),
+        (
+            "wrong audience",
+            jwt(&k, SCOPE_READ, |c| c["aud"] = json!("someone-else")),
+        ),
+        (
+            "wrong issuer",
+            jwt(&k, SCOPE_READ, |c| c["iss"] = json!("evil")),
+        ),
+        (
+            "no jti",
+            jwt(&k, SCOPE_READ, |c| {
+                c.as_object_mut().unwrap().remove("jti");
+            }),
+        ),
+        (
+            "foreign key",
+            jwt(
+                &rcgen::KeyPair::generate().unwrap().serialize_pem(),
+                SCOPE_READ,
+                |_| {},
+            ),
+        ),
         ("garbage", "not.a.jwt".to_string()),
     ];
     for (name, token) in cases {
@@ -552,12 +552,18 @@ async fn bad_tokens_are_refused_before_any_work() {
         &EncodingKey::from_secret(b"public-key-bytes"),
     )
     .unwrap();
-    assert_eq!(list(confusion).await.unwrap_err().code(), Code::Unauthenticated);
+    assert_eq!(
+        list(confusion).await.unwrap_err().code(),
+        Code::Unauthenticated
+    );
 
     // Missing header entirely.
     let e = h
         .client
-        .list_rooms(Request::new(ListRoomsRequest { api_version: "v1".into(), community_id: "7".into() }))
+        .list_rooms(Request::new(ListRoomsRequest {
+            api_version: "v1".into(),
+            community_id: "7".into(),
+        }))
         .await
         .unwrap_err();
     assert_eq!(e.code(), Code::Unauthenticated);
@@ -571,11 +577,17 @@ async fn client_without_a_certificate_from_the_configured_ca_is_refused() {
     let refused = match no_cert {
         Err(_) => true,
         Ok(mut c) => c
-            .list_rooms(Request::new(ListRoomsRequest { api_version: "v1".into(), community_id: "7".into() }))
+            .list_rooms(Request::new(ListRoomsRequest {
+                api_version: "v1".into(),
+                community_id: "7".into(),
+            }))
             .await
             .is_err(),
     };
-    assert!(refused, "a certificate-less client must not reach any handler");
+    assert!(
+        refused,
+        "a certificate-less client must not reach any handler"
+    );
 }
 
 #[tokio::test]
@@ -587,14 +599,18 @@ async fn unknown_or_missing_api_version_is_unimplemented_not_served() {
         let e = h
             .client
             .list_rooms(req(
-                ListRoomsRequest { api_version: v.into(), community_id: "7".into() },
+                ListRoomsRequest {
+                    api_version: v.into(),
+                    community_id: "7".into(),
+                },
                 &read,
             ))
             .await
             .unwrap_err();
         assert_eq!(e.code(), Code::Unimplemented, "api_version {v:?}");
         assert!(
-            e.message().contains(&format!("api_version {v} not supported")),
+            e.message()
+                .contains(&format!("api_version {v} not supported")),
             "message: {}",
             e.message()
         );
@@ -602,103 +618,70 @@ async fn unknown_or_missing_api_version_is_unimplemented_not_served() {
     // A wrong version never reaches auth-free territory: no token still wins.
     let e = h
         .client
-        .list_rooms(Request::new(ListRoomsRequest { api_version: "v2".into(), community_id: "7".into() }))
+        .list_rooms(Request::new(ListRoomsRequest {
+            api_version: "v2".into(),
+            community_id: "7".into(),
+        }))
         .await
         .unwrap_err();
     assert_eq!(e.code(), Code::Unauthenticated);
 }
 
 #[tokio::test]
-async fn hands_rpcs_fail_loud_until_the_queue_exists() {
-    let mut h = harness(42260, true).await;
+async fn empty_timeout_is_defaulted_disabled_or_clamped_by_the_server() {
+    let mut h = harness_with(
+        42280,
+        Opts {
+            idle: Some(svc_streaming::rooms::IdlePolicy::new(120, 600).unwrap()),
+            ..Opts::default()
+        },
+    )
+    .await;
+    let default = create_room(&mut h, "7", None).await;
+    let never = create_room(&mut h, "7", Some(0)).await;
+    let exact = create_room(&mut h, "7", Some(45)).await;
+    let clamped = create_room(&mut h, "7", Some(u32::MAX)).await;
+    assert_eq!(
+        default.empty_timeout_secs, 120,
+        "unset -> configured default"
+    );
+    assert_eq!(never.empty_timeout_secs, 0, "0 -> never expire");
+    assert_eq!(exact.empty_timeout_secs, 45);
+    assert_eq!(
+        clamped.empty_timeout_secs, 600,
+        "clamped to the configured maximum"
+    );
+    // The value round-trips through GetRoom and ListRooms.
     let read = jwt(&h.signing_pem, SCOPE_READ, |_| {});
-    let write = jwt(&h.signing_pem, SCOPE_WRITE, |_| {});
-    let moderate = jwt(&h.signing_pem, SCOPE_MODERATE, |_| {});
-    let room = uuid::Uuid::new_v4().to_string();
-    let who = uuid::Uuid::new_v4().to_string();
-    let (actor, role) = admin();
-    let mut seen = 0;
-    macro_rules! loud {
-        ($method:ident, $msg:expr, $tok:expr, $name:literal) => {{
-            let e = h.client.$method(req($msg, $tok)).await.unwrap_err();
-            assert_eq!(e.code(), Code::Unimplemented, "{}: {}", $name, e.message());
-            assert!(e.message().contains("not implemented"), "{}: {}", $name, e.message());
-            seen += 1;
-        }};
-    }
-    loud!(
-        list_hands,
-        ListHandsRequest { api_version: "v1".into(), community_id: "7".into(), room_id: room.clone() },
-        &read,
-        "ListHands"
-    );
-    loud!(
-        raise_hand,
-        RaiseHandRequest {
-            api_version: "v1".into(),
-            community_id: "7".into(),
-            room_id: room.clone(),
-            participant_id: who.clone(),
-        },
-        &write,
-        "RaiseHand"
-    );
-    loud!(
-        lower_hand,
-        LowerHandRequest {
-            api_version: "v1".into(),
-            community_id: "7".into(),
-            room_id: room.clone(),
-            participant_id: who.clone(),
-            actor_id: actor.clone(),
-            actor_role: role,
-        },
-        &write,
-        "LowerHand"
-    );
-    loud!(
-        acknowledge_hand,
-        AcknowledgeHandRequest {
-            api_version: "v1".into(),
-            community_id: "7".into(),
-            room_id: room,
-            participant_id: who,
-            actor_id: actor,
-            actor_role: role,
-        },
-        &moderate,
-        "AcknowledgeHand"
-    );
-    assert_eq!(seen, 4, "all four hands RPCs examined");
+    let got = h
+        .client
+        .get_room(req(
+            GetRoomRequest {
+                api_version: "v1".into(),
+                community_id: "7".into(),
+                room_id: exact.room_id.clone(),
+            },
+            &read,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .room
+        .unwrap();
+    assert_eq!(got.empty_timeout_secs, 45);
 }
 
 #[tokio::test]
-async fn nonzero_empty_timeout_is_refused_until_expiry_exists() {
-    let mut h = harness(42280, true).await;
-    let write = jwt(&h.signing_pem, SCOPE_WRITE, |_| {});
-    let e = h
+async fn community_bound_token_cannot_reach_another_community() {
+    let mut h = harness(42300, true).await;
+    let bound = |scope: &str| jwt(&h.signing_pem, scope, |c| c["community"] = json!(7));
+    let (read, write) = (bound(SCOPE_READ), bound(SCOPE_WRITE));
+    let room = h
         .client
         .create_room(req(
             CreateRoomRequest {
                 api_version: "v1".into(),
                 community_id: "7".into(),
-                empty_timeout_secs: Some(300),
-                ..Default::default()
-            },
-            &write,
-        ))
-        .await
-        .unwrap_err();
-    assert_eq!(e.code(), Code::Unimplemented);
-    assert!(e.message().contains("empty_timeout_secs"), "{}", e.message());
-    // 0 / unset stay valid (no expiry).
-    let ok = h
-        .client
-        .create_room(req(
-            CreateRoomRequest {
-                api_version: "v1".into(),
-                community_id: "7".into(),
-                empty_timeout_secs: Some(0),
                 ..Default::default()
             },
             &write,
@@ -708,5 +691,190 @@ async fn nonzero_empty_timeout_is_refused_until_expiry_exists() {
         .into_inner()
         .room
         .unwrap();
-    assert_eq!(ok.empty_timeout_secs, 0);
+    // The bound community works.
+    h.client
+        .get_room(req(
+            GetRoomRequest {
+                api_version: "v1".into(),
+                community_id: "7".into(),
+                room_id: room.room_id.clone(),
+            },
+            &read,
+        ))
+        .await
+        .unwrap();
+    // Any other community named in the body is NOT_FOUND, for reads and writes alike, and a
+    // room is never created in it.
+    for other in ["8", "", "07", "7 "] {
+        let e = h
+            .client
+            .get_room(req(
+                GetRoomRequest {
+                    api_version: "v1".into(),
+                    community_id: other.into(),
+                    room_id: room.room_id.clone(),
+                },
+                &read,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.code(),
+            Code::NotFound,
+            "community {other:?}: {}",
+            e.message()
+        );
+        let e = h
+            .client
+            .create_room(req(
+                CreateRoomRequest {
+                    api_version: "v1".into(),
+                    community_id: other.into(),
+                    ..Default::default()
+                },
+                &write,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code(), Code::NotFound, "create in {other:?}");
+    }
+    assert_eq!(h.svc.list_rooms("8").await.unwrap().len(), 0);
+    // A non-numeric `community` claim is an invalid token, not "no binding".
+    let bad = jwt(&h.signing_pem, SCOPE_READ, |c| c["community"] = json!("7"));
+    let e = h
+        .client
+        .list_rooms(req(
+            ListRoomsRequest {
+                api_version: "v1".into(),
+                community_id: "7".into(),
+            },
+            &bad,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn health_is_serving_when_ready_and_demands_a_service_jwt() {
+    use tonic_health::pb::health_check_response::ServingStatus;
+    use tonic_health::pb::health_client::HealthClient;
+    use tonic_health::pb::HealthCheckRequest;
+
+    let h = harness(42320, true).await;
+    let ch = channel(h.port, &h.ca_pem, Some(h.client_identity.clone()))
+        .await
+        .unwrap();
+    let mut health = HealthClient::new(ch);
+    let check = |service: &str| HealthCheckRequest {
+        service: service.into(),
+    };
+    let read = jwt(&h.signing_pem, SCOPE_READ, |_| {});
+    for service in ["", svc_streaming::rooms::grpc::HEALTH_SERVICE_NAME] {
+        let r = health
+            .check(req(check(service), &read))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(r.status(), ServingStatus::Serving, "service {service:?}");
+    }
+    // Unknown services are NOT_FOUND per the grpc.health.v1 contract.
+    let e = health.check(req(check("nope"), &read)).await.unwrap_err();
+    assert_eq!(e.code(), Code::NotFound);
+    // Health is an inter-service call like any other: no token, wrong scope, bad token.
+    let e = health.check(Request::new(check(""))).await.unwrap_err();
+    assert_eq!(e.code(), Code::Unauthenticated);
+    let write = jwt(&h.signing_pem, SCOPE_WRITE, |_| {});
+    let e = health.check(req(check(""), &write)).await.unwrap_err();
+    assert_eq!(e.code(), Code::PermissionDenied);
+    let e = health.check(req(check(""), "not.a.jwt")).await.unwrap_err();
+    assert_eq!(e.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn health_is_not_serving_when_the_room_service_is_not_ready() {
+    use tonic_health::pb::health_check_response::ServingStatus;
+    use tonic_health::pb::health_client::HealthClient;
+    use tonic_health::pb::HealthCheckRequest;
+
+    let h = harness_with(
+        42340,
+        Opts {
+            token_secret: false,
+            ..Opts::default()
+        },
+    )
+    .await;
+    assert!(h.svc.readiness().is_err());
+    let ch = channel(h.port, &h.ca_pem, Some(h.client_identity.clone()))
+        .await
+        .unwrap();
+    let mut health = HealthClient::new(ch);
+    let read = jwt(&h.signing_pem, SCOPE_READ, |_| {});
+    for service in ["", svc_streaming::rooms::grpc::HEALTH_SERVICE_NAME] {
+        let r = health
+            .check(req(
+                HealthCheckRequest {
+                    service: service.into(),
+                },
+                &read,
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(r.status(), ServingStatus::NotServing, "service {service:?}");
+    }
+}
+
+#[test]
+fn grpc_tls_config_names_its_crypto_provider_explicitly() {
+    // svc_streaming's lock holds BOTH rustls backends (ring and aws-lc-rs), so a bare
+    // `ServerConfig::builder()` cannot pick one: it panics unless a process default has been
+    // installed. The gRPC listener must therefore name its provider itself and must not lean
+    // on (or install) a process-wide default.
+    assert!(
+        rustls::crypto::CryptoProvider::get_default().is_none(),
+        "this test binary must run with no process-default provider installed"
+    );
+    let dir = std::env::temp_dir().join(format!("svc-streaming-tls-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (ca_params, ca_key, ca_cert) = {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["test-ca".to_string()]).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let cert = params.self_signed(&key).unwrap();
+        (params, key, cert)
+    };
+    let issuer = rcgen::Issuer::from_params(&ca_params, ca_key);
+    let server_key = rcgen::KeyPair::generate().unwrap();
+    let server_cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+        .unwrap()
+        .signed_by(&server_key, &issuer)
+        .unwrap();
+    let write = |name: &str, body: String| {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    };
+    let tls = HostApiTls {
+        server_cert: write("server.pem", server_cert.pem()),
+        server_key: write("server.key", server_key.serialize_pem()),
+        client_ca: write("ca.pem", ca_cert.pem()),
+        port: 0,
+    };
+    let cfg = build_grpc_server_config(&tls).expect("explicit-provider config builds");
+    assert!(
+        rustls::crypto::CryptoProvider::get_default().is_none(),
+        "building the listener config must not install a process default"
+    );
+    assert_eq!(cfg.alpn_protocols, vec![b"h2".to_vec()]);
+    // The provider is the one the code named (ring), not whichever backend won a default race:
+    // ring's default kx groups are exactly the config's.
+    let ring = rustls::crypto::ring::default_provider();
+    let names = |p: &rustls::crypto::CryptoProvider| {
+        p.kx_groups.iter().map(|g| g.name()).collect::<Vec<_>>()
+    };
+    assert_eq!(names(cfg.crypto_provider()), names(&ring));
+    assert!(!cfg.crypto_provider().cipher_suites.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
 }

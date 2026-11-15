@@ -139,6 +139,12 @@ class RoomsServiceStub:
             response_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandResponse.FromString,
             _registered_method=True,
         )
+        self.ResetHands = channel.unary_unary(
+            "/waddles.streaming.internal.v1.RoomsService/ResetHands",
+            request_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ResetHandsRequest.SerializeToString,
+            response_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ResetHandsResponse.FromString,
+            _registered_method=True,
+        )
 
 
 class RoomsServiceServicer:
@@ -163,7 +169,10 @@ class RoomsServiceServicer:
         raise NotImplementedError("Method not implemented!")
 
     def ListHands(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+        """Scope "streaming.rooms:read" (the actor's own entry + queue length/position) or
+        "streaming.rooms:moderate" (the whole queue, actor must be room staff). `actor_id` must
+        be a participant who joined the room.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
@@ -181,7 +190,10 @@ class RoomsServiceServicer:
         raise NotImplementedError("Method not implemented!")
 
     def JoinRoom(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+        """Scope "streaming.rooms:write". A call carrying the "streaming.rooms:moderate" service
+        JWT instead additionally registers the participant as room STAFF in the server-side
+        member table (the only way staff is established; no request field can claim it).
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
@@ -194,9 +206,12 @@ class RoomsServiceServicer:
 
     def RaiseHand(self, request, context):
         """Raised-hand queue, authoritative in svc-streaming (same lifecycle as rooms
-        and locks: in memory, cleared on kick/leave/delete). RaiseHand is idempotent
-        (raising twice keeps the original position). LowerHand by someone other
-        than the participant needs a moderator/admin actor role.
+        and locks: in memory, cleared on kick/leave/delete). Authorization is checked against
+        the server-side member table and the VERIFIED service JWT, never a caller-stated role
+        (`actor_role` is ignored by every hand RPC): RaiseHand needs `actor_id == participant_id`
+        who joined the room; it is idempotent (raising twice keeps the original position).
+        LowerHand: own hand needs a joined actor (scope write); someone else's needs scope
+        "streaming.rooms:moderate" AND the actor recorded as room staff.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
@@ -209,8 +224,9 @@ class RoomsServiceServicer:
         raise NotImplementedError("Method not implemented!")
 
     def KickParticipant(self, request, context):
-        """Scope "streaming.rooms:moderate" (also gated by flag rooms.moderation and
-        the actor role: moderator or admin).
+        """Scope "streaming.rooms:moderate" (also gated by flag rooms.moderation and the actor's
+        server-recorded role; the kick/mute/lock family still reads `actor_role`, the hand RPCs
+        below use the member table instead).
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
@@ -248,6 +264,12 @@ class RoomsServiceServicer:
 
     def AcknowledgeHand(self, request, context):
         """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def ResetHands(self, request, context):
+        """Clears the whole raised-hand queue of a room (moderator/admin actor role)."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
@@ -339,6 +361,11 @@ def add_RoomsServiceServicer_to_server(servicer, server):
             servicer.AcknowledgeHand,
             request_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandRequest.FromString,
             response_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandResponse.SerializeToString,
+        ),
+        "ResetHands": grpc.unary_unary_rpc_method_handler(
+            servicer.ResetHands,
+            request_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ResetHandsRequest.FromString,
+            response_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ResetHandsResponse.SerializeToString,
         ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -853,6 +880,36 @@ class RoomsService:
             "/waddles.streaming.internal.v1.RoomsService/AcknowledgeHand",
             waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandRequest.SerializeToString,
             waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.AcknowledgeHandResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def ResetHands(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/waddles.streaming.internal.v1.RoomsService/ResetHands",
+            waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ResetHandsRequest.SerializeToString,
+            waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.ResetHandsResponse.FromString,
             options,
             channel_credentials,
             insecure,

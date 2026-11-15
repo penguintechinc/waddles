@@ -20,22 +20,32 @@ service RoomsService {
   rpc ListRooms(ListRoomsRequest) returns (ListRoomsResponse);
   rpc GetRoom(GetRoomRequest) returns (GetRoomResponse);
   rpc ListParticipants(ListParticipantsRequest) returns (ListParticipantsResponse);
+  // Scope "streaming.rooms:read" (the actor's own entry + queue length/position) or
+  // "streaming.rooms:moderate" (the whole queue, actor must be room staff). `actor_id` must
+  // be a participant who joined the room.
   rpc ListHands(ListHandsRequest) returns (ListHandsResponse);
 
   // Scope "streaming.rooms:write" (member-level actions).
   rpc CreateRoom(CreateRoomRequest) returns (CreateRoomResponse);
   rpc DeleteRoom(DeleteRoomRequest) returns (DeleteRoomResponse);
+  // Scope "streaming.rooms:write". A call carrying the "streaming.rooms:moderate" service
+  // JWT instead additionally registers the participant as room STAFF in the server-side
+  // member table (the only way staff is established; no request field can claim it).
   rpc JoinRoom(JoinRoomRequest) returns (JoinRoomResponse);
   rpc LeaveRoom(LeaveRoomRequest) returns (LeaveRoomResponse);
   // Raised-hand queue, authoritative in svc-streaming (same lifecycle as rooms
-  // and locks: in memory, cleared on kick/leave/delete). RaiseHand is idempotent
-  // (raising twice keeps the original position). LowerHand by someone other
-  // than the participant needs a moderator/admin actor role.
+  // and locks: in memory, cleared on kick/leave/delete). Authorization is checked against
+  // the server-side member table and the VERIFIED service JWT, never a caller-stated role
+  // (`actor_role` is ignored by every hand RPC): RaiseHand needs `actor_id == participant_id`
+  // who joined the room; it is idempotent (raising twice keeps the original position).
+  // LowerHand: own hand needs a joined actor (scope write); someone else's needs scope
+  // "streaming.rooms:moderate" AND the actor recorded as room staff.
   rpc RaiseHand(RaiseHandRequest) returns (RaiseHandResponse);
   rpc LowerHand(LowerHandRequest) returns (LowerHandResponse);
 
-  // Scope "streaming.rooms:moderate" (also gated by flag rooms.moderation and
-  // the actor role: moderator or admin).
+  // Scope "streaming.rooms:moderate" (also gated by flag rooms.moderation and the actor's
+  // server-recorded role; the kick/mute/lock family still reads `actor_role`, the hand RPCs
+  // below use the member table instead).
   rpc KickParticipant(KickParticipantRequest) returns (KickParticipantResponse);
   rpc MuteParticipant(MuteParticipantRequest) returns (MuteParticipantResponse);
   rpc UnmuteParticipant(UnmuteParticipantRequest) returns (UnmuteParticipantResponse);
@@ -43,6 +53,8 @@ service RoomsService {
   rpc LockRoom(LockRoomRequest) returns (LockRoomResponse);
   rpc UnlockRoom(UnlockRoomRequest) returns (UnlockRoomResponse);
   rpc AcknowledgeHand(AcknowledgeHandRequest) returns (AcknowledgeHandResponse);
+  // Clears the whole raised-hand queue of a room (moderator/admin actor role).
+  rpc ResetHands(ResetHandsRequest) returns (ResetHandsResponse);
 }
 
 // The acting participant's room role, resolved by the caller (hub-api: admin
@@ -67,6 +79,8 @@ message Room {
   // Seconds a room may stay empty before the server deletes it (the effective
   // value after server clamping). 0 means expiry is disabled for this room.
   uint32 empty_timeout_secs = 9;
+  uint32 participant_count = 10;
+  uint32 hand_count = 11;
 }
 
 message Participant {
@@ -282,12 +296,19 @@ message ListHandsRequest {
   string api_version = 1;
   string community_id = 2;
   string room_id = 3;
+  // The end user listing (UUID); must have joined the room.
+  string actor_id = 4;
 }
 
 message ListHandsResponse {
   string room_id = 1;
-  // Oldest first.
+  // Oldest first. With the moderate scope (staff actor): the whole queue; otherwise only the
+  // actor's own entry (empty when their hand is not raised).
   repeated RaisedHand hands = 2;
+  // Total hands in the queue (always the full count, never who).
+  uint32 count = 3;
+  // The actor's 1-based position in the queue when their hand is raised.
+  optional uint32 position = 4;
 }
 
 message RaiseHandRequest {
@@ -296,6 +317,8 @@ message RaiseHandRequest {
   string community_id = 2;
   string room_id = 3;
   string participant_id = 4;
+  // The end user acting (UUID); must equal participant_id and have joined the room.
+  string actor_id = 5;
 }
 
 message RaiseHandResponse {
@@ -331,4 +354,19 @@ message AcknowledgeHandRequest {
 
 message AcknowledgeHandResponse {
   RaisedHand hand = 1;
+}
+
+message ResetHandsRequest {
+  // Contract version; only "v1" is accepted (anything else is UNIMPLEMENTED).
+  string api_version = 1;
+  string community_id = 2;
+  string room_id = 3;
+  string actor_id = 4;
+  RoomRole actor_role = 5;
+}
+
+message ResetHandsResponse {
+  string room_id = 1;
+  // Number of raised hands that were cleared (0 for an already-empty queue).
+  uint32 cleared = 2;
 }

@@ -30,4 +30,8 @@ paths = [
   "hub_api/tests/test_v1_discord_bot_install_blueprint\\.py",
   "hub_api/tests/test_discord_bot_install_service\\.py",
   "libs/flask_core/tests/test_ai_guard\\.py",
+  # Test vector minted by hub-api's real ServiceJwtIssuer with a THROWAWAY ES256 key whose private
+  # half was discarded at mint time (only the public key is committed); the tokens expired an hour
+  # after minting and the Rust test pins its clock to the fixture's iat. Never a live credential.
+  "core/svc_streaming/tests/rooms_fixtures/hub_api_service_jwt\\.json",
 ]

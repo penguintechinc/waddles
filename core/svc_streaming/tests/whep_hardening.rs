@@ -17,7 +17,6 @@ use webrtc::peer_connection::PeerConnection;
 
 use rtc_common::*;
 use svc_streaming::egress::whep;
-use svc_streaming::rooms::token::TokenKeys;
 use svc_streaming::rooms::{host_api, media, RoomService, MAX_ISSUED_PER_COMMUNITY};
 use svc_streaming::rtc::fanout::MediaFanouts;
 use svc_streaming::rtc::metrics::RtcMetrics;
@@ -147,7 +146,7 @@ fn svc(range: (u16, u16), cap: Option<usize>) -> Arc<RoomService> {
     let s = RoomService::new(
         factory(range),
         metrics(),
-        Some(TokenKeys::new(VIEWER_SECRET).unwrap()),
+        Some(rtc_common::test_token_keys()),
         "http://svc.test".into(),
     );
     Arc::new(match cap {
@@ -292,7 +291,7 @@ async fn community_subscriber_cap_is_enforced_below_the_global_cap() {
 /// it must be refused even though the pipeline was never revoked.
 #[tokio::test]
 async fn whep_tokens_from_a_previous_boot_are_refused_after_restart() {
-    let keys = TokenKeys::new(VIEWER_SECRET).unwrap();
+    let keys = rtc_common::test_token_keys();
     let viewers = PeerConnectionFactory::new(loopback_rtc_config((42400, 42419))).unwrap();
     let pipeline = Uuid::new_v4();
     let old_token = viewer_token("7", pipeline, 120, "pipeline", Uuid::new_v4());
