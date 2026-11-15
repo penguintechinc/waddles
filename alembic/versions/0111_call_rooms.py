@@ -11,8 +11,8 @@ the partial unique index allows at most ONE per community, which is what makes c
 Town Hall creation race-safe (the loser's insert conflicts and it deletes only its own room).
 Nothing here is PII (opaque ids and flags only).
 
-Revision ID: 0110_call_rooms
-Revises: 0109_platform_vault, 0108_bundle_precompile_requests (merges both heads)
+Revision ID: 0111_call_rooms
+Revises: 0110_merge_precompile_vault
 Create Date: 2026-11-14
 """
 
@@ -20,8 +20,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0110_call_rooms"
-down_revision = ("0109_platform_vault", "0108_bundle_precompile_requests")
+revision = "0111_call_rooms"
+down_revision = "0110_merge_precompile_vault"
 branch_labels = None
 depends_on = None
 

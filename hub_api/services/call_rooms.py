@@ -1,4 +1,4 @@
-"""hub-api's record of the call rooms it created (`call_rooms`, alembic 0110).
+"""hub-api's record of the call rooms it created (`call_rooms`, alembic 0111).
 
 The REST join trusts only this record for the facts svc-streaming's `Room` does not carry
 (kind, closed, guest opt-in): a room that is not recorded is unknown and the join fails closed
@@ -19,7 +19,7 @@ _TABLE = "call_rooms"
 
 
 def bind_call_rooms_table(dal: Any, *, migrate: bool = False) -> None:
-    """Idempotently bind `call_rooms` (schema owned by alembic 0110)."""
+    """Idempotently bind `call_rooms` (schema owned by alembic 0111)."""
     if _TABLE in dal.tables:
         return
     dal.define_table(

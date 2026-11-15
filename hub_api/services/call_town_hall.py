@@ -1,6 +1,6 @@
 """The per-community "Town Hall": one persistent default call room, recorded server-side.
 
-The Town Hall room id lives in `call_rooms` (alembic 0110) with `town_hall = true`; a partial
+The Town Hall room id lives in `call_rooms` (alembic 0111) with `town_hall = true`; a partial
 unique index allows ONE per community. It is NEVER found by label: labels are member-settable
 display aliases, so `is_reserved_label` rejects creating any room called "Town Hall" (case and
 space insensitive) through the room-create routes.

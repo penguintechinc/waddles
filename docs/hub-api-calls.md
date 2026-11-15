@@ -41,7 +41,7 @@ a locked room refuses non-staff (`403 ROOM_ACCESS_DENIED`, `room is locked`); st
 refused by hub-api's policy.
 
 Room facts fail closed. svc-streaming's `Room` exposes only `locked`, so hub-api records every
-room it creates in `call_rooms` (alembic 0110: kind int code, closed, allow_guests, town_hall) and
+room it creates in `call_rooms` (alembic 0111: kind int code, closed, allow_guests, town_hall) and
 `call_access.facts_from_room` consumes only that record. A room hub-api did not record is
 unknown: non-staff are refused (`403`, `room access cannot be verified`, no token minted), staff
 join under the plain community policy. Known stage / green-room / closed rooms get their policy
