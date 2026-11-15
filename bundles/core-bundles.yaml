@@ -218,9 +218,9 @@ bundles:
       - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.music
-    version: "1.0.9"
+    version: "1.1.0"
     language: python
-    wit_world: stage-next
+    wit_world: stage-next-tools
     source_dir: python/music
     manifest_path: music.manifest.yaml
     artifact_path: music.wasm

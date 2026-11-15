@@ -1,271 +1,108 @@
-"""`!sr`/`!songrequest` + `!music`/`!queue` -> a per-community song-request queue, kv-only.
+"""`!sr`, `!music`/`!queue`, `!songqueue`/`!sq` over the shared music-requests service.
 
-Migrated from the `bot_process` monolith's song-request feature (task:
-"Build the music (song-request queue) Python WASM app bundle"). Inspiration
-credit (not a literal port -- see `bundle.yaml`'s `author`/`notice`): the
-general "viewers queue up song requests, a mod advances the queue" shape is
-inspired by superpenguintv (Psychoboy)'s `PenguinTwitchBot`
-(https://github.com/Psychoboy/PenguinTwitchBot). No original source code or
-text is reused here -- the grammar, queue data shape, and all logic below
-are written fresh for Waddles, so no MIT notice reproduction is required
-(`sdk/waddle-sdk/AUTHORING.md`'s attribution convention: verbatim reuse
-needs the license text inline, inspiration-only needs credit only -- see
-`fish`/`shoutout`'s own module docstrings for the same shape).
+The song-request queue, now-playing state and history live in ONE service bundle
+(`waddles.core.service.music-requests`); this app is only the chat front end. It owns no queue:
+every command is a tool call (`waddle_sdk.tool.invoke`) made in the process stage, where the host
+resolves the verified actor from the triggering event. The action stage relays the reply and
+publishes the overlay surfaces from the service state the process stage fetched.
 
-v1 scope (KV-ONLY -- a request QUEUE, never actual playback or an external
-music-service API call; no `db`/`http`/egress capability used or declared):
+Privilege is never decided from chat badges. A moderator-only operation is attempted and the
+service's host-verified scopes (`music:requests.manage`) answer; a typed `forbidden` ToolError is
+mapped to a friendly reply. `!music remove <id>` tries `requests.remove` (moderator) first and falls
+back to `requests.cancel_own` (the requester's own row) on `forbidden`.
 
-- Bare `!sr <link-or-text>` / `!songrequest <link-or-text>` -- ADD a request
-  to the caller's community queue, subject to a per-caller max-pending limit
-  (`DEFAULT_MAX_PER_USER`, admin-configurable). These two command names are
-  pure free-text adds -- unlike `!music`, they never go through the shared
-  `waddle_sdk.command.parse_command` grammar (the request text itself may
-  start with any token, including one that looks like a VERB, e.g. a URL),
-  mirroring `shoutout`'s own documented "a positional argument has no slot
-  in the shared grammar" extension.
-- Bare `!music` / `!queue` -- SHOW the current queue (first `SHOW_LIMIT`
-  entries). `!music list` is the same read, reached through the standard
-  grammar's `list` verb instead of the bare case.
-- `!music remove <id>` -- remove one request by its numeric id: the
-  requester themself, or any moderator/broadcaster.
-- `!music next` / `!music skip` -- moderator/broadcaster only: pop the head
-  of the queue (now playing -> the next one up). `next`/`skip` are bare
-  advance keywords outside the shared `waddle_sdk.command.VERBS`
-  vocabulary -- `_resolve()` special-cases them before the formal grammar
-  parse, rather than smuggling them in as fake sub-modules
-  (`CommandSpec.sub_modules` names opt-in feature sub-modules, not verbs --
-  see `waddle_sdk.sub_modules`'s own docstring).
-- `!music set max-per-user <n>` -- moderator/broadcaster only: configures
-  the per-caller max-pending-requests limit, bounded
-  `[MIN_MAX_PER_USER, MAX_MAX_PER_USER]` (same `_caller_role_signal()`
-  fail-closed pattern as `fish`/`shoutout`/`count`/`lurk`: absent badge
-  fields -- e.g. Discord's normalizer today -- deny, never implicit allow).
+No requester identity ever reaches a reply, an overlay payload or a log line: the service never
+returns one, and logs carry only the command, tool name, error code and counts.
 
-Data scoping: the queue, its id sequence, and the max-per-user config are
-all keyed by the envelope's own `community_id` ONLY, via
-`waddle_sdk.community_kv` (`AUTHORING.md` Sec2). `dispatch()` raises before
-touching `kv` at all if `envelope.community` is falsy, never defaulting to
-a tenant-wide bucket.
+The AI DJ is an optional layer on top of the same service; this bundle never references it and works
+fully with it absent.
 
-PII note (same caveat as `fish`/`shoutout`/`lurk`): the tokenization
-pipeline (#429) is not merged yet, so `event.actor` may currently be a raw
-username. It is never stored in `kv` or logged in raw form --
-`_pseudonym()` SHA-256-hashes it before it ever reaches `community_kv`, and
-the queue itself stores only `{id, requester_pseudonym, text, ts}` --
-never a raw username. Because only the pseudonym is retained, `!music`'s
-queue listing cannot (and does not try to) show *who* requested each song;
-it instead marks the caller's own entries `(yours)` by comparing the
-caller's own freshly computed pseudonym against each stored one -- the same
-"count, not identity" trade-off `shoutout`'s own `auto` sub-module
-documents for its list command.
+Migration: bundles <= 1.0.9 kept a per-community kv queue (`music.queue`). On the first command per
+community, legacy items are handed to `requests.import` (title/artist/url only -- requester ids are
+dropped), then the legacy keys are deleted and `music.migrated` is set (one-shot, no ':' in keys).
 
-Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
-decides whether this bundle runs.
-
-DO NOT BUILD in v1 -- clean, documented extension points, never a silent
-stub:
-
-- **Actual playback / external music-service integration** (e.g. resolving
-  a YouTube/Spotify link). This bundle is a request
-  QUEUE only -- `!music next`/`!music skip` advance the *data structure*;
-  nothing here calls out to any player or external API, and no `http`/
-  egress capability is declared in `bundle.yaml`. The queue IS published (text only, no
-  requester) to this bundle's own overlay surfaces `<app_id>.now_playing` / `<app_id>.queue`
-  through `overlay.publish-surface` after every change (world `stage-next`).
-- **Cross-community anything.** Every queue/sequence/config key here is
-  scoped by `community_id` only (`waddle_sdk.community_kv` -- reputation/
-  user-details are the platform's only two cross-community exceptions, and
-  this bundle is neither).
+Attribution: net-new Waddles content, inspired by superpenguintv (Psychoboy)'s PenguinTwitchBot
+song-request feature (https://github.com/Psychoboy/PenguinTwitchBot); no original source reused.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
-from typing import Any, NoReturn, cast
+import re
+from typing import Any
 
-from waddle_sdk import clock, community_kv, log, relay
+from waddle_sdk import clock, community_kv, event_dedupe, log, relay, tool
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
+from waddle_sdk.community_kv import TENANT_WIDE_SENTINEL
+from waddle_sdk.flask_core.bundle_runtime import get_bundle_context
+from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.safe_text import guard_leading_command, sanitize_user_text
 
-#: Chat-invoked heads. `!sr`/`!songrequest` are pure free-text "add" commands
-#: (never run through `parse_command` -- see module docstring); `!music`/
-#: `!queue` share the one grammar-based `SPEC` below.
+#: The shared queue service every command delegates to.
+SERVICE = "waddles.core.service.music-requests"
+
+#: PostHog flag gating the `!songqueue`/`!sq` link command (default OFF).
+FLAG_QUEUE_PAGE = "waddles.music.queue-page"
+
 _REQUEST_HEADS = frozenset({"!sr", "!songrequest"})
 _QUEUE_HEADS = frozenset({"!music", "!queue"})
+_LINK_HEADS = frozenset({"!songqueue", "!sq"})
 
 #: No sub-modules declared -- `!music` has no opt-in feature toggles.
 SPEC = CommandSpec(name="music")
 
-#: Bare advance keywords, handled ahead of the formal grammar (see module
-#: docstring) -- neither is in `waddle_sdk.command.VERBS`.
+#: Bare keywords handled ahead of the formal grammar (none is in `waddle_sdk.command.VERBS`).
 _ADVANCE_VERBS = frozenset({"next", "skip"})
 
-#: Per-caller max-pending-requests bounds -- keeps one viewer from
-#: monopolizing the queue without a second confirmation step (mirrors
-#: `fish`'s own `DEFAULT_COOLDOWN_SECONDS`/`MIN_`/`MAX_` convention).
-DEFAULT_MAX_PER_USER = 3
 MIN_MAX_PER_USER = 1
 MAX_MAX_PER_USER = 10
 
-#: Caps unbounded growth of one community's queue (mirrors `shoutout`'s own
-#: `MAX_AUTO_LIST_SIZE`).
-MAX_QUEUE_SIZE = 200
-
-#: Caps one request's free-text length.
+#: Longest free-text request, per-field cap the service stores, and URL cap.
 MAX_REQUEST_TEXT_LEN = 300
+_FIELD_MAX = 200
+_URL_MAX = 500
 
-#: How many queue entries `!music`/`!music list` renders at once.
-SHOW_LIMIT = 10
+#: How many "up next" entries a chat reply lists, and the per-entry display width.
+SHOW_LIMIT = 5
+_DISPLAY_MAX = 60
+_HISTORY_LIMIT = 5
 
-#: Overlay surfaces this bundle OWNS (`<app_id>.<name>`, declared in `owned_surfaces`); the
-#: payloads are the contract's `public_track` shapes (`bundles/contracts/surfaces.v1.json`).
+#: Overlay surfaces this bundle owns (`bundles/contracts/surfaces.v1.json` `public_track` shape).
 _SURFACE_NOW_PLAYING = "waddles.core.example.music.now_playing"
 _SURFACE_QUEUE = "waddles.core.example.music.queue"
-
-#: Longest track title / queue length the contract accepts.
-_SURFACE_TITLE_MAX = 200
 _SURFACE_QUEUE_MAX = 50
 
-#: Durable per-community state -- never expires (`ttl_seconds=0`).
-_QUEUE_KEY = "music.queue"
-_SEQ_KEY = "music.seq"
-_MAX_PER_USER_CONFIG_KEY = "music.config.max-per-user"
+#: kv keys. Legacy keys are only ever read once, to migrate; no ':' anywhere.
+_LEGACY_QUEUE_KEY = "music.queue"
+_LEGACY_SEQ_KEY = "music.seq"
+_LEGACY_CONFIG_KEY = "music.config.max-per-user"
+_MIGRATED_KEY = "music.migrated"
+_IMPORT_MAX = 100
+
+_URL_RE = re.compile(r"https://\S+", re.IGNORECASE)
 
 _USAGE = (
-    "Usage: !sr <song> | !music | !music list | !music remove <id> | "
-    "!music next|skip (mod only) | !music set max-per-user <n> (mod only)"
+    "Usage: !sr <title - artist [https-link]> | !music | !music now | !music history | "
+    "!music remove <id> | !music top [artists|songs] | !music dmca | !music next|skip (mod) | "
+    "!music set max-per-user <n> | !music set dmca-safe on|off (mod) | !songqueue"
 )
-_PERMISSION_DENIED_MSG = "only moderators/broadcasters can do that"
+_DENIED_MSG = "only moderators can do that"
+_UNAVAILABLE_MSG = "the song queue is temporarily unavailable, try again shortly."
+_NOT_CONFIGURED_MSG = "song queue page is not configured"
 _QUEUE_EMPTY_MSG = "the queue is empty."
 
-_KNOWN_COMMANDS = frozenset({"add", "show", "remove", "config_set", "advance", "usage"})
-
-
-@dataclass(slots=True, frozen=True)
-class QueueEntry:
-    """One per-community song-request queue entry -- PII-tokenized, never a raw username."""
-
-    id: int
-    requester_pseudonym: str
-    text: str
-    ts: int
-
-
-def _pseudonym(actor: str | None) -> str:
-    """Non-reversible per-caller key component -- see module docstring's PII note.
-
-    `event.actor` may currently be a raw username (tokenization pipeline
-    #429 not yet merged); hashing it before it ever reaches `community_kv`
-    keeps this bundle PII-safe today and after #429 lands unchanged.
-    """
-    return hashlib.sha256((actor or "anonymous").encode()).hexdigest()
-
-
-def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
-    """`True`/`False` from the normalized event's own badge fields, or `None` if absent.
-
-    See `count`/`lurk`/`fish`/`shoutout`'s own identical helper -- `None`
-    (neither `is_mod`/`is_broadcaster` present, e.g. Discord's normalizer
-    today) must be treated as denied, never as an implicit allow.
-    """
-    if "is_mod" not in payload and "is_broadcaster" not in payload:
-        return None
-    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
-
-
-def _resolve(rest: str) -> tuple[str, str | None]:
-    """Map the text after `!music `/`!queue ` onto this bundle's own command set.
-
-    `rest` is already stripped and may be empty. `next`/`skip` are handled
-    here, before the formal grammar parse -- see module docstring. Every
-    other shape is normalized onto `!music ...` and delegated to
-    `parse_command` unchanged (so `!queue list` and `!music list` resolve
-    identically).
-    """
-    if rest:
-        first_tok, _, remainder = rest.partition(" ")
-        if first_tok.lower() in _ADVANCE_VERBS:
-            return ("usage", None) if remainder.strip() else ("advance", None)
-
-    normalized = f"!music {rest}" if rest else "!music"
-    try:
-        parsed = parse_command(normalized, SPEC)
-    except CommandUsageError as exc:
-        log.debug("music.invalid_command", error_type=type(exc).__name__)
-        return "usage", None
-    return _map_parsed(parsed)
-
-
-def _map_parsed(parsed: ParsedCommand) -> tuple[str, str | None]:
-    """Map a successfully parsed `ParsedCommand` onto this bundle's own command set.
-
-    Only `option in (None, "list", "remove", "set")` is implemented --
-    every other grammar-legal verb (`add`/`sub`/`enable`/`disable`/`reset`,
-    none of which this bundle declares sub-modules or behavior for)
-    resolves to `"usage"`, same fail-loud-never-silent rule as `fish`'s own
-    `_resolve_command`.
-    """
-    if parsed.option is None:
-        return "show", None
-    if parsed.option == "list":
-        return ("usage", None) if parsed.args is not None else ("show", None)
-    if parsed.option == "remove":
-        return ("usage", None) if parsed.args is None else ("remove", parsed.args)
-    if parsed.option == "set":
-        return ("usage", None) if parsed.args is None else ("config_set", parsed.args)
-    return "usage", None
-
-
-async def transform(event: PlatformEvent) -> PlatformEvent | None:
-    """Implement `process-stage.transform`: recognize this bundle's four command heads.
-
-    Cheap-skip first (no matching head -- `None`, zero cost), real grammar resolution last -- same
-    ordering as
-    `eightball`/`fish`/`shoutout`'s own documented rationale. A recognized-
-    but-malformed command still produces a reply (`"usage"`), never a
-    silent drop.
-    """
-    text = event.payload.get("text")
-    if not isinstance(text, str):
-        return None
-
-    stripped = text.strip()
-    head, _, rest = stripped.partition(" ")
-    head_lower = head.lower()
-
-    if head_lower in _REQUEST_HEADS:
-        is_request = True
-    elif head_lower in _QUEUE_HEADS:
-        is_request = False
-    else:
-        return None
-
-    if is_request:
-        arg = rest.strip() or None
-        command = "add" if arg is not None else "usage"
-    else:
-        command, arg = _resolve(rest.strip())
-
-    log.info("music.transform matched", command=command)
-    payload: dict[str, Any] = {"command": command, "channel_id": event.payload.get("channel_id")}
-    if arg is not None:
-        payload["arg"] = arg
-    # Forward the normalized badge signal, if present -- see `count`/`lurk`/`fish`/`shoutout`'s own
-    # identical forwarding comment for why absence must reach `dispatch` as absence, not `False`.
-    if "is_mod" in event.payload:
-        payload["is_mod"] = event.payload["is_mod"] is True
-    if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
-
-    return PlatformEvent(
-        platform=event.platform,
-        event_type=event.event_type,
-        actor=event.actor,
-        payload=payload,
-        occurred_at=event.occurred_at,
-    )
+#: Service error keys (the contract's typed errors) -> friendly replies.
+_SERVICE_ERRORS = {
+    "queue_full": "the queue is full -- try again once it drains",
+    "per_user_limit": "you already have the maximum number of pending requests",
+    "duplicate": "that song is already in the queue",
+    "invalid_url": "only https links are accepted",
+    "not_dmca_safe": (
+        "DMCA-safe mode is on: only royalty-free (RFM) and NCS tracks can be requested"
+    ),
+}
 
 
 class DispatchResult:
@@ -281,163 +118,489 @@ class DispatchResult:
         self.http_status = None
 
 
-async def _fail_kv(exc: Exception, *, provider: str, channel_id: str, op: str) -> NoReturn:
-    """Fail-loud kv backend-error path: log, reply an error to chat, then re-raise -- see `fish`."""
-    wit_error = getattr(exc, "value", exc)
-    case_name = type(wit_error).__name__
-    log.error("music.kv_error", op=op, error=case_name)
-    await relay.push(
-        provider,
-        {
-            "channel": channel_id,
-            "text": "the song queue is temporarily unavailable, try again shortly.",
-        },
-    )
-    raise RuntimeError(f"music kv {op} failed: {case_name}") from exc
+def _scope(community: str | None) -> str:
+    """Return the community to key kv under (`None` = the host's tenant-wide sentinel)."""
+    if community == "":
+        log.error("music.missing_community")
+        raise ValueError("music requires a community context (got an empty community id)")
+    return community if community is not None else TENANT_WIDE_SENTINEL
 
 
-async def _fail_state(reason: str, *, provider: str, channel_id: str) -> NoReturn:
-    """Fail-loud corrupt-stored-queue path -- see `shoutout`'s own identical `_fail_state`."""
-    log.error("music.state_corrupt", reason=reason)
-    await relay.push(
-        provider,
-        {"channel": channel_id, "text": "the song queue is corrupted, please contact support."},
-    )
-    raise RuntimeError(f"music corrupt state: {reason}")
+def _clean(value: str, limit: int) -> str:
+    """Printable-only, single-spaced, length-capped text."""
+    return " ".join("".join(ch for ch in value if ch.isprintable()).split())[:limit]
 
 
-async def _kv_get(community: str, key: str, *, provider: str, channel_id: str) -> bytes | None:
-    """`community_kv.get`, fail-loud on a backend error (see `_fail_kv`)."""
-    try:
-        result = await community_kv.get(community, key)
-    except Exception as exc:  # noqa: BLE001 -- structurally classified, see `_fail_kv`
-        await _fail_kv(exc, provider=provider, channel_id=channel_id, op="get")
-    # `waddle_sdk` ships no `py.typed` marker, so mypy sees `Any` here -- cast back to the
-    # real contract (`waddle_sdk/community_kv.py`'s own `get()` signature) rather than
-    # leaking `Any` (see `shoutout`'s own identical `_kv_get` for the same pattern).
-    return cast("bytes | None", result)
+def parse_request(text: str) -> tuple[dict[str, str], str | None]:
+    """Split free text `title - artist [https://link]` into `requests.add` fields.
 
-
-async def _kv_set(
-    community: str, key: str, value: bytes, *, ttl_seconds: int, provider: str, channel_id: str
-) -> None:
-    """`community_kv.set`, fail-loud on a backend error (see `_fail_kv`)."""
-    try:
-        await community_kv.set(community, key, value, ttl_seconds)
-    except Exception as exc:  # noqa: BLE001 -- structurally classified, see `_fail_kv`
-        await _fail_kv(exc, provider=provider, channel_id=channel_id, op="set")
-
-
-async def _kv_increment(
-    community: str, key: str, delta: int, *, ttl_seconds: int, provider: str, channel_id: str
-) -> int:
-    """`community_kv.increment`, fail-loud on a backend error (see `_fail_kv`)."""
-    try:
-        result = await community_kv.increment(community, key, delta, ttl_seconds)
-    except Exception as exc:  # noqa: BLE001 -- structurally classified, see `_fail_kv`
-        await _fail_kv(exc, provider=provider, channel_id=channel_id, op="increment")
-    # See `_kv_get`'s own identical cast-back-from-`Any` comment.
-    return cast(int, result)
-
-
-async def _load_queue(community: str, *, provider: str, channel_id: str) -> list[QueueEntry]:
-    """Return the community's song-request queue, oldest-first.
-
-    Raises (via `_fail_state`) on corrupt stored JSON -- see that helper's
-    own docstring for why this is fail-loud rather than a silent reset.
+    Returns `(fields, error)`; `error` is a user-facing message when the text is unusable. The
+    first `https://` token is the source URL; the rest is `title - artist` (artist optional).
     """
-    raw = await _kv_get(community, _QUEUE_KEY, provider=provider, channel_id=channel_id)
-    if raw is None:
-        return []
+    url = ""
+    match = _URL_RE.search(text)
+    if match:
+        url = match.group(0)
+        if len(url) > _URL_MAX:
+            return {}, "that link is too long"
+        text = f"{text[: match.start()]} {text[match.end() :]}"
+    cleaned = _clean(text, MAX_REQUEST_TEXT_LEN)
+    title, _, artist = cleaned.partition(" - ")
+    title, artist = title.strip()[:_FIELD_MAX], artist.strip()[:_FIELD_MAX]
+    if not title:
+        if not url:
+            return {}, _USAGE
+        title = "Requested link"
+    fields = {"title": title, "artist": artist}
+    if url:
+        fields["source_url"] = url
+    return fields, None
+
+
+def _resolve(rest: str) -> tuple[str, str | None]:
+    """Map the text after `!music `/`!queue ` onto this bundle's command set.
+
+    Bare keywords (`now`, `history`, `next`, `skip`) are handled first; every other shape is
+    normalized onto `!music ...` and delegated to `parse_command` unchanged.
+    """
+    if rest:
+        first_tok, _, remainder = rest.partition(" ")
+        word = first_tok.lower()
+        if word in _ADVANCE_VERBS:
+            return ("usage", None) if remainder.strip() else ("advance", None)
+        if word in {"now", "history", "dmca"}:
+            return ("usage", None) if remainder.strip() else (word, None)
+        if word == "top":
+            return "top", remainder.strip().lower() or "songs"
+
+    normalized = f"!music {rest}" if rest else "!music"
     try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        await _fail_state(f"corrupt queue: {exc}", provider=provider, channel_id=channel_id)
-    if not isinstance(data, list):
-        await _fail_state(
-            "corrupt queue: expected a JSON array", provider=provider, channel_id=channel_id
-        )
-
-    entries: list[QueueEntry] = []
-    for item in data:
-        if not isinstance(item, dict):
-            await _fail_state(
-                "corrupt queue entry: expected an object", provider=provider, channel_id=channel_id
-            )
-        try:
-            entries.append(
-                QueueEntry(
-                    id=int(item["id"]),
-                    requester_pseudonym=str(item["requester_pseudonym"]),
-                    text=str(item["text"]),
-                    ts=int(item["ts"]),
-                )
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            await _fail_state(
-                f"corrupt queue entry: {exc}", provider=provider, channel_id=channel_id
-            )
-    return entries
+        parsed = parse_command(normalized, SPEC)
+    except CommandUsageError as exc:
+        log.debug("music.invalid_command", error_type=type(exc).__name__)
+        return "usage", None
+    return _map_parsed(parsed)
 
 
-async def _save_queue(
-    community: str, entries: list[QueueEntry], *, provider: str, channel_id: str
-) -> None:
-    """Persist the community's song-request queue, oldest-first."""
-    serialized = [
-        {
-            "id": entry.id,
-            "requester_pseudonym": entry.requester_pseudonym,
-            "text": entry.text,
-            "ts": entry.ts,
-        }
-        for entry in entries
-    ]
-    await _kv_set(
-        community,
-        _QUEUE_KEY,
-        json.dumps(serialized).encode("utf-8"),
-        ttl_seconds=0,
-        provider=provider,
-        channel_id=channel_id,
-    )
-    await _publish_overlay(entries)
+def _map_parsed(parsed: ParsedCommand) -> tuple[str, str | None]:
+    """Map a parsed `ParsedCommand` onto `show`/`remove`/`config_set`; anything else is usage."""
+    if parsed.option is None:
+        return "show", None
+    if parsed.option == "list":
+        return ("usage", None) if parsed.args is not None else ("show", None)
+    if parsed.option == "remove":
+        return ("usage", None) if parsed.args is None else ("remove", parsed.args)
+    if parsed.option == "set":
+        return ("usage", None) if parsed.args is None else ("config_set", parsed.args)
+    return "usage", None
 
 
-def _public_track(entry: QueueEntry) -> dict[str, Any]:
-    """One queue entry as the contract's `public_track`: text only, no requester, no URLs."""
-    title = "".join(ch for ch in entry.text if ch.isprintable())[:_SURFACE_TITLE_MAX]
+def _idem(event: PlatformEvent, op: str) -> str:
+    """Replay-stable idempotency key from the platform message id (raises `EventIdError`)."""
+    message_id = event_dedupe.event_id_from_payload(event.payload, platform=event.platform)
+    return hashlib.sha256(f"music:{op}:{message_id}".encode()).hexdigest()
+
+
+def _service_error(exc: tool.ToolError) -> str | None:
+    """Friendly reply for one of the contract's typed service errors, else `None`."""
+    blob = f"{exc.code} {exc.message}".lower()
+    for key, reply in _SERVICE_ERRORS.items():
+        if key in blob:
+            return reply
+    return None
+
+
+def _show(item: dict[str, Any]) -> str:
+    """One item as `Title - Artist`, sanitized and truncated -- never a requester."""
+    title = _clean(str(item.get("title", "")), _DISPLAY_MAX)
+    artist = _clean(str(item.get("artist", "")), _DISPLAY_MAX)
+    return sanitize_user_text(f"{title} - {artist}" if artist else title)
+
+
+def _public_track(item: dict[str, Any]) -> dict[str, Any]:
+    """One service item as the contract's `public_track`: text only, no requester, no URLs."""
+    duration_s = item.get("duration_ms")
+    seconds = duration_s // 1000 if isinstance(duration_s, int) and duration_s > 0 else 0
+    item_id = item.get("id")
+    ident = item_id if isinstance(item_id, int) and item_id >= 0 else 0
     return {
-        "id": entry.id,
+        "id": ident,
         "provider": "request",
-        "track_id": str(entry.id),
-        "title": title,
-        "artist": "",
-        "duration_s": 0,
+        "track_id": str(ident),
+        "title": _clean(str(item.get("title", "")), _FIELD_MAX),
+        "artist": _clean(str(item.get("artist", "")), _FIELD_MAX),
+        "duration_s": min(seconds, 86400),
     }
 
 
-def _surface_payloads(entries: list[QueueEntry], now_ms: int) -> list[tuple[str, dict[str, Any]]]:
-    """The two surface frames for `entries` (head = now playing, the rest = up next)."""
-    now = _public_track(entries[0]) if entries else None
-    upcoming = [_public_track(e) for e in entries[1 : 1 + _SURFACE_QUEUE_MAX]]
-    return [
-        (_SURFACE_NOW_PLAYING, {"now_playing": now, "updated_ms": now_ms}),
-        (_SURFACE_QUEUE, {"queue": upcoming, "updated_ms": now_ms}),
-    ]
+def _overlay_state(listing: dict[str, Any]) -> dict[str, Any]:
+    """Overlay frames' content derived from a `requests.list` result (service state only)."""
+    now = listing.get("now_playing")
+    queue = listing.get("queue")
+    items = queue if isinstance(queue, list) else []
+    return {
+        "now_playing": _public_track(now) if isinstance(now, dict) else None,
+        "queue": [_public_track(i) for i in items[:_SURFACE_QUEUE_MAX] if isinstance(i, dict)],
+    }
 
 
-async def _publish_overlay(entries: list[QueueEntry]) -> None:
-    """Publish the queue to this bundle's own overlay surfaces via `overlay.publish-surface`.
+def _format_listing(listing: dict[str, Any]) -> str:
+    """`Now playing: X. Up next (n): #id A; #id B (+k more)` from a `requests.list` result."""
+    now = listing.get("now_playing")
+    queue = [i for i in (listing.get("queue") or []) if isinstance(i, dict)]
+    total = listing.get("total_queued")
+    total = total if isinstance(total, int) else len(queue)
+    parts = [f"Now playing: {_show(now)}" if isinstance(now, dict) else "Nothing is playing"]
+    if queue:
+        shown = "; ".join(f"#{i.get('id')} {_show(i)}" for i in queue[:SHOW_LIMIT])
+        more = f" (+{total - SHOW_LIMIT} more)" if total > SHOW_LIMIT else ""
+        parts.append(f"Up next ({total}): {shown}{more}")
+    else:
+        parts.append(_QUEUE_EMPTY_MSG.rstrip("."))
+    return ". ".join(parts) + "."
 
-    The queue is already persisted, so a refused or failed publish must not fail the chat command;
-    it is logged loudly (surface + error type only, never the payload) and the next queue change
-    republishes the full state.
+
+async def _migrate(scope: str) -> None:
+    """One-shot import of the legacy per-community kv queue into the service (see module doc).
+
+    A kv or service failure leaves the legacy keys untouched so the next command retries; a
+    service REFUSAL (`invalid_args`: already imported / queue not empty) clears the stale legacy
+    data, since retrying could never succeed.
+    """
+    try:
+        if await community_kv.get(scope, _MIGRATED_KEY) is not None:
+            return
+        raw = await community_kv.get(scope, _LEGACY_QUEUE_KEY)
+    except Exception as exc:  # noqa: BLE001 -- loud log; migration retried on the next command
+        log.error("music.migrate_kv_failed", op="read", error_type=type(exc).__name__)
+        return
+    if raw is not None:
+        items = _legacy_items(raw)
+        if items:
+            key = hashlib.sha256(f"music:import:{scope}".encode()).hexdigest()
+            try:
+                result = await tool.invoke(
+                    SERVICE, "requests.import", {"items": items}, idempotency_key=key
+                )
+                log.info("music.migrated", count=_imported_count(result))
+            except tool.ToolError as exc:
+                if exc.code != "invalid_args":
+                    log.error("music.migrate_import_failed", code=exc.code)
+                    return
+                log.warn("music.migrate_import_refused", code=exc.code)
+    try:
+        for legacy in (_LEGACY_QUEUE_KEY, _LEGACY_SEQ_KEY, _LEGACY_CONFIG_KEY):
+            await community_kv.delete(scope, legacy)
+        await community_kv.set(scope, _MIGRATED_KEY, b"1")
+    except Exception as exc:  # noqa: BLE001 -- loud log; the import is idempotent on retry
+        log.error("music.migrate_kv_failed", op="clear", error_type=type(exc).__name__)
+
+
+def _imported_count(result: Any) -> int:
+    """`imported` from a `requests.import` result, 0 when absent."""
+    value = result.get("imported") if isinstance(result, dict) else None
+    return value if isinstance(value, int) else 0
+
+
+def _legacy_items(raw: bytes) -> list[dict[str, Any]]:
+    """Convert the legacy JSON queue into import items (title/artist/url/duration only)."""
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        log.warn("music.migrate_corrupt_legacy")
+        return []
+    if not isinstance(data, list):
+        log.warn("music.migrate_corrupt_legacy")
+        return []
+    items: list[dict[str, Any]] = []
+    for entry in data[:_IMPORT_MAX]:
+        text = entry.get("text") if isinstance(entry, dict) else None
+        if not isinstance(text, str):
+            continue
+        fields, error = parse_request(text)
+        if error is not None:
+            continue
+        items.append(
+            {
+                "title": fields["title"],
+                "artist": fields["artist"],
+                "source_url": fields.get("source_url", ""),
+                "duration_ms": 0,
+            }
+        )
+    return items
+
+
+async def _list(limit: int = 50) -> dict[str, Any]:
+    """`requests.list` after `requests.advance_due`, so time-based advances show up first."""
+    await tool.invoke(SERVICE, "requests.advance_due", {})
+    result = await tool.invoke(SERVICE, "requests.list", {"limit": limit})
+    if not isinstance(result, dict):
+        raise tool.ToolError("invalid_args", "unexpected requests.list result")
+    return result
+
+
+async def _handle_add(event: PlatformEvent, arg: str | None) -> str:
+    """`!sr <title - artist [link]>` -> `requests.add` (idempotent per chat message)."""
+    if not arg or not arg.strip():
+        return _USAGE
+    if len(arg.strip()) > MAX_REQUEST_TEXT_LEN:
+        return f"song requests must be {MAX_REQUEST_TEXT_LEN} characters or fewer"
+    fields, error = parse_request(arg)
+    if error is not None:
+        return error
+    result = await tool.invoke(SERVICE, "requests.add", fields, idempotency_key=_idem(event, "add"))
+    item = result.get("item") if isinstance(result, dict) else None
+    position = result.get("position") if isinstance(result, dict) else None
+    label = f"{_show(item)} (#{item.get('id')})" if isinstance(item, dict) else "your song"
+    where = f" at position {position}" if isinstance(position, int) else ""
+    return f"added {label} to the queue{where}"
+
+
+async def _handle_remove(event: PlatformEvent, arg: str | None) -> str:
+    """`!music remove <id>`: try the moderator tool, fall back to the requester's own row."""
+    if not arg:
+        return _USAGE
+    cleaned = arg.strip()
+    if not cleaned.isdigit() or int(cleaned) < 1:
+        return "that isn't a valid request id"
+    target = int(cleaned)
+    try:
+        result = await tool.invoke(
+            SERVICE, "requests.remove", {"id": target}, idempotency_key=_idem(event, "remove")
+        )
+    except tool.ToolError as exc:
+        if exc.code != "forbidden":
+            raise
+        result = await tool.invoke(
+            SERVICE, "requests.cancel_own", {"id": target}, idempotency_key=_idem(event, "cancel")
+        )
+        if not (isinstance(result, dict) and result.get("removed") is True):
+            return "you can only remove your own requests"
+    if isinstance(result, dict) and result.get("removed") is True:
+        return f"removed request #{target}"
+    return f"no request #{target} found"
+
+
+async def _handle_advance(event: PlatformEvent) -> str:
+    """`!music next|skip` -> `requests.advance` (service enforces `music:requests.manage`)."""
+    result = await tool.invoke(
+        SERVICE, "requests.advance", {}, idempotency_key=_idem(event, "advance")
+    )
+    now = result.get("now_playing") if isinstance(result, dict) else None
+    finished = result.get("finished") if isinstance(result, dict) else None
+    if isinstance(now, dict):
+        return f"now playing: {_show(now)}"
+    if isinstance(finished, dict):
+        return f"finished: {_show(finished)} (queue is now empty)"
+    return _QUEUE_EMPTY_MSG
+
+
+async def _handle_config_set(event: PlatformEvent, arg: str | None) -> str:
+    """`!music set max-per-user <n>` -> `config.set` (service enforces the manage scope)."""
+    parts = (arg or "").split()
+    if len(parts) == 2 and parts[0].lower() == "dmca-safe":
+        return await _handle_dmca_set(event, parts[1].lower())
+    if len(parts) != 2 or parts[0].lower() != "max-per-user":
+        return _USAGE
+    if not parts[1].isdigit():
+        return "that isn't a whole number"
+    value = int(parts[1])
+    if not (MIN_MAX_PER_USER <= value <= MAX_MAX_PER_USER):
+        return f"max-per-user must be between {MIN_MAX_PER_USER} and {MAX_MAX_PER_USER}"
+    result = await tool.invoke(
+        SERVICE, "config.set", {"max_per_user": value}, idempotency_key=_idem(event, "config")
+    )
+    stored = result.get("max_per_user") if isinstance(result, dict) else None
+    return f"max-per-user set to {stored if isinstance(stored, int) else value}"
+
+
+async def _handle_dmca_set(event: PlatformEvent, value: str) -> str:
+    """`!music set dmca-safe on|off` -> `settings.set` (service enforces `music:settings.write`)."""
+    if value not in {"on", "off"}:
+        return _USAGE
+    result = await tool.invoke(
+        SERVICE,
+        "settings.set",
+        {"dmca_safe": value == "on"},
+        idempotency_key=_idem(event, "dmca"),
+    )
+    stored = result.get("dmca_safe") if isinstance(result, dict) else None
+    on = stored if isinstance(stored, bool) else value == "on"
+    return f"DMCA-safe mode is now {'on' if on else 'off'}"
+
+
+async def _handle_dmca_status() -> str:
+    """`!music dmca` -> DMCA-safe status from `config.get`."""
+    result = await tool.invoke(SERVICE, "config.get", {})
+    on = isinstance(result, dict) and result.get("dmca_safe") is True
+    return f"DMCA-safe mode is {'on' if on else 'off'}"
+
+
+async def _handle_top(arg: str | None) -> str:
+    """`!music top [artists|songs]` -> top 5 from `music.stats.top` (no requester data)."""
+    word = (arg or "songs").lower()
+    kinds = {"artist": "artist", "artists": "artist", "song": "song", "songs": "song"}
+    kind = kinds.get(word)
+    if kind is None:
+        return _USAGE
+    result = await tool.invoke(SERVICE, "music.stats.top", {"kind": kind, "limit": 5})
+    items = (
+        [i for i in (result.get("items") or []) if isinstance(i, dict)]
+        if isinstance(result, dict)
+        else []
+    )
+    if not items:
+        return "no plays recorded yet."
+    rows = []
+    for rank, item in enumerate(items[:5], 1):
+        name = _clean(str(item.get("artist", "")), _DISPLAY_MAX)
+        if kind == "song":
+            title = _clean(str(item.get("title", "")), _DISPLAY_MAX)
+            name = f"{title} - {name}" if name else title
+        plays = item.get("plays") if isinstance(item.get("plays"), int) else 0
+        rows.append(f"{rank}. {sanitize_user_text(name)} ({plays})")
+    return f"Top {'artists' if kind == 'artist' else 'songs'}: " + "; ".join(rows)
+
+
+async def _handle_history() -> str:
+    """`!music history` -> the last few finished songs from `history.list`."""
+    result = await tool.invoke(SERVICE, "history.list", {"limit": _HISTORY_LIMIT})
+    items = (
+        [i for i in (result.get("items") or []) if isinstance(i, dict)]
+        if isinstance(result, dict)
+        else []
+    )
+    if not items:
+        return "no songs have been played yet."
+    return "Recently played: " + "; ".join(_show(i) for i in items[:_HISTORY_LIMIT])
+
+
+async def _handle_link() -> str:
+    """`!songqueue`/`!sq` -> `page.link`; a not-configured platform gets a plain notice."""
+    try:
+        result = await tool.invoke(SERVICE, "page.link", {})
+    except tool.ToolError as exc:
+        if "link_not_configured" in f"{exc.code} {exc.message}".lower():
+            return _NOT_CONFIGURED_MSG
+        raise
+    url = result.get("url") if isinstance(result, dict) else None
+    if not isinstance(url, str) or not url:
+        return _NOT_CONFIGURED_MSG
+    return f"Song queue: {url}"
+
+
+async def _execute(
+    event: PlatformEvent, command: str, arg: str | None
+) -> tuple[str, dict[str, Any] | None]:
+    """Run one command; return `(reply, overlay_state_or_None)` (overlay = fresh service state)."""
+    if command == "usage":
+        return _USAGE, None
+    if command == "link":
+        return await _handle_link(), None
+    if command == "history":
+        return await _handle_history(), None
+    if command == "dmca":
+        return await _handle_dmca_status(), None
+    if command == "top":
+        return await _handle_top(arg), None
+    if command in {"show", "now"}:
+        listing = await _list()
+        if command == "show":
+            return _format_listing(listing), _overlay_state(listing)
+        now = listing.get("now_playing")
+        reply = f"Now playing: {_show(now)}" if isinstance(now, dict) else "Nothing is playing."
+        return reply, _overlay_state(listing)
+    handlers = {
+        "add": lambda: _handle_add(event, arg),
+        "remove": lambda: _handle_remove(event, arg),
+        "advance": lambda: _handle_advance(event),
+        "config_set": lambda: _handle_config_set(event, arg),
+    }
+    reply = await handlers[command]()
+    try:
+        return reply, _overlay_state(await _list())
+    except tool.ToolError as exc:
+        log.warn("music.overlay_refresh_failed", code=exc.code)
+        return reply, None
+
+
+async def transform(event: PlatformEvent) -> PlatformEvent | None:
+    """Implement `process-stage.transform`: recognize the command heads and run the tool calls.
+
+    Cheap-skip first (no matching head -- `None`), then the one-shot migration, then the command.
+    Every recognized command yields a reply; a service failure becomes a friendly chat line plus
+    an ERROR log (code only), never a silent drop.
+    """
+    text = event.payload.get("text")
+    if not isinstance(text, str):
+        return None
+    head, _, rest = text.strip().partition(" ")
+    head_lower = head.lower()
+    arg: str | None = None
+    if head_lower in _REQUEST_HEADS:
+        arg = rest.strip() or None
+        command = "add" if arg is not None else "usage"
+    elif head_lower in _QUEUE_HEADS:
+        command, arg = _resolve(rest.strip())
+    elif head_lower in _LINK_HEADS:
+        if not await feature_enabled(FLAG_QUEUE_PAGE, default=False):
+            return None
+        command = "link"
+    else:
+        return None
+    channel_id = event.payload.get("channel_id")
+    if not channel_id:
+        raise ValueError("music reply requires a channel_id from the inbound chat.message")
+
+    log.info("music.transform matched", command=command)
+    scope = _scope(get_bundle_context().community)
+    await _migrate(scope)
+    overlay: dict[str, Any] | None = None
+    try:
+        reply, overlay = await _execute(event, command, arg)
+    except event_dedupe.EventIdError:
+        log.warn("music.missing_message_id", command=command)
+        reply = "couldn't process that message, please try again."
+    except tool.ToolError as exc:
+        reply = _tool_error_reply(exc, command)
+    payload: dict[str, Any] = {"channel_id": channel_id, "reply": guard_leading_command(reply)}
+    if overlay is not None:
+        payload["overlay"] = overlay
+    return PlatformEvent(
+        platform=event.platform,
+        event_type=event.event_type,
+        actor=event.actor,
+        payload=payload,
+        occurred_at=event.occurred_at,
+    )
+
+
+def _tool_error_reply(exc: tool.ToolError, command: str) -> str:
+    """Map a typed ToolError to a chat reply; unknown failures log loudly and apologize."""
+    if exc.code == "forbidden":
+        return _DENIED_MSG
+    friendly = _service_error(exc)
+    if friendly is not None:
+        return friendly
+    log.error("music.tool_failed", command=command, code=exc.code)
+    return _UNAVAILABLE_MSG
+
+
+async def _publish_overlay(overlay: dict[str, Any]) -> None:
+    """Publish the service-derived state to this bundle's own overlay surfaces.
+
+    A refused or failed publish must not fail the chat command; it is logged loudly (surface and
+    error code only, never the payload) and the next command republishes the full state.
     """
     import wit_world
 
     now_ms = int(clock.now_millis())
-    for surface_id, payload in _surface_payloads(entries, now_ms):
+    frames = (
+        (_SURFACE_NOW_PLAYING, {"now_playing": overlay.get("now_playing"), "updated_ms": now_ms}),
+        (_SURFACE_QUEUE, {"queue": overlay.get("queue") or [], "updated_ms": now_ms}),
+    )
+    for surface_id, payload in frames:
         try:
             wit_world.imports.overlay.publish_surface(surface_id, json.dumps(payload))
         except Exception as exc:  # noqa: BLE001 -- loud log, never a silent drop
@@ -446,218 +609,24 @@ async def _publish_overlay(entries: list[QueueEntry]) -> None:
             log.error("music.surface_publish_failed", surface=surface_id, error=str(code))
 
 
-async def _get_max_per_user(community: str, *, provider: str, channel_id: str) -> int:
-    """Return the community's configured max-pending limit, or the default if unset/corrupt."""
-    raw = await _kv_get(
-        community, _MAX_PER_USER_CONFIG_KEY, provider=provider, channel_id=channel_id
-    )
-    if raw is None:
-        return DEFAULT_MAX_PER_USER
-    try:
-        return int(raw.decode())
-    except (UnicodeDecodeError, ValueError):
-        log.error("music.max_per_user_config_corrupt", community=community)
-        return DEFAULT_MAX_PER_USER
-
-
-async def _handle_add(
-    arg: str | None, *, community: str, actor: str | None, provider: str, channel_id: str
-) -> str:
-    """Validate+enqueue `!sr <text>`/`!songrequest <text>`'s own free-text request."""
-    if not arg:
-        return _USAGE
-    text = arg.strip()
-    if not text:
-        return _USAGE
-    if len(text) > MAX_REQUEST_TEXT_LEN:
-        return f"song requests must be {MAX_REQUEST_TEXT_LEN} characters or fewer"
-
-    queue = await _load_queue(community, provider=provider, channel_id=channel_id)
-    if len(queue) >= MAX_QUEUE_SIZE:
-        return f"the queue is full ({MAX_QUEUE_SIZE} max) -- try again once it drains"
-
-    pseudonym = _pseudonym(actor)
-    max_per_user = await _get_max_per_user(community, provider=provider, channel_id=channel_id)
-    pending = sum(1 for entry in queue if entry.requester_pseudonym == pseudonym)
-    if pending >= max_per_user:
-        return f"you already have {pending} pending request(s) -- the limit is {max_per_user}"
-
-    next_id = await _kv_increment(
-        community, _SEQ_KEY, 1, ttl_seconds=0, provider=provider, channel_id=channel_id
-    )
-    queue.append(
-        QueueEntry(id=next_id, requester_pseudonym=pseudonym, text=text, ts=clock.now_millis())
-    )
-    await _save_queue(community, queue, provider=provider, channel_id=channel_id)
-    log.info("music.request_added", community=community)
-    return f"added to the queue at position {len(queue)} (#{next_id})"
-
-
-async def _handle_show(*, community: str, actor: str | None, provider: str, channel_id: str) -> str:
-    """Render the first `SHOW_LIMIT` queue entries, marking the caller's own `(yours)`."""
-    queue = await _load_queue(community, provider=provider, channel_id=channel_id)
-    if not queue:
-        return _QUEUE_EMPTY_MSG
-
-    pseudonym = _pseudonym(actor)
-    shown = queue[:SHOW_LIMIT]
-    rendered = [
-        f"#{entry.id} {entry.text}" + (" (yours)" if entry.requester_pseudonym == pseudonym else "")
-        for entry in shown
-    ]
-    remainder = len(queue) - len(shown)
-    suffix = f" (+{remainder} more)" if remainder > 0 else ""
-    return f"Queue ({len(queue)}): " + " | ".join(rendered) + suffix
-
-
-async def _handle_remove(
-    arg: str | None,
-    *,
-    community: str,
-    actor: str | None,
-    role_signal: bool | None,
-    provider: str,
-    channel_id: str,
-) -> str:
-    """Remove one queue entry by id -- the requester themself, or any moderator/broadcaster."""
-    if not arg:
-        return _USAGE
-    cleaned = arg.strip()
-    try:
-        target_id = int(cleaned)
-    except ValueError as exc:
-        log.debug("music.invalid_request_id", error_type=type(exc).__name__)
-        return f"'{cleaned}' isn't a valid request id"
-
-    queue = await _load_queue(community, provider=provider, channel_id=channel_id)
-    match = next((entry for entry in queue if entry.id == target_id), None)
-    if match is None:
-        return f"no request #{target_id} found"
-
-    pseudonym = _pseudonym(actor)
-    is_owner = match.requester_pseudonym == pseudonym
-    if not (is_owner or role_signal is True):
-        return "you can only remove your own requests"
-
-    remaining = [entry for entry in queue if entry.id != target_id]
-    await _save_queue(community, remaining, provider=provider, channel_id=channel_id)
-    log.info("music.request_removed", community=community)
-    return f"removed request #{target_id}"
-
-
-async def _handle_advance(*, community: str, provider: str, channel_id: str) -> str:
-    """Pop the head of the queue (`!music next`/`!music skip`) -- moderator/broadcaster only."""
-    queue = await _load_queue(community, provider=provider, channel_id=channel_id)
-    if not queue:
-        return _QUEUE_EMPTY_MSG
-
-    removed, *remaining = queue
-    await _save_queue(community, remaining, provider=provider, channel_id=channel_id)
-    log.info("music.advanced", community=community)
-    if remaining:
-        return f"now playing: {removed.text} (up next: {remaining[0].text})"
-    return f"now playing: {removed.text} (queue is now empty)"
-
-
-async def _handle_config_set(
-    arg: str | None, *, community: str, provider: str, channel_id: str
-) -> str:
-    """Parse+apply `!music set max-per-user <n>`'s own free-text `args` tail."""
-    if not arg:
-        return _USAGE
-    parts = arg.split()
-    if len(parts) != 2 or parts[0].lower() != "max-per-user":
-        return _USAGE
-    try:
-        value = int(parts[1])
-    except ValueError as exc:
-        log.debug("music.invalid_max_per_user", error_type=type(exc).__name__)
-        return f"'{parts[1]}' isn't a whole number"
-    if not (MIN_MAX_PER_USER <= value <= MAX_MAX_PER_USER):
-        return f"max-per-user must be between {MIN_MAX_PER_USER} and {MAX_MAX_PER_USER}"
-    await _kv_set(
-        community,
-        _MAX_PER_USER_CONFIG_KEY,
-        str(value).encode(),
-        ttl_seconds=0,
-        provider=provider,
-        channel_id=channel_id,
-    )
-    return f"max-per-user set to {value}"
-
-
 async def dispatch(
     envelope: StageEnvelope, config: dict[str, Any], *, http_client: Any
 ) -> DispatchResult:
-    """Implement `action-stage.dispatch`: permission gate where required, then the queue op.
+    """Implement `action-stage.dispatch`: publish the overlay (if any), then relay the reply.
 
     Raises:
-        ValueError: The envelope's payload has no `channel_id`; the
-            envelope has no `community` (no tenant-wide fallback -- see
-            module docstring's data-scoping section); or an unrecognized
-            `command` (defensive -- `transform` only ever emits a member of
-            `_KNOWN_COMMANDS`).
-        RuntimeError: A `kv` backend call failed, or stored queue state was
-            corrupt (see `_fail_kv`/`_fail_state` -- a chat error reply and
-            an ERROR log line are always emitted first).
+        ValueError: the payload has no `channel_id` or no `reply` string (defensive -- `transform`
+            always emits both).
     """
     payload = envelope.event.payload
     channel_id = payload.get("channel_id")
-    if not channel_id:
-        raise ValueError("music reply requires a channel_id from the inbound chat.message")
-    command = payload.get("command")
-    if command not in _KNOWN_COMMANDS:
-        raise ValueError(f"unrecognized music command: {command!r}")
-
+    reply = payload.get("reply")
+    if not channel_id or not isinstance(reply, str) or not reply:
+        raise ValueError("music reply requires a channel_id and a reply from process-stage")
+    overlay = payload.get("overlay")
+    if isinstance(overlay, dict):
+        await _publish_overlay(overlay)
     provider = envelope.event.platform
-    community = envelope.community
-    if not community:
-        log.error("music.missing_community", command=command)
-        raise ValueError("music requires a community context and cannot operate tenant-wide")
-
-    if command == "usage":
-        await relay.push(provider, {"channel": channel_id, "text": _USAGE})
-        return DispatchResult(transport=provider, detail="usage")
-
-    # `add`/`show`/`remove` are open to any caller (remove is further gated by
-    # ownership-or-mod inside `_handle_remove`); `config_set`/`advance` are
-    # moderator/broadcaster only (module docstring).
-    role_signal = _caller_role_signal(payload)
-    if command in ("config_set", "advance") and role_signal is not True:
-        log.info("music.permission_denied", command=command, role_signal=str(role_signal))
-        await relay.push(provider, {"channel": channel_id, "text": _PERMISSION_DENIED_MSG})
-        return DispatchResult(transport=provider, detail=f"{command}:denied")
-
-    arg = payload.get("arg")
-    arg = arg if isinstance(arg, str) else None
-    actor = envelope.event.actor
-
-    if command == "add":
-        reply_text = await _handle_add(
-            arg, community=community, actor=actor, provider=provider, channel_id=channel_id
-        )
-    elif command == "show":
-        reply_text = await _handle_show(
-            community=community, actor=actor, provider=provider, channel_id=channel_id
-        )
-    elif command == "remove":
-        reply_text = await _handle_remove(
-            arg,
-            community=community,
-            actor=actor,
-            role_signal=role_signal,
-            provider=provider,
-            channel_id=channel_id,
-        )
-    elif command == "config_set":
-        reply_text = await _handle_config_set(
-            arg, community=community, provider=provider, channel_id=channel_id
-        )
-    else:  # advance
-        reply_text = await _handle_advance(
-            community=community, provider=provider, channel_id=channel_id
-        )
-
-    await relay.push(provider, {"channel": channel_id, "text": reply_text})
-    log.info("music.dispatch relayed", platform=provider, command=command)
-    return DispatchResult(transport=provider, detail=command)
+    await relay.push(provider, {"channel": channel_id, "text": reply})
+    log.info("music.dispatch relayed", platform=provider)
+    return DispatchResult(transport=provider, detail="reply")
