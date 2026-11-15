@@ -79,22 +79,6 @@ Returns the namespace where resources should be created.
 {{- end }}
 
 {{/*
-Image path with registry prefix
-Constructs the full image path including registry, repository, and tag.
-Usage: {{ include "waddlebot.image" (dict "image" .Values.modules.router "global" .Values.global "defaultTag" .Chart.AppVersion) }}
-*/}}
-{{- define "waddlebot.image" -}}
-{{- $registry := .global.imageRegistry | default "" }}
-{{- $repository := .image.repository | required "image.repository is required" }}
-{{- $tag := .image.tag | default .defaultTag | default "latest" | toString }}
-{{- if $registry }}
-{{- printf "%s/%s:%s" $registry $repository $tag }}
-{{- else }}
-{{- printf "%s:%s" $repository $tag }}
-{{- end }}
-{{- end }}
-
-{{/*
 Service Account name
 Returns the name of the service account to use.
 */}}
@@ -223,24 +207,6 @@ Usage: {{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_p
 {{- end }}
 
 {{/*
-Module image helper
-Simplified image helper for module-specific images.
-Uses global registry and chart version as defaults.
-Handles both bare module names and legacy patterns with properly scoped registry.
-Usage: {{ include "waddlebot.moduleImage" (dict "root" . "module" "router" "tag" .Values.modules.router.imageTag) }}
-*/}}
-{{- define "waddlebot.moduleImage" -}}
-{{- $registry := .root.Values.global.imageRegistry | default "" }}
-{{- $repository := .module | required "module name is required" }}
-{{- $tag := .tag | default .root.Chart.AppVersion | default "latest" | toString }}
-{{- if $registry }}
-{{- printf "%s/%s:%s" $registry $repository $tag }}
-{{- else }}
-{{- printf "%s:%s" $repository $tag }}
-{{- end }}
-{{- end }}
-
-{{/*
 Per-image tag resolution
 Precedence: explicit per-component tag > global.imageTags[<image>] > global.imageTag > "latest".
 global.imageTags (default empty) lets a deploy pin each image independently, so an image that
@@ -268,20 +234,6 @@ Usage: {{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "action-
 {{- else }}
 {{- printf "%s:%s" $repository $tag }}
 {{- end }}
-{{- end }}
-
-{{/*
-Create the name of the config map for common configuration
-*/}}
-{{- define "waddlebot.commonConfigName" -}}
-{{- printf "%s-config" (include "waddlebot.fullname" .) }}
-{{- end }}
-
-{{/*
-Create the name of the secret for common secrets
-*/}}
-{{- define "waddlebot.commonSecretName" -}}
-{{- printf "%s-secrets" (include "waddlebot.fullname" .) }}
 {{- end }}
 
 {{/*
@@ -318,64 +270,6 @@ a rendered Secret. Call as:
 {{- if regexMatch "(?i)(REPLACE_ME|CHANGE_ME|changeme|example)" $v }}
 {{- fail (printf "refusing to render placeholder value for %q -- set a real value or remove the key (see docs/PLATFORM_CREDENTIALS.md)" .key) }}
 {{- end }}
-{{- end }}
-{{- end }}
-
-{{/*
-API Key Secret Name
-Returns the name of the secret containing API keys.
-*/}}
-{{- define "waddlebot.apiKeySecretName" -}}
-{{- if .Values.apiKeys.existingSecret }}
-{{- .Values.apiKeys.existingSecret }}
-{{- else }}
-{{- printf "%s-api-keys" (include "waddlebot.fullname" .) }}
-{{- end }}
-{{- end }}
-
-{{/*
-License Key Secret Name
-Returns the name of the secret containing license keys.
-*/}}
-{{- define "waddlebot.licenseSecretName" -}}
-{{- if .Values.license.existingSecret }}
-{{- .Values.license.existingSecret }}
-{{- else }}
-{{- printf "%s-license" (include "waddlebot.fullname" .) }}
-{{- end }}
-{{- end }}
-
-{{/*
-Ingress API Version
-Returns the appropriate API version for Ingress based on Kubernetes version.
-*/}}
-{{- define "waddlebot.ingress.apiVersion" -}}
-{{- if .Capabilities.APIVersions.Has "networking.k8s.io/v1" }}
-{{- print "networking.k8s.io/v1" }}
-{{- else if .Capabilities.APIVersions.Has "networking.k8s.io/v1beta1" }}
-{{- print "networking.k8s.io/v1beta1" }}
-{{- else }}
-{{- print "extensions/v1beta1" }}
-{{- end }}
-{{- end }}
-
-{{/*
-Return true if cert-manager is enabled
-*/}}
-{{- define "waddlebot.certManager.enabled" -}}
-{{- if and .Values.ingress.enabled .Values.ingress.certManager.enabled }}
-{{- true }}
-{{- end }}
-{{- end }}
-
-{{/*
-Return the appropriate cert-manager annotation
-*/}}
-{{- define "waddlebot.certManager.annotation" -}}
-{{- if eq .Values.ingress.certManager.issuer.kind "ClusterIssuer" }}
-cert-manager.io/cluster-issuer: {{ .Values.ingress.certManager.issuer.name }}
-{{- else }}
-cert-manager.io/issuer: {{ .Values.ingress.certManager.issuer.name }}
 {{- end }}
 {{- end }}
 
@@ -578,12 +472,6 @@ whenever hub-api itself is enabled.
 
 {{- define "waddlebot.hubApiGrpcTlsSansSha256" -}}
 {{- include "waddlebot.hubApiGrpcTlsDesiredDnsNames" . | sha256sum -}}
-{{- end }}
-
-{{- define "waddlebot.hubApiGrpcTlsMaterialAvailable" -}}
-{{- if .Values.pipeline.hubApi.enabled -}}
-true
-{{- end -}}
 {{- end }}
 
 {{/* Server-role env for hub-api's own container -- matches hub_api/grpc_internal/

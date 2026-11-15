@@ -25,19 +25,9 @@ data:
   DATABASE_PORT: {{ .Values.infrastructure.postgresql.service.port | quote }}
   DATABASE_NAME: {{ .Values.infrastructure.postgresql.database | quote }}
 
-  # Redis Configuration
-  REDIS_HOST: {{ .Values.infrastructure.redis.service.name | quote }}
-  # TLS port only -- the cache Valkey has no plaintext listener (feature/transit-tls-core F2).
-  REDIS_PORT: {{ .Values.infrastructure.redis.tls.port | quote }}
-
-  # S3-compatible object storage (SeaweedFS, was MinIO) -- key names kept as
-  # MINIO_* for backward compatibility with consumers still reading them
-  # (legacy consumers); S3_* names are the primary/preferred keys.
-  MINIO_ENDPOINT: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
-  MINIO_CONSOLE_ENDPOINT: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.masterPort }}"
+  # S3-compatible object storage (SeaweedFS)
   S3_ENDPOINT_URL: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
   S3_BUCKET_NAME: {{ .Values.infrastructure.seaweedfs.bucketName | quote }}
-  S3_STORAGE_ENABLED: "true"
   # regression: bundle publish/fetch bucket split after SeaweedFS migration (#508/#509) --
   # hub_api/services/storage_service.py's bundle component/sidecar uploads (and
   # hub_api/cli/seed_core_bundles.py, which shares this ConfigMap via envFrom) MUST target
@@ -49,20 +39,12 @@ data:
 
   # Qdrant Configuration
   QDRANT_URL: "http://{{ .Values.infrastructure.qdrant.service.name }}:{{ .Values.infrastructure.qdrant.service.port }}"
-  MEM0_VECTOR_STORE: "qdrant"
-
-  # Ollama Configuration
-  OLLAMA_HOST: {{ .Values.infrastructure.ollama.service.name | quote }}
-  OLLAMA_PORT: {{ .Values.infrastructure.ollama.service.port | quote }}
-  OLLAMA_USE_TLS: "false"
 
   # General Configuration
   LOG_LEVEL: {{ .Values.global.logLevel | quote }}
   NODE_ENV: {{ .Values.global.nodeEnv | quote }}
   DEPLOYMENT_TIER: {{ .Values.global.deploymentTier | quote }}
-  BASE_DOMAIN: {{ .Values.global.baseDomain | quote }}
   OVERLAY_BASE_URL: {{ .Values.global.overlayBaseUrl | quote }}
-  OVERLAY_KEY_GRACE_PERIOD_MINUTES: "5"
 
   # PostgreSQL Init Configuration
   POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"

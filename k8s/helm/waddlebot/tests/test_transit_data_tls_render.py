@@ -254,7 +254,7 @@ def test_python_redis_clients_mount_the_valkey_ca(values):
 def test_every_s3_client_is_https_with_ca(values):
     docs = _docs(values)
     cfg = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "waddlebot-config")
-    for k in ("S3_ENDPOINT_URL", "MINIO_ENDPOINT"):
+    for k in ("S3_ENDPOINT_URL",):
         assert cfg["data"][k] == f'https://{_fqdn(docs, "seaweedfs")}:8333', k
     n = 0
     ep_names = ("BUNDLE_BUCKET_ENDPOINT", "BUNDLE_STORAGE_ENDPOINT", "S3_ENDPOINT", "IMAGE_BUCKET_ENDPOINT")

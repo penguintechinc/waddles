@@ -10,7 +10,7 @@
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
         test-data-plane-parity test-connector-parity gen-connector-parity-expected \
-        test-helm-matrix test-helm-matrix-quick
+        test-helm-matrix test-helm-matrix-quick audit-chart-values
 
 dev:
 	$(error dev: docker-compose is deprecated -- deploy to Kubernetes via scripts/deploy-alpha.sh)
@@ -65,6 +65,14 @@ test-helm-matrix:
 
 test-helm-matrix-quick:
 	@bash scripts/ci/helm_matrix.sh --quick
+
+# Dead values keys / never-included helpers in the waddlebot chart (static: .Values, $var aliases,
+# index, wholesale toYaml/range/include parents, subchart). Prints counts; zero examined fails.
+# Intentional keeps go in scripts/ci/audit-chart-values/allowlist.txt with a '# reason'.
+audit-chart-values:
+	@python3 -m pytest -q -p no:cacheprovider scripts/ci/audit-chart-values/test_audit_chart_values.py
+	@python3 scripts/ci/audit-chart-values/audit_chart_values.py k8s/helm/waddlebot \
+		--allowlist scripts/ci/audit-chart-values/allowlist.txt
 
 # USER DECISION (2026-10-01, fix/chart-fresh-install-hooks): db-migrate now runs
 # post-install -- helm upgrade --install in alpha-deploy.sh must never pass
