@@ -117,7 +117,7 @@ def _openssl_text(pem: str) -> str:
 @pytest.mark.parametrize("values", _ENVS)
 def test_transit_secret_is_ecdsa_p256_sha256_and_chains(values):
     """Self-generated fallback CA (cert-manager off): every env is forced static here."""
-    docs = _docs(values, _STATIC)
+    docs = with_provisioned(_docs(values, _STATIC))
     secs = [d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-transit-tls")]
     assert len(secs) == 1, "exactly one transit-tls Secret expected"
     data = secs[0]["stringData"]
@@ -144,9 +144,10 @@ def test_transit_secret_is_ecdsa_p256_sha256_and_chains(values):
 
 @pytest.mark.parametrize("values", _ENVS)
 def test_secret_is_a_pre_hook_so_migration_hooks_can_mount_it(values):
-    sec = next(d for d in _docs(values, _STATIC) if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-transit-tls"))
-    ann = sec["metadata"]["annotations"]
+    job = next(d for d in _docs(values, _STATIC) if d["kind"] == "Job" and d["metadata"]["name"].endswith("-provision-secrets"))
+    ann = job["metadata"]["annotations"]
     assert ann["helm.sh/hook"] == "pre-install,pre-upgrade"
+    assert any(s.endswith("-transit-tls") for s in ann["waddles.penguintech.io/provisions-secrets"].split(","))
 
 
 @pytest.mark.parametrize("values", _ENVS)
@@ -275,7 +276,7 @@ def test_every_s3_client_is_https_with_ca(values):
 
 @pytest.mark.parametrize("values", ("values-alpha.yaml", "values-dal2alpha.yaml"))
 def test_generated_valkey_ca_and_leaf_are_ecdsa_p256(values):
-    docs = _docs(values, _STATIC)
+    docs = with_provisioned(_docs(values, _STATIC))
     sec = next(d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-valkey-tls"))
     for key in ("ca.crt", "tls.crt"):
         txt = _openssl_text(sec["stringData"][key])
@@ -394,7 +395,7 @@ def test_wildcard_san_fails_the_render():
 
 def test_static_fallback_only_when_cert_manager_is_off():
     """values-alpha (no cert-manager) self-generates one CA; the cert-manager Certificates are absent."""
-    docs = _docs("values-alpha.yaml")
+    docs = with_provisioned(_docs("values-alpha.yaml"))
     assert not [d for d in docs if d["kind"] == "Certificate" and d["metadata"]["name"].endswith(("-postgres-tls", "-seaweedfs-tls", "-valkey-tls"))]
     assert any(d["kind"] == "Secret" and d["metadata"]["name"].endswith("-transit-tls") for d in docs)
     assert not [d for d in docs if d["kind"] == "Issuer"]

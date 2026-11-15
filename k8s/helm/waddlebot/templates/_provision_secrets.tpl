@@ -60,3 +60,33 @@ the inputs Secret and wins over generation, but never over an existing real valu
 {{- define "waddlebot.prov.marker" -}}
 {{- $_ := set .acc "lines" (append .acc.lines (printf "marker|%s|root-hmac-v1" .key)) -}}
 {{- end -}}
+
+{{- define "waddlebot.prov.tlsMeta" -}}
+{{- $_ := set .acc "lines" (append .acc.lines (printf "tls_meta|%s|%s" (.identity | default "") (.sansSha256 | default ""))) -}}
+{{- end -}}
+
+{{- define "waddlebot.prov.tlsCa" -}}
+{{- $_ := set .acc "lines" (append .acc.lines (printf "tls_ca|%s|%s|%s|%s" .caTag .key .cn ((.days | default 365) | toString))) -}}
+{{- $explicit := (.explicit | default "") | toString -}}
+{{- if ne $explicit "" -}}
+{{- $_ := set .acc.inputs (printf "%s__%s" .secret .key) $explicit -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "waddlebot.prov.tlsLeaf" -}}
+{{- $_ := set .acc "lines" (append .acc.lines (printf "tls_leaf|%s|%s|%s|%s|%s|%s|%s" .caTag .certKey .keyKey .cn (.dnsCsv | default "") (.uriCsv | default "") ((.days | default 365) | toString))) -}}
+{{- $ec := (.explicitCert | default "") | toString -}}
+{{- $ek := (.explicitKey | default "") | toString -}}
+{{- if and (ne $ec "") (ne $ek "") -}}
+{{- $_ := set .acc.inputs (printf "%s__%s" .secret .certKey) $ec -}}
+{{- $_ := set .acc.inputs (printf "%s__%s" .secret .keyKey) $ek -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "waddlebot.prov.tlsAlias" -}}
+{{- $_ := set .acc "lines" (append .acc.lines (printf "tls_alias|%s|%s" .key .targetKey)) -}}
+{{- end -}}
+
+{{- define "waddlebot.prov.tlsConcat" -}}
+{{- $_ := set .acc "lines" (append .acc.lines (printf "tls_concat|%s|%s" .key .refs)) -}}
+{{- end -}}

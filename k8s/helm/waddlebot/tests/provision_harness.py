@@ -100,6 +100,18 @@ def run_hook(
         env = {
             **os.environ,
             "NAMESPACE": "waddlebot",
+            "DEPLOYMENT_TIER": next(
+                (
+                    e["value"]
+                    for d in docs
+                    if d.get("kind") == "Job"
+                    and d.get("metadata", {}).get("name", "").endswith("-provision-secrets")
+                    for c in d.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+                    for e in c.get("env", [])
+                    if e.get("name") == "DEPLOYMENT_TIER"
+                ),
+                "alpha",
+            ),
             "SPEC_FILE": str(spec),
             "INPUTS_DIR": str(inputs),
             "KUBECTL": str(kubectl),
