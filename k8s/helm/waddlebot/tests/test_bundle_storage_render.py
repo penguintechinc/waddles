@@ -24,7 +24,9 @@ _ENVS = (
     "values-ci.yaml",
     "values-local.yaml",
 )
-_CONSUMERS = ("svc-process-rust", "svc-action-rust")
+#: ONLY the process stage hosts the object-storage capability (svc-action refuses it loudly).
+_CONSUMERS = ("svc-process-rust",)
+_NON_CONSUMERS = ("svc-action-rust",)
 _BUCKET = "waddles-bundle-storage"
 _EXTERNAL = (
     "bundleStorage.mode=external",
@@ -152,3 +154,59 @@ def test_bad_mode_and_bundled_without_seaweedfs_fail():
     assert r.returncode != 0 and "must be bundled or external" in r.stderr
     r = _helm("values-alpha.yaml", ("infrastructure.seaweedfs.enabled=false",))
     assert r.returncode != 0 and "requires infrastructure.seaweedfs.enabled=true" in r.stderr
+
+
+def _deployment_env(docs, suffix):
+    found = [
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"].endswith(suffix)
+    ]
+    assert len(found) == 1, f"{suffix}: {len(found)} deployments"
+    c = found[0]["spec"]["template"]["spec"]["containers"][0]
+    return {e["name"]: e for e in c["env"]}
+
+
+@pytest.mark.parametrize("values", _ENVS)
+@pytest.mark.parametrize("extra", [(), _EXTERNAL])
+def test_svc_action_gets_no_bundle_storage_env(values, extra):
+    # least privilege: svc-action never reads object storage, so it must not mount the S3 credentials
+    env = _deployment_env(_docs(values, extra), "svc-action-rust")
+    leaked = sorted(k for k in env if k.startswith("BUNDLE_STORAGE_"))
+    assert not leaked, leaked
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_audit_password_is_a_secret_ref_to_the_credentials_secret(values):
+    env = _deployment_env(_docs(values), "svc-process-rust")["BUNDLE_STORAGE_AUDIT_PASSWORD"]
+    assert "value" not in env
+    ref = env["valueFrom"]["secretKeyRef"]
+    assert ref["key"] == "PW_WADDLES_BUNDLE_STORAGE_AUDIT" and ref["name"].endswith("db-credentials")
+
+
+def test_audit_password_is_generated_per_tier_and_handed_to_the_migrator():
+    # run the real provisioning hook: create-if-absent in every tier, same value reaches the db-migrate hook
+    for values in ("values-alpha.yaml", "values-production.yaml"):
+        docs = with_provisioned(_docs(values))
+        creds = [
+            d for d in docs
+            if d["kind"] == "Secret" and "PW_WADDLES_BUNDLE_STORAGE_AUDIT" in (d.get("stringData") or {})
+        ]
+        assert len(creds) == 1, values
+        pw = creds[0]["stringData"]["PW_WADDLES_BUNDLE_STORAGE_AUDIT"]
+        assert len(pw) >= 32, values
+        mig = [
+            d for d in docs
+            if d["kind"] == "Secret" and "DB_BUNDLE_STORAGE_AUDIT_PASSWORD" in (d.get("stringData") or {})
+        ]
+        assert len(mig) == 1, values
+        assert mig[0]["stringData"]["DB_BUNDLE_STORAGE_AUDIT_PASSWORD"] == pw, values
+        for d in docs:
+            if d is creds[0] or d is mig[0]:
+                continue
+            assert pw not in yaml.safe_dump(d), (values, d["metadata"]["name"])
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_svc_process_trusts_the_runtime_generated_transit_ca_for_s3(values):
+    env = _deployment_env(_docs(values), "svc-process-rust")
+    ca = env["S3_CA_FILE"]["value"]
+    assert ca.endswith(".crt") and ca == env["AWS_CA_BUNDLE"]["value"], ca

@@ -1613,8 +1613,6 @@ fn try_start_process_loop(
             &bundle_db_license_client,
         )
         .await;
-        let object_storage_wiring =
-            bundle_storage::try_build_wiring(&cli, &bundle_db_license_client).await;
         let gameserver_net_wiring =
             try_build_gameserver_net_wiring(&cli, &bundle_db_license_client);
         let economy_wiring = try_build_economy_wiring(
@@ -1773,7 +1771,10 @@ fn try_start_process_loop(
                 reputation_wiring: reputation_wiring.clone(),
                 economy_wiring: economy_wiring.clone(),
                 platform_table_wiring: platform_table_wiring.clone(),
-                object_storage_wiring: object_storage_wiring.clone(),
+                // `object_storage` is wired only on the multi-tenant path: this legacy
+                // path runs at the `(0, 0)` fail-closed scope, and storage prefixes
+                // are keyed by (tenant, community) -- a zero scope must never reach S3.
+                object_storage_wiring: None,
                 gameserver_net_wiring: gameserver_net_wiring.clone(),
                 // The legacy single-bundle path runs at the `(0, 0)` fail-closed
                 // scope (no resolved tenant/community), where every

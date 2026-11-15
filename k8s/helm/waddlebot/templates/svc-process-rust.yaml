@@ -219,6 +219,14 @@ spec:
         # Bundle object storage (spec 2026-11-06-bundle-object-storage): host-side S3 endpoint +
         # credentials -- bundles never see these (host-mediated `storage` capability).
         {{- include "waddlebot.bundleStorage.env" . | nindent 8 }}
+        # Durable audit sink credential (REQUIRED by svc-process whenever BUNDLE_STORAGE_* is set,
+        # outside DEPLOYMENT_TIER=local): the INSERT-only waddles_bundle_storage_audit role's
+        # runtime-generated password, secretKeyRef from <release>-db-credentials ONLY.
+        - name: BUNDLE_STORAGE_AUDIT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.db.credentialsSecretName" . }}
+              key: PW_WADDLES_BUNDLE_STORAGE_AUDIT
         {{- /* Durable VALKEY_URL override below is TLS-only: fail the render rather than leave the spine on the cache/plaintext envFrom VALKEY_URL. */}}
         {{- include "waddlebot.assertDurableTls" . }}
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}

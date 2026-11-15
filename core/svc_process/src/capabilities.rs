@@ -2522,6 +2522,14 @@ impl<K: KvBackend> StageCapabilities<K> {
             .op
             .strip_prefix("object_storage.")
             .ok_or_else(|| denied("unknown_op", "not an object_storage op"))?;
+        // Defence in depth: object prefixes are keyed by (tenant, community); a zero or
+        // negative scope (legacy `(0, 0)` fail-closed path) must never reach the backend.
+        if self.tenant_id <= 0 || self.community_id <= 0 {
+            return Err(denied(
+                "invalid_args",
+                "object-storage requires a resolved tenant and community scope",
+            ));
+        }
         let args = &call.args;
         let str_arg = |k: &str| -> Result<String, HostResultError> {
             args.get(k)
@@ -2567,6 +2575,17 @@ impl<K: KvBackend> StageCapabilities<K> {
                 "object-storage capability is disabled (waddles.bundle-object-storage is OFF)",
             ));
         }
+
+        // Own-prefix baseline: storage is OFF by default for a bundle -- its manifest must
+        // declare `storage.objects` (the app-scoped object-storage permission), checked on
+        // EVERY op (own prefix, cross-prefix and tag changes alike) before any host work.
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                PermissionId::StorageObjects,
+                ResourceRef::AppScoped(AppScopedResource::Objects),
+            )
+            .map_err(denied_from_gate)?;
 
         // Cross-prefix data op: the gate must hold `storage.<op>:<owner>`.
         let mut grants: Vec<String> = Vec::new();

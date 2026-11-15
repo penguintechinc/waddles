@@ -34,9 +34,33 @@ pub const REQUIRED_ENV: [&str; 5] = [
     "BUNDLE_STORAGE_SECRET_ACCESS_KEY",
 ];
 
-/// Optional password of the INSERT-only `waddles_bundle_storage_audit` role. Unset
-/// falls back to the structured-tracing audit sink (logged, not durable).
+/// Password of the INSERT-only `waddles_bundle_storage_audit` role. REQUIRED whenever the
+/// capability is provisioned: the durable Postgres audit sink is the only audit sink
+/// outside local development (`DEPLOYMENT_TIER=local` may fall back to tracing events).
 pub const AUDIT_PASSWORD_ENV: &str = "BUNDLE_STORAGE_AUDIT_PASSWORD";
+
+/// The only tier allowed to run without the durable audit sink.
+pub const LOCAL_TIER: &str = "local";
+
+/// Resolves the audit credential policy for a PROVISIONED capability: `Ok(Some)` =
+/// durable Postgres audit, `Ok(None)` = local-dev tracing fallback, `Err` = missing
+/// credential outside local dev (startup must fail, never silently downgrade).
+pub fn resolve_audit_password(
+    get: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<Secret>, StorageConfigError> {
+    if let Some(pw) = get(AUDIT_PASSWORD_ENV).filter(|s| !s.trim().is_empty()) {
+        return Ok(Some(Secret::new(pw)));
+    }
+    let tier = get("DEPLOYMENT_TIER").unwrap_or_default();
+    if tier.trim() == LOCAL_TIER {
+        return Ok(None);
+    }
+    Err(StorageConfigError::Invalid(format!(
+        "{AUDIT_PASSWORD_ENV} is required when object storage is provisioned (the durable \
+         Postgres audit sink is mandatory outside DEPLOYMENT_TIER={LOCAL_TIER}; \
+         got tier {tier:?})"
+    )))
+}
 
 /// Default INSERT-only audit role (`alembic/versions/0080_bundle_storage_audit.py`).
 pub const AUDIT_ROLE: &str = "waddles_bundle_storage_audit";
@@ -156,7 +180,7 @@ pub fn validate_startup() -> Result<(), StorageConfigError> {
 
 /// [`validate_startup`] over an injected variable source.
 fn validate_with(get: impl Fn(&str) -> Option<String>) -> Result<(), StorageConfigError> {
-    match parse_settings(get)? {
+    match parse_settings(&get)? {
         None => {
             record_provisioned(false);
             tracing::warn!(
@@ -164,12 +188,16 @@ fn validate_with(get: impl Fn(&str) -> Option<String>) -> Result<(), StorageConf
                  object_storage host-call will report not_implemented until provisioned)"
             );
         }
-        Some(s) => tracing::info!(
-            endpoint = %s.endpoint,
-            bucket = %s.bucket,
-            region = %s.region,
-            "bundle object-storage configuration validated"
-        ),
+        Some(s) => {
+            // Provisioned: the durable audit credential is mandatory (local dev excepted).
+            resolve_audit_password(&get)?;
+            tracing::info!(
+                endpoint = %s.endpoint,
+                bucket = %s.bucket,
+                region = %s.region,
+                "bundle object-storage configuration validated"
+            );
+        }
     }
     Ok(())
 }
@@ -242,9 +270,14 @@ async fn try_build_with(
             return None;
         }
     };
-    let audit_password = get(AUDIT_PASSWORD_ENV)
-        .filter(|s| !s.is_empty())
-        .map(Secret::new);
+    let audit_password = match resolve_audit_password(&get) {
+        Ok(pw) => pw,
+        Err(err) => {
+            record_provisioned(false);
+            tracing::error!(error = %err, "object-storage capability unavailable");
+            return None;
+        }
+    };
     let audit_cfg = AuditConnectConfig {
         host: cli.bundle_db_host.clone(),
         port: cli.bundle_db_port,
@@ -412,7 +445,7 @@ mod tests {
     #[test]
     fn startup_validation_passes_when_disabled_or_complete_and_fails_when_partial() {
         assert!(validate_with(env(&[])).is_ok());
-        assert!(validate_with(env(&full())).is_ok());
+        assert!(validate_with(env(&local())).is_ok());
         let partial = vec![("BUNDLE_STORAGE_BUCKET", "b")];
         assert!(matches!(
             validate_with(env(&partial)),
@@ -429,9 +462,52 @@ mod tests {
 
     #[tokio::test]
     async fn try_build_provisions_when_env_complete() {
-        assert!(try_build_with(env(&full()), &cli(), &test_license_client())
+        assert!(
+            try_build_with(env(&local()), &cli(), &test_license_client())
+                .await
+                .is_some()
+        );
+    }
+
+    fn local() -> Vec<(&'static str, &'static str)> {
+        let mut p = full();
+        p.push(("DEPLOYMENT_TIER", "local"));
+        p
+    }
+
+    #[test]
+    fn audit_password_is_required_outside_local_dev() {
+        for tier in ["alpha", "beta", "production", ""] {
+            let mut p = full();
+            p.push(("DEPLOYMENT_TIER", tier));
+            assert!(
+                matches!(validate_with(env(&p)), Err(StorageConfigError::Invalid(m)) if m.contains(AUDIT_PASSWORD_ENV)),
+                "tier {tier:?} must fail loud without the audit credential"
+            );
+        }
+        // Unset tier is not local either.
+        assert!(validate_with(env(&full())).is_err());
+    }
+
+    #[test]
+    fn audit_password_present_passes_in_any_tier_and_blank_counts_as_missing() {
+        let mut p = full();
+        p.push(("DEPLOYMENT_TIER", "production"));
+        p.push((AUDIT_PASSWORD_ENV, "pw"));
+        assert!(validate_with(env(&p)).is_ok());
+        let mut blank = full();
+        blank.push(("DEPLOYMENT_TIER", "production"));
+        blank.push((AUDIT_PASSWORD_ENV, "  "));
+        assert!(validate_with(env(&blank)).is_err());
+    }
+
+    #[tokio::test]
+    async fn try_build_refuses_tracing_fallback_outside_local() {
+        let mut p = full();
+        p.push(("DEPLOYMENT_TIER", "alpha"));
+        assert!(try_build_with(env(&p), &cli(), &test_license_client())
             .await
-            .is_some());
+            .is_none());
     }
 
     #[tokio::test]

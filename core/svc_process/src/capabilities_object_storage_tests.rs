@@ -40,11 +40,25 @@ fn grant_set(ids: &[&str]) -> GrantSet {
 /// Builds the caps under test plus the shared host, so a test can seed another
 /// bundle's prefix directly.
 fn fixture(ids: &[&str], flag_on: bool, wired: bool) -> (StageCapabilities, Arc<StorageHost>) {
+    let mut all = vec!["storage.objects"];
+    all.extend_from_slice(ids);
+    fixture_scoped(&all, flag_on, wired, TENANT_ID, COMMUNITY_ID)
+}
+
+/// Like [`fixture`] but with EXACTLY `ids` granted (no `storage.objects` baseline) and an
+/// explicit invocation scope.
+fn fixture_scoped(
+    ids: &[&str],
+    flag_on: bool,
+    wired: bool,
+    tenant: i32,
+    community: i32,
+) -> (StageCapabilities, Arc<StorageHost>) {
     let snapshot = InMemoryGrantSnapshot::new();
     snapshot.set(
         GrantScopeKey {
-            tenant_id: TENANT_ID,
-            community_id: COMMUNITY_ID,
+            tenant_id: tenant,
+            community_id: community,
             app_id: APP_ID.to_string(),
             app_version: VERSION,
         },
@@ -80,8 +94,8 @@ fn fixture(ids: &[&str], flag_on: bool, wired: bool) -> (StageCapabilities, Arc<
         "acme".to_string(),
         Some("main".to_string()),
         APP_ID.to_string(),
-        TENANT_ID,
-        COMMUNITY_ID,
+        tenant,
+        community,
         VERSION,
         egress,
         gate,
@@ -253,4 +267,51 @@ async fn unknown_op_is_refused_loudly() {
         code_of(&caps, "frobnicate", serde_json::json!({})).await,
         "unknown_op"
     );
+}
+
+#[tokio::test]
+async fn own_prefix_requires_the_manifest_declared_storage_objects_permission() {
+    let (caps, _) = fixture_scoped(&[], true, true, TENANT_ID, COMMUNITY_ID);
+    for (op, args) in [
+        ("put", put_args("a.txt", None)),
+        ("get", get_args("a.txt", None)),
+        ("head", get_args("a.txt", None)),
+        ("delete", get_args("a.txt", None)),
+        ("list", serde_json::json!({"key_prefix": "", "limit": 10})),
+    ] {
+        assert_eq!(code_of(&caps, op, args).await, "not_granted", "{op}");
+    }
+}
+
+#[tokio::test]
+async fn cross_prefix_grant_alone_does_not_replace_the_baseline_permission() {
+    let (caps, host) = fixture_scoped(
+        &["storage.read:waddles.core.other-store"],
+        true,
+        true,
+        TENANT_ID,
+        COMMUNITY_ID,
+    );
+    seed_other(&host, "s.txt").await;
+    share_with_caller(&host, "s.txt").await;
+    assert_eq!(
+        code_of(&caps, "get", get_args("s.txt", Some(OTHER_APP))).await,
+        "not_granted"
+    );
+}
+
+#[tokio::test]
+async fn unresolved_tenant_or_community_scope_is_refused_even_with_every_grant() {
+    for (tenant, community) in [(0, COMMUNITY_ID), (TENANT_ID, 0), (0, 0), (-1, 3), (7, -1)] {
+        let (caps, _) = fixture_scoped(&["storage.objects"], true, true, tenant, community);
+        assert_eq!(
+            code_of(&caps, "put", put_args("a.txt", None)).await,
+            "invalid_args",
+            "{tenant}/{community}"
+        );
+        assert_eq!(
+            code_of(&caps, "get", get_args("a.txt", None)).await,
+            "invalid_args"
+        );
+    }
 }
