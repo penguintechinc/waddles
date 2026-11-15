@@ -59,9 +59,8 @@ use pb::{
     DistributionStage, EphemeralPseudonym, GetStreamDekRequest, GetStreamDekResponse,
     GetTenantDekRequest, GetTenantDekResponse, ListBundlesRequest, ListBundlesResponse,
     MintEphemeralPseudonymRequest, MintEphemeralPseudonymsRequest, ResolveDisplayNamesRequest,
-    ResolveDisplayNamesResponse,
-    ResolveHandleRequest, ResolveHandleResponse, ResolvePlatformUserRequest,
-    ResolvePlatformUserResponse,
+    ResolveDisplayNamesResponse, ResolveHandleRequest, ResolveHandleResponse,
+    ResolvePlatformUserRequest, ResolvePlatformUserResponse,
 };
 use service_auth::{HttpTimeouts, HubChannel, MachineJwtClient, ServiceAuthError};
 use tonic::transport::{Channel, Endpoint};
