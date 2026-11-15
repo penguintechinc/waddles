@@ -140,9 +140,8 @@ def test_policies_still_select_statefulset_pods() -> None:
 
 
 def test_otlp_endpoint_absent_without_collector_but_service_name_set() -> None:
-    # The executor takes OTEL_* from the shared waddlebot.otel.env helper only (global.otel); with
-    # global.otel disabled it renders no exporter env at all. The two stages still render their
-    # service name through the legacy rustOtelEnv path.
+    # OTEL_* comes from the shared waddlebot.otel.env helper only (global.otel); with global.otel
+    # disabled the executor and both stages render no OTEL_* / K8S_POD_NAME env at all (release fix).
     docs = _render(["global.otel.enabled=false"])
     checked = 0
     for name, container in ((_EXEC, "svc-bundles-executor"),
@@ -150,9 +149,7 @@ def test_otlp_endpoint_absent_without_collector_but_service_name_set() -> None:
                             ("waddlebot-svc-action-rust", "svc-action-rust")):
         wl = next(d for d in docs if d["kind"] in ("Deployment", "StatefulSet") and d["metadata"]["name"] == name)
         env = _env(wl, container)
-        if container != "svc-bundles-executor":
-            assert "OTEL_SERVICE_NAME" in env
-        assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in env
+        assert not [n for n in env if n.startswith("OTEL_") or n == "K8S_POD_NAME"], sorted(env)
         checked += 1
     assert checked == 3
 
