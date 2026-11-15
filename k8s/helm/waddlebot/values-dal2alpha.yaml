@@ -209,6 +209,8 @@ pipeline:
     # once its key is provisioned. Never put license-tier flags here.
     extraEnv:
       FLAG_WADDLES_TENANT_DISCORD_INSTALL: "true"
+      # Reserved catch-all tenant slug, explicit (see values-alpha.yaml); mirrors defaultTenantId.
+      DEFAULT_TENANT_SLUG: "default"
       # Alpha capacity stopgap: svc-process shares one per-identity internal gRPC bucket (default
       # 50 rps / burst 100, hub_api/grpc_internal/server.py:125-126). Each Discord message fans out
       # to ~160 per-app consumers that each call identity resolution, which tripped
