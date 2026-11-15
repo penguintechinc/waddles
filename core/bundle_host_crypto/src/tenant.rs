@@ -137,36 +137,6 @@ impl TenantCrypto {
         result
     }
 
-    /// Version-aware HMAC blind index: `version` of `None` uses (and reports) the active DEK
-    /// version, `Some(v)` recomputes under that retained version (verifying data written
-    /// before a rotation). Returns the version actually used with the MAC.
-    pub async fn blind_index_versioned(
-        &self,
-        surface: &'static str,
-        tenant_id: &str,
-        version: Option<u32>,
-        context: &[&str],
-        value: &[u8],
-    ) -> Result<(u32, [u8; 32]), CryptoError> {
-        let start = Instant::now();
-        let result = async {
-            let (dek, used) = match version {
-                None => self.source.active(tenant_id).await?,
-                Some(v) => (self.source.version(tenant_id, v).await?, v),
-            };
-            let subkey = derive_subkey(&dek, tenant_id, Purpose::BlindIndex)?;
-            Ok((used, blind_index_with_subkey(&subkey, context, value)?))
-        }
-        .await;
-        finish("blind_index", surface, start, &result);
-        result
-    }
-
-    /// The tenant's currently active DEK version.
-    pub async fn active_dek_version(&self, tenant_id: &str) -> Result<u32, CryptoError> {
-        Ok(self.source.active(tenant_id).await?.1)
-    }
-
     /// True when `bytes` is a sealed envelope (vs legacy plaintext).
     #[must_use]
     pub fn is_sealed(bytes: &[u8]) -> bool {

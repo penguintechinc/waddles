@@ -11,8 +11,8 @@ use bundle_host_crypto::{Dek, DekProvider, DekUnavailableError, TenantCrypto, MA
 use bundle_host_storage::key::object_key;
 use bundle_host_storage::seal::BoxFuture;
 use bundle_host_storage::{
-    AuditEvent, AuditSink, GrantSet, LedgerEntry, MemoryBackend, MemoryPlainLedger, ObjectBackend,
-    ObjectSealing, PlainLedger, SealGate, StorageError, StorageHost, StorageScope,
+    AuditEvent, AuditSink, GrantSet, MemoryBackend, ObjectBackend, ObjectSealing, SealGate,
+    StorageError, StorageHost, StorageScope,
 };
 use bytes::Bytes;
 use zeroize::Zeroizing;
@@ -78,8 +78,6 @@ struct Rig {
     backend: Arc<MemoryBackend>,
     broker_up: Arc<AtomicBool>,
     seal_on: Arc<AtomicBool>,
-    active: Arc<AtomicU32>,
-    ledger: Arc<MemoryPlainLedger>,
 }
 
 fn rig(legacy_cutoff: Option<u64>) -> Rig {
@@ -87,12 +85,10 @@ fn rig(legacy_cutoff: Option<u64>) -> Rig {
     let broker_up = Arc::new(AtomicBool::new(true));
     let seal_on = Arc::new(AtomicBool::new(true));
     let active = Arc::new(AtomicU32::new(1));
-    let ledger = Arc::new(MemoryPlainLedger::default());
     let sealing = ObjectSealing::new(TenantCrypto::new(Keys {
         up: broker_up.clone(),
         active: active.clone(),
     }))
-    .with_plain_ledger(ledger.clone())
     .with_gate(Arc::new(Gate(seal_on.clone())));
     let sealing = match legacy_cutoff {
         Some(cutoff) => sealing.with_legacy_plaintext_until(cutoff),
@@ -104,8 +100,6 @@ fn rig(legacy_cutoff: Option<u64>) -> Rig {
         backend,
         broker_up,
         seal_on,
-        active,
-        ledger,
     }
 }
 
@@ -355,79 +349,52 @@ async fn tagged_sealed_object_with_plaintext_body_is_an_integrity_failure() {
 }
 
 #[tokio::test]
-async fn kill_switch_plaintext_is_mac_authenticated_and_forgery_is_refused() {
+async fn kill_switch_refuses_writes_and_never_stores_plaintext_but_sealed_reads_still_work() {
     let r = rig(None);
     let s = scope(1, 7);
     put(&r, &s, "sealed").await;
     r.seal_on.store(false, Ordering::SeqCst);
-    put(&r, &s, "plain").await;
-    let stored = raw(&r, &s, "plain").await;
-    assert_eq!(&stored.body[..], PLAIN);
-    assert!(stored
-        .meta
-        .tags
-        .iter()
-        .any(|t| t.starts_with("waddles-plain=")));
-    // Sealed objects still open, and the host-written plaintext reads back (MAC verifies).
+    let err = r
+        .host
+        .put(
+            &s,
+            None,
+            "plain",
+            Bytes::from_static(PLAIN),
+            "text/plain",
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        StorageError::Backend("object write refused: tenant encryption unavailable".into())
+    );
+    assert!(
+        r.backend
+            .get(&object_key(APP, 1, 7, "plain"))
+            .await
+            .expect("backend")
+            .is_none(),
+        "nothing written"
+    );
+    // Overwriting an existing sealed object is refused too, and leaves it intact.
+    assert!(r
+        .host
+        .put(
+            &s,
+            None,
+            "sealed",
+            Bytes::from_static(b"x"),
+            "text/plain",
+            &[]
+        )
+        .await
+        .is_err());
     assert_eq!(
         &r.host.get(&s, None, "sealed").await.expect("get").1[..],
         PLAIN
     );
-    assert_eq!(
-        &r.host.get(&s, None, "plain").await.expect("get").1[..],
-        PLAIN
-    );
-
-    // Tampered body under the original MAC tag: refused.
-    r.backend
-        .put(
-            &object_key(APP, 1, 7, "plain"),
-            Bytes::from_static(b"tampered"),
-            "text/plain",
-            &stored.meta.tags,
-        )
-        .await
-        .expect("tamper");
-    assert!(r.host.get(&s, None, "plain").await.is_err());
-
-    // Forged MAC tag (attacker lacks the tenant key): refused.
-    let mut tags: Vec<String> = legacy_tags();
-    tags.push(format!("waddles-plain={}", "ab".repeat(32)));
-    r.backend
-        .put(
-            &object_key(APP, 1, 7, "plain"),
-            Bytes::from_static(b"forged"),
-            "text/plain",
-            &tags,
-        )
-        .await
-        .expect("forge");
-    assert!(r.host.get(&s, None, "plain").await.is_err());
-
-    // A MAC minted for another tenant's scope does not transplant.
-    let other = scope(2, 7);
-    r.seal_on.store(false, Ordering::SeqCst);
-    put(&r, &other, "plain").await;
-    let theirs = raw(&r, &other, "plain").await;
-    let mut moved = legacy_tags();
-    moved.extend(
-        theirs
-            .meta
-            .tags
-            .iter()
-            .filter(|t| t.starts_with("waddles-plain="))
-            .cloned(),
-    );
-    r.backend
-        .put(
-            &object_key(APP, 1, 7, "plain"),
-            theirs.body,
-            "text/plain",
-            &moved,
-        )
-        .await
-        .expect("transplant");
-    assert!(r.host.get(&s, None, "plain").await.is_err());
 }
 
 #[tokio::test]
@@ -444,282 +411,4 @@ async fn sealed_objects_have_no_presigned_url_and_unsealed_host_refuses_them() {
         bare.get(&s, None, "x").await.unwrap_err(),
         StorageError::Backend(m) if m.contains("sealing is not configured")
     ));
-}
-
-fn plain_tag_of(o: &bundle_host_storage::StoredObject) -> String {
-    o.meta
-        .tags
-        .iter()
-        .find(|t| t.starts_with("waddles-plain="))
-        .cloned()
-        .expect("plain tag")
-}
-
-fn with_tag(o: &bundle_host_storage::StoredObject, tag: String) -> Vec<String> {
-    o.meta
-        .tags
-        .iter()
-        .filter(|t| !t.starts_with("waddles-plain="))
-        .cloned()
-        .chain([tag])
-        .collect()
-}
-
-#[tokio::test]
-async fn rotation_keeps_recent_plain_tags_verifiable_and_rewrite_moves_to_the_new_version() {
-    let r = rig(None);
-    let s = scope(1, 7);
-    r.seal_on.store(false, Ordering::SeqCst);
-    put(&r, &s, "p").await;
-    assert!(plain_tag_of(&raw(&r, &s, "p").await).starts_with("waddles-plain=v1:1:"));
-    // One rotation: still inside the window.
-    r.active.store(2, Ordering::SeqCst);
-    assert_eq!(
-        &r.host
-            .get(&s, None, "p")
-            .await
-            .expect("v1 tag after rotation")
-            .1[..],
-        PLAIN
-    );
-    // A rewrite re-tags under v2 with the next counter.
-    put(&r, &s, "p").await;
-    assert!(plain_tag_of(&raw(&r, &s, "p").await).starts_with("waddles-plain=v2:2:"));
-    // Two rotations past the tag's version: outside the window, refused until rewritten.
-    r.active.store(4, Ordering::SeqCst);
-    assert!(r.host.get(&s, None, "p").await.is_err());
-}
-
-#[tokio::test]
-async fn replayed_older_plain_body_and_tag_is_refused() {
-    let r = rig(None);
-    let s = scope(1, 7);
-    r.seal_on.store(false, Ordering::SeqCst);
-    r.host
-        .put(
-            &s,
-            None,
-            "k",
-            Bytes::from_static(b"old value"),
-            "text/plain",
-            &[],
-        )
-        .await
-        .expect("put old");
-    let old = raw(&r, &s, "k").await;
-    r.host
-        .put(
-            &s,
-            None,
-            "k",
-            Bytes::from_static(b"new value"),
-            "text/plain",
-            &[],
-        )
-        .await
-        .expect("put new");
-    assert_eq!(
-        &r.host.get(&s, None, "k").await.expect("current").1[..],
-        b"new value"
-    );
-    // Attacker restores the earlier (valid-at-the-time) body + tags wholesale.
-    r.backend
-        .put(
-            &object_key(APP, 1, 7, "k"),
-            old.body,
-            "text/plain",
-            &old.meta.tags,
-        )
-        .await
-        .expect("rollback");
-    assert!(r.host.get(&s, None, "k").await.is_err(), "rollback refused");
-}
-
-#[tokio::test]
-async fn plain_tag_version_mismatch_is_refused() {
-    let r = rig(None);
-    let s = scope(1, 7);
-    r.seal_on.store(false, Ordering::SeqCst);
-    put(&r, &s, "v").await;
-    r.active.store(2, Ordering::SeqCst);
-    let o = raw(&r, &s, "v").await;
-    // Claim the MAC (made under v1) was made under v2.
-    let forged = plain_tag_of(&o).replacen("=v1:", "=v2:", 1);
-    r.backend
-        .put(
-            &object_key(APP, 1, 7, "v"),
-            o.body.clone(),
-            "text/plain",
-            &with_tag(&o, forged),
-        )
-        .await
-        .expect("forge");
-    assert!(r.host.get(&s, None, "v").await.is_err());
-    // Version beyond the active one is refused outright.
-    let beyond = plain_tag_of(&o).replacen("=v1:", "=v9:", 1);
-    r.backend
-        .put(
-            &object_key(APP, 1, 7, "v"),
-            o.body.clone(),
-            "text/plain",
-            &with_tag(&o, beyond),
-        )
-        .await
-        .expect("forge");
-    assert!(r.host.get(&s, None, "v").await.is_err());
-}
-
-#[tokio::test]
-async fn plaintext_writes_without_a_ledger_are_refused() {
-    let backend = Arc::new(MemoryBackend::new());
-    let up = Arc::new(AtomicBool::new(true));
-    let host = StorageHost::with_rate_limit(backend, Arc::new(Sink::default()), 1000).with_sealing(
-        ObjectSealing::new(TenantCrypto::new(Keys {
-            up,
-            active: Arc::new(AtomicU32::new(1)),
-        }))
-        .with_gate(Arc::new(Gate(Arc::new(AtomicBool::new(false))))),
-    );
-    let err = host
-        .put(
-            &scope(1, 7),
-            None,
-            "x",
-            Bytes::from_static(PLAIN),
-            "text/plain",
-            &[],
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(err, StorageError::Backend(m) if m.contains("rollback ledger")));
-}
-
-/// Restores a previously captured raw object wholesale (what a bucket-write attacker can do).
-async fn restore(r: &Rig, key: &str, old: &bundle_host_storage::StoredObject) {
-    r.backend
-        .put(
-            &object_key(APP, 1, 7, key),
-            old.body.clone(),
-            "text/plain",
-            &old.meta.tags,
-        )
-        .await
-        .expect("restore");
-}
-
-#[tokio::test]
-async fn old_plaintext_cannot_be_restored_after_a_sealed_overwrite() {
-    let r = rig(None);
-    let s = scope(1, 7);
-    r.seal_on.store(false, Ordering::SeqCst);
-    put(&r, &s, "k").await;
-    let old = raw(&r, &s, "k").await;
-    r.seal_on.store(true, Ordering::SeqCst);
-    put(&r, &s, "k").await; // sealed put advances the ledger
-    restore(&r, "k", &old).await;
-    assert!(
-        r.host.get(&s, None, "k").await.is_err(),
-        "sealed overwrite supersedes plaintext"
-    );
-}
-
-#[tokio::test]
-async fn old_plaintext_cannot_be_restored_after_delete() {
-    let r = rig(None);
-    let s = scope(1, 7);
-    r.seal_on.store(false, Ordering::SeqCst);
-    put(&r, &s, "k").await;
-    let old = raw(&r, &s, "k").await;
-    r.host.delete(&s, None, "k").await.expect("delete");
-    restore(&r, "k", &old).await;
-    assert!(
-        r.host.get(&s, None, "k").await.is_err(),
-        "tombstone refuses resurrection"
-    );
-}
-
-#[tokio::test]
-async fn plaintext_with_no_ledger_entry_is_refused_not_adopted() {
-    let r = rig(None);
-    let s = scope(1, 7);
-    r.seal_on.store(false, Ordering::SeqCst);
-    put(&r, &s, "k").await;
-    assert!(r.host.get(&s, None, "k").await.is_ok());
-    // Entry evicted / lost: the same valid body+tag must now fail closed.
-    r.ledger.forget(&object_key(APP, 1, 7, "k"));
-    assert!(r.host.get(&s, None, "k").await.is_err());
-}
-
-/// Ledger whose first `commit` fails, simulating a crash between the backend put and the commit.
-struct CrashOnce {
-    inner: Arc<MemoryPlainLedger>,
-    armed: AtomicBool,
-}
-impl PlainLedger for CrashOnce {
-    fn begin<'a>(&'a self, k: &'a str) -> BoxFuture<'a, Result<u64, StorageError>> {
-        self.inner.begin(k)
-    }
-    fn commit<'a>(
-        &'a self,
-        k: &'a str,
-        n: u64,
-        plain: bool,
-    ) -> BoxFuture<'a, Result<(), StorageError>> {
-        if self.armed.swap(false, Ordering::SeqCst) {
-            return Box::pin(async { Err(StorageError::Backend("crash before commit".into())) });
-        }
-        self.inner.commit(k, n, plain)
-    }
-    fn entry<'a>(&'a self, k: &'a str) -> BoxFuture<'a, Result<Option<LedgerEntry>, StorageError>> {
-        self.inner.entry(k)
-    }
-}
-
-#[tokio::test]
-async fn crash_between_put_and_commit_adopts_only_the_recorded_pending_counter() {
-    let backend = Arc::new(MemoryBackend::new());
-    let inner = Arc::new(MemoryPlainLedger::default());
-    let crash = Arc::new(CrashOnce {
-        inner: inner.clone(),
-        armed: AtomicBool::new(false),
-    });
-    let host = StorageHost::with_rate_limit(backend.clone(), Arc::new(Sink::default()), 1000)
-        .with_sealing(
-            ObjectSealing::new(TenantCrypto::new(Keys {
-                up: Arc::new(AtomicBool::new(true)),
-                active: Arc::new(AtomicU32::new(1)),
-            }))
-            .with_gate(Arc::new(Gate(Arc::new(AtomicBool::new(false)))))
-            .with_plain_ledger(crash.clone()),
-        );
-    let s = scope(1, 7);
-    host.put(&s, None, "k", Bytes::from_static(b"one"), "text/plain", &[])
-        .await
-        .expect("first");
-    let first = backend
-        .get(&object_key(APP, 1, 7, "k"))
-        .await
-        .expect("get")
-        .expect("exists");
-    crash.armed.store(true, Ordering::SeqCst);
-    let err = host
-        .put(&s, None, "k", Bytes::from_static(b"two"), "text/plain", &[])
-        .await;
-    assert!(err.is_err(), "commit crashed");
-    // The stored object carries the pending counter: adopted on read.
-    assert_eq!(
-        &host.get(&s, None, "k").await.expect("adopted").1[..],
-        b"two"
-    );
-    // ...and that adoption superseded counter 1: the first body+tags can no longer be restored.
-    backend
-        .put(
-            &object_key(APP, 1, 7, "k"),
-            first.body,
-            "text/plain",
-            &first.meta.tags,
-        )
-        .await
-        .expect("restore");
-    assert!(host.get(&s, None, "k").await.is_err());
 }

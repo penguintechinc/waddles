@@ -220,7 +220,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bundle-host-crypto",
- "bundle-host-storage",
  "bytes",
  "futures",
  "http",
