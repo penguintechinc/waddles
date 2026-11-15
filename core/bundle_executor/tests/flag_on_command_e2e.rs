@@ -384,6 +384,7 @@ async fn run_one_transform(wasm: &[u8], digest: &str) -> serde_json::Value {
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             },
             Arc::clone(&executor),
             "test-peer",

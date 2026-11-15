@@ -48,6 +48,7 @@ images:
     groups: [ctx-root, flask-core]
     inputs:
       - hub_api/requirements.txt
+      - hub_api/build-tools/requirements.txt
       - hub_api/app.py
       - hub_api/config.py
       - hub_api/bootstrap.py
@@ -101,9 +102,11 @@ images:
       - bundles/core-bundles.yaml
       - bundles/build_python_bundles.py
       - bundles/python/**
+      - bundles/python-builder/requirements.txt
       - bundles/rust/**
       - bundles/csharp/csping/**
       - hub_api/requirements.txt
+      - hub_api/build-tools/requirements.txt
       - hub_api/config.py
       - hub_api/services/**
       - hub_api/cli/**
@@ -285,6 +288,8 @@ ignore:
   - hub_api/.coveragerc
   - hub_api/requirements-dev.*
   - hub_api/requirements.in
+  - hub_api/build-tools/requirements.in
+  - bundles/python-builder/requirements.in
   - hub_api/Dockerfile.*
   # Source trees no alpha image copies.
   - core/*/target/**

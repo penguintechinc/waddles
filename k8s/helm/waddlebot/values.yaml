@@ -338,6 +338,64 @@ global:
   # Deployment tier (alpha/beta/production) — used by services for environment-specific behavior
   deploymentTier: "production"
 
+  # OpenTelemetry export (logs + metrics + traces) -- ONE block drives every workload through the
+  # shared helpers in templates/_otel.tpl (OTEL_* env + the CiliumNetworkPolicy egress rule).
+  # Docs: docs/observability/sending-telemetry-to-signoz.md. Off by default: enabling needs a
+  # reachable OTLP collector + the egress rule; an environment opts in via its values file.
+  otel:
+    enabled: false
+    # OTLP gRPC (intra-cluster standard). SigNoz self-hosted collector Service; the receiver is
+    # unauthenticated and in-cluster only, so NO key/header lives here. If an ingestion key is ever
+    # required, reference it from an existingSecret -- never a literal.
+    endpoint: "http://signoz-otel-collector.signoz.svc.cluster.local:4317"
+    protocol: "grpc"
+    # Per-signal exporter: "otlp" or "none" (OTEL_{TRACES,METRICS,LOGS}_EXPORTER). Whether a given
+    # service honours it is per-language -- see the docs page support matrix.
+    exporters:
+      traces: "otlp"
+      metrics: "otlp"
+      logs: "otlp"
+    # Head sampling (OTEL_TRACES_SAMPLER[_ARG]). Keeping all slow/error traces needs tail sampling in
+    # the collector (see docs); head sampling below 1.0 drops them before the collector sees them.
+    sampler: "parentbased_traceidratio"
+    samplerRatio: "1.0"
+    # Cap on one blocked export (OTEL_EXPORTER_OTLP_TIMEOUT, ms): a dead collector never stalls a service.
+    exportTimeoutMs: 5000
+    metricExportIntervalMs: 15000
+    # deployment.environment resource attribute; empty = global.deploymentTier.
+    environment: ""
+    # Extra OTEL_RESOURCE_ATTRIBUTES (no commas). service.name is per workload (OTEL_SERVICE_NAME =
+    # the workload's component name); k8s.pod.name is added from the downward API.
+    resourceAttributes:
+      service.namespace: "waddlebot"
+    # Where the egress CiliumNetworkPolicy rule points (namespace + pod labels + ports). Ports: 4317
+    # gRPC; add 4318 only if protocol is switched to http/protobuf.
+    collector:
+      namespace: "signoz"
+      podLabels:
+        app.kubernetes.io/name: "signoz"
+        app.kubernetes.io/instance: "signoz"
+        app.kubernetes.io/component: "otel-collector"
+      ports: [4317]
+    # Optional receiver auth for a collector that enables it: reference an EXISTING Secret key whose value is the
+    # OTEL_EXPORTER_OTLP_HEADERS string (for example `authorization=Bearer <token>`). Never a value here; unset =
+    # no header (today's unauthenticated in-cluster receiver). The Secret ref is `optional`, so a missing Secret
+    # never blocks a pod.
+    headersSecretRef:
+      name: ""
+      key: "headers"
+    egress:
+      enabled: true
+      # Per-emitter collector allow (the env follows the flag, so a pod never exports toward an unreachable collector).
+      # egress-proxy is OPT-IN: its CNP is the SSRF backstop (world minus every cluster-internal range); allowing the
+      # collector there would let an SSRF reach it and inject telemetry. Its stdout logs still reach SigNoz via the
+      # signoz-agents infra collection; its traces/metrics stay off until a safe path exists.
+      egressProxy: false
+      # svc-bundles-executor: the pod is the trusted HOST process (guest WASM has no sockets; all I/O is host
+      # capabilities), so the exporter is trusted code and the rule is scoped to the collector endpoints only.
+      # Set false to turn executor telemetry (compile time, invoke latency) off.
+      bundleExecutor: true
+
 # Per-family image-tag override for the `hub-api` image family -- pins hub-api independently
 # of global.imageTag (every other workload keeps reading global.imageTag). Empty (default)
 # falls back to global.imageTag, so unset = unchanged behavior for every environment.

@@ -59,6 +59,19 @@ ALLOWLIST: dict[str, str] = {
         "The seeder's secretKeyRef is deliberately NOT optional: a missing "
         "key must fail closed."
     ),
+    "waddlebot-transit-ca": (
+        "Dedicated transit trust-root Secret `<fullname>-transit-ca`, materialised by cert-manager "
+        "from the regular Certificate `<fullname>-transit-ca` (templates/transit-data-tls-certificates."
+        "yaml; global.transitTls.certManager.enabled on dal2alpha/beta/gamma/production), so the chart "
+        "renders no Secret manifest of this name. Post-* hooks (core-bundle-seeder, hub-admin-seed, "
+        "seaweedfs-bucket-init, db-migrate on install) always run after the Certificate is created, and "
+        "the pod mount simply waits (ContainerCreating) until cert-manager issues it. The only "
+        "pre-upgrade consumer, db-migrate, relies on the Secret persisting from the previous release "
+        "(cert-manager keeps it across upgrades); the ONE upgrade that first introduces cert-manager TLS "
+        "is covered by the documented first-rollout order (docs/transit-encryption.md 'First rollout "
+        "onto an existing release'). Name is '<fullname>-transit-ca' for the CI release name 'waddlebot'. "
+        "A missing Secret fails the pod closed, never silently."
+    ),
     "waddlebot-valkey-tls": (
         "Valkey TLS Secret owned OUT-OF-BAND (ExternalSecret/SealedSecret) on beta/gamma/"
         "production (values-{beta,gamma,production}.yaml global.valkeyTls.externalSecret=true), "
@@ -68,6 +81,11 @@ ALLOWLIST: dict[str, str] = {
         "'<fullname>-valkey-tls' for the CI release name 'waddlebot'."
     ),
 }
+
+# cert-manager `Certificate.spec.secretName` Secrets are PROVIDED by the chart (cert-manager
+# materialises them from a regular Certificate resource), so they count as regular Secrets even
+# though no Secret manifest is rendered. Indexed in main() below.
+CERT_MANAGER_KIND = "Certificate"
 
 HOOK_ANNOTATION = "helm.sh/hook"
 WEIGHT_ANNOTATION = "helm.sh/hook-weight"
@@ -133,6 +151,10 @@ def main() -> int:
         name = (d.get("metadata") or {}).get("name")
         if kind and name:
             index[(kind, name)] = d
+        # A cert-manager Certificate provides the Secret named in spec.secretName (regular resource).
+        secret_name = (d.get("spec") or {}).get("secretName") if kind == CERT_MANAGER_KIND else None
+        if secret_name and ("Secret", secret_name) not in index:
+            index[("Secret", secret_name)] = {"kind": "Secret", "metadata": {"name": secret_name}}
 
     # Secrets created at RUNTIME by a pre-* hook Job (provision-secrets) are declared in that
     # Job's PROVISIONS_ANNOTATION; they resolve exactly like a pre-* hook Secret at the Job's weight.
