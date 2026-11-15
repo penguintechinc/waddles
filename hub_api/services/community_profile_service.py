@@ -24,7 +24,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from services.community_authz import require_community_scope
-from services.errors import bad_request, forbidden, not_found
+from services.errors import bad_request, not_found
+from services.scope_registry import SCOPE_BRANDING_MANAGE, SCOPE_PROFILE_MANAGE
 from services.storage_service import (
     MAX_BANNER_SIZE_BYTES,
     MAX_LOGO_SIZE_BYTES,
@@ -34,10 +35,6 @@ from services.storage_service import (
 )
 
 VALID_VISIBILITIES = ("public", "registered", "members_only")
-_ADMIN_ROLE_NAMES = frozenset({"community-owner", "community-admin", "super-admin"})
-#: OR-check, mirrors `requireCommunityAdmin`'s own `scopes.includes('community:manage_members')
-#: || scopes.includes('community:manage_channels')`.
-_ADMIN_SCOPES = ("community:manage_members", "community:manage_channels")
 _DISCORD_INVITE_RE = re.compile(r"^https?://(discord\.gg|discord\.com/invite)/[a-zA-Z0-9]+$")
 
 
@@ -201,11 +198,10 @@ async def update_community_profile(
     async_dal: Any, dal: Any, *, community_id: int, user_id: int, fields: dict[str, Any]
 ) -> CommunityProfile:
     """Update a community's profile. Owner/admin only (stricter than logo/banner)."""
-    role = await require_community_scope(
-        async_dal, dal, community_id=community_id, user_id=user_id, any_of=_ADMIN_SCOPES
+    # Dedicated per-action scope (admin-kind only by default) -- never a role-name check.
+    await require_community_scope(
+        async_dal, dal, community_id=community_id, user_id=user_id, any_of=(SCOPE_PROFILE_MANAGE,)
     )
-    if role.name not in _ADMIN_ROLE_NAMES:
-        raise forbidden("Admin access required")
 
     visibility = fields.get("visibility")
     if visibility and visibility not in VALID_VISIBILITIES:
@@ -269,9 +265,9 @@ async def upload_community_logo(
     content_type: str,
     size: int,
 ) -> str:
-    """Upload a community logo. Moderator+ (`community:manage_channels`)."""
+    """Upload a community logo. Needs `community.branding:manage`."""
     await require_community_scope(
-        async_dal, dal, community_id=community_id, user_id=user_id, any_of=_ADMIN_SCOPES
+        async_dal, dal, community_id=community_id, user_id=user_id, any_of=(SCOPE_BRANDING_MANAGE,)
     )
     if not is_allowed_image_type(content_type):
         raise bad_request("Invalid file type. Allowed: JPEG, PNG, GIF, WebP")
@@ -293,9 +289,9 @@ async def upload_community_logo(
 async def delete_community_logo(
     async_dal: Any, dal: Any, *, community_id: int, user_id: int
 ) -> None:
-    """Delete a community logo. Moderator+ (`community:manage_channels`)."""
+    """Delete a community logo. Needs `community.branding:manage`."""
     await require_community_scope(
-        async_dal, dal, community_id=community_id, user_id=user_id, any_of=_ADMIN_SCOPES
+        async_dal, dal, community_id=community_id, user_id=user_id, any_of=(SCOPE_BRANDING_MANAGE,)
     )
     row = await _get_active_community(dal, async_dal, community_id)
     if row is None:
@@ -317,9 +313,9 @@ async def upload_community_banner(
     content_type: str,
     size: int,
 ) -> str:
-    """Upload a community banner. Moderator+ (`community:manage_channels`)."""
+    """Upload a community banner. Needs `community.branding:manage`."""
     await require_community_scope(
-        async_dal, dal, community_id=community_id, user_id=user_id, any_of=_ADMIN_SCOPES
+        async_dal, dal, community_id=community_id, user_id=user_id, any_of=(SCOPE_BRANDING_MANAGE,)
     )
     if not is_allowed_image_type(content_type):
         raise bad_request("Invalid file type. Allowed: JPEG, PNG, GIF, WebP")
@@ -343,9 +339,9 @@ async def upload_community_banner(
 async def delete_community_banner(
     async_dal: Any, dal: Any, *, community_id: int, user_id: int
 ) -> None:
-    """Delete a community banner. Moderator+ (`community:manage_channels`)."""
+    """Delete a community banner. Needs `community.branding:manage`."""
     await require_community_scope(
-        async_dal, dal, community_id=community_id, user_id=user_id, any_of=_ADMIN_SCOPES
+        async_dal, dal, community_id=community_id, user_id=user_id, any_of=(SCOPE_BRANDING_MANAGE,)
     )
     row = await _get_active_community(dal, async_dal, community_id)
     if row is None:

@@ -45,13 +45,14 @@ from services.bundle_tool_transport import (
 )
 from services.community_authz import CommunityMembership
 from services.errors import ApiError, forbidden
+from services.scope_registry import SCOPE_BUNDLE_ADMIN_ADMIN, SCOPE_BUNDLE_ADMIN_MODERATE
 
 logger = logging.getLogger(__name__)
 
 #: Community scope -> hub-api community-role scopes that satisfy it (admin is a superset of mod).
 SCOPE_SATISFIED_BY: dict[str, frozenset[str]] = {
-    "community:moderate": frozenset({"community:manage_channels", "community:manage_members"}),
-    "community:admin": frozenset({"community:manage_members"}),
+    "community:moderate": frozenset({SCOPE_BUNDLE_ADMIN_MODERATE, SCOPE_BUNDLE_ADMIN_ADMIN}),
+    "community:admin": frozenset({SCOPE_BUNDLE_ADMIN_ADMIN}),
 }
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_ARGS_BYTES = 64 * 1024

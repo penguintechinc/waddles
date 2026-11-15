@@ -157,8 +157,6 @@ spec:
 {{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         - name: MODULE_NAME
           value: "svc-streaming"
-        - name: PIPELINE_STAGE
-          value: "streaming"
         - name: MODULE_PORT
           value: {{ .Values.pipeline.svcStreaming.port | quote }}
         {{- if include "waddlebot.transitTlsEnabled" . }}

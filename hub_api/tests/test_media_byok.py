@@ -43,6 +43,7 @@ from tests.conftest import (
     make_user_token,
     seed_community,
     seed_membership,
+    seed_scoped_member,
 )
 
 PLAINTEXT = "not-a-real-gemini-key-" + "x" * 20 + "-test"
@@ -119,6 +120,39 @@ def _machine(issuer: ServiceJwtIssuer, sid: str = PROCESS, scope: str = "") -> d
 
 def _audit_rows(db: Any) -> list[Any]:
     return list(db.dal(db.dal.audit_log.action == "media.byok.resolve").select())
+
+
+class TestByokDedicatedScope:
+    """BYOK admin needs `media.byok:manage`; broad scopes (even billing/ai) do not satisfy it."""
+
+    async def test_broad_scopes_cannot_manage_byok_keys(
+        self, app: Quart, ai_routing_db: Any
+    ) -> None:
+        cid = seed_community(ai_routing_db)
+        _set_tier(ai_routing_db, cid, "professional")
+        seed_scoped_member(
+            ai_routing_db,
+            community_id=cid,
+            user_id=811,
+            scopes=[
+                "community:manage_members",
+                "community:manage_channels",
+                "calls:manage",
+                "billing:manage",
+            ]
+            + ["ai.routing:manage"],
+        )
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=811)}"}
+        client = app.test_client()
+        url = f"/api/v1/admin/{cid}/media/byok-keys"
+        r = await client.put(
+            url, headers=headers, json={"provider": "gemini", "api_key": PLAINTEXT}
+        )
+        assert r.status_code == 403
+        r = await client.get(url, headers=headers)
+        assert r.status_code == 403
+        r = await client.delete(url + "/gemini", headers=headers)
+        assert r.status_code in (403, 404)
 
 
 class TestAdminApi:
