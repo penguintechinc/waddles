@@ -23,6 +23,8 @@ pub const KEY_STATE: &str = "dj.state";
 pub const KEY_AUDIT: &str = "dj.audit";
 /// Set once the pre-1.1.0 kv queue has been exported to the service.
 pub const KEY_MIGRATED: &str = "dj.migrated";
+/// Set once the old local `dmca_safe` switch has been carried to the service flag.
+pub const KEY_DMCA_MIGRATED: &str = "dj.dmca_migrated";
 /// Old overlay snapshot key (deleted by the migration; music owns the overlay now).
 const KEY_OLD_PUBLIC: &str = "dj.public_state";
 
@@ -180,6 +182,7 @@ impl<'a> Engine<'a> {
         match first.to_ascii_lowercase().as_str() {
             "!dj" => {
                 self.migrate_old_queue()?;
+                self.migrate_dmca_flag()?;
                 self.dj(args).map(Some)
             }
             _ => Ok(None),
@@ -301,6 +304,47 @@ impl<'a> Engine<'a> {
             .map_err(DjError::Storage)
     }
 
+    /// One-shot, idempotent: a community that had the old local `dmca_safe` ON keeps that
+    /// restriction by carrying it to the service flag (`settings.set`). If the call is
+    /// refused (the invoking actor lacks `music:settings.write`) or the service is down,
+    /// the old flag stays stored (and safe mode stays ON in `plan`) and it is retried on
+    /// the next invocation. Only after success is the field dropped and `dj.dmca_migrated` set.
+    pub(crate) fn migrate_dmca_flag(&self) -> Result<(), DjError> {
+        if self
+            .host
+            .kv_get(KEY_DMCA_MIGRATED)
+            .map_err(DjError::Storage)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let mut cfg = self.config()?;
+        if cfg.dmca_safe == Some(true) {
+            match requests::set_dmca_safe(self.host, true, "dj.dmca.migrate") {
+                Ok(()) => self.host.log(
+                    Level::Info,
+                    "dj legacy dmca_safe carried to service",
+                    json!({"carried": 1, "metric": "dj_dmca_migration_total"}),
+                ),
+                Err(e) => {
+                    self.host.log(
+                        Level::Warn,
+                        "dj legacy dmca_safe migration deferred; staying safe-only",
+                        json!({"error": e.to_string(), "deferred": 1}),
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        if cfg.dmca_safe.is_some() {
+            cfg.dmca_safe = None;
+            self.save(KEY_CONFIG, &cfg, 0)?;
+        }
+        self.host
+            .kv_set(KEY_DMCA_MIGRATED, b"1", 0)
+            .map_err(DjError::Storage)
+    }
+
     // ---- planner (fill / next) -------------------------------------------
 
     /// Plans DJ picks from the SHARED queue. Every invocation re-reads the queue
@@ -347,10 +391,20 @@ impl<'a> Engine<'a> {
         }
         // Dedupe against everything queued/playing; only the DJ's OWN titles may reach the
         // model as "avoid" (viewer-influenced text never reaches ai.complete).
+        // Fail closed: safe mode is ON unless the service said an explicit `false`, and while
+        // the old local flag is still stored (migration pending).
+        let legacy_safe = cfg.dmca_safe == Some(true);
         let mut live = Live {
-            safe: snap.dmca_safe,
+            safe: legacy_safe || snap.safe_flag() != Some(false),
             ..Live::default()
         };
+        if snap.safe_flag().is_none() {
+            self.host.log(
+                Level::Warn,
+                "dj dmca state unknown; failing closed (safe-only)",
+                json!({"unknown": 1}),
+            );
+        }
         for i in snap.queue.iter().chain(snap.now_playing.iter()) {
             live.keys.push(policy::live_key(&i.title, &i.artist));
             if i.kind == "dj" {

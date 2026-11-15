@@ -229,6 +229,10 @@ pub struct FakeHost {
     pub has_dj_manage: Cell<bool>,
     /// The actor lacks `music:stats.read` (host answers Forbidden).
     pub deny_stats: Cell<bool>,
+    /// The actor lacks `music:settings.write` (host answers Forbidden for `settings.set`).
+    pub deny_settings: Cell<bool>,
+    /// How `requests.list` reports `dmca_safe`: 0 = real value, 1 = field missing, 2 = garbage.
+    pub dmca_list_mode: Cell<u8>,
     /// Every `requests.add` args seen (for asserting no requester/actor is ever sent).
     pub add_args: RefCell<Vec<Value>>,
     /// When > 0, `playlist.get` serves pages of this many tracks.
@@ -253,6 +257,8 @@ impl FakeHost {
             deny_service: Cell::new(false),
             has_dj_manage: Cell::new(true),
             deny_stats: Cell::new(false),
+            deny_settings: Cell::new(false),
+            dmca_list_mode: Cell::new(0),
             add_args: RefCell::default(),
             page_size: Cell::new(0),
             music: serde_json::from_str(MUSIC_CONTRACT).expect("music contract parses"),
@@ -418,12 +424,21 @@ impl FakeHost {
                 unknown(&["limit"]);
                 let lim = obj.get("limit").and_then(Value::as_u64).unwrap_or(50);
                 assert!((1..=100).contains(&lim), "limit bounds");
-                Ok(self.svc(|s| {
+                let mode = self.dmca_list_mode.get();
+                let mut out = self.svc(|s| {
                     json!({"now_playing": s.now.as_ref().map(item_json),
                            "queue": s.queue.iter().take(lim as usize).map(item_json).collect::<Vec<_>>(),
                            "total_queued": s.queue.len(), "ai_dj_on": s.ai_on,
                            "dmca_safe": s.dmca_safe})
-                }))
+                });
+                match mode {
+                    1 => {
+                        out.as_object_mut().unwrap().remove("dmca_safe");
+                    }
+                    2 => out["dmca_safe"] = json!("maybe"),
+                    _ => {}
+                }
+                Ok(out)
             }
             "requests.add" => {
                 unknown(&["title", "artist", "source_url", "duration_ms", "kind"]);
@@ -464,6 +479,16 @@ impl FakeHost {
                     s.queue.push(row.clone());
                     Ok(json!({"item": item_json(&row), "position": s.queue.len()}))
                 })
+            }
+            "settings.set" => {
+                unknown(&["dmca_safe"]);
+                assert!(idem.is_some(), "settings.set is a write: idempotency key");
+                if self.deny_settings.get() {
+                    return Err(ToolErr::Forbidden);
+                }
+                let on = args["dmca_safe"].as_bool().expect("dmca_safe bool");
+                self.svc(|s| s.dmca_safe = on);
+                Ok(json!({"dmca_safe": on, "purged": 0}))
             }
             "music.stats.top" => {
                 unknown(&["kind", "limit"]);

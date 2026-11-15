@@ -739,21 +739,150 @@ fn safe_mode_with_nothing_safe_adds_nothing_and_attempts_are_bounded() {
     assert_eq!(h.calls_to("ai.complete"), 0);
 }
 
-#[test]
-fn old_local_dmca_allowlist_flag_is_ignored_the_service_flag_rules() {
-    let h = host();
-    on(&h);
-    // old config with the DJ's own allowlist-only switch on, service flag off
-    let mut raw = serde_json::to_value(cfg(&h)).unwrap();
-    raw["dmca_safe"] = json!(true);
+/// A catalog row with NO source url (cannot be safe-listed by the service).
+fn urlless_track(h: &FakeHost, id: &str, title: &str, artist: &str) {
+    let mut t = track("youtube", id, title, artist, "UC_N", 200);
+    t["source_url"] = json!("");
+    h.add(t);
+}
+
+/// Stores the pre-1.1 config with the DJ-local allowlist-only switch set.
+fn legacy_dmca(h: &FakeHost, on_: bool) {
+    let mut raw = serde_json::to_value(cfg(h)).unwrap();
+    raw["dmca_safe"] = json!(on_);
     h.kv.borrow_mut()
         .insert("dj.config".into(), raw.to_string().into_bytes());
+}
+
+fn stored_cfg(h: &FakeHost) -> Value {
+    serde_json::from_slice(&h.kv.borrow()["dj.config"]).unwrap()
+}
+
+#[test]
+fn legacy_local_dmca_flag_carries_over_to_the_service_once_then_is_dropped() {
+    let h = host();
+    on(&h);
+    legacy_dmca(&h, true);
+    assert!(!h.svc(|s| s.dmca_safe));
+    dj(&h, "m1", "!dj config");
+    assert_eq!(h.calls_to("settings.set"), 1);
+    assert!(
+        h.svc(|s| s.dmca_safe),
+        "the restriction is preserved on the service"
+    );
+    assert!(
+        stored_cfg(&h).get("dmca_safe").is_none(),
+        "legacy field dropped"
+    );
+    assert!(h.kv.borrow().contains_key("dj.dmca_migrated"));
+    // idempotent: re-runs and other commands never call it again
+    dj(&h, "m2", "!dj config");
+    assert_eq!(h.calls_to("settings.set"), 1);
+    // the call carried only the flag and a stable idempotency key; the log line is PII-free
+    let c = h
+        .calls
+        .borrow()
+        .iter()
+        .find(|c| c.1 == "settings.set")
+        .cloned()
+        .unwrap();
+    assert_eq!(c.2, json!({"dmca_safe": true}));
+    assert_eq!(c.3.as_deref(), Some("dj.dmca.migrate"));
+    assert!(
+        h.logs
+            .borrow()
+            .iter()
+            .any(|l| l.contains("carried to service"))
+    );
+}
+
+#[test]
+fn legacy_flag_false_or_absent_is_just_cleaned_up_without_a_service_call() {
+    let h = host();
+    legacy_dmca(&h, false);
+    dj(&h, "m1", "!dj config");
+    assert_eq!(h.calls_to("settings.set"), 0);
+    assert!(stored_cfg(&h).get("dmca_safe").is_none());
+    assert!(h.kv.borrow().contains_key("dj.dmca_migrated"));
+    assert!(!h.svc(|s| s.dmca_safe));
+}
+
+#[test]
+fn migration_refused_defers_keeps_the_flag_and_stays_safe_only_meanwhile() {
+    let h = host();
+    urlless_track(&h, "nourl", "No Url Song", "Anon Band");
+    on(&h);
+    legacy_dmca(&h, true);
+    h.deny_settings.set(true); // invoking actor lacks music:settings.write
+    suggest(&h, &[("No Url Song", "Anon Band")]);
+    let r = dj(&h, "m1", "!dj fill");
+    assert_eq!(
+        stored_cfg(&h)["dmca_safe"],
+        json!(true),
+        "kept until it succeeds"
+    );
+    assert!(!h.kv.borrow().contains_key("dj.dmca_migrated"));
+    assert!(!h.svc(|s| s.dmca_safe));
+    // service flag is still false, but the unmigrated legacy flag keeps the DJ safe-only:
+    // the url-less candidate is skipped and nothing is added
+    assert!(
+        r.contains("found nothing") && r.contains("1 skipped by DMCA-safe mode"),
+        "{r}"
+    );
+    assert_eq!(h.calls_to("requests.add"), 0);
+    // retried on the next invocation, and succeeds once a permitted actor runs it
+    h.deny_settings.set(false);
+    dj(&h, "m2", "!dj config");
+    assert_eq!(
+        h.calls_to("settings.set"),
+        2,
+        "first refused, second succeeded"
+    );
+    assert!(h.svc(|s| s.dmca_safe));
+    assert!(stored_cfg(&h).get("dmca_safe").is_none());
+    assert!(h.kv.borrow().contains_key("dj.dmca_migrated"));
+}
+
+#[test]
+fn unknown_missing_or_garbage_service_state_fails_closed_to_safe_only() {
+    for mode in [1u8, 2u8] {
+        let h = host();
+        urlless_track(&h, "nourl", "No Url Song", "Anon Band");
+        on(&h);
+        h.dmca_list_mode.set(mode);
+        suggest(&h, &[("No Url Song", "Anon Band")]);
+        let r = dj(&h, "m1", "!dj fill");
+        assert!(
+            r.contains("found nothing") && r.contains("skipped by DMCA-safe mode"),
+            "mode {mode}: {r}"
+        );
+        assert_eq!(h.calls_to("requests.add"), 0);
+        assert!(h.logs.borrow().iter().any(|l| l.contains("failing closed")));
+        assert!(dj(&h, "m2", "!dj config").contains("dmca_safe on (fail-closed)"));
+    }
+}
+
+#[test]
+fn a_failed_service_read_makes_no_picks_at_all() {
+    let h = host();
+    on(&h);
+    h.fail_tools.borrow_mut().push("requests.list".into());
     suggest(&h, &[("Heroes Tonight", "Janji")]);
-    assert!(dj(&h, "m1", "!dj fill").contains("Heroes Tonight"));
+    let r = dj(&h, "m1", "!dj fill");
+    assert!(r.contains("unavailable"), "{r}");
+    assert_eq!(h.calls_to("requests.add"), 0);
+}
+
+#[test]
+fn explicit_false_from_the_service_allows_normal_picks() {
+    let h = host();
+    urlless_track(&h, "nourl", "No Url Song", "Anon Band");
+    on(&h);
+    suggest(&h, &[("No Url Song", "Anon Band")]);
+    let r = dj(&h, "m1", "!dj fill");
+    assert!(r.contains("No Url Song") && !r.contains("skipped"), "{r}");
     assert!(dj(&h, "m2", "!dj config").contains("dmca_safe off (service)"));
-    h.svc(|s| s.dmca_safe = true);
-    assert!(dj(&h, "m3", "!dj config").contains("dmca_safe on (service)"));
-    assert!(dj(&h, "m4", "!dj set dmca_safe on").contains("unknown setting"));
+    assert!(dj(&h, "m3", "!dj set dmca_safe on").contains("unknown setting"));
 }
 
 #[test]
@@ -829,7 +958,6 @@ fn top_songs_fill_the_gap_when_the_ai_has_nothing_and_respect_cooldown_and_dupes
     h.viewer("On And On", "Cartoon");
     h.now.set(h.now.get() + 3_700_000);
     suggest(&h, &[]);
-    dj(&h, "m3", "!dj fill");
     let titles: Vec<String> = h.svc(|s| s.queue.iter().map(|q| q.title.clone()).collect());
     assert_eq!(
         titles.iter().filter(|t| *t == "On And On").count(),

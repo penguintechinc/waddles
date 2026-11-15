@@ -14,7 +14,8 @@ const BUNDLE_MANIFEST: &str = include_str!("../bundle.yaml");
 /// Tools of `waddles.core.service.music-requests` the DJ may request (from
 /// `docs/music-requests-service.md`): every one must be granted, and nothing else.
 const REQUESTS_TARGET: &str = "waddles.core.service.music-requests";
-const REQUESTS_TOOLS: [&str; 7] = [
+const REQUESTS_TOOLS: [&str; 8] = [
+    "settings.set",
     "music.stats.top",
     "requests.list",
     "requests.advance_due",
@@ -45,7 +46,7 @@ fn every_requested_tool_exists_in_its_producers_contract() {
     let ai_target = ai["target_app_id"].as_str().unwrap();
     let reqs = requested(HUB_MANIFEST);
     assert!(
-        reqs.len() >= 18,
+        reqs.len() >= 19,
         "examined too few tool grants: {}",
         reqs.len()
     );

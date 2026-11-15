@@ -180,6 +180,10 @@ pub struct Config {
     pub max_duration_s: u32,
     pub replay_cooldown_s: u32,
     pub explicit_allowed: bool,
+    /// Pre-1.1 local DMCA-safe switch. Only read by the one-shot migration to the service
+    /// flag (`settings.set`); while it is `Some(true)` the DJ treats safe mode as ON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dmca_safe: Option<bool>,
     /// DJ picks only while queued viewer requests are below this (1-50).
     pub dj_min_queue: u32,
     /// After this many queued viewer requests the DJ may add one more pick (1-20).
@@ -204,6 +208,7 @@ impl Default for Config {
             max_duration_s: 600,
             replay_cooldown_s: 3600,
             explicit_allowed: true,
+            dmca_safe: None,
             dj_min_queue: 3,
             dj_requests_per_pick: 2,
             sources_allow: Vec::new(),

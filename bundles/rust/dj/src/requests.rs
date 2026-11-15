@@ -71,9 +71,18 @@ pub struct Snapshot {
     pub queue: Vec<QItem>,
     #[serde(default)]
     pub ai_dj_on: bool,
-    /// The service's single DMCA-safe flag (per community).
+    /// The service's single DMCA-safe flag (per community). Kept raw so a missing or
+    /// malformed value is NOT parsed as `false`: see [`Snapshot::safe_flag`].
     #[serde(default)]
-    pub dmca_safe: bool,
+    pub dmca_safe: Value,
+}
+
+impl Snapshot {
+    /// `Some(b)` only for an explicit boolean; `None` (missing/unknown/garbage) must be
+    /// treated as safe-mode ON by callers (fail closed).
+    pub fn safe_flag(&self) -> Option<bool> {
+        self.dmca_safe.as_bool()
+    }
 }
 
 fn call(host: &dyn Host, tool: &str, args: Value, idem: Option<&str>) -> Result<Value, ReqError> {
@@ -160,6 +169,12 @@ pub fn stats_top(host: &dyn Host, kind: &str, limit: u32) -> Result<Vec<StatRow>
     )?;
     serde_json::from_value(v.get("items").cloned().unwrap_or(Value::Null))
         .map_err(|_| ReqError::BadResponse)
+}
+
+/// `settings.set {dmca_safe}` (scope `music:settings.write`, host-enforced): used only by the
+/// one-shot carry-over of the old local DMCA-safe switch.
+pub fn set_dmca_safe(host: &dyn Host, on: bool, idem: &str) -> Result<(), ReqError> {
+    call(host, "settings.set", json!({"dmca_safe": on}), Some(idem)).map(|_| ())
 }
 
 /// True when an add was refused by the service's DMCA-safe mode.

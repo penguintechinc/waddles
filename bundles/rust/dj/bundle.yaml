@@ -116,6 +116,10 @@ permissions:
   justification: Read aggregate community play history (top artists/songs, no requester) to weight and fill DJ picks
   params:
     write: false
+- id: tool.call:waddles.core.service.music-requests:settings.set
+  justification: One-shot carry-over of the old DJ-local DMCA-safe switch to the service flag (music:settings.write enforced host-side)
+  params:
+    write: true
 - id: tool.call:waddles.core.service.music-requests:dj.get
   justification: Read the single stored AI DJ on/off setting
   params:
@@ -172,6 +176,9 @@ requested_tools:
   target_app_id: waddles.core.service.music-requests
 - tool: music.stats.top
   access: read
+  target_app_id: waddles.core.service.music-requests
+- tool: settings.set
+  access: write
   target_app_id: waddles.core.service.music-requests
 - tool: dj.get
   access: read

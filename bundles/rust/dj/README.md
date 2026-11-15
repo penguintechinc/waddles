@@ -35,7 +35,10 @@ Planning (every invocation re-reads the queue first; there is still **no periodi
    `ai.complete` as "avoid". Replays are blocked by the replay cooldown (the DJ's own recent picks) and by anything
    already queued/playing. No grant or an outage just means no weighting.
 6. **DMCA-safe mode** is the service's single per-community flag (`requests.list.dmca_safe`, read on every plan; the
-   DJ's old local allowlist-only `dmca_safe` setting is gone and ignored). When on, the DJ skips candidates without a
+   DJ's old local `dmca_safe` setting is gone). **Fail closed:** an unknown / missing / unparseable flag, or the
+   old local flag still stored, means safe-only, never off. **Carry-over:** a community that had the old local flag ON gets
+   `settings.set {dmca_safe:true}` once (scope `music:settings.write`); if the invoking actor is refused it stays
+   safe-only and retries on the next `!dj`; only after success is the old field dropped and `dj.dmca_migrated` set. When on, the DJ skips candidates without a
    source url and treats the service's `not_dmca_safe` refusal as skip-and-try-next (it never sends a provider; the
    service derives it from the url host). At most 8 `requests.add` calls per plan, so it can never loop; the reply
    says only how many were skipped.
@@ -82,7 +85,7 @@ pushes it through the same policy; unresolved tracks are never added. Hourly cap
 ## State (kv, community-scoped, keys use `.`)
 
 `dj.config`, `dj.state` (bans, recent DJ picks for replay cooldown, playlist cursor, AI hourly window),
-`dj.audit`, `dj.pl_index`, `dj.pl.<name>`, `dj.migrated`. No requester id is stored or emitted anywhere.
+`dj.audit`, `dj.pl_index`, `dj.pl.<name>`, `dj.migrated`, `dj.dmca_migrated`. No requester id is stored or emitted anywhere.
 **Migration (1.0.x to 1.1.0):** on the first `!dj` invocation per community, if `dj.migrated` is unset, the
 old `dj.state.queue` (queued items only; held ones are dropped) is sent once via `requests.import` (an
 "already imported" refusal is tolerated), then `queue/now/rejected/next_id` and `dj.public_state` are removed
@@ -94,7 +97,7 @@ Queue service (`waddles.core.service.music-requests`, scopes enforced by the hos
 sends an actor or community): `requests.list {limit}` -> `{now_playing, queue, total_queued, ai_dj_on}`,
 `requests.advance_due {}`, `requests.add {title, artist, source_url?, duration_ms, kind:"dj"}` -> `{item, position}`
 (errors `queue_full`, `duplicate`, `invalid_url`; needs `music:requests.manage`), `requests.import {items<=100}`,
-`music.stats.top {kind:artist|song, limit<=25}` -> `{items:[{title?,artist,plays}]}`, `dj.get {}` / `dj.set {enabled}` -> `{enabled}`. Items never carry a requester.
+`music.stats.top {kind:artist|song, limit<=25}` -> `{items:[{title?,artist,plays}]}`, `settings.set {dmca_safe}` (migration only), `dj.get {}` / `dj.set {enabled}` -> `{enabled}`. Items never carry a requester.
 Without the grant every call is `NotGranted` and the DJ replies that it is not allowed to use the music queue.
 
 Providers (derived from `bundles/contracts/*.v1.json`; tests `include_str!` them, so drift fails the build):

@@ -291,10 +291,11 @@ impl Engine<'_> {
             Ok(false) => "off",
             Err(_) => "unavailable",
         };
+        let legacy = c.dmca_safe == Some(true);
         let safe = match requests::list(self.host, 1) {
-            Ok(s) if s.dmca_safe => "on (service)",
-            Ok(_) => "off (service)",
-            Err(_) => "unavailable",
+            Ok(s) if s.safe_flag() == Some(true) => "on (service)",
+            Ok(s) if s.safe_flag() == Some(false) && !legacy => "off (service)",
+            _ => "on (fail-closed)",
         };
         Ok(format!(
             "providers {} | dj_min_queue {} | dj_requests_per_pick {} | max {} | replay {}s | explicit {} | mode {} | ai {} | dmca_safe {}",
