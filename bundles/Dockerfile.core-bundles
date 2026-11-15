@@ -275,7 +275,9 @@ RUN cargo component build --release --target wasm32-wasip2 --locked
 # ---------------------------------------------------------------------------
 FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS python-bundles-builder
 
-RUN pip install --no-cache-dir componentize-py==0.25.1 pyyaml==6.0.3
+COPY bundles/python-builder/requirements.txt /tmp/python-builder-requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r /tmp/python-builder-requirements.txt && \
+    rm -f /tmp/python-builder-requirements.txt
 
 WORKDIR /repo
 COPY wit wit
@@ -400,8 +402,15 @@ WORKDIR /app
 COPY hub_api/requirements.txt .
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
+# flask_core's runtime deps are all in hub_api/requirements.txt (installed above with
+# --require-hashes), so it installs --no-deps / --no-build-isolation; setuptools comes from the
+# hash-locked build-tools lock and is removed again (same as hub_api/Dockerfile).
+COPY hub_api/build-tools/requirements.txt /tmp/build-tools-requirements.txt
 COPY libs/flask_core /app/libs/flask_core
-RUN pip install --no-cache-dir /app/libs/flask_core
+RUN pip install --no-cache-dir --require-hashes -r /tmp/build-tools-requirements.txt && \
+    pip install --no-cache-dir --no-deps --no-build-isolation /app/libs/flask_core && \
+    pip uninstall -y setuptools && \
+    rm -f /tmp/build-tools-requirements.txt
 
 # wasm-tools -- the seeder's own bundle_component_validator.validate_component() shells out to
 # this CLI (same WIT-conformance check hub-api's own onboarding endpoint uses); pinned +

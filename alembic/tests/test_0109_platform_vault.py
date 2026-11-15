@@ -159,6 +159,9 @@ def test_emitted_sql_shape() -> None:
     ):
         assert trigger in text
     assert "root_marker_no_delete" in text and "secrets_guard" in text
+    # verify-only may only follow active; pending never skips ahead; INSERT only pending/active
+    assert "OLD.state = 1 AND NEW.state NOT IN (1, 2, 5)" in text
+    assert "IF NEW.state NOT IN (1, 2) THEN" in text
 
 
 def test_downgrade_refuses_to_drop_a_populated_store_unless_confirmed(
@@ -868,4 +871,30 @@ def test_drop_role_succeeds_after_downgrade_and_fails_without_it(
             "SELECT count(*) FROM pg_roles WHERE rolname = ANY(%s)", (list(roles),)
         )
         assert cur.fetchone()[0] == 0
+    owner.close()
+
+
+@requires_docker
+def test_verify_only_only_follows_active(real_chain: PgTestDatabase) -> None:
+    """1 -> 3 and INSERT state 3 are refused (a pending key never reaches public_keys); 2 -> 3 works."""
+    owner = _owner(real_chain)
+    refused = psycopg2.errors.IntegrityConstraintViolation
+    with owner.cursor() as cur:
+        _insert_key(cur, secret_type=915, version=1, state=1, kid="vo-old-pending")
+        _insert_key(cur, secret_type=915, version=2, state=2, kid="vo-new-active")
+        with pytest.raises(refused):
+            cur.execute(
+                "UPDATE platform_vault.secrets SET state = 3, activated_at = now() "
+                "WHERE secret_type = 915 AND version = 1"
+            )
+        with pytest.raises(refused):
+            _insert_key(cur, secret_type=915, version=3, state=3, kid="vo-insert-3")
+        cur.execute(
+            "SELECT count(*) FROM platform_vault.public_keys WHERE kid = 'vo-old-pending'"
+        )
+        assert cur.fetchone()[0] == 0
+        cur.execute(
+            "UPDATE platform_vault.secrets SET state = 3, rotated_at = now() "
+            "WHERE secret_type = 915 AND version = 2"
+        )  # control: active -> verify-only is legal
     owner.close()

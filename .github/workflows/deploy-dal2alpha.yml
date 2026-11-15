@@ -369,9 +369,19 @@ jobs:
             | python3 scripts/ci/alpha_plan.py verify --plan "${RUNNER_TEMP}/plan.json" --registry "${IMAGE_PREFIX}"
 
           # 4. real health + readiness check against hub-api (HTTP 200 required).
+          #    No pods/exec: the runner SA is least-privilege (create pods/portforward only).
+          #    kubectl port-forward tunnels through the API server; the probe runs on the runner.
           PORT="$(kubectl -n "${NAMESPACE}" get deploy "${RELEASE}-hub-api-v3" -o jsonpath='{.spec.template.spec.containers[?(@.name=="hub-api")].ports[?(@.name=="http")].containerPort}')"
           [ -n "${PORT}" ] || { echo "::error::hub-api http port not found" >&2; exit 1; }
-          for p in /health /ready; do
-            kubectl -n "${NAMESPACE}" exec "deploy/${RELEASE}-hub-api-v3" -c hub-api -- \
-              python -c "import sys,urllib.request as u; r=u.urlopen('http://127.0.0.1:${PORT}${p}',timeout=10); print('${p}',r.status); sys.exit(0 if r.status==200 else 1)"
-          done
+          LPORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+          [ -n "${LPORT}" ] || { echo "::error::no free local port" >&2; exit 1; }
+          PF_LOG="${RUNNER_TEMP}/hub-api-portforward.log"
+          kubectl -n "${NAMESPACE}" port-forward "deploy/${RELEASE}-hub-api-v3" "${LPORT}:${PORT}" >"${PF_LOG}" 2>&1 &
+          PF_PID=$!
+          trap 'if kill -0 "${PF_PID}" 2>/dev/null; then kill "${PF_PID}"; fi' EXIT
+          if ! python3 scripts/ci/hub_api_probe.py --base-url "http://127.0.0.1:${LPORT}" \
+              --paths /health /ready --attempts 20 --delay 2 --timeout 5; then
+            echo "::error::hub-api /health or /ready did not return 200 (port-forward log follows)" >&2
+            cat "${PF_LOG}" >&2
+            exit 1
+          fi

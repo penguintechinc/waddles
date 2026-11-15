@@ -50,6 +50,7 @@ from typing import Any
 import pytest
 import yaml
 from cryptography import x509
+from provision_harness import with_provisioned  # type: ignore[import-not-found]
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _ALPHA_VALUES = _CHART_DIR / "values-alpha.yaml"
@@ -165,7 +166,7 @@ class TestAlphaRenderAnnotationsAndChecksum:
             pytest.fail(f"helm template failed:\n{result.stdout}\n{result.stderr}")
         docs = [doc for doc in yaml.safe_load_all(result.stdout) if doc]
         assert docs, "helm template produced zero documents -- cannot be a pass"
-        return docs
+        return with_provisioned(docs)
 
     @staticmethod
     def _secret(docs: list[dict[str, Any]], suffix: str) -> dict[str, Any]:

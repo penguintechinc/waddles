@@ -7,6 +7,7 @@ on:
       - 'core/svc_ingest/**'
       - 'core/discord_mentions/**'
       - 'core/hub_client/**'
+      - 'core/command_latency/**'
       - 'core/egress_detokenizer/**'
       - 'proto/**'
       - '.github/workflows/rust-svc-ingest.yml'
@@ -53,6 +54,7 @@ jobs:
             core/svc_ingest/**
             core/discord_mentions/**
             core/hub_client/**
+            core/command_latency/**
             core/egress_detokenizer/**
             proto/**
 

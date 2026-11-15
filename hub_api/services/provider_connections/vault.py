@@ -17,18 +17,28 @@ adapter or API change is needed.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import logging
 import os
+import secrets
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final, Protocol, runtime_checkable
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    PublicFormat,
+)
 
 from services import platform_integrations_crypto as crypto
 from services.envelope.errors import EnvelopeError, PlatformKekError
@@ -519,3 +529,96 @@ def _open_failure(secret_type: int, version: int) -> PlatformSecretCorruptError:
     """Log (ints only) and build the one undifferentiated open failure."""
     _log_open_failure(secret_type, version)
     return PlatformSecretCorruptError("platform secret failed authentication")
+
+
+# Key material for platform secrets: generation and parsing of the four algorithm families. Lives in
+# the vault because it is the only module allowed to import `cryptography` for this key family
+# (seal-callers guard); the registry / bootstrap only call these. Plaintext layout (what is sealed):
+# Ed25519 = raw 32-byte seed, ES256 = raw 32-byte big-endian P-256 scalar, random 256-bit =
+# 32 raw bytes, password = 43-char unpadded base64url text of 32 random bytes.
+# Public material is the raw 32-byte Ed25519 key / the 65-byte uncompressed P-256 point.
+
+#: ``platform_vault.secrets.algorithm`` codes (the migration documents the same mapping).
+PLATFORM_ALG_ED25519: Final = 1
+PLATFORM_ALG_ES256: Final = 2
+PLATFORM_ALG_RANDOM_256: Final = 3
+PLATFORM_ALG_PASSWORD: Final = 4
+_PLATFORM_ALGORITHMS: Final = frozenset(
+    {PLATFORM_ALG_ED25519, PLATFORM_ALG_ES256, PLATFORM_ALG_RANDOM_256, PLATFORM_ALG_PASSWORD}
+)
+_RANDOM_BYTES: Final = 32
+
+
+@dataclass(slots=True, frozen=True)
+class PlatformKeyMaterial:
+    """One secret value plus the public columns derived from it (never printed: repr hides it)."""
+
+    plaintext: bytes = field(repr=False)
+    public_material: bytes | None
+    kid: str | None
+
+
+def platform_kid(public_material: bytes) -> str:
+    """Deterministic key id for a public key: ``k`` + first 16 hex chars of its SHA-256."""
+    return "k" + hashlib.sha256(public_material).hexdigest()[:16]
+
+
+def _public_columns(algorithm: int, plaintext: bytes, kid: str | None) -> PlatformKeyMaterial:
+    """Parse an Ed25519 seed / P-256 scalar and return the material with its public key and kid."""
+    if algorithm == PLATFORM_ALG_ED25519:
+        if len(plaintext) != _RANDOM_BYTES:
+            raise PlatformSecretInputError("an Ed25519 seed must be exactly 32 bytes")
+        public = (
+            Ed25519PrivateKey.from_private_bytes(plaintext)
+            .public_key()
+            .public_bytes(Encoding.Raw, PublicFormat.Raw)
+        )
+    else:
+        if len(plaintext) != _RANDOM_BYTES:
+            raise PlatformSecretInputError("a P-256 private scalar must be exactly 32 bytes")
+        try:
+            ec_key = ec.derive_private_key(int.from_bytes(plaintext, "big"), ec.SECP256R1())
+        except ValueError:
+            raise PlatformSecretInputError("not a valid P-256 private scalar") from None
+        public = ec_key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    return PlatformKeyMaterial(plaintext, public, kid or platform_kid(public))
+
+
+def platform_key_material_from_private(
+    algorithm: int, plaintext: bytes, *, kid: str | None = None
+) -> PlatformKeyMaterial:
+    """Validate imported asymmetric key material and derive its public columns.
+
+    Only Ed25519 (32-byte seed) and ES256 (32-byte P-256 scalar) can be parsed; any other
+    algorithm, a wrong length or a degenerate scalar raises :class:`PlatformSecretInputError`
+    with a fixed message (never the value).
+    """
+    if algorithm not in (PLATFORM_ALG_ED25519, PLATFORM_ALG_ES256):
+        raise PlatformSecretInputError("only asymmetric algorithms carry parseable key material")
+    return _public_columns(algorithm, bytes(plaintext), kid)
+
+
+def generate_platform_key_material(algorithm: int) -> PlatformKeyMaterial:
+    """Generate fresh material for one algorithm code from the OS CSPRNG.
+
+    Ed25519 and ES256 return the private bytes plus public material and kid; random-256 and
+    password return only the secret (no public columns, no kid), as the migration's CHECK requires.
+    """
+    if algorithm == PLATFORM_ALG_ED25519:
+        seed = Ed25519PrivateKey.generate().private_bytes(
+            Encoding.Raw, PrivateFormat.Raw, NoEncryption()
+        )
+        return _public_columns(algorithm, seed, None)
+    if algorithm == PLATFORM_ALG_ES256:
+        scalar = (
+            ec.generate_private_key(ec.SECP256R1())
+            .private_numbers()
+            .private_value.to_bytes(_RANDOM_BYTES, "big")
+        )
+        return _public_columns(algorithm, scalar, None)
+    if algorithm == PLATFORM_ALG_RANDOM_256:
+        return PlatformKeyMaterial(secrets.token_bytes(_RANDOM_BYTES), None, None)
+    if algorithm == PLATFORM_ALG_PASSWORD:
+        text = base64.urlsafe_b64encode(secrets.token_bytes(_RANDOM_BYTES)).rstrip(b"=")
+        return PlatformKeyMaterial(text, None, None)
+    raise PlatformSecretInputError("unknown platform secret algorithm")

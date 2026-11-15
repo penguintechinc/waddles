@@ -2,14 +2,6 @@ FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803
 
 WORKDIR /app
 
-# Install migration dependencies
-RUN pip install --no-cache-dir \
-    "alembic>=1.13" \
-    "sqlalchemy>=2.0" \
-    psycopg2-binary \
-    flask-sqlalchemy \
-    "PyYAML>=6.0.2,<7.0.0"
-
 # Hash-locked: alembic revisions 0062/0075 import cryptography (AESGCM).
 # Same pinned version as hub_api (migrations/requirements.txt).
 COPY migrations/requirements.txt /tmp/migrations-requirements.txt

@@ -109,7 +109,7 @@ fn validate_id_charset(field_name: &'static str, value: &str) -> Result<(), Exec
     }
 }
 
-fn write_length_prefixed(buf: &mut Vec<u8>, field: &[u8]) {
+pub(crate) fn write_length_prefixed(buf: &mut Vec<u8>, field: &[u8]) {
     buf.extend_from_slice(&(field.len() as u32).to_be_bytes());
     buf.extend_from_slice(field);
 }
@@ -207,30 +207,51 @@ impl PlatformPublicKeys {
     /// error (fails closed at startup, `crate::lib::run`'s validation
     /// path), never a silently-skipped one.
     pub fn from_json(raw: &str) -> Result<Self, ExecutorError> {
-        let entries: HashMap<String, String> = serde_json::from_str(raw).map_err(|e| {
-            ExecutorError::Config(format!("BUNDLE_SIGNING_PUBLIC_KEYS is not valid JSON: {e}"))
-        })?;
+        Self::from_json_named(raw, "BUNDLE_SIGNING_PUBLIC_KEYS")
+    }
+
+    /// [`Self::from_json`] with the env-var name used in error messages, so a
+    /// malformed `PRECOMPILE_SIGNING_PUBLIC_KEYS` is not reported as the bundle
+    /// key variable. Error text never contains key material.
+    pub fn from_json_named(raw: &str, var: &str) -> Result<Self, ExecutorError> {
+        let entries: HashMap<String, String> = serde_json::from_str(raw)
+            .map_err(|e| ExecutorError::Config(format!("{var} is not valid JSON: {e}")))?;
         let mut keys = HashMap::with_capacity(entries.len());
         for (key_id, encoded) in entries {
             let bytes = BASE64.decode(encoded.as_bytes()).map_err(|e| {
-                ExecutorError::Config(format!(
-                    "BUNDLE_SIGNING_PUBLIC_KEYS[{key_id:?}] is not valid base64: {e}"
-                ))
+                ExecutorError::Config(format!("{var}[{key_id:?}] is not valid base64: {e}"))
             })?;
             let array: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
                 ExecutorError::Config(format!(
-                    "BUNDLE_SIGNING_PUBLIC_KEYS[{key_id:?}] must decode to exactly 32 bytes, got {}",
+                    "{var}[{key_id:?}] must decode to exactly 32 bytes, got {}",
                     bytes.len()
                 ))
             })?;
             let verifying_key = VerifyingKey::from_bytes(&array).map_err(|e| {
                 ExecutorError::Config(format!(
-                    "BUNDLE_SIGNING_PUBLIC_KEYS[{key_id:?}] is not a valid Ed25519 public key: {e}"
+                    "{var}[{key_id:?}] is not a valid Ed25519 public key: {e}"
                 ))
             })?;
             keys.insert(key_id, verifying_key);
         }
         Ok(Self { keys, cache: None })
+    }
+
+    /// `true` when any key in `self` has the same public-key bytes as a key in
+    /// `other` (under any key id). Used to refuse an AOT key set that reuses a
+    /// bundle-approval key: one compromised key must never be able to forge
+    /// both signature families.
+    #[must_use]
+    pub fn shares_key_with(&self, other: &Self) -> bool {
+        self.keys
+            .values()
+            .any(|a| other.keys.values().any(|b| a.as_bytes() == b.as_bytes()))
+    }
+
+    /// Number of configured key ids (rotation: current + previous).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.keys.len()
     }
 
     /// Resolves `cfg.bundle_signing_public_keys` leniently: unset or blank
@@ -276,7 +297,14 @@ impl PlatformPublicKeys {
         self.cache.is_some()
     }
 
-    fn get(&self, key_id: &str) -> Option<&VerifyingKey> {
+    /// Builds a key set from already-decoded keys -- used by
+    /// `crate::precompile` to check existing artifacts against the
+    /// precompiler's own verifying key.
+    pub fn from_keys(keys: HashMap<String, VerifyingKey>) -> Self {
+        Self { keys, cache: None }
+    }
+
+    pub(crate) fn get(&self, key_id: &str) -> Option<&VerifyingKey> {
         self.keys.get(key_id)
     }
 }

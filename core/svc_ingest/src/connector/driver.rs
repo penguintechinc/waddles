@@ -901,7 +901,33 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
     /// only the invoker/sink (never the transport), so the pump can write a
     /// heartbeat while this is in flight; the transport is told the verdict
     /// afterwards.
+    ///
+    /// The command-latency first door is taken HERE: the instant the transport handed the frame to
+    /// the driver. The whole in-task chain (`on-frame` -> sink -> `publish_event`) runs inside the
+    /// scope, so the publish funnel stamps `t0` into the envelope's tracestate (metadata only).
     async fn process_frame(
+        &self,
+        platform: &str,
+        pinned: &PinnedConnector,
+        ctx: &ConnectionCtx,
+        bytes: Vec<u8>,
+        logs: &mut PumpLogs,
+    ) -> FrameVerdict {
+        command_latency::first_door::with_first_door(
+            command_latency::stamp::now_ms(),
+            command_latency::Door::Gateway,
+            self.process_frame_inner(platform, pinned, ctx, bytes, logs)
+                .instrument(tracing::info_span!(
+                    "ingest.receive",
+                    platform = %platform,
+                    "otel.kind" = "consumer",
+                )),
+        )
+        .await
+    }
+
+    /// The body of [`Self::process_frame`], unchanged by the first-door wrapper.
+    async fn process_frame_inner(
         &self,
         platform: &str,
         pinned: &PinnedConnector,
