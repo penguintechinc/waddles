@@ -56,6 +56,9 @@ _KIND_CASE = (
 def upgrade() -> None:
     """Add the column, backfill predefined rows, and install the seeding trigger."""
     conn = op.get_bind()
+    if not conn.execute(sa.text("SELECT to_regclass('public.community_roles') IS NOT NULL")).scalar():
+        # Minimal CI bootstrap (no legacy community tables): nothing to alter; a full DB has the table.
+        return
     conn.execute(
         sa.text(
             "ALTER TABLE community_roles "
@@ -130,6 +133,9 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Drop the trigger, constraint and column."""
     conn = op.get_bind()
+    if not conn.execute(sa.text("SELECT to_regclass('public.community_roles') IS NOT NULL")).scalar():
+        # Minimal CI bootstrap (no legacy community tables): nothing to alter; a full DB has the table.
+        return
     conn.execute(sa.text("DROP TRIGGER IF EXISTS trg_community_roles_kind ON community_roles"))
     conn.execute(sa.text("DROP FUNCTION IF EXISTS community_roles_set_kind()"))
     conn.execute(sa.text("DROP FUNCTION IF EXISTS community_roles_with_moderator_seed(jsonb)"))
