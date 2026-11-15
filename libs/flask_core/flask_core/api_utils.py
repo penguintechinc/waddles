@@ -392,7 +392,6 @@ def auth_required(f: Callable) -> Callable:
     @wraps(f)
     async def decorated_function(*args, **kwargs):
         from .auth import verify_jwt_token, verify_api_key_async
-        from .secrets import require_secret_key
 
         # Get token from Authorization header
         auth_header = request.headers.get('Authorization')
@@ -403,8 +402,7 @@ def auth_required(f: Callable) -> Callable:
         # Try JWT token first
         if auth_header and auth_header.startswith('Bearer '):
             token = auth_header[7:]  # Remove 'Bearer ' prefix
-            secret_key = require_secret_key()
-            payload = verify_jwt_token(token, secret_key)
+            payload = verify_jwt_token(token)
 
             if payload:
                 user_info = {

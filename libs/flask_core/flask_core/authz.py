@@ -29,7 +29,6 @@ from functools import wraps
 from typing import Any, Callable, FrozenSet, Optional
 
 from .auth import verify_jwt_token
-from .secrets import require_secret_key
 
 logger = logging.getLogger(__name__)
 
@@ -159,8 +158,7 @@ def require_scope(*required_scopes: str) -> Callable:
                 return error_response("Authentication required", status_code=403)
 
             token = auth_header[7:]
-            secret_key = require_secret_key()
-            payload = verify_jwt_token(token, secret_key)
+            payload = verify_jwt_token(token)
             if payload is None:
                 request.authz_decision = AuthzDecision(required_scopes, False, "invalid_token")
                 logger.warning(

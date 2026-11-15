@@ -210,7 +210,6 @@ def _mint_access_token(
             username=(user.username if user is not None else username_override) or "",
             email=(user.email if user is not None else None) or "",
             roles=roles,
-            secret_key=cfg.secret_key,
             tenant=tenant,
             scope=" ".join(sorted(scopes)),
             session_id=str(session_id) if session_id is not None else None,
@@ -738,7 +737,7 @@ async def logout(
         tenant_slug = parsed.tenant_slug
 
     if access_token:
-        payload = verify_jwt_token(access_token, cfg.secret_key)
+        payload = verify_jwt_token(access_token)
         if payload is not None:
             jti = payload.get("jti")
             if isinstance(jti, str):

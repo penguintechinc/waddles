@@ -584,6 +584,24 @@ def _public_columns(algorithm: int, plaintext: bytes, kid: str | None) -> Platfo
     return PlatformKeyMaterial(plaintext, public, kid or platform_kid(public))
 
 
+def es256_private_key(scalar: bytes) -> ec.EllipticCurvePrivateKey:
+    """Rebuild the P-256 private key object from its sealed raw 32-byte scalar (JWT signing)."""
+    if len(scalar) != _RANDOM_BYTES:
+        raise PlatformSecretInputError("a P-256 private scalar must be exactly 32 bytes")
+    try:
+        return ec.derive_private_key(int.from_bytes(scalar, "big"), ec.SECP256R1())
+    except ValueError:
+        raise PlatformSecretInputError("not a valid P-256 private scalar") from None
+
+
+def es256_public_key(point: bytes) -> ec.EllipticCurvePublicKey:
+    """Parse a 65-byte uncompressed P-256 point (the published public material)."""
+    try:
+        return ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), bytes(point))
+    except ValueError:
+        raise PlatformSecretInputError("not a valid uncompressed P-256 public point") from None
+
+
 def platform_key_material_from_private(
     algorithm: int, plaintext: bytes, *, kid: str | None = None
 ) -> PlatformKeyMaterial:

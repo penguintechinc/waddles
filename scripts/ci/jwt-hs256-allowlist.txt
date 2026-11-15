@@ -1,0 +1,28 @@
+# Paths allowed to mention a shared JWT secret / HS* JWT algorithm (Secrets T10 CI gate).
+# Format: path|reason  (a path ending in / is a directory prefix). Every entry MUST still match
+# something, else the gate fails as stale. Only tests asserting HS* REJECTION, rejection-label
+# vocabularies, and the documented exceptions below belong here -- never a verifier that accepts HS*.
+core/egress_assertion/src/lib.rs|test: HS* assertions are rejected
+core/egress_proxy/src/assertion.rs|test: HS* assertions are rejected
+core/service_auth/src/jwt_hardening.rs|rejection-label vocabulary + tests for HS* rejection
+core/service_auth/src/lib.rs|tests: HS* service JWT rejected
+core/svc_ingest/src/connector/wix_jwt.rs|test: HS*/none confusion rejected (Wix RS256 verifier)
+core/svc_ingest/tests/webhook_wix_real.rs|test: HS*/none confusion rejected
+core/svc_streaming/src/http/auth.rs|tests: HS* tokens (incl. keyed with the public key) rejected
+core/svc_streaming/src/http/auth/hardening.rs|rejection-label vocabulary + tests
+core/svc_streaming/tests/config.rs|test: a stale JWT_HMAC_SECRET env var is ignored
+core/svc_streaming/tests/jwt_metrics.rs|test: HS512 rejected, counted as alg_mismatch
+core/svc_streaming/src/rooms/token.rs|DOCUMENTED EXCEPTION (owner decision pending): service-local room join token MAC with its own WEBRTC_ROOM_TOKEN_SECRET, not the platform identity key; follow-up: migrate to asymmetric
+bundles/rust/webrtc/README.md|documents the room-token exception above
+hub_api/tests/sso/test_sso_login_oidc.py|test: HS256 OIDC id_token rejected
+hub_api/tests/sso/test_sso_oidc.py|test: HS256 OIDC id_token rejected
+hub_api/tests/test_media_byok.py|test comment: HS user token rejected
+hub_api/tests/test_platform_secrets_bootstrap.py|test: a JWT_SECRET env value is never imported
+hub_api/tests/test_session_lifecycle.py|test: legacy HS256 token is dead; refresh tag is not a signature
+k8s/helm/waddlebot/tests/test_provision_secrets_render.py|test: no JWT_SECRET is generated
+libs/flask_core/tests/test_auth.py|test: forged HS256 with old secret refused
+libs/flask_core/tests/test_jwt_hardening.py|tests: HS* attacks refused
+libs/flask_core/tests/test_secrets.py|test: legacy placeholder-secret name list
+libs/flask_core/tests/test_service_jwt_migration.py|tests: legacy HS256 service token rejected
+libs/flask_core/tests/test_service_jwt.py|tests: HS* service JWT rejected
+hub_api/tests/test_jwt_keyring_vault.py|tests: HS* / forged shared-secret tokens refused

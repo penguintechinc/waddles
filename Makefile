@@ -26,6 +26,10 @@ docker-push:
 lint:
 	@bash scripts/lint.sh
 
+# Secrets T10 gate: no shared JWT secret / HMAC JWT (see scripts/ci/jwt-hs256-allowlist.txt)
+check-no-shared-jwt-secret:
+	@bash scripts/ci/check-no-shared-jwt-secret.sh
+
 backfill-bundle-author:
 	@python3 scripts/backfill_bundle_author.py
 

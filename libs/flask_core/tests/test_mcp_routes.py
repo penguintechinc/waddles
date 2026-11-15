@@ -131,7 +131,6 @@ def token_for(tenant: str, roles: list[str]) -> str:
         username="alice",
         email="alice@example.com",
         roles=roles,
-        secret_key=SECRET,
         tenant=tenant,
     )
 

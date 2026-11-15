@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from flask_core.auth import verify_jwt_token
 from flask_core.authz import parse_scope_claim
-from flask_core.secrets import require_secret_key
 from quart import Request
 
 from services.errors import unauthorized
@@ -35,8 +34,7 @@ def get_current_user_id(request: Request) -> int:
         raise unauthorized("Authentication required")
 
     token = auth_header[7:]
-    secret_key = require_secret_key()
-    payload = verify_jwt_token(token, secret_key)
+    payload = verify_jwt_token(token)
     if payload is None:
         raise unauthorized("Invalid or expired token")
 
@@ -57,7 +55,7 @@ def get_current_session_id(request: Request) -> int | None:
     if not auth_header or not auth_header.startswith("Bearer "):
         raise unauthorized("Authentication required")
 
-    payload = verify_jwt_token(auth_header[7:], require_secret_key())
+    payload = verify_jwt_token(auth_header[7:])
     if payload is None:
         raise unauthorized("Invalid or expired token")
     sid = payload.get("sid")
@@ -88,8 +86,7 @@ def get_current_scopes(request: Request) -> frozenset[str]:
     if not auth_header or not auth_header.startswith("Bearer "):
         raise unauthorized("Authentication required")
 
-    secret_key = require_secret_key()
-    payload = verify_jwt_token(auth_header[7:], secret_key)
+    payload = verify_jwt_token(auth_header[7:])
     if payload is None:
         raise unauthorized("Invalid or expired token")
     scopes: frozenset[str] = parse_scope_claim(payload.get("scope"))

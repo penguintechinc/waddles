@@ -22,7 +22,7 @@ rotation, revocation triggers), `hub_api/blueprints/v1/auth.py` and `user_manage
 
 ## Access tokens
 
-Minted by `flask_core.auth.create_jwt_token`, HS256, `kid`-stamped (see JWT Verification). New claims:
+Minted by `flask_core.auth.create_jwt_token`, ES256, stamped with the platform-vault signing key's `kid` (see JWT Verification). New claims:
 
 | Claim | Meaning |
 |---|---|

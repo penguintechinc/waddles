@@ -12,15 +12,11 @@ every data structure, `frozen=True` for a value object built once at
 startup and never mutated.
 
 Two field names deliberately mirror `flask_core` verbatim rather than
-inventing a hub-api-local name: `secret_key` reads `SECRET_KEY` (not
-`JWT_SECRET_KEY`) because `flask_core.tenancy.tenant_middleware` and
-`flask_core.authz.require_scope` both call `flask_core.secrets.
-require_secret_key()` directly at request time -- a differently-named env
-var here would leave those decorators reading a different (or unset)
-value than `HubAPIConfig.secret_key`. `require_secret_key()` fails closed
-(raises `InsecureSecretError`) rather than silently falling back to the
-`"change-me-in-production"` placeholder when running in a production-like
-environment (C1, security audit) -- see `flask_core.secrets` module docs.
+inventing a hub-api-local name: `secret_key` reads `SECRET_KEY`. It is NOT a JWT key (platform
+JWTs are ES256 with keys in `platform_vault`, see `flask_core.jwt_keyring`); it only keys the
+Flask session cookie and the refresh-token MAC, and `require_secret_key()` fails closed (raises
+`InsecureSecretError`) rather than silently falling back to the `"change-me-in-production"`
+placeholder when running in a production-like environment (C1, security audit).
 Likewise `posthog_api_key`/`posthog_host` mirror `flask_core.entitlement`'s
 own `POSTHOG_API_KEY`/`POSTHOG_HOST` lookups. Config.from_env() exists so
 hub-api's own code (logging, health blueprint naming, OpenAPI info) has
@@ -113,9 +109,8 @@ class HubAPIConfig:
     db_max_retries: int
     db_retry_delay: int
 
-    # Mirrors flask_core's own SECRET_KEY / HS256 lookup -- see module docstring.
+    # Session-cookie / refresh-token MAC key (SECRET_KEY) -- NOT a JWT key; see module docstring.
     secret_key: str
-    jwt_algorithm: str
     default_tenant_slug: str
 
     # flask_core.entitlement reads POSTHOG_API_KEY/POSTHOG_HOST directly;
@@ -336,7 +331,6 @@ class HubAPIConfig:
             db_max_retries=int(os.getenv("DB_MAX_RETRIES", "5")),
             db_retry_delay=int(os.getenv("DB_RETRY_DELAY", "5")),
             secret_key=require_secret_key(),
-            jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256"),
             default_tenant_slug=os.getenv("DEFAULT_TENANT_SLUG", "default"),
             posthog_api_key=os.getenv("POSTHOG_API_KEY") or os.getenv("POSTHOG_KEY"),
             posthog_host=os.getenv("POSTHOG_HOST", "https://license.penguintech.io"),

@@ -61,7 +61,7 @@ def make_app(dal) -> Quart:
 
 
 def bearer(tenant: str | None = "acme") -> dict[str, str]:
-    tok = create_jwt_token("u1", "alice", "a@e.invalid", [], SECRET, tenant=tenant or "x")
+    tok = create_jwt_token("u1", "alice", "a@e.invalid", [], tenant=tenant or "x")
     return {"Authorization": f"Bearer {tok}"}
 
 
@@ -93,7 +93,22 @@ class TestTenantMiddleware:
         assert app.config["calls"] == []
 
     async def test_token_signed_with_wrong_key_is_401(self, db):
-        bad = create_jwt_token("u1", "a", "a@e.invalid", [], "k" * 40, tenant="acme")
+        import time
+
+        import jwt as pyjwt
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        from flask_core.jwt_keyring import get_jwt_keyring
+
+        now = int(time.time())
+        claims = {
+            "sub": "u1", "tenant": "acme", "scope": "", "iss": "waddlebot",
+            "aud": "waddlebot-services", "iat": now, "exp": now + 600,
+        }
+        bad = pyjwt.encode(
+            claims, ec.generate_private_key(ec.SECP256R1()), algorithm="ES256",
+            headers={"kid": get_jwt_keyring().active.kid},
+        )
         app = make_app(db)
         resp = await app.test_client().get("/who", headers={"Authorization": f"Bearer {bad}"})
         assert resp.status_code == 401 and app.config["calls"] == []

@@ -48,7 +48,9 @@ global:
   # OVERRIDE REQUIRED: override via --set or values override file
   # Security secrets (set via kubectl create secret or values override)
   # Defaults match docker-compose.yml for local development consistency
-  jwtSecret: "REPLACE_ME_jwt_secret"
+  # No jwtSecret: platform JWTs are ES256, keys live in platform_vault (docs/PLATFORM_VAULT.md).
+  # secretKey is the Flask session-cookie / refresh-token MAC key; empty = generated on first run.
+  secretKey: ""
   moduleSecretKey: "REPLACE_ME_module_secret"
   serviceApiKey: "REPLACE_ME_service_key"
 
@@ -2975,7 +2977,7 @@ spire:
       enabled: false
 
 # Per-service ES256 (ECDSA P-256 / SHA-256) machine JWTs -- replaces
-# the platform-wide HS256 shared SECRET_KEY / static API keys for
+# the retired platform-wide shared-secret JWT / static API keys for
 # service-to-service calls, starting with the new internal PII endpoints.
 # SPIFFE-ready by design (see libs/flask_core/flask_core/service_jwt.py
 # module docstring): retiring hub-api issuance for Skauswatch JWT-SVIDs

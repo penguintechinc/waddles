@@ -30,6 +30,7 @@ from flask_core import (
     install_security_headers,
     setup_aaa_logging,
 )
+from flask_core.jwt_keyring import NoSigningKeyError, get_jwt_keyring, set_jwt_keyring
 from flask_core.mcp_routes import create_mcp_blueprint
 from flask_core.service_jwt import (
     ServiceJwtError,
@@ -57,6 +58,8 @@ from services.community_common import api_error
 from services.envelope.runtime import build_envelope_runtime
 from services.identity_resolution_service import run_uuid_availability_monitor
 from services.object_storage_kms import get_object_storage_sse
+from services.platform_secrets.bootstrap import get_process_cache
+from services.platform_secrets.jwt_keyring import PlatformVaultJwtKeyring
 from services.rate_limiting import install_rate_limiting
 from services.schema import (
     bind_ai_routing_tables,
@@ -88,6 +91,11 @@ def _install_error_handlers(app: Quart) -> None:
         """Log the exception, then return the JSON 500 envelope."""
         if isinstance(exc, HTTPException):
             return exc
+        if isinstance(exc, NoSigningKeyError):
+            # The platform vault has not produced a JWT signing key yet (boot, kill-switch ON,
+            # vault refused): sign-in is unavailable, not broken -- never a shared-secret fallback.
+            logger.error("jwt_signing_unavailable path=%s", request.path)
+            return api_error("Sign-in is temporarily unavailable", 503)
         logger.exception("unhandled_exception path=%s method=%s", request.path, request.method)
         return api_error("An unexpected error occurred", 500)
 
@@ -195,6 +203,10 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     app = Quart(__name__)
     app.config["HUB_API_CONFIG"] = cfg
     app.secret_key = cfg.secret_key
+    if get_jwt_keyring() is None:
+        # ES256 platform JWTs: private key sealed in platform_vault, public keys by `kid`
+        # (docs/PLATFORM_VAULT.md). Fails closed until the vault bootstrap has seeded the cache.
+        set_jwt_keyring(PlatformVaultJwtKeyring(get_process_cache()))
     # OpenTelemetry request hooks + late-bound ASGI middleware shim (telemetry.py). Registered
     # FIRST so its before_request runs before every other hook (the rate limiter can short-circuit
     # later ones) and its after_request runs last, seeing the final status. Providers/exporters

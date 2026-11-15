@@ -52,7 +52,6 @@ def _test_hub_config() -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",
-        jwt_algorithm="HS256",
         default_tenant_slug="global",
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",

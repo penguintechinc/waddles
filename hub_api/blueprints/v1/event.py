@@ -58,7 +58,6 @@ from flask_core.api_utils import error_response
 from flask_core.auth import verify_jwt_token
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
-from flask_core.secrets import require_secret_key
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, Response, request
 
@@ -339,8 +338,7 @@ def _build_user_context(req: Any) -> UserContext:
     auth_header = req.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         return UserContext(user_id=None, username=None, role="anonymous")
-    secret_key = require_secret_key()
-    payload = verify_jwt_token(auth_header[7:], secret_key)
+    payload = verify_jwt_token(auth_header[7:])
     if payload is None:
         return UserContext(user_id=None, username=None, role="anonymous")
     roles = payload.get("roles") or []

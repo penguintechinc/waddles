@@ -1,20 +1,21 @@
-# JWT Verification (Phase 0 Hardening)
+# JWT Verification (ES256, Secrets T10)
 
 How every Python service verifies a JWT, what it refuses, and what it emits. This is **Phase 0**
-of the H-2 asymmetric-JWT migration plus the MED-5 permissive-claims finding (2026-10-09 security
-audit). It is non-breaking hardening only: **minting is still HS256** with the shared
-`SECRET_KEY`; the move to ES256/JWKS is a later phase and adds a *second* verifier rather than
-widening this one.
+of the H-2 asymmetric-JWT migration plus the MED-5 permissive-claims finding. **Cutover done
+(Secrets T10): platform JWTs are ES256**, signed by hub-api with a key sealed in `platform_vault`
+and verified with public keys selected by `kid` (`flask_core.jwt_keyring`). The shared HS256
+secret no longer exists and no HS* algorithm is accepted anywhere (hard cutover, no dual-accept
+window; users re-login once). See `PLATFORM_VAULT.md`.
 
 Code: `libs/flask_core/flask_core/jwt_hardening.py` (shared primitives),
-`flask_core/auth.py` (platform HS256), `flask_core/service_jwt.py` (service ES256),
+`flask_core/auth.py` + `flask_core/jwt_keyring.py` (platform ES256), `flask_core/service_jwt.py` (service ES256),
 `hub_api/services/sso_oidc.py` (IdP ID tokens). Standard: RFC 8725 (JWT BCP).
 
 ## The three verifiers
 
 | Verifier (`verifier` label) | Algorithm (exactly one) | Token | Entry point |
 |---|---|---|---|
-| `platform_hs256` | `HS256` | user/session JWT, shared secret | `flask_core.auth.verify_jwt_token` |
+| `platform_es256` | `ES256` | user/session JWT, platform-vault key by `kid` | `flask_core.auth.verify_jwt_token` |
 | `service_eddsa` | `ES256` (+ legacy `EdDSA` only while `SERVICE_JWT_ACCEPT_LEGACY_EDDSA=true`) | per-service machine JWT, hub-api JWKS | `flask_core.service_jwt.ServiceJwtVerifier.verify` |
 | `oidc_id_token` | `RS*`/`PS*`/`ES*`/`EdDSA` allow-list, one per token | external IdP ID token | `hub_api.services.sso_oidc` |
 
@@ -28,7 +29,10 @@ correct secret is still refused.
 | Check | Rejection reason (`outcome` label) |
 |---|---|
 | `alg: none` in any letter case | `alg_none` |
-| Header `alg` is not `HS256` (RS*, ES*, EdDSA, HS384/512, absent, non-string) | `alg_mismatch` |
+| Header `alg` is not `ES256` (HS256/384/512, RS*, EdDSA, absent, non-string) | `alg_mismatch` |
+| `kid` missing | `bad_kid` |
+| `kid` unknown, retired or past its verify-only window | `unknown_kid` |
+| No key ring installed (deployment bug) | `no_key` |
 | Header carries `jku`, `jwk`, `x5u`, `x5c` or `crit` (key-material / unknown-critical params) | `forbidden_header` |
 | `kid` present but outside `[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}` | `bad_kid` |
 | Not a three-segment JWS, undecodable / non-object / oversized (>16 KiB) header | `malformed` |
@@ -78,10 +82,10 @@ unaffected.
 
 ## `kid` on minted tokens
 
-`create_jwt_token` stamps `kid` into every HS256 header (`JWT_KID`, default `hs256-v1`; blank =
-default; a malformed value stops the service at import). The HS256 verifier only *vets* `kid` and
-tolerates its absence (tokens minted before that change); in the JWKS phase
-`kid` selects the verification key. Bump `JWT_KID` when rotating the shared secret.
+`create_jwt_token` stamps the active signing key's `kid` (`k` + 16 hex of the public key's SHA-256)
+into every header; the caller cannot choose it. The verifier REQUIRES `kid` and uses it, and only
+it, to pick the verification key (rotated-out keys stay verify-only until `verify_until`). A key
+rotation is a vault operation, not an env change.
 
 ## No unverified decodes
 
@@ -138,8 +142,7 @@ CRITICAL (`no_key`). The token, its claims, header values and the JWT library's 
   browser_source_core}_module`, `libs/module_sdk/security/scoped_tokens.py`,
   `services/action-platforms`) already pin `algorithms=[...]` but do not use these primitives;
   migrate them onto `inspect_header` / `record_verification` module by module.
-- Phase 1+: JWKS endpoint, ES256 minting with real `kid`s, a second (asymmetric) platform
-  verifier, then retire HS256.
+- Done (T10): ES256 minting with real `kid`s; HS256 retired with no fallback.
 
 ## Service JWT ES256 cut-over (EdDSA legacy window)
 

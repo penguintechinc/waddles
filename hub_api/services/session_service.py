@@ -2,7 +2,7 @@
 
 The model, end to end (OWASP session management / SOC 2 CC6.1; ``docs/TOKEN_REVOCATION.md``):
 
-* **Access token** -- a 15-minute HS256 JWT (``flask_core.auth``) carrying ``jti`` and ``sid``.
+* **Access token** -- a 15-minute ES256 JWT (``flask_core.auth``) carrying ``jti`` and ``sid``.
   Verified statelessly plus one revocation-store lookup (``flask_core.token_revocation``).
 * **Login session** -- one ``hub_sessions`` row per login. ``session_token`` holds the *digest* of
   the current refresh token (never a bearer value -- a database leak yields no usable credential);

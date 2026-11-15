@@ -32,11 +32,6 @@ spec:
               value: "production"
             - name: PORT
               value: "8060"
-            - name: JWT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: waddlebot-secrets
-                  key: JWT_SECRET
           readinessProbe:
             httpGet:
               path: /health

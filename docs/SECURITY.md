@@ -92,7 +92,7 @@ Content-Type: application/json
 
 **Purpose**: User session management and browser-based authentication
 
-**Token Structure** (header carries `alg: HS256` and `kid`; every claim in the first row is
+**Token Structure** (header carries `alg: ES256` and the signing key's `kid`; every claim in the first row is
 mandatory and a token missing any of them is rejected):
 ```json
 {
@@ -111,6 +111,11 @@ mandatory and a token missing any of them is rejected):
 }
 ```
 
+**Keys** (Secrets T10): platform JWTs are signed ES256 by hub-api with a P-256 key sealed in
+`platform_vault`; every verifier holds public keys only (`kid` selects the key, the algorithm is
+pinned in code). There is no shared JWT secret and no HS256 acceptance anywhere. See
+[`PLATFORM_VAULT.md`](PLATFORM_VAULT.md#jwt-signing-es256-t10).
+
 **Token Generation**:
 ```python
 from flask_core.auth import create_jwt_token
@@ -120,7 +125,6 @@ token = create_jwt_token(
     username="streamername",
     email="user@example.com",
     roles=["community_owner", "moderator"],
-    secret_key=os.getenv('JWT_SECRET'),
     tenant='global',            # mandatory -- there is no untenanted token
     scope='community:read',
     session_id='42',   # `sid` claim -- the login session (omit for service tokens)
@@ -131,7 +135,7 @@ token = create_jwt_token(
 ```python
 from flask_core.auth import verify_jwt_token
 
-payload = verify_jwt_token(token, secret_key=os.getenv('JWT_SECRET'))
+payload = verify_jwt_token(token)  # ES256, public key chosen by the token's `kid`
 if payload:
     user_id = payload['sub']
     roles = payload['roles']

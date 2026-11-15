@@ -93,7 +93,7 @@ class SecretSpec:
 
 
 #: Every registered type. JWT signing is deliberately import-less: the replacement of the shared
-#: HS256 secret must be a fresh ES256 key, never a value that has already been distributed.
+#: shared JWT secret must be a fresh ES256 key, never a value that has already been distributed.
 REGISTRY: dict[SecretType, SecretSpec] = {
     SecretType.BUNDLE_SIGNING: SecretSpec(
         secret_type=SecretType.BUNDLE_SIGNING,

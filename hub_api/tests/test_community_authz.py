@@ -47,6 +47,7 @@ from unittest.mock import Mock
 import jwt as pyjwt
 import pytest
 from flask_core.auth import create_jwt_token
+from flask_core.jwt_keyring import get_jwt_keyring
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -64,7 +65,7 @@ from services.community_authz import (
 )
 from services.errors import ApiError
 from services.workflow_service import ProxyResult
-from tests.conftest import SECRET_KEY, TENANT_SLUG, insert_global_admin
+from tests.conftest import TENANT_SLUG, insert_global_admin
 
 COMMUNITY_ID = 1
 
@@ -119,7 +120,7 @@ class TestDecodeCaller:
     def test_token_missing_subject_claim_is_401(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import services.community_authz as module
 
-        monkeypatch.setattr(module, "verify_jwt_token", lambda token, key: {"roles": []})
+        monkeypatch.setattr(module, "verify_jwt_token", lambda token: {"roles": []})
         with pytest.raises(ApiError) as exc_info:
             _decode_caller(_FakeRequest(headers={"Authorization": "Bearer x"}))
         assert exc_info.value.status_code == 401
@@ -130,7 +131,6 @@ class TestDecodeCaller:
             username="alice",
             email="alice@example.com",
             roles=["super_admin"],
-            secret_key=SECRET_KEY,
             tenant="acme-corp",
         )
         user_id, roles = _decode_caller(_FakeRequest(headers={"Authorization": f"Bearer {token}"}))
@@ -192,8 +192,9 @@ class TestJwtRolesDirect:
                 "roles": "platform-admin",  # a bare string, not a list
                 "exp": datetime.now(UTC) + timedelta(hours=1),
             },
-            SECRET_KEY,
-            algorithm="HS256",
+            get_jwt_keyring().active.private_key,
+            algorithm="ES256",
+            headers={"kid": get_jwt_keyring().active.kid},
         )
         request = Mock()
         request.headers = {"Authorization": f"Bearer {token}"}
@@ -205,7 +206,6 @@ class TestJwtRolesDirect:
             username="u",
             email="u@example.com",
             roles=["platform-admin"],
-            secret_key=SECRET_KEY,
             tenant=TENANT_SLUG,
         )
         request = Mock()
@@ -230,7 +230,6 @@ class TestRequireCommunityAdminBypasses:
             username="u",
             email="u@example.com",
             roles=roles or [],
-            secret_key=SECRET_KEY,
             tenant=TENANT_SLUG,
         )
 

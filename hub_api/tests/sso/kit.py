@@ -13,7 +13,7 @@ from quart import Quart
 
 from blueprints.v1.sso import TRANSPORT_CONFIG_KEY
 from services.sso_types import SCOPE_SSO_ADMIN
-from tests.conftest import SECRET_KEY, TENANT_SLUG, make_user_token
+from tests.conftest import TENANT_SLUG, make_user_token
 from tests.sso.idp_fakes import FakeOidcIdp, FakeSamlIdp
 
 FRONTEND = "https://app.example.com"
@@ -188,7 +188,7 @@ class Kit:
         )
         assert exchanged.status_code == 200, await exchanged.get_data(as_text=True)
         token = (await exchanged.get_json())["token"]
-        payload = verify_jwt_token(token, SECRET_KEY)
+        payload = verify_jwt_token(token)
         assert payload is not None
         payload["_token"] = token
         return payload

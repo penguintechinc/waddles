@@ -141,7 +141,7 @@ def make_app() -> Quart:
 
 
 def token(**kw) -> str:
-    return auth.create_jwt_token("u1", "alice", "alice@example.invalid", ["admin"], SECRET, tenant="t1", **kw)
+    return auth.create_jwt_token("u1", "alice", "alice@example.invalid", ["admin"], tenant="t1", **kw)
 
 
 class TestResponseHelpers:
@@ -318,7 +318,22 @@ class TestAuthRequired:
         assert resp.status_code == 401
 
     async def test_jwt_signed_with_other_key_rejected(self):
-        bad = auth.create_jwt_token("u1", "alice", "a@e.invalid", [], "x" * 40, tenant="t1")
+        import time
+
+        import jwt as pyjwt
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        from flask_core.jwt_keyring import get_jwt_keyring
+
+        now = int(time.time())
+        claims = {
+            "sub": "u1", "tenant": "t1", "scope": "", "iss": "waddlebot",
+            "aud": "waddlebot-services", "iat": now, "exp": now + 600,
+        }
+        bad = pyjwt.encode(
+            claims, ec.generate_private_key(ec.SECP256R1()), algorithm="ES256",
+            headers={"kid": get_jwt_keyring().active.kid},
+        )
         resp = await make_app().test_client().get("/protected", headers={"Authorization": f"Bearer {bad}"})
         assert resp.status_code == 401
 

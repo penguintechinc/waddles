@@ -20,6 +20,7 @@ import psycopg2.errors
 import pytest
 from pydal import DAL, Field
 
+from flask_core.jwt_keyring import get_jwt_keyring
 from flask_core.auth import (
     DEFAULT_JWT_AUDIENCE,
     DEFAULT_JWT_ISSUER,
@@ -147,7 +148,6 @@ class TestTenantClaim:
                 username="alice",
                 email="alice@example.com",
                 roles=["viewer"],
-                secret_key=SECRET,
                 tenant="",
             )
 
@@ -157,10 +157,9 @@ class TestTenantClaim:
             username="alice",
             email="alice@example.com",
             roles=["viewer"],
-            secret_key=SECRET,
             tenant="tenant-a",
         )
-        payload = verify_jwt_token(token, SECRET)
+        payload = verify_jwt_token(token)
         assert payload is not None
         assert payload["tenant"] == "tenant-a"
 
@@ -190,8 +189,9 @@ class TestTenantClaim:
             "exp": datetime.now(timezone.utc) + timedelta(hours=1),
             "type": "access",
         }
-        token = jwt.encode(payload, SECRET, algorithm="HS256")
-        assert verify_jwt_token(token, SECRET) is None
+        ring = get_jwt_keyring().active
+        token = jwt.encode(payload, ring.private_key, algorithm="ES256", headers={"kid": ring.kid})
+        assert verify_jwt_token(token) is None
 
     def test_verify_never_defaults_an_empty_tenant_to_global(self):
         """`tenant: ""` is not "global" -- it is rejected, not defaulted."""
@@ -206,8 +206,9 @@ class TestTenantClaim:
             "iat": now,
             "exp": now + timedelta(hours=1),
         }
-        token = jwt.encode(payload, SECRET, algorithm="HS256")
-        assert verify_jwt_token(token, SECRET) is None
+        ring = get_jwt_keyring().active
+        token = jwt.encode(payload, ring.private_key, algorithm="ES256", headers={"kid": ring.kid})
+        assert verify_jwt_token(token) is None
 
     def test_migration_cutoff_fallback_is_removed(self):
         """The 2026-11-26 default-tenant migration window must stay deleted (MED-5)."""

@@ -62,7 +62,6 @@ def _cfg() -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",  # noqa: S106
-        jwt_algorithm="HS256",
         default_tenant_slug="global",
         posthog_api_key=None,
         posthog_host="x",

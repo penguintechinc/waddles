@@ -7,7 +7,7 @@
 # Fails when the container exits before answering, or after MAX_RETRIES polls.
 #
 # Per-module runtime prerequisites (the image fails fast without them, by design):
-#   hub-api    NODE_ENV=production requires JWT_SECRET + SERVICE_API_KEY, and
+#   hub-api    NODE_ENV=production requires SECRET_KEY + SERVICE_API_KEY, and
 #              initializeDatabase() requires a reachable Postgres. A throwaway
 #              postgres sidecar on a private docker network supplies the DB.
 #   hub-webui  NODE_ENV=production requires HUB_API_URL (no localhost fallback).
@@ -62,7 +62,7 @@ case "$MODULE" in
     umask 077
     DB_PASS="$(openssl rand -hex 24)"
     {
-      echo "JWT_SECRET=$(openssl rand -hex 32)"
+      echo "SECRET_KEY=$(openssl rand -hex 32)"
       echo "SERVICE_API_KEY=$(openssl rand -hex 32)"
       echo "DATABASE_URL=postgresql://smoke:${DB_PASS}@${DB_NAME}:5432/smoke"
     } > "$APP_ENV"

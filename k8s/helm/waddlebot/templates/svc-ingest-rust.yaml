@@ -293,11 +293,6 @@ spec:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: VALKEY_DURABLE_URL
         {{- end }}
-        - name: SECRET_KEY
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: SECRET_KEY
         - name: WADDLES_AI_ENABLED
           value: {{ .Values.pipeline.hubApi.aiEnabled | quote }}
         # fix/helm-platform-credentials -- sourced from the operator-managed

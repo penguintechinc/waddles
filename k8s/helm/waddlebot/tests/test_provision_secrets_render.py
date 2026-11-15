@@ -129,9 +129,9 @@ def test_no_template_time_generation_left() -> None:
 
 def test_explicit_values_go_to_inputs_secret_never_the_spec_cm() -> None:
     marker = "explicit-secret-value-0123456789abcdef"
-    docs = _render("production", [f"global.jwtSecret={marker}", "global.moduleSecretKey=REPLACE_ME_x"])
+    docs = _render("production", [f"global.secretKey={marker}", "global.moduleSecretKey=REPLACE_ME_x"])
     inputs = _one(docs, "Secret", "waddlebot-provision-secrets-inputs")["stringData"]
-    assert inputs["waddlebot-secrets__JWT_SECRET"] == marker
+    assert inputs["waddlebot-secrets__SECRET_KEY"] == marker
     assert "waddlebot-secrets__MODULE_SECRET_KEY" not in inputs  # placeholder is never an explicit value
     cm = json.dumps(_one(docs, "ConfigMap", "waddlebot-provision-secrets")["data"])
     job = json.dumps(_one(docs, "Job", "waddlebot-provision-secrets"))
@@ -183,7 +183,10 @@ def test_rendered_spec_drives_script_end_to_end_second_run_unchanged(env: str, t
     assert pw in e.val("waddlebot-db-migrate-secret", "DATABASE_URL")
     roles = json.loads(e.val("waddlebot-db-migrate-secret", "WADDLES_DB_SERVICE_ROLE_PASSWORDS"))
     assert roles and all(len(v) == 43 for v in roles.values())
-    assert e.val("waddlebot-secrets", "SECRET_KEY") == e.val("waddlebot-secrets", "JWT_SECRET")
+    # T10: no shared JWT secret is generated; SECRET_KEY is independent random material.
+    assert e.get("waddlebot-secrets")["data"].get("JWT_SECRET") is None
+    assert e.get("waddlebot-secrets")["data"].get("JWT_SECRET_KEY") is None
+    assert len(base64.b64decode(e.get("waddlebot-secrets")["data"]["SECRET_KEY"])) >= 32
     assert f":{e.val('waddlebot-secrets', 'REDIS_PASSWORD')}@" in e.val("waddlebot-secrets", "REDIS_URL")
     base64.b64decode(e.get("waddlebot-tenant-kek")["data"]["TENANT_KEK_HEX"])
     assert "waddles.penguintech.io/root-marker" in e.get("waddlebot-tenant-kek")["annotations"]

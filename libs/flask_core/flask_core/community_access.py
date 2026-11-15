@@ -49,7 +49,6 @@ from pydal import Field
 from quart import Blueprint, Quart, Request
 
 from .auth import verify_jwt_token
-from .secrets import require_secret_key
 from .tenancy import TenantContext, TenantIsolationError, resolve_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -122,8 +121,7 @@ def _is_super_admin(request: Request) -> bool:
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         return False
-    secret_key = require_secret_key("SECRET_KEY")
-    payload = verify_jwt_token(auth_header[7:], secret_key)
+    payload = verify_jwt_token(auth_header[7:])
     if payload is None:
         return False
     return "super_admin" in (payload.get("roles") or [])
@@ -207,8 +205,7 @@ def decode_caller_user_id(request: Request) -> int:
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         raise CallerIdentityError("Authentication required")
-    secret_key = require_secret_key("SECRET_KEY")
-    payload = verify_jwt_token(auth_header[7:], secret_key)
+    payload = verify_jwt_token(auth_header[7:])
     if payload is None:
         raise CallerIdentityError("Invalid or expired token")
     try:
@@ -272,8 +269,7 @@ def install_community_scoped_auth(
             return error_response("Authentication required", status_code=401)
 
         token = auth_header[7:]
-        secret_key = require_secret_key("SECRET_KEY")
-        payload = verify_jwt_token(token, secret_key)
+        payload = verify_jwt_token(token)
         if payload is None:
             return error_response("Invalid or expired token", status_code=401)
 

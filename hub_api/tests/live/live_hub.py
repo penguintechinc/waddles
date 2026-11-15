@@ -262,8 +262,8 @@ async def _serve(manifest_path: Path) -> None:
         port = _free_port()
         admin_token = create_jwt_token(
             user_id=str(ids["admin_user"]), username="live-admin", email="admin@example.invalid",
-            roles=["super_admin"], secret_key=os.environ["SECRET_KEY"],
-            tenant=TENANT_SLUG, scope="connections:admin", expiration_seconds=3600,
+            roles=["super_admin"], tenant=TENANT_SLUG, scope="connections:admin",
+            expiration_seconds=3600,
         )  # fmt: skip
         manifest: dict[str, Any] = {
             "hub_url": f"http://127.0.0.1:{port}",

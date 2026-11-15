@@ -58,6 +58,34 @@ The seal-callers guard (`hub_api/tests/test_seal_callers_guard.py`) pins that th
 derivation and `hmac` run only inside these functions, that the namespace label appears only in the
 vault, and ratchets the set of modules allowed to import `cryptography` / `hmac`.
 
+## JWT signing (ES256, T10)
+
+The platform's user / session JWT is ES256. The shared HS256 `JWT_SECRET` is gone: no env var,
+Helm value, Secret key, script or code path accepts or mints HS256, and a CI gate
+(`scripts/ci/check-no-shared-jwt-secret.sh`, allowlist `scripts/ci/jwt-hs256-allowlist.txt`) fails if it reappears.
+
+| Piece | Behaviour |
+|---|---|
+| Key | `SecretType.JWT_SIGNING` (3), ES256 / P-256, freshly generated at first boot, **never imported** from env/Secret (security review H1) |
+| Signing | hub-api only, `PlatformVaultJwtKeyring` -> active version from the process cache; header `alg=ES256`, `kid` = the key id. No active key -> sign-in answers 503, never a fallback |
+| Verifying (Python) | `flask_core.auth.verify_jwt_token(token)`: header vetted (alg pinned to ES256 in code, `none`/HS*/RS*/unknown rejected, `jku/jwk/x5u/x5c/crit` rejected, `kid` required), key chosen by `kid` from the key ring, `iss`/`aud`/`exp` enforced, 30 s skew on `iat`/`nbf` only, max lifetime 1 h |
+| Verifying (Rust) | `svc_streaming` reads public keys through `core/platform_keys` (view `platform_vault.public_keys`), same rules; points are 65-byte uncompressed P-256 |
+| Rotation | new version active, previous version **verify-only** until `rotated_at + 2 h` (`verify_window_s`), then refused even if no refresh happened (M6); a Rust cache additionally refuses verify-only keys when its snapshot is > 15 min stale |
+| Kill-switch | `waddles.disable-db-platform-keys` ON skips the vault bootstrap: JWTs then fail CLOSED (no signing key). It is not an HS256 fallback |
+
+`SECRET_KEY` remains only as the Flask session-cookie / refresh-token MAC key (independent random value, Helm
+`global.secretKey`, generated on first run); it can sign no JWT.
+
+### Migration notes (HS256 -> ES256)
+
+1. Deploy: hub-api bootstraps the ES256 key on start; every previously issued access/refresh JWT is refused, so
+   **users re-login once** (access tokens live <= 15 min; sessions refresh-rotate after re-login).
+2. There is deliberately **no dual-accept window** (security review H3): HS256 acceptance is removed in code.
+3. Remove the orphaned `JWT_SECRET` / `JWT_SECRET_KEY` entries from the `waddlebot-secrets` Secret in each cluster
+   (`kubectl patch secret waddlebot-secrets --type=json -p '[{"op":"remove","path":"/data/JWT_SECRET"},{"op":"remove","path":"/data/JWT_SECRET_KEY"}]'`);
+   leaked copies verify nothing, but they should not linger.
+4. Helm: `global.jwtSecret` / `WADDLEBOT_ALPHA_JWT_SECRET` are removed; `global.secretKey` / `WADDLEBOT_ALPHA_SECRET_KEY` replace them.
+
 ## Data-plane verifying keys (`core/platform_keys`, design T5)
 
 Data-plane services verify signatures against the PUBLIC keys in the view `public_keys`, read with

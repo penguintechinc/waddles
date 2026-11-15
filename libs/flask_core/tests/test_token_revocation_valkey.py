@@ -207,30 +207,30 @@ class TestEndToEndThroughTheVerifier:
             def mint(sid: str | None = None) -> str:
                 return create_jwt_token(
                     user_id=user, username="u", email="u@example.invalid", roles=[],
-                    secret_key=SECRET, tenant="global", scope="community:read", session_id=sid,
+                    tenant="global", scope="community:read", session_id=sid,
                 )
 
             one, two = mint(f"s1{ident}"), mint(f"s2{ident}")
-            assert verify_jwt_token(one, SECRET) is not None
-            payload = verify_jwt_token(two, SECRET)
+            assert verify_jwt_token(one) is not None
+            payload = verify_jwt_token(two)
             assert payload is not None
             keys.append(revocation_key(RevocationKind.JTI, payload["jti"]))
 
             shared.revoke_token(payload["jti"], exp=payload["exp"])  # one token, before its exp
-            assert verify_jwt_token(two, SECRET) is None
-            assert verify_jwt_token(one, SECRET) is not None  # its sibling is untouched
+            assert verify_jwt_token(two) is None
+            assert verify_jwt_token(one) is not None  # its sibling is untouched
 
             shared.revoke_session(f"s1{ident}")
             keys.append(revocation_key(RevocationKind.SID, f"s1{ident}"))
-            assert verify_jwt_token(one, SECRET) is None
+            assert verify_jwt_token(one) is None
 
             survivor = mint()
-            assert verify_jwt_token(survivor, SECRET) is not None
+            assert verify_jwt_token(survivor) is not None
             shared.revoke_user(user)
             keys.append(revocation_key(RevocationKind.USER, user))
-            assert verify_jwt_token(survivor, SECRET) is None  # revoke-all cut off a prior token
+            assert verify_jwt_token(survivor) is None  # revoke-all cut off a prior token
             time.sleep(1.1)  # iat has second resolution: a token minted next second is later
-            assert verify_jwt_token(mint(), SECRET) is not None
+            assert verify_jwt_token(mint()) is not None
         finally:
             tr.configure_token_revocation(previous)
             raw.delete(*keys)
@@ -247,10 +247,10 @@ class TestEndToEndThroughTheVerifier:
         try:
             token = create_jwt_token(
                 user_id=f"user-{ident}", username="u", email="u@example.invalid", roles=[],
-                secret_key=SECRET, tenant="global", scope="",
+                tenant="global", scope="",
             )
             time.sleep(0.05)  # grace_seconds=0: any elapsed time since construction is "beyond"
-            assert verify_jwt_token(token, SECRET) is None
+            assert verify_jwt_token(token) is None
         finally:
             tr.configure_token_revocation(previous)
             dead.close()

@@ -168,7 +168,6 @@ def client(role_dal: AsyncDAL, pg_db: PgTestDatabase) -> Any:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",
-        jwt_algorithm="HS256",
         **_extra_config(),
     )
     return quart_app.test_client()

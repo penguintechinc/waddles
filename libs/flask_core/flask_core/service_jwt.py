@@ -2,7 +2,7 @@
 Per-Service ES256 Machine JWTs
 ==============================
 
-Replaces the platform-wide HS256 shared ``SECRET_KEY`` (see ``auth.py``) and
+Replaces the platform-wide shared-secret ``SECRET_KEY`` (see ``auth.py``) and
 static API keys for service-to-service calls, starting with the new internal
 PII endpoints (security.md Service-to-Service Auth). Each service is issued
 a short-lived (<=1h) ECDSA P-256 / SHA-256 (ES256) signed JWT scoped to specific ``scope`` values
@@ -793,11 +793,11 @@ def require_service_scope(scope: str) -> Callable[[F], F]:
 # ---------------------------------------------------------------------------
 # Verify-only trust bundle (callers mint over gRPC: ServiceAuthService)
 #
-# Privilege separation (H-2 / security audit HIGH, HS256 shared secret): ONLY
+# Privilege separation (H-2 / security audit HIGH, shared-secret scheme): ONLY
 # hub-api (the issuer) may hold an ES256 private key. Every other service
 # verifies with public keys and mints nothing -- it obtains a short-lived
 # machine JWT from hub-api by presenting its Kubernetes SA token. A verifier
-# compromise therefore yields no forging capability, unlike the legacy HS256
+# compromise therefore yields no forging capability, unlike the legacy shared-secret
 # `MODULE_SECRET_KEY`/`SECRET_KEY` design where every verifier held the minting key.
 # ---------------------------------------------------------------------------
 
@@ -830,7 +830,7 @@ def load_verifier_from_env(
     any key is not P-256 (Ed25519 only with `SERVICE_JWT_ACCEPT_LEGACY_EDDSA=true`), when a kid is malformed, or when a `SERVICE_JWT_PRIVATE_KEY_*`
     variable is present -- a verifier-only service holding signing material defeats
     the privilege separation this module exists for, so it is refused at startup
-    rather than tolerated. No HS256/shared-secret fallback exists anywhere here.
+    rather than tolerated. No shared-secret fallback exists anywhere here.
     """
     private_vars = sorted(
         name for name in os.environ if name.startswith(_PRIVATE_PREFIX)

@@ -52,7 +52,6 @@ from typing import Any
 
 from flask_core.auth import DEFAULT_TENANT_SLUG, verify_jwt_token
 from flask_core.bundle_author import author_view
-from flask_core.secrets import require_secret_key
 
 from services.errors import bad_request
 from services.marketplace_author import AuthorDTO, to_author_dto
@@ -105,8 +104,7 @@ def visible_tenant_ids(dal: Any, request: Any) -> frozenset[int]:
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header[7:]
-        secret_key = require_secret_key()
-        payload = verify_jwt_token(token, secret_key)
+        payload = verify_jwt_token(token)
         if payload:
             tenant_slug = payload.get("tenant")
             if tenant_slug:

@@ -16,7 +16,7 @@ from flask_core.auth import verify_jwt_token
 from services import data_privacy_service as privacy
 from services import session_service
 from tests import test_data_privacy_erasure as erasure_suite
-from tests.conftest import SECRET_KEY, make_user_token
+from tests.conftest import make_user_token
 
 # Re-exported so pytest registers the erasure suite's real-pydal fixtures in this module.
 module_db = erasure_suite.module_db
@@ -30,14 +30,14 @@ class TestErasureRevokesAccessTokens:
         bystander = _user(erasure_db, name="bystander")
         tokens = [make_user_token(user_id=user_id) for _ in range(3)]
         kept = make_user_token(user_id=bystander)
-        assert all(verify_jwt_token(t, SECRET_KEY) is not None for t in tokens)
+        assert all(verify_jwt_token(t) is not None for t in tokens)
 
         await privacy.anonymize_user_data(
             erasure_db, erasure_db.dal, user_id=user_id, email="goner@example.com"
         )
 
-        assert all(verify_jwt_token(t, SECRET_KEY) is None for t in tokens)
-        assert verify_jwt_token(kept, SECRET_KEY) is not None
+        assert all(verify_jwt_token(t) is None for t in tokens)
+        assert verify_jwt_token(kept) is not None
 
     async def test_a_failed_erasure_revokes_nothing(
         self, erasure_db: Any, monkeypatch: pytest.MonkeyPatch
@@ -53,7 +53,7 @@ class TestErasureRevokesAccessTokens:
             await privacy.anonymize_user_data(
                 erasure_db, erasure_db.dal, user_id=user_id, email="survivor@example.com"
             )
-        assert verify_jwt_token(token, SECRET_KEY) is not None
+        assert verify_jwt_token(token) is not None
 
     async def test_erasure_adds_no_second_commit(
         self, erasure_db: Any, monkeypatch: pytest.MonkeyPatch

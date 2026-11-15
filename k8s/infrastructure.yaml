@@ -21,7 +21,7 @@ type: Opaque
 stringData:
   POSTGRES_PASSWORD: ""
   REDIS_PASSWORD: ""
-  JWT_SECRET: ""
+  SECRET_KEY: ""
   MODULE_SECRET_KEY: ""
   OPENWHISK_AUTH_KEY: ""
 ---

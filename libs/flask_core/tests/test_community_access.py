@@ -47,7 +47,6 @@ def _token(*, sub: str = "1", tenant: str = "acme-corp", roles: list[str] | None
         username="alice",
         email="alice@example.com",
         roles=roles or [],
-        secret_key=SECRET,
         tenant=tenant,
     )
 

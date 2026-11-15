@@ -31,7 +31,6 @@ def _token(scope: str = "", user_id: str = "7") -> str:
         username="alice",
         email="alice@example.com",
         roles=["viewer"],
-        secret_key=SECRET,
         tenant="acme-corp",
         scope=scope,
     )

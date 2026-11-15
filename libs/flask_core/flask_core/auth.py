@@ -31,13 +31,22 @@ from .jwt_hardening import (
     REASON_NO_KEY,
     REASON_REVOCATION_UNAVAILABLE,
     REASON_REVOKED,
-    VERIFIER_PLATFORM_HS256,
+    VERIFIER_PLATFORM_ES256,
+    REASON_UNKNOWN_KID,
     JwtRejection,
     classify_decode_error,
     inspect_header,
     is_valid_kid,
     log_rejection,
     record_verification,
+)
+from .jwt_keyring import (
+    PLATFORM_JWT_ALGORITHM,
+    NoSigningKeyError,
+    UnknownKidError,
+    get_jwt_keyring,
+    require_signing_key,
+    require_verify_key,
 )
 from .token_revocation import (
     CHECK_UNAVAILABLE_REJECTED,
@@ -50,7 +59,7 @@ logger = logging.getLogger(__name__)
 
 #: Default `iss`/`aud` claims (security.md JWT Claims: both mandatory on
 #: every token). Every flask_core-based service verifies tokens with
-#: `verify_jwt_token()` against the same shared HS256 `SECRET_KEY` --
+#: `verify_jwt_token()` against the platform's ES256 public keys (`jwt_keyring`) --
 #: there is one platform-wide issuer and one platform-wide audience, not a
 #: distinct value per one of the ~47 services, so both default to a fixed
 #: constant rather than requiring every caller to supply a per-service
@@ -58,20 +67,6 @@ logger = logging.getLogger(__name__)
 #: that split identity issuance from token consumption.
 DEFAULT_JWT_ISSUER = os.getenv("JWT_ISSUER", "waddlebot")
 DEFAULT_JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "waddlebot-services")
-
-#: The ONE algorithm the platform verifier accepts and the minter uses (RFC
-#: 8725 one-alg-per-verifier). H-2 Phase 0 only hardens HS256; the ES256/JWKS
-#: cutover adds a *second verifier* with its own single algorithm, it does not
-#: widen this list.
-PLATFORM_JWT_ALGORITHM = "HS256"
-
-#: `kid` stamped into every minted HS256 header (forward-compat for the JWKS/ES256
-#: phase, where `kid` selects the verification key). Rotation of the shared
-#: secret bumps this value. Validated at import so a malformed `JWT_KID` stops the
-#: service at startup instead of minting tokens every verifier would refuse.
-DEFAULT_JWT_KID = os.getenv("JWT_KID") or "hs256-v1"  # empty (e.g. a blank Helm value) = unset
-if not is_valid_kid(DEFAULT_JWT_KID):
-    raise ValueError("JWT_KID must match [A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}")
 
 #: Claims every platform token must carry (security.md JWT Claims; MED-5). `scope`
 #: may be the empty string (no scopes granted) but must be present.
@@ -292,14 +287,12 @@ def create_jwt_token(
     username: str,
     email: str,
     roles: List[str],
-    secret_key: str,
     tenant: str,
     scope: str = "",
     expiration_hours: float | None = None,
     teams: list[str] | None = None,
     issuer: str = DEFAULT_JWT_ISSUER,
     audience: str = DEFAULT_JWT_AUDIENCE,
-    kid: str = DEFAULT_JWT_KID,
     expiration_seconds: int | None = None,
     session_id: str | None = None,
     issued_at: int | None = None,
@@ -312,7 +305,6 @@ def create_jwt_token(
         username: Username
         email: User email
         roles: List of role names
-        secret_key: JWT secret key
         tenant: Tenant slug the token is scoped to. Mandatory -- security.md
             requires every token to carry a `tenant` claim; single-tenant
             deployments pass DEFAULT_TENANT_SLUG, not an empty/omitted value.
@@ -340,9 +332,6 @@ def create_jwt_token(
             data to attach yet.
         issuer: `iss` claim; defaults to `DEFAULT_JWT_ISSUER`.
         audience: `aud` claim; defaults to `DEFAULT_JWT_AUDIENCE`.
-        kid: JOSE header `kid` identifying the signing key; defaults to
-            `DEFAULT_JWT_KID`. Selects the verification key once the JWKS
-            (ES256) phase lands; the HS256 verifier only vets its charset.
 
     Returns:
         JWT token string
@@ -351,9 +340,9 @@ def create_jwt_token(
     `MAX_JWT_LIFETIME_SECONDS` -- the verifier refuses anything longer-lived.
 
     Raises:
-        ValueError: If tenant or secret_key is empty, or kid is malformed --
-            there is no untenanted token, and a token signed with an empty
-            secret is forgeable by anyone -- or the requested lifetime is not
+        NoSigningKeyError: No active ES256 signing key is available (the key ring is not
+            installed or the platform vault has not produced one yet) -- never a fallback.
+        ValueError: If tenant is empty -- there is no untenanted token -- or the requested lifetime is not
             within (0, MAX_JWT_LIFETIME_SECONDS], or `session_id` is not a valid identifier.
     """
     if not tenant:
@@ -361,13 +350,10 @@ def create_jwt_token(
             "tenant is mandatory on every JWT (security.md Tenant Isolation) -- "
             "pass DEFAULT_TENANT_SLUG for single-tenant deployments, never empty"
         )
-    if not secret_key:
-        raise ValueError(
-            "secret_key is empty -- refusing to mint a token anyone could forge "
-            "(the signing secret is unset or unresolved)"
-        )
+    signing_key = require_signing_key()
+    kid = signing_key.kid
     if not is_valid_kid(kid):
-        raise ValueError("kid must match [A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}")
+        raise NoSigningKeyError("the active signing key has a malformed key id")
 
     if expiration_hours is not None and expiration_seconds is not None:
         raise ValueError("pass expiration_hours or expiration_seconds, not both")
@@ -409,7 +395,10 @@ def create_jwt_token(
         payload['sid'] = session_id
 
     token = jwt.encode(
-        payload, secret_key, algorithm=PLATFORM_JWT_ALGORITHM, headers={'kid': kid}
+        payload,
+        signing_key.private_key,
+        algorithm=PLATFORM_JWT_ALGORITHM,
+        headers={'kid': kid},
     )
 
     # PII-free: the subject id and tenant slug only -- never username/email/token.
@@ -431,7 +420,7 @@ def create_jwt_token(
 
 
 def _verify_platform_token(
-    token: str, secret_key: str, issuer: str, audience: str
+    token: str, issuer: str, audience: str
 ) -> tuple[Dict[str, Any], str]:
     """
     Run every platform-token check; raise `JwtRejection` on the first failure.
@@ -440,19 +429,27 @@ def _verify_platform_token(
     logging/metrics so the policy is one readable sequence; the side effects
     live in `verify_jwt_token()`.
     """
-    if not isinstance(secret_key, (str, bytes)) or not secret_key:
-        # Deployment bug (unset/unresolved secret), not attacker input -- but an
-        # empty HMAC key would otherwise *verify* tokens anyone can forge.
+    if get_jwt_keyring() is None:
+        # Deployment bug (no ring installed), not attacker input: fail closed and loudly.
         raise JwtRejection(REASON_NO_KEY)
-
+    # The algorithm is pinned here by code and the key is chosen by `kid` alone: the header can
+    # neither pick a different algorithm (HS*/RS*/none are refused by `inspect_header`) nor
+    # supply a key (jku/jwk/x5u/x5c are refused), and a token without a `kid` is refused.
     header = inspect_header(
-        token, allowed_algs=(PLATFORM_JWT_ALGORITHM,), validate_kid=True
+        token, allowed_algs=(PLATFORM_JWT_ALGORITHM,), require_kid=True
     )
+    assert header.kid is not None  # require_kid guarantees it
+    try:
+        verify_key = require_verify_key(header.kid)
+    except UnknownKidError:
+        raise JwtRejection(REASON_UNKNOWN_KID, alg=header.alg) from None
+    except Exception as exc:  # noqa: BLE001 -- a broken key ring must fail closed, not 500
+        raise JwtRejection(REASON_NO_KEY, alg=header.alg) from exc
 
     try:
         payload: Dict[str, Any] = jwt.decode(
             token,
-            secret_key,
+            verify_key.public_key,
             algorithms=[PLATFORM_JWT_ALGORITHM],
             audience=audience,
             issuer=issuer,
@@ -511,13 +508,12 @@ def _verify_platform_token(
 
 def verify_jwt_token(
     token: str,
-    secret_key: str,
     *,
     issuer: str = DEFAULT_JWT_ISSUER,
     audience: str = DEFAULT_JWT_AUDIENCE,
 ) -> Optional[Dict[str, Any]]:
     """
-    Verify and decode a platform (HS256) JWT.
+    Verify and decode a platform (ES256) JWT.
 
     H-2 Phase 0 / MED-5 hardening (RFC 8725). Every check fails closed:
 
@@ -530,7 +526,9 @@ def verify_jwt_token(
     * Every claim in `REQUIRED_JWT_CLAIMS` must be present, and `sub`/`tenant`
       must be non-empty strings. There is no default-tenant fallback: a token
       with no `tenant` is rejected, never treated as `DEFAULT_TENANT_SLUG`.
-    * An empty `secret_key` is refused (a CRITICAL log, not a pass).
+    * The verification key is the public key whose `kid` the header names, taken from the
+      installed key ring (`jwt_keyring`); an unknown, retired or expired-verify-only `kid` is
+      refused, as is a token with no `kid`. No shared secret exists, so no verifier can mint.
     * A token lived longer than `MAX_JWT_LIFETIME_SECONDS` (`exp - iat`) is refused.
     * A revoked token is refused before its `exp`: by `jti`, by login session `sid`, or by the
       per-user `iat` cutoff written by "revoke all sessions" (`token_revocation`). When the
@@ -543,7 +541,6 @@ def verify_jwt_token(
 
     Args:
         token: JWT token string
-        secret_key: JWT secret key
         issuer: Expected `iss` claim.
         audience: Expected `aud` claim.
 
@@ -553,25 +550,25 @@ def verify_jwt_token(
     """
     started = time.perf_counter()
     try:
-        payload, alg = _verify_platform_token(token, secret_key, issuer, audience)
+        payload, alg = _verify_platform_token(token, issuer, audience)
     except JwtRejection as rejection:
         record_verification(
-            verifier=VERIFIER_PLATFORM_HS256,
+            verifier=VERIFIER_PLATFORM_ES256,
             alg=rejection.alg,
             outcome=rejection.reason,
             started=started,
         )
         log_rejection(
-            verifier=VERIFIER_PLATFORM_HS256, reason=rejection.reason, alg=rejection.alg
+            verifier=VERIFIER_PLATFORM_ES256, reason=rejection.reason, alg=rejection.alg
         )
         return None
 
     record_verification(
-        verifier=VERIFIER_PLATFORM_HS256, alg=alg, outcome=OUTCOME_OK, started=started
+        verifier=VERIFIER_PLATFORM_ES256, alg=alg, outcome=OUTCOME_OK, started=started
     )
     logger.debug(
         "JWT verified: verifier=%s alg=%s",
-        VERIFIER_PLATFORM_HS256,
+        VERIFIER_PLATFORM_ES256,
         alg,
         extra={'event_type': 'AUTH', 'action': 'verify_jwt_token', 'result': 'SUCCESS'},
     )

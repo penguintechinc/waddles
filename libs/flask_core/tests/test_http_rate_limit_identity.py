@@ -23,7 +23,7 @@ def _secret(monkeypatch):
 
 
 def bearer(sub: str) -> dict[str, str]:
-    tok = create_jwt_token(sub, "name", "n@e.invalid", [], SECRET, tenant="t")
+    tok = create_jwt_token(sub, "name", "n@e.invalid", [], tenant="t")
     return {"Authorization": f"Bearer {tok}"}
 
 

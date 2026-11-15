@@ -9,14 +9,14 @@ environment. Never commit real credentials into a values file.
 For a quick local install, generate strong secrets and pass them with `--set`:
 
 ```bash
-JWT_SECRET=$(openssl rand -hex 32)
+SECRET_KEY=$(openssl rand -hex 32)   # session-cookie / refresh-token MAC key; NOT a JWT key
 DB_PASS=$(openssl rand -hex 16)
 REDIS_PASS=$(openssl rand -hex 16)
 
 helm install waddlebot ./k8s/helm/waddlebot -n waddlebot --create-namespace \
   --kube-context local-alpha \
   -f k8s/helm/waddlebot/values-alpha.yaml \
-  --set secrets.jwtSecret="$JWT_SECRET" \
+  --set global.secretKey="$SECRET_KEY" \
   --set secrets.dbPassword="$DB_PASS" \
   --set secrets.redisPassword="$REDIS_PASS"
 ```

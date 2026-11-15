@@ -43,16 +43,12 @@
 
 ## API & Service Credentials
 
-### JWT Secret
-- **Environment Variable**: `JWT_SECRET`
-- **Default Value**: REMOVED (was: `waddlebot_jwt_secret`)
-- **Used By**: hub_module (JWT signing/verification)
-- **Locations to Update**:
-  - `.env` file
-  - `docker-compose.yml` (hub service)
-  - K8s Secrets
-  - Helm values.yaml
-- **Impact**: Invalidates all existing JWT tokens on rotation
+### JWT signing key (ES256, `platform_vault`)
+- **No environment variable and no shared secret** (the HS256 `JWT_SECRET` was removed in Secrets T10).
+- **Where it lives**: `platform_vault.secrets`, type `JWT_SIGNING`, sealed under the platform KEK.
+- **Rotate**: operator-triggered via the platform-secrets rotate API (see `PLATFORM_VAULT.md`); the previous key stays verify-only for 2 h, then is refused.
+- **Cutover cleanup (once)**: delete the orphaned `JWT_SECRET` / `JWT_SECRET_KEY` keys from the `waddlebot-secrets` Secret.
+- **Impact**: rotation does not log anyone out (old key verifies during the window); the one-time HS256 -> ES256 cutover did (users re-login once).
 - **Rotation Procedure**:
   1. Generate new 256-bit secret (min 64 chars)
   2. Update all secret stores
