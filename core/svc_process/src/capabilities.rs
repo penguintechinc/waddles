@@ -2577,12 +2577,18 @@ impl<K: KvBackend> StageCapabilities<K> {
         }
 
         // Own-prefix baseline: storage is OFF by default for a bundle -- its manifest must
-        // declare `storage.objects` (the app-scoped object-storage permission), checked on
-        // EVERY op (own prefix, cross-prefix and tag changes alike) before any host work.
+        // declare the per-action app-scoped permission (`storage.objects.read` for
+        // get/head/list/presign_get, `storage.objects.write` for put/delete/tag changes),
+        // checked on EVERY op (own prefix, cross-prefix and tag changes alike) before any
+        // host work.
+        let baseline = match op {
+            "get" | "head" | "list" | "presign_get" => PermissionId::StorageObjectsRead,
+            _ => PermissionId::StorageObjectsWrite,
+        };
         self.gate
             .authorize(
                 &self.gate_scope(),
-                PermissionId::StorageObjects,
+                baseline,
                 ResourceRef::AppScoped(AppScopedResource::Objects),
             )
             .map_err(denied_from_gate)?;

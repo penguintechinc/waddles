@@ -2,7 +2,7 @@
 
 A GLOBAL admin (`platform:admin`) can allow/deny an entire permission
 *type* -- a catalog id or family, e.g. `net.http.private-ip`,
-`storage.objects` -- instance-wide (2026-09-28 decision). This applies to
+`storage.objects.write` -- instance-wide (2026-09-28 decision). This applies to
 every bundle regardless of its own per-app approval; it is a platform-
 level kill-switch, never a per-bundle/per-admission decision. The layer
 sits ABOVE the existing 3 tiers (global catalog approval -> tenant

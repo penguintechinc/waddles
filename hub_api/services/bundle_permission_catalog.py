@@ -95,7 +95,8 @@ def _overlaps_always_denied(network: IpNetwork) -> bool:
 STATIC_PERMISSIONS: dict[str, Risk] = {
     "storage.kv": "normal",
     "storage.tables": "normal",
-    "storage.objects": "normal",
+    "storage.objects.read": "normal",
+    "storage.objects.write": "normal",
     "overlay.media": "dangerous",
     #: Control plane of svc-streaming's WebRTC rooms/SFU (`webrtc` host capability):
     #: create/close rooms, mint short-lived room join tokens, route tracks. `dangerous`:

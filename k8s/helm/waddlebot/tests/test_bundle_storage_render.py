@@ -206,7 +206,16 @@ def test_audit_password_is_generated_per_tier_and_handed_to_the_migrator():
 
 
 @pytest.mark.parametrize("values", _ENVS)
-def test_svc_process_trusts_the_runtime_generated_transit_ca_for_s3(values):
+def test_bundled_storage_pins_the_runtime_generated_transit_ca(values):
     env = _deployment_env(_docs(values), "svc-process-rust")
-    ca = env["S3_CA_FILE"]["value"]
-    assert ca.endswith(".crt") and ca == env["AWS_CA_BUNDLE"]["value"], ca
+    ca = env["BUNDLE_STORAGE_CA_FILE"]["value"]
+    assert ca.endswith(".crt") and ca == env["S3_CA_FILE"]["value"], ca
+    assert "seaweedfs" in env["BUNDLE_STORAGE_ENDPOINT"]["value"]
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_external_storage_never_pins_the_private_transit_ca(values):
+    # a public-CA external S3 must verify with system roots: the host client gets NO CA override
+    env = _deployment_env(_docs(values, _EXTERNAL), "svc-process-rust")
+    assert "BUNDLE_STORAGE_CA_FILE" not in env
+    assert env["BUNDLE_STORAGE_ENDPOINT"]["value"] == "https://s3.example.com"

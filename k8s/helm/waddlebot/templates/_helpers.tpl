@@ -1026,6 +1026,9 @@ existingSecret (SSE assertion mandatory). Fails the render on any inconsistency.
 {{- define "waddlebot.bundleStorage.env" -}}
 {{- include "waddlebot.bundleStorage.validate" . -}}
 {{- if eq .Values.bundleStorage.mode "bundled" }}
+{{- /* Bundled SeaweedFS is signed by the runtime-generated transit CA: pin it as the ONLY trust anchor for THIS client. External S3 renders no CA var, so the host crate verifies with the system roots (public CA) -- never the private transit CA. */}}
+- name: BUNDLE_STORAGE_CA_FILE
+  value: {{ include "waddlebot.transitTls.caPath" . | quote }}
 - name: BUNDLE_STORAGE_ENDPOINT
   value: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
 - name: BUNDLE_STORAGE_BUCKET
