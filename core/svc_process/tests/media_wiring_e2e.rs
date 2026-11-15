@@ -36,11 +36,9 @@ async fn build_media_wiring_fails_closed_per_missing_dependency_and_wires_when_c
     )
     .await;
     let conn_for = || async {
-        redis::Client::open(format!("redis://{}:{}/", valkey.host(), valkey.port()))
-            .unwrap()
-            .get_multiplexed_async_connection()
-            .await
-            .unwrap()
+        let client =
+            redis::Client::open(format!("redis://{}:{}/", valkey.host(), valkey.port())).unwrap();
+        redis::aio::ConnectionManager::new(client).await.unwrap()
     };
     let lc = license_client();
 
