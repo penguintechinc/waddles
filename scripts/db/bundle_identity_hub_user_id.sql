@@ -1,4 +1,4 @@
--- 0111: appends `hub_user_id` (hub_users.id, the numeric id hub-api derives the per-community
+-- 0116: appends `hub_user_id` (hub_users.id, the numeric id hub-api derives the per-community
 -- call-participant pseudonym from; an opaque integer, no PII; NULL for platform-only members) to
 -- the view as of bundle_identity_role.sql. Everything below is that file plus the one column.
 --

@@ -6,12 +6,11 @@ The stage derives a member's per-community call-participant pseudonym
 participant while the global `hub_users.uuid` never reaches svc-streaming. The numeric
 `hub_users.id` is an opaque integer (no PII); NULL for platform-only members.
 
-Merges the two open heads (0109, 0108 precompile) so this branch has one head. When
-#1326's `0110_call_rooms` (which also merges them) lands, re-chain this to
-`down_revision = "0110_call_rooms"`.
+Chained to 0110_merge_precompile_vault for now; re-point down_revision to release's head at
+merge time (the single-head gate enforces it).
 
-Revision ID: 0111_identity_view_hub_user_id
-Revises: 0109_platform_vault, 0108_bundle_precompile_requests
+Revision ID: 0116_identity_view_hub_uid
+Revises: 0110_merge_precompile_vault
 Create Date: 2026-11-14
 """
 
@@ -21,8 +20,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0111_identity_view_hub_user_id"
-down_revision = ("0109_platform_vault", "0108_bundle_precompile_requests")
+revision = "0116_identity_view_hub_uid"
+down_revision = "0110_merge_precompile_vault"
 branch_labels = None
 depends_on = None
 

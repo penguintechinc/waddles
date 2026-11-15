@@ -912,7 +912,7 @@ const ROLE_SQL: &str = "SELECT role, is_active_member AS is_active \
      LIMIT 2";
 
 /// Active member's call-participant basis by platform account id (hub user id is
-/// NULL for a platform-only member; alembic 0111).
+/// NULL for a platform-only member; alembic 0116).
 const PARTICIPANT_SQL: &str = "SELECT hub_user_id::bigint AS hub_user_id, \
      user_uuid::text AS user_uuid, is_active_member AS is_active \
      FROM community_member_identities \
