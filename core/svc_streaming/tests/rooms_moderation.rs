@@ -94,6 +94,35 @@ async fn new_room(h: &Harness) -> String {
     r["room_id"].as_str().unwrap().to_string()
 }
 
+/// `room.create` carries the room facts through the host API and `room.get` reads them back.
+#[tokio::test]
+async fn host_room_create_applies_room_facts() {
+    let h = harness(42900, false);
+    let (st, r) = call(
+        &h.host,
+        "room.create",
+        json!({"community_id": "7", "kind": "stage", "allow_guests": true, "closed": false}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["kind"], "stage", "{r}");
+    assert_eq!(r["allow_guests"], true, "{r}");
+    let (st, r) = call(
+        &h.host,
+        "room.create",
+        json!({"community_id": "7", "kind": "bogus"}),
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "an unknown kind is refused, never coerced: {r}");
+    let (st, r) = call(
+        &h.host,
+        "room.create",
+        json!({"community_id": "7", "starts_at": 20, "ends_at": 10}),
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "an inverted window is refused: {r}");
+}
+
 async fn endpoint(h: &Harness, op: &str, room: &str, extra: Value) -> (StatusCode, Value) {
     let mut body = json!({"community_id": "7", "room_id": room});
     for (k, v) in extra.as_object().unwrap() {

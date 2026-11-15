@@ -46,6 +46,21 @@ exported_tools:
       route:
         enum:
         - sfu
+      kind:
+        enum:
+        - community
+        - stage
+        - green_room
+      closed:
+        type: boolean
+      allow_guests:
+        type: boolean
+      starts_at:
+        type: integer
+        minimum: 0
+      ends_at:
+        type: integer
+        minimum: 0
     required: []
     additionalProperties: false
   output_schema:

@@ -188,7 +188,19 @@ fn room_view(v: &Value) -> Result<Value, ToolError> {
 }
 
 fn room_create(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
-    let o = object(&args, &["label", "max_publishers", "route"])?;
+    let o = object(
+        &args,
+        &[
+            "label",
+            "max_publishers",
+            "route",
+            "kind",
+            "closed",
+            "allow_guests",
+            "starts_at",
+            "ends_at",
+        ],
+    )?;
     let mut req = Map::new();
     match o.get("label") {
         None | Some(Value::Null) => {}
@@ -220,6 +232,39 @@ fn room_create(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, Too
             req.insert("route".into(), json!("sfu"));
         }
         _ => return Err(bad("route must be \"sfu\"")),
+    }
+    // Room facts svc-streaming enforces on join. A closed set: an unknown kind is refused (a
+    // town hall is created by hub-api only, never through this tool).
+    match o.get("kind") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(k)) if ["community", "stage", "green_room"].contains(&k.as_str()) => {
+            req.insert("kind".into(), json!(k));
+        }
+        _ => return Err(bad("kind must be community, stage or green_room")),
+    }
+    for flag in ["closed", "allow_guests"] {
+        match o.get(flag) {
+            None | Some(Value::Null) => {}
+            Some(Value::Bool(b)) => {
+                req.insert(flag.into(), json!(b));
+            }
+            _ => return Err(ToolError::InvalidArgs(format!("{flag} must be a boolean"))),
+        }
+    }
+    for bound in ["starts_at", "ends_at"] {
+        match o.get(bound) {
+            None | Some(Value::Null) => {}
+            Some(v) => match v.as_i64() {
+                Some(n) if n >= 0 => {
+                    req.insert(bound.into(), json!(n));
+                }
+                _ => {
+                    return Err(ToolError::InvalidArgs(format!(
+                        "{bound} must be a non-negative unix time"
+                    )));
+                }
+            },
+        }
     }
     room_view(
         &m.call("room.create", &Value::Object(req))
@@ -834,6 +879,29 @@ mod tests {
             "community stays host-side"
         );
         assert_eq!(out["room_id"], ROOM);
+    }
+
+    #[test]
+    fn room_create_forwards_room_facts_and_refuses_bad_ones() {
+        let f = Fake::ok(room_json());
+        let facts = json!({"kind": "stage", "closed": false, "allow_guests": true,
+                           "starts_at": 10, "ends_at": 20});
+        call(&f, "room.create", facts.clone()).unwrap();
+        assert_eq!(f.calls()[0].1, facts, "facts reach svc-streaming unchanged");
+        for bad in [
+            json!({"kind": "town_hall"}),
+            json!({"kind": "nope"}),
+            json!({"closed": "yes"}),
+            json!({"allow_guests": 1}),
+            json!({"starts_at": -1}),
+            json!({"ends_at": "x"}),
+        ] {
+            let g = Fake::ok(room_json());
+            assert!(
+                matches!(call(&g, "room.create", bad), Err(ToolError::InvalidArgs(_))),
+            );
+            assert!(g.calls().is_empty());
+        }
     }
 
     #[test]

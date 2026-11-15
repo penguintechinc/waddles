@@ -267,6 +267,16 @@ pub(crate) fn tool_err(e: ToolFail) -> RoomsError {
     RoomsError::Tool(e)
 }
 
+/// The svc-streaming room kind a rooms-app kind creates (event and breakout rooms are
+/// ordinary community rooms there; only stage and green room change the grants).
+fn svc_kind(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Stage => "stage",
+        Kind::GreenRoom => "green_room",
+        Kind::Community | Kind::Event | Kind::Breakout => "community",
+    }
+}
+
 fn whitelist_room(v: &Value) -> Result<String, RoomsError> {
     v.get("room_id")
         .and_then(Value::as_str)
@@ -315,7 +325,12 @@ fn create_room(
     let out = tools
         .invoke(
             "room.create",
-            &json!({"label": label}),
+            &json!({
+                "label": label,
+                "kind": svc_kind(kind),
+                "closed": false,
+                "allow_guests": false,
+            }),
             Some(&idem_key(msg, "room.create")),
         )
         .map_err(tool_err)?;
@@ -1046,7 +1061,10 @@ mod tests {
         let (tool, args, idem) = s.calls.borrow()[0].clone();
         assert_eq!(
             (tool.as_str(), args),
-            ("room.create", json!({"label": "Game Night"}))
+            (
+                "room.create",
+                json!({"label": "Game Night", "kind": "community", "closed": false, "allow_guests": false})
+            )
         );
         assert_eq!(
             idem.unwrap(),

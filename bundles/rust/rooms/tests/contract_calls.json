@@ -2,7 +2,10 @@
   "admin.verify": {},
   "participant.self": {},
   "room.create": {
-    "label": "Game Night"
+    "label": "Game Night",
+    "kind": "community",
+    "closed": false,
+    "allow_guests": false
   },
   "room.close": {
     "room_id": "00000000-0000-0000-0000-000000000001"

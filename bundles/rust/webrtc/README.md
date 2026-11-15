@@ -101,3 +101,6 @@ Every id this bundle sends to svc-streaming (`actor_id`, `participant_id`) is th
 `call_participants.identity_uuid`, so chat `!room kick` and REST kick target the same participant, and the
 global `hub_users.uuid` never leaves the platform. No pseudonym in the context => `forbidden` (never a fallback to
 `actor`). Shared vectors: `docs/contracts/call_participant_id_vectors.json` (Rust host + Python tests).
+
+`room.create` args also accept the room facts `kind` (`community|stage|green_room`; a town hall is hub-api only),
+`closed`, `allow_guests`, `starts_at`, `ends_at`; svc-streaming validates and enforces them on join.

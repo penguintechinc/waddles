@@ -80,5 +80,8 @@ tool `participant.self` (host-derived `__ctx.participant`), never the global com
 uses. Unresolvable => the command is refused (fail closed). Note: ACL entries / rooms created before this
 change were keyed by the old id and must be recreated (alpha only; nothing is migrated).
 
-Rooms created here are NOT yet registered in hub-api's `call_rooms` record (REST join refuses non-staff for
-them): blocked on a RecordRoom path (no hub-api RPC exists; svc-streaming room facts T2b has not landed).
+Room facts: `room.create` now sets `kind` (community, or stage / green_room for virtual rooms),
+`closed=false` and `allow_guests=false` on svc-streaming's `CreateRoom` (webrtc tool args -> host `room.create`),
+so svc-streaming enforces them on join and hub-api can read them from the Room (T2b). Later fact changes
+(close, set_access, set_schedule) still only update the app's kv; pushing them through `UpdateRoom` needs a webrtc
+`room.update` tool (not built).
