@@ -1114,96 +1114,6 @@
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 249,
-      "line_hash": "65d9f4f3c1277849"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 269,
-      "line_hash": "c46535ec16e63f67"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 298,
-      "line_hash": "6a963da8ce8aea88"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 336,
-      "line_hash": "7943a7d27e7c8ba6"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 373,
-      "line_hash": "9a19c471e081c82e"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 391,
-      "line_hash": "e244bc54884fa553"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 417,
-      "line_hash": "653aed256a3a5067"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 448,
-      "line_hash": "ce7926d38ed2c82e"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 466,
-      "line_hash": "b4a148140f1a8b94"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 544,
-      "line_hash": "794fa1d108ff91ac"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 636,
-      "line_hash": "8b7e22528bc4f162"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 710,
-      "line_hash": "8aa57629acf2dea7"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 844,
-      "line_hash": "2306d46dc28139fc"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 893,
-      "line_hash": "dd0697019967ac10"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_music_queue.py",
-      "line": 948,
-      "line_hash": "130773ee8205f96f"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
       "path": "hub_api/blueprints/v1/community_profile.py",
       "line": 175,
       "line_hash": "ea991b08cd82b5bf"
@@ -1990,12 +1900,6 @@
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/public_music_queue.py",
-      "line": 138,
-      "line_hash": "a74751a3b81f9eeb"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
       "path": "hub_api/blueprints/v1/stream.py",
       "line": 83,
       "line_hash": "65eeaa453fd6ea73"
@@ -2497,18 +2401,6 @@
       "path": "hub_api/services/community_engagement_proxy.py",
       "line": 38,
       "line_hash": "95347ef4fa0e0c1d"
-    },
-    {
-      "rule_id": "python-capability-silent-denial",
-      "path": "hub_api/services/community_music_queue_service.py",
-      "line": 1031,
-      "line_hash": "448aa8b9b9e74d8f"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/services/community_music_queue_service.py",
-      "line": 1031,
-      "line_hash": "448aa8b9b9e74d8f"
     },
     {
       "rule_id": "python-silent-except-return-default",

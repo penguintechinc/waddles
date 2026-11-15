@@ -150,13 +150,6 @@ convention = "google"
 "blueprints/v1/join_request.py" = ["N815"]
 "services/community_profile_service.py" = ["S101"]
 "services/join_request_service.py" = ["N815"]
-# Music Station queue feature (new API surface, not a port) -- DTO field
-# names are camelCase by convention with every other v1 blueprint's own
-# JSON contract (see services/community_music_queue_service.py's "DTO
-# casing" note); S101 for community_music_queue.py already covered by the
-# "blueprints/v1/community_*.py" glob above.
-"blueprints/v1/community_music_queue.py" = ["N815"]
-"services/community_music_queue_service.py" = ["N815"]
 # Analytics module port (M9) -- same tenant_middleware postcondition
 # assert as blueprints/v2/platform.py above (`get_tenant_context` always
 # non-None on the success path for Scenario 2/4 routes).

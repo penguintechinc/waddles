@@ -99,3 +99,17 @@ dropped). `page.link` returns `{base}/community/{numeric community_id}/music`, o
   non-empty URL, among queued + playing) is a pre-check, not a unique index.
 - `history` is bounded to the newest 500 rows (oldest pruned best-effort after each advance) so the community row quota is not exhausted.
 - `requests.import` needs `music:requests.manage` (a moderator-level actor must trigger the legacy-queue migration), is refused with `queue_full` when the batch exceeds `max_queue` or 100 (before any write), and claims the one-shot marker first (guards: queue and history empty), then inserts in chunks of 16; a failure after the claim returns `import_partial`.
+
+## Legacy hub-api queue removed + trusted import
+
+The hub-api Music Station queue (`/api/v1/admin/{id}/music-station/*`, `/api/v1/public/communities/{id}/music-station/queue`) no longer exists
+(404); this service is the only queue. `GET /api/v1/communities/{id}/music` orders the queue by `seq`, then `queued_at`.
+Legacy tables (`music_tracks`, `music_station_queue`, `music_policy`, `music_moderation_log`) are left in place, unread.
+
+`hub_api/services/music_legacy_migration.py` (CLI `python3 -m cli.migrate_legacy_music_queue`; also run after the music-requests bundle installs)
+imports each community's queued/playing legacy rows into the physical `requests` table once: per `(tenant_id, community_id)` in one transaction under a
+Postgres advisory lock (RLS GUCs set), skipped when `settings.imported = 1`, marking `imported = 1` (and importing nothing) when `requests`/`history`
+already hold rows, `kind = 3`, `requester` NULL, https-only `source_url`, `provider = other`, `seq` allocated from `settings.seq`, at most 100 rows,
+a missing service table skips the community for a later run. Only counts are logged. The Python music bundle's kv (`music.queue`) and the DJ kv
+(`dj.state`, `dj.config.dmca_safe`) are NOT migrated by hub-api: kv values are stored in a host-versioned envelope behind Valkey Lua scripts
+(`core/bundle_host_kv`), so the bundles keep their own in-bundle one-shot migrations.

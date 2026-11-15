@@ -81,7 +81,7 @@ def _create_tables(db: Any) -> None:
         f'CREATE TABLE "{_table("requests")}" (id INTEGER PRIMARY KEY AUTOINCREMENT, '
         "tenant_id INT, community_id INT, title TEXT, artist TEXT, source_url TEXT, "
         "duration_ms INT, requester TEXT, kind INT, status INT, queued_at TEXT, "
-        "started_at TEXT, provider TEXT)"
+        "started_at TEXT, provider TEXT, seq INT NOT NULL DEFAULT 0)"
     )
     ex(
         f'CREATE TABLE "{_table("history")}" (id INTEGER PRIMARY KEY AUTOINCREMENT, '
@@ -103,11 +103,13 @@ def _create_tables(db: Any) -> None:
     db.dal.commit()
 
 
-def _req(db: Any, t: int, c: int, title: str, status: int, at: str, kind: int = 1) -> None:
+def _req(
+    db: Any, t: int, c: int, title: str, status: int, at: str, kind: int = 1, seq: int = 0
+) -> None:
     db.dal.executesql(
         f'INSERT INTO "{_table("requests")}" (tenant_id, community_id, title, artist, '
-        "source_url, duration_ms, requester, kind, status, queued_at, started_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "source_url, duration_ms, requester, kind, status, queued_at, started_at, seq) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         placeholders=[
             t,
             c,
@@ -120,6 +122,7 @@ def _req(db: Any, t: int, c: int, title: str, status: int, at: str, kind: int = 
             status,
             at,
             at,
+            seq,
         ],
     )
     db.dal.commit()
@@ -186,6 +189,22 @@ async def _get(client: Any, community_id: int, headers: dict[str, str]) -> Any:
 
 
 class TestMusicPage:
+    async def test_queue_ordered_by_seq_then_queued_at(
+        self, client: Any, music_station_db: Any
+    ) -> None:
+        db = music_station_db
+        _create_tables(db)
+        t, c = _tenant(db), _community(db)
+        headers = _member(db, c)
+        # seq wins over queued_at; equal seq falls back to queued_at.
+        _req(db, t, c, "third", 1, "2026-01-01T00:01:00", seq=3)
+        _req(db, t, c, "first", 1, "2026-01-01T00:09:00", seq=1)
+        _req(db, t, c, "second-b", 1, "2026-01-01T00:05:00", seq=2)
+        _req(db, t, c, "second-a", 1, "2026-01-01T00:04:00", seq=2)
+        resp = await _get(client, c, headers)
+        titles = [q["title"] for q in (await resp.get_json())["queue"]]
+        assert titles == ["first", "second-a", "second-b", "third"]
+
     async def test_happy_path(self, client: Any, music_station_db: Any) -> None:
         db = music_station_db
         _create_tables(db)

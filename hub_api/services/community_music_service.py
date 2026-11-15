@@ -190,7 +190,7 @@ async def _read_requests(
     queued = await _query(
         async_dal,
         read_dal,
-        base + f"ORDER BY queued_at ASC LIMIT {int(QUEUE_LIMIT)}",
+        base + f"ORDER BY seq ASC, queued_at ASC LIMIT {int(QUEUE_LIMIT)}",
         [tenant_id, community_id, _STATUS_QUEUED],
     )
     return (_queue_item(playing[0]) if playing else None), [_queue_item(r) for r in queued]
