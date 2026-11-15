@@ -31,6 +31,7 @@ from dataclasses import asdict
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
@@ -86,11 +87,11 @@ def _tenant_slug_for_community(dal: Any, community_id: int) -> str:
         .first()
     )
     if community_row is None:
-        return "default"
+        return DEFAULT_TENANT_SLUG
     tenant_row = (
         dal(dal.tenants.id == int(community_row.tenant_id)).select(dal.tenants.slug).first()
     )
-    return tenant_row.slug if tenant_row is not None else "default"
+    return tenant_row.slug if tenant_row is not None else DEFAULT_TENANT_SLUG
 
 
 def _parse_int(raw: str | None) -> int | None:

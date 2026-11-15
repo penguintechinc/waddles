@@ -79,12 +79,28 @@ function buildUpstreamHeaders(req, upstreamHost, allowedHosts) {
  * server-set X-Forwarded-Host, overwriting any client value), and an unreachable
  * upstream yields a 502.
  */
-export function createProxy(target, publicHostnames = parseHostnames(process.env.PUBLIC_HOSTNAMES)) {
+export function createProxy(target, options = {}) {
+  const opts = Array.isArray(options) ? { publicHostnames: options } : (options ?? {});
+  const {
+    ca = null,
+    required = false,
+    publicHostnames = parseHostnames(process.env.PUBLIC_HOSTNAMES),
+  } = opts;
   const allowedHosts = new Set(publicHostnames);
   const upstream = new URL(target);
+  if (required && upstream.protocol !== 'https:') {
+    throw new Error(`plaintext upstream ${target} refused: INTERNAL_TLS_REQUIRED is set`);
+  }
   const transport = upstream.protocol === 'https:' ? https : http;
   const basePath = upstream.pathname.replace(/\/+$/, '');
-  const agent = new transport.Agent({ keepAlive: true });
+  // ONE keep-alive agent per proxy: connections (and TLS sessions, which node's https.Agent
+  // caches per host for resumption) are reused across requests, so no per-request handshake.
+  // With a pinned internal CA the public roots are NOT trusted (`ca` replaces them), and a
+  // failed handshake surfaces as a 502 below -- never a plaintext retry.
+  const agent =
+    upstream.protocol === 'https:'
+      ? new https.Agent({ keepAlive: true, minVersion: 'TLSv1.2', ...(ca ? { ca } : {}) })
+      : new http.Agent({ keepAlive: true });
 
   return function proxy(req, res) {
     const upstreamReq = transport.request(

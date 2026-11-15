@@ -60,6 +60,13 @@ global:
       enabled: true
       issuerKind: "ClusterIssuer"
       issuerName: "waddlebot-internal-ca"
+  # F3/F4/F6 -- HTTPS between pods for hub-api, hub-webui (Gateway hop), core-data, svc-streaming;
+  # certs from the same internal-CA ClusterIssuer (ECDSA P-256). PREREQ: cert-manager + that issuer.
+  internalTransitTls:
+    enabled: true
+    certManager:
+      issuerKind: "ClusterIssuer"
+      issuerName: "waddlebot-internal-ca"
   # First-run super-admin bootstrap (PR #256) -- email is non-sensitive and
   # documented so alpha's Playwright e2e suite (tests/k8s/alpha/) has a known
   # login. The password is NOT committed here (fix/alpha-helm-deploy) -- it
@@ -206,6 +213,8 @@ pipeline:
     # once its key is provisioned. Never put license-tier flags here.
     extraEnv:
       FLAG_WADDLES_TENANT_DISCORD_INSTALL: "true"
+      # Reserved catch-all tenant slug, explicit (see values-alpha.yaml); mirrors defaultTenantId.
+      DEFAULT_TENANT_SLUG: "default"
       # Alpha capacity stopgap: svc-process shares one per-identity internal gRPC bucket (default
       # 50 rps / burst 100, hub_api/grpc_internal/server.py:125-126). Each Discord message fans out
       # to ~160 per-app consumers that each call identity resolution, which tripped
