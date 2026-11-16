@@ -957,6 +957,11 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `BUNDLE_PLATFORM_TABLE_PASSWORD` is unset or the connection failed
     /// (every `platform_table.*` call then denies `not_implemented`).
     pub platform_table_wiring: Option<crate::capabilities::PlatformTableWiring>,
+    /// The `object-storage` host capability's production wiring
+    /// (`crate::bundle_storage::try_build_wiring`), cloned into every per-invoke
+    /// `StageCapabilities`. `None` when `BUNDLE_STORAGE_*` is unset (logged +
+    /// gauge at startup) -- every `object_storage.*` call then denies `not_implemented`.
+    pub object_storage_wiring: Option<crate::capabilities::ObjectStorageWiring>,
     /// The `gameserver-net` host capability's production wiring (`crate::lib::
     /// try_build_gameserver_net_wiring`). `None` when the connection-resolver endpoints are
     /// unconfigured (every `gameserver_net.*` call then denies `not_implemented`).
@@ -1163,6 +1168,10 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
     };
     let caps = match &deps.platform_table_wiring {
         Some(pt) => caps.with_platform_table(pt.clone()),
+        None => caps,
+    };
+    let caps = match &deps.object_storage_wiring {
+        Some(os) => caps.with_object_storage(os.clone()),
         None => caps,
     };
     let caps = match &deps.gameserver_net_wiring {
@@ -2840,6 +2849,7 @@ mod tests {
             reputation_wiring: None,
             economy_wiring: None,
             platform_table_wiring: None,
+            object_storage_wiring: None,
             gameserver_net_wiring: None,
             identity_wiring: None,
             ai_wiring: None,

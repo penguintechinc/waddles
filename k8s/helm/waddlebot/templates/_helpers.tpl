@@ -79,22 +79,6 @@ Returns the namespace where resources should be created.
 {{- end }}
 
 {{/*
-Image path with registry prefix
-Constructs the full image path including registry, repository, and tag.
-Usage: {{ include "waddlebot.image" (dict "image" .Values.modules.router "global" .Values.global "defaultTag" .Chart.AppVersion) }}
-*/}}
-{{- define "waddlebot.image" -}}
-{{- $registry := .global.imageRegistry | default "" }}
-{{- $repository := .image.repository | required "image.repository is required" }}
-{{- $tag := .image.tag | default .defaultTag | default "latest" | toString }}
-{{- if $registry }}
-{{- printf "%s/%s:%s" $registry $repository $tag }}
-{{- else }}
-{{- printf "%s:%s" $repository $tag }}
-{{- end }}
-{{- end }}
-
-{{/*
 Service Account name
 Returns the name of the service account to use.
 */}}
@@ -223,54 +207,6 @@ Usage: {{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_p
 {{- end }}
 
 {{/*
-Redis connection URL
-Constructs the Redis connection URL from values.
-Supports both external and internal Redis instances.
-Format: redis://[:password@]host:port[/database]
-*/}}
-{{- define "waddlebot.redis.url" -}}
-{{- if .Values.redis.enabled }}
-{{- $host := printf "%s-redis-master" (include "waddlebot.fullname" .) }}
-{{- $port := .Values.redis.master.service.port | default 6379 }}
-{{- $password := .Values.redis.auth.password | default "" }}
-{{- $database := .Values.redis.database | default 0 }}
-{{- if $password }}
-{{- printf "redis://:%s@%s:%v/%v" $password $host $port $database }}
-{{- else }}
-{{- printf "redis://%s:%v/%v" $host $port $database }}
-{{- end }}
-{{- else }}
-{{- $host := .Values.redis.external.host | required "redis.external.host is required when redis.enabled is false" }}
-{{- $port := .Values.redis.external.port | default 6379 }}
-{{- $password := .Values.redis.external.password | default "" }}
-{{- $database := .Values.redis.external.database | default 0 }}
-{{- if $password }}
-{{- printf "redis://:%s@%s:%v/%v" $password $host $port $database }}
-{{- else }}
-{{- printf "redis://%s:%v/%v" $host $port $database }}
-{{- end }}
-{{- end }}
-{{- end }}
-
-{{/*
-Module image helper
-Simplified image helper for module-specific images.
-Uses global registry and chart version as defaults.
-Handles both bare module names and legacy patterns with properly scoped registry.
-Usage: {{ include "waddlebot.moduleImage" (dict "root" . "module" "router" "tag" .Values.modules.router.imageTag) }}
-*/}}
-{{- define "waddlebot.moduleImage" -}}
-{{- $registry := .root.Values.global.imageRegistry | default "" }}
-{{- $repository := .module | required "module name is required" }}
-{{- $tag := .tag | default .root.Chart.AppVersion | default "latest" | toString }}
-{{- if $registry }}
-{{- printf "%s/%s:%s" $registry $repository $tag }}
-{{- else }}
-{{- printf "%s:%s" $repository $tag }}
-{{- end }}
-{{- end }}
-
-{{/*
 Per-image tag resolution
 Precedence: explicit per-component tag > global.imageTags[<image>] > global.imageTag > "latest".
 global.imageTags (default empty) lets a deploy pin each image independently, so an image that
@@ -298,44 +234,6 @@ Usage: {{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "action-
 {{- else }}
 {{- printf "%s:%s" $repository $tag }}
 {{- end }}
-{{- end }}
-
-{{/*
-Redis host
-Returns the Redis host name.
-*/}}
-{{- define "waddlebot.redis.host" -}}
-{{- if .Values.redis.enabled }}
-{{- printf "%s-redis-master" (include "waddlebot.fullname" .) }}
-{{- else }}
-{{- .Values.redis.external.host | required "redis.external.host is required when redis.enabled is false" }}
-{{- end }}
-{{- end }}
-
-{{/*
-Redis port
-Returns the Redis port.
-*/}}
-{{- define "waddlebot.redis.port" -}}
-{{- if .Values.redis.enabled }}
-{{- .Values.redis.master.service.port | default 6379 }}
-{{- else }}
-{{- .Values.redis.external.port | default 6379 }}
-{{- end }}
-{{- end }}
-
-{{/*
-Create the name of the config map for common configuration
-*/}}
-{{- define "waddlebot.commonConfigName" -}}
-{{- printf "%s-config" (include "waddlebot.fullname" .) }}
-{{- end }}
-
-{{/*
-Create the name of the secret for common secrets
-*/}}
-{{- define "waddlebot.commonSecretName" -}}
-{{- printf "%s-secrets" (include "waddlebot.fullname" .) }}
 {{- end }}
 
 {{/*
@@ -372,64 +270,6 @@ a rendered Secret. Call as:
 {{- if regexMatch "(?i)(REPLACE_ME|CHANGE_ME|changeme|example)" $v }}
 {{- fail (printf "refusing to render placeholder value for %q -- set a real value or remove the key (see docs/PLATFORM_CREDENTIALS.md)" .key) }}
 {{- end }}
-{{- end }}
-{{- end }}
-
-{{/*
-API Key Secret Name
-Returns the name of the secret containing API keys.
-*/}}
-{{- define "waddlebot.apiKeySecretName" -}}
-{{- if .Values.apiKeys.existingSecret }}
-{{- .Values.apiKeys.existingSecret }}
-{{- else }}
-{{- printf "%s-api-keys" (include "waddlebot.fullname" .) }}
-{{- end }}
-{{- end }}
-
-{{/*
-License Key Secret Name
-Returns the name of the secret containing license keys.
-*/}}
-{{- define "waddlebot.licenseSecretName" -}}
-{{- if .Values.license.existingSecret }}
-{{- .Values.license.existingSecret }}
-{{- else }}
-{{- printf "%s-license" (include "waddlebot.fullname" .) }}
-{{- end }}
-{{- end }}
-
-{{/*
-Ingress API Version
-Returns the appropriate API version for Ingress based on Kubernetes version.
-*/}}
-{{- define "waddlebot.ingress.apiVersion" -}}
-{{- if .Capabilities.APIVersions.Has "networking.k8s.io/v1" }}
-{{- print "networking.k8s.io/v1" }}
-{{- else if .Capabilities.APIVersions.Has "networking.k8s.io/v1beta1" }}
-{{- print "networking.k8s.io/v1beta1" }}
-{{- else }}
-{{- print "extensions/v1beta1" }}
-{{- end }}
-{{- end }}
-
-{{/*
-Return true if cert-manager is enabled
-*/}}
-{{- define "waddlebot.certManager.enabled" -}}
-{{- if and .Values.ingress.enabled .Values.ingress.certManager.enabled }}
-{{- true }}
-{{- end }}
-{{- end }}
-
-{{/*
-Return the appropriate cert-manager annotation
-*/}}
-{{- define "waddlebot.certManager.annotation" -}}
-{{- if eq .Values.ingress.certManager.issuer.kind "ClusterIssuer" }}
-cert-manager.io/cluster-issuer: {{ .Values.ingress.certManager.issuer.name }}
-{{- else }}
-cert-manager.io/issuer: {{ .Values.ingress.certManager.issuer.name }}
 {{- end }}
 {{- end }}
 
@@ -669,12 +509,6 @@ Off: the legacy self-generated/ExternalSecret `<fullname>-hub-api-grpc-tls` Secr
 
 {{- define "waddlebot.hubApiGrpcTlsSansSha256" -}}
 {{- include "waddlebot.hubApiGrpcTlsDesiredDnsNames" . | sha256sum -}}
-{{- end }}
-
-{{- define "waddlebot.hubApiGrpcTlsMaterialAvailable" -}}
-{{- if .Values.pipeline.hubApi.enabled -}}
-true
-{{- end -}}
 {{- end }}
 
 {{/* Server-role env for hub-api's own container -- matches hub_api/grpc_internal/
@@ -1063,6 +897,9 @@ existingSecret (SSE assertion mandatory). Fails the render on any inconsistency.
 {{- define "waddlebot.bundleStorage.env" -}}
 {{- include "waddlebot.bundleStorage.validate" . -}}
 {{- if eq .Values.bundleStorage.mode "bundled" }}
+{{- /* Bundled SeaweedFS is signed by the runtime-generated transit CA: pin it as the ONLY trust anchor for THIS client. External S3 renders no CA var, so the host crate verifies with the system roots (public CA) -- never the private transit CA. */}}
+- name: BUNDLE_STORAGE_CA_FILE
+  value: {{ include "waddlebot.transitTls.caPath" . | quote }}
 - name: BUNDLE_STORAGE_ENDPOINT
   value: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
 - name: BUNDLE_STORAGE_BUCKET

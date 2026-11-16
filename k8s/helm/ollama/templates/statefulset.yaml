@@ -1,0 +1,105 @@
+# STATEFUL EXCEPTION (approved): model weights cache. Rebuildable by re-running the pull Job,
+# but ~7-10 GB, so it persists on a PVC instead of re-downloading on every restart.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "ollama.fullname" . }}
+  labels:
+    {{- include "ollama.labels" (dict "root" . "component" "server") | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "ollama.fullname" . }}
+  podManagementPolicy: OrderedReady
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      {{- include "ollama.selectorLabels" (dict "root" . "component" "server") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ollama.labels" (dict "root" . "component" "server") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "ollama.podSecurityContext" . | nindent 8 }}
+        fsGroup: {{ .Values.securityContext.runAsGroup }}
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: ollama
+          image: {{ include "ollama.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: OLLAMA_HOST
+              value: {{ printf "0.0.0.0:%d" (.Values.service.port | int) | quote }}
+            - name: OLLAMA_NUM_PARALLEL
+              value: {{ .Values.ollama.numParallel | quote }}
+            {{- if .Values.ollama.noCloud }}
+            - name: OLLAMA_NO_CLOUD   # no calls to ollama.com (egress is registry-only anyway)
+              value: "1"
+            {{- end }}
+            - name: OLLAMA_MAX_LOADED_MODELS
+              value: {{ .Values.ollama.maxLoadedModels | quote }}
+            - name: OLLAMA_KEEP_ALIVE
+              value: {{ .Values.ollama.keepAlive | quote }}
+            # Non-root + read-only rootfs: keep every writable path on the PVC or an emptyDir.
+            - name: HOME
+              value: /data
+            - name: OLLAMA_MODELS
+              value: /data/models
+            - name: TMPDIR
+              value: /tmp
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- include "ollama.containerSecurityContext" . | nindent 12 }}
+          startupProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 2Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: {{ .Chart.Name }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ .Values.persistence.storageClassName }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
