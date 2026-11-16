@@ -5,11 +5,11 @@ the tenant at-rest key lineage (`GetTenantDek`, per-tenant sealing of bundle kv 
 `purpose` CHECK is widened from `('ingest-stream')` to `('ingest-stream', 'at-rest')`. No data
 change, no new table: one audit trail for every DEK that leaves hub-api.
 
-This revision is also the merge point of the two heads present on `release/v3.0.X`
-(`0108_bundle_precompile_requests` and `0109_platform_vault`), restoring a single alembic head.
+A plain revision chained after the release head at merge time (`0115_platform_vault_rotation`); if
+another migration lands first, re-chain `down_revision` so the graph keeps a single head.
 
 Revision ID: 0120_dek_issuances_at_rest
-Revises: 0109_platform_vault, 0108_bundle_precompile_requests
+Revises: 0115_platform_vault_rotation
 Create Date: 2026-11-15
 """
 
@@ -18,7 +18,7 @@ from __future__ import annotations
 from alembic import op
 
 revision = "0120_dek_issuances_at_rest"
-down_revision = ("0109_platform_vault", "0108_bundle_precompile_requests")
+down_revision = "0115_platform_vault_rotation"
 branch_labels = None
 depends_on = None
 

@@ -18,6 +18,8 @@ path = "src/main.rs"
 # Exact-version pins, matching core/bundle_executor (the verifier) so the
 # signature format is produced and checked by the same crypto crates.
 [dependencies]
+# Direct pin so the entrypoint can install the process-level CryptoProvider (see src/crypto.rs).
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
 base64 = "=0.22.1"
 serde = { version = "=1.0.229", features = ["derive"] }
