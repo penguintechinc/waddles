@@ -1,0 +1,7 @@
+apiVersion: v2
+name: ollama
+description: Interim in-cluster Ollama (arm64) serving gemma4:e4b, hardened (L7 CNP, Tetragon, rootless)
+type: application
+version: 0.1.0
+appVersion: "0.40.13"
+keywords: [ollama, llm, waddleai, interim]

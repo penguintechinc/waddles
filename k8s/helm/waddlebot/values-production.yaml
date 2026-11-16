@@ -87,7 +87,6 @@ autoscaling:
     hubWebui: { enabled: true }
     svcActionRust: { enabled: true }
     svcProcessRust: { enabled: true }
-    reputation: { enabled: true }
 
 # Egress lockdown — MANDATORY (fail guard blocks a render with this off).
 # PenguinTech prod resource tier (500m/1000m cpu, 512Mi/1Gi mem, replicas 3+) for the proxy.

@@ -23,7 +23,7 @@ from blueprints.v1.streaming import streaming_bp
 from config import HubAPIConfig
 from services import stream_keys_service as svc
 from services.platform_integrations_crypto import decrypt_value, stream_destination_aad
-from tests.conftest import TENANT_SLUG, make_user_token
+from tests.conftest import TENANT_SLUG, make_user_token, role_kind_fields
 
 _ENC_KEY = "11" * 32
 _DEST = {
@@ -95,6 +95,7 @@ def _admin(db: Any, *, community_id: int, user_id: int = 1) -> dict[str, str]:
         community_id=community_id,
         name="community-admin",
         base_claims={"scopes": ["community:manage_members"]},
+        **role_kind_fields("community-admin"),
     )
     db.dal.community_members.insert(
         community_id=community_id,
@@ -442,6 +443,7 @@ class TestDestinations:
             community_id=b,
             name="community-admin",
             base_claims={"scopes": ["community:manage_members"]},
+            **role_kind_fields("community-admin"),
         )
         streaming_db.dal.community_members.insert(
             community_id=b,

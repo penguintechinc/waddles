@@ -58,13 +58,23 @@ def client(app: Quart) -> Any:
 
 
 def _seed_admin(
-    automation_db: Any, *, user_id: int, community_id: int, role: str = "admin"
+    automation_db: Any,
+    *,
+    user_id: int,
+    community_id: int,
+    role: str = "admin",
+    admin_kind: bool = True,
 ) -> None:
+    """Seed a member holding the admin role (`admin_kind`) or a moderator-like broad-scope role."""
     dal = automation_db.dal
     if not dal(dal.communities.id == community_id).count():
         dal.communities.insert(id=community_id, name=f"community-{community_id}")
     role_id = dal.community_roles.insert(
-        community_id=community_id, name=role, base_claims={"scopes": ["community:manage_members"]}
+        community_id=community_id,
+        name=role,
+        is_system=admin_kind,
+        role_kind=1 if admin_kind else 0,
+        base_claims={"scopes": ["community:manage_members"]},
     )
     dal.community_members.insert(
         community_id=community_id,
@@ -228,6 +238,36 @@ class TestDeleteConnection:
             f"/api/v1/{COMMUNITY_ID}/github-sync/connections/{conn_id}", headers=headers
         )
         assert response.status_code == 403
+
+    async def test_delete_denied_for_broad_scope_role_without_github_manage(
+        self, client: Any, user_auth_headers: Any, automation_db: Any
+    ) -> None:
+        """`community:manage_members` (moderator-satisfiable) is not `github:manage`."""
+        dal = automation_db.dal
+        _seed_admin(
+            automation_db,
+            user_id=ADMIN_USER_ID,
+            community_id=COMMUNITY_ID,
+            role="moderator",
+            admin_kind=False,
+        )
+        conn_id = dal.github_repo_connections.insert(
+            community_id=COMMUNITY_ID,
+            repo_owner="owner",
+            repo_name="repo",
+            auth_type="pat",
+            encrypted_token="x",
+            webhook_secret="y",
+            is_active=True,
+        )
+        dal.commit()
+        response = await client.delete(
+            f"/api/v1/{COMMUNITY_ID}/github-sync/connections/{conn_id}",
+            headers=user_auth_headers(user_id=ADMIN_USER_ID),
+        )
+        assert response.status_code == 403
+        rows = await automation_db.select_async(dal(dal.github_repo_connections.id == conn_id))
+        assert rows.first().is_active
 
     async def test_delete_succeeds_for_admin_role(
         self, client: Any, user_auth_headers: Any, automation_db: Any

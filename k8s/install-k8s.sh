@@ -10,7 +10,6 @@
 #
 # Options:
 #   --helm              Use Helm chart for deployment (default)
-#   --manifests         Use raw Kubernetes manifests for deployment
 #   --build-images      Build and push Docker images to registry
 #   --skip-build        Skip image building (use existing images)
 #   --registry URL      Container registry URL (default: localhost:5000)
@@ -327,46 +326,6 @@ deploy_with_helm() {
     log_success "Helm deployment initiated"
 }
 
-update_manifests_for_deployment() {
-    log_info "Updating manifests for deployment..."
-
-    MANIFESTS_DIR="${SCRIPT_DIR}/manifests"
-    TEMP_MANIFESTS_DIR="/tmp/waddlebot-manifests"
-
-    # Copy manifests to temp directory
-    cp -r "$MANIFESTS_DIR" "$TEMP_MANIFESTS_DIR"
-
-    # Update image registry in all deployment files
-    find "$TEMP_MANIFESTS_DIR" -name "*.yaml" -type f -exec sed -i \
-        "s|localhost:32000/waddlebot|${REGISTRY}/${IMAGE_PREFIX}|g" {} \;
-
-    # Update storage class
-    find "$TEMP_MANIFESTS_DIR" -name "*.yaml" -type f -exec sed -i \
-        "s|storageClassName: microk8s-hostpath|storageClassName: ${STORAGE_CLASS}|g" {} \;
-
-    # Update ingress class
-    sed -i "s|ingressClassName: public|ingressClassName: ${INGRESS_CLASS}|g" \
-        "$TEMP_MANIFESTS_DIR/ingress.yaml"
-
-    log_success "Manifests updated for deployment"
-}
-
-deploy_with_manifests() {
-    log_info "Deploying WaddleBot with raw Kubernetes manifests..."
-
-    update_manifests_for_deployment
-
-    # Set context if specified
-    if [[ -n "$K8S_CONTEXT" ]]; then
-        kubectl config use-context "$K8S_CONTEXT"
-    fi
-
-    # Apply manifests using kustomize
-    kubectl apply -k /tmp/waddlebot-manifests
-
-    log_success "Manifest deployment initiated"
-}
-
 wait_for_deployment() {
     log_info "Waiting for pods to be ready..."
 
@@ -428,14 +387,8 @@ uninstall() {
         kubectl config use-context "$K8S_CONTEXT"
     fi
 
-    if [[ "$DEPLOYMENT_METHOD" == "helm" ]]; then
-        log_info "Uninstalling Helm release..."
-        helm uninstall waddlebot -n "$NAMESPACE" || log_warning "Helm release not found"
-    else
-        log_info "Deleting Kubernetes resources..."
-        update_manifests_for_deployment
-        kubectl delete -k /tmp/waddlebot-manifests || log_warning "Resources may not exist"
-    fi
+    log_info "Uninstalling Helm release..."
+    helm uninstall waddlebot -n "$NAMESPACE" || log_warning "Helm release not found"
 
     # Delete namespace
     log_info "Deleting namespace..."
@@ -459,10 +412,6 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --helm)
             DEPLOYMENT_METHOD="helm"
-            shift
-            ;;
-        --manifests)
-            DEPLOYMENT_METHOD="manifests"
             shift
             ;;
         --build-images)
@@ -537,11 +486,7 @@ main() {
 
     build_and_push_images
 
-    if [[ "$DEPLOYMENT_METHOD" == "helm" ]]; then
-        deploy_with_helm
-    else
-        deploy_with_manifests
-    fi
+    deploy_with_helm
 
     wait_for_deployment
     configure_access
