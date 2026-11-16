@@ -21,11 +21,10 @@
 # nvidia-container-toolkit injects the host-matched copies when the pod runs
 # with the NVIDIA runtime and `video` in NVIDIA_DRIVER_CAPABILITIES.
 #
-# Build (context = this directory, not the repo root -- no shared libs to
-# pull in for a Rust crate):
-#   docker build -f Dockerfile.rust --target cpu    -t <repo>/svc-streaming:<tag>-cpu    .
-#   docker build -f Dockerfile.rust --target amd    -t <repo>/svc-streaming:<tag>-amd    .
-#   docker build -f Dockerfile.rust --target nvidia -t <repo>/svc-streaming:<tag>-nvidia .
+# Build (context = this directory; the repo-root `proto/` tree is a named build context):
+#   docker build --build-context proto=../../proto -f Dockerfile.rust --target cpu    -t <repo>/svc-streaming:<tag>-cpu    .
+#   docker build --build-context proto=../../proto -f Dockerfile.rust --target amd    -t <repo>/svc-streaming:<tag>-amd    .
+#   docker build --build-context proto=../../proto -f Dockerfile.rust --target nvidia -t <repo>/svc-streaming:<tag>-nvidia .
 # Docker builds the LAST stage when --target is omitted, so `cpu` stays last.
 
 # ---------------------------------------------------------------------------
@@ -40,9 +39,11 @@ FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcb
 # time only -- utoipa-swagger-ui's build script downloads the Swagger UI
 # static assets over HTTPS via the system `curl` binary; this is a
 # builder-stage-only dependency and never ships in the runtime image below.
+# protobuf-compiler (protoc): build.rs compiles rooms.proto via tonic-prost-build.
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
         cmake=3.25.1-1 build-essential=12.9 curl=7.88.1-10+deb12u15 ca-certificates=20250419~deb12u2 \
+        protobuf-compiler=3.21.12-3+deb12u1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -52,6 +53,14 @@ COPY Cargo.toml Cargo.lock ./
 # `cargo build`). Tests are not compiled by the release build.
 COPY tests ./tests
 COPY src ./src
+COPY build.rs ./build.rs
+# build.rs compiles `proto/waddles/streaming/internal/v1/rooms.proto` from
+# `CARGO_MANIFEST_DIR/../../proto` -- for `/build` that is `/proto`. The repo-root `proto/`
+# tree is outside this crate's build context, so it is supplied as the named `proto` build
+# context (`--build-context proto=./proto`; see build-svc-streaming.yml / deploy-dal2alpha.yml).
+# `proto` is a named build context (--build-context), not a FROM alias -> DL3022 false positive.
+# hadolint ignore=DL3022
+COPY --from=proto . /proto
 # Bump CACHE_EPOCH (workflow build-arg, repo variable ALPHA_CACHE_EPOCH) to abandon every cache mount id
 # below and force a clean rebuild; the value is also part of the RUN layer cache key.
 ARG CACHE_EPOCH=1

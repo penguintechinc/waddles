@@ -77,15 +77,12 @@ global:
   # comment -- and svc-bundles-executor retries the dial forever with capped exponential backoff,
   # so neither pod crashloops); only the executor-invoked-bundle path stays inert.
   #
-  # fix/alpha-host-api-tls -- templates/host-api-tls-secret.yaml now guarantees the
-  # <fullname>-host-api-tls Secret exists (kept, explicitly supplied, generated alpha/local,
-  # or the whole release fails to render) whenever pipeline.rustDataPlane.enabled is true,
-  # exactly mirroring global.valkeyTls's self-provisioning policy -- alpha/local no longer
-  # need real PEM material supplied out of band. beta/gamma/production still REQUIRE real
-  # material (--set-file global.hostApiTls.ca.crt=... --set-file global.hostApiTls.tls.crt=...
-  # --set-file global.hostApiTls.tls.key=...), cert-manager (certManager.enabled=true), or
-  # externalSecret: true delegating to an out-of-band controller -- auto-generation is
-  # alpha/local only, fails closed otherwise.
+  # The <fullname>-host-api-tls Secret is minted by the runtime provisioner
+  # (templates/provision-secrets.yaml) in EVERY tier, create-if-absent and never overwritten
+  # (owner policy: all internal identities are runtime-generated). Optional overrides, all off by
+  # default: explicit material (--set-file global.hostApiTls.ca.crt=... tls.crt=... tls.key=...),
+  # cert-manager (certManager.enabled=true), or externalSecret: true delegating to an out-of-band
+  # controller.
   hostApiTls:
     certManager:
       enabled: false
@@ -135,6 +132,26 @@ global:
     # beta/gamma/production. Alpha/local ignore this flag entirely (auto-generated instead).
     externalSecret: false
 
+  # TLS material for svc-presentation's in-cluster surface gRPC listener
+  # (waddles.presentation.internal.v1.SurfaceService on pipeline.svcPresentation.grpcPort;
+  # core/svc_presentation/src/surfaces/ingress.rs -- the listener REFUSES to start in plaintext off
+  # loopback). Generated at runtime by the provision-secrets Job IN EVERY TIER (ECDSA P-256 via
+  # OpenSSL, own CA, SANs = the svc-presentation Service DNS names; create-if-absent, a present
+  # Secret is never overwritten -- owner policy for internal identities); the
+  # callers (svc-action-rust, svc-process-rust) mount ONLY the CA (PRESENTATION_GRPC_CA_FILE).
+  # NEVER a literal cert/key in git; populate via --set-file or an out-of-git values override /
+  # ExternalSecret.
+  presentationGrpcTls:
+    ca:
+      crt: ""
+    tls:
+      crt: ""
+      key: ""
+    # OPTIONAL override (default false in every tier): true delegates provisioning of the
+    # <fullname>-presentation-grpc-tls Secret (keys ca.crt, tls.crt, tls.key) to an out-of-band
+    # ExternalSecret/SealedSecret controller instead of the runtime provisioner.
+    externalSecret: false
+
   # fix/valkey-tls-alpha -- TLS material for the Valkey (infra-redis) cache/streams
   # listener. `penguin_spine::SpineConfig::validate()` (core/svc_process, core/svc_action,
   # core/svc_ingest) fails closed when SECURITY_TRANSPORT_TLS=true (the default -- never
@@ -154,7 +171,7 @@ global:
   # One chart-owned ECDSA P-256 / SHA-256 CA signs a server leaf for each; clients mount ONLY the CA and
   # verify (Postgres sslmode=verify-full, S3 https with the CA pinned, system roots disabled). See
   # templates/_transit_data_tls.tpl for the design, templates/transit-tls-secret.yaml for the provisioning policy.
-  # alpha/local self-generate (lookup-keep); beta/gamma/production REQUIRE material below (never a literal in git)
+  # runtime-generated in every tier by the provisioner (create-if-absent, never overwritten); material below is an optional override (never a literal in git)
   # or externalSecret: true. There is NO plaintext toggle: Postgres and SeaweedFS are TLS-only whenever enabled.
   # Negotiation: TLS 1.3 preferred / 1.2 minimum, ECDSA P-256, P-256 key exchange, AES-128-GCM or ChaCha20-Poly1305,
   # session resumption on, pooled keep-alive clients. Customers wanting stronger protection can additionally enable
@@ -196,15 +213,12 @@ global:
   # comment -- and bundle-executor retries the dial forever with capped exponential backoff,
   # so neither pod crashloops); only the executor-invoked-bundle path stays inert.
   #
-  # fix/alpha-host-api-tls -- templates/host-api-tls-secret.yaml now guarantees the
-  # <fullname>-host-api-tls Secret exists (kept, explicitly supplied, generated alpha/local,
-  # or the whole release fails to render) whenever pipeline.rustDataPlane.enabled is true,
-  # exactly mirroring global.valkeyTls's self-provisioning policy -- alpha/local no longer
-  # need real PEM material supplied out of band. beta/gamma/production still REQUIRE real
-  # material (--set-file global.hostApiTls.ca.crt=... --set-file global.hostApiTls.tls.crt=...
-  # --set-file global.hostApiTls.tls.key=...), cert-manager (certManager.enabled=true), or
-  # externalSecret: true delegating to an out-of-band controller -- auto-generation is
-  # alpha/local only, fails closed otherwise.
+  # The <fullname>-host-api-tls Secret is minted by the runtime provisioner
+  # (templates/provision-secrets.yaml) in EVERY tier, create-if-absent and never overwritten
+  # (owner policy: all internal identities are runtime-generated). Optional overrides, all off by
+  # default: explicit material (--set-file global.hostApiTls.ca.crt=... tls.crt=... tls.key=...),
+  # cert-manager (certManager.enabled=true), or externalSecret: true delegating to an out-of-band
+  # controller.
   # In-cluster HTTP transit TLS (docs/superpowers/specs/2026-11-08-pod-transit-encryption-audit.md
   # F3/F4/F6): hub-api, hub-webui, core-data and svc-streaming serve HTTPS with an ECDSA P-256 /
   # SHA-256 cert minted by cert-manager from the internal CA (ClusterIssuer name below = the one
@@ -294,7 +308,7 @@ global:
   # One chart-owned ECDSA P-256 / SHA-256 CA signs a server leaf for each; clients mount ONLY the CA and
   # verify (Postgres sslmode=verify-full, S3 https with the CA pinned, system roots disabled). See
   # templates/_transit_data_tls.tpl for the design, templates/transit-tls-secret.yaml for the provisioning policy.
-  # alpha/local self-generate (lookup-keep); beta/gamma/production REQUIRE material below (never a literal in git)
+  # runtime-generated in every tier by the provisioner (create-if-absent, never overwritten); material below is an optional override (never a literal in git)
   # or externalSecret: true. There is NO plaintext toggle: Postgres and SeaweedFS are TLS-only whenever enabled.
   # Negotiation: TLS 1.3 preferred / 1.2 minimum, ECDSA P-256, P-256 key exchange, AES-128-GCM or ChaCha20-Poly1305,
   # session resumption on, pooled keep-alive clients. Customers wanting stronger protection can additionally enable
@@ -896,6 +910,24 @@ infrastructure:
       bundleStorage:
         accessKey: "REPLACE_ME"
         secretKey: "REPLACE_ME"
+      # hub-api's platform-secret ESCROW identity (hub_api/services/platform_secrets/escrow.py): the
+      # DR copy of the platform's own keys. Read/Write/List on escrow.bucketName ONLY -- a bucket no
+      # other identity names, so no bundle / data-plane / general hub-api grant can reach it. Its
+      # credentials live in the dedicated `<release>-platform-escrow-s3` Secret (never the
+      # envFrom'd waddlebot-secrets), generated at runtime by the provision-secrets hook and
+      # mounted only by SeaweedFS (to render this identity) and hub-api.
+      escrow:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+    # Platform-secret escrow bucket (hub_api T7). The bucket-init Job creates it, applies the
+    # default SSE and turns versioning ON (history survives an overwrite or a poisoned PUT; a
+    # versioning failure is logged loudly, never silent). Object-lock is NOT enabled: SeaweedFS
+    # needs it at bucket creation and a retention lock would also block the manifest rewrite on
+    # every rotation -- versioning + the sealed/signed objects are the integrity layer (see
+    # docs/PLATFORM_VAULT.md Escrow).
+    escrow:
+      bucketName: "waddles-platform-escrow"
+      versioning: true
     service:
       name: "infra-seaweedfs"
       type: ClusterIP
@@ -1410,6 +1442,19 @@ pipeline:
     enabled: true
     port: 8204
     grpcPort: 50204
+    # RTC RoomsService client (hub_api/services/calls_proxy.py `RoomsClient`) -> svc-streaming
+    # gRPC (HTTP/2 + mTLS + a per-call ES256 service JWT minted by hub-api's own issuer for the
+    # `serviceJwt.identities.hub-api` SPIFFE id). The target/CA/client-cert env is derived in
+    # templates/hub-api.yaml from the svc-streaming Service; only the tunables live here. The
+    # retired REST env `STREAMING_RTC_URL` is never rendered.
+    streamingRtc:
+      # Per-call gRPC deadline -> STREAMING_RTC_TIMEOUT_SECONDS (client default 10 when empty).
+      timeoutSeconds: 10
+      # TLS server name the client verifies -> STREAMING_RTC_GRPC_SERVER_NAME. Empty = the Service
+      # name from the target, which IS a SAN of the shared host-api-tls cert
+      # (waddlebot.hostApiTlsDesiredDnsNames: <fullname>-svc-streaming[.<ns>.svc.cluster.local]).
+      # Set only when reaching svc-streaming through a different DNS name.
+      serverName: ""
     # SPIFFE_PEER_TRUST / SPIFFE_PEER_ID_HEADER (hub_api/services/machine_auth.py). Default OFF.
     # Enable ONLY behind an mTLS terminator that strips the header from non-mTLS traffic AND
     # after a per-identity community allow-list exists -- see docs/PROVIDER_CONNECTIONS.md.
@@ -1587,6 +1632,15 @@ pipeline:
   svcPresentation:
     enabled: true
     port: 8207
+    # In-cluster surface gRPC port (waddles.presentation.internal.v1.SurfaceService): the ONLY
+    # transport bundles' `overlay.publish-surface` publishes use. TLS (global.presentationGrpcTls)
+    # is mandatory; ingress is restricted to svc-action-rust/svc-process-rust by
+    # templates/svc-presentation-grpc-networkpolicy.yaml.
+    grpcPort: 50051
+    # Default-OFF feature flag gating the publish side: PostHog `waddles.overlay-surfaces`
+    # (checked by the stages, never by svc-presentation). The OWNER flips it (PostHog -> Feature
+    # flags). Until it is ON every `surface.publish` denies `feature_disabled`; the listener and
+    # callers' endpoints being wired is independent of it.
     # MUST stay 1. The overlay fan-out is IN-PROCESS: each pod only knows the websocket/SSE
     # clients connected to itself, so with >1 replica a pushed frame reaches only the clients on
     # the pod that received it -- frames split across pods. The chart REFUSES to render
@@ -1643,8 +1697,12 @@ pipeline:
   # pod, not a generic pipeline-stage skeleton.
   svcStreaming:
     enabled: true
-    # Stateful singleton (RTMP/SRT listeners + local stream dir): Deployment strategy is
-    # Recreate and replicas must stay 1. No HPA/PDB (not in waddlebot.scaleTargets).
+    # Stateful singleton (RTMP/SRT listeners + local stream dir + the in-memory RTC SFU rooms):
+    # Deployment strategy is Recreate and replicas must stay 1. No HPA/PDB (not in
+    # waddlebot.scaleTargets): a PDB with minAvailable 1 on a single replica would block every node
+    # drain, and maxUnavailable 1 would be a no-op. EVERY svc-streaming rollout (image bump, config
+    # change) therefore DROPS ALL LIVE RTC ROOMS AND STREAMS -- clients must rejoin. Deploy in a
+    # quiet window. (Isolating RTC into its own pod is plan Q5, not done here.)
     # Longer drain than the chart default so in-flight streams/recordings can finalize.
     terminationGracePeriodSeconds: 60
     port: 8208
@@ -1652,8 +1710,63 @@ pipeline:
     metricsPort: 9090
     rtmpPort: 1935
     srtPort: 9000
-    webrtcRangeStart: 40000
-    webrtcRangeEnd: 40100
+    # WebRTC media (RTC rooms + WHIP/WHEP): ONE multiplexed UDP port (webrtc-rs UDP mux) plus an
+    # optional ICE-TCP fallback on ONE TCP port. No port range, no TURN (v3.3.x, #1318).
+    # The port rendered here is BOTH the container port the SFU binds and the port the media
+    # Service publishes (NodePort / LoadBalancer) -- the SFU advertises the port it binds in its
+    # ICE candidates, so the externally reachable port MUST equal it (the render fails otherwise).
+    # Env contract with core/svc_streaming: WEBRTC_UDP_RANGE="<udpPort>-<udpPort>" (single-port
+    # range, accepted by config.rs::parse_udp_range); WEBRTC_ICE_TCP_PORT=<iceTcp.port> only when
+    # iceTcp.enabled (the SFU rejects/ignores it until the T2 mux server lands -- see
+    # docs/RTC_MEDIA_EXPOSURE.md).
+    webrtc:
+      udpPort: 40000
+      iceTcp:
+        enabled: false
+        port: 40000
+      # Dedicated media Service, scoped to the ports above and NOTHING else (RTMP/SRT/HTTP/gRPC
+      # are never published here). Alpha/local: NodePort (owner-approved exemption from the
+      # no-external-ports rule, fixed nodePort == udpPort, set in values-alpha/-dal2alpha/-local).
+      # beta/gamma/production: LoadBalancer (never NodePort/hostPort/externalIPs).
+      media:
+        service:
+          enabled: true
+          type: LoadBalancer        # NodePort | LoadBalancer
+          # NodePort only: must equal the bound port (udpPort / iceTcp.port) and sit in the
+          # cluster's NodePort range (default 30000-32767).
+          nodePort:
+            udp: 0
+            tcp: 0
+          # LoadBalancer only. Empty = open to the internet (browsers anywhere must reach media);
+          # restrict only for a closed audience. Provider-specific annotations go in `annotations`
+          # (e.g. MetalLB address pool). Cluster policy keeps the client source IP (no SNAT).
+          loadBalancerSourceRanges: []
+          loadBalancerClass: ""
+          externalTrafficPolicy: Local
+          annotations: {}
+        # CiliumNetworkPolicy ingress on the media port(s): which entities may open media flows.
+        # Alpha NodePort with externalTrafficPolicy Cluster SNATs through the node, so the overlay
+        # adds host + remote-node. Nothing else is admitted on these ports.
+        networkPolicy:
+          fromEntities: ["world"]
+      # No STUN/TURN: the SFU advertises host candidates only (TURN is v3.3.x, #1318). The generic
+      # svc-streaming CNP egress profile is `world`, so a future STUN server needs no extra rule.
+    # Rooms room-token signing key (WEBRTC_ROOM_TOKEN_SECRET). No value ever lives in values.
+    # `existingSecret` names a pre-created Secret + key that is mounted as that env var. Empty =
+    # the env is NOT rendered and RoomsService fails loud on the first JoinRoom
+    # ("WEBRTC_ROOM_TOKEN_SECRET is not set"). SEAM: the platform_secrets store (being built
+    # separately) will supersede this reference; the room token is moving to ES256 (plan Q6) --
+    # the Secret then holds the PEM private key and svc-streaming a new env name. Keep this
+    # indirection, do not inline.
+    rooms:
+      roomToken:
+        existingSecret: ""
+        key: "WEBRTC_ROOM_TOKEN_SECRET"
+      # Idle-room expiry policy (env ROOMS_EMPTY_TIMEOUT_DEFAULT_SECS / _MAX_SECS, read by
+      # core/svc_streaming rooms::IdlePolicy::from_env). Defaults mirror the binary's own;
+      # an empty room is deleted after the default (0 = never), requests clamp to the max.
+      emptyTimeoutDefaultSecs: 300
+      emptyTimeoutMaxSecs: 86400
     streamDataDir: "/var/lib/waddlebot/stream"
     # Externally-reachable base URL svc-streaming embeds in playback URLs and uses as
     # the WebRTC ICE host. Empty = unset (service default http://localhost:8208).
@@ -1674,10 +1787,23 @@ pipeline:
       rtmpPort: 31935
       srtPort: 30900
       httpPort: 31208
+    # Probes. HTTP (not native gRPC): the RoomsService listener demands a client certificate and
+    # the kubelet's gRPC probe cannot present one, so `grpc.health.v1` probes cannot work. The
+    # probes hit the plaintext HTTP port 8208 (/health, /readyz) -- owner-approved exception to
+    # the svc-* "native gRPC probes" rule (see the EXCEPTION comment in templates/svc-streaming.yaml).
+    # Startup budget = periodSeconds x failureThreshold: 5s x 60 = 300s (chart default is 150s) for the
+    # first cold boot -- DB wait + GPU trial-encode gate + rooms/WASM bundle first compile.
+    startupProbe:
+      periodSeconds: 5
+      failureThreshold: 60
+    # Owner policy for this pod: small guaranteed request (it idles most of the time; the
+    # scheduler should not reserve transcode capacity), generous limit so an RTMP transcode or a
+    # room full of subscribers can burst without throttling/OOM. cpu 4 / 4Gi is the ceiling on
+    # every environment; the 512Mi tmpfs HLS scratch (stream-data) counts against the memory limit.
     resources:
       requests:
-        cpu: "1000m"
-        memory: "1Gi"
+        cpu: "250m"
+        memory: "512Mi"
       limits:
         cpu: "4000m"
         memory: "4Gi"
@@ -2610,6 +2736,28 @@ httproute:
     caConfigMapName: ""
     caPem: ""
 
+# Interactions / webhook door through the shared Gateway (templates/interactions-gateway.yaml):
+# POST /intake/webhook/{route_key} -> svc-ingest-rust, plus the edge-stamped `x-request-start` so the
+# command-latency SLA clock starts at the first door (the Cilium LB, not Cloudflare). Requires
+# `httproute.enabled` (same shared Gateway parentRef) and the Rust data plane. OFF by default;
+# supported in every environment. Enabling adds a CNP admitting the Gateway to svc-ingest's HTTP port
+# only. NOTE: the shared Gateway's listener must admit this namespace (namespaceLabels
+# `gateway-access`, already required by `httproute`).
+interactionsGateway:
+  enabled: false
+  # Defaults to httproute.hostnames.
+  hostnames: []
+  pathPrefix: /intake/webhook
+  # Discord requires an interaction response within 3 s; the route must not outlive it by much.
+  timeoutSeconds: 10
+  edgeRequestStart:
+    # Stamp the header at the Gateway AND make svc-ingest trust it (INGEST_TRUST_EDGE_REQUEST_START).
+    enabled: true
+    headerName: x-request-start
+    # Envoy command operator, evaluated per request by the Gateway's Envoy: epoch seconds.millis.
+    # RequestHeaderModifier `set` overwrites any client-supplied value.
+    value: "t=%START_TIME(%s.%3f)%"
+
 # Network Policies — namespace-level ingress isolation
 # When enabled, denies all cross-namespace ingress and allows only
 # same-namespace traffic + ingress controller traffic.
@@ -2884,6 +3032,21 @@ serviceJwt:
   # the token to that one tenant. hub-api's internal gRPC server rejects tokens
   # with no tenant claim -- an identity with `tenant` unset cannot call identity RPCs.
   identities:
+    # hub-api calling svc-streaming's RoomsService (hub_api/services/calls_proxy.py): hub-api
+    # mints these itself (in-process issuer) -- they are NOT obtainable via the SA bootstrap
+    # beyond the SA match below. One scope per RPC class: read (list/get/participants), write
+    # (delete/join/leave), create (CreateRoom alone), moderate (kick/mute/lock). svc-streaming
+    # additionally pins
+    # `sub` to this SPIFFE id (ROOMS_GRPC_ALLOWED_SUBJECTS).
+    hub-api:
+      spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/hub-api"
+      serviceAccount: hub-api
+      tenant: system
+      allowedScopes:
+        - "streaming.rooms:read"
+        - "streaming.rooms:create"
+        - "streaming.rooms:write"
+        - "streaming.rooms:moderate"
     svc-process:
       spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-process"
       serviceAccount: svc-process

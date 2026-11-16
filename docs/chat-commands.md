@@ -13,7 +13,7 @@ All bot commands are prefixed with `!`. Aliases (alternate command names) are li
 | `!sr pause` | — | Mod+ | Pause playback | *(routed to music app)* | `waddles.social.music` |
 | `!sr resume` | — | Mod+ | Resume playback | *(routed to music app)* | `waddles.social.music` |
 | `!sr set youtube-labels <labels>` | — | Mod+ | Set YouTube title label allowlist | *(routed to music app)* | `waddles.social.music` (youtube_labels subset) |
-| `!sq` | `!songqueue` | Everyone | Link to public queue page | `song queue: {PUBLIC_WEBUI_URL}/c/{community}/music/queue` | `waddles.social.music.queue_page` |
+| `!songqueue` | `!sq` | Everyone | Link to public queue page | `Song queue: {base}/community/{community_id}/music` (or `song queue page is not configured`) | PostHog `waddles.music.queue-page` (default OFF) |
 
 ---
 
@@ -171,7 +171,7 @@ All bot commands are prefixed with `!`. Aliases (alternate command names) are li
 
 | Name | Path | Purpose | Access |
 |------|------|---------|--------|
-| **Music Queue** | `/c/<community>/music/queue` | Public queue page (linked by `!sq`/`!songqueue`) | Public (web) |
+| **Music Queue** | `/community/<community_id>/music` | Public queue page (linked by `!sq`/`!songqueue`) | Public (web) |
 | **Music Overlay** | `/overlay/<community>/music` | OBS overlay for queue display | External (OBS) |
 | **Admin: Music Settings** | `https://{webui}/admin/community/{id}/music` | Configure song requests, pause/resume | Web UI (admin) |
 | **Admin: Aliases** | `https://{webui}/admin/community/{id}/aliases` | Manage custom commands | Web UI (admin) |

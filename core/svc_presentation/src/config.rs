@@ -230,6 +230,27 @@ pub struct CliConfig {
     #[arg(long, env = "HUB_API_GRPC_CA_FILE", default_value = "")]
     pub hub_api_grpc_ca_file: String,
 
+    /// In-cluster gRPC port of the bundle -> presentation surface publish service
+    /// (`waddles.presentation.internal.v1.SurfaceService`, the only in-cluster publish
+    /// transport). Served on `BIND_ADDR`.
+    #[arg(long, env = "SURFACE_GRPC_PORT", default_value_t = 50051)]
+    pub surface_grpc_port: u16,
+
+    /// PEM server certificate chain (ECDSA P-256) for the surface gRPC listener. Required unless
+    /// `BIND_ADDR` is loopback; must be set together with the key.
+    #[arg(long, env = "SURFACE_GRPC_TLS_CERT_FILE", default_value = "")]
+    pub surface_grpc_tls_cert_file: String,
+
+    /// PEM private key for the surface gRPC listener's certificate.
+    #[arg(long, env = "SURFACE_GRPC_TLS_KEY_FILE", default_value = "")]
+    pub surface_grpc_tls_key_file: String,
+
+    /// Extra `https://host[:port]` origins (comma-separated) the scene/widget pages may load
+    /// images from, added to the built-in artwork CDNs and the image bucket origin. Never a
+    /// wildcard, `http:` or `data:`: invalid entries are rejected at startup.
+    #[arg(long, env = "WIDGET_IMG_SRC_ALLOWLIST", default_value = "")]
+    pub widget_img_src_allowlist: String,
+
     /// Explicit operator escape hatch for deployments with no working
     /// hub-api gRPC connection yet (dev, air-gapped, alpha without an
     /// in-cluster PostHog). `Some(false)` (`PII_DETOKENIZATION_ENABLED=false`)
@@ -248,6 +269,24 @@ impl CliConfig {
     /// Validates cross-field invariants that `clap`'s per-arg parsing can't
     /// express.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.surface_grpc_port == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "surface_grpc_port",
+                reason: "port 0 is not a valid bind port".to_string(),
+            });
+        }
+        if let Some(bad) = self
+            .widget_img_src_allowlist
+            .split(',')
+            .map(str::trim)
+            .filter(|o| !o.is_empty())
+            .find(|o| !crate::scene::valid_img_origin(o))
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "widget_img_src_allowlist",
+                reason: format!("{bad:?} is not a plain https://host[:port] origin"),
+            });
+        }
         if self.http_port == 0 || self.metrics_port == 0 {
             return Err(ConfigError::InvalidValue {
                 field: "http_port/metrics_port",

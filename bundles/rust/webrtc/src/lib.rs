@@ -9,6 +9,7 @@
 //! enter the guest. Unknown tools fail LOUD with a typed `invalid-args`.
 #[allow(warnings)]
 mod bindings;
+mod grants;
 mod logic;
 
 use std::sync::{Arc, OnceLock};

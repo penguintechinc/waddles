@@ -77,6 +77,7 @@ pub mod distribution;
 pub mod egress;
 pub mod error;
 pub mod flags;
+pub mod floor_ban_dispatch;
 pub mod grant_gate;
 pub mod hop;
 pub mod host_api;
@@ -87,6 +88,7 @@ pub mod platform_user;
 pub mod retry;
 pub mod senders;
 pub mod stage_metrics;
+pub mod surface;
 pub mod telemetry;
 pub mod usage;
 pub mod wiring;
@@ -291,6 +293,7 @@ where
         config.bundle_db_password.clone(),
         host_api_metrics,
         app_version_snapshot.clone(),
+        config.db_password.clone(),
     );
 
     let state = http::AppState::new(config.clone(), prom_registry, Arc::clone(&connections));
@@ -697,6 +700,7 @@ async fn build_stage_capabilities(
     bundle_db_password: Option<config::Secret>,
     connections: Arc<host_api::ConnectionRegistry>,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    db_password: config::Secret,
 ) -> Option<Arc<dyn capabilities::CapabilityHandler>> {
     let spine_cfg = match penguin_spine::SpineConfig::from_env() {
         Ok(c) => c,
@@ -824,6 +828,12 @@ async fn build_stage_capabilities(
         cache.set_read_path_gate(Arc::new(flags::DbConfigReadsGate(license.clone())));
     }
     let caps = caps.with_bundle_config(bundle_config);
+    // `bundle` / `bundle_lang` latency labels: registered bundles from the read REPLICA only (never
+    // the primary, never an env list); seed + periodic + lazy-on-miss refresh.
+    let _latency_labels = bundle_config_db::labels::start(command_latency::labels::Wanted {
+        commands: false,
+        bundles: true,
+    });
     // `db` host capability (v1 + v2 `db2.*`): see `try_build_db_wiring`'s doc for
     // its two distinct unwired outcomes.
     let bundle_db_cfg = bundle_host_db::ConnectConfig {
@@ -840,6 +850,15 @@ async fn build_stage_capabilities(
     .await
     {
         Some(db) => caps.with_db(db),
+        None => caps,
+    };
+    // `overlay.publish-surface` (`surface.publish`): gRPC to svc-presentation with a
+    // community-bound JWT; default-OFF flag, unwired without PRESENTATION_GRPC_ENDPOINT.
+    let caps = match surface::build_surface_wiring(
+        cli,
+        flag_or_closed(&license, flags::OVERLAY_SURFACES_FLAG),
+    ) {
+        Some(wiring) => caps.with_surface(wiring),
         None => caps,
     };
     // Dispatcher egress toggle (`flags::EGRESS_VIA_DISPATCHER_FLAG`) --
@@ -889,7 +908,48 @@ async fn build_stage_capabilities(
     if event_sync_enabled {
         start_event_sync_consumer(&spine_cfg, Arc::clone(&caps)).await;
     }
+    start_floor_ban_dispatcher(
+        cli,
+        &db_password,
+        flag_or_closed(&license, flags::REPUTATION_AUTO_BAN_FLAG),
+        Arc::clone(&caps),
+    )
+    .await;
     Some(caps)
+}
+
+/// Starts the automated reputation floor-ban outbox dispatcher
+/// ([`floor_ban_dispatch`]): it claims the rows the process stage queued and delivers each as a
+/// signed outbound `mod.ban` command through THIS stage's sender path, completing a row only on
+/// the sender's confirmed ack. A database connect failure is logged loudly and leaves it off:
+/// queued bans then wait in the outbox (nothing is lost) until the next start.
+async fn start_floor_ban_dispatcher(
+    cli: &config::CliConfig,
+    db_password: &config::Secret,
+    flag: Arc<dyn flags::FeatureFlag>,
+    caps: Arc<
+        capabilities::StageCapabilities<
+            redis::aio::ConnectionManager,
+            redis::aio::ConnectionManager,
+        >,
+    >,
+) {
+    let conn = match db::connect_with(cli, db_password).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "floor-ban dispatcher NOT started: database connection failed; queued automated bans wait in the outbox"
+            );
+            return;
+        }
+    };
+    let store = Arc::new(floor_ban_dispatch::PgFloorBanStore::new(conn));
+    let metrics = stage_metrics::stage_metrics();
+    tokio::spawn(async move {
+        floor_ban_dispatch::run_floor_ban_sweeper(store, caps, metrics, flag, shutdown_signal())
+            .await;
+    });
 }
 
 /// Builds the `db` bundle host capability's production wiring, mirroring
@@ -1075,6 +1135,7 @@ fn try_start_host_api(
     bundle_db_password: Option<config::Secret>,
     metrics: telemetry::HostApiMetrics,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    db_password: config::Secret,
 ) -> Arc<host_api::ConnectionRegistry> {
     let registry = Arc::new(host_api::ConnectionRegistry::new());
     registry.set_dead_letter_metric(metrics.dead_lettered_no_executor_total.clone());
@@ -1097,6 +1158,7 @@ fn try_start_host_api(
             bundle_db_password,
             Arc::clone(&registry_for_task),
             app_version_snapshot,
+            db_password,
         )
         .await
         .unwrap_or_else(|| Arc::new(capabilities::DenyAllCapabilities));

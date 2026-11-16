@@ -15,6 +15,7 @@ updates:
   - /core/bundle_host_http
   - /core/bundle_host_kv
   - /core/bundle_host_media
+  - /core/bundle_host_surface
   - /core/bundle_tool_call
   - /core/bundle_host_reputation
   - /core/circuit_breaker

@@ -184,6 +184,16 @@ components:
       - isSuperAdmin
       title: AdminLoginUserDTO
       type: object
+    AiDjDTO:
+      description: Whether the optional AI DJ layer is currently running for the community.
+      properties:
+        enabled:
+          title: Enabled
+          type: boolean
+      required:
+      - enabled
+      title: AiDjDTO
+      type: object
     Announcement:
       description: One `announcements` row, camelCase-in-Node fields kept snake_case
         here (ruff N815).
@@ -2277,6 +2287,35 @@ components:
       - occurredAt
       title: HistoryEntryDTO
       type: object
+    HistoryItemDTO:
+      description: One recently played track -- deliberately carries no requester
+        field.
+      properties:
+        artist:
+          title: Artist
+          type: string
+        duration_ms:
+          title: Duration Ms
+          type: integer
+        played_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Played At
+        source_url:
+          title: Source Url
+          type: string
+        title:
+          title: Title
+          type: string
+      required:
+      - title
+      - artist
+      - source_url
+      - duration_ms
+      - played_at
+      title: HistoryItemDTO
+      type: object
     IdentityDTO:
       description: Identity DTO.
       properties:
@@ -3460,42 +3499,6 @@ components:
       - lastActivity
       title: PlatformUserDTO
       type: object
-    PolicyDTO:
-      description: One community's Music Station policy.
-      properties:
-        communityId:
-          title: Communityid
-          type: integer
-        requestsCategoryRestricted:
-          title: Requestscategoryrestricted
-          type: boolean
-        songRequestsAllowed:
-          title: Songrequestsallowed
-          type: boolean
-        updatedAt:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Updatedat
-        updatedBy:
-          anyOf:
-          - type: integer
-          - type: 'null'
-          title: Updatedby
-        youtubeAllowedLabels:
-          items:
-            type: string
-          title: Youtubeallowedlabels
-          type: array
-      required:
-      - communityId
-      - songRequestsAllowed
-      - requestsCategoryRestricted
-      - youtubeAllowedLabels
-      - updatedBy
-      - updatedAt
-      title: PolicyDTO
-      type: object
     ProfileDTO:
       description: Profile DTO.
       properties:
@@ -3874,81 +3877,30 @@ components:
       title: PublicStatsDTO
       type: object
     QueueItemDTO:
-      description: 'One `music_station_queue` row, with its resolved track embedded.
-
-
-        `etaSeconds`: seconds until this item is expected to start playing --
-
-        the sum of `track.durationMs` for every currently-`queued` item ahead
-
-        of this one (by `position`), plus the remaining playtime of whatever''s
-
-        currently `playing`, if anything. `None` when not computed for this
-
-        call site (only `enqueue_request()` populates it today -- see
-
-        `_compute_eta_seconds()`); `0` means "next up".'
+      description: One upcoming or now-playing track -- deliberately carries no requester
+        field.
       properties:
-        addedAt:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Addedat
-        communityId:
-          title: Communityid
-          type: integer
-        endedAt:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Endedat
-        etaSeconds:
-          anyOf:
-          - type: integer
-          - type: 'null'
-          title: Etaseconds
-        id:
-          title: Id
-          type: integer
-        playlistId:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Playlistid
-        position:
-          title: Position
-          type: integer
-        requestedBy:
-          anyOf:
-          - type: integer
-          - type: 'null'
-          title: Requestedby
-        source:
-          title: Source
+        artist:
+          title: Artist
           type: string
-        startedAt:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Startedat
-        status:
-          title: Status
+        duration_ms:
+          title: Duration Ms
+          type: integer
+        kind:
+          title: Kind
           type: string
-        track:
-          $ref: '#/components/schemas/TrackDTO'
+        source_url:
+          title: Source Url
+          type: string
+        title:
+          title: Title
+          type: string
       required:
-      - id
-      - communityId
-      - track
-      - position
-      - status
-      - source
-      - playlistId
-      - requestedBy
-      - addedAt
-      - startedAt
-      - endedAt
-      - etaSeconds
+      - title
+      - artist
+      - source_url
+      - duration_ms
+      - kind
       title: QueueItemDTO
       type: object
     RadioStationDTO:
@@ -5835,41 +5787,37 @@ components:
       - targetAppId
       title: ToolDTO
       type: object
-    TrackDTO:
-      description: Wire shape of a resolved `Track` -- mirrors `services.music_providers.track.Track`.
+    TopArtistDTO:
+      description: One most-played artist for the community (aggregate counts only).
       properties:
         artist:
           title: Artist
           type: string
-        artworkUrl:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Artworkurl
-        durationMs:
-          title: Durationms
+        plays:
+          title: Plays
           type: integer
-        externalId:
-          title: Externalid
+      required:
+      - artist
+      - plays
+      title: TopArtistDTO
+      type: object
+    TopSongDTO:
+      description: One most-played song for the community (aggregate counts only).
+      properties:
+        artist:
+          title: Artist
           type: string
-        provider:
-          title: Provider
-          type: string
+        plays:
+          title: Plays
+          type: integer
         title:
           title: Title
           type: string
-        url:
-          title: Url
-          type: string
       required:
-      - provider
-      - externalId
       - title
       - artist
-      - durationMs
-      - artworkUrl
-      - url
-      title: TrackDTO
+      - plays
+      title: TopSongDTO
       type: object
     TwitchStatsDTO:
       description: Twitch stats DTO.
@@ -5888,6 +5836,26 @@ components:
       - live
       - viewers
       title: TwitchStatsDTO
+      type: object
+    TypeDTO:
+      description: 'Response DTO: one registered secret type and its versions.'
+      properties:
+        type:
+          title: Type
+          type: string
+        typeCode:
+          title: Typecode
+          type: integer
+        versions:
+          items:
+            $ref: '#/components/schemas/VersionDTO'
+          title: Versions
+          type: array
+      required:
+      - type
+      - typeCode
+      - versions
+      title: TypeDTO
       type: object
     UsageMetaDTO:
       description: Pagination metadata.
@@ -6121,6 +6089,48 @@ components:
       required:
       - id
       title: VendorRequestDTO
+      type: object
+    VersionDTO:
+      description: 'Response DTO: one version (no key id, fingerprint or value).
+
+
+        `state` is the int code: 1 pending, 2 active, 3 verify-only, 4 retired, 5
+        destroyed.'
+      properties:
+        activatedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Activatedat
+        retiredAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Retiredat
+        rotatedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Rotatedat
+        state:
+          title: State
+          type: integer
+        verifyUntil:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Verifyuntil
+        version:
+          title: Version
+          type: integer
+      required:
+      - version
+      - state
+      - activatedAt
+      - rotatedAt
+      - retiredAt
+      - verifyUntil
+      title: VersionDTO
       type: object
     WorkItemDTO:
       description: One create (``action`` 1) or delete (``action`` 2). Never carries
@@ -6679,6 +6689,157 @@ paths:
       responses:
         default:
           description: Undocumented response
+  /api/v1/admin/platform-secrets/:
+    get:
+      description: ''
+      operationId: get_status
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /`.
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                  types:
+                    items:
+                      $ref: '#/components/schemas/TypeDTO'
+                    title: Types
+                    type: array
+                required:
+                - success
+                - types
+                title: StatusResponse
+                type: object
+          description: Response DTO for `GET /`.
+      summary: No-secrets status of every platform secret type (system-tenant global
+        admins only).
+  /api/v1/admin/platform-secrets/{secret_type}/retire:
+    post:
+      description: ''
+      operationId: post_retire
+      parameters:
+      - in: path
+        name: secret_type
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Request DTO for `POST /<type>/retire`: the verify-only
+                version and a reason code.'
+              properties:
+                reasonCode:
+                  maximum: 3
+                  minimum: 1
+                  title: Reasoncode
+                  type: integer
+                version:
+                  maximum: 2147483647
+                  minimum: 1
+                  title: Version
+                  type: integer
+              required:
+              - version
+              - reasonCode
+              title: RetireRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO: which version was retired and when.'
+                properties:
+                  retiredAt:
+                    title: Retiredat
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  type:
+                    title: Type
+                    type: string
+                  version:
+                    title: Version
+                    type: integer
+                required:
+                - success
+                - type
+                - version
+                - retiredAt
+                title: RetireResponse
+                type: object
+          description: 'Response DTO: which version was retired and when.'
+      summary: Retire one verify-only version after the verify window (server-side)
+        has closed.
+  /api/v1/admin/platform-secrets/{secret_type}/rotate:
+    post:
+      description: ''
+      operationId: post_rotate
+      parameters:
+      - in: path
+        name: secret_type
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Request DTO for `POST /<type>/rotate`: only an operator
+                reason code (1/2/3).'
+              properties:
+                reasonCode:
+                  maximum: 3
+                  minimum: 1
+                  title: Reasoncode
+                  type: integer
+              required:
+              - reasonCode
+              title: RotateRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO: the new active version and when the previous
+                  one stops verifying.'
+                properties:
+                  newVersion:
+                    title: Newversion
+                    type: integer
+                  previousVerifyUntil:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Previousverifyuntil
+                  previousVersion:
+                    title: Previousversion
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  type:
+                    title: Type
+                    type: string
+                required:
+                - success
+                - type
+                - newVersion
+                - previousVersion
+                - previousVerifyUntil
+                title: RotateResponse
+                type: object
+          description: 'Response DTO: the new active version and when the previous
+            one stops verifying.'
+      summary: Mint the next version ACTIVE and demote the current one to verify-only.
   /api/v1/admin/{community_id}/ai-chatter/config:
     get:
       description: ''
@@ -8152,7 +8313,7 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Acknowledge a raised hand (admin).
+      summary: 'Acknowledge a raised hand (admin) -- 501: not a svc-streaming concern.'
   /api/v1/admin/{community_id}/calls/rooms/{room_name}/kick:
     post:
       description: ''
@@ -8172,7 +8333,8 @@ paths:
         content:
           application/json:
             schema:
-              description: Request DTO for `POST .../kick`.
+              description: Request DTO for `POST .../kick` -- `identity` is the participant's
+                UUID.
               properties:
                 identity:
                   title: Identity
@@ -8260,7 +8422,8 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Get raised hands queue (admin).
+      summary: 'Raised-hands queue (admin) -- 501: not a svc-streaming concern, see
+        module docstring.'
   /api/v1/admin/{community_id}/calls/rooms/{room_name}/unlock:
     post:
       description: ''
@@ -9554,280 +9717,6 @@ paths:
                 type: object
           description: Response DTO for message endpoints.
       summary: Update a community's module configuration.
-  /api/v1/admin/{community_id}/music-station/policy:
-    get:
-      description: ''
-      operationId: get_get_policy
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO wrapping `PolicyDTO`.
-                properties:
-                  policy:
-                    $ref: '#/components/schemas/PolicyDTO'
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - policy
-                title: PolicyResponse
-                type: object
-          description: Response DTO wrapping `PolicyDTO`.
-      summary: Get the community's Music Station policy (community admin only).
-    put:
-      description: ''
-      operationId: put_set_policy
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          type: integer
-      requestBody:
-        content:
-          application/json:
-            schema:
-              description: 'Request DTO for `PUT .../music-station/policy` -- all
-                fields optional (partial update).
-
-
-                `youtubeAllowedLabels`: `None` leaves the allowlist unchanged; `[]`
-
-                explicitly clears it back to unrestricted (gh-313).'
-              properties:
-                requestsCategoryRestricted:
-                  anyOf:
-                  - type: boolean
-                  - type: 'null'
-                  default: null
-                  title: Requestscategoryrestricted
-                songRequestsAllowed:
-                  anyOf:
-                  - type: boolean
-                  - type: 'null'
-                  default: null
-                  title: Songrequestsallowed
-                youtubeAllowedLabels:
-                  anyOf:
-                  - items:
-                      type: string
-                    type: array
-                  - type: 'null'
-                  default: null
-                  title: Youtubeallowedlabels
-              title: SetPolicyRequest
-              type: object
-      responses:
-        default:
-          description: Undocumented response
-      summary: Set the community's Music Station policy (community admin only).
-  /api/v1/admin/{community_id}/music-station/queue:
-    get:
-      description: ''
-      operationId: get_list_queue
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for `GET .../music-station/queue`.
-                properties:
-                  nowPlaying:
-                    anyOf:
-                    - $ref: '#/components/schemas/QueueItemDTO'
-                    - type: 'null'
-                  success:
-                    title: Success
-                    type: boolean
-                  upcoming:
-                    items:
-                      $ref: '#/components/schemas/QueueItemDTO'
-                    title: Upcoming
-                    type: array
-                required:
-                - success
-                - nowPlaying
-                - upcoming
-                title: QueueListResponse
-                type: object
-          description: Response DTO for `GET .../music-station/queue`.
-      summary: List the community's queue -- now-playing (if any) plus upcoming, in
-        order.
-  /api/v1/admin/{community_id}/music-station/queue/advance:
-    post:
-      description: ''
-      operationId: post_advance_queue
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        default:
-          description: Undocumented response
-      summary: 'Advance the queue: mark now-playing played, promote the next queued
-        track (admin only).'
-  /api/v1/admin/{community_id}/music-station/queue/playlists:
-    post:
-      description: ''
-      operationId: post_enqueue_playlist_request
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          type: integer
-      requestBody:
-        content:
-          application/json:
-            schema:
-              description: Request DTO for `POST .../music-station/queue/playlists`.
-              properties:
-                items:
-                  items:
-                    type: string
-                  title: Items
-                  type: array
-                overrideCategoryRestriction:
-                  default: false
-                  title: Overridecategoryrestriction
-                  type: boolean
-                provider:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Provider
-              required:
-              - items
-              title: EnqueuePlaylistRequest
-              type: object
-      responses:
-        default:
-          description: Undocumented response
-      summary: Submit a whole playlist (list of URLs/queries) -- self-service, gated
-        by community policy.
-  /api/v1/admin/{community_id}/music-station/queue/playlists/{playlist_id}:
-    delete:
-      description: ''
-      operationId: delete_kick_playlist
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          type: integer
-      - in: path
-        name: playlist_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-      summary: Kick an entire playlist off the queue (community admin only) -- audited
-        once.
-  /api/v1/admin/{community_id}/music-station/queue/reorder:
-    put:
-      description: ''
-      operationId: put_reorder_queue
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          type: integer
-      requestBody:
-        content:
-          application/json:
-            schema:
-              description: Request DTO for `PUT .../music-station/queue/reorder`.
-              properties:
-                orderedQueueIds:
-                  items:
-                    type: integer
-                  title: Orderedqueueids
-                  type: array
-              required:
-              - orderedQueueIds
-              title: ReorderQueueRequest
-              type: object
-      responses:
-        default:
-          description: Undocumented response
-      summary: Reorder the community's upcoming queue (community admin only).
-  /api/v1/admin/{community_id}/music-station/queue/requests:
-    post:
-      description: ''
-      operationId: post_enqueue_song_request
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          type: integer
-      requestBody:
-        content:
-          application/json:
-            schema:
-              description: Request DTO for `POST .../music-station/queue/requests`.
-              properties:
-                overrideCategoryRestriction:
-                  default: false
-                  title: Overridecategoryrestriction
-                  type: boolean
-                provider:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Provider
-                urlOrQuery:
-                  title: Urlorquery
-                  type: string
-              required:
-              - urlOrQuery
-              title: EnqueueRequestRequest
-              type: object
-      responses:
-        default:
-          description: Undocumented response
-      summary: Submit a single song request -- self-service, gated by community policy.
-  /api/v1/admin/{community_id}/music-station/queue/{queue_id}:
-    delete:
-      description: ''
-      operationId: delete_kick_song
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          type: integer
-      - in: path
-        name: queue_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        default:
-          description: Undocumented response
-      summary: Kick a single song off the queue (community admin only) -- audited.
   /api/v1/admin/{community_id}/music/providers:
     get:
       description: ''
@@ -15811,6 +15700,81 @@ paths:
             browser.'
       summary: '`GET /<id>/start` -- begin a login; sets the binder cookie, returns
         the IdP URL as JSON.'
+  /api/v1/auth/step-up/passkey/finish:
+    post:
+      description: ''
+      operationId: post_passkey_finish
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Request DTO: the authenticator''s assertion (`navigator.credentials.get`
+                result).'
+              properties:
+                credential:
+                  additionalProperties: true
+                  title: Credential
+                  type: object
+              required:
+              - credential
+              title: StepUpFinishRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO: the re-issued access token and the window
+                  it is good for.'
+                properties:
+                  mfaValidForSeconds:
+                    title: Mfavalidforseconds
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  token:
+                    title: Token
+                    type: string
+                required:
+                - success
+                - token
+                - mfaValidForSeconds
+                title: StepUpFinishResponse
+                type: object
+          description: 'Response DTO: the re-issued access token and the window it
+            is good for.'
+      summary: Verify the assertion and re-issue the caller's token with fresh step-up
+        claims.
+  /api/v1/auth/step-up/passkey/start:
+    post:
+      description: ''
+      operationId: post_passkey_start
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO: the WebAuthn `PublicKeyCredentialRequestOptions`
+                  for the browser.'
+                properties:
+                  options:
+                    additionalProperties: true
+                    title: Options
+                    type: object
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - options
+                title: StepUpOptionsResponse
+                type: object
+          description: 'Response DTO: the WebAuthn `PublicKeyCredentialRequestOptions`
+            for the browser.'
+      summary: Options for a user-verified assertion over the caller's own passkeys.
   /api/v1/auth/temp-password:
     post:
       description: ''
@@ -16988,6 +16952,64 @@ paths:
         default:
           description: Undocumented response
       summary: Join an open community (idempotent); tenant comes from the token only.
+  /api/v1/communities/{community_id}/music:
+    get:
+      description: ''
+      operationId: get_get_music
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Full response of `GET /api/v1/communities/<id>/music`.
+                properties:
+                  ai_dj:
+                    $ref: '#/components/schemas/AiDjDTO'
+                  dmca_safe:
+                    title: Dmca Safe
+                    type: boolean
+                  history:
+                    items:
+                      $ref: '#/components/schemas/HistoryItemDTO'
+                    title: History
+                    type: array
+                  now_playing:
+                    anyOf:
+                    - $ref: '#/components/schemas/QueueItemDTO'
+                    - type: 'null'
+                  queue:
+                    items:
+                      $ref: '#/components/schemas/QueueItemDTO'
+                    title: Queue
+                    type: array
+                  top_artists:
+                    items:
+                      $ref: '#/components/schemas/TopArtistDTO'
+                    title: Top Artists
+                    type: array
+                  top_songs:
+                    items:
+                      $ref: '#/components/schemas/TopSongDTO'
+                    title: Top Songs
+                    type: array
+                required:
+                - now_playing
+                - queue
+                - history
+                - ai_dj
+                - dmca_safe
+                - top_artists
+                - top_songs
+                title: MusicPageDTO
+                type: object
+          description: Full response of `GET /api/v1/communities/<id>/music`.
+      summary: Return the community's music page (members only, replica read, flag-gated).
   /api/v1/communities/{community_id}/provider-connections:
     get:
       description: ''
@@ -17818,7 +17840,7 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Join a voice room -- mints a LiveKit token for THIS caller, THIS room,
+      summary: Join a voice room -- mints a room token for THIS caller, THIS room,
         only if a member.
   /api/v1/community/{community_id}/interact/voice/rooms/{room_name}/leave:
     post:
@@ -17838,7 +17860,7 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Leave a voice room (member).
+      summary: Leave a voice room (member) -- always acts as oneself (actor == participant).
   /api/v1/community/{community_id}/leaderboard/messages:
     get:
       description: ''
@@ -19187,179 +19209,6 @@ paths:
         default:
           description: Undocumented response
       summary: '`POST /api/v1/internal/marketplace/execute/<moduleId>` -- service-to-service
-        only.'
-  /api/v1/internal/music/playback:
-    post:
-      description: '
-
-        Body: `{"community_id": int, "action": "pause"|"resume"}`. Pauses or
-
-        resumes the community''s currently-`playing` track by writing/clearing
-
-        `music:playback:{community_id}` in Valkey -- see `services.
-
-        community_music_queue_service.set_playback()`''s own docstring for the
-
-        full state machine (`reason` in `{"paused", "resumed",
-
-        "already_paused", "already_playing", "nothing_playing"}`, `changed`
-
-        `False` for every no-op reason).'
-      operationId: post_internal_set_music_playback
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`POST /api/v1/internal/music/playback` -- service-to-service only
-        (gh-315).'
-  /api/v1/internal/music/policy:
-    put:
-      description: '
-
-        Lets a chat-side moderation command (no user JWT) update a
-
-        community''s `youtube_allowed_labels` allowlist without going through
-
-        the admin-JWT-scoped `music_queue_bp.set_policy` route above. Body:
-
-        `{"community_id": int, "youtube_allowed_labels": [str, ...]}` --
-
-        `tenant_id` is deliberately NOT accepted from the caller, same trust
-
-        boundary reasoning as `internal_enqueue_song_request()`''s own
-
-        docstring: derived from the community row itself, never the caller.
-
-        Validation (bounds/shape) is `services.community_music_queue_service.
-
-        set_policy()`''s own `_normalize_youtube_allowed_labels()` -- one
-
-        validator for both the admin and internal write paths.'
-      operationId: put_internal_set_music_policy
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`PUT /api/v1/internal/music/policy` -- service-to-service only (gh-313).'
-  /api/v1/internal/music/queue:
-    get:
-      description: '
-
-        Backs the OBS overlay player (`core/svc_presentation`) and the public
-
-        (unauthenticated) queue page (`blueprints/v1/public_music_queue.py`) --
-
-        neither calls hub-api''s admin-scoped `music_queue_bp` routes above (no
-
-        user JWT to present, same rationale as `internal_enqueue_song_request`).
-
-
-        Lazily auto-advances on read: an expired `playing` item (its track''s
-
-        `duration_ms` plus a grace period elapsed) is marked `played` and the
-
-        oldest `queued` item promoted; an idle queue with nothing playing
-
-        auto-starts its head item. Both inside one locked transaction (see
-
-        `services.community_music_queue_service.get_live_queue_state`''s own
-
-        docstring) so two overlay instances polling concurrently can never
-
-        double-advance.'
-      operationId: get_internal_get_live_queue
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`GET /api/v1/internal/music/queue?community_id=<id>` -- service-to-service
-        only.'
-  /api/v1/internal/music/queue/advance:
-    post:
-      description: '
-
-        Body: `{"community_id": int, "item_id": int}`. Advances ONLY if
-
-        `item_id` is the community''s CURRENT `playing` item -- a guard against
-
-        two overlay instances (or a race against the GET route''s own lazy
-
-        auto-advance) both trying to advance the same already-advanced state.
-
-        `advanced: false` (never an error) means another caller already won
-
-        the race; the response still carries the current, authoritative state
-
-        either way.'
-      operationId: post_internal_advance_live_queue
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`POST /api/v1/internal/music/queue/advance` -- service-to-service
-        only.'
-  /api/v1/internal/music/queue/requests:
-    post:
-      description: '
-
-        Lets a pipeline action bundle (no user JWT -- a chat command, not an
-
-        admin API call) enqueue a Music Station song request on a viewer''s
-
-        behalf. `communityId`/`urlOrQuery` are required; `tenantId` is
-
-        deliberately NOT accepted from the caller -- it''s derived from the
-
-        community row itself (security.md: never trust a tenant claim from
-
-        the caller when it can instead come from an already-tenant-scoped
-
-        row), same trust boundary reasoning as `communityId` being trusted at
-
-        all here: this route is service-key gated, not open to the internet.'
-      operationId: post_internal_enqueue_song_request
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`POST /api/v1/internal/music/queue/requests` -- service-to-service
-        only.'
-  /api/v1/internal/music/status:
-    get:
-      description: '
-
-        Backs `!sr status` (`core/svc_action/builtin_handlers/social_music_action.py`).
-
-        Deliberately does NOT check `music_policy.song_requests_allowed` --
-
-        that''s a separate per-community admin toggle from the PostHog
-
-        `waddles.social.music` feature flag this endpoint''s caller already
-
-        resolved itself before ever reaching hub-api (`social_music_process.
-
-        py`''s `disabled` short-circuit). This endpoint answers one question
-
-        only: is the Spotify provider usable right now, and how big is the
-
-        queue -- both real signals `music_policy` can''t answer.
-
-
-        `state` in the response body is always `"enabled"` or `"error"` (with
-
-        a specific, secret-free `cause`) -- never `"offline"`. `"offline"` is
-
-        a caller-side interpretation of an unreachable hub-api or a non-2xx
-
-        response, not a state this handler can observe about itself; see
-
-        `social_music_action._check_status()`''s own docstring.'
-      operationId: get_internal_music_status
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`GET /api/v1/internal/music/status?community_id=<id>` -- service-to-service
         only.'
   /api/v1/internal/relay/incoming:
     post:
@@ -21985,31 +21834,6 @@ paths:
           description: Undocumented response
       summary: Unauthenticated, rate-limited read of one community's current live
         status.
-  /api/v1/public/communities/{community_id}/music-station/queue:
-    get:
-      description: '
-
-        `community_id` must resolve to an existing, active, non-deleted,
-
-        PUBLIC community (`communities.is_public`) -- a private/inactive/
-
-        deleted/unknown community all collapse to the same 404, never leaking
-
-        which case applies. `Cache-Control: no-store` -- this is live queue
-
-        state, never a cacheable response.'
-      operationId: get_get_public_queue
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        default:
-          description: Undocumented response
-      summary: Unauthenticated, rate-limited read of one community's live Music Station
-        queue.
   /api/v1/public/communities/{community_id}/profile:
     get:
       description: ''

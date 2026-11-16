@@ -303,6 +303,8 @@ def create_jwt_token(
     expiration_seconds: int | None = None,
     session_id: str | None = None,
     issued_at: int | None = None,
+    amr: list[str] | None = None,
+    auth_time: int | None = None,
 ) -> str:
     """
     Create JWT token for user authentication.
@@ -343,6 +345,13 @@ def create_jwt_token(
         kid: JOSE header `kid` identifying the signing key; defaults to
             `DEFAULT_JWT_KID`. Selects the verification key once the JWKS
             (ES256) phase lands; the HS256 verifier only vets its charset.
+
+        amr: OIDC `amr` (RFC 8176) authentication-methods list for the authentication event
+            that produced this token (e.g. `["pwd", "otp"]`). Omitted when None. Only a
+            step-up issuer that really verified a second factor may pass it: sensitive
+            admin actions (`services/mfa_stepup.py`) trust it.
+        auth_time: OIDC `auth_time` (epoch seconds of that authentication event). Omitted
+            when None.
 
     Returns:
         JWT token string
@@ -407,6 +416,10 @@ def create_jwt_token(
     }
     if session_id is not None:
         payload['sid'] = session_id
+    if amr is not None:
+        payload['amr'] = list(amr)
+    if auth_time is not None:
+        payload['auth_time'] = int(auth_time)
 
     token = jwt.encode(
         payload, secret_key, algorithm=PLATFORM_JWT_ALGORITHM, headers={'kid': kid}

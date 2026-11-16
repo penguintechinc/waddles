@@ -36,7 +36,7 @@ coverage:
 VARIANT ?= cpu
 
 docker-build:
-	docker build -f Dockerfile.rust --target $(VARIANT) -t localhost:32000/waddlebot/svc-streaming:alpha-$$(date +%s)-$(VARIANT) .
+	docker build --build-context proto=../../proto -f Dockerfile.rust --target $(VARIANT) -t localhost:32000/waddlebot/svc-streaming:alpha-$$(date +%s)-$(VARIANT) .
 
 # Smoke-tests a built variant image: encoders, driver wiring, CPU fallback. Usage:
 #   make image-smoke VARIANT=nvidia IMAGE=localhost:32000/waddlebot/svc-streaming:alpha-1700000000-nvidia

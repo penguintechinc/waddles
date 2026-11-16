@@ -90,6 +90,7 @@ use crate::stage_metrics::{self, StageMetrics};
 
 mod gameserver_net;
 pub use gameserver_net::{GameServerNetWiring, BUNDLE_GAMESERVER_NET_CAPABILITY_FLAG};
+mod floor_ban;
 mod tool;
 pub use tool::ToolContext;
 
@@ -444,6 +445,9 @@ pub struct ReputationWiring {
     /// `crate::license::BUNDLE_REPUTATION_CAPABILITY_FLAG` gate -- OFF denies
     /// every call `feature_disabled` before the store is touched.
     pub flag: Arc<dyn FeatureGate>,
+    /// `crate::license::REPUTATION_AUTO_BAN_FLAG` gate (`waddles.reputation-auto-ban`, default
+    /// OFF) for the automated floor ban (`floor_ban`). `None` or OFF refuses every floor ban.
+    pub auto_ban_flag: Option<Arc<dyn FeatureGate>>,
 }
 
 /// Live wiring for the `platform-table` bundle host capability (spec
@@ -593,6 +597,8 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::ConnectionManager> {
     /// `None` until [`Self::with_media`] -- every `media.*` call denies
     /// `not_implemented` in that state (fail-loud, never a canned result).
     media: Option<MediaWiring>,
+    /// `None` until [`Self::with_surface`] -- `surface.publish` denies `not_implemented` then.
+    surface: Option<crate::surface::SurfaceWiring>,
     /// The instant this invocation's executor deadline expires, set with
     /// [`Self::with_media`]; bounds the synchronous image call.
     media_deadline: Option<std::time::Instant>,
@@ -733,6 +739,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             ai: None,
             ai_deadline: None,
             media: None,
+            surface: None,
             media_deadline: None,
             invocation_identity: None,
             verified_scope: None,
@@ -905,6 +912,33 @@ impl<K: KvBackend> StageCapabilities<K> {
         self.media = Some(media);
         self.media_deadline = Some(invoke_deadline);
         self
+    }
+
+    /// Attaches the `overlay.publish-surface` wiring (delivery host + default-OFF flag).
+    pub fn with_surface(mut self, surface: crate::surface::SurfaceWiring) -> Self {
+        self.surface = Some(surface);
+        self
+    }
+
+    /// `surface.publish`: community and app id come from the host-verified scope, never args.
+    async fn handle_surface(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        if call.op != "surface.publish" {
+            return Err(denied(
+                "unknown_op",
+                format!("surface op {:?} not supported", call.op),
+            ));
+        }
+        let scope = self.gate_scope();
+        crate::surface::publish(
+            self.surface.as_ref(),
+            scope.app_id(),
+            i64::from(scope.community_id()),
+            &call.args,
+        )
+        .await
     }
 
     /// `media.generate_image` / `media.submit_music` / `media.submit_video` /
@@ -3727,6 +3761,16 @@ impl<K: KvBackend> StageCapabilities<K> {
         {
             invocation.release_mutation(kind, ordinal);
         }
+        // Host-tracked fact for the automated floor-ban gate: THIS user's score in THIS community
+        // really changed in THIS invocation. Only `applied == true` counts: an idempotent replay
+        // changed nothing and must never unlock a ban (never guest input; see `floor_ban`).
+        if let (Op::Apply { user, .. }, Ok(v)) = (&op, &result) {
+            if v.get("applied") == Some(&serde_json::Value::Bool(true)) {
+                if let Some(invocation) = self.invocation_identity.as_deref() {
+                    invocation.mark_reputation_applied(*user, scope.community_id);
+                }
+            }
+        }
         result.map_err(reputation_error_to_host)
     }
 
@@ -3791,6 +3835,15 @@ impl<K: KvBackend> StageCapabilities<K> {
     }
 
     fn handle_context(&self) -> Result<serde_json::Value, HostResultError> {
+        self.handle_context_with_base(std::env::var(PUBLIC_WEBUI_URL_ENV).ok().as_deref())
+    }
+
+    /// `handle_context` with the public web base URL injected (the env read is the caller's
+    /// job so tests never touch process-global state).
+    fn handle_context_with_base(
+        &self,
+        web_base_url: Option<&str>,
+    ) -> Result<serde_json::Value, HostResultError> {
         self.gate
             .authorize(
                 &self.gate_scope(),
@@ -3820,6 +3873,11 @@ impl<K: KvBackend> StageCapabilities<K> {
         if let Some((tenant_id, community_id)) = self.verified_scope {
             ctx["tenant_id"] = serde_json::json!(i64::from(tenant_id));
             ctx["community_id"] = serde_json::json!(community_id);
+        }
+        // Platform web base URL (omitted when unset/invalid): lets service bundles build
+        // user-facing links such as the community music page. Not a secret.
+        if let Some(base) = normalize_web_base_url(web_base_url) {
+            ctx["web_base_url"] = serde_json::json!(base);
         }
         Ok(ctx)
     }
@@ -4578,6 +4636,10 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             // `media.*` ops likewise: own gate permission (`media.generate`), own
             // handler (`bundle_host_media`), never the `storage.tables` path.
             CapabilityKind::Db if call.op.starts_with("media.") => self.handle_media(&call).await,
+            // `surface.publish` (overlay.publish-surface): own handler, never `storage.tables`.
+            CapabilityKind::Db if call.op.starts_with("surface.") => {
+                self.handle_surface(&call).await
+            }
             CapabilityKind::Db => self.handle_db(&call).await,
             // `enabled` is wired to a real `penguin_licensing::
             // LicenseClient` (`crate::license::resolve_flag`) -- see
@@ -4644,6 +4706,23 @@ impl CapabilityHandler for DenyAllCapabilities {
 /// behind one `Arc<dyn CapabilityHandler>`.
 pub fn boxed(handler: impl CapabilityHandler + 'static) -> Arc<dyn CapabilityHandler> {
     Arc::new(handler)
+}
+
+/// Env var carrying the public web UI base URL (for links bundles hand to users).
+const PUBLIC_WEBUI_URL_ENV: &str = "PUBLIC_WEBUI_URL";
+
+/// Normalises the configured public web base URL: trimmed, `https://` (or `http://` for dev
+/// only), trailing slashes dropped; anything else (unset, empty, other scheme, no host) is
+/// `None` so the context simply omits `web_base_url` instead of handing out a bad link base.
+fn normalize_web_base_url(raw: Option<&str>) -> Option<String> {
+    let t = raw?.trim().trim_end_matches('/');
+    let host = t
+        .strip_prefix("https://")
+        .or_else(|| t.strip_prefix("http://"))?;
+    if host.is_empty() || host.starts_with('/') || host.bytes().any(|b| b.is_ascii_whitespace()) {
+        return None;
+    }
+    Some(t.to_string())
 }
 
 #[cfg(test)]
@@ -4877,6 +4956,58 @@ mod tests {
             assert_eq!(ctx["message_id"], id);
         }
         assert!(caps().handle_context().unwrap().get("message_id").is_none());
+    }
+
+    /// `web_base_url` normalisation: https (or dev http), trimmed, no trailing slash; else None.
+    #[test]
+    fn web_base_url_is_normalised_or_omitted() {
+        for (raw, want) in [
+            (
+                Some("https://app.example.org"),
+                Some("https://app.example.org"),
+            ),
+            (
+                Some("  https://app.example.org/// "),
+                Some("https://app.example.org"),
+            ),
+            (
+                Some("http://localhost:8080/"),
+                Some("http://localhost:8080"),
+            ),
+            (
+                Some("https://app.example.org/sub"),
+                Some("https://app.example.org/sub"),
+            ),
+        ] {
+            assert_eq!(normalize_web_base_url(raw).as_deref(), want, "{raw:?}");
+        }
+        for bad in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("ftp://x.example"),
+            Some("javascript:1"),
+            Some("https://"),
+            Some("https:///x"),
+            Some("app.example.org"),
+            Some("https://a b.example"),
+        ] {
+            assert_eq!(normalize_web_base_url(bad), None, "{bad:?}");
+        }
+    }
+
+    /// The bundle context carries `web_base_url` only when the platform configured one.
+    #[test]
+    fn get_context_carries_web_base_url_only_when_set() {
+        let h = caps();
+        let with = h
+            .handle_context_with_base(Some("https://app.example.org/"))
+            .expect("context");
+        assert_eq!(with["web_base_url"], "https://app.example.org");
+        for unset in [None, Some(""), Some("ftp://nope")] {
+            let ctx = h.handle_context_with_base(unset).expect("context");
+            assert!(ctx.get("web_base_url").is_none(), "{unset:?}");
+        }
     }
 
     fn caps() -> StageCapabilities {

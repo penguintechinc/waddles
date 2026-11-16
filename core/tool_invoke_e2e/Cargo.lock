@@ -683,6 +683,7 @@ name = "bundle-config-db"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "command-latency",
  "hub_client",
  "opentelemetry",
  "redis",
@@ -870,6 +871,23 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "bundle-host-surface"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "prost",
+ "serde",
+ "serde_json",
+ "service_auth",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
 ]
 
 [[package]]
@@ -4808,6 +4826,7 @@ dependencies = [
  "bundle-host-platform-table",
  "bundle-host-reputation",
  "bundle-host-storage",
+ "bundle-host-surface",
  "bundle-tool-call",
  "chrono",
  "circuit-breaker",
