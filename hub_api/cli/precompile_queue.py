@@ -24,14 +24,36 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from config import HubAPIConfig
 from services import bundle_precompile_service as svc
 from services.bundle_install_dal import build_install_dal
 
 logger = logging.getLogger("waddles.hub_api.precompile_queue")
+
+
+class PrecompileConfigError(RuntimeError):
+    """Raised when the precompile CLI's minimal environment is incomplete (fail closed)."""
+
+
+def database_url_from_env(env: Mapping[str, str] | None = None) -> str:
+    """Return the Postgres DSN the precompile CLI needs -- and nothing else.
+
+    The queue export/ack steps only touch `bundle_precompile_requests` / bundle versions
+    through the install DAL, so they must not demand the full `HubAPIConfig` (which also
+    requires SECRET_KEY, a session/JWT secret this pod deliberately never receives -- M2).
+    `DATABASE_URL` is rendered by the chart from the precompile DB role's own secretKeyRef;
+    a missing/blank value raises rather than falling back to a guessed default DSN.
+    """
+    source = os.environ if env is None else env
+    url = (source.get("DATABASE_URL") or "").strip()
+    if not url:
+        raise PrecompileConfigError(
+            "DATABASE_URL is required for cli.precompile_queue export/ack (no default DSN)"
+        )
+    return url
 
 
 async def _export(install_dal: Any, out: Path, *, all_active: bool, limit: int) -> int:
@@ -109,8 +131,7 @@ async def _run(args: argparse.Namespace) -> int:
         _check_denominator(report, args.manifest)
         if args.backfill:
             return await _ack(None, report)
-    config = HubAPIConfig.from_env()
-    install_dal = await build_install_dal(config.database_url, pool_size=2)
+    install_dal = await build_install_dal(database_url_from_env(), pool_size=2)
     try:
         if args.command == "export":
             return await _export(
