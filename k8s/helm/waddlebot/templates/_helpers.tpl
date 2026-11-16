@@ -1019,6 +1019,14 @@ existingSecret (SSE assertion mandatory). Fails the render on any inconsistency.
       name: {{ $e.existingSecret | quote }}
       key: {{ $e.secretKeyKey | quote }}
 {{- end }}
+{{- /* Object bodies are sealed per tenant (no plaintext write path). Legacy pre-encryption plaintext is READ only for objects last modified before this unix-seconds cutoff; unset renders nothing = no plaintext object is ever served. svc-process refuses a cutoff in the future. */}}
+{{- with .Values.bundleStorage.legacyPlaintextUntil }}
+{{- if not (regexMatch "^[0-9]+$" (toString .)) }}
+{{- fail "bundleStorage.legacyPlaintextUntil must be unix seconds (digits only) or empty" }}
+{{- end }}
+- name: BUNDLE_STORAGE_LEGACY_PLAINTEXT_UNTIL
+  value: {{ toString . | quote }}
+{{- end }}
 {{- end -}}
 
 {{- define "waddlebot.valkeyTlsCaVolumeMount" -}}

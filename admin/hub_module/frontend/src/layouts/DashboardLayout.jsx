@@ -5,6 +5,7 @@ import {
   HomeIcon,
   UserGroupIcon,
   ChatBubbleLeftRightIcon,
+  VideoCameraIcon,
   Cog6ToothIcon,
   UserCircleIcon,
   UserIcon,
@@ -84,6 +85,7 @@ function DashboardLayout() {
           { name: 'Overview', href: `/dashboard/community/${communityId}`, icon: HomeIcon },
           { name: 'Members', href: `/dashboard/community/${communityId}/members`, icon: UserGroupIcon },
           { name: 'Chat & Forums', href: `/community/${communityId}/interact`, icon: ChatBubbleLeftRightIcon },
+          { name: 'Town Hall', href: `/community/${communityId}/town-hall`, icon: VideoCameraIcon },
           { name: 'Leaderboard', href: `/dashboard/community/${communityId}/leaderboard`, icon: TrophyIcon },
           { name: 'Inventory', href: `/community/${communityId}/inventory`, icon: InboxStackIcon },
           ...(musicEnabled

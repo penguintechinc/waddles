@@ -4838,6 +4838,7 @@ dependencies = [
  "bundle-capability-gate",
  "bundle-config-db",
  "bundle-host-credentials",
+ "bundle-host-crypto",
  "bundle-host-db",
  "bundle-host-economy",
  "bundle-host-gameserver-net",

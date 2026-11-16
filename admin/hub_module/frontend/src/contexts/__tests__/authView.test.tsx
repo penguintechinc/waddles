@@ -17,6 +17,16 @@ describe('toAuthView', () => {
     }
   });
 
+  it('wraps isCommunityAdmin, passing the community id and treating anything but true as false', () => {
+    const isCommunityAdmin = vi.fn((id: number) => id === 7);
+    const view = toAuthView({ isCommunityAdmin });
+    expect(view.isCommunityAdmin(7)).toBe(true);
+    expect(view.isCommunityAdmin(8)).toBe(false);
+    expect(isCommunityAdmin).toHaveBeenCalledWith(7);
+    expect(toAuthView({ isCommunityAdmin: () => 'yes' }).isCommunityAdmin(1)).toBe(false);
+    expect(toAuthView({}).isCommunityAdmin(7)).toBe(false);
+  });
+
   it('refreshUser calls the context function and is a no-op when absent', async () => {
     const refresh = vi.fn().mockResolvedValue(undefined);
     await toAuthView({ refreshUser: refresh }).refreshUser();
