@@ -19,6 +19,7 @@ Every test asserts how many values files/documents it examined -- zero is a fail
 from __future__ import annotations
 
 import functools
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -28,8 +29,34 @@ import pytest
 import yaml
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
-_HELM3 = str(Path.home() / ".local" / "bin" / "helm3")
-_HELMS = {"helm4": "helm", "helm3": _HELM3}
+_HELM3 = Path.home() / ".local" / "bin" / "helm3"
+
+
+def _major(binary: str | None) -> int | None:
+    """Major version of a helm binary (`helm version --template`), or None when unusable."""
+    if not binary:
+        return None
+    out = subprocess.run(  # noqa: S603 -- fixed argv, test-only
+        [binary, "version", "--template", "{{.Version}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "HELM_PLUGINS": "/nonexistent"},
+    )
+    version = out.stdout.strip().lstrip("v")
+    return int(version.split(".")[0]) if out.returncode == 0 and version[:1].isdigit() else None
+
+
+def _find_helms() -> dict[str, str | None]:
+    """The helm 3 and helm 4 binaries: explicit locations first, then `helm` by its real major."""
+    default = shutil.which("helm")
+    helm3 = str(_HELM3) if _HELM3.exists() else (default if _major(default) == 3 else None)
+    helm4_env = os.environ.get("HELM4_BIN")
+    helm4 = helm4_env if helm4_env else (default if _major(default) == 4 else None)
+    return {"helm3": helm3, "helm4": helm4}
+
+
+_HELMS = _find_helms()
 # (values file, extra --set). values.yaml / values-ci.yaml need the alpha tier to render the (unrelated)
 # SeaweedFS encryption guard; values-local runs an EXTERNAL database (no in-chart Postgres).
 _ENVS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -51,8 +78,10 @@ _ids = lambda c: f"{c[0]}-{c[1][0]}"  # noqa: E731 -- pytest id callback
 def _run(helm: str, values: str, extra: tuple[str, ...], more: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
     """Run `helm template` for one values file; return the raw process result."""
     binary = _HELMS[helm]
-    if not shutil.which(binary) and not Path(binary).exists():
-        pytest.fail(f"{helm} binary not found ({binary})")
+    if not binary:
+        if os.getenv("CI"):
+            pytest.fail(f"{helm} is required in CI")
+        pytest.skip(f"{helm} not available in this environment")
     argv = [binary, "template", "waddlebot", str(_CHART_DIR), "--kube-version", "1.30.0"]
     if values != "values.yaml":
         argv += ["--values", str(_CHART_DIR / values)]
