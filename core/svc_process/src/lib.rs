@@ -2327,10 +2327,28 @@ fn try_start_changelog_consumer(
                         }
                         None => None,
                     };
+                    // Per-tenant at-rest sealing of bundle kv values AND object bodies; see
+                    // `crate::kv_sealing`. One DEK cache (and one rotation/revocation listener)
+                    // serves both. The gate honours the opt-out kill-switch when a license client
+                    // exists, else seals.
+                    let (sealing, dek_cache) =
+                        kv_sealing::build(&config.cli, bundle_db_license_client.as_ref());
                     deps.object_storage_wiring = match &bundle_db_license_client {
-                        Some(client) => bundle_storage::try_build_wiring(&config.cli, client).await,
+                        Some(client) => {
+                            bundle_storage::try_build_wiring(&config.cli, client, &dek_cache).await
+                        }
                         None => None,
                     };
+                    match build_redis_client(&deps.spine_cfg) {
+                        Some(client) => {
+                            bundle_host_kv::grpc_wiring::spawn_dek_invalidation(client, dek_cache);
+                        }
+                        None => tracing::error!(
+                            "kv/object sealing: no spine Valkey client; DEK rotation/revocation \
+                             signals will not be received (cache TTL bounds staleness)"
+                        ),
+                    }
+                    deps.kv_sealing = Some(sealing);
                     deps.gameserver_net_wiring = bundle_db_license_client
                         .as_ref()
                         .and_then(|client| try_build_gameserver_net_wiring(&config.cli, client));
@@ -2423,21 +2441,6 @@ fn try_start_changelog_consumer(
                             bundle_db_license_client.clone(),
                         )));
                     }
-                    // Per-tenant at-rest sealing of bundle kv values; see
-                    // `crate::kv_sealing`. The gate honours the opt-out
-                    // kill-switch when a license client exists, else seals.
-                    let (sealing, dek_cache) =
-                        kv_sealing::build(&config.cli, bundle_db_license_client.as_ref());
-                    match build_redis_client(&deps.spine_cfg) {
-                        Some(client) => {
-                            bundle_host_kv::grpc_wiring::spawn_dek_invalidation(client, dek_cache);
-                        }
-                        None => tracing::error!(
-                            "kv sealing: no spine Valkey client; DEK rotation/revocation \
-                             signals will not be received (cache TTL bounds staleness)"
-                        ),
-                    }
-                    deps.kv_sealing = Some(sealing);
                     // `command` latency label: registered commands from the read REPLICA only
                     // (never the primary, never an env list); seed + periodic + lazy-on-miss.
                     let _latency_labels =

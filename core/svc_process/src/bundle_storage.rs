@@ -13,13 +13,24 @@
 //!   `waddles_bundle_storage_capability_provisioned` gauge at 0;
 //! - all five set: capability PROVISIONED (gauge 1);
 //! - some set, some missing/empty, or the endpoint is rejected: startup FAILS.
+//!
+//! Object bodies are sealed per tenant (`bundle_host_storage::seal`, tenant DEK from hub-api's
+//! `GetTenantDek` broker, shared with the kv sealing). Sealing fails CLOSED and has no ledger:
+//! there is no plaintext write path (no usable key or the
+//! `waddles.disable-tenant-at-rest-encryption` kill-switch refuses the write), and legacy
+//! pre-encryption plaintext is only READ, only for objects last modified before the operator's
+//! `BUNDLE_STORAGE_LEGACY_PLAINTEXT_UNTIL` cutoff (unset = never). Without the hub-api key service
+//! configured the capability is not provisioned at all (ERROR + gauge 0), never unsealed.
 
 use std::fmt;
 use std::sync::Arc;
 
+use bundle_host_kv::grpc_wiring::GrpcDekProvider;
 use bundle_host_storage::pg_audit::{self, AuditConnectConfig};
 use bundle_host_storage::s3::{S3Backend, S3Config};
-use bundle_host_storage::{AuditSink, PgAuditSink, StorageHost, TracingAuditSink};
+use bundle_host_storage::{
+    AuditSink, ObjectBackend, ObjectSealing, PgAuditSink, StorageHost, TracingAuditSink,
+};
 
 use crate::capabilities::ObjectStorageWiring;
 use crate::config::Secret;
@@ -65,6 +76,47 @@ pub fn resolve_audit_password(
 
 /// Default INSERT-only audit role (`alembic/versions/0080_bundle_storage_audit.py`).
 pub const AUDIT_ROLE: &str = "waddles_bundle_storage_audit";
+
+/// Unix-seconds cutoff for serving legacy (pre-encryption) plaintext objects: only objects whose
+/// server-side last-modified is BEFORE it are read. Record the instant sealing was first enabled.
+/// Unset/blank = no plaintext object is ever served.
+pub const LEGACY_PLAINTEXT_UNTIL_ENV: &str = "BUNDLE_STORAGE_LEGACY_PLAINTEXT_UNTIL";
+
+/// Clock-skew allowance when checking that the cutoff is not in the future.
+const CUTOFF_SKEW_SECS: u64 = 300;
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Parses [`LEGACY_PLAINTEXT_UNTIL_ENV`]: `Ok(None)` when unset/blank. A malformed value or one in
+/// the future is an error -- a future cutoff would make plaintext an attacker writes NOW readable
+/// until then, so the window may only close at or before the present.
+pub fn resolve_legacy_cutoff(
+    get: &impl Fn(&str) -> Option<String>,
+    now_unix: u64,
+) -> Result<Option<u64>, StorageConfigError> {
+    let Some(raw) = get(LEGACY_PLAINTEXT_UNTIL_ENV)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    else {
+        return Ok(None);
+    };
+    let cutoff: u64 = raw.parse().map_err(|_| {
+        StorageConfigError::Invalid(format!(
+            "{LEGACY_PLAINTEXT_UNTIL_ENV} must be unix seconds (digits only)"
+        ))
+    })?;
+    if cutoff > now_unix.saturating_add(CUTOFF_SKEW_SECS) {
+        return Err(StorageConfigError::Invalid(format!(
+            "{LEGACY_PLAINTEXT_UNTIL_ENV} is in the future; the legacy-plaintext window must close \
+             at or before now (a future cutoff would serve plaintext written after sealing began)"
+        )));
+    }
+    Ok(Some(cutoff))
+}
 
 /// Parsed, validated `BUNDLE_STORAGE_*` settings. Credentials are redacted in `Debug`.
 #[derive(Clone)]
@@ -198,6 +250,7 @@ fn validate_with(get: impl Fn(&str) -> Option<String>) -> Result<(), StorageConf
         Some(s) => {
             // Provisioned: the durable audit credential is mandatory (local dev excepted).
             resolve_audit_password(&get)?;
+            resolve_legacy_cutoff(&get, now_unix())?;
             tracing::info!(
                 endpoint = %s.endpoint,
                 bucket = %s.bucket,
@@ -219,12 +272,14 @@ fn record_provisioned(on: bool) {
 
 /// Builds the production wiring from `settings`. The audit sink is the durable
 /// Postgres one when `audit_password` is given (connect failure is an error, never a
-/// silent downgrade), else the tracing sink with a WARN.
+/// silent downgrade), else the tracing sink with a WARN. `sealing` is mandatory: every host
+/// built here seals object bodies per tenant, with no plaintext write path.
 pub async fn build_wiring(
     settings: &StorageSettings,
     audit_cfg: &AuditConnectConfig,
     audit_password: Option<&Secret>,
     license_client: &Arc<penguin_licensing::LicenseClient>,
+    sealing: ObjectSealing,
 ) -> Result<ObjectStorageWiring, StorageConfigError> {
     let backend = build_backend(settings)?;
     let audit: Arc<dyn AuditSink> = match audit_password {
@@ -244,12 +299,22 @@ pub async fn build_wiring(
             Arc::new(TracingAuditSink)
         }
     };
-    Ok(ObjectStorageWiring {
-        host: Arc::new(StorageHost::new(Arc::new(backend), audit)),
+    Ok(assemble(Arc::new(backend), audit, license_client, sealing))
+}
+
+/// The one place a [`StorageHost`] is built: always with sealing attached.
+fn assemble(
+    backend: Arc<dyn ObjectBackend>,
+    audit: Arc<dyn AuditSink>,
+    license_client: &Arc<penguin_licensing::LicenseClient>,
+    sealing: ObjectSealing,
+) -> ObjectStorageWiring {
+    ObjectStorageWiring {
+        host: Arc::new(StorageHost::new(backend, audit).with_sealing(sealing)),
         flag: Arc::new(BundleObjectStorageCapabilityGate::new(Arc::clone(
             license_client,
         ))),
-    })
+    }
 }
 
 /// Process-start entry used at both stage-spawn sites: `None` when disabled, the
@@ -259,8 +324,9 @@ pub async fn build_wiring(
 pub async fn try_build_wiring(
     cli: &crate::config::CliConfig,
     license_client: &Arc<penguin_licensing::LicenseClient>,
+    dek_cache: &GrpcDekProvider,
 ) -> Option<ObjectStorageWiring> {
-    try_build_with(|k| std::env::var(k).ok(), cli, license_client).await
+    try_build_with(|k| std::env::var(k).ok(), cli, license_client, dek_cache).await
 }
 
 /// [`try_build_wiring`] over an injected variable source.
@@ -268,6 +334,7 @@ async fn try_build_with(
     get: impl Fn(&str) -> Option<String>,
     cli: &crate::config::CliConfig,
     license_client: &Arc<penguin_licensing::LicenseClient>,
+    dek_cache: &GrpcDekProvider,
 ) -> Option<ObjectStorageWiring> {
     let settings = match parse_settings(&get) {
         Ok(Some(s)) => s,
@@ -285,6 +352,32 @@ async fn try_build_with(
             return None;
         }
     };
+    // Sealing fails closed at build time too: with no hub-api key service there is no tenant
+    // DEK, so every put/get would refuse -- say so once, loudly, and do not provision.
+    if crate::kv_sealing::key_endpoint(cli).is_none() {
+        record_provisioned(false);
+        tracing::error!(
+            "object-storage capability unavailable: hub-api key service not configured \
+             (HUB_API_GRPC_ENDPOINT / SERVICE_JWT_TOKEN_ENDPOINT); bodies are never stored unsealed"
+        );
+        return None;
+    }
+    let legacy_cutoff = match resolve_legacy_cutoff(&get, now_unix()) {
+        Ok(cutoff) => cutoff,
+        Err(err) => {
+            record_provisioned(false);
+            tracing::error!(error = %err, "object-storage capability unavailable");
+            return None;
+        }
+    };
+    if let Some(cutoff) = legacy_cutoff {
+        tracing::warn!(
+            cutoff_unix = cutoff,
+            "legacy plaintext object READS enabled for objects modified before the cutoff \
+             (writes are always sealed); unset {LEGACY_PLAINTEXT_UNTIL_ENV} once migrated"
+        );
+    }
+    let sealing = crate::kv_sealing::object_sealing(dek_cache, Some(license_client), legacy_cutoff);
     let audit_cfg = AuditConnectConfig {
         host: cli.bundle_db_host.clone(),
         port: cli.bundle_db_port,
@@ -296,6 +389,7 @@ async fn try_build_with(
         &audit_cfg,
         audit_password.as_ref(),
         license_client,
+        sealing,
     )
     .await
     {
@@ -424,7 +518,7 @@ mod tests {
     async fn build_wiring_provisions_with_tracing_audit_fallback() {
         let s = parse_settings(env(&full())).unwrap().unwrap();
         let lc = test_license_client();
-        let w = build_wiring(&s, &audit_cfg(), None, &lc)
+        let w = build_wiring(&s, &audit_cfg(), None, &lc, test_sealing())
             .await
             .expect("wiring");
         assert!(
@@ -438,15 +532,41 @@ mod tests {
         let s = parse_settings(env(&full())).unwrap().unwrap();
         let lc = test_license_client();
         let pw = Secret::new("x");
-        let r = build_wiring(&s, &audit_cfg(), Some(&pw), &lc).await;
+        let r = build_wiring(&s, &audit_cfg(), Some(&pw), &lc, test_sealing()).await;
         assert!(
             matches!(r, Err(StorageConfigError::Invalid(m)) if m.contains("audit connection failed"))
         );
     }
 
+    /// A CLI with the hub-api key service configured (sealing needs it).
     fn cli() -> crate::config::CliConfig {
         use clap::Parser as _;
+        crate::config::CliConfig::parse_from([
+            "svc-process",
+            "--hub-api-grpc-endpoint",
+            "https://hub-api:50051",
+            "--service-jwt-token-endpoint",
+            "https://hub-api:8443/token",
+        ])
+    }
+
+    /// A CLI WITHOUT the key service: sealing cannot work, so nothing may be provisioned.
+    fn cli_without_key_service() -> crate::config::CliConfig {
+        use clap::Parser as _;
         crate::config::CliConfig::parse_from(["svc-process"])
+    }
+
+    /// The (lazy, unconnected) DEK cache the stage would build from `cli()`.
+    fn dek() -> GrpcDekProvider {
+        bundle_host_crypto::grpc::tenant_crypto_over_grpc(
+            crate::kv_sealing::key_endpoint(&cli()),
+            crate::SERVICE_NAME,
+        )
+        .1
+    }
+
+    fn test_sealing() -> ObjectSealing {
+        crate::kv_sealing::object_sealing(&dek(), None, None)
     }
 
     #[test]
@@ -462,15 +582,17 @@ mod tests {
 
     #[tokio::test]
     async fn try_build_is_none_when_disabled() {
-        assert!(try_build_with(env(&[]), &cli(), &test_license_client())
-            .await
-            .is_none());
+        assert!(
+            try_build_with(env(&[]), &cli(), &test_license_client(), &dek())
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn try_build_provisions_when_env_complete() {
         assert!(
-            try_build_with(env(&local()), &cli(), &test_license_client())
+            try_build_with(env(&local()), &cli(), &test_license_client(), &dek())
                 .await
                 .is_some()
         );
@@ -512,16 +634,18 @@ mod tests {
     async fn try_build_refuses_tracing_fallback_outside_local() {
         let mut p = full();
         p.push(("DEPLOYMENT_TIER", "alpha"));
-        assert!(try_build_with(env(&p), &cli(), &test_license_client())
-            .await
-            .is_none());
+        assert!(
+            try_build_with(env(&p), &cli(), &test_license_client(), &dek())
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn try_build_is_none_on_partial_env_never_a_half_wired_host() {
         let partial = vec![("BUNDLE_STORAGE_BUCKET", "b")];
         assert!(
-            try_build_with(env(&partial), &cli(), &test_license_client())
+            try_build_with(env(&partial), &cli(), &test_license_client(), &dek())
                 .await
                 .is_none()
         );
@@ -531,8 +655,311 @@ mod tests {
     async fn try_build_is_none_when_configured_audit_db_is_unreachable() {
         let mut p = full();
         p.push((AUDIT_PASSWORD_ENV, "pw"));
-        assert!(try_build_with(env(&p), &cli(), &test_license_client())
-            .await
-            .is_none());
+        assert!(
+            try_build_with(env(&p), &cli(), &test_license_client(), &dek())
+                .await
+                .is_none()
+        );
+    }
+
+    // ---- legacy-plaintext cutoff ----------------------------------------------------------
+
+    #[test]
+    fn legacy_cutoff_unset_blank_valid_malformed_and_future() {
+        const NOW: u64 = 2_000_000_000;
+        let none = env(&[]);
+        assert_eq!(resolve_legacy_cutoff(&none, NOW), Ok(None));
+        let blank = env(&[(LEGACY_PLAINTEXT_UNTIL_ENV, "  ")]);
+        assert_eq!(resolve_legacy_cutoff(&blank, NOW), Ok(None));
+        let ok = env(&[(LEGACY_PLAINTEXT_UNTIL_ENV, " 1999999999 ")]);
+        assert_eq!(resolve_legacy_cutoff(&ok, NOW), Ok(Some(1_999_999_999)));
+        let at_now = env(&[(LEGACY_PLAINTEXT_UNTIL_ENV, "2000000000")]);
+        assert_eq!(resolve_legacy_cutoff(&at_now, NOW), Ok(Some(NOW)));
+        let skew = env(&[(LEGACY_PLAINTEXT_UNTIL_ENV, "2000000300")]);
+        assert_eq!(resolve_legacy_cutoff(&skew, NOW), Ok(Some(NOW + 300)));
+        for bad in ["soon", "-5", "12.5", "0x10", "20000000001234567890123"] {
+            let g = env(&[(LEGACY_PLAINTEXT_UNTIL_ENV, bad)]);
+            assert!(
+                matches!(
+                    resolve_legacy_cutoff(&g, NOW),
+                    Err(StorageConfigError::Invalid(_))
+                ),
+                "{bad:?} must be rejected"
+            );
+        }
+        let future = env(&[(LEGACY_PLAINTEXT_UNTIL_ENV, "2000000301")]);
+        assert!(matches!(
+            resolve_legacy_cutoff(&future, NOW),
+            Err(StorageConfigError::Invalid(m)) if m.contains("future")
+        ));
+    }
+
+    #[test]
+    fn startup_validation_rejects_a_bad_cutoff_only_when_provisioned() {
+        let mut p = local();
+        p.push((LEGACY_PLAINTEXT_UNTIL_ENV, "tomorrow"));
+        assert!(matches!(
+            validate_with(env(&p)),
+            Err(StorageConfigError::Invalid(m)) if m.contains(LEGACY_PLAINTEXT_UNTIL_ENV)
+        ));
+        // not provisioned: the setting is irrelevant
+        assert!(validate_with(env(&[(LEGACY_PLAINTEXT_UNTIL_ENV, "tomorrow")])).is_ok());
+        let mut ok = local();
+        ok.push((LEGACY_PLAINTEXT_UNTIL_ENV, "1700000000"));
+        assert!(validate_with(env(&ok)).is_ok());
+    }
+
+    // ---- fail-closed provisioning ---------------------------------------------------------
+
+    #[tokio::test]
+    async fn without_the_key_service_nothing_is_provisioned() {
+        assert!(try_build_with(
+            env(&local()),
+            &cli_without_key_service(),
+            &test_license_client(),
+            &dek()
+        )
+        .await
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_malformed_or_future_cutoff_provisions_nothing() {
+        for bad in ["soon", "99999999999"] {
+            let mut p = local();
+            p.push((LEGACY_PLAINTEXT_UNTIL_ENV, bad));
+            assert!(
+                try_build_with(env(&p), &cli(), &test_license_client(), &dek())
+                    .await
+                    .is_none(),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_valid_cutoff_still_provisions() {
+        let mut p = local();
+        p.push((LEGACY_PLAINTEXT_UNTIL_ENV, "1700000000"));
+        assert!(
+            try_build_with(env(&p), &cli(), &test_license_client(), &dek())
+                .await
+                .is_some()
+        );
+    }
+
+    // ---- the assembled host really seals --------------------------------------------------
+
+    mod assembled_host {
+        use super::*;
+        use bundle_host_crypto::{Dek, DekProvider, DekUnavailableError, TenantCrypto, MAGIC};
+        use bundle_host_storage::key::object_key;
+        use bundle_host_storage::seal::BoxFuture as SealFuture;
+        use bundle_host_storage::{GrantSet, MemoryBackend, SealGate, StorageError, StorageScope};
+        use bytes::Bytes;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use zeroize::Zeroizing;
+
+        const APP: &str = "waddles.harness.wiring";
+        const PLAIN: &[u8] = b"tenant confidential clip metadata";
+        const CUTOFF: u64 = 2_000_000_000;
+
+        /// DEK provider double: one fixed key per tenant, switchable to "broker down".
+        struct Keys(Arc<AtomicBool>);
+
+        impl DekProvider for Keys {
+            async fn get_dek(&self, tenant: &str) -> Result<(Dek, u32), DekUnavailableError> {
+                self.get_dek_version(tenant, 1).await.map(|d| (d, 1))
+            }
+
+            async fn get_dek_version(
+                &self,
+                tenant: &str,
+                version: u32,
+            ) -> Result<Dek, DekUnavailableError> {
+                if !self.0.load(Ordering::SeqCst) || version != 1 {
+                    return Err(DekUnavailableError {
+                        tenant_id: tenant.to_string(),
+                        dek_version: Some(version),
+                        reason: "test: unavailable".into(),
+                    });
+                }
+                Ok(Zeroizing::new([tenant.len() as u8 + 9; 32]))
+            }
+        }
+
+        struct Off;
+        impl SealGate for Off {
+            fn seal_writes(&self) -> SealFuture<'_, bool> {
+                Box::pin(async { false })
+            }
+        }
+
+        struct Rig {
+            wiring: ObjectStorageWiring,
+            backend: Arc<MemoryBackend>,
+            key_up: Arc<AtomicBool>,
+        }
+
+        fn rig(configure: impl FnOnce(ObjectSealing) -> ObjectSealing, cutoff: Option<u64>) -> Rig {
+            let backend = Arc::new(MemoryBackend::new());
+            let key_up = Arc::new(AtomicBool::new(true));
+            let crypto = TenantCrypto::new(Keys(key_up.clone()));
+            let sealing = configure(crate::kv_sealing::object_sealing_with(crypto, None, cutoff));
+            let wiring = assemble(
+                backend.clone(),
+                Arc::new(TracingAuditSink),
+                &test_license_client(),
+                sealing,
+            );
+            Rig {
+                wiring,
+                backend,
+                key_up,
+            }
+        }
+
+        fn scope() -> StorageScope {
+            StorageScope {
+                app_id: APP.into(),
+                tenant: 1,
+                community: 7,
+                grants: GrantSet::from_permission_ids(std::iter::empty::<&str>()).expect("grants"),
+                enabled: true,
+                request_id: "req-wiring".into(),
+            }
+        }
+
+        async fn put(r: &Rig, key: &str) -> Result<(), StorageError> {
+            r.wiring
+                .host
+                .put(
+                    &scope(),
+                    None,
+                    key,
+                    Bytes::from_static(PLAIN),
+                    "text/plain",
+                    &[],
+                )
+                .await
+                .map(|_| ())
+        }
+
+        async fn stored(r: &Rig, key: &str) -> Option<bundle_host_storage::StoredObject> {
+            r.backend
+                .get(&object_key(APP, 1, 7, key))
+                .await
+                .expect("backend get")
+        }
+
+        #[tokio::test]
+        async fn a_wired_host_stores_ciphertext_and_reads_it_back() {
+            let r = rig(|s| s, None);
+            put(&r, "clip").await.expect("put");
+            let body = stored(&r, "clip").await.expect("stored").body;
+            assert_eq!(&body[..4], &MAGIC, "the bucket holds an envelope");
+            assert!(!body.windows(PLAIN.len()).any(|w| w == PLAIN));
+            let (_, read) = r
+                .wiring
+                .host
+                .get(&scope(), None, "clip")
+                .await
+                .expect("get");
+            assert_eq!(&read[..], PLAIN);
+        }
+
+        #[tokio::test]
+        async fn the_kill_switch_refuses_writes_and_never_stores_plaintext() {
+            let r = rig(|s| s.with_gate(Arc::new(Off)), None);
+            assert!(put(&r, "clip").await.is_err());
+            assert!(
+                stored(&r, "clip").await.is_none(),
+                "nothing written, sealed or not"
+            );
+        }
+
+        #[tokio::test]
+        async fn without_a_tenant_key_nothing_is_written_and_nothing_opens() {
+            let r = rig(|s| s, None);
+            put(&r, "kept")
+                .await
+                .expect("put while the key is available");
+            r.key_up.store(false, Ordering::SeqCst);
+            assert_eq!(
+                put(&r, "new").await.unwrap_err(),
+                StorageError::Backend("tenant data key unavailable".into())
+            );
+            assert!(stored(&r, "new").await.is_none());
+            assert!(r.wiring.host.get(&scope(), None, "kept").await.is_err());
+        }
+
+        #[tokio::test]
+        async fn an_unconfigured_key_service_fails_closed_through_the_production_sealing() {
+            // `object_sealing` over a DEK cache with no reachable broker: every put refuses.
+            let backend = Arc::new(MemoryBackend::new());
+            let wiring = assemble(
+                backend.clone(),
+                Arc::new(TracingAuditSink),
+                &test_license_client(),
+                crate::kv_sealing::object_sealing(
+                    &bundle_host_crypto::grpc::tenant_crypto_over_grpc(None, crate::SERVICE_NAME).1,
+                    None,
+                    None,
+                ),
+            );
+            let r = Rig {
+                wiring,
+                backend,
+                key_up: Arc::new(AtomicBool::new(false)),
+            };
+            assert!(put(&r, "clip").await.is_err());
+            assert!(stored(&r, "clip").await.is_none());
+        }
+
+        fn seed_legacy(r: &Rig, key: &str, modified: u64) {
+            r.backend
+                .put_with_modified(
+                    &object_key(APP, 1, 7, key),
+                    Bytes::from_static(PLAIN),
+                    "text/plain",
+                    &[
+                        "waddles-tenant=1".to_string(),
+                        "waddles-community=7".to_string(),
+                    ],
+                    modified,
+                )
+                .expect("seed");
+        }
+
+        #[tokio::test]
+        async fn legacy_plaintext_is_read_only_inside_the_operator_cutoff() {
+            let never = rig(|s| s, None);
+            seed_legacy(&never, "old", 1);
+            assert!(
+                never.wiring.host.get(&scope(), None, "old").await.is_err(),
+                "no cutoff configured: no plaintext is ever served"
+            );
+
+            let windowed = rig(|s| s, Some(CUTOFF));
+            seed_legacy(&windowed, "older", CUTOFF - 1);
+            seed_legacy(&windowed, "newer", CUTOFF);
+            let (_, body) = windowed
+                .wiring
+                .host
+                .get(&scope(), None, "older")
+                .await
+                .expect("inside the window");
+            assert_eq!(&body[..], PLAIN);
+            assert!(windowed
+                .wiring
+                .host
+                .get(&scope(), None, "newer")
+                .await
+                .is_err());
+            // and writes stay sealed even while legacy reads are open
+            put(&windowed, "fresh").await.expect("put");
+            let fresh = stored(&windowed, "fresh").await.expect("stored").body;
+            assert_eq!(&fresh[..4], &MAGIC);
+        }
     }
 }

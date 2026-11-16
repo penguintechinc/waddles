@@ -219,3 +219,25 @@ def test_external_storage_never_pins_the_private_transit_ca(values):
     env = _deployment_env(_docs(values, _EXTERNAL), "svc-process-rust")
     assert "BUNDLE_STORAGE_CA_FILE" not in env
     assert env["BUNDLE_STORAGE_ENDPOINT"]["value"] == "https://s3.example.com"
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_legacy_plaintext_cutoff_is_unset_by_default_so_no_plaintext_is_ever_served(values):
+    # Objects are sealed per tenant with no plaintext write path; the only plaintext allowance is a
+    # bounded READ window, and it must be an explicit operator opt-in.
+    for name, env in _consumer_envs(_docs(values)).items():
+        assert "BUNDLE_STORAGE_LEGACY_PLAINTEXT_UNTIL" not in env, name
+
+
+@pytest.mark.parametrize("extra", ((), _EXTERNAL))
+def test_legacy_plaintext_cutoff_renders_as_a_quoted_unix_timestamp_when_set(extra):
+    docs = _docs("values-alpha.yaml", (*extra, "bundleStorage.legacyPlaintextUntil=1700000000"))
+    for name, env in _consumer_envs(docs).items():
+        assert env["BUNDLE_STORAGE_LEGACY_PLAINTEXT_UNTIL"]["value"] == "1700000000", name
+
+
+@pytest.mark.parametrize("bad", ("soon", "-5", "12.5", "0x10"))
+def test_a_non_numeric_legacy_cutoff_fails_the_render(bad):
+    r = _helm("values-alpha.yaml", (f"bundleStorage.legacyPlaintextUntil={bad}",))
+    assert r.returncode != 0
+    assert "legacyPlaintextUntil must be unix seconds" in r.stderr
