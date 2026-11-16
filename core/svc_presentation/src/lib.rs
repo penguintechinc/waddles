@@ -20,6 +20,8 @@ pub mod flags;
 pub mod http;
 pub mod images;
 pub mod overlay;
+pub mod scene;
+pub mod surfaces;
 pub mod telemetry;
 
 use std::net::SocketAddr;
@@ -164,20 +166,42 @@ where
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);
+    let grpc_addr = SocketAddr::new(config.cli.bind_addr, config.cli.surface_grpc_port);
+
+    // Fails the process when the gRPC listener would be plaintext on a non-loopback address.
+    let grpc_tls = surfaces::ingress::server_tls(
+        grpc_addr,
+        &config.cli.surface_grpc_tls_cert_file,
+        &config.cli.surface_grpc_tls_key_file,
+    )?;
 
     let http_listener = tokio::net::TcpListener::bind(http_addr).await?;
     let metrics_listener = tokio::net::TcpListener::bind(metrics_addr).await?;
+    let grpc_listener = tokio::net::TcpListener::bind(grpc_addr).await?;
 
-    tracing::info!(%http_addr, %metrics_addr, "listening");
+    tracing::info!(
+        %http_addr, %metrics_addr, %grpc_addr, grpc_tls = grpc_tls.is_some(), "listening"
+    );
+
+    // One stop signal for the HTTP and gRPC listeners: the HTTP shutdown future drives both.
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        http_shutdown.await;
+        let _ = stop_tx.send(true);
+    });
+    let stopped = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
+        let _ = rx.wait_for(|stop| *stop).await;
+    };
 
     let http_server = axum::serve(http_listener, http::router(state.clone()))
-        .with_graceful_shutdown(http_shutdown);
-    let metrics_server = axum::serve(metrics_listener, http::metrics_router(state))
+        .with_graceful_shutdown(stopped(stop_rx.clone()));
+    let metrics_server = axum::serve(metrics_listener, http::metrics_router(state.clone()))
         .with_graceful_shutdown(metrics_shutdown);
 
     let served = tokio::try_join!(
         async { http_server.await.map_err(anyhow::Error::from) },
         async { metrics_server.await.map_err(anyhow::Error::from) },
+        surfaces::ingress::serve(state, grpc_listener, grpc_tls, stopped(stop_rx)),
     );
     retention_task.abort();
     served?;

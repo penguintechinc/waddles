@@ -152,6 +152,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             identity: self.identity.clone(),
             ai: self.ai.clone(),
             media: self.media.clone(),
+            surface: self.surface.clone(),
             media_deadline: ctx.deadline.or(self.media_deadline),
             ai_deadline: ctx.deadline.or(self.ai_deadline),
             invocation_identity: self.invocation_identity.as_ref().map(|identity| {
