@@ -1,8 +1,12 @@
 name: Security & Code Quality
 
 on:
+  # Short-lived branches (feature/fix/chore/docs/refactor/hotfix) are covered by
+  # the pull_request trigger below; listing them here too ran every scan twice
+  # per PR commit (push + pull_request, different concurrency keys). KEEP main,
+  # v*, release/** so direct pushes to long-lived branches still scan.
   push:
-    branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
+    branches: [main, 'v*', 'release/**']
   pull_request:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
   merge_group:

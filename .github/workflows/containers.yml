@@ -1,7 +1,23 @@
 name: Container Builds
 
 on:
+  # Short-lived branches (feature/fix/chore/docs/refactor/hotfix) are covered by
+  # the pull_request trigger below; listing them here too built images twice per
+  # PR commit (push + pull_request, different concurrency keys). KEEP main, v*,
+  # release/** for direct pushes to long-lived branches.
   push:
+    branches: [main, 'v*', 'release/**']
+    paths:
+      - 'admin/hub_module/**'
+      - 'hub_api/**'
+      - 'libs/flask_core/**'
+      - 'migrations/**'
+      - 'docker-compose.yml'
+      - '.version'
+      - '.github/workflows/containers.yml'
+  # Mirror the push paths so a PR that touches none of the container inputs
+  # doesn't spin up the build matrix (and its runner) for nothing.
+  pull_request:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
     paths:
       - 'admin/hub_module/**'
@@ -11,8 +27,6 @@ on:
       - 'docker-compose.yml'
       - '.version'
       - '.github/workflows/containers.yml'
-  pull_request:
-    branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
   merge_group:
     types: [checks_requested]
     branches: ['release/**']
