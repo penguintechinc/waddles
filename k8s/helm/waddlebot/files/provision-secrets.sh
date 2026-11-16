@@ -58,6 +58,9 @@ MARKER_ANN="waddles.penguintech.io/root-marker"
 CERT_ID_ANN="waddlebot.io/cert-identity"
 CERT_SANS_ANN="waddlebot.io/cert-sans-sha256"
 MARKER_MSG="waddles-root-check"
+# Built at runtime: Helm's renderer rewrites the two-word kubectl sentinel to "" if it appears
+# literally anywhere in a chart file (it would turn the strip below into a no-op).
+NOVAL='<no'; NOVAL="${NOVAL} value>"
 URLSAFE_RE='^[A-Za-z0-9._~-]+$'
 
 WORK="$(mktemp -d "${WORK_PARENT:-${TMPDIR:-/tmp}}/provision-XXXXXX")"
@@ -181,10 +184,10 @@ fetch_secret() { # <name> <dest dir> -> sets F_EXISTS F_RV F_KEEP F_MARK F_CID F
     die "kubectl get secret/${name} failed: $(errhead "${err}")"
   fi
   F_EXISTS=1
-  # kubectl's go-template prints the literal "<no value>" for a missing key inside a NON-empty
+  # kubectl's go-template prints the literal '<no' + ' value>' sentinel for a missing key inside a NON-empty
   # annotations map (a nil map skips `with`, hence ""). Treat it as absent, or an existing Secret
   # that has other annotations but no marker/cert annotation looks like a mismatching stamp.
-  out="${out//'<no value>'/}"
+  out="${out//"${NOVAL}"/}"
   while IFS=' ' read -r tag a b; do
     case "${tag}" in
       RV) F_RV="${a}" ;;
