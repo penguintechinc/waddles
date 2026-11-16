@@ -348,16 +348,23 @@ jobs:
       # 0060_port_legacy_sql_097_102 on real Postgres (fresh replay, an existing DB baselined
       # before 097 with seeded data, re-run, minimal CI bootstrap) and that no new numbered SQL
       # file lands un-bridged. No `|| true`: pytest exits 5 on zero collected, failing the step.
-      - name: Legacy SQL -> Alembic bridge (real Postgres)
+      #
+      # Runs the WHOLE alembic/tests suite, not a hand-picked file list: the old four-file list
+      # left every other test_00NN_*.py uncollected in CI, so 0093 (dropped the legacy catalog
+      # branches test_0091 asserted at `head`) and 0117 (a `bundles.admin:moderate` scope string
+      # test_0047's entrypoint scanner matched) broke those tests on the release branch with no
+      # red check. Docker-backed tests skip when the docker CLI is absent, so the step fails loud
+      # if docker is unusable or any test skipped for that reason (a skip is not a pass).
+      - name: Alembic revision tests (full alembic/tests suite, real Postgres)
         if: steps.changes.outputs.any == 'true'
         run: |
           set -euo pipefail
-          python3 -m pytest \
-            alembic/tests/test_legacy_sql_ownership.py \
-            alembic/tests/test_0060_port_legacy_sql_097_102.py \
-            alembic/tests/test_0061_port_legacy_sql_103_codec.py \
-            alembic/tests/test_0001_baseline_fresh_replay.py \
-            -v -rs -p no:cacheprovider
+          docker info --format '{{.ServerVersion}}'
+          log="$(mktemp)"
+          python3 -m pytest alembic/tests -rfEs -p no:cacheprovider 2>&1 | tee "$log"
+          docker_skips="$(grep -c 'docker CLI not available' "$log" || [ $? -eq 1 ])"
+          echo "docker-unavailable skips: ${docker_skips}"
+          test "${docker_skips}" -eq 0
 
       # This repo's real-Postgres alembic history starts at migration 0020 --
       # everything before it is a 96-file legacy SQL baseline replay
