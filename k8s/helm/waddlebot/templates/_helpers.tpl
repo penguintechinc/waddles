@@ -706,7 +706,11 @@ joined: a stable hash input for waddlebot.hostApiTlsSansSha256, and directly
 {{- $fullname := include "waddlebot.fullname" . -}}
 {{- $ns := .Values.namespace -}}
 {{- /* Explicit FQDNs, never a `*.<ns>.svc.cluster.local` wildcard: a wildcard cert from the shared internal CA would let any pod holding it impersonate Postgres/Valkey/S3 (security review HIGH). */ -}}
-{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-svc-process-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-action-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-bundles-executor.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-streaming" $fullname) (printf "%s-svc-streaming.%s.svc.cluster.local" $fullname $ns) | sortAlpha | join "," -}}
+{{- /* Every SAN here MUST sit inside the internal CA's permitted nameConstraints (k8s/dal2alpha/internal-ca.yaml):
+webpki/OpenSSL check EVERY SAN, not just the dialled name, so one out-of-tree SAN breaks every stage.
+Bare single-label names are permitted only for the executor-dialled stages (process/action); svc-streaming
+is FQDN-only. # regression: NameConstraintViolation from bare <fullname>-svc-streaming SAN (alpha 2026-11-16) */ -}}
+{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-svc-process-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-action-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-bundles-executor.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-streaming.%s.svc.cluster.local" $fullname $ns) | sortAlpha | join "," -}}
 {{- end }}
 
 {{/* sha256 of waddlebot.hostApiTlsDesiredDnsNames -- the waddlebot.io/cert-sans-sha256
