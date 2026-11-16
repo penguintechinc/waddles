@@ -136,6 +136,10 @@ class TestSchema:
                 "occurred_at",
                 # Added by 0056_economy_idempotency (the chain runs to head).
                 "idempotency_key",
+                # Added by 0071_economy_ledger_kinds: nullable replay-binding columns.
+                "rate_num",
+                "rate_den",
+                "min_balance",
             }
 
     def test_balance_check_rejects_a_negative_balance(
