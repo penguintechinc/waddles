@@ -46,6 +46,7 @@ from tests.conftest import (
     OTHER_TENANT_SLUG,
     TENANT_SLUG,
     make_user_token,
+    role_kind_fields,
 )
 
 APP_ID_A = "waddles.bot.shoutout.custom-a"
@@ -497,6 +498,7 @@ class TestActivateDeactivate:
             community_id=LIFECYCLE_OTHER_COMMUNITY_ID,
             name="admin",
             base_claims={"scopes": ["community:manage_members"]},
+            **role_kind_fields("admin"),
         )
         dal.community_members.insert(
             community_id=LIFECYCLE_OTHER_COMMUNITY_ID,

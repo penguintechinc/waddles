@@ -13,7 +13,7 @@ use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde_json::json;
 use svc_streaming::rooms::grpc::pb::*;
 use svc_streaming::rooms::grpc::{build_grpc_server_config, RPC_NAMES};
-use svc_streaming::rooms::grpc_auth::{SCOPE_MODERATE, SCOPE_READ, SCOPE_WRITE};
+use svc_streaming::rooms::grpc_auth::{SCOPE_CREATE, SCOPE_MODERATE, SCOPE_READ, SCOPE_WRITE};
 use svc_streaming::rooms::host_api::HostApiTls;
 use tonic::{Code, Request};
 
@@ -102,6 +102,7 @@ async fn every_proto_rpc_is_declared_served_and_auth_gated() {
 async fn full_room_lifecycle_over_mtls_with_service_jwt() {
     let mut h = harness(42120, true).await;
     let read = jwt(&h.signing_pem, SCOPE_READ, |_| {});
+    let create = jwt(&h.signing_pem, SCOPE_CREATE, |_| {});
     let write = jwt(&h.signing_pem, SCOPE_WRITE, |_| {});
     let moderate = jwt(&h.signing_pem, SCOPE_MODERATE, |_| {});
     let (actor, role) = admin();
@@ -116,7 +117,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
                 max_publishers: Some(4),
                 empty_timeout_secs: None,
             },
-            &write,
+            &create,
         ))
         .await
         .unwrap()
@@ -379,7 +380,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
 #[tokio::test]
 async fn moderation_enforces_actor_role_and_feature_flag() {
     let mut h = harness(42140, true).await;
-    let write = jwt(&h.signing_pem, SCOPE_WRITE, |_| {});
+    let create = jwt(&h.signing_pem, SCOPE_CREATE, |_| {});
     let moderate = jwt(&h.signing_pem, SCOPE_MODERATE, |_| {});
     let room = h
         .client
@@ -389,7 +390,7 @@ async fn moderation_enforces_actor_role_and_feature_flag() {
                 community_id: "7".into(),
                 ..Default::default()
             },
-            &write,
+            &create,
         ))
         .await
         .unwrap()
@@ -419,7 +420,7 @@ async fn moderation_enforces_actor_role_and_feature_flag() {
 
     // Flag OFF: moderation refused loudly (Unimplemented), not silently ignored.
     let mut off = harness(42160, false).await;
-    let write = jwt(&off.signing_pem, SCOPE_WRITE, |_| {});
+    let create = jwt(&off.signing_pem, SCOPE_CREATE, |_| {});
     let moderate = jwt(&off.signing_pem, SCOPE_MODERATE, |_| {});
     let room = off
         .client
@@ -429,7 +430,7 @@ async fn moderation_enforces_actor_role_and_feature_flag() {
                 community_id: "7".into(),
                 ..Default::default()
             },
-            &write,
+            &create,
         ))
         .await
         .unwrap()
@@ -675,7 +676,7 @@ async fn empty_timeout_is_defaulted_disabled_or_clamped_by_the_server() {
 async fn community_bound_token_cannot_reach_another_community() {
     let mut h = harness(42300, true).await;
     let bound = |scope: &str| jwt(&h.signing_pem, scope, |c| c["community"] = json!(7));
-    let (read, write) = (bound(SCOPE_READ), bound(SCOPE_WRITE));
+    let (read, create) = (bound(SCOPE_READ), bound(SCOPE_CREATE));
     let room = h
         .client
         .create_room(req(
@@ -684,7 +685,7 @@ async fn community_bound_token_cannot_reach_another_community() {
                 community_id: "7".into(),
                 ..Default::default()
             },
-            &write,
+            &create,
         ))
         .await
         .unwrap()
@@ -732,7 +733,7 @@ async fn community_bound_token_cannot_reach_another_community() {
                     community_id: other.into(),
                     ..Default::default()
                 },
-                &write,
+                &create,
             ))
             .await
             .unwrap_err();
@@ -877,4 +878,30 @@ fn grpc_tls_config_names_its_crypto_provider_explicitly() {
     assert_eq!(names(cfg.crypto_provider()), names(&ring));
     assert!(!cfg.crypto_provider().cipher_suites.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn create_room_needs_its_own_create_scope_not_write() {
+    let mut h = harness(42175, true).await;
+    for scope in [SCOPE_WRITE, SCOPE_READ, SCOPE_MODERATE] {
+        let token = jwt(&h.signing_pem, scope, |_| {});
+        let err = h
+            .client
+            .create_room(req(
+                CreateRoomRequest {
+                    api_version: "v1".into(),
+                    community_id: "7".into(),
+                    ..Default::default()
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code(),
+            Code::PermissionDenied,
+            "{scope} must not create rooms: {}",
+            err.message()
+        );
+    }
 }

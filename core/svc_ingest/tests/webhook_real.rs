@@ -126,7 +126,7 @@ async fn rig(valkey: &str, owner_community: i64) -> Rig {
     // before acking; without a store it answers 503, so the rig runs the real Valkey-backed one.
     state.interactions = Some(svc_ingest::interaction_store::InteractionStore::new(
         client
-            .get_multiplexed_async_connection()
+            .get_connection_manager()
             .await
             .expect("valkey connection for the interaction store"),
     ));

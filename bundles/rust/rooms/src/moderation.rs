@@ -52,7 +52,10 @@ fn hands_key(room: &str) -> String {
 
 /// Loads a room's ordered hand queue (absent = nobody has raised a hand).
 fn hands(store: &dyn Store, room: &str) -> Result<Vec<Hand>, RoomsError> {
-    Ok(kv_json::<Vec<Hand>>(store, &hands_key(room))?.unwrap_or_default())
+    match kv_json::<Vec<Hand>>(store, &hands_key(room))? {
+        Some(queue) => Ok(queue),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Persists the queue; an empty queue deletes the key.

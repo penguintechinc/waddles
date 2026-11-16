@@ -34,6 +34,8 @@ import math
 from datetime import UTC, datetime
 from typing import Any
 
+from flask_core.auth import DEFAULT_TENANT_SLUG
+
 from services.errors import bad_request, conflict, forbidden, not_found
 from services.free_tier_caps import create_community_capped, create_tenant_capped
 from services.global_identity import SYSTEM_TENANT_SLUG
@@ -43,7 +45,7 @@ VALID_COMMUNITY_TYPES = ("shared_interest_group", "gaming", "creator", "corporat
 VALID_JOIN_MODES = ("open", "approval", "invite")
 #: Reserved tenant slugs (security.md): `system` = operator plane (its admins ARE the global
 #: admins), `default` = catch-all. Never creatable, renamable-to, renamable or deactivatable here.
-RESERVED_TENANT_SLUGS = frozenset({SYSTEM_TENANT_SLUG, "default"})
+RESERVED_TENANT_SLUGS = frozenset({SYSTEM_TENANT_SLUG, DEFAULT_TENANT_SLUG})
 
 
 def _ensure_tables(dal: Any) -> None:

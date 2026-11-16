@@ -1,0 +1,4 @@
+# dal2alpha (context `dal2alpha`, namespace `waddleai`). Interim chart: alpha only; beta/gamma/production
+# files are intentionally absent (no such deployments exist).
+# Overrides here are intentionally empty: values.yaml carries the alpha-sized defaults for k8s3-worker.
+{}
