@@ -17,8 +17,11 @@ name: Build svc-streaming
 # pushed). Only the push path is granted packages:write.
 
 on:
+  # Short-lived branches are covered by the pull_request trigger below; listing
+  # them here too built the image twice per PR commit (push + pull_request,
+  # different concurrency keys). KEEP main, v*, release/**.
   push:
-    branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
+    branches: [main, 'v*', 'release/**']
     paths:
       - 'core/svc_streaming/**'
       - 'core/platform_keys/**'

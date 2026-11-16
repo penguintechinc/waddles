@@ -38,8 +38,12 @@ concurrency:
 jobs:
   rtc-bundle:
     name: "${{ matrix.bundle }}: fmt + clippy + test + wasm32-wasip2 component"
-    # bare dal2-alpha-ci image has no cc/make/cmake and sudo is blocked (no-new-privileges): C-toolchain jobs stay on hosted ubuntu-latest until a custom runner image bakes them in (same exception as rust-crate-ci.yml lint-test)
-    runs-on: ubuntu-latest
+    # Canonical runner-routing expression (github-actions-workflows skill): dal2-alpha-ci for every non-main ref.
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
+    # The bare ARC runner image has no cc/make and sudo is blocked, so the toolchain comes from a
+    # digest-pinned job container (run by the pod's dind sidecar): gcc/g++/make (host test + build-script linking), git, curl, unzip.
+    container:
+      image: buildpack-deps:bookworm@sha256:f53cd4c58cdb96a467b98696cd510a949ef4ccd7d23e07b75107de754773007a
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -51,6 +55,8 @@ jobs:
             wasm: waddle_bundle_webrtc_service.wasm
     defaults:
       run:
+        # Job containers default to `sh -e` (dash): bash keeps `set -o pipefail` working.
+        shell: bash
         working-directory: bundles/rust/${{ matrix.bundle }}
     steps:
       - name: Checkout code
@@ -58,7 +64,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # Verifies preinstalled C toolchain (host test binaries link with cc); no apt, fails loud.
+      # Verifies the container's C toolchain (host test binaries link with cc); no apt, fails loud.
       - name: Setup build deps (C toolchain)
         uses: ./.github/actions/setup-build-deps
         with:
@@ -79,9 +85,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             bundles/rust/${{ matrix.bundle }}/target
-          key: cargo-bundle-${{ matrix.bundle }}-1.97.1-${{ runner.os }}-${{ hashFiles(format('bundles/rust/{0}/Cargo.lock', matrix.bundle)) }}
+          key: cargo-bundle-ctr-${{ matrix.bundle }}-1.97.1-${{ runner.os }}-${{ hashFiles(format('bundles/rust/{0}/Cargo.lock', matrix.bundle)) }}
           restore-keys: |
-            cargo-bundle-${{ matrix.bundle }}-1.97.1-${{ runner.os }}-
+            cargo-bundle-ctr-${{ matrix.bundle }}-1.97.1-${{ runner.os }}-
 
       - name: Cache cargo-component + wasm-tools binaries
         id: tools-cache
@@ -90,7 +96,7 @@ jobs:
           path: |
             ~/.cargo/bin/cargo-component
             ~/.cargo/bin/wasm-tools
-          key: cargo-tools-cargo-component-0.21.1-wasm-tools-1.259.0-${{ runner.os }}
+          key: cargo-tools-ctr-cargo-component-0.21.1-wasm-tools-1.259.0-${{ runner.os }}
 
       # Exact pins as in bundles/Dockerfile.core-bundles; --locked resolves transitive deps.
       # --force: only reached when the binary on PATH is NOT the pinned version (the hosted image ships

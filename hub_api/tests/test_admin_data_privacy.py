@@ -1366,6 +1366,50 @@ class TestBulk:
         )
         assert response.status_code in (400, 422)
 
+    @pytest.mark.parametrize(
+        ("action", "extra"),
+        [("erase", {"confirm": True}), ("do_not_sell", {})],
+    )
+    async def test_bulk_non_export_results_never_carry_an_export_payload(
+        self,
+        client: Any,
+        db: Any,
+        world: dict[str, int],
+        gate_on: Any,
+        action: str,
+        extra: dict[str, Any],
+    ) -> None:
+        """Response-shape guard: only `export` may populate `data`/`incomplete`.
+
+        `DsarResultDTO.data` holds the subject's raw personal rows (account
+        records, emails) -- it is the point of an access-request export and
+        the one PII-bearing field on this polymorphic endpoint's response.
+        `bulk_dsar` branches its result shape on `action`; a regression that
+        let `erase`/`do_not_sell` echo an export payload would leak that PII
+        through the bulk console's response. This pins the non-export variants
+        to an empty `data`/`incomplete` (asserted present-as-null OR absent, so
+        it holds regardless of how None fields serialize), contrasting the
+        `export`-carries-`data` path proven by
+        `test_bulk_export_returns_each_users_data`.
+        """
+        bob = _user(db, name="bob")
+        _member(db, community_id=world["acme_community"], user_id=bob)
+
+        response = await client.post(
+            _base() + "/bulk",
+            headers=_headers(world["admin"]),
+            json={"action": action, "userIds": [world["alice"], bob], **extra},
+        )
+
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert body["action"] == action
+        results = body["results"]
+        assert len(results) == 2, body
+        for row in results:
+            assert row.get("data") is None, (action, row)
+            assert row.get("incomplete") is None, (action, row)
+
 
 class TestScopeResolution:
     async def test_resolve_scope_batches_and_classifies(

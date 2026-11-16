@@ -1015,6 +1015,22 @@ jobs:
       - name: alpha render -- all-digit short SHA image tag regression test
         run: bash scripts/ci/tests/test_image_tag_all_digit_sha.sh
 
+      # fix/smoke-precompile-pod-exclusion -- the deploy smoke step's generic pod-phase scan
+      # excluded precompile batch pods by the waddlebot.io/workload label. A CronJob batch pod
+      # created before that label was added to the chart does not carry it, and k8s equality
+      # `!=` selects label-less pods, so a stale/stuck precompile pod (alpha deploy 43894038667,
+      # waddlebot-executor-precompile-29914020-cnpqp) was counted as bad and failed the whole
+      # deploy. The scan now excludes precompile batch pods by stable NAME; a Failed precompile
+      # batch Job still trips the gate (step 2b). The bash test embeds the pre-fix label scan to
+      # prove it regresses on the stale pod.
+      - name: smoke step -- precompile pod-exclusion + batch-gate regression tests
+        run: |
+          set -euo pipefail
+          bash scripts/ci/smoke/tests/test-pod-phase-check.sh
+          python3 -m pytest -q -p no:cacheprovider \
+            scripts/ci/smoke/tests/test_pod_phase_classify.py \
+            scripts/ci/smoke/tests/test_precompile_batch_gate.py
+
       # Static chart-values audit: every values key must be consumed by a template and
       # every template reference must resolve. Fails the job on any finding (no `|| true`);
       # zero items examined is a failure inside the target itself.

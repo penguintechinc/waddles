@@ -69,13 +69,19 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
     name: rooms gRPC + moderation tests (counted)
-    # bare dal2-alpha-ci image has no cc/make/cmake and sudo is blocked (no-new-privileges): C-toolchain jobs stay on hosted ubuntu-latest until a custom runner image bakes them in (same exception as rust-crate-ci.yml lint-test)
-    runs-on: ubuntu-latest
+    # Canonical runner-routing expression (github-actions-workflows skill): dal2-alpha-ci for every non-main ref.
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
+    # The bare ARC runner image has no cc/make and sudo is blocked, so the toolchain comes from a
+    # digest-pinned job container (run by the pod's dind sidecar): gcc/g++/make for ring + aws-lc-sys (cc builder), curl+unzip for the pinned protoc.
+    container:
+      image: buildpack-deps:bookworm@sha256:f53cd4c58cdb96a467b98696cd510a949ef4ccd7d23e07b75107de754773007a
     timeout-minutes: 45
     permissions:
       contents: read
     defaults:
       run:
+        # Job containers default to `sh -e` (dash): bash keeps `set -o pipefail` working.
+        shell: bash
         working-directory: core/svc_streaming
     steps:
       - name: Checkout code
@@ -83,11 +89,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # Verifies preinstalled cmake + C toolchain (no apt; fails loud when absent).
-      - name: Setup build deps (cmake, C toolchain, protoc)
+      # Verifies the container's C toolchain (no apt; fails loud when absent) + sha256-pinned protoc.
+      # No cmake: aws-lc-sys 0.45 builds with its cc builder; cmake is only an opt-in builder.
+      - name: Setup build deps (C toolchain, protoc)
         uses: ./.github/actions/setup-build-deps
         with:
-          packages: 'cmake build-essential protobuf-compiler'
+          packages: 'build-essential protobuf-compiler'
 
       - name: Install Rust 1.97.1
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
@@ -102,9 +109,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             core/svc_streaming/target
-          key: cargo-svc-streaming-rooms-1.97.1-${{ runner.os }}-${{ hashFiles('core/svc_streaming/Cargo.lock') }}
+          key: cargo-svc-streaming-rooms-ctr-1.97.1-${{ runner.os }}-${{ hashFiles('core/svc_streaming/Cargo.lock') }}
           restore-keys: |
-            cargo-svc-streaming-rooms-1.97.1-${{ runner.os }}-
+            cargo-svc-streaming-rooms-ctr-1.97.1-${{ runner.os }}-
 
       # Fails on any failing test (pipefail) and on a suite count other than 2 or zero passing
       # tests: a gate that examined nothing is a failure. `|| :` only on grep -c (0 matches is a
