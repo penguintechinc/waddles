@@ -60,7 +60,11 @@ def test_hub_api_streaming_target_matches_the_rendered_service() -> None:
     docs = _render([])
     name, port = _svc_streaming_service_port(docs)
     env = _hub_api_env(docs)
-    assert env["STREAMING_RTC_GRPC_TARGET"] == f"{name}:{port}"
+    ns = "waddlebot"  # chart default .Values.namespace
+    # FQDN, never the bare Service name: the internal CA's nameConstraints reject a bare SAN
+    # (regression: NameConstraintViolation, alpha 2026-11-16).
+    assert env["STREAMING_RTC_GRPC_TARGET"] == f"{name}.{ns}.svc.cluster.local:{port}"
+    assert env["STREAMING_RTC_GRPC_SERVER_NAME"] == f"{name}.{ns}.svc.cluster.local"
     assert port == 50208
     assert "STREAMING_RTC_URL" not in env, "the REST proxy env is retired"
 

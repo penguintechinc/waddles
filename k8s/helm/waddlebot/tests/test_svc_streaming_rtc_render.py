@@ -465,13 +465,17 @@ def test_hub_api_rooms_client_env(helm: str, env: str) -> None:
         assert "ROOMS_GRPC_PORT" not in _env(_container(_streaming_deployment(docs)))
         assert "STREAMING_RTC_URL" not in env_
         return
-    assert env_["STREAMING_RTC_GRPC_TARGET"]["value"] == f"{name}:50208"
+    # FQDN only: the internal CA's nameConstraints do not permit the bare Service name as a SAN
+    # (regression: NameConstraintViolation, alpha 2026-11-16).
+    fqdn = f"{name}.waddlebot.svc.cluster.local"
+    assert env_["STREAMING_RTC_GRPC_TARGET"]["value"] == f"{fqdn}:50208"
     assert "STREAMING_RTC_URL" not in env_, "the REST proxy env is retired"
-    assert env_["STREAMING_RTC_GRPC_SERVER_NAME"]["value"] == name
+    assert env_["STREAMING_RTC_GRPC_SERVER_NAME"]["value"] == fqdn
     assert env_["STREAMING_RTC_TIMEOUT_SECONDS"]["value"] == "10"
     assert env_["STREAMING_RTC_GRPC_CA_FILE"]["value"].endswith("/ca.crt")
     sans = _cert_sans(docs)
-    assert name in sans, (name, sans)
+    assert fqdn in sans, (fqdn, sans)
+    assert name not in sans, f"bare SAN {name} violates the internal CA's nameConstraints"
     # service identity: the hub-api SPIFFE id (the minted JWT `sub`), allow-listed with exactly the
     # four RoomsService scopes (read/create/write/moderate), and pinned on the server side.
     sid = env_["STREAMING_RTC_SERVICE_ID"]["value"]

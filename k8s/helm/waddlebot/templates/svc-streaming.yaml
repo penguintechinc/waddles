@@ -77,6 +77,12 @@ spec:
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-streaming
+      {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+      annotations:
+        # RoomsService serves the shared host-api-tls leaf; roll when its identity/SANs change so a
+        # reissued cert (e.g. a SAN removed for the CA's nameConstraints) is actually served.
+        checksum/host-api-tls: {{ include "waddlebot.hostApiTlsPodChecksum" . | quote }}
+      {{- end }}
     spec:
       {{- include "waddlebot.terminationGracePeriod" (dict "root" $ "seconds" $.Values.pipeline.svcStreaming.terminationGracePeriodSeconds) | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
