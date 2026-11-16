@@ -46,6 +46,10 @@ jobs:
     # digest-pinned job container (run by the pod's dind sidecar): Python 3.13 + make (make check-proto) + git.
     container:
       image: python:3.13-bookworm@sha256:cc55e4ded9c95f6ce2133b3d096db43f214d280c2a8af65d83e246c8fa7d168c
+    defaults:
+      run:
+        # Job containers default to `sh -e` (dash): bash keeps `set -o pipefail` working.
+        shell: bash
     timeout-minutes: 20
     env:
       # buf release pinned by exact version; the binary is verified against its upstream SHA256.

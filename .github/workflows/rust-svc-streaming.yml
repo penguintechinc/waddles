@@ -80,6 +80,8 @@ jobs:
       contents: read
     defaults:
       run:
+        # Job containers default to `sh -e` (dash): bash keeps `set -o pipefail` working.
+        shell: bash
         working-directory: core/svc_streaming
     steps:
       - name: Checkout code
