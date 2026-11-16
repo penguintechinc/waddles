@@ -4,10 +4,13 @@ Real sockets on 127.0.0.1 (no mocked transport); each case asserts the printed c
 """
 
 import contextlib
+import datetime
 import io
 import pathlib
 import socket
+import ssl
 import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -110,3 +113,106 @@ def test_relative_path_rejected() -> None:
     with pytest.raises(SystemExit) as exc:
         _run(["--base-url", "http://127.0.0.1:1", "--paths", "health"])
     assert exc.value.code != 0
+
+
+def _self_signed_cert(dirpath: pathlib.Path) -> tuple[str, str]:
+    """Write a throwaway self-signed ECDSA cert whose SAN is a service FQDN (never 127.0.0.1).
+
+    Mirrors the real hub-api cert (SAN = in-cluster FQDN only), so verification against the
+    port-forward loopback host can never match -- exactly the case --insecure exists for.
+    """
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "waddlebot-hub-api-v3")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName("waddlebot-hub-api-v3.waddlebot.svc")]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    cert_path = dirpath / "cert.pem"
+    key_path = dirpath / "key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    return str(cert_path), str(key_path)
+
+
+@pytest.fixture
+def tls_stub() -> object:
+    """Yield a started HTTPS stub (self-signed, FQDN-only SAN); shut it down after the test."""
+    holder: dict[str, ThreadingHTTPServer] = {}
+    tmp = tempfile.TemporaryDirectory()
+
+    def start(routes: dict[str, list[int]]) -> str:
+        srv = _server(routes)
+        cert, key = _self_signed_cert(pathlib.Path(tmp.name))
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, key)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        holder["srv"] = srv
+        return f"https://127.0.0.1:{srv.server_address[1]}"
+
+    yield start
+    if "srv" in holder:
+        holder["srv"].shutdown()
+        holder["srv"].server_close()
+    tmp.cleanup()
+
+
+def test_build_ssl_context_default_verifies() -> None:
+    """Without --insecure, no override context is built (urllib's verifying default is used)."""
+    assert probe.build_ssl_context(False) is None
+
+
+def test_build_ssl_context_insecure_skips_verification() -> None:
+    """--insecure yields a context that skips cert AND hostname checks (curl -k equivalent)."""
+    ctx = probe.build_ssl_context(True)
+    assert isinstance(ctx, ssl.SSLContext)
+    assert ctx.check_hostname is False
+    assert ctx.verify_mode == ssl.CERT_NONE
+
+
+def test_https_insecure_passes_on_200(tls_stub: object) -> None:
+    """https against the FQDN-only self-signed cert succeeds with --insecure: examined=2 ok=2."""
+    base = tls_stub({"/health": [200], "/ready": [200]})  # type: ignore[operator]
+    rc, out = _run(["--base-url", base, "--paths", "/health", "/ready", "--delay", "0", "--insecure"])
+    assert rc == 0
+    assert "endpoints examined=2 ok=2 failed=0" in out
+
+
+def test_https_insecure_still_fails_on_non_200(tls_stub: object) -> None:
+    """--insecure skips TLS verification only -- a real non-200 over https still fails the gate."""
+    base = tls_stub({"/health": [200], "/ready": [503]})  # type: ignore[operator]
+    rc, out = _run(
+        ["--base-url", base, "--paths", "/health", "/ready", "--attempts", "3", "--delay", "0", "--insecure"]
+    )
+    assert rc == 1
+    assert "GET /ready status=503 attempts=3 FAIL" in out
+    assert "endpoints examined=2 ok=1 failed=1" in out
+
+
+def test_https_without_insecure_fails_verification(tls_stub: object) -> None:
+    """Default (verifying) context rejects the self-signed cert: status 0, exit 1, never a silent pass."""
+    base = tls_stub({"/health": [200]})  # type: ignore[operator]
+    rc, out = _run(["--base-url", base, "--paths", "/health", "--attempts", "2", "--delay", "0"])
+    assert rc == 1
+    assert "GET /health status=0 attempts=2 FAIL" in out
