@@ -342,6 +342,12 @@ jobs:
             "alembic==1.20.0" \
             "flask-sqlalchemy==3.1.1" \
             "PyYAML>=6.0.2,<7.0.0"
+          # pytest-xdist parallelizes the full alembic/tests suite (#1389) across
+          # workers. Hash-pinned, --no-deps so it adds only pytest-xdist + execnet
+          # and never upgrades the pytest==9.1.1 installed above. The suite is
+          # xdist-safe: pg_docker.py names each container per os.getpid() (unique
+          # per worker) and allocates an OS-assigned free port per container.
+          pip install --require-hashes --no-deps -r scripts/ci/tests/requirements-xdist.txt
 
       # Legacy `config/postgres/migrations/NNN_*.sql` files reach an EXISTING database only
       # through an Alembic bridge (0001_baseline replays them on a fresh DB only). This proves
@@ -361,7 +367,11 @@ jobs:
           set -euo pipefail
           docker info --format '{{.ServerVersion}}'
           log="$(mktemp)"
-          python3 -m pytest alembic/tests -rfEs -p no:cacheprovider 2>&1 | tee "$log"
+          # -n auto parallelizes across pytest-xdist workers. Safe because
+          # pg_docker.py gives each worker its own container (named per os.getpid())
+          # and an OS-allocated free port per container -- no shared container name
+          # or fixed port to collide on.
+          python3 -m pytest alembic/tests -n auto -rfEs -p no:cacheprovider 2>&1 | tee "$log"
           docker_skips="$(grep -c 'docker CLI not available' "$log" || [ $? -eq 1 ])"
           echo "docker-unavailable skips: ${docker_skips}"
           test "${docker_skips}" -eq 0
@@ -798,6 +808,22 @@ jobs:
       # exit code 5, never a silent pass -- critical-rules.md Verification Integrity.
       - name: Helm chart template tests (pytest)
         run: python3 -m pytest k8s/helm/waddlebot/tests/ -v
+
+      # #1382 -- a service-leaf Certificate whose SAN falls outside the internal CA's
+      # permitted X.509 nameConstraint subtrees is rejected by rustls-webpki (which checks
+      # EVERY SAN, not just the dialled name), crashlooping the consumer and blocking
+      # `helm --wait` on every deploy. The pytest run above already exercises the
+      # cryptographic render test; this makes it a NAMED, standalone gate that renders
+      # every env and fails LOUD (never a skip) if helm/openssl is missing.
+      - name: Cert name-constraints gate (#1382, all envs)
+        run: make check-cert-name-constraints
+
+      # #1391 -- a helm hook Job with no (or too-large) activeDeadlineSeconds, or long/serial
+      # work (precompile) run AS a blocking hook, can hang `helm --wait` past the deploy
+      # timeout and time the release out. Asserts every hook Job is bounded below the deploy
+      # helm --timeout, for the alpha + beta topologies. Prints hooks examined; zero = fail.
+      - name: Helm hook timeout gate (#1391, all envs)
+        run: make check-helm-hook-timeouts
 
       # changed-only alpha deploys pin each image via global.imageTags; this proves a pinned
       # (unchanged) image keeps its pod template byte-identical, so it does NOT restart, and

@@ -1,0 +1,18 @@
+# Hash-pinned pytest-xdist for parallelizing the real-Postgres alembic/tests suite
+# (pr-validation.yml "Alembic revision tests"). Installed with
+# `pip install --require-hashes --no-deps` AFTER pytest==9.1.1 is already present
+# in the alembic-migration-chain job, so this does not pull/upgrade pytest --
+# only pytest-xdist and its runtime dep execnet are added. --no-deps keeps the
+# already-installed pytest/pluggy/iniconfig untouched (critical-rules.md
+# Dependency Pinning: immutable, hash-verified).
+#
+# The suite is xdist-safe: alembic/tests/pg_docker.py names each container
+# `waddles-migtest-<suffix>-<os.getpid()>` (unique per xdist worker process) and
+# allocates an OS-assigned free port per container (_free_port, bind to :0), so
+# two workers never collide on a container name or a fixed port.
+execnet==2.1.2 \
+    --hash=sha256:63d83bfdd9a23e35b9c6a3261412324f964c2ec8dcd8d3c6916ee9373e0befcd \
+    --hash=sha256:67fba928dd5a544b783f6056f449e5e3931a5c378b128bc18501f7ea79e296ec
+pytest-xdist==3.6.1 \
+    --hash=sha256:9ed4adfb68a016610848639bb7e02c9352d5d9f03d04809919e2dafc3be4cca7 \
+    --hash=sha256:ead156a4db231eec769737f57668ef58a2084a34b2e55c4a8fa20d861107300d

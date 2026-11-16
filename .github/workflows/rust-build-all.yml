@@ -1,11 +1,22 @@
 name: Rust build-all (every core crate compiles)
 
-# Always-run compile gate for EVERY Rust crate under core/. The per-crate
-# rust-*.yml workflows are path-filtered (a change in bundle_host_db does not
-# trigger svc_action's CI), so a non-compiling crate could ride into a release
-# branch. This workflow has NO path filter, so it reports on every PR and
-# merge_group run and ci-gate (which fails on any failed sibling check) fails
-# if any crate stops compiling. No `|| true`: a build error fails the job.
+# Shared-dependency compile gate for EVERY Rust crate under core/. The per-crate
+# rust-*.yml workflows already build+TEST their own crate on a direct change
+# (rust-crate-ci.yml reusable: fmt+clippy+deny+build+llvm-cov), so re-compiling
+# all 28 on a single-crate change is pure waste. This gate exists for the case
+# the per-crate workflows CANNOT catch: a change to a SHARED input (wit/, the
+# waddle SDKs, proto/, or a shared core crate many others path-depend on) that
+# breaks a crate whose own path-filtered workflow does not fire.
+#
+# So on release-targeting PRs/merge-groups it runs ONLY when a shared input
+# changed (see the `changes` job's `globs` closure + the build job's `match`
+# gate). On main PRs / pushes / dispatch it still runs the full matrix (the
+# classifier's `match` is true when path gating does not apply). The globs also
+# include the three crates with no full per-crate build+test coverage
+# (bundle_host_credentials -- no dedicated workflow; connector_e2e &
+# tool_invoke_e2e -- their crate-ci is main-tier-only), so scoping never drops
+# their existing compile coverage on a release PR. No `|| true`: a build error
+# fails the job.
 
 on:
   pull_request:
@@ -39,6 +50,10 @@ jobs:
       python: ${{ steps.paths.outputs.python }}
       node: ${{ steps.paths.outputs.node }}
       go: ${{ steps.paths.outputs.go }}
+      # true when a SHARED Rust input changed (globs below), OR when path gating
+      # does not apply (main PR / push / dispatch -> full matrix), OR the detector
+      # failed (fail-open). Drives the build job's gate.
+      shared: ${{ steps.paths.outputs.match }}
     steps:
       - name: Checkout (change classifier only)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -51,14 +66,38 @@ jobs:
       - name: Classify changed paths
         id: paths
         uses: ./.github/actions/changed-paths
+        with:
+          # Shared Rust inputs a single crate's own path-filtered workflow would
+          # NOT catch -- a change here can break/re-digest many crates. Plus the
+          # three crates lacking full per-crate build+test coverage, so scoping
+          # never drops their existing compile coverage on a release PR.
+          # (On main PRs / pushes / dispatch the classifier returns match=true
+          #  regardless, so the full matrix still runs there.)
+          globs: |
+            wit/**
+            sdk/waddle-sdk/**
+            sdk/waddle-sdk-rs/**
+            proto/**
+            core/connection_resolver/**
+            core/test_support/**
+            core/bundle_host_surface/**
+            core/hub_client/**
+            core/platform_keys/**
+            core/bundle_host_credentials/**
+            core/connector_e2e/**
+            core/tool_invoke_e2e/**
+            .github/workflows/rust-build-all.yml
 
   build:
     name: "build ${{ matrix.crate }}"
     needs: changes
-    # Skipped (reports "skipped", which ci-gate treats as non-failing) when no
-    # Rust-affecting file changed, e.g. docs-only or Python-only PRs. Real
-    # `if:` on the job, so no runner is allocated for the 24-crate matrix.
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
+    # Skipped (reports "skipped", which ci-gate treats as non-failing) on a
+    # release PR / merge-group whose diff touched NO shared Rust input (the
+    # per-crate workflow covers a single-crate change). Still runs the full
+    # matrix on main PRs / pushes / dispatch and on any shared-input change
+    # (needs.changes.outputs.shared), and fail-open if the detector errored.
+    # Real `if:` on the job, so no runner is allocated for the 28-crate matrix.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.shared == 'true') }}
     # bare dal2-alpha-ci image has no cc/cmake/libatomic and sudo is blocked (no-new-privileges): C-toolchain / node jobs stay on hosted ubuntu-latest until a custom runner image bakes them in
     runs-on: ubuntu-latest
     timeout-minutes: 90
