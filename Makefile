@@ -5,7 +5,7 @@
         build-superpenguin-roll-bundle test-superpenguin-roll-e2e test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
+        check-no-stubs check-rustls-provider check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
         test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
@@ -115,6 +115,10 @@ test-helm-pending-recover:
 # `semgrep` on PATH (pinned in CI; see scripts/ci/semgrep-silent-fallback.yml).
 check-no-stubs:
 	@bash scripts/ci/check-no-stubs.sh
+
+# Every core/ bin crate that uses rustls must install a process-level CryptoProvider.
+check-rustls-provider:
+	@bash scripts/ci/check-rustls-provider.sh
 
 # PII boundary: only svc-ingest's outbound drain/sender_exec and svc-presentation may reference the
 # egress detokenizer. Prints files examined; fails on a violation or zero files examined. Its
