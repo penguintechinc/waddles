@@ -42,6 +42,9 @@ from sqlalchemy.future import select
 
 from services import storage_service
 from services.errors import ApiError
+from services.platform_secrets.bootstrap import db_platform_keys_disabled, get_process_cache
+from services.platform_secrets.cache import NoActiveSecretError, PlatformSecretCache
+from services.platform_secrets.registry import SecretType
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +164,52 @@ class PlatformSigner:
             ) from exc
         return cls(key_id=key_id, _private_key=private_key)
 
+    @classmethod
+    def from_vault(cls, cache: PlatformSecretCache | None = None) -> PlatformSigner:
+        """Loads the active signer from `platform_vault` (SecretType.BUNDLE_SIGNING).
+
+        Fails closed (`ApiError` 500) if no active secret exists in the vault cache or if the
+        stored key material is malformed.
+        """
+        target = cache if cache is not None else get_process_cache()
+        try:
+            secret = target.active(int(SecretType.BUNDLE_SIGNING))
+        except NoActiveSecretError as exc:
+            raise ApiError(
+                "platform_vault has no active bundle_signing key -- artifact signing has "
+                "no supported disabled mode (spec SS5.6)",
+                500,
+                "artifact_signing_key_unavailable",
+            ) from exc
+        if not secret.kid:
+            raise ApiError(
+                "platform_vault bundle_signing key is missing key_id (kid)",
+                500,
+                "artifact_signing_key_invalid",
+            )
+        if len(secret.plaintext) != 32:
+            raise ApiError(
+                f"platform_vault bundle_signing key must be 32 bytes, got {len(secret.plaintext)}",
+                500,
+                "artifact_signing_key_invalid",
+            )
+        try:
+            private_key = Ed25519PrivateKey.from_private_bytes(secret.plaintext)
+        except (InvalidKey, ValueError) as exc:  # pragma: no cover - defensive
+            raise ApiError(
+                "platform_vault bundle_signing key is not a valid Ed25519 private key seed",
+                500,
+                "artifact_signing_key_invalid",
+            ) from exc
+        return cls(key_id=secret.kid, _private_key=private_key)
+
+    @classmethod
+    def from_vault_or_env(cls, cache: PlatformSecretCache | None = None) -> PlatformSigner:
+        """Reads `platform_vault` unless `waddles.disable-db-platform-keys` is ON."""
+        if db_platform_keys_disabled():
+            return cls.from_env()
+        return cls.from_vault(cache=cache)
+
     def sign(self, *, app_id: str, version: str, digest: str, approval_id: int) -> tuple[str, str]:
         """Returns `(base64_signature, key_id)` over `build_signing_payload(...)`."""
         payload = build_signing_payload(
@@ -219,7 +268,7 @@ async def sign_and_record_version(
         )
     digest = row.artifact_digest
 
-    signer = PlatformSigner.from_env()
+    signer = PlatformSigner.from_vault_or_env()
     signature_b64, key_id = signer.sign(
         app_id=app_id, version=version, digest=digest, approval_id=approval_id
     )

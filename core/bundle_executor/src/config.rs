@@ -318,6 +318,13 @@ pub struct CliConfig {
     #[arg(long, env = "BUNDLE_SIGNING_PUBLIC_KEYS")]
     pub bundle_signing_public_keys: Option<String>,
 
+    /// Migration switch for where artifact-signature verifying keys come from: `configmap`
+    /// (`BUNDLE_SIGNING_PUBLIC_KEYS`, the default for this binary) or `db`
+    /// (`platform_vault.public_keys` via `platform_keys::KeyCache`). Never a silent fallback:
+    /// see `crate::signing::require_supported_key_source`.
+    #[arg(long, env = "BUNDLE_SIGNING_KEY_SOURCE")]
+    pub bundle_signing_key_source: Option<String>,
+
     /// Interval between `crate::heartbeat`'s liveness checks (and, when
     /// `EXECUTOR_SELF_PING_ENABLED` is set, this executor's own `ping`
     /// frames). A connection is declared stale after
@@ -604,6 +611,7 @@ impl CliConfig {
             executor_id: None,
             executor_require_id: false,
             bundle_signing_public_keys: None,
+            bundle_signing_key_source: None,
             executor_heartbeat_interval_secs: 5,
             executor_heartbeat_enabled: true,
             executor_self_ping_enabled: false,

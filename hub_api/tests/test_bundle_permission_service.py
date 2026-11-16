@@ -296,6 +296,28 @@ async def test_grant_community_permissions_consent_required(install_dal: Any) ->
     assert exc.value.code == "consent_required"
 
 
+@pytest.mark.parametrize("bogus", ["storage.objects", "storage.nonexistent", "not a permission"])
+async def test_grant_community_permissions_rejects_ids_outside_the_catalog(
+    install_dal: Any, bogus: str
+) -> None:
+    await _seed_upload(install_dal)
+    await _approve(install_dal)
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme")
+    with pytest.raises(ApiError) as exc:
+        await svc.grant_community_permissions(
+            install_dal,
+            tenant_id=1,
+            community_id=community_id,
+            app_id=_APP_ID,
+            version=_VERSION,
+            manifest=_manifest(),
+            granted_permission_ids=frozenset({"storage.kv", "ai.generate", bogus}),
+            params_by_id=None,
+            granted_by=1,
+        )
+    assert exc.value.code == "unknown_permission"
+
+
 async def test_grant_community_permissions_rejects_restricted(install_dal: Any) -> None:
     await _seed_upload(install_dal)
     await _approve(install_dal)

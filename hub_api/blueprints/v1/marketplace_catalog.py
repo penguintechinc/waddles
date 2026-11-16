@@ -21,9 +21,10 @@ from __future__ import annotations
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
-from quart import Blueprint, current_app, request
+from quart import Blueprint, request
 from quart_schema import validate_response
 
+from services.db_routing import get_read_dal, reads_from_replica
 from services.marketplace_catalog_service import (
     CatalogEntryResponse,
     CatalogListResponse,
@@ -44,8 +45,12 @@ vendors_bp = Blueprint("v1_marketplace_vendors", __name__, url_prefix="/api/v1/m
 
 
 def _dal() -> Any:
-    """Return the app's synchronous pydal `DAL` -- this group never uses `async_dal`."""
-    return current_app.config["dal"]
+    """Return the pydal DAL for this group's pure-read catalog browse (replica when configured).
+
+    Every route here is a GET with no read-after-write coupling (see
+    `docs/hub-api-db-routing.md`); lag tolerance: catalog browse, seconds of staleness is fine.
+    """
+    return get_read_dal()
 
 
 def _int_arg(name: str, default: int) -> int:
@@ -70,6 +75,7 @@ def _optional_int_arg(name: str) -> int | None:
 
 @catalog_bp.route("", methods=["GET"])
 @validate_response(CatalogListResponse)
+@reads_from_replica("marketplace_catalog.browse_catalog")
 async def browse_catalog() -> CatalogListResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/marketplace/catalog` -- paginated browsing with search & filters.
 
@@ -101,6 +107,7 @@ async def browse_catalog() -> CatalogListResponse | tuple[dict[str, object], int
 
 @vendors_bp.route("", methods=["GET"])
 @validate_response(VendorsResponse)
+@reads_from_replica("marketplace_catalog.vendors")
 async def vendors() -> VendorsResponse:
     """`GET /api/v1/marketplace/vendors` -- vendor marketplaces (GitHub orgs) with repo counts."""
     return get_vendors(_dal(), request)
@@ -108,6 +115,7 @@ async def vendors() -> VendorsResponse:
 
 @catalog_bp.route("/categories", methods=["GET"])
 @validate_response(CategoriesResponse)
+@reads_from_replica("marketplace_catalog.categories")
 async def categories() -> CategoriesResponse:
     """`GET /api/v1/marketplace/catalog/categories` -- distinct categories with module counts."""
     dal = _dal()
@@ -116,6 +124,7 @@ async def categories() -> CategoriesResponse:
 
 @catalog_bp.route("/featured", methods=["GET"])
 @validate_response(FeaturedResponse)
+@reads_from_replica("marketplace_catalog.featured")
 async def featured() -> FeaturedResponse:
     """`GET /api/v1/marketplace/catalog/featured` -- top/featured modules."""
     dal = _dal()
@@ -125,6 +134,7 @@ async def featured() -> FeaturedResponse:
 
 @catalog_bp.route("/bundle/<string:app_id>", methods=["GET"])
 @validate_response(CatalogEntryResponse)
+@reads_from_replica("marketplace_catalog.catalog_bundle_entry")
 async def catalog_bundle_entry(app_id: str) -> CatalogEntryResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/marketplace/catalog/bundle/<app_id>` -- single bundle entry (by app_id)."""
     entry = get_catalog_bundle_entry(_dal(), request, app_id, _optional_int_arg("communityId"))
@@ -138,6 +148,7 @@ async def catalog_bundle_entry(app_id: str) -> CatalogEntryResponse | tuple[dict
 
 @catalog_bp.route("/<string:source>/<int:source_id>", methods=["GET"])
 @validate_response(CatalogEntryResponse)
+@reads_from_replica("marketplace_catalog.catalog_entry")
 async def catalog_entry(
     source: str, source_id: int
 ) -> CatalogEntryResponse | tuple[dict[str, object], int]:

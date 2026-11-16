@@ -150,6 +150,8 @@ def _declared_context(dockerfile: Path, dockerfile_rel: Path, repo_root: Path) -
     for line in dockerfile.read_text().splitlines()[:40]:
         m = _HEADER_CONTEXT_RE.match(line)
         if m:
+            if m.group(1) == ".":  # explicit repo-root context (COPY paths are repo-relative)
+                return repo_root.resolve()
             cand = (repo_root / dockerfile_rel.parent.parent / m.group(1)).resolve()
             if cand.is_dir():
                 return cand

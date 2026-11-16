@@ -97,7 +97,9 @@ def test_executor_identity_budget_and_cpu_limit() -> None:
     assert env["POD_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.name"
     assert env["EXECUTOR_POOL"]["value"] == "default"
     assert env["EXECUTOR_MEMORY_BUDGET_MB"]["value"] == "15360"
-    assert env["EXECUTOR_PRECOMPILED_PREFIX"]["value"] == "precompiled"
+    # The AOT prefix is the crate constant (core/bundle_executor/src/precompile.rs PRECOMPILED_PREFIX),
+    # not configuration: no env var for it (nothing read EXECUTOR_PRECOMPILED_PREFIX).
+    assert "EXECUTOR_PRECOMPILED_PREFIX" not in env
     assert env["EXECUTOR_MAX_CONCURRENT_COMPILES"]["value"] == "2"
     assert env["STAGE_HOST_API_ADDR"]["value"] == "waddlebot-svc-process-rust:8301,waddlebot-svc-action-rust:8302"
     c = sts["spec"]["template"]["spec"]["containers"][0]
@@ -135,22 +137,41 @@ def test_policies_still_select_statefulset_pods() -> None:
         assert sel.items() <= labels.items(), sel
 
 
-def test_otlp_endpoint_absent_without_collector_but_service_name_set() -> None:
-    docs = _render()
+_LEGACY = "global.otel.enabled=false"  # the legacy otel.exporter/otel.collector path only renders when global.otel is off
+
+
+def test_no_otel_env_without_any_collector_or_global_otel() -> None:
+    """Neither global.otel nor a legacy endpoint => no OTEL_* env on the executor or stages (no half-wired exporter)."""
+    docs = _render([_LEGACY])
     checked = 0
     for name, container in ((_EXEC, "svc-bundles-executor"),
                             ("waddlebot-svc-process-rust", "svc-process-rust"),
                             ("waddlebot-svc-action-rust", "svc-action-rust")):
         wl = next(d for d in docs if d["kind"] in ("Deployment", "StatefulSet") and d["metadata"]["name"] == name)
         env = _env(wl, container)
-        assert "OTEL_SERVICE_NAME" in env
-        assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in env
+        assert not [n for n in env if n.startswith("OTEL_") or n == "K8S_POD_NAME"], sorted(env)
+        checked += 1
+    assert checked == 3
+
+
+def test_global_otel_enabled_gives_exactly_one_otel_service_name() -> None:
+    """global.otel on => the shared helper is the only source (legacy helper must not duplicate env)."""
+    docs = _render()
+    checked = 0
+    for name, container in ((_EXEC, "svc-bundles-executor"),
+                            ("waddlebot-svc-process-rust", "svc-process-rust"),
+                            ("waddlebot-svc-action-rust", "svc-action-rust")):
+        wl = next(d for d in docs if d["kind"] in ("Deployment", "StatefulSet") and d["metadata"]["name"] == name)
+        cs = [c for c in wl["spec"]["template"]["spec"]["containers"] if c["name"] == container]
+        names = [e["name"] for e in cs[0]["env"]]
+        assert names.count("OTEL_SERVICE_NAME") == 1 and names.count("K8S_POD_NAME") == 1, names
+        assert len(names) == len(set(names)), "duplicate env names"
         checked += 1
     assert checked == 3
 
 
 def test_otlp_endpoint_from_values_on_executor_and_stages() -> None:
-    docs = _render(["otel.exporter.endpoint=http://otel.example.svc:4317"])
+    docs = _render([_LEGACY, "otel.exporter.endpoint=http://otel.example.svc:4317"])
     checked = 0
     for name, container in ((_EXEC, "svc-bundles-executor"),
                             ("waddlebot-svc-process-rust", "svc-process-rust"),
@@ -164,7 +185,7 @@ def test_otlp_endpoint_from_values_on_executor_and_stages() -> None:
 
 
 def test_otlp_collector_enabled_derives_endpoint_and_cnp_egress() -> None:
-    docs = _render(["otel.collector.enabled=true"])
+    docs = _render([_LEGACY, "otel.collector.enabled=true"])
     env = _env(_executors(docs)[0], "svc-bundles-executor")
     assert env["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://waddlebot-otel-collector:4317"
     cnp = _named(docs, "CiliumNetworkPolicy", _EXEC)

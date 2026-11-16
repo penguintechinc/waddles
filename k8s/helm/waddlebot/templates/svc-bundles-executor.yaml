@@ -252,10 +252,6 @@ spec:
         # LRU ceiling for resident compiled modules (MiB); render fails unless below the limit.
         - name: EXECUTOR_MEMORY_BUDGET_MB
           value: {{ $budgetMb | quote }}
-        # Object-storage prefix of signed AOT artifacts (precompiled/<engine_fp>/<digest>.cwasm)
-        # written by the precompile Jobs (part D); read here via the read-only data-plane identity.
-        - name: EXECUTOR_PRECOMPILED_PREFIX
-          value: {{ $be.precompiledPrefix | quote }}
         {{- if $be.maxPrecompiledBytes }}
         - name: BUNDLE_MAX_PRECOMPILED_BYTES
           value: {{ $be.maxPrecompiledBytes | toString | quote }}

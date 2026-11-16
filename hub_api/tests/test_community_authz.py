@@ -3,13 +3,13 @@
 `tests/test_v1_workflow_blueprint.py`/`test_v1_github_sync_blueprint.py`
 exercise the "not an admin -> 403" and "is a community member with the
 right scope -> 200" paths through the real HTTP blueprints already --
-`TestJwtRolesDirect`/`TestRequireCommunityAdminBypasses` below close the
+`TestJwtScopesDirect`/`TestRequireCommunityAdminBypasses` below close the
 remaining branches for the M-automation group's `require_community_admin()`:
 the three bypasses (`super-admin`, `tenant-admin`, `platform-admin`), the
-"member but wrong scope" 403, and `_jwt_roles()`'s own defensive branches
+"member but wrong scope" 403, and `_jwt_scopes()`'s own defensive branches
 (unreachable through the normal HTTP flow, since `tenant_middleware`/
 `get_current_user_id` already validate the bearer token before
-`_jwt_roles()` ever runs -- covered here as a direct unit test of the
+`_jwt_scopes()` ever runs -- covered here as a direct unit test of the
 function instead).
 
 `TestParseClaimsScopes`/`TestDecodeCaller`/`TestAuthorizeCommunityMissingTenantContext`
@@ -54,7 +54,7 @@ import blueprints.v1.workflow as workflow_module
 from blueprints.v1.workflow import workflow_bp
 from services.community_authz import (
     _decode_caller,
-    _jwt_roles,
+    _jwt_scopes,
     _parse_claims_scopes,
     authorize_community,
     community_belongs_to_tenant,
@@ -124,7 +124,7 @@ class TestDecodeCaller:
             _decode_caller(_FakeRequest(headers={"Authorization": "Bearer x"}))
         assert exc_info.value.status_code == 401
 
-    def test_success_returns_user_id_and_roles(self) -> None:
+    def test_success_returns_user_id_and_scopes(self) -> None:
         token = create_jwt_token(
             user_id="7",
             username="alice",
@@ -132,10 +132,11 @@ class TestDecodeCaller:
             roles=["super_admin"],
             secret_key=SECRET_KEY,
             tenant="acme-corp",
+            scope="users:admin community:read",
         )
-        user_id, roles = _decode_caller(_FakeRequest(headers={"Authorization": f"Bearer {token}"}))
+        user_id, scopes = _decode_caller(_FakeRequest(headers={"Authorization": f"Bearer {token}"}))
         assert user_id == 7
-        assert roles == ["super_admin"]
+        assert scopes == frozenset({"users:admin", "community:read"})
 
 
 class TestAuthorizeCommunityMissingTenantContext:
@@ -165,31 +166,31 @@ def _stub_workflow_core(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(workflow_module, "_client", _StubWorkflowCore())
 
 
-class TestJwtRolesDirect:
+class TestJwtScopesDirect:
     """Direct unit tests -- these branches are unreachable through the normal HTTP flow."""
 
     def test_no_authorization_header_is_empty(self) -> None:
         request = Mock()
         request.headers = {}
-        assert _jwt_roles(request) == frozenset()
+        assert _jwt_scopes(request) == frozenset()
 
     def test_non_bearer_header_is_empty(self) -> None:
         request = Mock()
         request.headers = {"Authorization": "Basic dXNlcjpwYXNz"}
-        assert _jwt_roles(request) == frozenset()
+        assert _jwt_scopes(request) == frozenset()
 
     def test_invalid_token_is_empty(self) -> None:
         request = Mock()
         request.headers = {"Authorization": "Bearer not-a-real-jwt"}
-        assert _jwt_roles(request) == frozenset()
+        assert _jwt_scopes(request) == frozenset()
 
-    def test_non_list_roles_claim_is_empty(self) -> None:
-        """`create_jwt_token()` only accepts `List[str]` -- hand-craft the payload instead."""
+    def test_non_string_scope_claim_is_empty(self) -> None:
+        """`create_jwt_token()` only accepts a str scope -- hand-craft the payload instead."""
         token = pyjwt.encode(
             {
                 "sub": "1",
                 "tenant": TENANT_SLUG,
-                "roles": "platform-admin",  # a bare string, not a list
+                "scope": ["users:admin"],  # a list, not a space-delimited string
                 "exp": datetime.now(UTC) + timedelta(hours=1),
             },
             SECRET_KEY,
@@ -197,20 +198,35 @@ class TestJwtRolesDirect:
         )
         request = Mock()
         request.headers = {"Authorization": f"Bearer {token}"}
-        assert _jwt_roles(request) == frozenset()
+        assert _jwt_scopes(request) == frozenset()
 
-    def test_platform_admin_role_is_present(self) -> None:
+    def test_global_admin_scope_is_present(self) -> None:
         token = create_jwt_token(
             user_id="1",
             username="u",
             email="u@example.com",
-            roles=["platform-admin"],
+            roles=[],
+            secret_key=SECRET_KEY,
+            tenant=TENANT_SLUG,
+            scope="users:admin",
+        )
+        request = Mock()
+        request.headers = {"Authorization": f"Bearer {token}"}
+        assert "users:admin" in _jwt_scopes(request)
+
+    def test_role_name_claim_alone_grants_no_scope(self) -> None:
+        """Authorization never branches on role names: a `platform-admin` role claim is inert."""
+        token = create_jwt_token(
+            user_id="1",
+            username="u",
+            email="u@example.com",
+            roles=["platform-admin", "super_admin"],
             secret_key=SECRET_KEY,
             tenant=TENANT_SLUG,
         )
         request = Mock()
         request.headers = {"Authorization": f"Bearer {token}"}
-        assert "platform-admin" in _jwt_roles(request)
+        assert _jwt_scopes(request) == frozenset()
 
 
 class TestRequireCommunityAdminBypasses:
@@ -224,7 +240,7 @@ class TestRequireCommunityAdminBypasses:
         quart_app.config["async_dal"] = automation_db
         return quart_app
 
-    def _token(self, *, user_id: str, roles: list[str] | None = None) -> str:
+    def _token(self, *, user_id: str, roles: list[str] | None = None, scope: str = "") -> str:
         return create_jwt_token(
             user_id=user_id,
             username="u",
@@ -232,6 +248,7 @@ class TestRequireCommunityAdminBypasses:
             roles=roles or [],
             secret_key=SECRET_KEY,
             tenant=TENANT_SLUG,
+            scope=scope,
         )
 
     async def test_super_admin_bypasses_community_membership(self, automation_db: Any) -> None:
@@ -296,16 +313,14 @@ class TestRequireCommunityAdminBypasses:
         )
         assert response.status_code == 403
 
-    async def test_platform_admin_role_bypasses_community_membership(
+    async def test_global_admin_scope_bypasses_community_membership(
         self, automation_db: Any
     ) -> None:
         app = self._app(automation_db)
         client = app.test_client()
         response = await client.get(
             f"/api/v1/admin/{COMMUNITY_ID}/workflows",
-            headers={
-                "Authorization": f"Bearer {self._token(user_id='999', roles=['platform-admin'])}"
-            },
+            headers={"Authorization": f"Bearer {self._token(user_id='999', scope='users:admin')}"},
         )
         assert response.status_code == 200
 
@@ -374,7 +389,7 @@ class TestResolveCommunityMembershipScopedTenantAdminBypass:
             community_id=community_id,
             user_id=user_id,
             tenant_id=tenant_row.id,
-            roles_claim=[],
+            scopes_claim=frozenset(),
         )
         assert membership is not None
         assert membership.bypass is True
@@ -386,7 +401,7 @@ class TestResolveCommunityMembershipScopedTenantAdminBypass:
             community_id=community_id,
             user_id=user_id,
             tenant_id=tenant_row.id,
-            roles_claim=[],
+            scopes_claim=frozenset(),
         )
         assert admin_membership.is_admin is True
 
@@ -417,7 +432,7 @@ class TestResolveCommunityMembershipScopedTenantAdminBypass:
             community_id=other_community_id,
             user_id=user_id,
             tenant_id=own_tenant_row.id,
-            roles_claim=[],
+            scopes_claim=frozenset(),
         )
         assert membership is None
 
@@ -428,7 +443,7 @@ class TestResolveCommunityMembershipScopedTenantAdminBypass:
                 community_id=other_community_id,
                 user_id=user_id,
                 tenant_id=own_tenant_row.id,
-                roles_claim=[],
+                scopes_claim=frozenset(),
             )
         assert exc_info.value.status_code == 403
 

@@ -11,8 +11,7 @@
 # bundleExecutor.stages must include svc-process-rust:8301
 # for the ping-bundle e2e proof, since PROCESS_BUNDLE_* above is
 # what drives the `load`/`invoke` calls this connection carries. CACHE_HOST/CACHE_PORT are
-# wired explicitly below (not envFrom'd) because the shared ConfigMap only exposes
-# REDIS_HOST/REDIS_PORT, a different name than this crate's CliConfig reads.
+# wired explicitly below (not envFrom'd): the shared ConfigMap carries no cache host/port.
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcProcess.enabled }}
 {{- if and (not .Values.pipeline.rustDataPlane.egressClusterCidrDenylist) (ne .Values.global.deploymentTier "alpha") (ne .Values.global.deploymentTier "local") }}
 {{- fail (printf "pipeline.rustDataPlane.egressClusterCidrDenylist is REQUIRED when global.deploymentTier=%q (outside alpha/local): set this cluster's pod, Service and node CIDRs -- the Rust stage's CliConfig::validate hard-fails startup on an empty list" .Values.global.deploymentTier) }}
@@ -165,7 +164,9 @@ spec:
         {{- include "waddlebot.hostApiTlsServerEnv" . | nindent 8 }}
         {{- end }}
         - name: HUB_API_URL
-          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+          value: {{ include "waddlebot.hubApiBaseUrl" . | quote }}
+        # F3 -- internal CA (secretKeyRef) + plaintext refusal for every internal HTTP client in this pod.
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
         # feature/hub-grpc-env-wiring (closes #569's startup seam) -- core/hub_client::
         # HubClient needs hub-api's internal gRPC endpoint (TLS mandatory, see
         # hub_api/grpc_internal/server.py) and its machine-JWT bootstrap endpoint
@@ -174,9 +175,9 @@ spec:
         # requiring a per-environment override (see values.yaml's own comment on this
         # key, incl. the KNOWN GAP note on hub-api's TLS wiring + hub_client's CA trust).
         - name: HUB_API_GRPC_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s:%v" (include "waddlebot.hubApiGrpcHost" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: SERVICE_JWT_TOKEN_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s:%v" (include "waddlebot.hubApiGrpcHost" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         # Matches the audience-scoped projected token this pod already mounts via
         # waddlebot.serviceJwtBootstrapVolume(Mount) below -- NOT the generic default
         # k8s SA token path (wrong audience, hub-api's TokenReview call would reject
@@ -205,8 +206,8 @@ spec:
               name: {{ include "waddlebot.bundleAdminRequestSecretName" . }}
               key: BUNDLE_ADMIN_REQUEST_KEYS
               optional: true  # absent when the Rust data plane is off; the consumer then logs and stays off
-        # CliConfig reads CACHE_HOST/CACHE_PORT/CACHE_PASSWORD -- the shared ConfigMap only
-        # publishes REDIS_HOST/REDIS_PORT (a different name), so these are wired explicitly.
+        # CliConfig reads CACHE_HOST/CACHE_PORT/CACHE_PASSWORD -- not in the shared ConfigMap,
+        # so these are wired explicitly.
         - name: CACHE_HOST
           value: {{ .Values.infrastructure.redis.service.name | quote }}
         - name: CACHE_PORT
@@ -219,6 +220,14 @@ spec:
         # Bundle object storage (spec 2026-11-06-bundle-object-storage): host-side S3 endpoint +
         # credentials -- bundles never see these (host-mediated `storage` capability).
         {{- include "waddlebot.bundleStorage.env" . | nindent 8 }}
+        # Durable audit sink credential (REQUIRED by svc-process whenever BUNDLE_STORAGE_* is set,
+        # outside DEPLOYMENT_TIER=local): the INSERT-only waddles_bundle_storage_audit role's
+        # runtime-generated password, secretKeyRef from <release>-db-credentials ONLY.
+        - name: BUNDLE_STORAGE_AUDIT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.db.credentialsSecretName" . }}
+              key: PW_WADDLES_BUNDLE_STORAGE_AUDIT
         {{- /* Durable VALKEY_URL override below is TLS-only: fail the render rather than leave the spine on the cache/plaintext envFrom VALKEY_URL. */}}
         {{- include "waddlebot.assertDurableTls" . }}
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
