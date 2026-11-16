@@ -65,6 +65,11 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      # The workspace dir is owned by the runner uid while container steps run as root; checkout's
+      # safe.directory entry lives in a temporary HOME, so later git calls hit "dubious ownership".
+      - name: Trust the checked-out workspace for git (container runs as root)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Verify breaking-change baseline ref exists
         run: |
           set -euo pipefail
