@@ -55,7 +55,7 @@ chrono = { version = "=0.4.45", features = ["serde"] }
 thiserror = "=2.0.20"
 anyhow = "=1.0.104"
 clap = { version = "=4.6.6", features = ["derive", "env"] }
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "http2"] }
 sea-orm = { version = "=2.0.2", default-features = false, features = [
     "sqlx-postgres",
     "sqlx-sqlite",
@@ -100,10 +100,12 @@ rtc = "=0.21.1"
 async-trait = "=0.1.92"
 # Host-API mTLS listener (`rooms::host_api`): same crates/versions as the stage
 # services' `host_api.rs` (svc_action/svc_process); all already in Cargo.lock.
-rustls = { version = "=0.23.46", default-features = false, features = ["ring", "tls12"] }
-tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12", "ring"] }
 rustls-pki-types = "=1.15.1"
-hyper-util = { version = "=0.1.20", features = ["server-auto", "tokio", "service"] }
+# In-cluster TLS control-plane listener (src/tls.rs) reuses the rustls/tokio-rustls pins above over a
+# hand-rolled accept loop, so the existing axum Router is served with ALPN h2/http1.1 (http1/http2 below).
+hyper-util = { version = "=0.1.20", features = ["server-auto", "tokio", "service", "http1", "http2"] }
 ffmpeg-sidecar = "=2.7.0"
 hls_m3u8 = "=0.7.0"
 object_store = { version = "=0.14.1", features = ["aws"] }

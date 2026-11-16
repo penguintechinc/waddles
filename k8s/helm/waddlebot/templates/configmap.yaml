@@ -25,19 +25,9 @@ data:
   DATABASE_PORT: {{ .Values.infrastructure.postgresql.service.port | quote }}
   DATABASE_NAME: {{ .Values.infrastructure.postgresql.database | quote }}
 
-  # Redis Configuration
-  REDIS_HOST: {{ .Values.infrastructure.redis.service.name | quote }}
-  # TLS port only -- the cache Valkey has no plaintext listener (feature/transit-tls-core F2).
-  REDIS_PORT: {{ .Values.infrastructure.redis.tls.port | quote }}
-
-  # S3-compatible object storage (SeaweedFS, was MinIO) -- key names kept as
-  # MINIO_* for backward compatibility with consumers still reading them
-  # (legacy consumers); S3_* names are the primary/preferred keys.
-  MINIO_ENDPOINT: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
-  MINIO_CONSOLE_ENDPOINT: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.masterPort }}"
+  # S3-compatible object storage (SeaweedFS)
   S3_ENDPOINT_URL: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
   S3_BUCKET_NAME: {{ .Values.infrastructure.seaweedfs.bucketName | quote }}
-  S3_STORAGE_ENABLED: "true"
   # regression: bundle publish/fetch bucket split after SeaweedFS migration (#508/#509) --
   # hub_api/services/storage_service.py's bundle component/sidecar uploads (and
   # hub_api/cli/seed_core_bundles.py, which shares this ConfigMap via envFrom) MUST target
@@ -49,26 +39,12 @@ data:
 
   # Qdrant Configuration
   QDRANT_URL: "http://{{ .Values.infrastructure.qdrant.service.name }}:{{ .Values.infrastructure.qdrant.service.port }}"
-  MEM0_VECTOR_STORE: "qdrant"
-
-  # Ollama Configuration
-  OLLAMA_HOST: {{ .Values.infrastructure.ollama.service.name | quote }}
-  OLLAMA_PORT: {{ .Values.infrastructure.ollama.service.port | quote }}
-  OLLAMA_USE_TLS: "false"
-  AI_PROVIDER: {{ .Values.infrastructure.ollama.defaultProvider | quote }}
-  AI_MODEL: {{ .Values.infrastructure.ollama.defaultModel | quote }}
-  OLLAMA_MODEL: {{ .Values.infrastructure.ollama.defaultModel | quote }}
-
-  # CORS Configuration (comma-separated origins for hub-api)
-  CORS_ORIGIN: {{ .Values.global.corsOrigin | default "http://localhost:5173" | quote }}
 
   # General Configuration
   LOG_LEVEL: {{ .Values.global.logLevel | quote }}
   NODE_ENV: {{ .Values.global.nodeEnv | quote }}
   DEPLOYMENT_TIER: {{ .Values.global.deploymentTier | quote }}
-  BASE_DOMAIN: {{ .Values.global.baseDomain | quote }}
   OVERLAY_BASE_URL: {{ .Values.global.overlayBaseUrl | quote }}
-  OVERLAY_KEY_GRACE_PERIOD_MINUTES: "5"
 
   # PostgreSQL Init Configuration
   POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
@@ -78,20 +54,6 @@ data:
   # hosted default. See templates/infrastructure/posthog/_helpers.tpl.
   POSTHOG_HOST: {{ include "waddlebot.posthog.effectiveHost" . | quote }}
 
-  # Connector channel configuration (svc-ingest receivers)
-  TWITCH_CHANNELS: {{ .Values.config.twitchChannels | default "" | quote }}
-  KICK_CHANNELS: {{ .Values.config.kickChannels | default "" | quote }}
-  KICK_PUSHER_KEY: {{ .Values.config.kickPusherKey | default "" | quote }}
-  KICK_PUSHER_CLUSTER: {{ .Values.config.kickPusherCluster | default "" | quote }}
-  YOUTUBE_LIVE_CHANNELS: {{ .Values.config.youtubeLiveChannels | default "" | quote }}
-  # RSI Spectrum one-way ingest (gh #101). Flag baseline defaults OFF; PostHog overrides when connected.
-  SPECTRUM_FORUM_CHANNELS: {{ .Values.config.spectrumForumChannels | default "" | quote }}
-  SPECTRUM_LOBBIES: {{ .Values.config.spectrumLobbies | default "" | quote }}
-  FLAG_WADDLES_SPECTRUM_INTEGRATION: {{ .Values.config.spectrumIntegrationEnabled | default false | quote }}
-  # Spectrum org sync (roster join/leave/role changes + event create/update/RSVP). Needs BOTH
-  # flags ON; baseline defaults OFF, PostHog overrides when connected.
-  SPECTRUM_ORG_COMMUNITIES: {{ .Values.config.spectrumOrgCommunities | default "" | quote }}
-  FLAG_WADDLES_SPECTRUM_ORG_SYNC: {{ .Values.config.spectrumOrgSyncEnabled | default false | quote }}
   # waddles.calendar.event_discord_sync ENV baseline (default OFF; PostHog overrides when connected).
   # Read by hub-api via envFrom waddlebot-config.
   FLAG_WADDLES_CALENDAR_EVENT_DISCORD_SYNC: {{ .Values.config.eventDiscordSyncEnabled | default false | quote }}
@@ -110,12 +72,9 @@ data:
   {{- if .Values.webui.frontendOrigin }}
   FRONTEND_ORIGIN: {{ .Values.webui.frontendOrigin | quote }}
   {{- end }}
-  SPECTRUM_ORG_POLL_INTERVAL_S: {{ .Values.config.spectrumOrgPollIntervalS | default 300 | quote }}
-  SPECTRUM_ROSTER_MAX_DEPARTURE_RATIO: {{ .Values.config.spectrumRosterMaxDepartureRatio | default 0.5 | quote }}
-  SPECTRUM_ORG_EMIT_BACKLOG: {{ .Values.config.spectrumOrgEmitBacklog | default false | quote }}
 
   # Service Discovery URLs
-  HUB_API_URL: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:8204"
+  HUB_API_URL: {{ include "waddlebot.hubApiBaseUrl" . | quote }}
   PUBLIC_WEBUI_URL: {{ .Values.webui.publicUrl | quote }}
   # #320 Connections: OAuth redirect_uri base for the per-community connect flow. Empty
   # by default -- hub-api falls back to PUBLIC_WEBUI_URL when this is blank. Override

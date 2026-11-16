@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
 
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from flask_core.db_errors import describe_db_error, format_sanitized_traceback
 from flask_core.feature_flags import feature_enabled
 from opentelemetry import metrics, trace
@@ -75,7 +76,7 @@ FEATURE_AUDIT_EXPORT: Final[str] = "waddles.compliance.audit_export"
 
 #: Tenant slug the platform chain is entitlement-checked against (the default tenant: on-prem
 #: it carries the deployment baseline tier, on SaaS it is Free so platform events are skipped).
-DEFAULT_GATE_TENANT: Final[str] = "default"
+DEFAULT_GATE_TENANT: Final[str] = DEFAULT_TENANT_SLUG
 
 TABLE_NAME: Final[str] = "audit_events"
 MAX_APPEND_ATTEMPTS: Final[int] = 10

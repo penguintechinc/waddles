@@ -52,8 +52,12 @@ REP = "waddles.core.service.reputation"
 #: Service bundles the reputation manifest requests `<platform>.moderation.ban` from.
 _BAN_TARGETS = tuple(f"waddles.core.service.{p}" for p in ("twitch", "discord", "youtube"))
 
-ADMIN = CommunityMembership("admin", frozenset({"community:manage_members"}), True, False)
-MOD = CommunityMembership("mod", frozenset({"community:manage_channels"}), False, False)
+ADMIN = CommunityMembership(
+    "admin", frozenset({"community:manage_members", "bundles.admin:admin"}), True, False
+)
+MOD = CommunityMembership(
+    "mod", frozenset({"community:manage_channels", "bundles.admin:moderate"}), False, False
+)
 
 
 @pytest.fixture(scope="module")
