@@ -22,10 +22,33 @@ import yaml
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _VALUES = sorted(p.name for p in _CHART_DIR.glob("values-*.yaml"))
 _HELM3 = Path.home() / ".local" / "bin" / "helm3"
-_HELMS = {
-    "helm3": str(_HELM3) if _HELM3.exists() else None,
-    "helm4": shutil.which("helm"),
-}
+
+
+def _major(binary: str | None) -> int | None:
+    """Major version of a helm binary (`helm version --template`), or None when unusable."""
+    if not binary:
+        return None
+    out = subprocess.run(  # noqa: S603 -- fixed argv, test-only
+        [binary, "version", "--template", "{{.Version}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "HELM_PLUGINS": "/nonexistent"},
+    )
+    version = out.stdout.strip().lstrip("v")
+    return int(version.split(".")[0]) if out.returncode == 0 and version[:1].isdigit() else None
+
+
+def _find_helms() -> dict[str, str | None]:
+    """The helm 3 and helm 4 binaries: explicit locations first, then `helm` by its real major."""
+    default = shutil.which("helm")
+    helm3 = str(_HELM3) if _HELM3.exists() else (default if _major(default) == 3 else None)
+    helm4_env = os.environ.get("HELM4_BIN")
+    helm4 = helm4_env if helm4_env else (default if _major(default) == 4 else None)
+    return {"helm3": helm3, "helm4": helm4}
+
+
+_HELMS = _find_helms()
 # dal2alpha enables the route in its own values; every other environment needs the prerequisites.
 _ENABLE = [
     "interactionsGateway.enabled=true",
