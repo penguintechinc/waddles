@@ -377,6 +377,9 @@ fn provider_error_mapping_and_invalid_responses() {
         fn now_ms(&self) -> u64 {
             0
         }
+        fn publish_surface(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
         fn invoke(
             &self,
             _: &str,

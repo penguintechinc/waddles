@@ -599,3 +599,102 @@ fn non_dj_text_is_ignored() {
     );
     assert!(Engine::new(&h, &a("m")).handle("").unwrap().is_none());
 }
+
+// ---- overlay surfaces (publish-surface) ----------------------------------
+
+#[test]
+fn state_changes_publish_to_own_surfaces_without_requester_identity() {
+    let h = host();
+    let mut c = cfg(&h);
+    c.cooldown_s = 0;
+    set_cfg(&h, &c);
+    say(&h, &a("m1"), "!sr heroes");
+    say(&h, &a("m2"), "!sr on and on");
+    say(&h, &modc("m3"), "!music skip");
+    let published = h.published.borrow();
+    assert!(!published.is_empty());
+    for (surface, _) in published.iter() {
+        assert!(
+            surface == "waddles.core.example.dj.now_playing"
+                || surface == "waddles.core.example.dj.queue",
+            "{surface} is not under the dj app id"
+        );
+    }
+    let blob = serde_json::to_string(&*published).unwrap();
+    assert!(!blob.contains(USER_A) && !blob.contains("requester"));
+    let (_, last_now) = published
+        .iter()
+        .rev()
+        .find(|(s, _)| s.ends_with(".now_playing"))
+        .unwrap();
+    assert_eq!(last_now["now_playing"]["title"], "Heroes Tonight");
+    // Only the contract's fields are present (additionalProperties: false).
+    let mut keys: Vec<_> = last_now["now_playing"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "artist",
+            "duration_s",
+            "id",
+            "provider",
+            "title",
+            "track_id",
+            "url"
+        ]
+    );
+}
+
+#[test]
+fn surface_tracks_drop_non_https_urls_and_control_characters() {
+    use waddle_bundle_dj_app::engine::surface_track;
+    use waddle_bundle_dj_app::model::PublicTrack;
+    let mut t = PublicTrack {
+        id: 1,
+        provider: "p".into(),
+        track_id: "t".into(),
+        title: "bad\u{7}title".into(),
+        artist: "a".repeat(500),
+        duration_s: 10,
+        url: Some("http://example.com/x".into()),
+    };
+    let v = surface_track(&t);
+    assert!(v["url"].is_null());
+    assert_eq!(v["title"], "badtitle");
+    assert_eq!(v["artist"].as_str().unwrap().chars().count(), 200);
+    for bad in [
+        "javascript:alert(1)",
+        "https://a b",
+        "https://x<y",
+        "https://",
+    ] {
+        t.url = Some(bad.into());
+        assert!(surface_track(&t)["url"].is_null(), "{bad}");
+    }
+    t.url = Some("https://example.com/x".into());
+    assert_eq!(surface_track(&t)["url"], "https://example.com/x");
+}
+
+#[test]
+fn publish_refusal_is_logged_and_does_not_fail_the_command() {
+    let h = host();
+    *h.publish_fail.borrow_mut() = Some("feature_disabled".into());
+    let mut c = cfg(&h);
+    c.cooldown_s = 0;
+    set_cfg(&h, &c);
+    say(&h, &a("m1"), "!sr heroes");
+    assert!(h.published.borrow().is_empty());
+    assert!(
+        h.logs
+            .borrow()
+            .iter()
+            .any(|l| l.contains("dj surface publish failed"))
+    );
+    // State was persisted regardless.
+    assert!(h.kv.borrow().contains_key("dj.state"));
+}
