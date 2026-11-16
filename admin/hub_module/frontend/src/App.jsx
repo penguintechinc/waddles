@@ -23,7 +23,6 @@ const CommunitiesPage = lazy(() => import('./pages/public/CommunitiesPage'));
 const CommunityPublicPage = lazy(() => import('./pages/public/CommunityPublicPage'));
 const LiveStreamsPage = lazy(() => import('./pages/public/LiveStreamsPage'));
 const UserPublicProfile = lazy(() => import('./pages/public/UserPublicProfile'));
-const MusicQueuePage = lazy(() => import('./pages/public/MusicQueuePage'));
 
 // Auth pages
 const LoginPage = lazy(() => import('./pages/auth/LoginPage'));
@@ -63,6 +62,7 @@ const AdminDomains = lazy(() => import('./pages/admin/AdminDomains'));
 const AdminServers = lazy(() => import('./pages/admin/AdminServers'));
 const AdminConnectedPlatforms = lazy(() => import('./pages/admin/AdminConnectedPlatforms'));
 const LiveActivity = lazy(() => import('./pages/community/LiveActivity'));
+const MusicQueue = lazy(() => import('./pages/community/MusicQueue'));
 const AdminMirrorGroups = lazy(() => import('./pages/admin/AdminMirrorGroups'));
 const AdminLeaderboardConfig = lazy(() => import('./pages/admin/AdminLeaderboardConfig'));
 const AdminCommunityProfile = lazy(() => import('./pages/admin/AdminCommunityProfile'));
@@ -100,6 +100,7 @@ const AdminCalendarScanner = lazy(() => import('./pages/admin/AdminCalendarScann
 const AdminCalendarAttendance = lazy(() => import('./pages/admin/AdminCalendarAttendance'));
 const AdminLiveStreams = lazy(() => import('./pages/admin/AdminLiveStreams'));
 const AdminCommunityCalls = lazy(() => import('./pages/admin/AdminCommunityCalls'));
+const TownHall = lazy(() => import('./pages/community/TownHall'));
 const AdminPolls = lazy(() => import('./pages/admin/AdminPolls'));
 const AdminForms = lazy(() => import('./pages/admin/AdminForms'));
 const AdminSupportDashboard = lazy(() => import('./pages/admin/AdminSupportDashboard'));
@@ -174,6 +175,13 @@ const DesignSystem = import.meta.env.DEV ? lazy(() => import('./pages/dev/Design
 function ReputationRedirect() {
   const { communityId } = useParams();
   return <Navigate to={`/admin/${communityId}/reputation/policy`} replace />;
+}
+
+// Legacy public song-queue URL (`/c/:id/music/queue`); the music-station REST API is gone, so
+// send bookmarks/links to the member music page instead of 404ing.
+export function MusicQueueRedirect() {
+  const { communityId } = useParams();
+  return <Navigate to={`/community/${communityId}/music`} replace />;
 }
 
 // Legacy "modules" URLs were superseded by app bundles; redirect so bookmarks do not 404.
@@ -255,7 +263,7 @@ function App() {
         <Route path="/book/:slug" element={<BookingPagePublic />} />
 
         {/* Public song-queue page (no auth required) -- linked from chat via !sq */}
-        <Route path="/c/:communityId/music/queue" element={<MusicQueuePage />} />
+        <Route path="/c/:communityId/music/queue" element={<MusicQueueRedirect />} />
 
         {/* Vendor submission routes (public) */}
         <Route path="/vendor/submit" element={<VendorSubmissionForm />} />
@@ -287,7 +295,9 @@ function App() {
         {/* Inventory (Quartermaster) routes (authenticated) */}
         <Route path="/community/:communityId/inventory" element={<InventoryBrowse />} />
         <Route path="/community/:communityId/inventory/my-items" element={<InventoryMyItems />} />
+        <Route path="/community/:communityId/music" element={<MusicQueue />} />
         <Route path="/community/:communityId/game-servers" element={<GameServers />} />
+        <Route path="/community/:communityId/town-hall" element={<TownHall />} />
         <Route path="/community/:communityId/interact" element={<CommunityInteraction />} />
         <Route path="/community/:communityId/interact/:channelId" element={<CommunityInteraction />} />
 

@@ -95,7 +95,7 @@ fn test_state() -> AppState {
         db_password: Secret::new("db-pass"),
         cache_password: None,
         service_api_key: Secret::new(SERVICE_KEY),
-        jwt_hmac_secret: None,
+        jwt_keys: svc_streaming::jwt_keys::JwtKeys::None,
     };
     AppState::new(config, prometheus::Registry::new())
 }

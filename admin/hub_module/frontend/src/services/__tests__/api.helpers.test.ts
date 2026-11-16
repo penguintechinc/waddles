@@ -95,15 +95,6 @@ describe('default-valued parameters', () => {
 });
 
 describe('path-segment encoding', () => {
-  it('encodes call-room names that contain spaces and slashes', async () => {
-    await adminApi.getCallRoom(7, 'team room/1');
-    expect(lastCall().url).toBe('/api/v1/admin/7/calls/rooms/team%20room%2F1');
-
-    await adminApi.kickCallParticipant(7, 'team room/1', 'user-9');
-    expect(lastCall().url).toBe('/api/v1/admin/7/calls/rooms/team%20room%2F1/kick');
-    expect(JSON.parse(String(lastCall().data))).toEqual({ identity: 'user-9' });
-  });
-
   it('encodes both bundle app id and version', async () => {
     await bundleApi.getPermissions('a/b', '1.0.0+build 5');
     expect(lastCall().url).toBe('/api/v1/apps/a%2Fb/versions/1.0.0%2Bbuild%205/permissions');

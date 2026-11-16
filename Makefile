@@ -1,16 +1,16 @@
-.PHONY: webui-api-coverage backfill-bundle-author role-sync-remediate seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: webui-api-coverage platform-secrets-rotate backfill-tenant-keys backfill-bundle-author role-sync-remediate seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit check-docs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
         build-superpenguin-roll-bundle test-superpenguin-roll-e2e test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
-        test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
+        check-no-stubs check-rustls-provider check-bundle-docker-context check-core-docker-context check-bundle-version-bump check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
+        test-seaweedfs-sse-kms test-helm-pending-recover test-smoke-pod-phase publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
         test-data-plane-parity test-connector-parity gen-connector-parity-expected \
-        test-hub-api test-helm-matrix test-helm-matrix-quick audit-chart-values audit-chart-values-deep
+        check-proto test-hub-api test-helm-matrix test-helm-matrix-quick audit-chart-values audit-chart-values-deep
 
 dev:
 	$(error dev: docker-compose is deprecated -- deploy to Kubernetes via scripts/deploy-alpha.sh)
@@ -26,8 +26,22 @@ docker-push:
 lint:
 	@bash scripts/lint.sh
 
+# Secrets T10 gate: no shared JWT secret / HMAC JWT (see scripts/ci/jwt-hs256-allowlist.txt)
+check-no-shared-jwt-secret:
+	@bash scripts/ci/check-no-shared-jwt-secret.sh
+
+# Idempotent: ensure every existing tenant owns an at-rest DEK (needs DATABASE_URL + the KEK env).
+backfill-tenant-keys:
+	@cd hub_api && PYTHONPATH="$(CURDIR)/libs/flask_core:$(CURDIR)/libs:$(CURDIR)/hub_api" python3 -m cli.backfill_tenant_keys
+
 backfill-bundle-author:
 	@python3 scripts/backfill_bundle_author.py
+
+# Rotate / retire a platform secret THROUGH the hub-api admin API (system-tenant global admin,
+# recent MFA, Idempotency-Key): `make platform-secrets-rotate ARGS="rotate jwt_signing --reason scheduled"`.
+# Needs WADDLES_API_URL and WADDLES_ADMIN_TOKEN in the environment (never as arguments).
+platform-secrets-rotate:
+	@python3 scripts/ops/platform_secrets_rotate.py $(ARGS)
 
 openapi-hubapi:
 	@PYTHONPATH="$(CURDIR)/libs/flask_core:$(CURDIR)/libs:$(CURDIR)/hub_api" python3 scripts/export-hubapi-openapi.py
@@ -42,6 +56,11 @@ check-openapi-drift:
 
 check-docs:
 	@bash scripts/check-doc-refs.sh
+
+# Proto gate: buf lint + buf breaking vs origin/release/v3.0.X (override PROTO_BREAKING_AGAINST) +
+# committed hub-api stubs match the .proto sources. Prints files examined; fails on zero examined.
+check-proto:
+	@bash scripts/ci/check-proto-gate.sh
 
 # M1.5 gate (docs/superpowers/specs/2026-09-14-rust-data-plane-design.md §16):
 # zero flask_core.database/pydal occurrences under the App Bundle directories.
@@ -102,6 +121,13 @@ test-alpha-smoke:
 test-helm-pending-recover:
 	@bash scripts/test-helm-pending-recover.sh
 
+# Deploy smoke-step regression: the generic pod-phase scan must exclude precompile batch
+# pods by NAME (a pre-label CronJob pod does not carry waddlebot.io/workload, and k8s `!=`
+# selects label-less pods), and a Failed precompile batch Job must still trip the gate.
+test-smoke-pod-phase:
+	@bash scripts/ci/smoke/tests/test-pod-phase-check.sh
+	@python3 -m pytest -q -p no:cacheprovider scripts/ci/smoke/tests/test_pod_phase_classify.py scripts/ci/smoke/tests/test_precompile_batch_gate.py
+
 # No-stubs / no-silent-fallbacks gate (gh-regression: a `flags capability not
 # wired -- TODO(M4+)` stub returned a silent default and shipped as "done",
 # causing a multi-hour alpha outage). Scans non-test core/hub_api/sdk/bundles/
@@ -110,6 +136,34 @@ test-helm-pending-recover:
 # `semgrep` on PATH (pinned in CI; see scripts/ci/semgrep-silent-fallback.yml).
 check-no-stubs:
 	@bash scripts/ci/check-no-stubs.sh
+
+# Every core/ bin crate that uses rustls must install a process-level CryptoProvider.
+check-rustls-provider:
+	@bash scripts/ci/check-rustls-provider.sh
+
+# Every bundle-<crate> stage in bundles/Dockerfile.core-bundles must COPY each out-of-crate file the
+# release build reads (#[path], include_*!, Cargo path deps). Prints crates/refs examined.
+check-bundle-docker-context:
+	@python3 scripts/ci/check-bundle-docker-context.py
+
+# Every core Rust service Dockerfile (images in scripts/ci/image-inputs.yaml, built with their real
+# context + --build-context) must COPY each Cargo path dep / #[path] / include_*! target to the
+# container path the crate resolves it at. Negative test first: the pre-fix svc-streaming
+# Dockerfile (platform_keys COPYed before WORKDIR, deploy runs 43859970070/43858247593) MUST fail.
+# Prints images/crates/refs examined; zero examined fails.
+check-core-docker-context:
+	@out=$$(python3 scripts/ci/check-core-docker-context.py \
+		--dockerfile-override svc-streaming=scripts/ci/tests/fixtures/core-docker-context/svc_streaming-pre-fix.dockerfile.txt 2>&1); \
+	rc=$$?; if [ "$$rc" -ne 1 ] || ! printf '%s\n' "$$out" | grep -q 'COPYed to /platform_keys, crate expects /build/platform_keys'; then \
+		printf '%s\n' "$$out" >&2; echo "FAIL: negative test (pre-fix svc-streaming) was not rejected for platform_keys (rc=$$rc)" >&2; exit 1; fi; \
+	echo "negative test: pre-fix svc-streaming Dockerfile rejected (rc=1, platform_keys misplaced) -- expected"
+	@python3 scripts/ci/check-core-docker-context.py
+
+# A catalog bundle whose build inputs changed vs BASE (own source; wit/+waddle-sdk for Python;
+# Cargo path deps, #[path] and include_*! targets for Rust) must bump its version, or the
+# seeder 409s digest_conflict. CI runs it in bundle-hygiene.yml. Zero bundles examined fails.
+check-bundle-version-bump:
+	@python3 scripts/ci/check-bundle-version-bump.py "$(or $(BASE),origin/release/v3.0.X)"
 
 # PII boundary: only svc-ingest's outbound drain/sender_exec and svc-presentation may reference the
 # egress detokenizer. Prints files examined; fails on a violation or zero files examined. Its

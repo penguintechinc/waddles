@@ -31,6 +31,8 @@ from unittest.mock import patch
 import psycopg2
 import psycopg2.extensions
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from pg_docker import DOCKER_AVAILABLE, PgTestDatabase, _free_port, _wait_ready
 
 requires_docker = pytest.mark.skipif(
@@ -55,6 +57,22 @@ def _load_migration() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _ancestor_revision_paths() -> list[Path]:
+    """Files of every revision strictly before 0047 in the real chain (0047 excluded).
+
+    Walked through Alembic's own ScriptDirectory so the set tracks re-pointed
+    `down_revision`s instead of file-name ordering.
+    """
+    cfg = Config(str(_REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_ALEMBIC_DIR))
+    script = ScriptDirectory.from_config(cfg)
+    return [
+        Path(rev.path)
+        for rev in script.iterate_revisions("0047_builtin_handler_paths", "base")
+        if rev.revision != "0047_builtin_handler_paths" and rev.path is not None
+    ]
 
 
 @pytest.fixture
@@ -107,15 +125,19 @@ class TestModuleAllowlist:
     def test_every_historically_seeded_entrypoint_module_is_covered(
         self, migration: ModuleType
     ) -> None:
-        """Every `bundles.<module>:` any earlier revision/legacy SQL seeded must be rewritten."""
+        """Every `bundles.<module>:` an EARLIER revision/legacy SQL seeded must be rewritten.
+
+        0047 only ever sees rows written before it runs, so the evidence set is its ancestor
+        revisions (walked from the real chain) plus the legacy SQL baseline -- not later
+        revisions, whose `bundles.<x>:<y>` text can be unrelated (e.g. the OIDC scope
+        `bundles.admin:moderate` in 0117). Later revisions are guarded separately below.
+        """
         pattern = re.compile(r"\bbundles\.([a-z][a-z0-9_]*):")
         historical: set[str] = set()
         files_scanned = 0
-        sources = [
-            p
-            for p in sorted(_VERSIONS.glob("*.py")) + sorted(_LEGACY_SQL_DIR.glob("*.sql"))
-            if p.name != "0047_builtin_handler_paths.py"
-        ]
+        ancestors = _ancestor_revision_paths()
+        assert len(ancestors) >= 40, f"suspiciously short 0047 ancestry: {len(ancestors)}"
+        sources = sorted(ancestors) + sorted(_LEGACY_SQL_DIR.glob("*.sql"))
         for path in sources:
             files_scanned += 1
             historical.update(pattern.findall(path.read_text(encoding="utf-8")))
@@ -124,6 +146,19 @@ class TestModuleAllowlist:
         assert len(historical) >= 20, f"suspiciously few historical entrypoints: {historical}"
         uncovered = sorted(historical - set(migration._MODULES))
         assert not uncovered, f"historical entrypoint modules the rewrite would miss: {uncovered}"
+
+    def test_no_later_revision_seeds_an_old_form_entrypoint(self) -> None:
+        """A revision after 0047 seeding `"entrypoint": "bundles.<m>:"` would never be rewritten."""
+        ancestors = {p.resolve() for p in _ancestor_revision_paths()}
+        later = [
+            p
+            for p in sorted(_VERSIONS.glob("*.py"))
+            if p.name != "__init__.py" and p.resolve() not in ancestors
+        ]
+        assert len(later) >= 1, "no post-0047 revisions found; scanner pointed at the wrong root"
+        pattern = re.compile(r"entrypoint[^\n]{0,8}\bbundles\.[a-z][a-z0-9_]*:")
+        offenders = [p.name for p in later if pattern.search(p.read_text(encoding="utf-8"))]
+        assert not offenders, f"post-0047 revisions seeding old-form entrypoints: {offenders}"
 
 
 class TestEmittedSql:

@@ -210,7 +210,7 @@ async fn codec_selection_reaches_the_ffmpeg_command_line_and_bad_choices_never_s
         db_password: Secret::new("unused"),
         cache_password: None,
         service_api_key: Secret::new("unused"),
-        jwt_hmac_secret: None,
+        jwt_keys: svc_streaming::jwt_keys::JwtKeys::None,
     };
 
     let db = svc_streaming::db::get_or_connect(&config)

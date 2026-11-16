@@ -87,7 +87,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             community_id: self.community_id,
         };
         match identity::resolve_actor_scopes(wiring, invocation, scope).await {
-            Ok(actor) => actor,
+            Ok(actor) => self.with_call_participant(actor).await,
             Err(e) => {
                 tracing::info!(
                     app_id = %self.app_id, community_id = self.community_id,
@@ -97,6 +97,34 @@ impl<K: KvBackend> StageCapabilities<K> {
                 bundle_tool_call::ActorContext::none()
             }
         }
+    }
+}
+
+impl<K: KvBackend> StageCapabilities<K> {
+    /// Attaches the host-derived per-community call-participant pseudonym to a
+    /// verified actor (`identity::resolve_participant`). A pre-verified admin actor
+    /// or any derivation failure leaves it `None`: tools that need it then refuse
+    /// (fail closed), they never fall back to the global `user_uuid`.
+    async fn with_call_participant(
+        &self,
+        mut actor: bundle_tool_call::ActorContext,
+    ) -> bundle_tool_call::ActorContext {
+        let (Some(wiring), Some(invocation)) = (&self.identity, &self.invocation_identity) else {
+            return actor;
+        };
+        let scope = IdentityScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+        };
+        match identity::resolve_participant(wiring, invocation, scope, &self.tenant).await {
+            Ok(p) => actor.participant = Some(p.to_string()),
+            Err(e) => tracing::info!(
+                app_id = %self.app_id, community_id = self.community_id,
+                outcome = e.wire_code(),
+                "call participant unresolved; participant-bound tools are refused"
+            ),
+        }
+        actor
     }
 }
 
@@ -140,6 +168,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             community_id: self.community_id,
             app_version: plan.target_version,
             kv: self.kv.clone(),
+            kv_sealing: self.kv_sealing.clone(),
             egress: Arc::clone(&self.egress),
             gate: Arc::clone(&self.gate),
             db: self.db.clone(),
@@ -152,6 +181,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             identity: self.identity.clone(),
             ai: self.ai.clone(),
             media: self.media.clone(),
+            surface: self.surface.clone(),
             media_deadline: ctx.deadline.or(self.media_deadline),
             ai_deadline: ctx.deadline.or(self.ai_deadline),
             invocation_identity: self.invocation_identity.as_ref().map(|identity| {
@@ -196,6 +226,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             Ok(user) => Ok(bundle_tool_call::ActorContext {
                 actor: Some(user.to_string()),
                 scopes: Vec::new(),
+                participant: None,
             }),
             Err(
                 error @ (identity::IdentityError::NotLinked | identity::IdentityError::NotAMember),
@@ -280,6 +311,13 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
         // 1-5: validate, guard, matrix, gate, resolve. No executor slot is
         // touched until this returns.
         let req = bundle_tool_call::parse_request(&call.args)?;
+        // The AUTOMATED floor ban (reputation service -> platform ban tool): the host-asserted
+        // `system:reputation_floor` actor, only under the strict eligibility in `floor_ban`.
+        // `None` (not an eligible claim) continues through the ordinary human-actor path below,
+        // which refuses a caller without the tool's required scope.
+        if let Some(outcome) = self.try_floor_ban(ctx, &req).await {
+            return outcome;
+        }
         let gate_scope = self.gate_scope();
         // Steps 1-5 (self/cycle/depth, the caller's requested_tools, the P2
         // gate, target resolution + app->app ban, write-key) are actor-
@@ -327,7 +365,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
     }
 
     /// Step 6: the nested invoke of the planned target on the active executor connection.
-    async fn run_nested(
+    pub(super) async fn run_nested(
         &self,
         ctx: &ToolContext,
         plan: &bundle_tool_call::ToolPlan,

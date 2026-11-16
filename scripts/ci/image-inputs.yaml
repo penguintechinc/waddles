@@ -50,6 +50,7 @@ images:
       - hub_api/requirements.txt
       - hub_api/build-tools/requirements.txt
       - hub_api/app.py
+      - hub_api/telemetry.py
       - hub_api/config.py
       - hub_api/bootstrap.py
       - hub_api/healthcheck.py
@@ -118,6 +119,9 @@ images:
     dockerfile: core/bundle_executor/Dockerfile.rust
     context: "."
     lane: b
+    # Deployed as StatefulSets (compiled/scripted executor pools), not a
+    # Deployment — verify must look for its image among StatefulSets.
+    workload: statefulset
     groups: [ctx-root]
     inputs:
       - core/bundle_executor/**
@@ -142,6 +146,7 @@ images:
       - core/egress_assertion/**
       - core/egress_detokenizer/**
       - core/hub_client/**
+      - core/command_latency/**
       - core/service_auth/**
 
   svc-process:
@@ -158,6 +163,7 @@ images:
       - core/bundle_config_db/**
       - core/bundle_capability_gate/**
       - core/bundle_host_credentials/**
+      - core/bundle_host_crypto/**
       - core/bundle_host_db/**
       - core/bundle_host_economy/**
       - core/bundle_host_gameserver_net/**
@@ -173,6 +179,8 @@ images:
       - core/connection_resolver/**
       - core/egress_assertion/**
       - core/hub_client/**
+      - core/command_latency/**
+      - core/bundle_host_surface/**
       - core/service_auth/**
 
   svc-action:
@@ -189,6 +197,7 @@ images:
       - core/bundle_config_db/**
       - core/bundle_capability_gate/**
       - core/bundle_host_credentials/**
+      - core/bundle_host_crypto/**
       - core/bundle_host_db/**
       - core/bundle_host_http/**
       - core/bundle_host_kv/**
@@ -199,6 +208,8 @@ images:
       - core/discord_mentions/**
       - core/egress_assertion/**
       - core/hub_client/**
+      - core/command_latency/**
+      - core/bundle_host_surface/**
       - core/service_auth/**
 
   svc-presentation:
@@ -213,6 +224,7 @@ images:
       - core/svc_presentation/src/**
       - core/egress_detokenizer/**
       - core/hub_client/**
+      - core/bundle_host_surface/**
       - core/overlay_auth/**
       - core/overlay_schema/**
       - core/service_auth/**
@@ -234,13 +246,17 @@ images:
   # Chart appends -<variant> to the tag; only the cpu variant is built for alpha.
   svc-streaming:
     dockerfile: core/svc_streaming/Dockerfile.rust
-    context: core/svc_streaming
+    context: core
     target: cpu
     tag_suffix: "-cpu"
+    build_contexts: ["proto=./proto"]
     lane: b
+    groups: [proto]
     inputs:
       - core/svc_streaming/Cargo.toml
       - core/svc_streaming/Cargo.lock
+      - core/svc_streaming/build.rs
+      - core/platform_keys/**
       - core/svc_streaming/src/**
       - core/svc_streaming/tests/**
 

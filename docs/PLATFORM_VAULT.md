@@ -58,6 +58,110 @@ The seal-callers guard (`hub_api/tests/test_seal_callers_guard.py`) pins that th
 derivation and `hmac` run only inside these functions, that the namespace label appears only in the
 vault, and ratchets the set of modules allowed to import `cryptography` / `hmac`.
 
+## JWT signing (ES256, T10)
+
+The platform's user / session JWT is ES256. The shared HS256 `JWT_SECRET` is gone: no env var,
+Helm value, Secret key, script or code path accepts or mints HS256, and a CI gate
+(`scripts/ci/check-no-shared-jwt-secret.sh`, allowlist `scripts/ci/jwt-hs256-allowlist.txt`) fails if it reappears.
+
+| Piece | Behaviour |
+|---|---|
+| Key | `SecretType.JWT_SIGNING` (3), ES256 / P-256, freshly generated at first boot, **never imported** from env/Secret (security review H1) |
+| Signing | hub-api only, `PlatformVaultJwtKeyring` -> active version from the process cache; header `alg=ES256`, `kid` = the key id. No active key -> sign-in answers 503, never a fallback |
+| Verifying (Python) | `flask_core.auth.verify_jwt_token(token)`: header vetted (alg pinned to ES256 in code, `none`/HS*/RS*/unknown rejected, `jku/jwk/x5u/x5c/crit` rejected, `kid` required), key chosen by `kid` from the key ring, `iss`/`aud`/`exp` enforced, 30 s skew on `iat`/`nbf` only, max lifetime 1 h |
+| Verifying (Rust) | `svc_streaming` reads public keys through `core/platform_keys` (view `platform_vault.public_keys`), same rules; points are 65-byte uncompressed P-256 |
+| Rotation | new version active, previous version **verify-only** until `rotated_at + 2 h` (`verify_window_s`), then refused even if no refresh happened (M6); a Rust cache additionally refuses verify-only keys when its snapshot is > 15 min stale |
+| Kill-switch | `waddles.disable-db-platform-keys` ON skips the vault bootstrap: JWTs then fail CLOSED (no signing key). It is not an HS256 fallback |
+
+`SESSION_MAC_KEY` is the Flask session-cookie / refresh-token MAC key (independent random value, Helm
+`global.sessionMacKey`, generated create-if-absent on first run). It is a NEW key name on purpose: the old `SECRET_KEY`
+was derived from the retired shared JWT secret, so its value is never reused. It can sign no JWT.
+
+### Migration notes (HS256 -> ES256)
+
+1. Deploy: hub-api bootstraps the ES256 key on start; every previously issued access/refresh JWT is refused, so
+   **users re-login once** (access tokens live <= 15 min; sessions refresh-rotate after re-login).
+2. There is deliberately **no dual-accept window** (security review H3): HS256 acceptance is removed in code.
+3. Remove the orphaned `JWT_SECRET` / `JWT_SECRET_KEY` / `SECRET_KEY` entries from the `waddlebot-secrets` Secret in each cluster
+   (`kubectl patch secret waddlebot-secrets --type=json -p '[{"op":"remove","path":"/data/JWT_SECRET"},{"op":"remove","path":"/data/JWT_SECRET_KEY"},{"op":"remove","path":"/data/SECRET_KEY"}]'`);
+   leaked copies verify nothing, but they should not linger.
+4. Helm: `global.jwtSecret` / `WADDLEBOT_ALPHA_JWT_SECRET` are removed; `global.sessionMacKey` / `WADDLEBOT_ALPHA_SESSION_MAC_KEY` replace them; a values file that still sets `global.jwtSecret` now FAILS the render.
+## Escrow (S3 disaster-recovery copy)
+
+Postgres is the source of truth. After every commit that creates a version (bootstrap generate / import / restore, and rotation) hub-api writes a DR copy to the **dedicated escrow bucket** (`infrastructure.seaweedfs.escrow.bucketName`, default `waddles-platform-escrow`), through a **dedicated S3 identity** (`hub-api-escrow`, Read/Write/List on that bucket only). No bundle, data-plane, streaming or general hub-api identity names the bucket, and the escrow credentials live in their own Secret `<release>-platform-escrow-s3` (generated at runtime by the provision-secrets hook, never the envFrom'd `waddlebot-secrets`).
+
+| Object | Content |
+|---|---|
+| `platform/secrets-escrow/<type>/<scope or global>/<version>.sealed` | the value, AES-GCM sealed under a KEK-derived key (HKDF label `escrow/v1`), AAD = type, scope, version, kek_id, public_id, keyed fingerprint |
+| `platform/secrets-escrow/manifest.json` | one signed document: generation counter, and per version the identity, kek_id, keyed fingerprint, algorithm, state, kid, object key; MAC under a KEK-derived key (label `escrow-manifest/v1`) |
+
+**Restore** runs at hub-api bootstrap only, when the `secrets` table is empty and the root marker does not mismatch (a changed KEK refuses first: `root_mismatch`). It verifies, in order: the manifest signature; each entry against the registry (type, scope rule, algorithm, canonical object key, highest version = the single active one); each object under its manifest-bound AAD; the fingerprint recomputed from the opened value. Anything off refuses the boot and generates nothing (`escrow_tampered`, `escrow_invalid`, `escrow_missing`, `escrow_unavailable`). A restore is permitted automatically only in `alpha`/`local` (`DEPLOYMENT_TIER`); everywhere else set `WADDLES_PLATFORM_SECRETS_ESCROW_RESTORE=1` for that one boot (otherwise `restore_blocked`). Restored values are re-sealed under the current KEK; older versions come back verify-only.
+
+**Anti-rollback anchor.** A signed manifest is valid forever, so an attacker with bucket write could replay an OLDER one and roll a restore back to retired or compromised keys. `root_marker` (in the database, outside the bucket) therefore records the highest manifest **generation** ever written, the **digest** of that manifest, and a keyed MAC over both (`escrow-anchor/v1`); a trigger makes it monotonic (generation never goes down; at the same generation the digest never changes). Every escrow write advances the anchor BEFORE it writes the bucket. Restore refuses a manifest with `generation < anchor` (`escrow_rollback`), or the same generation with another digest (`escrow_tampered`), or an anchor whose MAC does not verify, or any entry the audit chain records as retired / destroyed (`escrow_rollback`). Every generation is also kept as a write-once object `platform/secrets-escrow/manifests/<generation>.json` (a taken key is never reused, the escrow identity never overwrites it); if the latest pointer `manifest.json` is stale, restore falls back to the anchored generation's object when its digest matches. After a restore the anchor is advanced to the restored generation. A sync that finds the bucket's manifest older than the anchor alerts (`escrow_rollback`) and re-publishes from the database as a NEW generation. Residual risk: if the whole database (marker included) is lost AND the attacker controls the bucket, no anchor survives and an old signed manifest can still be replayed -- hence the operator flag outside alpha, bucket versioning, and a KMS-wrapped root before beta.
+
+**Drift** (metric `waddles_platform_secrets_drift_detected_total{type,outcome}`, outcome `escrow_tampered`, `escrow_drift`, `escrow_ahead`): a remote manifest that does not verify, an entry whose fingerprint no longer matches the database, or a manifest listing a version the database lacks (the DB went backwards) is alerted and **never overwritten**; bucket versioning keeps history. Resolve by restoring the previous object version in the bucket (or deleting the manifest after confirming the database is right) and restarting hub-api. Other signals: `waddles_platform_secrets_escrow_total{type,outcome}` (`ok`, `error`, `restored`), span `platform_secrets.escrow`. Page on any drift outcome; never auto-remediate.
+
+**Alpha with a replaced root KEK**: the old escrow cannot be opened, so a pristine database plus a stale escrow refuses to boot (`escrow_tampered`). Wipe the escrow bucket together with the database when you deliberately start over.
+
+**Versioning / object lock**: the bucket-init Job enables bucket versioning (`escrow.versioning`, logged loudly if SeaweedFS rejects it). Object-lock is not enabled: it must be set at bucket creation and a retention lock would block the manifest rewrite on every rotation; versioning plus the sealed, signed objects is the integrity layer. Residual risk: an attacker with write access to the bucket AND old valid objects can replay an older, still validly-signed manifest; restore then yields an older but genuine key set. Restore is operator-gated outside alpha for that reason.
+
+## Rotation and retirement (operator-triggered)
+
+Rotation never happens implicitly (upgrades, restarts and bootstrap never rotate). An operator calls the admin API or the CLI that calls the SAME API:
+
+```
+POST /api/v1/admin/platform-secrets/{type}/rotate   {"reasonCode": 1|2|3}
+POST /api/v1/admin/platform-secrets/{type}/retire   {"version": N, "reasonCode": 1|2|3}
+GET  /api/v1/admin/platform-secrets/                status, no secret material
+make platform-secrets-rotate ARGS="rotate jwt_signing --reason scheduled"   # WADDLES_API_URL + WADDLES_ADMIN_TOKEN in env
+```
+
+`{type}` = `jwt_signing` | `bundle_signing` | `precompile_signing` (or the int code). Reason codes: 1 scheduled, 2 suspected compromise, 3 maintenance (stored as `reason` 8/9/10).
+
+| Gate | Rule |
+|---|---|
+| Scope | `platform_secrets:admin` (`require_scope`, no role names) |
+| Who | token tenant = reserved `system` AND caller is a global admin; a tenant admin with the scope is refused |
+| CSRF | a `wb_session`-cookie-authenticated call also needs `X-Requested-With: waddles-admin`, a JSON body and a same-origin `Origin`; bearer-header callers (the CLI) are not CSRF-exposed |
+| MFA step-up | `amr` has a second factor (`mfa`/`otp`/`hwk`/`swk`) and `auth_time` is <= 5 min old |
+| Replay | mandatory `Idempotency-Key: <uuid>`, single use (`platform_vault.rotation_requests`) |
+| Rate limit | rotate: one new version per type per 10 minutes |
+| Retire window | refused until the new active version's `activated_at` + the type's verify window (JWT 2h; signing keys 24h), computed server-side; only a verify-only version can be retired |
+
+State machine: rotate = ACTIVE vN becomes VERIFY-ONLY (still verifies until `verify_until`, never signs) and v(N+1) is ACTIVE; retire = VERIFY-ONLY -> RETIRED. Both are audited in `platform_vault.secret_events` (actor UUID, event code, reason code, outcome; refusals included as outcome 2; never a value, fingerprint or key id) inside the hash chain, under the bootstrap advisory lock. After a committed change the new state is escrowed. Metrics: `waddles_platform_secrets_rotations_total{type,outcome}`; spans `platform_secrets.rotate|retire`.
+
+**MFA step-up (how an operator satisfies the gate).** Access tokens now carry `amr` + `auth_time`: password login = `["pwd"]` (never MFA); a passkey login = `["hwk"|"swk"]`, plus `"user","mfa"` ONLY when the authenticator reported user verification (the WebAuthn UV flag, checked server-side; `services/auth_amr.py`). Refresh re-mints without them. Right before a rotate/retire the operator calls:
+
+```
+POST /api/v1/auth/step-up/passkey/start    -> WebAuthn options over THEIR OWN passkeys, user verification required
+POST /api/v1/auth/step-up/passkey/finish   {"credential": <navigator.credentials.get result>} -> {"token": ..., "mfaValidForSeconds": 300}
+```
+
+`finish` verifies the assertion (challenge bound to the user and single-use, credential owned by the user, signature, counter, UV flag) and re-issues the caller's own token (same session, tenant, scopes, roles; nothing added) with `amr=[hwk|swk,user,mfa]`, `auth_time=now`; the session cookie is refreshed too. The rotate/retire gate accepts only `mfa`/`otp` in `amr` (a bare `hwk`/`swk`/`pwd` is not enough) and `auth_time` <= 5 min. Prerequisite: the operator has registered a passkey (`/api/v1/user/passkey/register/*`); there is no TOTP in hub-api. Caveat: challenges are in-process (same as passkey login), so start and finish must hit the same replica; otherwise `finish` answers 400 and the operator retries. The CLI takes the token from `WADDLES_ADMIN_TOKEN` / `--token-stdin` (the browser performs the step-up, the CLI never holds a passkey).
+
+## Offline signers (core-bundle seeder, signing backfill)
+
+The seeder (`cli/seed_core_bundles.py`) and the backfill (`cli/sign_approved_bundles.py`) are their
+own Job pods, so hub-api's bootstrap never seeds THEIR process cache. They must not hold the
+platform KEK (it stays inside hub-api), so each calls `load_offline_signer_cache(DATABASE_URL)`
+before any signing: it reads the ACTIVE `bundle_signing` row's public key + kid (public columns,
+nothing is opened) and accepts the Job's bundle-signing Secret (`BUNDLE_SIGNING_PRIVATE_KEY`) only
+when its public key equals that row's. The vault decides which key signs; creation stays with
+hub-api's bootstrap (advisory lock; the seeder waits for hub-api `/ready`).
+
+| Condition | Result |
+|---|---|
+| kill-switch `waddles.disable-db-platform-keys` ON | skipped, legacy env signer authoritative |
+| no active `bundle_signing` row | refuse `signing_key_missing` (never generates) |
+| Secret absent / placeholder / invalid | refuse `signing_key_unavailable` |
+| Secret's public key != active vault key (e.g. rotated, Secret not updated) | refuse `trust_mismatch`, drift metric `outcome=mismatch` |
+| otherwise | `waddles_platform_secrets_offline_loads_total{outcome="ok"}`, log type/version/count |
+
+Executor trust: hub-api imports that Secret's key as `bundle_signing` v1 on first run, and the
+executors' `BUNDLE_SIGNING_PUBLIC_KEYS` ConfigMap is derived from the same Secret, so what the
+offline signers sign is exactly what the executors verify. A rotation must update the Secret (and
+so the ConfigMap) too; until it does, the offline signers refuse rather than sign unverifiably.
+
 ## Data-plane verifying keys (`core/platform_keys`, design T5)
 
 Data-plane services verify signatures against the PUBLIC keys in the view `public_keys`, read with

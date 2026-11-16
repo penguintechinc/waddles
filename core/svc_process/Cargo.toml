@@ -155,7 +155,8 @@ bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
 # `stage.wit`'s `interface kv`. `core/svc_action` declares the identical
 # dependency so the capability is written and tested exactly once. See
 # `core/bundle_host_kv/Cargo.toml`.
-bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
+bundle-host-crypto = { path = "../bundle_host_crypto", version = "=0.1.0", features = ["grpc"] }
+bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0", features = ["grpc"] }
 # The standard enforcement gate every host capability arm calls first
 # (`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
 # SS5, `src/capabilities.rs`).
@@ -166,7 +167,7 @@ bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0
 bundle-tool-call = { path = "../bundle_tool_call", version = "=0.1.0" }
 # Target-user id parsing for the `reputation` capability (`handle_reputation`):
 # a bundle names its target as a UUID string; same pin as the gate crate.
-uuid = { version = "=1.26.1" }
+uuid = { version = "=1.26.1", features = ["v5"] }
 # `src/identity.rs` (the `identity` bundle host capability): an OTel latency
 # histogram + outcome counter for identity resolutions, reading the global
 # meter provider `penguin-logging` installs (never building its own), exactly
@@ -226,6 +227,10 @@ bundle-host-credentials = { path = "../bundle_host_credentials", version = "=0.1
 # The `media` host capability (Gemini image/music/video, tier-gated + BYOK):
 # same-repo path dependency, see core/bundle_host_media.
 bundle-host-media = { path = "../bundle_host_media", version = "=0.1.0" }
+# `crate::surface`: stage side of `overlay.publish-surface` (gRPC delivery to svc-presentation,
+# host-derived community + app-id namespace ownership). Its build.rs compiles
+# `proto/waddles/presentation/internal/v1` with the same protoc/`proto` context as hub_client.
+bundle-host-surface = { path = "../bundle_host_surface", version = "=0.1.0" }
 # Machine-JWT source for bundle-host-media's hub-api calls (tier + BYOK);
 # already in this crate's lock via core/hub_client.
 service_auth = { path = "../service_auth", version = "=0.1.0", features = ["rest-tls"] }
@@ -275,6 +280,10 @@ hmac = "=0.12.1"
 hex = "=0.4.3"
 
 [dev-dependencies]
+# `crate::bundle_storage` tests put real object bodies through the assembled `StorageHost`.
+bytes = "=1.12.1"
+# `crate::surface` tests run a real in-process tonic `SurfaceService` on loopback.
+tokio-stream = { version = "=0.1.19", features = ["net"] }
 # In-process KeyService fake (the seal contract) for the real-path decrypt tests.
 hub_client = { path = "../hub_client", version = "=0.1.0", features = ["test-support"] }
 # In-process `ServiceAuthService` mint hub for the machine-JWT bootstrap of those tests.

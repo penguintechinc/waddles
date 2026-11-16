@@ -182,17 +182,31 @@ spec:
         - name: SERVICE_JWT_PUBLIC_KEY_{{ $kid }}
           value: {{ $pem | quote }}
         {{- end }}
-        {{- if .Values.pipeline.svcStreaming.enabled }}
-        # hub_api/services/calls_proxy.py -- svc-streaming (RTC control plane) base URL. Rendered
-        # from the same Service name/port templates/svc-streaming.yaml creates; hub-api has NO
-        # in-code default and fails loud on the first proxied call when this is absent.
-        - name: STREAMING_RTC_URL
-          {{- if include "waddlebot.transitTlsEnabled" . }}
-          # F6 -- svc-streaming's TLS control-plane listener (STREAMING_TLS_PORT), dialed by FQDN.
-          value: "https://{{ include "waddlebot.svcFqdn" (dict "root" . "name" "svc-streaming") }}:{{ .Values.global.internalTransitTls.streamingTlsPort }}"
-          {{- else }}
-          value: "http://{{ include "waddlebot.fullname" . }}-svc-streaming:{{ .Values.pipeline.svcStreaming.port }}"
-          {{- end }}
+        {{- if and .Values.pipeline.svcStreaming.enabled (eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true") }}
+        # hub_api/services/calls_proxy.py -- svc-streaming RoomsService gRPC target (HTTP/2 + mTLS,
+        # ES256 machine JWT per call). Rendered from the same Service name/port
+        # templates/svc-streaming.yaml creates; hub-api has NO in-code default and fails loud on the
+        # first call when this (or the mTLS file set) is absent. The server cert's SAN is the
+        # Service FQDN (waddlebot.hostApiTlsDesiredDnsNames) -- FQDN only: the name-constrained
+        # internal CA does not permit a bare <fullname>-svc-streaming SAN.
+        - name: STREAMING_RTC_GRPC_TARGET
+          value: "{{ include "waddlebot.fullname" . }}-svc-streaming.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.pipeline.svcStreaming.grpcPort }}"
+        # hub-api's own allow-listed SPIFFE identity (serviceJwt.identities.hub-api) -- the `sub`
+        # of the machine JWT it mints for each RoomsService call.
+        - name: STREAMING_RTC_SERVICE_ID
+          value: {{ tpl (index .Values.serviceJwt.identities "hub-api").spiffeId . | quote }}
+        - name: STREAMING_RTC_GRPC_CA_FILE
+          value: /etc/waddlebot/host-api-tls/ca.crt
+        - name: STREAMING_RTC_GRPC_CLIENT_CERT_FILE
+          value: /etc/waddlebot/host-api-tls/tls.crt
+        - name: STREAMING_RTC_GRPC_CLIENT_KEY_FILE
+          value: /etc/waddlebot/host-api-tls/tls.key
+        # TLS server name verified against the svc-streaming cert SANs (waddlebot.hostApiTlsDesiredDnsNames);
+        # defaults to the Service name from the target, so it always matches a SAN.
+        - name: STREAMING_RTC_GRPC_SERVER_NAME
+          value: {{ .Values.pipeline.hubApi.streamingRtc.serverName | default (printf "%s-svc-streaming.%s.svc.cluster.local" (include "waddlebot.fullname" .) .Values.namespace) | quote }}
+        - name: STREAMING_RTC_TIMEOUT_SECONDS
+          value: {{ .Values.pipeline.hubApi.streamingRtc.timeoutSeconds | default 10 | quote }}
         {{- end }}
         - name: SERVICE_JWT_AUDIENCE
           value: {{ .Values.serviceJwt.audience | quote }}
@@ -274,6 +288,23 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: HUB_API_S3_SECRET_ACCESS_KEY
+        # T7 platform-secret escrow: dedicated bucket + dedicated identity (own Secret, never the
+        # envFrom'd one) -- hub_api/services/platform_secrets/escrow.py. No bundle or data-plane
+        # identity names this bucket.
+        {{- if .Values.infrastructure.seaweedfs.enabled }}
+        - name: PLATFORM_ESCROW_S3_BUCKET
+          value: {{ .Values.infrastructure.seaweedfs.escrow.bucketName | quote }}
+        - name: PLATFORM_ESCROW_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-platform-escrow-s3
+              key: ESCROW_S3_ACCESS_KEY_ID
+        - name: PLATFORM_ESCROW_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-platform-escrow-s3
+              key: ESCROW_S3_SECRET_ACCESS_KEY
+        {{- end }}
         - name: CREDENTIAL_ENCRYPTION_KEY
           valueFrom:
             secretKeyRef:
@@ -383,6 +414,9 @@ spec:
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
         {{- include "waddlebot.hubApiGrpcTlsVolumeMount" . | nindent 8 }}
+        {{- if and .Values.pipeline.svcStreaming.enabled (eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true") }}
+        {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
+        {{- end }}
         {{- if include "waddlebot.transitTlsEnabled" . }}
         {{- include "waddlebot.transitServerVolumeMount" . | nindent 8 }}
         {{- end }}
@@ -401,6 +435,9 @@ spec:
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}
       {{- include "waddlebot.hubApiGrpcTlsVolume" . | nindent 6 }}
+      {{- if and .Values.pipeline.svcStreaming.enabled (eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true") }}
+      {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
+      {{- end }}
       {{- if include "waddlebot.transitTlsEnabled" . }}
       {{- include "waddlebot.transitServerVolume" (dict "root" . "component" "hub-api") | nindent 6 }}
       {{- end }}

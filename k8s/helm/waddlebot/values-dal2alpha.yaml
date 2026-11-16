@@ -72,7 +72,7 @@ global:
   # login. The password is NOT committed here (fix/alpha-helm-deploy) -- it
   # comes from the required WADDLEBOT_ALPHA_ADMIN_PASSWORD env var via
   # scripts/deploy-alpha.sh's generated secrets values file, same as
-  # jwtSecret/moduleSecretKey/serviceApiKey/minio root creds below. NEVER
+  # sessionMacKey/moduleSecretKey/serviceApiKey/minio root creds below. NEVER
   # reused in beta/gamma/production (see values.yaml global.initialAdmin).
   initialAdmin:
     email: "admin@waddles-alpha.penguintech.cloud"
@@ -320,9 +320,23 @@ pipeline:
     publicBaseUrlFromNodeIP: false
     nodePort:
       enabled: false
-    resources:
-      requests: { cpu: "200m", memory: "256Mi" }
-      limits: { cpu: "2000m", memory: "1Gi" }
+    # Resources follow the base owner policy (requests 250m/512Mi, limits 4 CPU/4Gi).
+    #
+    # RTC media: NodePort (owner-approved alpha exemption from the no-external-ports rule). The
+    # fixed nodePort MUST equal webrtc.udpPort -- the SFU advertises the port it binds in its ICE
+    # candidates, so the router UDP port-forward is WAN 31400/udp -> <node IP>:31400/udp (owner
+    # action; docs/RTC_MEDIA_EXPOSURE.md). externalTrafficPolicy Cluster so any node answers
+    # (the node SNATs, hence host + remote-node in the CNP entities). Chart refuses NodePort
+    # outside global.deploymentTier alpha|local.
+    webrtc:
+      udpPort: 31400
+      media:
+        service:
+          type: NodePort
+          nodePort: { udp: 31400, tcp: 0 }
+          externalTrafficPolicy: Cluster
+        networkPolicy:
+          fromEntities: ["world", "host", "remote-node"]
 
   # feature/e2e-helm-rust-dataplane -- Rust data-plane stack. Formalizing the alpha e2e
   # cutover state here (svc-action executor wiring) -- this was previously
@@ -579,6 +593,12 @@ httproute:
       port: 8080
       timeoutSeconds: 3600
 
+# Discord interactions / webhooks through the shared Gateway (command-latency first door): the
+# route stamps `x-request-start` at the Cilium LB and svc-ingest trusts it. Listener/namespace
+# admission is the same `gateway-access` label the hub-webui route already needs.
+interactionsGateway:
+  enabled: true
+
 # Operator-provisioned Secret (never rendered/overwritten by this chart).
 platformCredentials:
   existingSecret: "waddlebot-platform-credentials"
@@ -755,9 +775,3 @@ latencyCanary:
   commandText: "!ping"
   sinkMode: "post"
   intervalSeconds: 60
-
-# Bundle storage v2 (references only; Secrets are created out-of-band). Enable once the
-# Secrets exist -- off here so the pods keep starting without them:
-# bundleStorageV2:
-#   db: {enabled: true, existingSecret: waddlebot-bundle-db}
-#   migrator: {enabled: true, existingSecret: waddlebot-bundle-migrator}

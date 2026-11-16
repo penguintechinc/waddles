@@ -34,7 +34,11 @@ from services.identity_resolution_service import (
     resolve_target,
 )
 from services.stream_dek_broker import (
+    PURPOSE_AT_REST,
     STREAM_DEK_SCOPE,
+    TENANT_DEK_SCOPE,
+    X25519_KEY_LENGTH,
+    StreamDekBroker,
     StreamDekDeniedError,
     StreamDekError,
     StreamDekInvalidError,
@@ -54,6 +58,7 @@ REQUIRED_SCOPES: dict[str, str | tuple[str, ...]] = {
         "identity:platform-user:resolve"
     ),
     "/waddles.hub.internal.v1.KeyService/GetStreamDek": STREAM_DEK_SCOPE,
+    "/waddles.hub.internal.v1.KeyService/GetTenantDek": TENANT_DEK_SCOPE,
     # Data-plane reads (provider connections, distribution, media): dataplane_servicers.py.
     **DATAPLANE_REQUIRED_SCOPES,
 }
@@ -258,11 +263,31 @@ _DEK_STATUS: dict[type[StreamDekError], grpc.StatusCode] = {
 
 
 class KeyServicer(key_pb2_grpc.KeyServiceServicer):  # type: ignore[misc]
-    """Adapter for `KeyService`: sealed per-tenant stream DEKs (`services.stream_dek_broker`)."""
+    """Adapter for `KeyService`: sealed per-tenant DEKs, all through one `StreamDekBroker`.
+
+    `GetStreamDek` serves the ingest-stream lineage, `GetTenantDek` the at-rest lineage (bundle
+    kv sealing); both share the broker's authorization, sealing and audit path
+    (`services.stream_dek_broker`).
+    """
 
     def __init__(self, app_config: Mapping[str, Any] | None = None) -> None:
         """Bind the app config; the broker is resolved per call (built after startup wiring)."""
         self._config: Mapping[str, Any] = app_config if app_config is not None else {}
+
+    async def _verified_claims(
+        self, context: grpc.aio.ServicerContext[Any, Any]
+    ) -> tuple[dict[str, Any], str, StreamDekBroker]:
+        """Return (claims, tenant claim, broker) or abort fail-closed (no claims / no store)."""
+        claims = service_claims.get()
+        tenant = claims.get("tenant") if claims else None
+        if not claims or not isinstance(tenant, str) or not tenant.strip():
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "unauthorized")
+            raise AssertionError("unreachable")
+        broker = broker_from_config(self._config)
+        if broker is None:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "key store not configured")
+            raise AssertionError("unreachable")
+        return claims, tenant, broker
 
     async def GetStreamDek(  # noqa: N802 - grpc-generated servicer method name
         self,
@@ -274,15 +299,7 @@ class KeyServicer(key_pb2_grpc.KeyServiceServicer):  # type: ignore[misc]
         Claims come only from the verified token (`AuthInterceptor`); absent claims or an
         unwired key store fail closed. Status messages are constant and key/PII-free.
         """
-        claims = service_claims.get()
-        tenant = claims.get("tenant") if claims else None
-        if not claims or not isinstance(tenant, str) or not tenant.strip():
-            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "unauthorized")
-            raise AssertionError("unreachable")
-        broker = broker_from_config(self._config)
-        if broker is None:
-            await context.abort(grpc.StatusCode.UNAVAILABLE, "key store not configured")
-            raise AssertionError("unreachable")
+        claims, tenant, broker = await self._verified_claims(context)
         try:
             issued = await broker.issue(
                 StreamDekRequest(
@@ -299,4 +316,42 @@ class KeyServicer(key_pb2_grpc.KeyServiceServicer):  # type: ignore[misc]
             raise AssertionError("unreachable") from exc
         return key_pb2.GetStreamDekResponse(
             sealed_dek=issued.sealed_dek, version=issued.version, ttl_seconds=issued.ttl_seconds
+        )
+
+    async def GetTenantDek(  # noqa: N802 - grpc-generated servicer method name
+        self,
+        request: key_pb2.GetTenantDekRequest,
+        context: grpc.aio.ServicerContext[Any, Any],
+    ) -> key_pb2.GetTenantDekResponse:
+        """Return a tenant's at-rest data subkey sealed to the caller's ephemeral X25519 key.
+
+        The numeric `tenant_id` is bound into the seal context and checked against the token's
+        tenant (tenant-bound tokens get only their own; `system` any existing tenant). Only the
+        AT_REST purpose is served here -- ingest-stream keys come from `GetStreamDek`. The raw DEK
+        never leaves hub-api: the data plane receives the HKDF-derived subkey.
+        """
+        claims, tenant, broker = await self._verified_claims(context)
+        if request.purpose != key_pb2.TENANT_DEK_PURPOSE_AT_REST:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "purpose is not served here")
+            raise AssertionError("unreachable")
+        try:
+            issued = await broker.issue(
+                StreamDekRequest(
+                    tenant_id=str(request.tenant_id),
+                    purpose=PURPOSE_AT_REST,
+                    version=int(request.dek_version),
+                    caller_public_key=bytes(request.caller_ephemeral_public_key),
+                    claim_tenant=tenant,
+                    caller_sub=str(claims.get("sub", "")),
+                ),
+                lineage=PURPOSE_AT_REST,
+            )
+        except StreamDekError as exc:
+            await context.abort(_DEK_STATUS.get(type(exc), grpc.StatusCode.UNAVAILABLE), str(exc))
+            raise AssertionError("unreachable") from exc
+        return key_pb2.GetTenantDekResponse(
+            enc=issued.sealed_dek[:X25519_KEY_LENGTH],
+            ciphertext=issued.sealed_dek[X25519_KEY_LENGTH:],
+            dek_version=issued.version,
+            ttl_seconds=issued.ttl_seconds,
         )

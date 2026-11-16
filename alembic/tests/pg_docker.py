@@ -330,7 +330,10 @@ def _wait_ready(
     accepts connections briefly during its own first-run `initdb`
     bootstrap, then restarts once more before `POSTGRES_DB` actually
     exists -- a real `SELECT 1` against the actual database is the only
-    check that can't false-positive here. Each probe is bounded by
+    check that can't false-positive here. The probe goes over TCP (`-h 127.0.0.1`): that
+    first-run temporary server listens on the unix socket only (`listen_addresses=''`), so
+    a socket probe could succeed against it and the next `docker exec psql` then hit the
+    restart (psql exit 2). Each probe is bounded by
     `probe_timeout_s` (env `WADDLES_PG_PROBE_TIMEOUT_S`, default 10s) and the
     whole wait by `timeout_s` (env `WADDLES_PG_READY_TIMEOUT_S`, default 120s),
     so a loaded host fails loudly instead of hanging forever.
@@ -351,7 +354,10 @@ def _wait_ready(
         attempts += 1
         try:
             result = subprocess.run(  # noqa: S603 -- fixed argv, no shell, test-only
-                ["docker", "exec", container, "psql", "-U", user, "-d", dbname, "-c", "SELECT 1"],
+                [
+                    "docker", "exec", container,
+                    "psql", "-h", "127.0.0.1", "-U", user, "-d", dbname, "-c", "SELECT 1",
+                ],
                 capture_output=True,
                 text=True,
                 check=False,

@@ -61,7 +61,7 @@ fn orchestrator(whip: Arc<WhipState>, whep: Arc<WhepState>, dir: PathBuf) -> Orc
         db_password: svc_streaming::config::Secret::new("x"),
         cache_password: None,
         service_api_key: svc_streaming::config::Secret::new("x"),
-        jwt_hmac_secret: None,
+        jwt_keys: svc_streaming::jwt_keys::JwtKeys::None,
     };
     let reg = prometheus::Registry::new();
     let supervisor = Arc::new(FfmpegSupervisor::new(

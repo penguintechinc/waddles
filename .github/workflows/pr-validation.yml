@@ -139,6 +139,22 @@ jobs:
       - name: check-no-stubs
         run: make check-no-stubs
 
+      # A core/ bin crate using rustls without install_default() panics at first TLS build
+      # ("Could not automatically determine the process-level CryptoProvider") -> CrashLoop.
+      - name: check-rustls-provider
+        run: make check-rustls-provider
+
+      # A bundle-<crate> stage missing an out-of-crate #[path]/include_*!/path-dep source fails the
+      # seeder image build only at deploy time (alpha run 43812541222). Zero examined fails.
+      - name: check-bundle-docker-context
+        run: make check-bundle-docker-context
+
+      # A core Rust service Dockerfile that COPYs a Cargo path dep to the wrong container path (or
+      # not at all) fails only inside the deploy image build (svc-streaming platform_keys, deploy
+      # runs 43859970070/43858247593). Negative fixture runs first; zero examined fails.
+      - name: check-core-docker-context
+        run: make check-core-docker-context
+
       # PII boundary: only svc-ingest's outbound drain and svc-presentation may reference the
       # egress detokenizer (svc-action used to detokenize into Valkey queues). Prints files
       # examined; zero examined or any violation fails, and the negative test runs first.
@@ -332,16 +348,23 @@ jobs:
       # 0060_port_legacy_sql_097_102 on real Postgres (fresh replay, an existing DB baselined
       # before 097 with seeded data, re-run, minimal CI bootstrap) and that no new numbered SQL
       # file lands un-bridged. No `|| true`: pytest exits 5 on zero collected, failing the step.
-      - name: Legacy SQL -> Alembic bridge (real Postgres)
+      #
+      # Runs the WHOLE alembic/tests suite, not a hand-picked file list: the old four-file list
+      # left every other test_00NN_*.py uncollected in CI, so 0093 (dropped the legacy catalog
+      # branches test_0091 asserted at `head`) and 0117 (a `bundles.admin:moderate` scope string
+      # test_0047's entrypoint scanner matched) broke those tests on the release branch with no
+      # red check. Docker-backed tests skip when the docker CLI is absent, so the step fails loud
+      # if docker is unusable or any test skipped for that reason (a skip is not a pass).
+      - name: Alembic revision tests (full alembic/tests suite, real Postgres)
         if: steps.changes.outputs.any == 'true'
         run: |
           set -euo pipefail
-          python3 -m pytest \
-            alembic/tests/test_legacy_sql_ownership.py \
-            alembic/tests/test_0060_port_legacy_sql_097_102.py \
-            alembic/tests/test_0061_port_legacy_sql_103_codec.py \
-            alembic/tests/test_0001_baseline_fresh_replay.py \
-            -v -rs -p no:cacheprovider
+          docker info --format '{{.ServerVersion}}'
+          log="$(mktemp)"
+          python3 -m pytest alembic/tests -rfEs -p no:cacheprovider 2>&1 | tee "$log"
+          docker_skips="$(grep -c 'docker CLI not available' "$log" || [ $? -eq 1 ])"
+          echo "docker-unavailable skips: ${docker_skips}"
+          test "${docker_skips}" -eq 0
 
       # This repo's real-Postgres alembic history starts at migration 0020 --
       # everything before it is a 96-file legacy SQL baseline replay
@@ -372,7 +395,11 @@ jobs:
           CREATE TABLE communities (
               id SERIAL PRIMARY KEY,
               name TEXT,
-              tenant_id INTEGER  -- 0045 trigger reads it (legacy NOT NULL column)
+              tenant_id INTEGER,  -- 0045 trigger reads it (legacy NOT NULL column)
+              -- the live-community predicate (0114 reputation_tenant_communities, identity
+              -- resolution): 000_create_base_schema.sql. Mirrors pg_docker.py -- keep in sync.
+              is_active BOOLEAN DEFAULT TRUE,
+              deleted_at TIMESTAMP
           );
           CREATE TABLE hub_users (
               id SERIAL PRIMARY KEY,
@@ -730,6 +757,19 @@ jobs:
         with:
           version: 'v3.13.0'
 
+      # The chart render tests that prove BOTH helm majors (test_interactions_gateway_render.py) need a
+      # helm 4 next to the helm 3 above; a missing major is a CI FAILURE there, never a skip. Exact
+      # version, sha256-verified, exposed as HELM4_BIN (never replaces `helm`).
+      - name: Install Helm 4 (second major for dual-major render tests)
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/helm4.tgz https://get.helm.sh/helm-v4.0.0-linux-amd64.tar.gz
+          echo "c77e9e7c1cc96e066bd240d190d1beed9a6b08060b2043ef0862c4f865eca08f  /tmp/helm4.tgz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/helm4"
+          tar -xzf /tmp/helm4.tgz -C "$RUNNER_TEMP/helm4" --strip-components=1 linux-amd64/helm
+          "$RUNNER_TEMP/helm4/helm" version --short
+          echo "HELM4_BIN=$RUNNER_TEMP/helm4/helm" >> "$GITHUB_ENV"
+
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
@@ -948,6 +988,22 @@ jobs:
       # `--set-string` style render a clean tag with no `%!` anywhere.
       - name: alpha render -- all-digit short SHA image tag regression test
         run: bash scripts/ci/tests/test_image_tag_all_digit_sha.sh
+
+      # fix/smoke-precompile-pod-exclusion -- the deploy smoke step's generic pod-phase scan
+      # excluded precompile batch pods by the waddlebot.io/workload label. A CronJob batch pod
+      # created before that label was added to the chart does not carry it, and k8s equality
+      # `!=` selects label-less pods, so a stale/stuck precompile pod (alpha deploy 43894038667,
+      # waddlebot-executor-precompile-29914020-cnpqp) was counted as bad and failed the whole
+      # deploy. The scan now excludes precompile batch pods by stable NAME; a Failed precompile
+      # batch Job still trips the gate (step 2b). The bash test embeds the pre-fix label scan to
+      # prove it regresses on the stale pod.
+      - name: smoke step -- precompile pod-exclusion + batch-gate regression tests
+        run: |
+          set -euo pipefail
+          bash scripts/ci/smoke/tests/test-pod-phase-check.sh
+          python3 -m pytest -q -p no:cacheprovider \
+            scripts/ci/smoke/tests/test_pod_phase_classify.py \
+            scripts/ci/smoke/tests/test_precompile_batch_gate.py
 
       # Static chart-values audit: every values key must be consumed by a template and
       # every template reference must resolve. Fails the job on any finding (no `|| true`);

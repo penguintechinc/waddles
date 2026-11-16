@@ -12,7 +12,7 @@ meets it, and where it deliberately differs. Standard: RFC 8725 (JWT BCP). Minti
 | Verifier (`verifier` label) | Algorithm (exactly one) | Token | Code | Used by |
 |---|---|---|---|---|
 | `service_eddsa` | `ES256` (+ legacy `EdDSA` only while `SERVICE_JWT_ACCEPT_LEGACY_EDDSA=true`) | per-service machine JWT, hub-api JWKS | `core/service_auth` → `verify` | `svc_presentation` (overlay PUSH via `overlay_auth`), `egress_proxy` (caller auth) |
-| `platform_hs256` | `HS256` | user/session platform JWT, shared secret | `core/svc_streaming/src/http/auth.rs` | `svc_streaming` `/api/v1/*` |
+| `platform_es256` | `ES256` | user/session platform JWT, platform-vault public key by `kid` | `core/svc_streaming/src/http/auth.rs` | `svc_streaming` `/api/v1/*` |
 | `egress_assertion` | `ES256` (+ legacy `EdDSA` in the same window) | single-use egress grant (Rust-only) | `core/egress_assertion` → `verify_with_key`, `core/egress_proxy/src/assertion.rs` | `egress_proxy` |
 
 `svc_ingest`, `svc_process` and `svc_action` contain **no** JWT verifier (none depends on
@@ -25,15 +25,15 @@ everything below.
 
 Reason strings (the `outcome` metric label) are **identical** to the Python table.
 
-| Check | Rejection reason | `service_eddsa` | `platform_hs256` | `egress_assertion` |
+| Check | Rejection reason | `service_eddsa` | `platform_es256` | `egress_assertion` |
 |---|---|---|---|---|
 | `alg: none`, any letter case | `alg_none` | yes | yes | yes |
 | Header `alg` not the verifier's one algorithm (HS384/512, RS\*, ES\*, `eddsa`, absent, non-string) | `alg_mismatch` | yes | yes | yes |
 | Header carries `jku`, `jwk`, `x5u`, `x5c` or `crit` | `forbidden_header` | yes | yes | yes |
 | `kid` outside `[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}` | `bad_kid` | yes (never reaches the trust bundle) | yes | yes (never reaches the trust bundle) |
 | Not a 3-segment JWS, undecodable / non-object / >16 KiB header | `malformed` | yes | yes | yes |
-| `kid` absent or unknown to the trust bundle | `unknown_kid` | yes | n/a (HS256 has one key) | yes |
-| Empty or unset signing secret | `no_key` (logged `severity=critical`) | n/a (key comes from the JWKS) | yes | n/a |
+| `kid` absent or unknown to the trust bundle (platform: also retired / past `verify_until`) | `unknown_kid` | yes | yes | yes |
+| No platform keys configured / readable | `no_key` (logged `severity=critical`) | n/a (key comes from the JWKS) | yes | n/a |
 | Empty configured audience / issuer (nothing to compare against) | `bad_audience` / `bad_issuer` | yes | yes | n/a |
 | Signature does not verify | `bad_signature` | yes | yes | yes |
 | `iss` / `aud` missing | `missing_claim` | yes | yes | n/a (no `iss`/`aud`, see below) |
@@ -149,4 +149,4 @@ real router), asserting the exact label names, unit and one-sample-per-verificat
   so deliberately left out of this change; flagged in the PR for a follow-up.
 - `JWT_JWKS_URL` (RS256) in `svc_streaming` is parsed but not wired; when it is, it becomes a second
   verifier with its own `verifier` label rather than widening `platform_hs256`.
-- Phase 1+ (JWKS endpoint, ES256 minting, retire HS256) is unchanged from the Python document.
+- ES256 minting and HS256 retirement (Secrets T10) are described in the Python document.

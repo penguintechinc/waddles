@@ -1220,6 +1220,7 @@ fn tool_mutation_keys_are_domain_separated_and_read_calls_cannot_mutate() {
     another_actor.actor = bundle_tool_call::ActorContext {
         actor: Some(ACTOR_UUID.into()),
         scopes: vec![],
+        participant: None,
     };
     assert_ne!(original, key(&parent, &another_actor).unwrap());
     parent.tenant_id += 1;
@@ -1419,3 +1420,6 @@ async fn write_actor_directory_outage_fails_closed_but_actorless_events_proceed(
         .unwrap();
     assert_eq!(recorded(&exec).len(), 1);
 }
+
+#[path = "floor_ban_tests.rs"]
+mod floor_ban_tests;

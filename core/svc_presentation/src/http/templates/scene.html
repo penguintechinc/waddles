@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="no-referrer">
+<title>Waddles Composite Overlay Scene</title>
+<style>
+  :root { --primary: #1db954; --font: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: transparent; overflow: hidden; color: #fff; font-family: var(--font); }
+  #scene-canvas { position: absolute; top: 0; left: 0; transform-origin: top left; overflow: hidden; pointer-events: none; }
+  .scene-component { position: absolute; overflow: hidden; pointer-events: none; }
+  .scene-component[hidden] { display: none !important; }
+  #status { position: fixed; top: 8px; right: 8px; z-index: 99999; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: bold; background: rgba(244, 67, 54, 0.85); }
+  #status[hidden] { display: none; }
+  .card { display: flex; align-items: center; gap: 16px; width: 100%; height: 100%; background: rgba(18, 18, 24, 0.85); border-left: 4px solid var(--primary); border-radius: 12px; padding: 12px 16px; }
+  .art { width: 80px; height: 80px; border-radius: 8px; object-fit: cover; }
+  .info { flex: 1; overflow: hidden; }
+  .title { font-size: 18px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sub { font-size: 14px; color: #b3b3b3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div id="scene-canvas"></div>
+<div id="status" hidden>Connecting...</div>
+<script>
+'use strict';
+(function () {
+  var canvas = document.getElementById('scene-canvas');
+  var statusEl = document.getElementById('status');
+  var canvasW = 1920;
+  var canvasH = 1080;
+  // instance_id -> {el, c}; widgets are addressed by (bundle_app_id, widget_id), never widget_id alone.
+  var byInstance = new Map();
+  var params = new URLSearchParams(window.location.search);
+  var key = params.get('key') || '';
+  var overlayCode = window.location.pathname.split('/').filter(Boolean)[0] || '';
+
+  function showStatus(text) { statusEl.textContent = text; statusEl.hidden = !text; }
+
+  function resizeStage() {
+    var winW = window.innerWidth || canvasW;
+    var winH = window.innerHeight || canvasH;
+    var scale = Math.min(winW / canvasW, winH / canvasH);
+    var dx = Math.max(0, (winW - canvasW * scale) / 2);
+    var dy = Math.max(0, (winH - canvasH * scale) / 2);
+    canvas.style.width = canvasW + 'px';
+    canvas.style.height = canvasH + 'px';
+    canvas.style.transform = 'translate(' + dx + 'px, ' + dy + 'px) scale(' + scale + ')';
+  }
+  window.addEventListener('resize', resizeStage);
+
+  function mount(c) {
+    var entry = byInstance.get(c.instance_id);
+    if (!entry) {
+      var el = document.createElement('div');
+      el.className = 'scene-component';
+      canvas.appendChild(el);
+      entry = { el: el, c: c };
+      byInstance.set(c.instance_id, entry);
+    }
+    entry.c = c;
+    entry.el.style.left = c.x + 'px';
+    entry.el.style.top = c.y + 'px';
+    entry.el.style.width = c.width + 'px';
+    entry.el.style.height = c.height + 'px';
+    entry.el.style.zIndex = String(c.z_index);
+    entry.el.hidden = !c.visible;
+  }
+
+  function httpsUrl(value) {
+    return typeof value === 'string' && value.indexOf('https://') === 0;
+  }
+
+  function clear(el) { while (el.firstChild) { el.removeChild(el.firstChild); } }
+
+  function textDiv(cls, text) {
+    var d = document.createElement('div');
+    d.className = cls;
+    d.textContent = String(text == null ? '' : text);
+    return d;
+  }
+
+  /* The ONLY markup sink: the string was sanitized server-side (ammonia allowlist) before fan-out. */
+  function setSanitizedHtml(el, html) { clear(el); el.innerHTML = html; }
+
+  function renderTrackCard(el, track) {
+    clear(el);
+    if (!track) { return; }
+    var card = document.createElement('div');
+    card.className = 'card';
+    if (httpsUrl(track.artwork_url)) {
+      var art = new Image();
+      art.className = 'art';
+      art.src = track.artwork_url;
+      art.alt = '';
+      card.appendChild(art);
+    }
+    var info = document.createElement('div');
+    info.className = 'info';
+    info.appendChild(textDiv('title', track.title));
+    info.appendChild(textDiv('sub', track.artist));
+    card.appendChild(info);
+    el.appendChild(card);
+  }
+
+  function renderSurface(el, surface, p) {
+    if (surface === 'waddles.core.example.music.now_playing') {
+      renderTrackCard(el, p.now_playing);
+    } else if (surface === 'waddles.core.example.music.queue') {
+      clear(el);
+      var list = document.createElement('div');
+      list.className = 'card';
+      var info = document.createElement('div');
+      info.className = 'info';
+      (Array.isArray(p.queue) ? p.queue.slice(0, 5) : []).forEach(function (t) {
+        info.appendChild(textDiv('sub', t.title + ' - ' + t.artist));
+      });
+      list.appendChild(info);
+      el.appendChild(list);
+    } else if (surface === 'alert') {
+      clear(el);
+      var card = document.createElement('div');
+      card.className = 'card';
+      card.appendChild(textDiv('title', p.message));
+      el.appendChild(card);
+    }
+  }
+
+  function renderWidget(el, p) {
+    if (p.output_kind === 'sanitized_html' && typeof p.html === 'string') {
+      setSanitizedHtml(el, p.html);
+    } else if (p.output_kind === 'image' && httpsUrl(p.image_url)) {
+      clear(el);
+      var img = new Image();
+      img.src = p.image_url;
+      img.alt = '';
+      img.style.maxWidth = '100%';
+      img.style.maxHeight = '100%';
+      el.appendChild(img);
+    } else if (p.output_kind === 'text') {
+      clear(el);
+      el.textContent = String(p.text == null ? '' : p.text);
+    }
+  }
+
+  function onFrame(frame) {
+    var surface = String(frame.surface || '');
+    var parts = surface.split('/');
+    byInstance.forEach(function (entry) {
+      var c = entry.c;
+      if (parts[0] === 'widget') {
+        // widget/<bundle_app_id>/<widget_id>: only the matching bundle's widget.
+        if (parts.length === 3 && c.bundle_app_id === parts[1] && c.widget_id === parts[2]) {
+          renderWidget(entry.el, frame.payload || {});
+        }
+      } else if (c.output_kind === 'surface' && c.surface_id === surface) {
+        renderSurface(entry.el, surface, frame.payload || {});
+      }
+    });
+  }
+
+  function loadLayout() {
+    var q = key ? '?key=' + encodeURIComponent(key) : '';
+    return fetch('/' + overlayCode + '/scene/layout' + q).then(function (resp) {
+      if (!resp.ok) { throw new Error('layout ' + resp.status); }
+      return resp.json();
+    }).then(function (layout) {
+      canvasW = layout.canvas.width;
+      canvasH = layout.canvas.height;
+      resizeStage();
+      layout.components.forEach(mount);
+    });
+  }
+
+  function connect() {
+    var es = new EventSource('/' + overlayCode + '/scene/live?key=' + encodeURIComponent(key));
+    es.onopen = function () { showStatus(''); };
+    es.onmessage = function (ev) {
+      try { var frame = JSON.parse(ev.data); if (frame.surface) { onFrame(frame); } } catch (e) { /* skip unparseable frame */ }
+    };
+    es.onerror = function () { showStatus('Disconnected, reconnecting...'); };
+  }
+
+  resizeStage();
+  loadLayout().then(connect).catch(function () { showStatus('Failed to load layout'); });
+})();
+</script>
+</body>
+</html>

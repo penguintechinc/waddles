@@ -138,6 +138,22 @@ _TEST_SIGNING_KEY_ID = "test-key-1"
 
 
 @pytest.fixture(autouse=True)
+def jwt_keyring() -> Any:
+    """Install a fresh in-memory ES256 key ring for every test (T10: no shared JWT secret).
+
+    `create_jwt_token` signs with its active key and `verify_jwt_token` verifies by `kid`; tests
+    that need a rotated / retired / foreign key build their own `InMemoryJwtKeyring`.
+    """
+    from flask_core import jwt_keyring as jk
+
+    ring = jk.generate_test_keyring()
+    previous = jk.get_jwt_keyring()
+    jk.set_jwt_keyring(ring)
+    yield ring
+    jk.set_jwt_keyring(previous)
+
+
+@pytest.fixture(autouse=True)
 def bundle_signing_test_env(monkeypatch: Any) -> Any:
     """Every test gets a valid (test-only) Ed25519 artifact-signing key configured.
 
@@ -160,6 +176,12 @@ def bundle_signing_test_env(monkeypatch: Any) -> Any:
 
     monkeypatch.setenv("BUNDLE_SIGNING_PRIVATE_KEY", _TEST_SIGNING_PRIVATE_KEY_B64)
     monkeypatch.setenv("BUNDLE_SIGNING_KEY_ID", _TEST_SIGNING_KEY_ID)
+    # The CLIs (seeder, backfill) load the vault from the database at start; the cache is seeded
+    # directly below instead, so stub the DB load. Tests of the real loader capture the function
+    # at import time (tests/test_platform_secrets_offline_signer.py).
+    from services.platform_secrets import bootstrap as vault_bootstrap
+
+    monkeypatch.setattr(vault_bootstrap, "load_offline_signer_cache", lambda *_a, **_k: 1)
     cache = get_process_cache()
     cache.seed(
         [
@@ -871,7 +893,6 @@ def make_token(*, scope: str = "", tenant: str = TENANT_SLUG, user_id: str = "u1
         username="alice",
         email="alice@example.com",
         roles=["viewer"],
-        secret_key=SECRET_KEY,
         tenant=tenant,
         scope=scope,
     )
@@ -884,7 +905,6 @@ def make_user_token(*, user_id: int, scope: str = "", tenant: str = TENANT_SLUG)
         username="alice",
         email="alice@example.com",
         roles=["viewer"],
-        secret_key=SECRET_KEY,
         tenant=tenant,
         scope=scope,
     )
@@ -915,7 +935,6 @@ def make_super_admin_token(*, user_id: int, scope: str = "", tenant: str = TENAN
         username="root",
         email="root@example.com",
         roles=["super_admin"],
-        secret_key=SECRET_KEY,
         tenant=tenant,
         scope=_with_global_admin_scope(scope),
     )
@@ -936,7 +955,6 @@ def make_user_token_with_roles(
         username="alice",
         email="alice@example.com",
         roles=roles,
-        secret_key=SECRET_KEY,
         tenant=tenant,
         scope=_with_global_admin_scope(scope) if set(roles) & _LEGACY_ADMIN_ROLES else scope,
     )

@@ -27,7 +27,6 @@ from flask_core.auth import (
     ACCESS_TOKEN_TTL_SECONDS,
     DEFAULT_JWT_AUDIENCE,
     DEFAULT_JWT_ISSUER,
-    DEFAULT_JWT_KID,
     JWT_CLOCK_SKEW_SECONDS,
     MAX_ACCESS_TOKEN_TTL_SECONDS,
     MIN_ACCESS_TOKEN_TTL_SECONDS,
@@ -35,8 +34,8 @@ from flask_core.auth import (
     verify_jwt_token,
 )
 from flask_core.jwt_hardening import MAX_JWT_LIFETIME_SECONDS
+from flask_core.jwt_keyring import get_jwt_keyring
 
-SECRET = "test-secret-key-not-for-production-use-only"
 
 
 def mint(sub: str = "42", **kwargs: Any) -> str:
@@ -45,7 +44,6 @@ def mint(sub: str = "42", **kwargs: Any) -> str:
         username="alice",
         email="alice@example.invalid",
         roles=[],
-        secret_key=SECRET,
         tenant="global",
         scope="community:read",
         **kwargs,
@@ -67,7 +65,8 @@ def forge(**overrides: Any) -> str:
     }
     claims.update(overrides)
     claims = {k: v for k, v in claims.items() if v is not None}
-    return jwt.encode(claims, SECRET, algorithm="HS256", headers={"kid": DEFAULT_JWT_KID})
+    ring = get_jwt_keyring().active
+    return jwt.encode(claims, ring.private_key, algorithm="ES256", headers={"kid": ring.kid})
 
 
 def claims_of(token: str) -> dict[str, Any]:
@@ -163,8 +162,8 @@ class TestShortAccessTtl:
     def test_verifier_refuses_a_token_lived_past_the_ceiling(self, metrics_capture: Any) -> None:
         now = int(time.time())
         legacy = forge(iat=now, exp=now + 24 * 3600)  # what the old default minted
-        assert verify_jwt_token(legacy, SECRET) is None
-        assert ("platform_hs256", "hs256", "lifetime_exceeded") in metrics_capture.verifications()
+        assert verify_jwt_token(legacy) is None
+        assert ("platform_es256", "es256", "lifetime_exceeded") in metrics_capture.verifications()
 
     @pytest.mark.parametrize(
         ("lifetime", "accepted"),
@@ -179,14 +178,14 @@ class TestShortAccessTtl:
     def test_lifetime_ceiling_boundary(self, lifetime: int, accepted: bool) -> None:
         now = int(time.time())
         token = forge(iat=now, exp=now + lifetime)
-        assert (verify_jwt_token(token, SECRET) is not None) is accepted
+        assert (verify_jwt_token(token) is not None) is accepted
 
     def test_lifetime_rejection_is_an_error_level_alarm_without_token_data(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         now = int(time.time())
         with caplog.at_level(logging.DEBUG, logger="flask_core"):
-            assert verify_jwt_token(forge(iat=now, exp=now + 86400, sub="sentinel-sub-9"), SECRET) is None
+            assert verify_jwt_token(forge(iat=now, exp=now + 86400, sub="sentinel-sub-9")) is None
         rejected = [r for r in caplog.records if "JWT rejected" in r.getMessage()]
         assert [r.levelname for r in rejected] == ["ERROR"]
         assert "lifetime_exceeded" in rejected[0].getMessage()
@@ -206,8 +205,8 @@ class TestLifetimeGuardIsDefensive:
             return payload
 
         monkeypatch.setattr(auth.jwt, "decode", nan_exp)
-        assert verify_jwt_token(mint(), SECRET) is None
-        assert ("platform_hs256", "hs256", "invalid_claim") in metrics_capture.verifications()
+        assert verify_jwt_token(mint()) is None
+        assert ("platform_es256", "es256", "invalid_claim") in metrics_capture.verifications()
 
 
 class TestMintedClaims:
@@ -227,7 +226,7 @@ class TestMintedClaims:
 
     def test_token_without_jti_still_verifies(self) -> None:
         """Service tokens minted before the rollout carry no jti; they are not rejected for it."""
-        assert verify_jwt_token(forge(jti=None), SECRET) is not None
+        assert verify_jwt_token(forge(jti=None)) is not None
 
     @pytest.mark.parametrize(
         "overrides",
@@ -243,7 +242,7 @@ class TestMintedClaims:
     def test_hostile_identifier_claims_are_invalid_claims(
         self, overrides: dict[str, Any], metrics_capture: Any
     ) -> None:
-        assert verify_jwt_token(forge(**overrides), SECRET) is None
+        assert verify_jwt_token(forge(**overrides)) is None
         outcomes = {o for (_v, _a, o) in metrics_capture.verifications()}
         assert outcomes & {"invalid_claim", "invalid"}
 
@@ -251,25 +250,25 @@ class TestMintedClaims:
 class TestRevokedTokenIsRejectedBeforeExp:
     def test_revoked_jti(self, metrics_capture: Any) -> None:
         token = mint()
-        payload = verify_jwt_token(token, SECRET)
+        payload = verify_jwt_token(token)
         assert payload is not None and payload["exp"] > time.time() + 60
         tr.get_token_revocation().revoke_token(payload["jti"], exp=payload["exp"])
-        assert verify_jwt_token(token, SECRET) is None  # still ~15 minutes from its exp
-        assert ("platform_hs256", "hs256", "revoked") in metrics_capture.verifications()
+        assert verify_jwt_token(token) is None  # still ~15 minutes from its exp
+        assert ("platform_es256", "es256", "revoked") in metrics_capture.verifications()
 
     def test_only_the_revoked_token_dies(self) -> None:
         keep, kill = mint(), mint()
         tr.get_token_revocation().revoke_token(claims_of(kill)["jti"])
-        assert verify_jwt_token(keep, SECRET) is not None
-        assert verify_jwt_token(kill, SECRET) is None
+        assert verify_jwt_token(keep) is not None
+        assert verify_jwt_token(kill) is None
 
     def test_revoked_session_kills_every_token_minted_under_it(self) -> None:
         first, second = mint(session_id="sess-1"), mint(session_id="sess-1")
         other = mint(session_id="sess-2")
         tr.get_token_revocation().revoke_session("sess-1")
-        assert verify_jwt_token(first, SECRET) is None
-        assert verify_jwt_token(second, SECRET) is None
-        assert verify_jwt_token(other, SECRET) is not None
+        assert verify_jwt_token(first) is None
+        assert verify_jwt_token(second) is None
+        assert verify_jwt_token(other) is not None
 
     def test_revoked_token_logs_a_warning_without_any_token_data(
         self, caplog: pytest.LogCaptureFixture
@@ -278,7 +277,7 @@ class TestRevokedTokenIsRejectedBeforeExp:
         payload = claims_of(token)
         tr.get_token_revocation().revoke_token(payload["jti"])
         with caplog.at_level(logging.DEBUG, logger="flask_core"):
-            assert verify_jwt_token(token, SECRET) is None
+            assert verify_jwt_token(token) is None
         rejected = [r for r in caplog.records if "JWT rejected" in r.getMessage()]
         assert [r.levelname for r in rejected] == ["WARNING"]  # ordinary, not an alarm
         assert "reason=revoked" in rejected[0].getMessage()
@@ -294,29 +293,29 @@ class TestRevokeAllCutsOffPriorTokens:
         same_second = forge(sub="7", iat=now, exp=now + 600, jti="jnow")
         bystander = forge(sub="8", iat=now - 30, exp=now + 600, jti="jother")
         for token in [*before, same_second, bystander]:
-            assert verify_jwt_token(token, SECRET) is not None
+            assert verify_jwt_token(token) is not None
 
         cutoff = tr.get_token_revocation().revoke_user("7", cutoff=now)
         assert cutoff == now
 
         for token in [*before, same_second]:
-            assert verify_jwt_token(token, SECRET) is None
-        assert verify_jwt_token(bystander, SECRET) is not None  # another user is untouched
+            assert verify_jwt_token(token) is None
+        assert verify_jwt_token(bystander) is not None  # another user is untouched
         after = forge(sub="7", iat=now + 5, exp=now + 605, jti="jafter")  # inside iat leeway
-        assert verify_jwt_token(after, SECRET) is not None
+        assert verify_jwt_token(after) is not None
 
     def test_revoke_all_is_a_cutoff_not_a_list_of_tokens(self) -> None:
         """Tokens minted before the revoke but never seen by the store are covered too."""
         tokens = [mint(sub="99") for _ in range(25)]
         tr.get_token_revocation().revoke_user("99")
-        assert all(verify_jwt_token(t, SECRET) is None for t in tokens)
+        assert all(verify_jwt_token(t) is None for t in tokens)
 
     def test_a_service_token_without_jti_or_sid_is_covered_by_the_cutoff(self) -> None:
         now = int(time.time())
         token = forge(sub="svc-ingest", jti=None, iat=now - 5, exp=now + 600)
-        assert verify_jwt_token(token, SECRET) is not None
+        assert verify_jwt_token(token) is not None
         tr.get_token_revocation().revoke_user("svc-ingest", cutoff=now)
-        assert verify_jwt_token(token, SECRET) is None
+        assert verify_jwt_token(token) is None
 
 
 class TestIssuedAtFloor:
@@ -340,8 +339,8 @@ class TestIssuedAtFloor:
         floor = rev.issue_floor("55")
         assert floor == cutoff
         safe = mint(sub="55", issued_at=floor + 1)
-        assert verify_jwt_token(swept, SECRET) is None
-        assert verify_jwt_token(safe, SECRET) is not None  # iat one second ahead is inside the skew
+        assert verify_jwt_token(swept) is None
+        assert verify_jwt_token(safe) is not None  # iat one second ahead is inside the skew
 
 
 class TestStoreOutageBehavesAsDocumented:
@@ -358,11 +357,11 @@ class TestStoreOutageBehavesAsDocumented:
     def test_brief_outage_keeps_serving(self, metrics_capture: Any) -> None:
         backend, clock = self._install(grace_seconds=60.0)
         token = mint()
-        assert verify_jwt_token(token, SECRET) is not None
+        assert verify_jwt_token(token) is not None
         backend.down = True
         clock.now += 6  # local cache expired -> a store read is attempted -> it fails
-        assert verify_jwt_token(token, SECRET) is not None  # degraded, not broken
-        assert verify_jwt_token(mint(), SECRET) is not None  # a brand-new token is served too
+        assert verify_jwt_token(token) is not None  # degraded, not broken
+        assert verify_jwt_token(mint()) is not None  # a brand-new token is served too
 
     def test_known_revocations_are_still_enforced_during_the_outage(self) -> None:
         backend, clock = self._install(grace_seconds=60.0)
@@ -370,19 +369,19 @@ class TestStoreOutageBehavesAsDocumented:
         tr.get_token_revocation().revoke_token(claims_of(token)["jti"])
         backend.down = True
         clock.now += 30
-        assert verify_jwt_token(token, SECRET) is None
+        assert verify_jwt_token(token) is None
 
     def test_beyond_the_grace_window_it_fails_closed(
         self, metrics_capture: Any, caplog: pytest.LogCaptureFixture
     ) -> None:
         backend, clock = self._install(grace_seconds=60.0)
         token = mint()
-        assert verify_jwt_token(token, SECRET) is not None
+        assert verify_jwt_token(token) is not None
         backend.down = True
         clock.now += 61
         with caplog.at_level(logging.DEBUG, logger="flask_core"):
-            assert verify_jwt_token(token, SECRET) is None
-        assert ("platform_hs256", "hs256", "revocation_unavailable") in metrics_capture.verifications()
+            assert verify_jwt_token(token) is None
+        assert ("platform_es256", "es256", "revocation_unavailable") in metrics_capture.verifications()
         rejected = [r for r in caplog.records if "JWT rejected" in r.getMessage()]
         assert [r.levelname for r in rejected] == ["ERROR"]
 
@@ -391,17 +390,17 @@ class TestStoreOutageBehavesAsDocumented:
         token = mint()
         backend.down = True
         clock.now += 61
-        assert verify_jwt_token(token, SECRET) is not None
+        assert verify_jwt_token(token) is not None
 
     def test_service_recovers_without_a_restart(self) -> None:
         backend, clock = self._install(grace_seconds=60.0, circuit_open_seconds=5.0)
         token = mint()
         backend.down = True
         clock.now += 61
-        assert verify_jwt_token(token, SECRET) is None
+        assert verify_jwt_token(token) is None
         backend.down = False
         clock.now += 5.1
-        assert verify_jwt_token(token, SECRET) is not None
+        assert verify_jwt_token(token) is not None
 
 
 class TestMisconfigurationIsLoud:
@@ -412,11 +411,11 @@ class TestMisconfigurationIsLoud:
         monkeypatch.setenv("JWT_REVOCATION_FAIL_MODE", "ajar")
         tr.configure_token_revocation(None)
         with pytest.raises(ValueError, match="JWT_REVOCATION_FAIL_MODE"):
-            verify_jwt_token(mint(), SECRET)
+            verify_jwt_token(mint())
 
 
 def test_exp_is_still_strict_and_expired_tokens_are_not_revocation_checked() -> None:
     """Revocation never loosens the existing checks: an expired token is rejected, full stop."""
     now = int(time.time())
     expired = forge(iat=now - 700, exp=now - 100)
-    assert verify_jwt_token(expired, SECRET) is None
+    assert verify_jwt_token(expired) is None

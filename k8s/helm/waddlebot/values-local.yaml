@@ -11,7 +11,7 @@ global:
   # generation path for local/MicroK8s dev. "local" is the second tier (alongside
   # "alpha") that path treats as safe to auto-generate platform keys in.
   deploymentTier: "local"
-  # jwtSecret / moduleSecretKey / serviceApiKey / initialAdmin.password are NOT set here: the
+  # sessionMacKey / moduleSecretKey / serviceApiKey / initialAdmin.password are NOT set here: the
   # provision-secrets hook generates them on first run (every tier) and refuses committed
   # placeholder/default-looking literals. Read the admin password with
   # `kubectl -n waddlebot get secret waddlebot-hub-admin-bootstrap -o jsonpath='{.data.INITIAL_ADMIN_PASSWORD}' | base64 -d`.
@@ -166,6 +166,19 @@ tetragon:
 
 # Discord connector service bundle: the Valkey IDENTIFY budget is wired (see values.yaml).
 pipeline:
+  # RTC media (pre-alpha laptop cluster): NodePort exemption, same fixed port as alpha. The
+  # nodePort must equal webrtc.udpPort (the SFU advertises the port it binds). Chart refuses
+  # NodePort outside global.deploymentTier alpha|local.
+  svcStreaming:
+    webrtc:
+      udpPort: 31400
+      media:
+        service:
+          type: NodePort
+          nodePort: { udp: 31400, tcp: 0 }
+          externalTrafficPolicy: Cluster
+        networkPolicy:
+          fromEntities: ["world", "host", "remote-node"]
   rustDataPlane:
     svcIngest:
       connectorRuntime:

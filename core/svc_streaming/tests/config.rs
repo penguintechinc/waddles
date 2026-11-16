@@ -35,6 +35,7 @@ fn full_deployment_style_env_and_cli_assembly() {
     unsafe {
         std::env::set_var("DB_PASSWORD", "prod-db-secret");
         std::env::set_var("SERVICE_API_KEY", "prod-service-key");
+        // A leftover legacy shared secret must be inert: there is no HMAC path any more.
         std::env::set_var("JWT_HMAC_SECRET", "prod-jwt-secret");
     }
 
@@ -63,10 +64,11 @@ fn full_deployment_style_env_and_cli_assembly() {
     assert_eq!(config.cli.db_name, "waddlebot_streaming");
     assert_eq!(config.db_password.expose(), "prod-db-secret");
     assert_eq!(config.service_api_key.expose(), "prod-service-key");
-    assert_eq!(
-        config.jwt_hmac_secret.as_ref().map(|s| s.expose()),
-        Some("prod-jwt-secret")
-    );
+    // Verifying keys come from platform_vault (wired at startup), never from env.
+    assert!(matches!(
+        config.jwt_keys,
+        svc_streaming::jwt_keys::JwtKeys::None
+    ));
 
     clear_secret_env();
 }

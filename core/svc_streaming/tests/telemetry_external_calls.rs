@@ -155,7 +155,7 @@ async fn ingest_auth_call_is_timed_and_propagates_the_callers_trace() {
         db_password: Secret::new("x"),
         cache_password: None,
         service_api_key: Secret::new("svc-key"),
-        jwt_hmac_secret: None,
+        jwt_keys: svc_streaming::jwt_keys::JwtKeys::None,
     };
     let client = InternalIngestAuthClient::new(&config)
         .expect("client builds")

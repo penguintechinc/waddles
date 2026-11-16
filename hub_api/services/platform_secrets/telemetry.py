@@ -37,6 +37,26 @@ OUTCOMES: Final = frozenset(
         "inconsistent",
         "error",
         "skipped",
+        "restored",
+        "escrow_invalid",
+        "escrow_tampered",
+        "escrow_drift",
+        "escrow_ahead",
+        "escrow_rollback",
+        "restore_blocked",
+        "unavailable",
+        "retired",
+        "replayed",
+        "rate_limited",
+        "no_active",
+        "window_open",
+        "version_not_found",
+        "not_verify_only",
+        "not_system_tenant",
+        "not_global_admin",
+        "mfa_required",
+        "csrf_rejected",
+        "bad_request",
         "other",
     }
 )
@@ -109,6 +129,36 @@ def count_drift(type_name: str, outcome: str) -> None:
     """`waddles_platform_secrets_drift_detected_total{type,outcome}`."""
     _safe(
         lambda: _counter("waddles_platform_secrets_drift_detected_total").add(
+            1, _labels(type_name, outcome)
+        )
+    )
+
+
+def count_offline_load(outcome: str) -> None:
+    """`waddles_platform_secrets_offline_loads_total{type="all",outcome}`.
+
+    One per offline-signer process (core-bundle seeder, signing backfill) loading the vault cache.
+    """
+    _safe(
+        lambda: _counter("waddles_platform_secrets_offline_loads_total").add(
+            1, _labels("all", outcome)
+        )
+    )
+
+
+def count_escrow(type_name: str, outcome: str) -> None:
+    """`waddles_platform_secrets_escrow_total{type,outcome}` (ok / error / restored / refusals)."""
+    _safe(
+        lambda: _counter("waddles_platform_secrets_escrow_total").add(
+            1, _labels(type_name, outcome)
+        )
+    )
+
+
+def count_rotation(type_name: str, outcome: str) -> None:
+    """`waddles_platform_secrets_rotations_total{type,outcome}` (ok / retired / refusal words)."""
+    _safe(
+        lambda: _counter("waddles_platform_secrets_rotations_total").add(
             1, _labels(type_name, outcome)
         )
     )

@@ -43,6 +43,7 @@ from config import HubAPIConfig
 from services import bundle_precompile_service, bundle_signing_service
 from services.bundle_install_dal import build_install_dal, raw_sql_rows
 from services.bundle_telemetry import get_meter
+from services.platform_secrets import bootstrap as platform_vault_bootstrap
 
 logger = logging.getLogger("waddles.hub_api.sign_approved_bundles")
 
@@ -134,6 +135,8 @@ async def sign_one(install_dal: Any, row: Any) -> BackfillResult:
 
 async def _run() -> int:
     config = HubAPIConfig.from_env()
+    # Own process: load platform_vault into THIS process's cache before signing (fail closed).
+    await asyncio.to_thread(platform_vault_bootstrap.load_offline_signer_cache, config.database_url)
     install_dal = await build_install_dal(config.database_url, pool_size=2)
     counter = get_meter().create_counter(
         "waddles_hub_sign_approved_bundles_total",

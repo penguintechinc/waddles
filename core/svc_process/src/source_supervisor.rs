@@ -162,6 +162,9 @@ pub struct SupervisorDeps {
     /// `changelog_consumer::run` poll writes to, cloned (the `Arc`, not the
     /// snapshot) into every binding consumer's own `ProcessDeps`.
     pub kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
+    /// See `spine::ProcessDeps::kv_sealing`'s doc -- cloned into every
+    /// binding consumer's own `ProcessDeps`.
+    pub kv_sealing: Option<bundle_host_kv::Sealing>,
     /// See `spine::ProcessDeps::gate`'s doc -- cloned into every binding
     /// consumer's own `ProcessDeps` in [`run_binding_consumer`] below.
     pub gate: Arc<bundle_capability_gate::CapabilityGate>,
@@ -233,6 +236,8 @@ pub struct SupervisorDeps {
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::media_wiring`'s doc.
     pub media_wiring: Option<crate::media::MediaWiring>,
+    /// See `crate::spine::ProcessDeps::surface_wiring`.
+    pub surface_wiring: Option<crate::surface::SurfaceWiring>,
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::dek_provider`'s doc.
     pub dek_provider: Option<hub_client::dek::ConfiguredDekProvider>,
@@ -269,6 +274,7 @@ impl SupervisorDeps {
             license: Arc::clone(&self.license),
             kv_conn: self.kv_conn.clone(),
             kv_capabilities: Arc::clone(&self.kv_capabilities),
+            kv_sealing: self.kv_sealing.clone(),
             gate: Arc::clone(&self.gate),
             tenant_id,
             community_id,
@@ -290,6 +296,7 @@ impl SupervisorDeps {
             identity_wiring: self.identity_wiring.clone(),
             ai_wiring: self.ai_wiring.clone(),
             media_wiring: self.media_wiring.clone(),
+            surface_wiring: self.surface_wiring.clone(),
             dek_provider: self.dek_provider.clone(),
         }
     }

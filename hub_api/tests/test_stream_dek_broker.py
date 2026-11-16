@@ -487,6 +487,7 @@ class TestDenials:
 @dataclass(slots=True)
 class _Runtime:
     stream_service: TenantEnvelopeService
+    service: TenantEnvelopeService | None = None
 
 
 def _issuer(scopes: frozenset[str], sub: str = INGEST, tenant: str = "system") -> ServiceJwtIssuer:

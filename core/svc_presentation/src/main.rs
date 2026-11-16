@@ -4,6 +4,7 @@
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    svc_presentation::crypto::install_default_provider_or_exit();
     if std::env::args().nth(1).as_deref() == Some("--healthcheck") {
         return svc_presentation::run_healthcheck().await;
     }

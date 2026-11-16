@@ -675,6 +675,8 @@ async def test_reader_role_cannot_read_raw_handles_or_run_the_lookups(
         "tenant_id",
         "is_active_member",
         "role",
+        # 0116 appended the numeric hub user id (opaque integer, no PII) for participant identities
+        "hub_user_id",
     }
     assert HANDLE_SECRET not in str(rows) and NAME_SECRET not in str(rows)
 

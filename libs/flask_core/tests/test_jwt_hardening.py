@@ -35,10 +35,9 @@ from flask_core import jwt_hardening as hardening
 from flask_core.auth import (
     DEFAULT_JWT_AUDIENCE,
     DEFAULT_JWT_ISSUER,
-    DEFAULT_JWT_KID,
-    PLATFORM_JWT_ALGORITHM,
     verify_jwt_token,
 )
+from flask_core.jwt_keyring import PLATFORM_JWT_ALGORITHM, get_jwt_keyring, set_jwt_keyring
 from flask_core.jwt_hardening import (
     ALG_LABEL_ABSENT,
     ALG_LABEL_NONE,
@@ -51,10 +50,20 @@ from flask_core.jwt_hardening import (
     is_valid_kid,
 )
 
-SECRET = "test-secret-key-not-for-production-use-only"
+SECRET = "retired-shared-secret-used-only-to-forge-attacks"
 SENTINEL_USER = "sentinel-user-9f3a1c"
 SENTINEL_EMAIL = "sentinel-9f3a1c@example.invalid"
-HS256 = ("HS256",)
+ES256 = ("ES256",)
+
+
+def _active() -> Any:
+    """Active signing key of this test's in-memory ring (conftest `jwt_keyring`)."""
+    return get_jwt_keyring().active
+
+
+def _kid() -> str:
+    """`kid` of the active test key."""
+    return _active().kid
 
 
 def _b64(raw: bytes) -> str:
@@ -91,6 +100,13 @@ def _forge(
     """Hand-assemble a compact JWT: arbitrary header, HMAC-SHA256 (or caller) signature."""
     head = _b64(json.dumps(header).encode())
     body = _b64(json.dumps(claims).encode())
+    if signature is None and header.get("alg") == "ES256" and key is SECRET:
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+
+        der = _active().private_key.sign(f"{head}.{body}".encode(), ec.ECDSA(hashes.SHA256()))
+        r, sv = decode_dss_signature(der)
+        signature = r.to_bytes(32, "big") + sv.to_bytes(32, "big")
     if signature is None:
         raw_key = key.encode() if isinstance(key, str) else key
         signature = hmac.new(raw_key, f"{head}.{body}".encode(), hashlib.sha256).digest()
@@ -98,7 +114,7 @@ def _forge(
 
 
 def _valid_header(**extra: Any) -> dict[str, Any]:
-    return {"alg": "HS256", "typ": "JWT", "kid": DEFAULT_JWT_KID, **extra}
+    return {"alg": "ES256", "typ": "JWT", "kid": _kid(), **extra}
 
 
 # --------------------------------------------------------------------------
@@ -165,22 +181,22 @@ class TestKid:
 class TestInspectHeader:
     def test_valid_header_returns_vetted_subset(self) -> None:
         header = inspect_header(
-            _forge(_valid_header(), _claims()), allowed_algs=HS256, validate_kid=True
+            _forge(_valid_header(), _claims()), allowed_algs=ES256, validate_kid=True
         )
-        assert (header.alg, header.kid) == ("HS256", DEFAULT_JWT_KID)
+        assert (header.alg, header.kid) == ("ES256", _kid())
 
     def test_missing_kid_is_allowed_unless_required(self) -> None:
-        token = _forge({"alg": "HS256"}, _claims())
-        assert inspect_header(token, allowed_algs=HS256, validate_kid=True).kid is None
+        token = _forge({"alg": "ES256"}, _claims())
+        assert inspect_header(token, allowed_algs=ES256, validate_kid=True).kid is None
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(token, allowed_algs=HS256, require_kid=True)
+            inspect_header(token, allowed_algs=ES256, require_kid=True)
         assert exc.value.reason == hardening.REASON_BAD_KID
 
     @pytest.mark.parametrize("alg", ["none", "None", "NONE", "nOnE"])
     def test_alg_none_any_case_is_rejected_first(self, alg: str) -> None:
         token = _forge({"alg": alg, "typ": "JWT"}, _claims(), signature=b"")
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(token, allowed_algs=HS256)
+            inspect_header(token, allowed_algs=ES256)
         assert exc.value.reason == hardening.REASON_ALG_NONE
         assert exc.value.alg == ALG_LABEL_NONE
 
@@ -189,16 +205,16 @@ class TestInspectHeader:
             {"alg": "none", "jku": "https://evil.example/jwks"}, _claims(), signature=b""
         )
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(token, allowed_algs=HS256)
+            inspect_header(token, allowed_algs=ES256)
         assert exc.value.reason == hardening.REASON_ALG_NONE
 
     @pytest.mark.parametrize("param", sorted(FORBIDDEN_HEADER_PARAMS))
     def test_key_material_params_rejected_even_with_the_right_alg(self, param: str) -> None:
         token = _forge(_valid_header(**{param: "attacker-controlled"}), _claims())
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(token, allowed_algs=HS256, validate_kid=True)
+            inspect_header(token, allowed_algs=ES256, validate_kid=True)
         assert exc.value.reason == hardening.REASON_FORBIDDEN_HEADER
-        assert exc.value.alg == "hs256"
+        assert exc.value.alg == "es256"
 
     def test_forbidden_param_set_is_the_audited_one(self) -> None:
         assert (
@@ -206,18 +222,18 @@ class TestInspectHeader:
         )
 
     @pytest.mark.parametrize(
-        "alg", ["HS384", "HS512", "RS256", "ES256", "EdDSA", "PS256", "hs256", "HS256 ", ""]
+        "alg", ["HS384", "HS512", "RS256", "HS256", "EdDSA", "PS256", "hs256", "HS256 ", ""]
     )
     def test_any_other_alg_rejected_one_alg_per_verifier(self, alg: str) -> None:
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(_forge({"alg": alg}, _claims()), allowed_algs=HS256)
+            inspect_header(_forge({"alg": alg}, _claims()), allowed_algs=ES256)
         assert exc.value.reason == hardening.REASON_ALG_MISMATCH
 
     @pytest.mark.parametrize("alg", [None, 256, ["HS256"], {"a": 1}])
     def test_absent_or_non_string_alg_rejected(self, alg: object) -> None:
         header: dict[str, Any] = {} if alg is None else {"alg": alg}
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(_forge(header, _claims()), allowed_algs=HS256)
+            inspect_header(_forge(header, _claims()), allowed_algs=ES256)
         assert exc.value.reason == hardening.REASON_ALG_MISMATCH
 
     def test_allow_list_may_hold_several_algs_for_an_asymmetric_verifier(self) -> None:
@@ -228,31 +244,31 @@ class TestInspectHeader:
     def test_hostile_kid_rejected_when_validated(self, bad_kid: str) -> None:
         token = _forge(_valid_header(kid=bad_kid), _claims())
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(token, allowed_algs=HS256, validate_kid=True)
+            inspect_header(token, allowed_algs=ES256, validate_kid=True)
         assert exc.value.reason == hardening.REASON_BAD_KID
 
     def test_non_string_kid_rejected_when_validated(self) -> None:
         token = _forge(_valid_header(kid=["a"]), _claims())
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(token, allowed_algs=HS256, validate_kid=True)
+            inspect_header(token, allowed_algs=ES256, validate_kid=True)
         assert exc.value.reason == hardening.REASON_BAD_KID
 
     def test_kid_charset_is_not_enforced_for_external_idps(self) -> None:
         """OIDC IdPs use arbitrary kid strings; `validate_kid` is opt-in per verifier."""
         token = _forge(_valid_header(kid="https://idp.example/keys/1?v=2"), _claims())
-        header = inspect_header(token, allowed_algs=HS256)
+        header = inspect_header(token, allowed_algs=ES256)
         assert header.kid == "https://idp.example/keys/1?v=2"
 
     def test_non_string_kid_is_dropped_when_not_validated(self) -> None:
         token = _forge(_valid_header(kid=42), _claims())
-        assert inspect_header(token, allowed_algs=HS256).kid is None
+        assert inspect_header(token, allowed_algs=ES256).kid is None
 
     @pytest.mark.parametrize(
         "junk", ["", "garbage", "a.b", "a.b.c", "....", None, 7, b"x.y.z", ["a.b.c"]]
     )
     def test_malformed_tokens(self, junk: object) -> None:
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(junk, allowed_algs=HS256)
+            inspect_header(junk, allowed_algs=ES256)
         assert exc.value.reason == hardening.REASON_MALFORMED
         assert exc.value.alg == ALG_LABEL_ABSENT
 
@@ -260,13 +276,13 @@ class TestInspectHeader:
         nested = b"[" * 9000 + b"]" * 9000
         token = f"{_b64(nested)}.{_b64(b'{}')}.{_b64(b'sig')}"
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(token, allowed_algs=HS256)
+            inspect_header(token, allowed_algs=ES256)
         assert exc.value.reason == hardening.REASON_MALFORMED
 
     def test_oversized_header_segment_refused_before_parsing(self) -> None:
         huge = {"alg": "HS256", "x5c": ["A" * 20000]}
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(_forge(huge, _claims()), allowed_algs=HS256)
+            inspect_header(_forge(huge, _claims()), allowed_algs=ES256)
         assert exc.value.reason == hardening.REASON_MALFORMED
 
     @pytest.mark.parametrize(
@@ -274,26 +290,26 @@ class TestInspectHeader:
     )
     def test_wrong_segment_shape_or_undecodable_header_is_malformed(self, token: str) -> None:
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(token, allowed_algs=HS256)
+            inspect_header(token, allowed_algs=ES256)
         assert exc.value.reason == hardening.REASON_MALFORMED
 
     def test_non_utf8_header_is_malformed(self) -> None:
         token = f"{_b64(b'\xff\xfe{{')}.{_b64(b'{{}}')}.{_b64(b'sig')}"
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(token, allowed_algs=HS256)
+            inspect_header(token, allowed_algs=ES256)
         assert exc.value.reason == hardening.REASON_MALFORMED
 
     def test_header_that_is_json_but_not_an_object_is_malformed(self) -> None:
         token = f"{_b64(b'[1,2,3]')}.{_b64(b'{}')}.{_b64(b'sig')}"
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(token, allowed_algs=HS256)
+            inspect_header(token, allowed_algs=ES256)
         assert exc.value.reason == hardening.REASON_MALFORMED
 
     def test_rejection_text_is_the_reason_only(self) -> None:
         """str(exc) can never carry header values, so a handler that stringifies it stays clean."""
         token = _forge(_valid_header(jku="https://evil.example/SECRET-PATH"), _claims())
         with pytest.raises(JwtRejection) as exc:
-            inspect_header(token, allowed_algs=HS256)
+            inspect_header(token, allowed_algs=ES256)
         assert str(exc.value) == hardening.REASON_FORBIDDEN_HEADER
         assert "evil.example" not in repr(exc.value)
 
@@ -306,93 +322,131 @@ class TestInspectHeader:
 class TestPlatformVerifierAttacks:
     def test_control_a_hand_forged_valid_token_verifies(self) -> None:
         """Without this, every rejection below could be passing for the wrong reason."""
-        assert verify_jwt_token(_forge(_valid_header(), _claims()), SECRET) is not None
+        assert verify_jwt_token(_forge(_valid_header(), _claims())) is not None
 
     @pytest.mark.parametrize("alg", ["none", "None", "NONE", "nOnE"])
     def test_alg_none_unsigned_token_rejected(self, alg: str, metrics_capture: Any) -> None:
         token = _forge({"alg": alg, "typ": "JWT"}, _claims(), signature=b"")
         assert token.endswith(".")
-        assert verify_jwt_token(token, SECRET) is None
-        assert ("platform_hs256", "none", "alg_none") in metrics_capture.verifications()
+        assert verify_jwt_token(token) is None
+        assert ("platform_es256", "none", "alg_none") in metrics_capture.verifications()
 
     def test_alg_none_with_garbage_signature_rejected(self) -> None:
         assert (
-            verify_jwt_token(_forge({"alg": "none"}, _claims(), signature=b"anything"), SECRET)
+            verify_jwt_token(_forge({"alg": "none"}, _claims(), signature=b"anything"))
             is None
         )
 
     def test_alg_none_via_pyjwt_encode_rejected(self) -> None:
         unsigned = jwt.encode(_claims(), key=None, algorithm="none")  # type: ignore[arg-type]
-        assert verify_jwt_token(unsigned, SECRET) is None
+        assert verify_jwt_token(unsigned) is None
 
     def test_other_hmac_variant_with_the_correct_secret_rejected(
         self, metrics_capture: Any
     ) -> None:
         """HS512 signed with the REAL secret is a valid signature -- only the alg pin refuses it."""
-        token = jwt.encode(_claims(), SECRET, algorithm="HS512", headers={"kid": DEFAULT_JWT_KID})
-        assert verify_jwt_token(token, SECRET) is None
-        assert ("platform_hs256", "hs512", "alg_mismatch") in metrics_capture.verifications()
+        token = jwt.encode(_claims(), SECRET, algorithm="HS512", headers={"kid": _kid()})
+        assert verify_jwt_token(token) is None
+        assert ("platform_es256", "hs512", "alg_mismatch") in metrics_capture.verifications()
 
     def test_rs256_token_rejected(self, metrics_capture: Any) -> None:
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        token = jwt.encode(_claims(), key, algorithm="RS256", headers={"kid": DEFAULT_JWT_KID})
-        assert verify_jwt_token(token, SECRET) is None
-        assert ("platform_hs256", "rs256", "alg_mismatch") in metrics_capture.verifications()
+        token = jwt.encode(_claims(), key, algorithm="RS256", headers={"kid": _kid()})
+        assert verify_jwt_token(token) is None
+        assert ("platform_es256", "rs256", "alg_mismatch") in metrics_capture.verifications()
 
-    def test_es256_token_rejected(self) -> None:
+    def test_es256_token_signed_by_a_foreign_key_rejected(self, metrics_capture: Any) -> None:
+        """Right alg and a real kid, wrong key: only the signature check refuses it."""
         key = ec.generate_private_key(ec.SECP256R1())
-        assert verify_jwt_token(jwt.encode(_claims(), key, algorithm="ES256"), SECRET) is None
+        token = jwt.encode(_claims(), key, algorithm="ES256", headers={"kid": _kid()})
+        assert verify_jwt_token(token) is None
+        assert ("platform_es256", "es256", "bad_signature") in metrics_capture.verifications()
 
-    def test_classic_alg_confusion_hmac_keyed_with_a_public_key_pem(self) -> None:
-        """RSA public key PEM used as the HMAC secret (the textbook confusion attack).
+    def test_unknown_kid_rejected(self, metrics_capture: Any) -> None:
+        key = ec.generate_private_key(ec.SECP256R1())
+        token = jwt.encode(_claims(), key, algorithm="ES256", headers={"kid": "kunknown000000001"})
+        assert verify_jwt_token(token) is None
+        assert ("platform_es256", "es256", "unknown_kid") in metrics_capture.verifications()
 
-        Two layers refuse it: the alg pin (the RS256 verifier case) and PyJWT's refusal to HMAC with
-        a PEM. Here the *verifier* is (mis)configured with the PEM as its secret and the attacker
-        signs HS256 with those same bytes -- the one shape the alg pin alone would accept.
+    def test_missing_kid_rejected(self, metrics_capture: Any) -> None:
+        token = jwt.encode(_claims(), _active().private_key, algorithm="ES256")
+        assert verify_jwt_token(token) is None
+        assert ("platform_es256", "es256", "bad_kid") in metrics_capture.verifications()
+
+    @pytest.mark.parametrize("alg", ["HS256", "HS384", "HS512"])
+    def test_alg_confusion_hmac_keyed_with_the_public_key_is_rejected(
+        self, alg: str, metrics_capture: Any
+    ) -> None:
+        """The textbook attack: HMAC the token with the (public!) verification key as the secret.
+
+        Tried with the PEM text, the SPKI DER and the raw uncompressed point -- every spelling
+        of the public key. The alg pin refuses it before any key is touched.
         """
-        public_pem = (
-            rsa.generate_private_key(public_exponent=65537, key_size=2048)
-            .public_key()
-            .public_bytes(
+        pub = _active().private_key.public_key()
+        spellings = [
+            pub.public_bytes(
                 serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
-            )
-        )
-        forged = _forge(_valid_header(), _claims(), key=public_pem)
-        assert verify_jwt_token(forged, public_pem.decode()) is None
+            ),
+            pub.public_bytes(
+                serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+            ),
+            pub.public_bytes(
+                serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
+            ),
+        ]
+        digest = {"HS256": hashlib.sha256, "HS384": hashlib.sha384, "HS512": hashlib.sha512}[alg]
+        for raw_key in spellings:
+            head = _b64(json.dumps({"alg": alg, "typ": "JWT", "kid": _kid()}).encode())
+            body = _b64(json.dumps(_claims()).encode())
+            mac = hmac.new(raw_key, f"{head}.{body}".encode(), digest).digest()
+            assert verify_jwt_token(f"{head}.{body}.{_b64(mac)}") is None
+        assert ("platform_es256", alg.lower(), "alg_mismatch") in metrics_capture.verifications()
+
+    def test_rs256_alg_confusion_with_ec_public_key_rejected(self) -> None:
+        """An RS256 token naming the real kid must not be verified against the EC key."""
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        token = jwt.encode(_claims(), key, algorithm="RS256", headers={"kid": _kid()})
+        assert verify_jwt_token(token) is None
+
+    def test_forged_hs256_with_the_retired_shared_secret_rejected(self) -> None:
+        """The cutover guarantee: anyone still holding the old shared JWT secret can mint nothing."""
+        for kid in (_kid(), "hs256-v1"):
+            header = {"alg": "HS256", "typ": "JWT", "kid": kid}
+            assert verify_jwt_token(_forge(header, _claims())) is None
 
     @pytest.mark.parametrize("param", sorted(FORBIDDEN_HEADER_PARAMS))
     def test_key_material_header_rejected_despite_a_valid_signature(
         self, param: str, metrics_capture: Any
     ) -> None:
         token = _forge(_valid_header(**{param: "https://evil.example/jwks.json"}), _claims())
-        assert verify_jwt_token(token, SECRET) is None
-        assert ("platform_hs256", "hs256", "forbidden_header") in metrics_capture.verifications()
+        assert verify_jwt_token(token) is None
+        assert ("platform_es256", "es256", "forbidden_header") in metrics_capture.verifications()
 
     def test_embedded_jwk_signed_by_attacker_key_rejected(self) -> None:
         """Classic `jwk` injection: self-signed RS256 token carrying its own public key."""
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(key.public_key()))
         token = jwt.encode(
-            _claims(), key, algorithm="RS256", headers={"jwk": jwk, "kid": DEFAULT_JWT_KID}
+            _claims(), key, algorithm="RS256", headers={"jwk": jwk, "kid": _kid()}
         )
-        assert verify_jwt_token(token, SECRET) is None
+        assert verify_jwt_token(token) is None
 
     @pytest.mark.parametrize("bad_kid", ["../../../dev/null", "k' OR '1'='1", "x" * 200])
     def test_hostile_kid_rejected_before_any_use(self, bad_kid: str, metrics_capture: Any) -> None:
         token = _forge(_valid_header(kid=bad_kid), _claims())
-        assert verify_jwt_token(token, SECRET) is None
-        assert ("platform_hs256", "hs256", "bad_kid") in metrics_capture.verifications()
+        assert verify_jwt_token(token) is None
+        assert ("platform_es256", "es256", "bad_kid") in metrics_capture.verifications()
 
     def test_forged_signature_rejected(self, metrics_capture: Any) -> None:
         token = _forge(_valid_header(), _claims(), key="not-the-real-secret-at-all-xxxxxxxxxxxx")
-        assert verify_jwt_token(token, SECRET) is None
-        assert ("platform_hs256", "hs256", "bad_signature") in metrics_capture.verifications()
+        assert verify_jwt_token(token) is None
+        assert ("platform_es256", "es256", "bad_signature") in metrics_capture.verifications()
 
     def test_privilege_escalation_via_claim_tampering_rejected(self) -> None:
         good = _forge(_valid_header(), _claims())
         head, _body, sig = good.split(".")
         evil_body = _b64(json.dumps(_claims(scope="*:admin")).encode())
-        assert verify_jwt_token(f"{head}.{evil_body}.{sig}", SECRET) is None
+        assert verify_jwt_token(f"{head}.{evil_body}.{sig}") is None
 
 
 # --------------------------------------------------------------------------
@@ -402,22 +456,22 @@ class TestPlatformVerifierAttacks:
 
 class TestVerificationMetrics:
     def test_success_is_counted_per_algorithm(self, metrics_capture: Any) -> None:
-        assert verify_jwt_token(_forge(_valid_header(), _claims()), SECRET) is not None
+        assert verify_jwt_token(_forge(_valid_header(), _claims())) is not None
         points = metrics_capture.verifications()
         assert points  # a zero denominator is a failure, not a pass
-        assert points[("platform_hs256", "hs256", "ok")] == 1
-        assert metrics_capture.duration_counts()[("platform_hs256", "hs256")] == 1
+        assert points[("platform_es256", "es256", "ok")] == 1
+        assert metrics_capture.duration_counts()[("platform_es256", "es256")] == 1
 
     def test_counts_accumulate_across_outcomes(self, metrics_capture: Any) -> None:
         good = _forge(_valid_header(), _claims())
         for _ in range(3):
-            assert verify_jwt_token(good, SECRET) is not None
-        assert verify_jwt_token(_forge({"alg": "none"}, _claims(), signature=b""), SECRET) is None
-        assert verify_jwt_token("garbage", SECRET) is None
+            assert verify_jwt_token(good) is not None
+        assert verify_jwt_token(_forge({"alg": "none"}, _claims(), signature=b"")) is None
+        assert verify_jwt_token("garbage") is None
         points = metrics_capture.verifications()
-        assert points[("platform_hs256", "hs256", "ok")] == 3
-        assert points[("platform_hs256", "none", "alg_none")] == 1
-        assert points[("platform_hs256", "absent", "malformed")] == 1
+        assert points[("platform_es256", "es256", "ok")] == 3
+        assert points[("platform_es256", "none", "alg_none")] == 1
+        assert points[("platform_es256", "absent", "malformed")] == 1
         assert sum(points.values()) == 5
 
     @pytest.mark.parametrize(
@@ -448,18 +502,20 @@ class TestVerificationMetrics:
     def test_each_rejection_has_its_own_outcome(
         self, claims: dict[str, Any], outcome: str, metrics_capture: Any
     ) -> None:
-        assert verify_jwt_token(_forge(_valid_header(), claims), SECRET) is None
-        assert ("platform_hs256", "hs256", outcome) in metrics_capture.verifications()
+        assert verify_jwt_token(_forge(_valid_header(), claims)) is None
+        assert ("platform_es256", "es256", outcome) in metrics_capture.verifications()
 
     def test_attacker_chosen_alg_cannot_mint_label_values(self, metrics_capture: Any) -> None:
         for i in range(25):
-            verify_jwt_token(_forge({"alg": f"X-{i}-{'A' * 40}"}, _claims()), SECRET)
+            verify_jwt_token(_forge({"alg": f"X-{i}-{'A' * 40}"}, _claims()))
         labels = {alg for (_v, alg, _o) in metrics_capture.verifications()}
         assert labels == {ALG_LABEL_OTHER}
 
-    def test_empty_secret_is_counted_as_no_key(self, metrics_capture: Any) -> None:
-        assert verify_jwt_token(_forge(_valid_header(), _claims()), "") is None
-        assert ("platform_hs256", "absent", "no_key") in metrics_capture.verifications()
+    def test_missing_key_ring_is_counted_as_no_key(self, metrics_capture: Any) -> None:
+        token = _forge(_valid_header(), _claims())
+        set_jwt_keyring(None)
+        assert verify_jwt_token(token) is None
+        assert ("platform_es256", "absent", "no_key") in metrics_capture.verifications()
 
     def test_dead_exporter_never_changes_the_verdict(
         self,
@@ -478,9 +534,9 @@ class TestVerificationMetrics:
         monkeypatch.setattr(hardening._instruments, "duration", _Boom())
         good = _forge(_valid_header(), _claims())
         with caplog.at_level(logging.WARNING, logger="flask_core.jwt_hardening"):
-            assert verify_jwt_token(good, SECRET) is not None  # success survives a dead exporter
+            assert verify_jwt_token(good) is not None  # success survives a dead exporter
             assert (
-                verify_jwt_token(_forge({"alg": "none"}, _claims(), signature=b""), SECRET) is None
+                verify_jwt_token(_forge({"alg": "none"}, _claims(), signature=b"")) is None
             )  # so does denial
         warnings = [r for r in caplog.records if "metric emit failed" in r.getMessage()]
         assert warnings, "a metric failure must be logged, not silently swallowed"
@@ -495,7 +551,7 @@ class TestVerificationMetrics:
 class TestRejectionLogging:
     def _verify_logged(self, token: str, caplog: pytest.LogCaptureFixture) -> str:
         with caplog.at_level(logging.DEBUG, logger="flask_core"):
-            assert verify_jwt_token(token, SECRET) is None
+            assert verify_jwt_token(token) is None
         return " | ".join(
             f"{r.levelname} {r.getMessage()} {sorted(r.__dict__.items())}" for r in caplog.records
         )
@@ -526,7 +582,7 @@ class TestRejectionLogging:
         token = _forge(_valid_header(jku="https://evil.example/SECRET-PATH-31337"), _claims())
         rendered = self._verify_logged(token, caplog)
         assert "SECRET-PATH-31337" not in rendered and "evil.example" not in rendered
-        assert "reason=forbidden_header" in rendered and "alg=hs256" in rendered
+        assert "reason=forbidden_header" in rendered and "alg=es256" in rendered
 
     @pytest.mark.parametrize(
         ("token_factory", "level", "reason"),
@@ -546,16 +602,18 @@ class TestRejectionLogging:
         assert len(rejected) == 1
         assert (rejected[0].levelname, rejected[0].reason) == (level, reason)  # type: ignore[attr-defined]
 
-    def test_unset_secret_is_critical(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_missing_key_ring_is_critical(self, caplog: pytest.LogCaptureFixture) -> None:
+        token = _forge(_valid_header(), _claims())
+        set_jwt_keyring(None)
         with caplog.at_level(logging.DEBUG, logger="flask_core"):
-            assert verify_jwt_token(_forge(_valid_header(), _claims()), "") is None
+            assert verify_jwt_token(token) is None
         assert [r.levelname for r in caplog.records if "JWT rejected" in r.getMessage()] == [
             "CRITICAL"
         ]
 
     def test_success_logs_at_debug_only(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.DEBUG, logger="flask_core"):
-            assert verify_jwt_token(_forge(_valid_header(), _claims()), SECRET) is not None
+            assert verify_jwt_token(_forge(_valid_header(), _claims())) is not None
         verified = [r for r in caplog.records if "JWT verified" in r.getMessage()]
         assert [r.levelname for r in verified] == ["DEBUG"]
         assert SENTINEL_USER not in caplog.text
@@ -616,51 +674,26 @@ class TestJwtRejection:
 
 class TestPlatformAlgorithmIsPinned:
     def test_single_algorithm_constant(self) -> None:
-        assert PLATFORM_JWT_ALGORITHM == "HS256"
+        assert PLATFORM_JWT_ALGORITHM == "ES256"
 
 
-class TestJwtKidEnvValidation:
-    """A malformed JWT_KID must stop the service at import, not mint unverifiable tokens."""
+class TestNoSharedSecretSurface:
+    """T10: no env var, constant or parameter can reintroduce a shared JWT secret or kid."""
 
-    def _import_with(self, kid: str | None) -> subprocess.CompletedProcess[str]:
-        env = {k: v for k, v in os.environ.items() if k != "JWT_KID"}
-        if kid is not None:
-            env["JWT_KID"] = kid
-        pkg_parent = str(Path(hardening.__file__).resolve().parent.parent)
-        return subprocess.run(  # noqa: S603 - fixed argv, test-controlled env
-            [
-                sys.executable,
-                "-I",
-                "-c",
-                "import sys; sys.path.insert(0, sys.argv[1]); "
-                "import flask_core.auth as a; print(a.DEFAULT_JWT_KID)",
-                pkg_parent,
-            ],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
+    def test_auth_module_has_no_secret_or_default_kid_surface(self) -> None:
+        import flask_core.auth as auth
+
+        assert not hasattr(auth, "DEFAULT_JWT_KID")
+        assert "secret_key" not in auth.create_jwt_token.__code__.co_varnames
+        assert "secret_key" not in auth.verify_jwt_token.__code__.co_varnames
+
+    def test_jwt_kid_env_var_is_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A stale `JWT_KID` / `JWT_SECRET` in the environment changes nothing: kid is the ring's."""
+        from flask_core.auth import create_jwt_token
+
+        monkeypatch.setenv("JWT_KID", "hs256-v9")
+        monkeypatch.setenv("JWT_SECRET", "a-stale-shared-secret-that-must-do-nothing")
+        token = create_jwt_token(
+            user_id="u1", username="a", email="a@b.invalid", roles=[], tenant="global"
         )
-
-    def test_default_kid_when_unset(self) -> None:
-        proc = self._import_with(None)
-        assert proc.returncode == 0, proc.stderr[-400:]
-        assert proc.stdout.strip().splitlines()[-1] == "hs256-v1"
-
-    def test_custom_valid_kid_honoured(self) -> None:
-        proc = self._import_with("hs256-v7")
-        assert proc.returncode == 0, proc.stderr[-400:]
-        assert proc.stdout.strip().splitlines()[-1] == "hs256-v7"
-
-    def test_blank_kid_is_treated_as_unset(self) -> None:
-        """A blank Helm value must not crash every service at import."""
-        proc = self._import_with("")
-        assert proc.returncode == 0, proc.stderr[-400:]
-        assert proc.stdout.strip().splitlines()[-1] == "hs256-v1"
-
-    @pytest.mark.parametrize("bad", ["has space", "../x", "x" * 65])
-    def test_malformed_kid_fails_the_import_loudly(self, bad: str) -> None:
-        proc = self._import_with(bad)
-        assert proc.returncode != 0
-        assert "JWT_KID must match" in proc.stderr
+        assert jwt.get_unverified_header(token)["kid"] == _kid()

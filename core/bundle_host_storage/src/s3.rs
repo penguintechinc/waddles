@@ -40,6 +40,11 @@ fn be(e: impl std::fmt::Display) -> StorageError {
     StorageError::Backend(e.to_string())
 }
 
+/// Server-assigned last-modified of a stored object, unix seconds (negative clamps to 0).
+fn last_modified_unix(m: &object_store::ObjectMeta) -> u64 {
+    u64::try_from(m.last_modified.timestamp()).unwrap_or(0)
+}
+
 fn attrs(content_type: &str, tags: &[String]) -> Attributes {
     let mut a = Attributes::new();
     a.insert(
@@ -53,7 +58,12 @@ fn attrs(content_type: &str, tags: &[String]) -> Attributes {
     a
 }
 
-fn meta_from(key: &str, size: u64, a: &Attributes) -> Result<ObjectMeta, StorageError> {
+fn meta_from(
+    key: &str,
+    size: u64,
+    modified_unix: u64,
+    a: &Attributes,
+) -> Result<ObjectMeta, StorageError> {
     // Every object is written with a content type (`attrs`); a missing one means
     // the stored metadata is corrupt, so fail loudly instead of guessing a default.
     let content_type = match a.get(&Attribute::ContentType) {
@@ -86,6 +96,7 @@ fn meta_from(key: &str, size: u64, a: &Attributes) -> Result<ObjectMeta, Storage
         size,
         content_type,
         tags,
+        modified_unix: Some(modified_unix),
     })
 }
 
@@ -142,7 +153,9 @@ impl ObjectBackend for S3Backend {
             )
             .await
         {
-            Ok(r) => meta_from(key, r.meta.size, &r.attributes).map(Some),
+            Ok(r) => {
+                meta_from(key, r.meta.size, last_modified_unix(&r.meta), &r.attributes).map(Some)
+            }
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(be(e)),
         }
@@ -152,9 +165,10 @@ impl ObjectBackend for S3Backend {
         match self.client.get(&ObjectPath::from(key)).await {
             Ok(r) => {
                 let (size, attributes) = (r.meta.size, r.attributes.clone());
+                let modified = last_modified_unix(&r.meta);
                 let body = r.bytes().await.map_err(be)?;
                 Ok(Some(StoredObject {
-                    meta: meta_from(key, size, &attributes)?,
+                    meta: meta_from(key, size, modified, &attributes)?,
                     body,
                 }))
             }

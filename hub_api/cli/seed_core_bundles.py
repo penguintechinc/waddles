@@ -103,6 +103,7 @@ from services.bundle_version_service import (
 )
 from services.errors import ApiError
 from services.ingest_source_service import ensure_ingest_source
+from services.platform_secrets import bootstrap as platform_vault_bootstrap
 from services.tenant_app_availability_service import set_available
 
 # Guarded the same way `services/role_sync_service.py`/`services/event_discord_sync_service.py`
@@ -1668,6 +1669,10 @@ async def reconcile_removed_core_bundles(
 
 async def _run(bundles_dir: Path, catalog_path: Path) -> int:
     config = HubAPIConfig.from_env()
+    # This Job is its own process: hub-api's bootstrap seeded hub-api's platform-secret cache,
+    # not this one. Load the vault (fail closed) BEFORE any activation signs -- a refusal aborts
+    # the whole run instead of failing every bundle with `artifact_signing_key_unavailable`.
+    await asyncio.to_thread(platform_vault_bootstrap.load_offline_signer_cache, config.database_url)
     install_dal = await build_install_dal(config.database_url, pool_size=2)
     counter = get_meter().create_counter(
         "waddles_hub_core_bundle_seed_total",

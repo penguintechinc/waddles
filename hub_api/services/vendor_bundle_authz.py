@@ -41,7 +41,6 @@ from dataclasses import dataclass
 
 from flask_core.auth import verify_jwt_token
 from flask_core.authz import has_required_scopes
-from flask_core.secrets import require_secret_key
 from quart import Request
 
 from services.errors import forbidden, unauthorized
@@ -85,7 +84,7 @@ def _granted_scopes(request: Request) -> frozenset[str]:
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         raise unauthorized("Authentication required")
-    payload = verify_jwt_token(auth_header[7:], require_secret_key())
+    payload = verify_jwt_token(auth_header[7:])
     if payload is None:
         raise unauthorized("Invalid or expired token")
     raw_scope = payload.get("scope")

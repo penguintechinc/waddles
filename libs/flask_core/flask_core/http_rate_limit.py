@@ -55,7 +55,6 @@ from quart import Quart, request
 from .api_utils import error_response
 from .auth import verify_jwt_token
 from .rate_limiter import RateLimiter
-from .secrets import require_secret_key
 
 #: K8s liveness/readiness/metrics probes -- never rate limited, or a busy
 #: cluster starts killing healthy pods for the wrong reason.
@@ -122,7 +121,7 @@ def _current_user_id() -> str | None:
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         return None
-    payload = verify_jwt_token(auth_header[7:], require_secret_key())
+    payload = verify_jwt_token(auth_header[7:])
     if payload is None:
         return None
     sub = payload.get("sub")

@@ -1,0 +1,62 @@
+# Per-release enqueue of every signed, active bundle version for AOT precompile.
+#
+# Replaces the old executor-precompile-backfill post-upgrade HOOK, which compiled all ~160 bundles
+# serially inside the hook (~70 s per componentize-py bundle) and timed `helm upgrade` out
+# (alpha deploy 43868192527). This is a PLAIN Job, never a helm.sh/hook: Helm does not wait on it
+# (the deploy uses --wait without --wait-for-jobs), and it never compiles -- it only INSERTs
+# bundle_precompile_requests rows (ON CONFLICT DO NOTHING, seconds). The executor-precompile
+# CronJob drains the queue in bounded, parallel batches and skips digests that already have a
+# valid signed artifact for the current engine fingerprint. Until an artifact exists the executor
+# JIT-compiles from the signed source and counts executor_precompile_fallback_total (loud, never
+# silent).
+#
+# The name carries the Helm revision so each upgrade creates a fresh Job (Job pod templates are
+# immutable) and Helm prunes the previous revision's Job. The smoke step finds it by the
+# waddlebot.io/helm-revision label and requires it to complete.
+{{- if and .Values.pipeline.hubApi.executorPrecompile.enabled .Values.pipeline.hubApi.executorPrecompile.enqueue.enabled }}
+{{- $cfg := .Values.pipeline.hubApi.executorPrecompile }}
+{{- $fullname := include "waddlebot.fullname" . }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-executor-precompile-enqueue-r%d" $fullname (int .Release.Revision) }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor-precompile-enqueue
+    waddlebot.io/helm-revision: {{ .Release.Revision | quote }}
+spec:
+  backoffLimit: {{ $cfg.enqueue.backoffLimit }}
+  activeDeadlineSeconds: {{ $cfg.enqueue.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ $cfg.enqueue.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        waddlebot.io/workload: executor-precompile
+        app.kubernetes.io/component: executor-precompile-enqueue
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "waddlebot.executorPrecompile.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: enqueue
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.hubApi.imageTag) }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        command: ["python3", "-m", "cli.precompile_queue", "enqueue-all-active"]
+        {{- include "waddlebot.executorPrecompile.hubApiContainer" (dict "root" . "name" "enqueue") | nindent 8 }}
+      volumes:
+      - name: work
+        emptyDir:
+          sizeLimit: 16Mi
+      - name: tmp
+        emptyDir: {}
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
+{{- end }}

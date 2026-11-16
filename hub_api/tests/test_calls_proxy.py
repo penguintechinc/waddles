@@ -1,187 +1,275 @@
-"""`services/calls_proxy.py` -- unit tests for the real HTTP-forwarding logic.
+"""`services/calls_proxy.py` -- config, token minting and status mapping for the rooms gRPC client.
 
-`tests/test_v1_calls_blueprint.py` monkeypatches `CallsProxyClient.request`
-entirely (no real network I/O in route-level tests) -- which means the
-actual `httpx` call, header construction, and success/failure/timeout
-branching inside `request()` itself is exercised nowhere else. This file
-closes that gap with `httpx.MockTransport`, mirroring `tests/
-test_event_calendar_proxy.py`'s own pattern exactly (real `httpx`
-request/response objects, no real socket).
+Route-level behaviour (real in-process gRPC server) lives in `test_v1_calls_blueprint.py`;
+the route -> RPC contract lives in `test_calls_rpc_contract.py`. This file covers the
+fail-loud configuration paths and the client's own error translation.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import logging
 
-import httpx
+import grpc
 import pytest
+from flask_core.service_jwt import ServiceJwtError
 
+# isort: split
+import grpc_internal  # noqa: F401  (puts the generated pb/ tree on sys.path)
+
+# isort: split
+from waddles.streaming.internal.v1 import rooms_pb2, rooms_pb2_grpc
+
+from services import calls_proxy
 from services.calls_proxy import (
-    CallsProxyClient,
-    CallsProxyConfig,
-    StreamingUrlNotConfiguredError,
+    UNROUTED_RPCS,
+    RoomsClient,
+    RoomsClientConfig,
+    RoomsRpcError,
+    StreamingTargetNotConfiguredError,
 )
-from services.errors import ApiError
-from services.event_calendar_proxy import ProxyResult
+from tests.test_calls_support import (  # noqa: F401  (fixtures are consumed by name)
+    PARTICIPANT,
+    ROOM,
+    FakeRooms,
+    Issuer,
+    fake,
+)
 
-_CONFIG = CallsProxyConfig(base_url="http://svc-streaming:8093", timeout_seconds=1.0)
-
-
-def _patch_transport(
-    monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request], httpx.Response]
-) -> None:
-    """Force every `httpx.AsyncClient` built inside `calls_proxy.py` onto a mock transport."""
-    transport = httpx.MockTransport(handler)
-    original_init = httpx.AsyncClient.__init__
-
-    def patched_init(self: httpx.AsyncClient, *args: object, **kwargs: object) -> None:
-        kwargs["transport"] = transport
-        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
+_ENV = (
+    "STREAMING_RTC_GRPC_TARGET",
+    "STREAMING_RTC_GRPC_CA_FILE",
+    "STREAMING_RTC_GRPC_CLIENT_CERT_FILE",
+    "STREAMING_RTC_GRPC_CLIENT_KEY_FILE",
+)
 
 
-class TestCallsProxyConfigFromEnv:
-    def test_unset_url_fails_loud_instead_of_guessing(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        for name in ("STREAMING_RTC_URL", "MODULE_RTC_URL"):
+class TestConfigFromEnv:
+    def test_unset_fails_loud_instead_of_guessing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in _ENV:
             monkeypatch.delenv(name, raising=False)
-        with pytest.raises(StreamingUrlNotConfiguredError, match="STREAMING_RTC_URL"):
-            CallsProxyConfig.from_env()
+        with pytest.raises(StreamingTargetNotConfiguredError, match="STREAMING_RTC_GRPC_TARGET"):
+            RoomsClientConfig.from_env()
 
-    def test_blank_url_is_treated_as_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("STREAMING_RTC_URL", "  ")
-        monkeypatch.delenv("MODULE_RTC_URL", raising=False)
-        with pytest.raises(StreamingUrlNotConfiguredError):
-            CallsProxyConfig.from_env()
+    def test_target_without_mtls_files_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in _ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("STREAMING_RTC_GRPC_TARGET", "svc-streaming:50208")
+        with pytest.raises(StreamingTargetNotConfiguredError, match="mTLS"):
+            RoomsClientConfig.from_env()
 
-    def test_helm_rendered_url_and_default_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("STREAMING_RTC_URL", "http://waddlebot-svc-streaming:8208/")
+    def test_legacy_rest_url_is_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in _ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("STREAMING_RTC_URL", "http://svc-streaming:8208")
+        with pytest.raises(StreamingTargetNotConfiguredError):
+            RoomsClientConfig.from_env()
+
+    def test_files_and_target_resolve(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory
+    ) -> None:
+        files = {}
+        for name in _ENV[1:]:
+            path = tmp_path / name  # type: ignore[operator]
+            path.write_bytes(b"pem")
+            files[name] = str(path)
+            monkeypatch.setenv(name, str(path))
+        monkeypatch.setenv("STREAMING_RTC_GRPC_TARGET", "svc-streaming:50208")
         monkeypatch.delenv("STREAMING_RTC_TIMEOUT_SECONDS", raising=False)
-        cfg = CallsProxyConfig.from_env()
-        assert cfg.base_url == "http://waddlebot-svc-streaming:8208"
+        cfg = RoomsClientConfig.from_env()
+        assert cfg.target == "svc-streaming:50208"
         assert cfg.timeout_seconds == 10.0
+        assert cfg.ca_pem == b"pem"
 
-    async def test_client_without_url_raises_on_first_request_not_at_construction(
+
+class TestClientFailures:
+    async def test_client_without_config_raises_on_first_call_not_at_construction(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        for name in ("STREAMING_RTC_URL", "MODULE_RTC_URL"):
+        for name in _ENV:
             monkeypatch.delenv(name, raising=False)
-        client = CallsProxyClient()  # import-time construction must stay safe
-        with pytest.raises(StreamingUrlNotConfiguredError):
-            await client.request("GET", "/api/v1/rooms", authorization=None)
+        client = RoomsClient()  # import-time construction must stay safe
+        with pytest.raises(StreamingTargetNotConfiguredError):
+            await client.list_rooms(1)
 
-    def test_falls_back_to_module_rtc_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("STREAMING_RTC_URL", raising=False)
-        monkeypatch.setenv("MODULE_RTC_URL", "http://core-module-rtc:8093")
-        cfg = CallsProxyConfig.from_env()
-        assert cfg.base_url == "http://core-module-rtc:8093"
+    async def test_missing_issuer_is_a_masked_502_and_no_network(self) -> None:
+        channel = grpc.aio.insecure_channel("127.0.0.1:1")
+        client = RoomsClient(issuer_provider=lambda: None, channel=channel)
+        with pytest.raises(RoomsRpcError) as err:
+            await client.list_rooms(1)
+        assert err.value.status_code == 502
+        assert err.value.code == "STREAMING_AUTH_NOT_CONFIGURED"
+        await channel.close()
 
-    def test_streaming_rtc_url_takes_priority(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("STREAMING_RTC_URL", "http://svc-streaming.svc:9000")
-        monkeypatch.setenv("MODULE_RTC_URL", "http://core-module-rtc:8093")
-        cfg = CallsProxyConfig.from_env()
-        assert cfg.base_url == "http://svc-streaming.svc:9000"
-
-
-class TestCallsProxyClientRequest:
-    async def test_success_relays_status_and_body(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"rooms": []})
-
-        _patch_transport(monkeypatch, handler)
-        client = CallsProxyClient(_CONFIG)
-        result = await client.request(
-            "GET", "/api/v1/rooms", authorization="Bearer tok", params={"community_id": "1"}
+    async def test_unreachable_server_is_a_503(self) -> None:
+        channel = grpc.aio.insecure_channel("127.0.0.1:1")
+        client = RoomsClient(
+            issuer_provider=lambda: Issuer(),  # type: ignore[arg-type,return-value]
+            channel=channel,
+            timeout_seconds=1.0,
         )
-        assert result == ProxyResult(ok=True, status_code=200, body={"rooms": []})
+        with pytest.raises(RoomsRpcError) as err:
+            await client.list_rooms(1)
+        assert err.value.status_code == 503
+        assert err.value.code == "STREAMING_UNAVAILABLE"
+        assert "127.0.0.1" not in err.value.message  # no internal address leaks to callers
+        await channel.close()
 
-    async def test_forwards_authorization_header_unchanged(
-        self, monkeypatch: pytest.MonkeyPatch
+
+async def test_stub_exposes_every_proto_rpc() -> None:
+    names = set(rooms_pb2.DESCRIPTOR.services_by_name["RoomsService"].methods_by_name)
+    channel = grpc.aio.insecure_channel("127.0.0.1:1")
+    stub = rooms_pb2_grpc.RoomsServiceStub(channel)
+    assert names and all(hasattr(stub, n) for n in names)
+    await channel.close()
+
+
+class _Counter:
+    """Records `Counter.add` calls so the failure metric can be asserted without an SDK."""
+
+    def __init__(self) -> None:
+        self.points: list[tuple[int, dict[str, str]]] = []
+
+    def add(self, amount: int, attributes: dict[str, str]) -> None:
+        self.points.append((amount, attributes))
+
+
+@pytest.fixture
+def failure_counter(monkeypatch: pytest.MonkeyPatch) -> _Counter:
+    counter = _Counter()
+    monkeypatch.setattr(calls_proxy, "_upstream_failures", counter)
+    return counter
+
+
+class TestUpstreamFailureObservability:
+    """Every failure class is explicit, logged at ERROR (status + message) and counted."""
+
+    @pytest.mark.parametrize(
+        "code,http,error_code",
+        [
+            (grpc.StatusCode.NOT_FOUND, 404, "NOT_FOUND"),
+            (grpc.StatusCode.PERMISSION_DENIED, 403, "FORBIDDEN"),
+            (grpc.StatusCode.INVALID_ARGUMENT, 400, "INVALID_ARGUMENT"),
+            (grpc.StatusCode.RESOURCE_EXHAUSTED, 429, "RESOURCE_EXHAUSTED"),
+            (grpc.StatusCode.UNIMPLEMENTED, 501, "STREAMING_UNIMPLEMENTED"),
+            (grpc.StatusCode.UNAVAILABLE, 503, "STREAMING_UNAVAILABLE"),
+            (grpc.StatusCode.DEADLINE_EXCEEDED, 504, "STREAMING_TIMEOUT"),
+            (grpc.StatusCode.UNAUTHENTICATED, 502, "STREAMING_AUTH_REFUSED"),
+            (grpc.StatusCode.INTERNAL, 502, "STREAMING_ERROR"),
+        ],
+    )
+    async def test_each_status_maps_logs_and_counts(
+        self,
+        fake: FakeRooms,
+        failure_counter: _Counter,
+        caplog: pytest.LogCaptureFixture,
+        code: grpc.StatusCode,
+        http: int,
+        error_code: str,
     ) -> None:
-        captured: dict[str, object] = {}
+        import blueprints.v1.calls as calls_module
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["headers"] = dict(request.headers)
-            captured["method"] = request.method
-            captured["url"] = str(request.url)
-            return httpx.Response(200, json={})
+        fake.fail["GetRoom"] = (code, "downstream detail")
+        caplog.set_level(logging.ERROR, logger="services.calls_proxy")
+        with pytest.raises(RoomsRpcError) as err:
+            await calls_module._client.get_room(1, ROOM)
+        assert (err.value.status_code, err.value.code) == (http, error_code)
+        records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(records) == 1
+        message = records[0].getMessage()
+        assert code.name in message and "GetRoom" in message
+        assert "downstream detail" in message  # the log keeps the detail the caller never sees
+        assert failure_counter.points == [(1, {"rpc": "GetRoom", "status": code.name})]
 
-        _patch_transport(monkeypatch, handler)
-        client = CallsProxyClient(_CONFIG)
-        await client.request(
-            "POST",
-            "/api/v1/rooms",
-            authorization="Bearer abc123",
-            json_body={"room_name": "room1"},
+    async def test_missing_issuer_is_logged_and_counted(
+        self, failure_counter: _Counter, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        channel = grpc.aio.insecure_channel("127.0.0.1:1")
+        client = RoomsClient(issuer_provider=lambda: None, channel=channel)
+        caplog.set_level(logging.ERROR, logger="services.calls_proxy")
+        with pytest.raises(RoomsRpcError):
+            await client.list_rooms(1)
+        assert any(r.levelno == logging.ERROR for r in caplog.records)
+        assert failure_counter.points == [(1, {"rpc": "(token)", "status": "NOT_CONFIGURED"})]
+        await channel.close()
+
+    async def test_issuer_failure_is_logged_counted_and_a_502(
+        self, failure_counter: _Counter, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        class _BrokenIssuer:
+            def issue(self, service_id: str, scope: str, *, ttl_seconds: int = 0) -> str:
+                raise ServiceJwtError("signing key unreadable")
+
+        channel = grpc.aio.insecure_channel("127.0.0.1:1")
+        client = RoomsClient(
+            issuer_provider=lambda: _BrokenIssuer(),  # type: ignore[arg-type,return-value]
+            channel=channel,
         )
-        headers = captured["headers"]
-        assert isinstance(headers, dict)
-        assert headers["authorization"] == "Bearer abc123"
-        assert headers["content-type"] == "application/json"
-        assert captured["method"] == "POST"
-        assert captured["url"] == "http://svc-streaming:8093/api/v1/rooms"
+        caplog.set_level(logging.ERROR, logger="services.calls_proxy")
+        with pytest.raises(RoomsRpcError) as err:
+            await client.list_rooms(1)
+        assert (err.value.status_code, err.value.code) == (502, "STREAMING_AUTH_NOT_CONFIGURED")
+        assert "signing key unreadable" in caplog.text
+        assert failure_counter.points == [(1, {"rpc": "(token)", "status": "ServiceJwtError"})]
+        await channel.close()
 
-    async def test_no_authorization_header_when_none_given(
-        self, monkeypatch: pytest.MonkeyPatch
+    async def test_success_records_no_failure(
+        self, fake: FakeRooms, failure_counter: _Counter, caplog: pytest.LogCaptureFixture
     ) -> None:
-        captured: dict[str, object] = {}
+        import blueprints.v1.calls as calls_module
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["headers"] = dict(request.headers)
-            return httpx.Response(200, json={})
+        caplog.set_level(logging.ERROR, logger="services.calls_proxy")
+        await calls_module._client.list_rooms(1)
+        assert failure_counter.points == []
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
-        _patch_transport(monkeypatch, handler)
-        client = CallsProxyClient(_CONFIG)
-        await client.request("GET", "/api/v1/rooms", authorization=None)
-        headers = captured["headers"]
-        assert isinstance(headers, dict)
-        assert "authorization" not in headers
 
-    async def test_downstream_4xx_is_ok_false_with_relayed_status(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"error": "room not found"})
+async def test_every_client_method_stamps_api_version_v1(fake: FakeRooms) -> None:
+    """Every proto RPC, driven through the typed client, carry `api_version == "v1"`."""
+    from waddles.streaming.internal.v1 import rooms_pb2
 
-        _patch_transport(monkeypatch, handler)
-        client = CallsProxyClient(_CONFIG)
-        result = await client.request("GET", "/api/v1/rooms/missing", authorization="Bearer t")
-        assert result.ok is False
-        assert result.status_code == 404
-        assert result.body == {"error": "room not found"}
+    import blueprints.v1.calls as calls_module
 
-    async def test_non_json_response_body_raises_502_and_logs(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, content=b"not json")
+    c = calls_module._client
+    admin = {"actor_id": PARTICIPANT, "actor_role": rooms_pb2.ROOM_ROLE_ADMIN}
+    await c.list_rooms(1)
+    await c.get_room(1, ROOM)
+    await c.list_participants(1, ROOM)
+    await c.create_room(1, label="x", max_publishers=None)
+    await c.delete_room(1, ROOM)
+    fake.seed_room(1)
+    await c.join_room(1, ROOM, PARTICIPANT, publish=True, subscribe=True, ttl_secs=60, staff=True)
+    await c.raise_hand(1, ROOM, PARTICIPANT)
+    await c.list_hands(1, ROOM, actor_id=PARTICIPANT, staff=True)
+    await c.acknowledge_hand(1, ROOM, PARTICIPANT, **admin)
+    await c.lower_hand(1, ROOM, PARTICIPANT, **admin)
+    await c.reset_hands(1, ROOM, **admin)
+    await c.set_participant_muted(1, ROOM, PARTICIPANT, True, **admin)
+    await c.set_participant_muted(1, ROOM, PARTICIPANT, False, **admin)
+    await c.mute_all(1, ROOM, **admin)
+    await c.set_locked(1, ROOM, True, **admin)
+    await c.set_locked(1, ROOM, False, **admin)
+    await c.kick_participant(1, ROOM, PARTICIPANT, **admin)
+    await c.leave_room(1, ROOM, PARTICIPANT, **admin)
+    seen = {name for name, _, _ in fake.calls}
+    # every RPC hub-api has a client method for (UpdateRoom belongs to the rooms bundle)
+    descriptor = set(rooms_pb2.DESCRIPTOR.services_by_name["RoomsService"].methods_by_name) - set(
+        UNROUTED_RPCS
+    )
+    assert seen == descriptor, descriptor ^ seen  # every RPC examined
+    assert all(req.api_version == "v1" for _, req, _ in fake.calls)
+    assert len(fake.calls) == len(descriptor)  # one call per RPC, none repeated
 
-        _patch_transport(monkeypatch, handler)
-        client = CallsProxyClient(_CONFIG)
-        with caplog.at_level("ERROR"), pytest.raises(ApiError) as exc_info:
-            await client.request("GET", "/api/v1/rooms", authorization="Bearer t")
-        assert exc_info.value.status_code == 502
-        assert exc_info.value.code == "STREAMING_BAD_RESPONSE"
-        assert "non-JSON" in caplog.text
 
-    async def test_empty_body_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _patch_transport(monkeypatch, lambda request: httpx.Response(204))
-        client = CallsProxyClient(_CONFIG)
-        result = await client.request("DELETE", "/api/v1/rooms/1", authorization="Bearer t")
-        assert result == ProxyResult(ok=True, status_code=204, body=None)
+async def test_wrong_api_version_is_refused_by_the_server_contract(fake: FakeRooms) -> None:
+    """Pins the fake to the real server rule: anything but `v1` is UNIMPLEMENTED."""
+    from waddles.streaming.internal.v1 import rooms_pb2
 
-    async def test_transport_error_raises_502_and_logs_type_and_message(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            raise httpx.ConnectTimeout("connection timed out", request=request)
+    import blueprints.v1.calls as calls_module
 
-        _patch_transport(monkeypatch, handler)
-        client = CallsProxyClient(_CONFIG)
-        with caplog.at_level("ERROR"), pytest.raises(ApiError) as exc_info:
-            await client.request("GET", "/api/v1/rooms", authorization="Bearer t")
-        assert exc_info.value.status_code == 502
-        assert exc_info.value.code == "STREAMING_UNAVAILABLE"
-        assert "ConnectTimeout" in caplog.text and "connection timed out" in caplog.text
+    stub = rooms_pb2_grpc.RoomsServiceStub(calls_module._client._channel)  # type: ignore[arg-type]
+    with pytest.raises(grpc.aio.AioRpcError) as err:
+        await stub.ListRooms(
+            rooms_pb2.ListRoomsRequest(api_version="v2", community_id="1"),
+            metadata=(("authorization", "Bearer jwt-for-streaming.rooms:read"),),
+        )
+    assert err.value.code() == grpc.StatusCode.UNIMPLEMENTED

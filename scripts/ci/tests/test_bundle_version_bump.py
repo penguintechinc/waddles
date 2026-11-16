@@ -124,3 +124,58 @@ def test_non_build_file_classifier() -> None:
     assert not f(pre + "src/lib.rs", pre)
     assert not f(pre + "src/tests.rs", pre)
     assert not f(pre + "Cargo.toml", pre)
+
+
+SDK_REFS = {
+    "b.rs": ["sdk/waddle-sdk-rs", "wit/waddle-bundle", "bundles/contracts/x.v1.json"]
+}
+
+
+def test_rust_shared_sdk_change_without_bump_flags_rust() -> None:
+    """Regression (dal2alpha run 43849873861): an SDK change re-digests dependent Rust bundles."""
+    changed = ["sdk/waddle-sdk-rs/src/tool.rs"]
+    assert mod.find_unbumped(BASE, _head(), changed, SDK_REFS) == ["b.rs@1.0.0"]
+
+
+def test_rust_include_str_contract_change_flags_rust() -> None:
+    """A file pulled in via include_str! is a build input of the including bundle."""
+    changed = ["bundles/contracts/x.v1.json"]
+    assert mod.find_unbumped(BASE, _head(), changed, SDK_REFS) == ["b.rs@1.0.0"]
+
+
+def test_rust_shared_change_with_bump_passes() -> None:
+    """Bumping the dependent Rust bundle clears the shared-input finding."""
+    changed = ["sdk/waddle-sdk-rs/src/tool.rs"]
+    assert mod.find_unbumped(BASE, _head(rs="1.0.1"), changed, SDK_REFS) == []
+
+
+def test_rust_shared_docs_or_sibling_file_not_flagged() -> None:
+    """SDK docs/tests, an unreferenced sibling contract and a prefix-alike dir never flag."""
+    changed = [
+        "sdk/waddle-sdk-rs/README.md",
+        "sdk/waddle-sdk-rs/tests/t.rs",
+        "bundles/contracts/other.v1.json",
+        "sdk/waddle-sdk-rs-extra/src/lib.rs",
+    ]
+    assert mod.find_unbumped(BASE, _head(), changed, SDK_REFS) == []
+
+
+def test_real_rust_shared_refs_cover_sdk_wit_and_contracts() -> None:
+    """The real tree resolves every Rust catalog bundle's refs (SDK, WIT world, contracts)."""
+    root = Path(__file__).resolve().parents[3]
+    head = (root / mod.CATALOG).read_text()
+    refs = mod.rust_shared_refs(head, root)
+    n_rust = sum(1 for e in mod._entries(head).values() if e.get("language") == "rust")
+    assert n_rust >= 10 and len(refs) == n_rust, (n_rust, len(refs))
+    music = refs["waddles.core.service.music-requests"]
+    assert "sdk/waddle-sdk-rs" in music
+    assert any(r.startswith("wit/") for r in music)
+    # rooms compiles webrtc's grants.rs via #[path]: a webrtc edit must bump rooms too.
+    assert "bundles/rust/webrtc/src/grants.rs" in refs["waddles.core.app.rooms"]
+
+
+def test_explicit_in_crate_test_fixture_include_flags() -> None:
+    """A tests/ file named by a release include_str! is a build input, not test content."""
+    refs = {"b.rs": ["bundles/rust/b/tests/contract/x.json"]}
+    changed = ["bundles/rust/b/tests/contract/x.json"]
+    assert mod.find_unbumped(BASE, _head(), changed, refs) == ["b.rs@1.0.0"]

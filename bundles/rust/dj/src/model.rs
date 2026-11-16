@@ -1,5 +1,6 @@
-//! Persisted + wire data model for the DJ bundle: tracks, queue items,
-//! per-community state, config and audit rows.
+//! Persisted + wire data model for the DJ bundle: tracks, per-community DJ
+//! state (bans, recent picks, cursors), and audit rows. The request queue is
+//! NOT modelled here: it lives in the music-requests service.
 //!
 //! Status/source/mode/outcome values are int-enum codes (never strings or
 //! booleans) per the repo's entity-typing rule; ids that cross a boundary are
@@ -10,16 +11,13 @@ use serde::{Deserialize, Serialize};
 /// Providers this bundle may consume (one `music-<provider>` service bundle each).
 pub const PROVIDERS: [&str; 3] = ["youtube", "spotify", "soundcloud"];
 
-/// Maximum queue length persisted in one kv value (kv values are size-capped).
-pub const MAX_QUEUE_HARD: usize = 100;
 /// Maximum tracks in one static playlist.
 pub const MAX_PLAYLIST_TRACKS: usize = 200;
 /// Maximum number of static playlists per community.
 pub const MAX_PLAYLISTS: usize = 20;
-/// Ring-buffer sizes for history / audit / rejected records.
+/// Ring-buffer sizes for recent-pick / audit records.
 pub const HISTORY_CAP: usize = 100;
 pub const AUDIT_CAP: usize = 100;
-pub const REJECTED_CAP: usize = 50;
 
 /// Declares an int-coded enum that (de)serializes as its `u8` code.
 macro_rules! int_enum {
@@ -46,15 +44,7 @@ macro_rules! int_enum {
 }
 
 int_enum!(
-    /// Whether a queue entry is playable or waiting for a moderator.
-    Status { Queued = 0, Pending = 1 }
-);
-int_enum!(
-    /// Where a queue entry came from.
-    Source { Request = 0, Playlist = 1, Ai = 2 }
-);
-int_enum!(
-    /// Which feed drives playback when nothing is requested.
+    /// Which feed the DJ picks from (`Requests`/`Ai` = AI picks; `Playlist` = active playlist first).
     Mode { Requests = 0, Playlist = 1, Ai = 2 }
 );
 int_enum!(
@@ -193,49 +183,23 @@ impl Track {
     }
 }
 
-/// One queue entry.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Item {
-    pub id: u64,
-    pub track: Track,
-    /// Requester community `user_uuid` (None for playlist / AI sourced entries).
-    #[serde(default)]
-    pub requester: Option<String>,
-    pub status: Status,
-    pub source: Source,
-    pub added_ms: u64,
-    /// Human-readable hold reason shown to moderators (Pending only).
-    #[serde(default)]
-    pub reason: Option<String>,
-    /// Request cost charged for this entry (refunded if it is removed unplayed).
-    #[serde(default)]
-    pub paid: u64,
-}
-
-/// A recently played track (replay-cooldown input).
+/// A track the DJ recently picked (replay-cooldown input for DJ picks only).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Played {
     pub key: String,
     pub ms: u64,
 }
 
-/// A removed/rejected request kept so a moderator can restore it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Rejected {
-    pub item: Item,
-    pub rule: String,
-}
-
-/// Per-community mutable state, one kv value.
+/// Per-community DJ state, one kv value. Legacy `queue`/`now`/`rejected`/`next_id`
+/// fields from <1.1.0 are ignored on read and dropped on the next write (the
+/// one-shot migration exports the queue first).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct State {
-    pub next_id: u64,
-    pub queue: Vec<Item>,
-    pub now: Option<Item>,
+    /// Recent DJ picks (replay cooldown).
     pub history: Vec<Played>,
     /// Banned track keys (`provider/id`).
     pub banned: Vec<String>,
-    pub rejected: Vec<Rejected>,
     /// Round-robin cursor into the active playlist.
     pub cursor: usize,
     /// AI-fill rate window (start ms, count).
@@ -253,38 +217,4 @@ pub struct AuditRow {
     pub outcome: Outcome,
     #[serde(default)]
     pub actor: Option<String>,
-}
-
-/// Public read model consumed by the Music Station overlay.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublicTrack {
-    pub id: u64,
-    pub provider: String,
-    pub track_id: String,
-    pub title: String,
-    pub artist: String,
-    pub duration_s: u32,
-    pub url: Option<String>,
-}
-
-/// The overlay-facing snapshot (`dj.public_state`): no requester ids, no pending items.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublicState {
-    pub now_playing: Option<PublicTrack>,
-    pub queue: Vec<PublicTrack>,
-    pub updated_ms: u64,
-}
-
-impl From<&Item> for PublicTrack {
-    fn from(i: &Item) -> Self {
-        PublicTrack {
-            id: i.id,
-            provider: i.track.provider.clone(),
-            track_id: i.track.id.clone(),
-            title: i.track.title.clone(),
-            artist: i.track.artist.clone(),
-            duration_s: i.track.duration_s,
-            url: i.track.url.clone(),
-        }
-    }
 }

@@ -51,6 +51,7 @@ COPY svc_action/Cargo.toml svc_action/Cargo.lock ./svc_action/
 COPY svc_action/src ./svc_action/src
 COPY bundle_active_set ./bundle_active_set
 COPY bundle_host_kv ./bundle_host_kv
+COPY bundle_host_crypto ./bundle_host_crypto
 COPY bundle_host_db ./bundle_host_db
 COPY bundle_host_http ./bundle_host_http
 COPY bundle_host_credentials ./bundle_host_credentials
@@ -62,6 +63,8 @@ COPY command_latency ./command_latency
 COPY discord_mentions ./discord_mentions
 COPY egress_assertion ./egress_assertion
 COPY hub_client ./hub_client
+# Surface gRPC stubs + delivery host (`crate::surface`); its build.rs reads `/proto` like hub_client's.
+COPY bundle_host_surface ./bundle_host_surface
 # Live bundle-config DB reader (issue #1306): path dependency of this crate.
 COPY bundle_config_db ./bundle_config_db
 COPY service_auth ./service_auth

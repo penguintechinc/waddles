@@ -603,6 +603,86 @@ hub-api's gRPC server cert, consumed by HubClient::connect's HUB_API_GRPC_CA_FIL
 {{- end }}
 
 {{/*
+svc-presentation's in-cluster surface gRPC listener (waddles.presentation.internal.v1.SurfaceService,
+core/svc_presentation/src/surfaces/ingress.rs): its OWN identity Secret `<fullname>-presentation-grpc-tls`
+(keys ca.crt/tls.crt/tls.key), minted at runtime by templates/provision-secrets.yaml (ECDSA P-256,
+own CA) like hub-api's gRPC identity. SANs are the svc-presentation Service's DNS names so
+`bundle_host_surface::SurfaceHost` verifies the server by hostname. Callers mount ONLY the CA.
+*/}}
+{{- define "waddlebot.presentationGrpcEnabled" -}}
+{{- if and .Values.pipeline.svcPresentation.enabled .Values.presentation.rust.enabled -}}
+true
+{{- end -}}
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcSvcName" -}}
+{{- printf "%s-svc-presentation" (include "waddlebot.fullname" .) -}}
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsDesiredDnsNames" -}}
+{{- $svcName := include "waddlebot.presentationGrpcSvcName" . -}}
+{{- $ns := .Values.namespace -}}
+{{- list $svcName (printf "%s.%s" $svcName $ns) (printf "%s.%s.svc" $svcName $ns) (printf "%s.%s.svc.cluster.local" $svcName $ns) | sortAlpha | join "," -}}
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsSansSha256" -}}
+{{- include "waddlebot.presentationGrpcTlsDesiredDnsNames" . | sha256sum -}}
+{{- end }}
+
+{{/* Endpoint the stages dial (https, the Service DNS name the cert's SANs cover). */}}
+{{- define "waddlebot.presentationGrpcEndpoint" -}}
+{{- printf "https://%s:%v" (include "waddlebot.presentationGrpcSvcName" .) .Values.pipeline.svcPresentation.grpcPort -}}
+{{- end }}
+
+{{/* Server-role env for svc-presentation (core/svc_presentation/src/config.rs). */}}
+{{- define "waddlebot.presentationGrpcTlsServerEnv" -}}
+- name: SURFACE_GRPC_PORT
+  value: {{ .Values.pipeline.svcPresentation.grpcPort | quote }}
+- name: SURFACE_GRPC_TLS_CERT_FILE
+  value: /etc/waddlebot/presentation-grpc-tls/tls.crt
+- name: SURFACE_GRPC_TLS_KEY_FILE
+  value: /etc/waddlebot/presentation-grpc-tls/tls.key
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsVolume" -}}
+- name: presentation-grpc-tls
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-presentation-grpc-tls
+    defaultMode: 0440
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsVolumeMount" -}}
+- name: presentation-grpc-tls
+  mountPath: /etc/waddlebot/presentation-grpc-tls
+  readOnly: true
+{{- end }}
+
+{{/* Caller-role env + CA-only mount (svc-action-rust, svc-process-rust): `overlay.publish-surface`
+delivery (`bundle_host_surface::SurfaceHost`). Never the server's tls.crt/tls.key. */}}
+{{- define "waddlebot.presentationGrpcClientEnv" -}}
+- name: PRESENTATION_GRPC_ENDPOINT
+  value: {{ include "waddlebot.presentationGrpcEndpoint" . | quote }}
+- name: PRESENTATION_GRPC_CA_FILE
+  value: /etc/waddlebot/presentation-grpc-ca/ca.crt
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcCaVolume" -}}
+- name: presentation-grpc-ca
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-presentation-grpc-tls
+    items:
+      - key: ca.crt
+        path: ca.crt
+    defaultMode: 0440
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcCaVolumeMount" -}}
+- name: presentation-grpc-ca
+  mountPath: /etc/waddlebot/presentation-grpc-ca
+  readOnly: true
+{{- end }}
+
+{{/*
 fix/chart-host-api-stage-identity -- the single source of truth for the host-api-tls
 identity cert's CN (and `HOST_API_STAGE_IDENTITY`), read together with this file's
 waddlebot.hostApiTls* helpers above and templates/host-api-tls-secret.yaml's/
@@ -669,7 +749,11 @@ joined: a stable hash input for waddlebot.hostApiTlsSansSha256, and directly
 {{- $fullname := include "waddlebot.fullname" . -}}
 {{- $ns := .Values.namespace -}}
 {{- /* Explicit FQDNs, never a `*.<ns>.svc.cluster.local` wildcard: a wildcard cert from the shared internal CA would let any pod holding it impersonate Postgres/Valkey/S3 (security review HIGH). */ -}}
-{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-svc-process-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-action-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-bundles-executor.%s.svc.cluster.local" $fullname $ns) | sortAlpha | join "," -}}
+{{- /* Every SAN here MUST sit inside the internal CA's permitted nameConstraints (k8s/dal2alpha/internal-ca.yaml):
+webpki/OpenSSL check EVERY SAN, not just the dialled name, so one out-of-tree SAN breaks every stage.
+Bare single-label names are permitted only for the executor-dialled stages (process/action); svc-streaming
+is FQDN-only. # regression: NameConstraintViolation from bare <fullname>-svc-streaming SAN (alpha 2026-11-16) */ -}}
+{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-svc-process-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-action-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-bundles-executor.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-streaming.%s.svc.cluster.local" $fullname $ns) | sortAlpha | join "," -}}
 {{- end }}
 
 {{/* sha256 of waddlebot.hostApiTlsDesiredDnsNames -- the waddlebot.io/cert-sans-sha256
@@ -978,6 +1062,14 @@ existingSecret (SSE assertion mandatory). Fails the render on any inconsistency.
       name: {{ $e.existingSecret | quote }}
       key: {{ $e.secretKeyKey | quote }}
 {{- end }}
+{{- /* Object bodies are sealed per tenant (no plaintext write path). Legacy pre-encryption plaintext is READ only for objects last modified before this unix-seconds cutoff; unset renders nothing = no plaintext object is ever served. svc-process refuses a cutoff in the future. */}}
+{{- with .Values.bundleStorage.legacyPlaintextUntil }}
+{{- if not (regexMatch "^[0-9]+$" (toString .)) }}
+{{- fail "bundleStorage.legacyPlaintextUntil must be unix seconds (digits only) or empty" }}
+{{- end }}
+- name: BUNDLE_STORAGE_LEGACY_PLAINTEXT_UNTIL
+  value: {{ toString . | quote }}
+{{- end }}
 {{- end -}}
 
 {{- define "waddlebot.valkeyTlsCaVolumeMount" -}}
@@ -1059,11 +1151,26 @@ affinity:
 {{- end -}}
 
 {{/*
+Bundle storage v2 Secret names. Unset existingSecret (or the chart's own default name) = the
+chart-provisioned Secret, created-if-absent by templates/provision-secrets.yaml in every tier; any
+other name is an operator-owned Secret the hook never touches.
+Usage: include "waddlebot.bundleDbSecretName" . / include "waddlebot.bundleMigratorSecretName" .
+*/}}
+{{- define "waddlebot.bundleDbSecretName" -}}
+{{- .Values.bundleStorageV2.db.existingSecret | default "waddlebot-bundle-db" -}}
+{{- end -}}
+
+{{- define "waddlebot.bundleMigratorSecretName" -}}
+{{- .Values.bundleStorageV2.migrator.existingSecret | default "waddlebot-bundle-migrator" -}}
+{{- end -}}
+
+{{/*
 Bundle storage v2 (docs/bundle-storage-v2.md): BUNDLE_DB_* env for svc-process-rust / svc-action-rust.
-Off by default (bundleStorageV2.db.enabled=false -> renders nothing, db capability stays
-not_implemented). Enabled -> the password is read by secretKeyRef from an operator-managed
-existingSecret (required; the chart never renders or defaults a value). Host/port/name fall back to the
-chart's own Postgres service. Usage: include "waddlebot.bundleDbEnv" .
+On by default: the password is read by secretKeyRef from the chart-provisioned `waddlebot-bundle-db`
+Secret (or an operator-owned existingSecret); the db-migrate hook applies the same value to the
+waddles_bundle_runtime role. The db host capability itself stays behind its PostHog flag.
+enabled=false renders nothing. Host/port/name fall back to the chart's own Postgres service.
+Usage: include "waddlebot.bundleDbEnv" .
 */}}
 {{- define "waddlebot.bundleDbEnv" -}}
 {{- $v := .Values.bundleStorageV2.db -}}
@@ -1079,7 +1186,7 @@ chart's own Postgres service. Usage: include "waddlebot.bundleDbEnv" .
 - name: BUNDLE_DB_PASSWORD
   valueFrom:
     secretKeyRef:
-      name: {{ required "bundleStorageV2.db.existingSecret is required when bundleStorageV2.db.enabled=true" $v.existingSecret }}
+      name: {{ include "waddlebot.bundleDbSecretName" . }}
       key: {{ $v.passwordKey | default "BUNDLE_DB_PASSWORD" }}
 {{- end -}}
 {{- end -}}
@@ -1104,8 +1211,11 @@ Call: include "waddlebot.executorEffective" (dict "root" $ "pool" $pool) | fromJ
 {{- end -}}
 
 {{/*
-Bundle storage v2: BUNDLE_MIGRATOR_* env for hub-api only (DDL provisioning at install/upgrade/uninstall).
-Off by default; password only ever from an operator-managed existingSecret (required when enabled).
+Bundle storage v2: BUNDLE_MIGRATOR_* env for hub-api and its core-bundle seeder Job (same code, same
+DDL provisioning at install/upgrade/uninstall) only -- never a data-plane workload.
+On by default; password from the chart-provisioned `waddlebot-bundle-migrator` Secret (or an
+operator-owned existingSecret); the db-migrate hook applies the same value to the role, so the two
+always match. enabled=false renders nothing (approvals of db-v2 bundles then fail closed, 503).
 */}}
 {{- define "waddlebot.bundleMigratorEnv" -}}
 {{- $v := .Values.bundleStorageV2.migrator -}}
@@ -1117,7 +1227,7 @@ Off by default; password only ever from an operator-managed existingSecret (requ
 - name: BUNDLE_MIGRATOR_PASSWORD
   valueFrom:
     secretKeyRef:
-      name: {{ required "bundleStorageV2.migrator.existingSecret is required when bundleStorageV2.migrator.enabled=true" $v.existingSecret }}
+      name: {{ include "waddlebot.bundleMigratorSecretName" . }}
       key: {{ $v.passwordKey | default "BUNDLE_MIGRATOR_PASSWORD" }}
 {{- end -}}
 {{- end -}}
@@ -1140,4 +1250,74 @@ that dials no stage would serve nothing. Call with (dict "root" $ "stages" $pool
 {{- $addrs = append $addrs (printf "%s-%s:%v" $fullname $stage.target $stage.port) -}}
 {{- end -}}
 {{- join "," $addrs -}}
+{{- end }}
+
+{{/*
+RTC media exposure (svc-streaming SFU). Validates pipeline.svcStreaming.webrtc and returns the
+resolved settings as JSON (`include ... | fromJson`): udpPort, iceTcpEnabled, iceTcpPort,
+serviceEnabled, serviceType, nodePortUdp, nodePortTcp. Every misconfiguration FAILS the render
+loudly -- there is no silent fallback to a different exposure:
+  - the media port(s) must be unprivileged, distinct from every other declared containerPort;
+  - NodePort is the alpha/local exemption only (global.deploymentTier alpha|local); beta/gamma/
+    production must use LoadBalancer (no NodePort/hostPort/externalIPs anywhere);
+  - the published port must equal the bound port (the SFU advertises the port it binds in ICE
+    candidates, so a remapped nodePort/LB port would hand clients an unreachable candidate).
+*/}}
+{{- define "waddlebot.svcStreaming.rtcMedia" -}}
+{{- $s := .Values.pipeline.svcStreaming -}}
+{{- $w := $s.webrtc -}}
+{{- $svc := $w.media.service -}}
+{{- $tier := .Values.global.deploymentTier | default "" | toString -}}
+{{- $udp := int $w.udpPort -}}
+{{- $tcpOn := eq (toString $w.iceTcp.enabled) "true" -}}
+{{- $tcp := int $w.iceTcp.port -}}
+{{- if or (lt $udp 1024) (gt $udp 65535) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.udpPort must be an unprivileged port (1024-65535), got %v" $w.udpPort) -}}
+{{- end -}}
+{{- if eq $udp (int $s.srtPort) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.udpPort %d collides with srtPort (both UDP)" $udp) -}}
+{{- end -}}
+{{- if $tcpOn -}}
+{{- if or (lt $tcp 1024) (gt $tcp 65535) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.iceTcp.port must be an unprivileged port (1024-65535), got %v" $w.iceTcp.port) -}}
+{{- end -}}
+{{- range $name, $p := dict "port" $s.port "metricsPort" $s.metricsPort "grpcPort" $s.grpcPort "rtmpPort" $s.rtmpPort -}}
+{{- if eq $tcp (int $p) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.iceTcp.port %d collides with %s (both TCP)" $tcp $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $type := $svc.type | default "" | toString -}}
+{{- if eq (toString $svc.enabled) "true" -}}
+{{- if not (has $type (list "NodePort" "LoadBalancer")) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.media.service.type must be NodePort or LoadBalancer, got %q" $type) -}}
+{{- end -}}
+{{- if eq $type "NodePort" -}}
+{{- if not (has $tier (list "alpha" "local")) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.media.service.type=NodePort is the alpha/local exemption only (global.deploymentTier=%q); beta/gamma/production must use LoadBalancer -- no NodePort/hostPort/externalIPs" $tier) -}}
+{{- end -}}
+{{- if ne (int $svc.nodePort.udp) $udp -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.media.service.nodePort.udp (%v) must equal webrtc.udpPort (%d): the SFU advertises the port it binds, so the node port must match" $svc.nodePort.udp $udp) -}}
+{{- end -}}
+{{- if and $tcpOn (ne (int $svc.nodePort.tcp) $tcp) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.media.service.nodePort.tcp (%v) must equal webrtc.iceTcp.port (%d)" $svc.nodePort.tcp $tcp) -}}
+{{- end -}}
+{{- else -}}
+{{- if or (ne (int $svc.nodePort.udp) 0) (ne (int $svc.nodePort.tcp) 0) -}}
+{{- fail "pipeline.svcStreaming.webrtc.media.service.nodePort.* must be 0 for a LoadBalancer Service (the cluster assigns node ports; the published LB port equals the bound port)" -}}
+{{- end -}}
+{{- end -}}
+{{- if not (has (toString $svc.externalTrafficPolicy) (list "Local" "Cluster")) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.media.service.externalTrafficPolicy must be Local or Cluster, got %q" (toString $svc.externalTrafficPolicy)) -}}
+{{- end -}}
+{{- end -}}
+{{- range $e := $w.media.networkPolicy.fromEntities -}}
+{{- if not (has $e (list "world" "host" "remote-node")) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.media.networkPolicy.fromEntities: %q is not allowed (world|host|remote-node)" $e) -}}
+{{- end -}}
+{{- end -}}
+{{- if not $w.media.networkPolicy.fromEntities -}}
+{{- fail "pipeline.svcStreaming.webrtc.media.networkPolicy.fromEntities must not be empty: external media clients could never reach the SFU (an empty list renders an allow-nothing rule)" -}}
+{{- end -}}
+{{- dict "udpPort" $udp "iceTcpEnabled" $tcpOn "iceTcpPort" $tcp "serviceEnabled" (eq (toString $svc.enabled) "true") "serviceType" $type "nodePortUdp" (int $svc.nodePort.udp) "nodePortTcp" (int $svc.nodePort.tcp) | toJson -}}
 {{- end }}
