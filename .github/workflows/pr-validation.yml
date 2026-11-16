@@ -230,7 +230,10 @@ jobs:
   alembic-migration-chain:
     name: Alembic migration chain (real Postgres)
     needs: changes
-    runs-on: ubuntu-latest
+    # Canonical runner-routing expression: dal2-alpha-ci for every non-main ref. Docker comes from the
+    # pod's dind sidecar (DOCKER_HOST=tcp://127.0.0.1:2375); it shares the pod network, so the
+    # postgres service and pg_docker's published ports are reachable on localhost from the runner.
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
     # Scoped to pull_request only: the base-revision diff below needs a real
     # PR base commit to compare against (merge_group/workflow_dispatch have
     # no equivalent single "pre-PR tree" to diff, and this gate's whole job
@@ -384,7 +387,11 @@ jobs:
           PGPASSWORD: testpass123
         run: |
           set -euo pipefail
-          psql -h localhost -U waddlebot -d waddlebot <<'SQL'
+          # psql from the service's own digest-pinned image (the ARC runner image ships no psql
+          # client); --network host = the dind/pod network namespace, where localhost:5432 lives.
+          docker run --rm -i --network host -e PGPASSWORD \
+            postgres:17-bookworm@sha256:639ab7ceb90e13123085b741fb31ef493fba25463002f6da665352e7b534b652 \
+            psql -h 127.0.0.1 -U waddlebot -d waddlebot <<'SQL'
           CREATE TABLE tenants (
               id SERIAL PRIMARY KEY,
               slug TEXT NOT NULL UNIQUE,
