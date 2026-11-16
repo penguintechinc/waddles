@@ -54,9 +54,9 @@ jobs:
     with:
       crate_name: svc-streaming
       working_directory: core/svc_streaming
-      # aws-lc-sys needs cmake plus a C/C++ toolchain to build.
-      extra_apt_packages: 'cmake build-essential'
-      extra_apt_reason: 'for aws-lc-sys (cmake, C/C++ toolchain)'
+      # aws-lc-sys needs cmake plus a C/C++ toolchain; build.rs needs protoc (rooms.proto stubs).
+      extra_apt_packages: 'cmake build-essential protobuf-compiler'
+      extra_apt_reason: 'for aws-lc-sys (cmake, C/C++ toolchain) and build.rs rooms.proto (protoc)'
 
   # Real-media proof: RTMP publish of genuine H.264/AAC -> real ffmpeg -> HLS playlist
   # + segments, asserted with ffprobe. ffmpeg runs in a container built FROM the same
@@ -80,10 +80,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup build deps (C toolchain, cmake)
+      - name: Setup build deps (C toolchain, cmake, protoc)
         uses: ./.github/actions/setup-build-deps
         with:
-          packages: 'cmake build-essential'
+          packages: 'cmake build-essential protobuf-compiler'
       - name: Install Rust 1.97.1
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
         with:

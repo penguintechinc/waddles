@@ -10,7 +10,7 @@
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
         test-data-plane-parity test-connector-parity gen-connector-parity-expected \
-        test-hub-api test-helm-matrix test-helm-matrix-quick audit-chart-values audit-chart-values-deep
+        check-proto test-hub-api test-helm-matrix test-helm-matrix-quick audit-chart-values audit-chart-values-deep
 
 dev:
 	$(error dev: docker-compose is deprecated -- deploy to Kubernetes via scripts/deploy-alpha.sh)
@@ -48,6 +48,11 @@ check-openapi-drift:
 
 check-docs:
 	@bash scripts/check-doc-refs.sh
+
+# Proto gate: buf lint + buf breaking vs origin/release/v3.0.X (override PROTO_BREAKING_AGAINST) +
+# committed hub-api stubs match the .proto sources. Prints files examined; fails on zero examined.
+check-proto:
+	@bash scripts/ci/check-proto-gate.sh
 
 # M1.5 gate (docs/superpowers/specs/2026-09-14-rust-data-plane-design.md §16):
 # zero flask_core.database/pydal occurrences under the App Bundle directories.

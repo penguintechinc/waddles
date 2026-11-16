@@ -5,9 +5,8 @@
 //! - `music.<p>.search`        `{query, limit<=25}`            -> `{tracks, capability}`
 //! - `music.<p>.resolve`       `{url}`                         -> `{track, capability}`
 //! - `music.<p>.playlist.get`  `{playlist_id, limit, page_token}` -> `{tracks, next_page_token, capability}`
-//! - Spotify only: `music.spotify.player.play {uris}` (moderator scope, write) hands a
-//!   track to the streamer's Connect device. There is no generic playback tool;
-//!   other providers play through the Music Station / presentation.
+//!
+//! Playback is NOT the DJ's job: the music bundle / shared queue own it.
 //!
 //! Every returned track is untrusted third-party data: it is sanitized and
 //! provider-checked before it can enter state, and never interpreted as an
@@ -152,26 +151,6 @@ pub fn playlist(
     }
     out.truncate(max);
     Ok(out)
-}
-
-/// Hands a Spotify track to the streamer's Connect device
-/// (`music.spotify.player.play`, moderator scope enforced host-side). Other
-/// providers have no player tool and play through the Music Station, so this
-/// is a no-op for them. `item_id` keys idempotency.
-pub fn handoff_play(host: &dyn Host, track: &Track, item_id: u64) -> Result<(), MusicError> {
-    if track.provider != "spotify" {
-        return Ok(());
-    }
-    let uri = format!("spotify:track:{}", track.id);
-    let key = format!("dj.play.{item_id}");
-    call(
-        host,
-        "spotify",
-        "player.play",
-        json!({"uris": [uri]}),
-        Some(&key),
-    )
-    .map(|_| ())
 }
 
 /// Maps a request URL to `(provider, url)` when the host is a known music site.

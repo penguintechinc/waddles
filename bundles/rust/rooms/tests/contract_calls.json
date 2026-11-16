@@ -1,7 +1,60 @@
 {
   "admin.verify": {},
-  "room.create": {"label": "Game Night"},
-  "room.close": {"room_id": "00000000-0000-0000-0000-000000000001"},
-  "whip.endpoint": {"room_id": "00000000-0000-0000-0000-000000000001", "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"},
-  "whep.endpoint": {"room_id": "00000000-0000-0000-0000-000000000001", "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}
+  "room.create": {
+    "label": "Game Night"
+  },
+  "room.close": {
+    "room_id": "00000000-0000-0000-0000-000000000001"
+  },
+  "whip.endpoint": {
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+  },
+  "whep.endpoint": {
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+  },
+  "room.list": {},
+  "room.participants": {
+    "room_id": "00000000-0000-0000-0000-000000000001"
+  },
+  "room.leave": {
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "actor_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "actor_role": "member"
+  },
+  "room.kick": {
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "actor_role": "admin"
+  },
+  "room.mute": {
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "actor_role": "admin"
+  },
+  "room.unmute": {
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "actor_role": "admin"
+  },
+  "room.mute_all": {
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "actor_role": "admin"
+  },
+  "room.lock": {
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "actor_role": "admin"
+  },
+  "room.unlock": {
+    "room_id": "00000000-0000-0000-0000-000000000001",
+    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "actor_role": "admin"
+  }
 }
