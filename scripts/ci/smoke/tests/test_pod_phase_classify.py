@@ -26,11 +26,14 @@ _AFTER = "2026-11-16T15:30:00Z"            # created after the release
 _BEFORE = "2026-11-10T00:00:00Z"           # ancient, pre-release
 
 
-def _dep_pod(name: str, phase: str) -> dict:
+def _dep_pod(name: str, phase: str, reason: str | None = None) -> dict:
     """A Deployment (ReplicaSet-owned) pod -- a long-running workload, judged by phase."""
+    status: dict = {"phase": phase}
+    if reason is not None:
+        status["reason"] = reason
     return {
         "metadata": {"name": name, "ownerReferences": [{"kind": "ReplicaSet", "name": "rs"}]},
-        "status": {"phase": phase},
+        "status": status,
     }
 
 
@@ -100,6 +103,45 @@ def test_broken_deployment_pod_fails(tmp_path: Path) -> None:
         tmp_path,
         [_dep_pod("waddlebot-hub-api-v3-a", "Running"),
          _dep_pod("waddlebot-hub-webui-b", "CrashLoopBackOff")],
+        [],
+    )
+    assert res.returncode == 1, res.stderr
+    assert "pods examined=2 bad=1" in res.stdout
+
+
+def test_evicted_failed_pod_not_bad(tmp_path: Path) -> None:
+    """A phase=Failed reason=Evicted pod (DiskPressure tombstone) is skipped, not bad."""
+    res = _run(
+        tmp_path,
+        [_dep_pod("waddlebot-hub-api-v3-a", "Running"),
+         _dep_pod("waddlebot-hub-api-v3-evicted", "Failed", reason="Evicted")],
+        [],
+    )
+    assert res.returncode == 0, res.stderr
+    # evicted tombstone skipped entirely: neither examined nor bad.
+    assert "pods examined=1 bad=0" in res.stdout
+    assert "SKIP evicted: waddlebot-hub-api-v3-evicted" in res.stderr
+
+
+def test_failed_pod_other_reason_still_bad(tmp_path: Path) -> None:
+    """A phase=Failed pod for ANY non-Evicted reason (e.g. OOMKilled) still counts as bad."""
+    res = _run(
+        tmp_path,
+        [_dep_pod("waddlebot-hub-api-v3-a", "Running"),
+         _dep_pod("waddlebot-hub-api-v3-oom", "Failed", reason="OOMKilled")],
+        [],
+    )
+    assert res.returncode == 1, res.stderr
+    assert "pods examined=2 bad=1" in res.stdout
+    assert "NOT READY: waddlebot-hub-api-v3-oom phase=Failed" in res.stderr
+
+
+def test_failed_pod_no_reason_still_bad(tmp_path: Path) -> None:
+    """A phase=Failed pod with no reason at all is NOT an eviction -- it still counts as bad."""
+    res = _run(
+        tmp_path,
+        [_dep_pod("waddlebot-hub-api-v3-a", "Running"),
+         _dep_pod("waddlebot-hub-api-v3-x", "Failed")],
         [],
     )
     assert res.returncode == 1, res.stderr

@@ -389,7 +389,10 @@ jobs:
           echo "precompile cronjob concurrencyPolicy=${CJ_POLICY} suspend=${CJ_SUSPEND:-false}"
           [ "${CJ_POLICY}" = "Forbid" ] && [ "${CJ_SUSPEND:-false}" != "true" ] || { echo "::error::precompile CronJob must be Forbid and not suspended" >&2; exit 1; }
           ENQ_CREATED="$(kubectl -n "${NAMESPACE}" get job "${ENQ_NAME}" -o jsonpath='{.metadata.creationTimestamp}')"
-          kubectl -n "${NAMESPACE}" get jobs -l 'app.kubernetes.io/component=executor-precompile' -o json > "${RUNNER_TEMP}/precompile-jobs.json"
+          # Feed BOTH the enqueue Job and the batch Jobs: the enqueue Job is the enqueue-driven
+          # activity the gate examines, so a window with zero batch Jobs yet still has a non-zero
+          # denominator and the gate can never pass on an empty input.
+          kubectl -n "${NAMESPACE}" get jobs -l 'app.kubernetes.io/component in (executor-precompile,executor-precompile-enqueue)' -o json > "${RUNNER_TEMP}/precompile-jobs.json"
           python3 scripts/ci/smoke/precompile-batch-gate.py "${RUNNER_TEMP}/precompile-jobs.json" "${ENQ_CREATED}"
 
           # 3. every long-lived workload runs exactly its planned image (rebuilt -> new tag,

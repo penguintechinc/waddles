@@ -9,6 +9,10 @@ classifier judges each pod by what owns it:
 - Long-running workloads (Deployment/StatefulSet/DaemonSet/bare pods -- anything NOT owned
   by a Job) are judged by phase, exactly as before: Running or Succeeded is good, anything
   else is bad. These are the denominator ("pods examined=N"); zero of them is a failure.
+  One exception: a pod in phase=Failed with reason=Evicted (a node-pressure eviction, e.g.
+  DiskPressure on a hot box) is a tombstone the owning controller already replaces, so it is
+  skipped -- neither examined nor counted bad. A pod Failed for ANY OTHER reason still counts
+  as bad, so real breakage (CrashLoop, OOMKill, image pull) is never masked.
 - Job/CronJob-owned pods are judged by their JOB's status, never the instantaneous pod
   phase. A Job created at/after this release's deploy time whose status reports Failed trips
   the gate; a Job pod that is merely Pending/Init/active does not. A Job created BEFORE the
@@ -63,8 +67,10 @@ def main(argv: list[str]) -> int:
     if len(argv) != 4:
         print("usage: pod-phase-classify.py <pods.json> <jobs.json> <since>", file=sys.stderr)
         return 2
-    pods = json.load(open(argv[1], encoding="utf-8"))["items"]
-    jobs = {j["metadata"]["name"]: j for j in json.load(open(argv[2], encoding="utf-8"))["items"]}
+    with open(argv[1], encoding="utf-8") as fh:
+        pods = json.load(fh)["items"]
+    with open(argv[2], encoding="utf-8") as fh:
+        jobs = {j["metadata"]["name"]: j for j in json.load(fh)["items"]}
     since = _parse(argv[3])
 
     examined = 0
@@ -89,8 +95,15 @@ def main(argv: list[str]) -> int:
                 failed_jobs.add(job_name)
             continue
         # Long-running workload pod: judge by phase.
-        examined += 1
         phase = pod["status"].get("phase", "")
+        if phase == "Failed" and pod["status"].get("reason") == "Evicted":
+            # Node-pressure eviction (e.g. DiskPressure) tombstone: the owning controller
+            # already schedules a replacement (a separate entry in this same snapshot), so an
+            # Evicted Failed pod is not a broken workload. Skip it -- neither examined nor bad.
+            # A pod Failed for ANY OTHER reason still counts as bad below.
+            print(f"SKIP evicted: {name}", file=sys.stderr)
+            continue
+        examined += 1
         if phase not in _GOOD_PHASES:
             print(f"NOT READY: {name} phase={phase}", file=sys.stderr)
             bad += 1
