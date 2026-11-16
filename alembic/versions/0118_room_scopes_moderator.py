@@ -8,17 +8,17 @@ moderator row and installs a BEFORE INSERT trigger that does the same for rows c
 `seed_community_system_roles()` -- both key on the int `role_kind`, never on a role name. Moderators
 do NOT gain any management scope (`rooms:update` etc.).
 
-Revision id <= 32 chars; `down_revision` is re-pointed to the release alembic head at merge
-(single-head CI gate).
+Revision id <= 32 chars; `down_revision` chains onto 0116 (re-pointed to the release head at merge).
 """
 
 from __future__ import annotations
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0118_room_scopes_moderator"
-down_revision = "0117_community_role_kind"
+down_revision = "0116_identity_view_hub_uid"
 branch_labels = None
 depends_on = None
 
@@ -43,6 +43,12 @@ _MERGE_SQL = f"""
 def upgrade() -> None:
     """Backfill existing moderator-kind rows and install the seeding trigger."""
     conn = op.get_bind()
+    if not conn.execute(
+        sa.text("SELECT to_regclass('public.community_roles') IS NOT NULL")
+    ).scalar():
+        # Same fresh-DB tolerance as 0117_community_role_kind: the table (and so the role kinds
+        # this migration extends) only exists once the legacy schema has been created.
+        return
     conn.execute(
         sa.text(
             "UPDATE community_roles SET base_claims = "
@@ -65,7 +71,9 @@ def upgrade() -> None:
         )
     )
     conn.execute(
-        sa.text("DROP TRIGGER IF EXISTS trg_community_roles_room_scopes ON community_roles")
+        sa.text(
+            "DROP TRIGGER IF EXISTS trg_community_roles_room_scopes ON community_roles"
+        )
     )
     # Fires after trg_community_roles_kind (alphabetical), which sets role_kind from the name once.
     conn.execute(
@@ -79,8 +87,16 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Remove the trigger and the scopes this migration added to moderator-kind rows."""
     conn = op.get_bind()
+    if not conn.execute(
+        sa.text("SELECT to_regclass('public.community_roles') IS NOT NULL")
+    ).scalar():
+        # Same fresh-DB tolerance as 0117_community_role_kind: the table (and so the role kinds
+        # this migration extends) only exists once the legacy schema has been created.
+        return
     conn.execute(
-        sa.text("DROP TRIGGER IF EXISTS trg_community_roles_room_scopes ON community_roles")
+        sa.text(
+            "DROP TRIGGER IF EXISTS trg_community_roles_room_scopes ON community_roles"
+        )
     )
     conn.execute(sa.text("DROP FUNCTION IF EXISTS community_roles_add_room_scopes()"))
     conn.execute(

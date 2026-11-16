@@ -10,7 +10,7 @@ Chained to 0110_merge_precompile_vault for now; re-point down_revision to releas
 merge time (the single-head gate enforces it).
 
 Revision ID: 0116_identity_view_hub_uid
-Revises: 0110_merge_precompile_vault
+Revises: 0111_call_rooms
 Create Date: 2026-11-14
 """
 
@@ -21,7 +21,7 @@ from pathlib import Path
 from alembic import op
 
 revision = "0116_identity_view_hub_uid"
-down_revision = "0110_merge_precompile_vault"
+down_revision = "0111_call_rooms"
 branch_labels = None
 depends_on = None
 
