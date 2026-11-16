@@ -157,7 +157,8 @@ Both role passwords are internal secrets, ON by default in every tier, with no m
 provision-secrets hook (pre-install/upgrade, -8)
   -> waddlebot-bundle-migrator / BUNDLE_MIGRATOR_PASSWORD   create-if-absent, never overwritten
   -> waddlebot-bundle-db       / BUNDLE_DB_PASSWORD
-  -> waddlebot-db-migrate-secret: BUNDLE_MIGRATOR_PASSWORD + BUNDLE_RUNTIME_PASSWORD (derived)
+  -> waddlebot-db-migrate-secret: BUNDLE_{MIGRATOR,RUNTIME}_ROLE_PASSWORD (derived; distinct names so
+     alembic 0030 never sends a plaintext password to the server)
 db-migrate hook (-5): alembic upgrade head, then scripts/db/bundle_storage_roles.py
   -> create role if missing (LOGIN, no elevated attribute), set password only if the stored
      verifier differs, re-assert 0030's schema ownership/grants. Re-run = no-op.

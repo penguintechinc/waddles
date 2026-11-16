@@ -157,8 +157,12 @@ def test_hook_generates_both_secrets_and_hands_the_same_values_to_db_migrate(
     runtime = secrets[_DB_SECRET]["BUNDLE_DB_PASSWORD"]
     assert len(migrator) >= 32 and len(runtime) >= 32 and migrator != runtime
     hook = secrets[_MIGRATE_SECRET]
-    assert hook["BUNDLE_MIGRATOR_PASSWORD"] == migrator
-    assert hook["BUNDLE_RUNTIME_PASSWORD"] == runtime
+    assert hook["BUNDLE_MIGRATOR_ROLE_PASSWORD"] == migrator
+    assert hook["BUNDLE_RUNTIME_ROLE_PASSWORD"] == runtime
+    # alembic 0030's names would send the plaintext to the server via a GUC: never set
+    assert (
+        "BUNDLE_MIGRATOR_PASSWORD" not in hook and "BUNDLE_RUNTIME_PASSWORD" not in hook
+    )
     # retired keys scrubbed from the Secret ~40 workloads envFrom
     assert secrets["waddlebot-secrets"].get("BUNDLE_MIGRATOR_PASSWORD", "") == ""
     assert secrets["waddlebot-secrets"].get("BUNDLE_RUNTIME_PASSWORD", "") == ""
@@ -187,10 +191,12 @@ def test_existing_values_are_never_overwritten() -> None:
     assert state[_DB_SECRET]["data"] == kept[_DB_SECRET]
     hook = state[_MIGRATE_SECRET]["data"]
     assert (
-        hook["BUNDLE_MIGRATOR_PASSWORD"]
+        hook["BUNDLE_MIGRATOR_ROLE_PASSWORD"]
         == kept[_MIGRATOR_SECRET]["BUNDLE_MIGRATOR_PASSWORD"]
     )
-    assert hook["BUNDLE_RUNTIME_PASSWORD"] == kept[_DB_SECRET]["BUNDLE_DB_PASSWORD"]
+    assert (
+        hook["BUNDLE_RUNTIME_ROLE_PASSWORD"] == kept[_DB_SECRET]["BUNDLE_DB_PASSWORD"]
+    )
 
 
 def test_legacy_value_in_waddlebot_secrets_is_imported_then_scrubbed() -> None:
@@ -242,7 +248,7 @@ def test_operator_existing_secret_is_referenced_and_never_provisioned() -> None:
     assert res.returncode == 0, res.stderr
     assert state["bundle-migrator-ext"]["data"] == ext["bundle-migrator-ext"]
     assert (
-        state[_MIGRATE_SECRET]["data"]["BUNDLE_MIGRATOR_PASSWORD"]
+        state[_MIGRATE_SECRET]["data"]["BUNDLE_MIGRATOR_ROLE_PASSWORD"]
         == ext["bundle-migrator-ext"]["BUNDLE_MIGRATOR_PASSWORD"]
     )
     # operator Secret absent -> the hook fails closed (never a passwordless role)

@@ -270,3 +270,72 @@ def test_7_post_render_chart_secret_and_role_match(db: PgTestDatabase) -> None:
         pytest.fail("no core-bundle seeder Job rendered")
     # second run of the same hook values: no-op
     assert [r.password_changed for r in _reconcile(db, job_env)] == [False, False]
+    # alembic 0030 reads BUNDLE_{MIGRATOR,RUNTIME}_PASSWORD and would bridge the plaintext through a
+    # server-side GUC: the db-migrate hook must never hand it those names.
+    assert (
+        "BUNDLE_MIGRATOR_PASSWORD" not in hook and "BUNDLE_RUNTIME_PASSWORD" not in hook
+    )
+
+
+# Security review (sensitive-data-in-logs): the plaintext never reaches the server.
+
+
+def test_8_server_never_receives_the_plaintext(db: PgTestDatabase) -> None:
+    """Every statement + parameter set sent to Postgres is captured; none contains a password."""
+    new_migrator, new_runtime = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
+    with (
+        psycopg2.connect(db.dsn) as conn,
+        conn.cursor() as cur,
+    ):  # force the CREATE path too
+        cur.execute(f"DROP OWNED BY {bsr.RUNTIME_ROLE}")
+        cur.execute(f"DROP ROLE {bsr.RUNTIME_ROLE}")
+    sent: list[str] = []
+    engine = _engine(db)
+
+    @sa.event.listens_for(engine, "before_cursor_execute")
+    def _capture(_conn, _cursor, statement, parameters, _context, _many):  # type: ignore[no-untyped-def]
+        sent.append(f"{statement}\n{parameters!r}")
+
+    env = {
+        bsr.MIGRATOR_PASSWORD_ENV: new_migrator,
+        bsr.RUNTIME_PASSWORD_ENV: new_runtime,
+    }
+    try:
+        with engine.begin() as conn:
+            results = {r.role: r for r in bsr.reconcile(conn, env)}
+    finally:
+        engine.dispose()
+    assert results[bsr.MIGRATOR_ROLE].password_changed
+    assert results[bsr.RUNTIME_ROLE].created
+    role_ddl = [s for s in sent if "ROLE " in s and "PASSWORD" in s]
+    assert len(role_ddl) == 2, (
+        f"expected ALTER + CREATE, examined {len(sent)} statements"
+    )
+    assert all("'SCRAM-SHA-256$4096:" in s for s in role_ddl)
+    assert any("log_statement" in s for s in sent), (
+        "defence-in-depth SET LOCAL not issued"
+    )
+    for s in sent:
+        assert new_migrator not in s and new_runtime not in s
+    # the server stored exactly the client-computed verifier, and it logs in
+    stored = _verifier(db, bsr.MIGRATOR_ROLE)
+    assert stored and any(stored in s for s in role_ddl)
+    assert _login(db, bsr.MIGRATOR_ROLE, new_migrator)[0] == bsr.MIGRATOR_ROLE
+    assert _login(db, bsr.RUNTIME_ROLE, new_runtime)[0] == bsr.RUNTIME_ROLE
+    # scram_matches recognises the unchanged password -> the next run is a no-op
+    assert bsr.scram_matches(stored, new_migrator) and not bsr.scram_matches(
+        stored, MIGRATOR_PW
+    )
+    assert [r.password_changed for r in _reconcile(db, env)] == [False, False]
+    _reconcile(db, _env())  # restore for any later test
+
+
+def test_9_client_verifier_round_trips_and_is_salted() -> None:
+    pw = secrets.token_urlsafe(24)
+    a, b = bsr.scram_verifier(pw), bsr.scram_verifier(pw)
+    assert a != b, "a fresh random salt per verifier"
+    assert bsr.scram_matches(a, pw) and bsr.scram_matches(b, pw)
+    assert not bsr.scram_matches(a, pw + "x")
+    assert pw not in a
+    with pytest.raises(ValueError):
+        bsr.scram_verifier("pässwörd-not-ascii-123")

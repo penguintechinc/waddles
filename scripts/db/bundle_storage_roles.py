@@ -16,9 +16,13 @@ by design, or the role had none) is applied. A missing role is created LOGIN wit
 attribute; least-privilege attributes are re-asserted every run. Schema ownership / grants are
 re-asserted only where 0030 already created the schemas.
 
-**Password handling.** Values come from the environment only; they are bound through a
-session-local `set_config` GUC and read back inside a `DO $$` block via `format('%L', ...)` --
-never interpolated into SQL text, never logged, never an argv.
+**Password handling.** Values come from the environment only (never an argv, never logged by
+this module). The plaintext NEVER reaches the server: the SCRAM-SHA-256 verifier is computed
+client-side (RFC 5802/7677, random 16-byte salt, 4096 iterations -- Postgres' own default) and
+only that verifier is sent in `CREATE/ALTER ROLE ... PASSWORD '<verifier>'`, so a server
+statement/error log can at most capture a salted verifier. Defence in depth: the transaction
+also runs `SET LOCAL log_statement = 'none'` / `log_min_duration_statement = -1` where the
+connecting role may set them.
 """
 
 from __future__ import annotations
@@ -28,6 +32,8 @@ import hashlib
 import hmac
 import logging
 import os
+import re
+import secrets
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -39,8 +45,8 @@ LOG = logging.getLogger("waddles.bundle_storage_roles")
 
 MIGRATOR_ROLE = "waddles_bundle_migrator"
 RUNTIME_ROLE = "waddles_bundle_runtime"
-MIGRATOR_PASSWORD_ENV = "BUNDLE_MIGRATOR_PASSWORD"  # noqa: S105 -- env var NAME, not a secret
-RUNTIME_PASSWORD_ENV = "BUNDLE_RUNTIME_PASSWORD"  # noqa: S105 -- env var NAME, not a secret
+MIGRATOR_PASSWORD_ENV = "BUNDLE_MIGRATOR_ROLE_PASSWORD"  # noqa: S105 -- env var NAME, not a secret
+RUNTIME_PASSWORD_ENV = "BUNDLE_RUNTIME_ROLE_PASSWORD"  # noqa: S105 -- env var NAME, not a secret
 APP_SCHEMAS = ("app_core", "app_community")
 #: Same floor provision-secrets enforces (`min=16`); a shorter value is never a chart value.
 MIN_PASSWORD_LEN = 16
@@ -59,9 +65,58 @@ class RoleResult:
     password_changed: bool
 
 
-def _guc(role: str) -> str:
-    """The `set_config` key a role's password is bridged through -- never the SQL text itself."""
-    return f"waddles.{role}_pw"
+#: Postgres' default `scram_iterations`.
+SCRAM_ITERATIONS = 4096
+#: Shape check before a verifier is embedded as a SQL literal (base64 alphabet + separators only,
+#: so it can never break out of the quotes).
+_VERIFIER_RE = re.compile(
+    r"^SCRAM-SHA-256\$[0-9]+:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$"
+)
+
+
+def _scram_keys(password: str, salt: bytes, iterations: int) -> tuple[bytes, bytes]:
+    """(StoredKey, ServerKey) per RFC 5802/7677 for an ASCII `password` (SASLprep = identity)."""
+    salted = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+    client_key = hmac.new(salted, b"Client Key", hashlib.sha256).digest()
+    stored = hashlib.sha256(client_key).digest()
+    server = hmac.new(salted, b"Server Key", hashlib.sha256).digest()
+    return stored, server
+
+
+def scram_verifier(password: str, *, salt: bytes | None = None) -> str:
+    """Client-side SCRAM-SHA-256 verifier in pg_authid's format -- the only form sent to the server.
+
+    `SCRAM-SHA-256$<iter>:<b64 salt>$<b64 StoredKey>:<b64 ServerKey>`. Raises ValueError for a
+    non-ASCII password (SASLprep would be needed; chart values are always ASCII/base64url).
+    """
+    if not password.isascii():
+        raise ValueError("non-ASCII role password is not supported")
+    salt = salt if salt is not None else secrets.token_bytes(16)
+    stored, server = _scram_keys(password, salt, SCRAM_ITERATIONS)
+    b64 = base64.b64encode
+    return (
+        f"SCRAM-SHA-256${SCRAM_ITERATIONS}:{b64(salt).decode()}"
+        f"${b64(stored).decode()}:{b64(server).decode()}"
+    )
+
+
+def _suppress_statement_logging(conn: Connection) -> None:
+    """Defence in depth: no statement logging for this transaction where the role may set it.
+
+    Both GUCs are superuser-settable only; a non-superuser connection keeps the server's setting
+    (harmless -- only a verifier is ever sent).
+    """
+    for stmt in (
+        "SET LOCAL log_statement = 'none'",
+        "SET LOCAL log_min_duration_statement = -1",
+    ):
+        try:
+            with conn.begin_nested():
+                conn.execute(sa.text(stmt))
+        except sa.exc.DBAPIError:
+            LOG.info(
+                "bundle_storage_roles: cannot %s (not superuser); continuing", stmt
+            )
 
 
 def scram_matches(verifier: str, password: str) -> bool:
@@ -78,14 +133,11 @@ def scram_matches(verifier: str, password: str) -> bool:
         stored_b64, server_b64 = keys.split(":", 1)
         if method != "SCRAM-SHA-256" or not password.isascii():
             return False
-        salted = hashlib.pbkdf2_hmac(
-            "sha256", password.encode(), base64.b64decode(salt_b64), int(iterations_s)
+        stored, server = _scram_keys(
+            password, base64.b64decode(salt_b64), int(iterations_s)
         )
     except (ValueError, TypeError):
         return False
-    client_key = hmac.new(salted, b"Client Key", hashlib.sha256).digest()
-    stored = hashlib.sha256(client_key).digest()
-    server = hmac.new(salted, b"Server Key", hashlib.sha256).digest()
     return hmac.compare_digest(
         stored, base64.b64decode(stored_b64)
     ) and hmac.compare_digest(server, base64.b64decode(server_b64))
@@ -140,17 +192,18 @@ def reconcile_role(
     if exists and readable and password_matches(verifier, role, password):
         conn.execute(sa.text(f"ALTER ROLE {role} WITH {_LEAST_PRIVILEGE}"))
         return RoleResult(role, created=False, password_changed=False)
-    conn.execute(
-        sa.text("SELECT set_config(:k, :v, true)"), {"k": _guc(role), "v": password}
-    )
+    verifier_out = scram_verifier(password)
+    if not _VERIFIER_RE.fullmatch(
+        verifier_out
+    ):  # pragma: no cover -- defensive invariant
+        raise ValueError("computed SCRAM verifier has an unexpected shape")
     verb = "ALTER" if exists else "CREATE"
-    conn.execute(
-        sa.text(
-            f"DO $$ BEGIN EXECUTE format('{verb} ROLE {role} WITH {_LEAST_PRIVILEGE} PASSWORD %L', "
-            f"current_setting('{_guc(role)}')); END $$;"
-        )
+    # Only the salted verifier is ever in the statement text (shape-checked above, so the quoted
+    # literal cannot be broken out of); the plaintext never leaves this process.
+    # exec_driver_sql, not sa.text: the verifier's ':' must never be parsed as a bind parameter.
+    conn.exec_driver_sql(
+        f"{verb} ROLE {role} WITH {_LEAST_PRIVILEGE} PASSWORD '{verifier_out}'"
     )
-    conn.execute(sa.text("SELECT set_config(:k, '', true)"), {"k": _guc(role)})
     return RoleResult(role, created=not exists, password_changed=True)
 
 
@@ -190,6 +243,7 @@ def _reassert_schema_grants(conn: Connection, *, migrator: bool, runtime: bool) 
 
 def reconcile(conn: Connection, env: Mapping[str, str]) -> list[RoleResult]:
     """Reconcile every role whose password env var is set; an unset one is skipped (feature off)."""
+    _suppress_statement_logging(conn)
     results: list[RoleResult] = []
     plan = (
         (MIGRATOR_ROLE, MIGRATOR_PASSWORD_ENV),
