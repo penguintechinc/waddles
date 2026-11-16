@@ -7,7 +7,7 @@ pydantic>=2.0.0
 bleach>=6.0.0
 # HTTP Client (async)
 httpx>=0.27.0,<0.28.0
-aiohttp>=3.10.0,<4.0.0
+aiohttp>=3.14.4,<4.0.0
 # HTML Parsing (for bookmark metadata)
 beautifulsoup4>=4.13.0,<5.0.0
 # 6.1.0 is the first release fixing PYSEC-2026-87 (XXE via default resolve_entities)
