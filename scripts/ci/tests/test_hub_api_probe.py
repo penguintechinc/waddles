@@ -20,6 +20,18 @@ CI = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CI))
 import hub_api_probe as probe  # noqa: E402
 
+try:
+    import cryptography  # noqa: F401
+
+    _HAVE_CRYPTO = True
+except ImportError:  # some CI jobs (e.g. bundle-hygiene) run without cryptography installed
+    _HAVE_CRYPTO = False
+
+# The real-TLS roundtrip tests need a throwaway cert, which only cryptography can mint here; skip
+# where it is absent. The dependency-free tests below (build_ssl_context, http, transport-error)
+# still cover the insecure-context wiring and status-fail behavior in every job.
+requires_crypto = pytest.mark.skipif(not _HAVE_CRYPTO, reason="cryptography not installed in this CI job")
+
 
 def _server(routes: dict[str, list[int]]) -> ThreadingHTTPServer:
     """Start a stub server; routes maps path -> queue of statuses (last one repeats)."""
@@ -199,6 +211,7 @@ def test_build_ssl_context_insecure_skips_verification() -> None:
     assert ctx.verify_mode == ssl.CERT_NONE
 
 
+@requires_crypto
 def test_https_insecure_passes_on_200(tls_stub: object) -> None:
     """https against the FQDN-only self-signed cert succeeds with --insecure: examined=2 ok=2."""
     base = tls_stub({"/health": [200], "/ready": [200]})  # type: ignore[operator]
@@ -207,6 +220,7 @@ def test_https_insecure_passes_on_200(tls_stub: object) -> None:
     assert "endpoints examined=2 ok=2 failed=0" in out
 
 
+@requires_crypto
 def test_https_insecure_still_fails_on_non_200(tls_stub: object) -> None:
     """--insecure skips TLS verification only -- a real non-200 over https still fails the gate."""
     base = tls_stub({"/health": [200], "/ready": [503]})  # type: ignore[operator]
@@ -218,6 +232,7 @@ def test_https_insecure_still_fails_on_non_200(tls_stub: object) -> None:
     assert "endpoints examined=2 ok=1 failed=1" in out
 
 
+@requires_crypto
 def test_https_without_insecure_fails_verification(tls_stub: object) -> None:
     """Default (verifying) context rejects the self-signed cert: status 0, exit 1, never a silent pass."""
     base = tls_stub({"/health": [200]})  # type: ignore[operator]
