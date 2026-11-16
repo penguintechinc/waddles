@@ -8,6 +8,7 @@
 pub mod api;
 pub mod billing;
 pub mod config;
+pub mod crypto;
 pub mod db;
 pub mod egress;
 pub mod error;

@@ -137,6 +137,7 @@ dependencies = [
  "penguin-bundle-host",
  "regex",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

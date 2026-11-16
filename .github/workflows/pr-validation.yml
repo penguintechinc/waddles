@@ -139,6 +139,16 @@ jobs:
       - name: check-no-stubs
         run: make check-no-stubs
 
+      # A core/ bin crate using rustls without install_default() panics at first TLS build
+      # ("Could not automatically determine the process-level CryptoProvider") -> CrashLoop.
+      - name: check-rustls-provider
+        run: make check-rustls-provider
+
+      # A bundle-<crate> stage missing an out-of-crate #[path]/include_*!/path-dep source fails the
+      # seeder image build only at deploy time (alpha run 43812541222). Zero examined fails.
+      - name: check-bundle-docker-context
+        run: make check-bundle-docker-context
+
       # PII boundary: only svc-ingest's outbound drain and svc-presentation may reference the
       # egress detokenizer (svc-action used to detokenize into Valkey queues). Prints files
       # examined; zero examined or any violation fails, and the negative test runs first.

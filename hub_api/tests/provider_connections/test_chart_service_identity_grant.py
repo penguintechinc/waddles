@@ -131,6 +131,7 @@ def test_chart_grants_svc_ingest_exactly_connections_resolve_on_the_system_tenan
     assert identity.allowed_scopes == frozenset(
         {
             _STREAM_DEK_SCOPE,
+            "keys:tenant-dek:read",  # tenant-DEK broker (feature/tenant-key-provisioning)
             _SCOPE,
             _LIST_SCOPE,
             "dataplane:resolve-scope",
