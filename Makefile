@@ -126,7 +126,7 @@ test-helm-pending-recover:
 # selects label-less pods), and a Failed precompile batch Job must still trip the gate.
 test-smoke-pod-phase:
 	@bash scripts/ci/smoke/tests/test-pod-phase-check.sh
-	@python3 -m pytest -q -p no:cacheprovider scripts/ci/smoke/tests/test_precompile_batch_gate.py
+	@python3 -m pytest -q -p no:cacheprovider scripts/ci/smoke/tests/test_pod_phase_classify.py scripts/ci/smoke/tests/test_precompile_batch_gate.py
 
 # No-stubs / no-silent-fallbacks gate (gh-regression: a `flags capability not
 # wired -- TODO(M4+)` stub returned a silent default and shipped as "done",

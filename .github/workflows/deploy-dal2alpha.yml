@@ -357,11 +357,12 @@ jobs:
           [ "${TOTAL}" -gt 0 ] || { echo "::error::zero Deployments examined" >&2; exit 1; }
           [ "${BAD}" -eq 0 ] || exit 1
 
-          # 2. no non-Running/non-Succeeded pods; examine count > 0. Precompile batch pods are
-          #    excluded by NAME (not the mutable waddlebot.io/workload label, which a pre-label
-          #    CronJob pod does not carry) and checked explicitly in step 2b: an in-flight compile
-          #    batch is legitimately Pending (init containers) for minutes and must not fail here.
-          bash scripts/ci/smoke/pod-phase-check.sh "${NAMESPACE}"
+          # 2. long-running workloads (Deployment/StatefulSet pods) must be Running/Succeeded;
+          #    Job/CronJob-owned pods are judged by their Job's status, not an instantaneous
+          #    phase (a role-sync/precompile pod is legitimately Pending/Init for seconds-to-
+          #    minutes). A Job created since this release that is Failed still trips; a merely
+          #    initializing one does not. Precompile is judged by step 2b. Denominator > 0.
+          bash scripts/ci/smoke/pod-phase-check.sh "${NAMESPACE}" "${RELEASE}"
 
           # 2b. bundle AOT precompile readiness, explicit (it never gates helm: no hook).
           #     Bundles do not need an artifact to serve (the executor JIT-compiles from the

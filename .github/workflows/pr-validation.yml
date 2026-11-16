@@ -1001,7 +1001,9 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/ci/smoke/tests/test-pod-phase-check.sh
-          python3 -m pytest -q -p no:cacheprovider scripts/ci/smoke/tests/test_precompile_batch_gate.py
+          python3 -m pytest -q -p no:cacheprovider \
+            scripts/ci/smoke/tests/test_pod_phase_classify.py \
+            scripts/ci/smoke/tests/test_precompile_batch_gate.py
 
       # Static chart-values audit: every values key must be consumed by a template and
       # every template reference must resolve. Fails the job on any finding (no `|| true`);

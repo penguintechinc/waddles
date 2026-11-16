@@ -1,47 +1,34 @@
 #!/usr/bin/env bash
 # Generic pod-phase check for the dal2-alpha deploy smoke step (step 2).
 #
-# Every pod in the namespace must be Running or Succeeded, EXCEPT the AOT-precompile batch
-# pods, which are excluded here and judged only by the explicit precompile gate (step 2b,
-# scripts/ci/smoke/precompile-batch-gate.py). A precompile compile batch is legitimately
-# Pending (init containers) for minutes and the executor JIT-falls-back meanwhile, so it
-# must never fail the deploy.
+# Long-running workloads (Deployment/StatefulSet/DaemonSet pods) must be Running/Succeeded.
+# Job/CronJob-owned pods are NOT judged by their instantaneous phase -- a role-sync /
+# event-sync CronJob fires every minute and its pod is legitimately Pending/Init for a few
+# seconds, so a single snapshot failed the deploy at random. Instead, a Job created at/after
+# this release's deploy time whose status is Failed trips the gate; a merely Pending/active
+# Job pod does not, and an ancient pre-release Failed run never does. AOT-precompile pods are
+# excluded here and judged only by the explicit precompile gate (step 2b). Classification
+# logic + tests: scripts/ci/smoke/pod-phase-classify.py.
 #
-# Precompile pods are excluded by NAME, not by the waddlebot.io/workload label. A label
-# selector (`waddlebot.io/workload!=executor-precompile`) is WRONG for two reasons: k8s
-# equality `!=` also selects pods that LACK the key, so a CronJob batch pod created before
-# that label was added to the chart (or any future label rename) slips the exclusion and
-# fails the deploy (alpha deploy 43894038667: waddlebot-executor-precompile-29914020-cnpqp,
-# a pre-#1391 run, counted as bad). The pod NAME is stable: every precompile pod -- CronJob
-# batch (<release>-executor-precompile-<runid>-*) and per-release enqueue
-# (<release>-executor-precompile-enqueue-r<rev>-*) -- contains "executor-precompile".
+# Prints "pods examined=N bad=M" (N = long-running pods; zero is a FAILURE). Exits non-zero
+# on any bad long-running pod or any Failed this-release Job.
 #
-# Prints "pods examined=N bad=M" (zero examined is a FAILURE, not a pass). Exits non-zero on
-# any bad pod or an empty denominator.
-#
-# Usage: pod-phase-check.sh <namespace>
+# Usage: pod-phase-check.sh <namespace> [release]   (release defaults to $RELEASE/waddlebot)
 set -euo pipefail
 
-NS="${1:?usage: pod-phase-check.sh <namespace>}"
+NS="${1:?usage: pod-phase-check.sh <namespace> [release]}"
+RELEASE="${2:-${RELEASE:-waddlebot}}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORK="$(mktemp -d)"
+trap 'rm -rf "${WORK}"' EXIT
 
-PODS=0
-BAD=0
-while read -r name phase; do
-  [ -n "${name}" ] || continue
-  case "${name}" in
-    *executor-precompile*) continue ;;  # judged only by the precompile gate (step 2b)
-  esac
-  PODS=$((PODS + 1))
-  case "${phase}" in
-    Running | Succeeded) ;;
-    *)
-      echo "NOT READY: ${name} phase=${phase}" >&2
-      BAD=$((BAD + 1))
-      ;;
-  esac
-done < <(kubectl -n "${NS}" get pods --no-headers \
-  -o custom-columns=NAME:.metadata.name,PHASE:.status.phase)
+# Release boundary: the current Helm revision's deploy time. Jobs created at/after it are
+# "this release"; older Failed CronJob runs must not trip this deploy's smoke.
+SINCE="$(helm status "${RELEASE}" -n "${NS}" -o json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["last_deployed"])')"
+[ -n "${SINCE}" ] || { echo "::error::could not determine deploy time for release ${RELEASE}" >&2; exit 1; }
 
-echo "pods examined=${PODS} bad=${BAD}"
-[ "${PODS}" -gt 0 ] || { echo "::error::zero pods examined in ${NS}" >&2; exit 1; }
-[ "${BAD}" -eq 0 ] || exit 1
+kubectl -n "${NS}" get pods -o json > "${WORK}/pods.json"
+kubectl -n "${NS}" get jobs -o json > "${WORK}/jobs.json"
+
+python3 "${HERE}/pod-phase-classify.py" "${WORK}/pods.json" "${WORK}/jobs.json" "${SINCE}"
