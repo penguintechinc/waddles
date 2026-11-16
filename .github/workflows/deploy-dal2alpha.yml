@@ -392,9 +392,12 @@ jobs:
           kubectl -n "${NAMESPACE}" get jobs -l 'app.kubernetes.io/component=executor-precompile' -o json > "${RUNNER_TEMP}/precompile-jobs.json"
           python3 scripts/ci/smoke/precompile-batch-gate.py "${RUNNER_TEMP}/precompile-jobs.json" "${ENQ_CREATED}"
 
-          # 3. every long-lived Deployment runs exactly its planned image (rebuilt -> new tag,
+          # 3. every long-lived workload runs exactly its planned image (rebuilt -> new tag,
           #    reused -> its old tag); examined count must equal the planned set, > 0.
-          kubectl -n "${NAMESPACE}" get deploy -o jsonpath='{range .items[*]}{.spec.template.spec.containers[*].image}{"\n"}{end}' \
+          #    Deployments AND StatefulSets (the svc-bundles-executor compiled/scripted
+          #    pools run as StatefulSets). MAIN containers[*] only -- NOT initContainers,
+          #    which carry the independent db-migrate tag and would false-match.
+          kubectl -n "${NAMESPACE}" get deploy,statefulset -o jsonpath='{range .items[*]}{.spec.template.spec.containers[*].image}{"\n"}{end}' \
             | python3 scripts/ci/alpha_plan.py verify --plan "${RUNNER_TEMP}/plan.json" --registry "${IMAGE_PREFIX}"
 
           # 4. real health + readiness check against hub-api (HTTP 200 required).

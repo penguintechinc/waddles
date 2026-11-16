@@ -269,3 +269,57 @@ def test_verify_checks_only_deployment_images(
     )  # one missing -> fail
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
     assert ap.main(["verify", "--plan", str(f), "--registry", REG]) == 1
+
+
+def test_executor_is_statefulset_and_still_gated(tmp_path: pathlib.Path) -> None:
+    """The executor deploys as StatefulSets, yet its image is still verified.
+
+    Regression: verify fed only `kubectl get deploy` reported the executor
+    MISSING because it runs as two StatefulSets (compiled/scripted pools), even
+    though the correct image was running (examined=9 ok=8 missing=1 -> exit 1).
+    """
+    assert IMAP.images["svc-bundles-executor"].workload == "statefulset"
+    assert "statefulset" in ci.LONG_LIVED_WORKLOADS
+    _f, p = _plan_file(tmp_path, ["docs/x.md"])  # nothing rebuilt -> all OLD_TAG
+    want = ap.expected_deployment_images(p, REG, IMAP)
+    # StatefulSet-classified executor is still expected (gated), Jobs are not.
+    assert "svc-bundles-executor" in want
+    assert "seeder" not in want and "migrations" not in want
+    assert len(want) == 9  # 8 Deployments + 1 StatefulSet image; 2 Jobs excluded
+
+
+def test_verify_passes_when_executor_runs_as_two_statefulsets(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fixture: the executor image appears via its two StatefulSets -> PASS."""
+    f, p = _plan_file(tmp_path, ["core/bundle_executor/src/x.rs"])  # executor rebuilt
+    want = ap.expected_deployment_images(p, REG, IMAP)
+    assert want["svc-bundles-executor"].endswith(NEW_TAG)  # rebuilt -> new tag
+    # Simulate `kubectl get deploy,statefulset ... containers[*].image`: every
+    # Deployment once, plus the executor image twice (native + script pools).
+    exec_ref = want["svc-bundles-executor"]
+    stream = list(want.values()) + [exec_ref]  # executor listed twice
+    monkeypatch.setattr(sys, "stdin", io.StringIO(" ".join(stream)))
+    assert ap.main(["verify", "--plan", str(f), "--registry", REG]) == 0
+
+
+def test_verify_fails_on_stale_executor_statefulset_tag(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale executor StatefulSet image must still FAIL the gate.
+
+    Proves the check was not merely made to pass: every Deployment is on its
+    planned tag but the executor StatefulSets run the OLD tag -> exit 1. On the
+    pre-fix deployment-only filter the executor is not even expected, so this
+    stale state would wrongly PASS (exit 0) -- this assertion catches that.
+    """
+    f, p = _plan_file(tmp_path, ["core/bundle_executor/src/x.rs"])  # executor -> NEW_TAG
+    want = ap.expected_deployment_images(p, REG, IMAP)
+    stale_exec = f"{REG}/svc-bundles-executor:{OLD_TAG}"  # StatefulSets on old tag
+    live = [
+        stale_exec if n == "svc-bundles-executor" else ref for n, ref in want.items()
+    ]
+    monkeypatch.setattr(sys, "stdin", io.StringIO(" ".join(live)))
+    assert ap.main(["verify", "--plan", str(f), "--registry", REG]) == 1
