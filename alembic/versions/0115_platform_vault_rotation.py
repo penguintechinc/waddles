@@ -55,7 +55,7 @@ TABLE = "rotation_requests"
 HUB_API_GRANTS: dict[str, tuple[str, ...]] = {TABLE: ("SELECT", "INSERT")}
 
 _LEDGER = f"""
-CREATE TABLE {SCHEMA}.{TABLE} (
+CREATE TABLE platform_vault.rotation_requests (
     id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     idempotency_key UUID NOT NULL,
     secret_type     SMALLINT NOT NULL,
