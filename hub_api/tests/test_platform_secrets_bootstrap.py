@@ -49,6 +49,7 @@ from services.platform_secrets.importer import import_candidate
 from services.platform_secrets.refresher import CacheRefresher, PgNotifyWaiter
 from services.platform_secrets.registry import REGISTRY, SecretType
 from services.platform_secrets.repository import (
+    AnchorRow,
     EventRow,
     MarkerRow,
     NewSecret,
@@ -80,6 +81,8 @@ class FakeRepo:
         self.secrets: list[SecretRow] = []
         self.event_rows: list[EventRow] = []
         self.notifies = 0
+        self.claimed: set[uuid.UUID] = set()
+        self.anchor: AnchorRow | None = None
         self.before_insert: Any = None
         self._lock = threading.RLock()
 
@@ -145,6 +148,48 @@ class FakeRepo:
             )
             self.secrets.append(row)
             return row
+
+    def update_state(
+        self, secret_id: int, state: int, *, at: datetime, reason: int, actor_uuid: uuid.UUID | None
+    ) -> bool:
+        """Forward-only move of an active / verify-only row (mirrors the SQL WHERE clause)."""
+        with self._lock:
+            for index, row in enumerate(self.secrets):
+                if row.id == secret_id:
+                    if not (row.state < state and row.state in (2, 3)):
+                        return False
+                    self.secrets[index] = replace(
+                        row,
+                        state=state,
+                        rotated_at=row.rotated_at or at,
+                        retired_at=at if state == 4 else row.retired_at,
+                    )
+                    return True
+        return False
+
+    def read_anchor(self) -> AnchorRow | None:
+        """The escrow anchor (None until a manifest was written)."""
+        return self.anchor
+
+    def advance_anchor(
+        self, generation: int, manifest_digest: bytes, kek_id: str, mac: bytes
+    ) -> bool:
+        """Strictly-forward anchor move (mirrors the SQL WHERE and the trigger)."""
+        with self._lock:
+            if self.anchor is not None and self.anchor.generation >= generation:
+                return False
+            self.anchor = AnchorRow(generation, manifest_digest, kek_id, mac)
+            return True
+
+    def claim_request(
+        self, idempotency_key: uuid.UUID, *, secret_type: int, action: int, actor_uuid: uuid.UUID
+    ) -> bool:
+        """Unique-key semantics of the replay ledger."""
+        with self._lock:
+            if idempotency_key in self.claimed:
+                return False
+            self.claimed.add(idempotency_key)
+            return True
 
     def chain_tip(self) -> bytes | None:
         """Newest chain hash."""
@@ -715,12 +760,21 @@ def _boot_row_for(kek: PlatformKekAdapter, secret_type: SecretType) -> SecretRow
 
 
 def test_repository_never_updates_or_deletes() -> None:
-    """Static: the repository has no UPDATE / DELETE / TRUNCATE statement (insert-only)."""
+    """Static: no DELETE / TRUNCATE; the ONE UPDATE is the forward-only, state-guarded move.
+
+    Insert-only for bootstrap; `update_state` (escrow restore, rotation) is the single UPDATE and
+    only ever moves `state` forward (`WHERE ... state < :state`), never touches a value column.
+    """
     source = (REPO_ROOT / "hub_api/services/platform_secrets/repository.py").read_text()
     sql_lines = [ln for ln in source.splitlines() if '"' in ln]
     joined = "\n".join(sql_lines).upper()
-    for forbidden in ("UPDATE PLATFORM_VAULT", "UPDATE {SCHEMA}", "DELETE FROM", "TRUNCATE"):
+    for forbidden in ("UPDATE PLATFORM_VAULT", "DELETE FROM", "TRUNCATE"):
         assert forbidden not in joined, forbidden
+    # exactly two UPDATEs, both forward-only: secret `state`, and the escrow anchor generation
+    assert joined.count("UPDATE {SCHEMA}") == 2
+    assert "STATE < :STATE" in joined
+    assert "ESCROW_GENERATION < :G" in joined
+    assert "SEALED_VALUE =" not in joined
     assert "ON CONFLICT DO NOTHING" in source
 
 
