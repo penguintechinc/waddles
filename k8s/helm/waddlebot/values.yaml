@@ -1511,17 +1511,42 @@ pipeline:
     # hub_api/cli/reconcile_signed_sidecars.py on a schedule; metrics via the same
     # bundle_telemetry meter the backfill CLI uses.
     # executor-scale task 4 -- AOT precompile of approved bundles into signed .cwasm
-    # (templates/executor-precompile-cronjob.yaml + executor-precompile-backfill-job.yaml).
-    # Each run: hub-api `cli.precompile_queue export` -> `bundle-executor --precompile` (SAME
-    # image/tag as svc-bundles-executor, so the engine fingerprint matches) -> `ack`.
+    # (templates/executor-precompile-cronjob.yaml + executor-precompile-enqueue-job.yaml).
+    # CronJob run: hub-api `cli.precompile_queue export` -> `bundle-executor` compile (bounded
+    # parallel; SAME image/tag as svc-bundles-executor, so the engine fingerprint matches) ->
+    # sign -> `ack`. concurrencyPolicy is hard-coded Forbid in the template (runs never overlap).
+    # Nothing here is a Helm hook: precompile never gates `helm upgrade`.
     executorPrecompile:
       enabled: true
       schedule: "*/2 * * * *"
-      concurrencyPolicy: Forbid
       backoffLimit: 1
-      activeDeadlineSeconds: 3600
-      # Max queue rows leased per CronJob run.
-      batchLimit: 50
+      # Must stay below the queue lease (1800 s, bundle_precompile_service.DEFAULT_LEASE_SECONDS)
+      # so a killed run's rows are re-offered only after it is dead; the chart fails render
+      # otherwise. Sized for batchLimit items at compileConcurrency (~70 s per Python bundle).
+      activeDeadlineSeconds: 1500
+      # A missed schedule older than this is skipped, not caught up (no pile-up after downtime).
+      startingDeadlineSeconds: 120
+      successfulJobsHistoryLimit: 3
+      failedJobsHistoryLimit: 3
+      # Max queue rows leased per CronJob run. Each staged .cwasm is ~45 MB, so
+      # batchLimit x 45 MB must fit stagedSizeLimit (24 x 45 MB ~= 1.1 GB < 2Gi).
+      batchLimit: 24
+      # Bundles compiled at once in the compile step (bundle-executor --compile-concurrency).
+      # wasmtime is built without parallel-compilation, so one compile uses one core and this
+      # scales ~linearly up to the CPU limit (~160 bundles x 70 s / 3 ~= 1 h of CronJob runs).
+      # Bounded by the compile container's limits: render fails unless
+      # compileConcurrency <= resources.limits.cpu (cores) and
+      # compileConcurrency x compileMemoryPerWorkerMi <= resources.limits.memory.
+      compileConcurrency: 3
+      # Peak RSS budget for one in-flight Cranelift compile of a componentize-py bundle.
+      compileMemoryPerWorkerMi: 2048
+      # Per-release Job (NOT a Helm hook) that queues every signed, active version so a new
+      # executor image (new engine fingerprint) gets artifacts. It only INSERTs queue rows.
+      enqueue:
+        enabled: true
+        backoffLimit: 6
+        activeDeadlineSeconds: 900
+        ttlSecondsAfterFinished: 86400
       # Dedicated ServiceAccount for the precompile pods (no API token is ever mounted).
       # Empty name = "<fullname>-executor-precompile".
       serviceAccount:
@@ -1532,14 +1557,6 @@ pipeline:
       runtimeClassName: ""
       # Cap on the emptyDir the compile step stages .cwasm files into for the sign step.
       stagedSizeLimit: "2Gi"
-      # Backfill (all active versions for the CURRENT executor image's fingerprint) as a
-      # pre-upgrade hook, so a new executor image rolls out with its artifacts already built.
-      backfill:
-        enabled: true
-        activeDeadlineSeconds: 7200
-        # post-install,post-upgrade (default) | pre-upgrade (once the precompiler identity +
-        # signing key exist, so artifacts are warm before the executor rollout).
-        hookPhase: "post-install,post-upgrade"
       resources:
         requests:
           cpu: "1"

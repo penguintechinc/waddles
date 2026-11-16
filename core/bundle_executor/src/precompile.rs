@@ -33,6 +33,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -592,6 +594,40 @@ pub struct CompileStage<'a, S: ArtifactStore> {
     /// Public keys of the precompile signer (NOT secret). When present an
     /// existing valid artifact short-circuits the compile (idempotency).
     pub existing_keys: Option<&'a PlatformPublicKeys>,
+    /// Max items compiled at once (1..=[`MAX_COMPILE_CONCURRENCY`]). Each
+    /// in-flight item holds one component plus its Cranelift output in
+    /// memory, so the chart sizes this against the compile container's CPU
+    /// and memory limits.
+    pub concurrency: usize,
+}
+
+/// Upper bound on `--compile-concurrency`: a typo must not fork-bomb the pod.
+pub const MAX_COMPILE_CONCURRENCY: usize = 32;
+
+/// Polls every future in `futs` to completion on the current task without
+/// spawning (the futures borrow the stage). A dependency-free `join_all`
+/// over the FIXED worker pool [`CompileStage::run`] builds.
+async fn join_workers<F: std::future::Future<Output = ()>>(futs: Vec<F>) {
+    let mut futs: Vec<Option<std::pin::Pin<Box<F>>>> =
+        futs.into_iter().map(|f| Some(Box::pin(f))).collect();
+    std::future::poll_fn(|cx| {
+        let mut pending = false;
+        for slot in futs.iter_mut() {
+            if let Some(f) = slot {
+                if f.as_mut().poll(cx).is_ready() {
+                    *slot = None;
+                } else {
+                    pending = true;
+                }
+            }
+        }
+        if pending {
+            std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(())
+        }
+    })
+    .await
 }
 
 impl<S: ArtifactStore> CompileStage<'_, S> {
@@ -636,45 +672,91 @@ impl<S: ArtifactStore> CompileStage<'_, S> {
         })
     }
 
-    /// Compiles every item sequentially and writes the index.
+    /// Compiles every item with at most `concurrency` in flight (a fixed
+    /// pool of workers each pulling the next manifest index), then writes
+    /// the index in manifest order. Item failures are recorded, never fatal;
+    /// per-item progress (done/total) is logged so a long batch is
+    /// observable.
     pub async fn run(
         &self,
         items: &[PrecompileItem],
         out_dir: &Path,
     ) -> Result<CompiledIndex, ExecutorError> {
+        if self.concurrency == 0 || self.concurrency > MAX_COMPILE_CONCURRENCY {
+            return Err(ExecutorError::Config(format!(
+                "compile concurrency must be 1..={MAX_COMPILE_CONCURRENCY}, got {}",
+                self.concurrency
+            )));
+        }
         std::fs::create_dir_all(out_dir)?;
         let meter = opentelemetry::global::meter(crate::metrics::SCOPE);
         let counter = meter
             .u64_counter("executor_precompile_compile_items_total")
             .with_description("Compile-stage outcomes by status")
             .build();
-        let mut entries = Vec::with_capacity(items.len());
-        for item in items {
-            let entry = match self.compile_item(item, out_dir).await {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::error!(
-                        app_id = %item.app_id,
-                        version = %item.version,
-                        error = %e,
-                        "bundle compile failed"
-                    );
-                    CompiledEntry {
-                        item: item.clone(),
-                        status: ItemStatus::Failed,
-                        error: Some(e.to_string()),
-                        cwasm_sha256: None,
+        let duration = meter
+            .f64_histogram("executor_precompile_compile_duration_seconds")
+            .with_description("Wall time to compile (or skip) one bundle in the compile stage")
+            .with_unit("s")
+            .build();
+        let total = items.len();
+        let workers = self.concurrency.min(total.max(1));
+        let next = AtomicUsize::new(0);
+        let done = AtomicUsize::new(0);
+        let slots: Mutex<Vec<Option<CompiledEntry>>> = Mutex::new(vec![None; total]);
+        tracing::info!(items = total, workers, "compile stage starting");
+        let worker = || async {
+            loop {
+                let i = next.fetch_add(1, Ordering::SeqCst);
+                let Some(item) = items.get(i) else { break };
+                let started = Instant::now();
+                let entry = match self.compile_item(item, out_dir).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::error!(
+                            app_id = %item.app_id,
+                            version = %item.version,
+                            error = %e,
+                            "bundle compile failed"
+                        );
+                        CompiledEntry {
+                            item: item.clone(),
+                            status: ItemStatus::Failed,
+                            error: Some(e.to_string()),
+                            cwasm_sha256: None,
+                        }
                     }
-                }
-            };
-            counter.add(
-                1,
-                &[opentelemetry::KeyValue::new(
+                };
+                let label = [opentelemetry::KeyValue::new(
                     "status",
                     status_label(entry.status),
-                )],
-            );
-            entries.push(entry);
+                )];
+                counter.add(1, &label);
+                duration.record(started.elapsed().as_secs_f64(), &label);
+                let finished = done.fetch_add(1, Ordering::SeqCst) + 1;
+                tracing::info!(
+                    app_id = %item.app_id,
+                    version = %item.version,
+                    status = status_label(entry.status),
+                    done = finished,
+                    total,
+                    "compile stage progress"
+                );
+                slots.lock().unwrap_or_else(PoisonError::into_inner)[i] = Some(entry);
+            }
+        };
+        join_workers((0..workers).map(|_| worker()).collect()).await;
+        let slots = slots.into_inner().unwrap_or_else(PoisonError::into_inner);
+        let mut entries = Vec::with_capacity(total);
+        for (slot, item) in slots.into_iter().zip(items) {
+            // Each index < total is claimed by exactly one worker; a hole would be
+            // a bug and is reported as a failed item, never silently dropped.
+            entries.push(slot.unwrap_or_else(|| CompiledEntry {
+                item: item.clone(),
+                status: ItemStatus::Failed,
+                error: Some("compile worker produced no result".into()),
+                cwasm_sha256: None,
+            }));
         }
         let index = CompiledIndex {
             engine_fingerprint: self.engine_fp.to_string(),
@@ -841,6 +923,15 @@ pub struct PrecompileArgs {
     /// in the compile stage: enables skipping already-built artifacts.
     #[arg(long, env = "PRECOMPILE_SIGNING_PUBLIC_KEYS")]
     pub precompile_signing_public_keys: Option<String>,
+
+    /// Compile stage: max bundles compiled at once (1..=32). The chart sizes
+    /// it against the compile container's CPU and memory limits.
+    #[arg(
+        long = "compile-concurrency",
+        env = "PRECOMPILE_COMPILE_CONCURRENCY",
+        default_value_t = 1
+    )]
+    pub compile_concurrency: usize,
 
     /// JSON array of [`PrecompileItem`] (written by hub-api's
     /// `precompile_queue export`).
@@ -1043,13 +1134,22 @@ async fn run_compile_only(
         ExecutorError::Config("--out-dir (PRECOMPILE_OUT_DIR) must be set".into())
     })?;
     let bundle_keys = parse_bundle_keys(args)?;
+    // Required, not optional: without the precompile public keys this stage
+    // cannot recognise already-signed artifacts and would recompile every
+    // digest on every run. Fail loud instead.
     let existing = match args
         .precompile_signing_public_keys
         .as_deref()
         .map(str::trim)
     {
-        None | Some("") => None,
-        Some(raw) => Some(PlatformPublicKeys::from_json(raw)?),
+        None | Some("") => {
+            return Err(ExecutorError::Config(
+                "PRECOMPILE_SIGNING_PUBLIC_KEYS must be set for the compile stage: it is how \
+                 already-signed artifacts are skipped"
+                    .into(),
+            ))
+        }
+        Some(raw) => PlatformPublicKeys::from_json_named(raw, "PRECOMPILE_SIGNING_PUBLIC_KEYS")?,
     };
     let store = BucketStore::new(args.bucket_config()?, args.max_artifact_bytes);
     let stage = CompileStage {
@@ -1057,7 +1157,8 @@ async fn run_compile_only(
         engine_fp,
         store: &store,
         bundle_keys: &bundle_keys,
-        existing_keys: existing.as_ref(),
+        existing_keys: Some(&existing),
+        concurrency: args.compile_concurrency,
     };
     let index = stage.run(items, &out_dir).await?;
     let count = |s: ItemStatus| index.entries.iter().filter(|e| e.status == s).count();
@@ -1334,6 +1435,7 @@ mod tests {
             store: &f.store,
             bundle_keys: &f.bundle_keys,
             existing_keys: None,
+            concurrency: 1,
         }
     }
 
@@ -1386,6 +1488,172 @@ mod tests {
         assert_eq!(index.entries[1].status, ItemStatus::Failed);
         assert!(index.entries[1].error.is_some());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Store that records how many `fetch_bundle` calls overlap, so the
+    /// compile stage's worker bound is observable.
+    #[derive(Default)]
+    struct GateStore {
+        inner: MemStore,
+        in_flight: std::sync::atomic::AtomicUsize,
+        max_in_flight: std::sync::atomic::AtomicUsize,
+        fetches: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ArtifactStore for GateStore {
+        async fn fetch_bundle(
+            &self,
+            c: &str,
+            s: &str,
+        ) -> Result<(Vec<u8>, Vec<u8>), ExecutorError> {
+            self.fetches.fetch_add(1, Ordering::SeqCst);
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            self.inner.fetch_bundle(c, s).await
+        }
+        async fn get_optional(&self, k: &str) -> Result<Option<Vec<u8>>, ExecutorError> {
+            self.inner.get_optional(k).await
+        }
+        async fn put(&self, k: &str, b: &[u8]) -> Result<(), ExecutorError> {
+            self.inner.put(k, b).await
+        }
+    }
+
+    fn gate_items(n: usize) -> Vec<PrecompileItem> {
+        (0..n)
+            .map(|i| PrecompileItem {
+                app_id: format!("waddles.gate{i}"),
+                version: "1.0.0".into(),
+                digest: format!("{:064x}", i + 1),
+                component_key: format!("bundles/missing-{i}.wasm"),
+                sidecar_key: format!("bundles/missing-{i}.sidecar.json"),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn compile_stage_never_exceeds_the_worker_bound_and_keeps_manifest_order() {
+        let f = fixture();
+        for (bound, expect_max) in [(1usize, 1usize), (3, 3), (16, 7)] {
+            let store = GateStore::default();
+            let dir = temp_dir(&format!("bound{bound}"));
+            let stage = CompileStage {
+                store: &store,
+                concurrency: bound,
+                engine: &f.engine,
+                engine_fp: &f.fp,
+                bundle_keys: &f.bundle_keys,
+                existing_keys: None,
+            };
+            let items = gate_items(7);
+            let index = stage.run(&items, &dir).await.unwrap();
+            // Denominator: every manifest item answered, in manifest order.
+            assert_eq!(index.entries.len(), 7);
+            for (entry, item) in index.entries.iter().zip(&items) {
+                assert_eq!(&entry.item, item);
+                assert_eq!(entry.status, ItemStatus::Failed);
+            }
+            assert_eq!(store.fetches.load(Ordering::SeqCst), 7);
+            // Bound respected AND actually used (bounded parallelism, not serial).
+            assert_eq!(
+                store.max_in_flight.load(Ordering::SeqCst),
+                expect_max,
+                "concurrency {bound}"
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn compile_stage_rejects_zero_or_oversized_concurrency() {
+        let f = fixture();
+        let dir = temp_dir("badbound");
+        for bad in [0, MAX_COMPILE_CONCURRENCY + 1] {
+            let stage = CompileStage {
+                concurrency: bad,
+                ..compile_stage(&f)
+            };
+            let err = stage
+                .run(std::slice::from_ref(&f.item), &dir)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("compile concurrency"), "{err}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn parallel_compile_stage_skips_already_signed_digests_without_fetching_source() {
+        let f = fixture();
+        precompiler(&f).precompile_one(&f.item).await.unwrap();
+        let store = GateStore::default();
+        // Copy the signed artifact + sources into the gate store.
+        for (k, v) in f.store.objects.lock().unwrap().iter() {
+            store
+                .inner
+                .objects
+                .lock()
+                .unwrap()
+                .insert(k.clone(), v.clone());
+        }
+        let keys = f.signer.own_key_set();
+        let dir = temp_dir("pskip");
+        let stage = CompileStage {
+            store: &store,
+            concurrency: 4,
+            existing_keys: Some(&keys),
+            engine: &f.engine,
+            engine_fp: &f.fp,
+            bundle_keys: &f.bundle_keys,
+        };
+        let items = vec![f.item.clone(); 5];
+        let index = stage.run(&items, &dir).await.unwrap();
+        assert_eq!(index.entries.len(), 5);
+        assert!(index
+            .entries
+            .iter()
+            .all(|e| e.status == ItemStatus::Skipped));
+        // Skipped means skipped: the source component is never fetched or compiled.
+        assert_eq!(store.fetches.load(Ordering::SeqCst), 0);
+        assert!(!dir.join(staged_name(&f.item.digest)).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn compile_only_cli_requires_precompile_public_keys_to_skip_built_artifacts() {
+        let f = fixture();
+        let engine = Engine::new(&engine_config()).unwrap();
+        let bundle_keys = serde_json::json!({
+            "platform-1": BASE64.encode(f.signer.verifying_key().to_bytes())
+        })
+        .to_string();
+        let args = PrecompileArgs::parse_from([
+            "x",
+            "--precompile-compile-only",
+            "--out-dir",
+            "/nonexistent-precompile-out",
+            "--bundle-signing-public-keys",
+            bundle_keys.as_str(),
+        ]);
+        assert!(args.precompile_signing_public_keys.is_none());
+        let err = run_compile_only(&args, &engine, "0", &[])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("PRECOMPILE_SIGNING_PUBLIC_KEYS must be set"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn compile_concurrency_flag_parses_and_defaults_to_one() {
+        let a = PrecompileArgs::parse_from(["x", "--precompile-compile-only"]);
+        assert_eq!(a.compile_concurrency, 1);
+        let a = PrecompileArgs::parse_from(["x", "--compile-concurrency", "3"]);
+        assert_eq!(a.compile_concurrency, 3);
     }
 
     #[tokio::test]

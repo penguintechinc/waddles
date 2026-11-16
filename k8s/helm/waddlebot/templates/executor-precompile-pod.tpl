@@ -1,12 +1,14 @@
 {{/*
 executor-scale task 4 -- shared pod spec for the AOT precompile CronJob
-(executor-precompile-cronjob.yaml) and backfill Job (executor-precompile-backfill-job.yaml).
+(executor-precompile-cronjob.yaml). The per-release enqueue Job (executor-precompile-enqueue-job.yaml)
+only queues rows and reuses the hub-api container helper below, not this pod spec.
 
 Four sequential steps; compile and sign are SEPARATE containers so the process that runs Cranelift
 over attacker-influenced wasm never holds the signing key (security review M1):
   1. initContainer export   (hub-api image)   python3 -m cli.precompile_queue export
   2. initContainer compile  (executor image)  bundle-executor --precompile-compile-only
-       NO key mount, bucket READ-only identity (svc-bundles-executor's), /work mounted read-only;
+       --compile-concurrency N (bounded parallel; N validated against the container limits);
+       skips digests that already have a valid signed artifact (public keys REQUIRED); NO key mount, bucket READ-only identity (svc-bundles-executor's), /work mounted read-only;
        writes <digest>.cwasm + compiled.json to the `staged` emptyDir.
   3. initContainer sign     (executor image)  bundle-executor --precompile-sign
        key secret mounted 0400 here ONLY; hashes + signs + uploads, never compiles or loads a module;
@@ -20,11 +22,10 @@ M2: the hub-api containers take ONLY the explicit env they read (DB identity via
 TLS client env, MODULE_NAME) -- no envFrom of the shared <fullname>-secrets/-config -- and the pod runs
 as its own ServiceAccount with no API token (executor-precompile-security.yaml).
 
-Usage: include "waddlebot.executorPrecompile.podSpec" (dict "root" $ "mode" "queue"|"backfill")
+Usage: include "waddlebot.executorPrecompile.podSpec" (dict "root" $)
 */}}
 {{- define "waddlebot.executorPrecompile.podSpec" -}}
 {{- $root := .root -}}
-{{- $mode := .mode -}}
 {{- $cfg := $root.Values.pipeline.hubApi.executorPrecompile -}}
 {{- $fullname := include "waddlebot.fullname" $root -}}
 {{- $ps := $root.Values.autoProvisionedKeys.precompileSigning -}}
@@ -50,13 +51,12 @@ initContainers:
 - name: export
   image: "{{ $hubImage }}"
   imagePullPolicy: {{ $root.Values.global.imagePullPolicy }}
-  command: ["python3", "-m", "cli.precompile_queue", "export", "--out", "/work/manifest.json"
-    {{- if eq $mode "backfill" }}, "--all-active"{{ else }}, "--limit", {{ $cfg.batchLimit | quote }}{{ end }}]
+  command: ["python3", "-m", "cli.precompile_queue", "export", "--out", "/work/manifest.json", "--limit", {{ $cfg.batchLimit | quote }}]
   {{- include "waddlebot.executorPrecompile.hubApiContainer" (dict "root" $root "name" "export") | nindent 2 }}
 - name: compile
   image: "{{ $execImage }}"
   imagePullPolicy: {{ $root.Values.global.imagePullPolicy | default "IfNotPresent" }}
-  args: ["--precompile-compile-only", "--manifest", "/work/manifest.json", "--out-dir", "/staged"]
+  args: ["--precompile-compile-only", "--manifest", "/work/manifest.json", "--out-dir", "/staged", "--compile-concurrency", {{ $cfg.compileConcurrency | int | toString | quote }}]
   {{- include "waddlebot.executorPrecompile.executorSecurityContext" $root | nindent 2 }}
   env:
   {{- include "waddlebot.executorPrecompile.bucketEnv" (dict "root" $root "accessKey" "DATAPLANE_S3_ACCESS_KEY_ID" "secretKey" "DATAPLANE_S3_SECRET_ACCESS_KEY") | nindent 2 }}
@@ -70,13 +70,14 @@ initContainers:
         name: {{ $root.Values.autoProvisionedKeys.bundleSigning.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" $fullname) }}
         key: BUNDLE_SIGNING_PUBLIC_KEYS
   {{- end }}
-  # Public half only (not secret): lets the compile step skip already-built artifacts.
+  # Public half only (not secret): REQUIRED -- it is how the compile step skips digests that
+  # already have a valid signed artifact. Missing = the pod fails to start (loud), never a
+  # silent recompile of everything.
   - name: PRECOMPILE_SIGNING_PUBLIC_KEYS
     valueFrom:
       configMapKeyRef:
         name: {{ $psCmName }}
         key: PRECOMPILE_SIGNING_PUBLIC_KEYS
-        optional: true
   resources:
     {{- toYaml $cfg.resources | nindent 4 }}
   volumeMounts:
@@ -125,7 +126,7 @@ containers:
 - name: ack
   image: "{{ $hubImage }}"
   imagePullPolicy: {{ $root.Values.global.imagePullPolicy }}
-  command: ["python3", "-m", "cli.precompile_queue", "ack", "--report", "/work/report.json", "--manifest", "/work/manifest.json"{{ if eq $mode "backfill" }}, "--backfill"{{ end }}]
+  command: ["python3", "-m", "cli.precompile_queue", "ack", "--report", "/work/report.json", "--manifest", "/work/manifest.json"]
   {{- include "waddlebot.executorPrecompile.hubApiContainer" (dict "root" $root "name" "ack") | nindent 2 }}
 volumes:
 - name: work
@@ -144,6 +145,43 @@ volumes:
     - key: PRECOMPILE_SIGNING_PRIVATE_KEY
       path: key
 {{- include "waddlebot.transitTls.caVolume" $root | nindent 0 }}
+{{- end }}
+
+{{/*
+Fails the render unless compileConcurrency fits the compile container: 1..32, <= the CPU limit in
+whole cores (one Cranelift compile = one core; wasmtime has no parallel-compilation), and
+compileConcurrency x compileMemoryPerWorkerMi <= the memory limit. Accepts "4"/"4000m" CPU and
+Gi/Mi/G/M memory quantities.
+*/}}
+{{- define "waddlebot.executorPrecompile.validateConcurrency" -}}
+{{- $cfg := .Values.pipeline.hubApi.executorPrecompile -}}
+{{- $n := int $cfg.compileConcurrency -}}
+{{- if or (lt $n 1) (gt $n 32) -}}
+{{- fail (printf "pipeline.hubApi.executorPrecompile.compileConcurrency must be 1..32, got %v" $cfg.compileConcurrency) -}}
+{{- end -}}
+{{- $cpu := toString $cfg.resources.limits.cpu -}}
+{{- $cpuMilli := 0 -}}
+{{- if hasSuffix "m" $cpu -}}
+{{- $cpuMilli = int (trimSuffix "m" $cpu) -}}
+{{- else -}}
+{{- $cpuMilli = int (mulf (float64 $cpu) 1000) -}}
+{{- end -}}
+{{- if gt (mul $n 1000) $cpuMilli -}}
+{{- fail (printf "pipeline.hubApi.executorPrecompile.compileConcurrency (%d) exceeds resources.limits.cpu (%s)" $n $cpu) -}}
+{{- end -}}
+{{- $mem := toString $cfg.resources.limits.memory -}}
+{{- $memMi := 0 -}}
+{{- if hasSuffix "Gi" $mem -}}{{- $memMi = mul (int (trimSuffix "Gi" $mem)) 1024 -}}
+{{- else if hasSuffix "Mi" $mem -}}{{- $memMi = int (trimSuffix "Mi" $mem) -}}
+{{- else if hasSuffix "G" $mem -}}{{- $memMi = div (mul (int (trimSuffix "G" $mem)) 1000000000) 1048576 -}}
+{{- else if hasSuffix "M" $mem -}}{{- $memMi = div (mul (int (trimSuffix "M" $mem)) 1000000) 1048576 -}}
+{{- else -}}
+{{- fail (printf "pipeline.hubApi.executorPrecompile.resources.limits.memory %q: use a Gi/Mi/G/M quantity" $mem) -}}
+{{- end -}}
+{{- $need := mul $n (int $cfg.compileMemoryPerWorkerMi) -}}
+{{- if gt $need $memMi -}}
+{{- fail (printf "pipeline.hubApi.executorPrecompile.compileConcurrency (%d) x compileMemoryPerWorkerMi (%v) = %dMi exceeds resources.limits.memory (%s)" $n $cfg.compileMemoryPerWorkerMi $need $mem) -}}
+{{- end -}}
 {{- end }}
 
 {{/* Dedicated ServiceAccount name for the precompile pods (never the shared waddlebot SA). */}}
